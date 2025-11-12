@@ -1,0 +1,27 @@
+[package]
+name = "rust_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Window and event handling
+winit = "0.30"
+
+# Vulkano - Safe Vulkan wrapper
+vulkano = "0.34"
+
+# Window surface integration
+vulkano-win = "0.34"
+
+# Math library
+glam = "0.29"
+
+# Image loading (for textures later)
+image = "0.25"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
