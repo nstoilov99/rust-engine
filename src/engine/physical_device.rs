@@ -1,12 +1,14 @@
+// Physical device selection - picks the best GPU
+
 use std::sync::Arc;
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::{DeviceExtensions, QueueFlags};
 use vulkano::instance::Instance;
 
+/// Selects best GPU: must have graphics queue + swapchain, prefers discrete GPU
 pub fn select_physical_device(
     instance: Arc<Instance>,
 ) -> Result<Arc<PhysicalDevice>, String> {
-    // Get all physical devices and collect into Vec
     let devices: Vec<_> = instance
         .enumerate_physical_devices()
         .map_err(|e| format!("Failed to enumerate devices: {}", e))?
@@ -18,7 +20,6 @@ pub fn select_physical_device(
         println!("  - {}", props.device_name);
     }
 
-    // Select first device with graphics queue and swapchain support
     let device = devices
         .into_iter()
         .filter(|d| {

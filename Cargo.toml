@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Window and event handling
-winit = "0.30"
+winit = "0.28"
 
 # Vulkano - Safe Vulkan wrapper
 vulkano = "0.34"

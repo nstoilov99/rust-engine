@@ -1,3 +1,5 @@
+// Vulkan instance - entry point to Vulkan API
+
 use std::sync::Arc;
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::VulkanLibrary;
@@ -8,10 +10,11 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     pub fn new(app_name: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        // Load Vulkan library
         let library = VulkanLibrary::new()?;
 
-        // Create instance
+        // Enable all supported extensions (surface, win32_surface, etc.)
+        let required_extensions = library.supported_extensions().clone();
+
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -19,6 +22,7 @@ impl VulkanContext {
                 application_version: vulkano::Version::V1_0,
                 engine_name: Some("Rust Engine".to_string()),
                 engine_version: vulkano::Version::V1_0,
+                enabled_extensions: required_extensions,
                 ..Default::default()
             },
         )?;
