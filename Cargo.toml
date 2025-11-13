@@ -10,6 +10,9 @@ winit = "0.28"
 # Vulkano - Safe Vulkan wrapper
 vulkano = "0.34"
 
+# Shader compilation at build time
+vulkano-shaders = "0.34"
+
 # Window surface integration
 vulkano-win = "0.34"
 

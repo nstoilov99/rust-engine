@@ -3,6 +3,9 @@ pub mod physical_device;
 pub mod logical_device;
 pub mod swapchain;
 pub mod renderer;
+pub mod render_pass;
+pub mod framebuffer;
+pub mod pipeline;
 
 pub use vulkan_context::VulkanContext;
 pub use physical_device::select_physical_device;
