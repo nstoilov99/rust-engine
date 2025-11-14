@@ -92,6 +92,67 @@ mod textured_fs {
     }
 }
 
+/// Vertex shader with 2D transform support
+pub mod transform_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        src: "
+            #version 450
+
+            // Vertex inputs
+            layout(location = 0) in vec2 position;
+            layout(location = 1) in vec2 uv;
+
+            // Push constants (transform data)
+            layout(push_constant) uniform PushConstants {
+                vec2 pos;       // Position
+                float rotation; // Rotation (radians)
+                vec2 scale;     // Scale
+            } transform;
+
+            // Output to fragment shader
+            layout(location = 0) out vec2 fragUV;
+
+            void main() {
+                // Apply scale
+                vec2 scaled = position * transform.scale;
+
+                // Apply rotation
+                float c = cos(transform.rotation);
+                float s = sin(transform.rotation);
+                vec2 rotated = vec2(
+                    scaled.x * c - scaled.y * s,
+                    scaled.x * s + scaled.y * c
+                );
+
+                // Apply position
+                vec2 final_pos = rotated + transform.pos;
+
+                gl_Position = vec4(final_pos, 0.0, 1.0);
+                fragUV = uv;
+            }
+        "
+    }
+}
+
+// Fragment shader stays the same
+mod transform_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: "
+            #version 450
+
+            layout(location = 0) in vec2 fragUV;
+            layout(location = 0) out vec4 outColor;
+            layout(set = 0, binding = 0) uniform sampler2D texSampler;
+
+            void main() {
+                outColor = texture(texSampler, fragUV);
+            }
+        "
+    }
+}
+
 /// Vertex structure matching shader inputs
 #[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
 #[repr(C)]
@@ -219,6 +280,60 @@ pub fn create_textured_pipeline(
     Ok(pipeline)
 }
 
+/// Creates graphics pipeline with 2D transform support
+pub fn create_transform_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+    viewport: Viewport,
+) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
+    // Load transform shaders
+    let vs = transform_vs::load(device.clone())?;
+    let fs = transform_fs::load(device.clone())?;
+
+    let vs_entry_point = vs.entry_point("main").unwrap();
+    let fs_entry_point = fs.entry_point("main").unwrap();
+
+    let vertex_input_state = TexturedVertex::per_vertex()
+        .definition(&vs_entry_point.info().input_interface)?;
+
+    let stages = [
+        PipelineShaderStageCreateInfo::new(vs_entry_point),
+        PipelineShaderStageCreateInfo::new(fs_entry_point),
+    ];
+
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(device.clone())?,
+    )?;
+
+    let pipeline = GraphicsPipeline::new(
+        device.clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: stages.into_iter().collect(),
+            vertex_input_state: Some(vertex_input_state),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            viewport_state: Some(ViewportState {
+                viewports: [viewport].into_iter().collect(),
+                ..Default::default()
+            }),
+            rasterization_state: Some(RasterizationState::default()),
+            multisample_state: Some(MultisampleState::default()),
+            color_blend_state: Some(ColorBlendState::with_attachment_states(
+                1,
+                ColorBlendAttachmentState::default(),
+            )),
+            subpass: Some(render_pass.clone().first_subpass().into()),
+            ..GraphicsPipelineCreateInfo::layout(layout)
+        },
+    )?;
+
+    println!("✓ Transform pipeline created");
+
+    Ok(pipeline)
+}
+
 /// Creates descriptor set binding texture to shader
 pub fn create_texture_descriptor_set(
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
@@ -241,16 +356,19 @@ pub fn create_texture_descriptor_set(
 }
 
 /// Creates vertices for a textured quad (sprite)
-pub fn create_quad_vertices() -> [TexturedVertex; 6] {
+pub fn create_quad_vertices() -> [TexturedVertex; 4] {
     [
-        // Triangle 1
         TexturedVertex { position: [-0.5, -0.5], uv: [0.0, 0.0] },  // Top-left
         TexturedVertex { position: [ 0.5, -0.5], uv: [1.0, 0.0] },  // Top-right
         TexturedVertex { position: [-0.5,  0.5], uv: [0.0, 1.0] },  // Bottom-left
-
-        // Triangle 2
-        TexturedVertex { position: [ 0.5, -0.5], uv: [1.0, 0.0] },  // Top-right
         TexturedVertex { position: [ 0.5,  0.5], uv: [1.0, 1.0] },  // Bottom-right
-        TexturedVertex { position: [-0.5,  0.5], uv: [0.0, 1.0] },  // Bottom-left
+    ]
+}
+
+/// Creates indices for a quad (2 triangles)
+pub fn create_quad_indices() -> [u32; 6] {
+    [
+        0, 1, 2,  // First triangle: top-left, top-right, bottom-left
+        1, 3, 2,  // Second triangle: top-right, bottom-right, bottom-left
     ]
 }

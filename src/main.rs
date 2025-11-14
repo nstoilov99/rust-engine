@@ -1,10 +1,11 @@
-mod engine;
+pub mod engine;
 
 use engine::Renderer;
+use vulkano::descriptor_set;
 use std::sync::Arc;
 use winit::event::{Event, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::Window;
+use crate::engine::Transform2D;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -27,6 +28,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assets/sprite.png",  // Put a test image here
     )?;
     println!("Texture loaded successfully!");
+
+        // Create transforms for 3 sprites
+    let sprites = vec![
+        // Sprite 1: Center, no rotation
+        (Transform2D::at_position(0.0, 0.0), renderer.descriptor_set.clone()),
+
+        // Sprite 2: Right, rotated 45 degrees
+        (Transform2D::new([0.5, 0.0], std::f32::consts::PI / 4.0, [0.5, 0.5]), renderer.descriptor_set.clone()),
+
+        // Sprite 3: Left, scaled 2x
+        (Transform2D::new([-0.5, 0.0], 0.0, [2.0, 2.0]), renderer.descriptor_set.clone()),
+    ];
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -51,8 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             },
             Event::RedrawRequested(_) => {
-                if let Err(e) = renderer.render() {
-                    eprintln!("❌ Render error: {}", e);
+                if let Err(e) = renderer.render_sprites(&sprites) {
+                    eprintln!("❌ Render error: {:?}", e);
                 }
             }
             Event::MainEventsCleared => {

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use winit::window::Window;
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo,
     SubpassBeginInfo, SubpassEndInfo,
@@ -10,20 +11,22 @@ use vulkano::instance::Instance;
 use vulkano::render_pass::Framebuffer;
 use vulkano::swapchain::{self as vk_swapchain, Surface, Swapchain};
 use vulkano::{Validated, VulkanError};
-use vulkano::sync::{self, GpuFuture};
+use vulkano::sync::{GpuFuture};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use winit::window::Window;
-use crate::engine::render_pass::create_render_pass;
-use crate::engine::framebuffer::create_framebuffers;
-use crate::engine::pipeline::{create_pipeline, create_textured_pipeline, create_texture_descriptor_set, create_quad_vertices, Vertex, TexturedVertex};
-use crate::engine::texture::load_texture;
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineLayout, PipelineBindPoint};
 use vulkano::descriptor_set::{PersistentDescriptorSet, allocator::StandardDescriptorSetAllocator};
 use vulkano::image::view::ImageView;
 use vulkano::image::sampler::Sampler;
-
+use crate::engine::render_pass::create_render_pass;
+use crate::engine::framebuffer::create_framebuffers;
+use crate::engine::pipeline::{
+    create_pipeline, create_textured_pipeline, create_texture_descriptor_set, create_transform_pipeline, 
+     create_quad_vertices, create_quad_indices, transform_vs, Vertex, TexturedVertex
+};
+use crate::engine::texture::load_texture;
+use crate::engine::components::Transform2D;
 use crate::engine::{
     create_logical_device, select_physical_device, VulkanContext,
 };
@@ -39,11 +42,12 @@ pub struct Renderer {
     pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     pub memory_allocator: Arc<StandardMemoryAllocator>,
     pub vertex_buffer: Subbuffer<[TexturedVertex]>,
+    pub index_buffer: Subbuffer<[u32]>,
     render_pass: Arc<vulkano::render_pass::RenderPass>,
-    framebuffers: Vec<Arc<Framebuffer>>,
-    pipeline: Arc<GraphicsPipeline>,
+    pub framebuffers: Vec<Arc<Framebuffer>>,
+    pub pipeline: Arc<GraphicsPipeline>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    descriptor_set: Arc<PersistentDescriptorSet>, 
+    pub descriptor_set: Arc<PersistentDescriptorSet>,
     // Frame-in-flight tracking
     frames_in_flight: usize,
     current_frame: usize,
@@ -87,6 +91,9 @@ impl Renderer {
         // Create textured quad vertices
         let vertices = create_quad_vertices();
 
+        // Create quad vertices (indexed version - only 4 vertices)
+        let vertices = create_quad_vertices();
+
         // Create vertex buffer and upload to GPU
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -102,7 +109,25 @@ impl Renderer {
             vertices.iter().cloned(),
         )?;
 
-        println!("✓ Vertex buffer created (6 vertices for textured quad)");
+                // Create index buffer
+        let indices = create_quad_indices();
+
+        let index_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,  // Note: INDEX_BUFFER
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            indices.iter().cloned(),
+        )?;
+
+        println!("✓ Vertex buffer created (4 vertices)");
+        println!("✓ Index buffer created (6 indices)");
 
         // Create render pass
         let render_pass = create_render_pass(device_context.device.clone(), swapchain.clone())?;
@@ -120,7 +145,7 @@ impl Renderer {
         };
 
         // Create textured pipeline
-        let pipeline = create_textured_pipeline(
+        let pipeline = create_transform_pipeline(
         device_context.device.clone(),
         render_pass.clone(),
         viewport,
@@ -165,14 +190,15 @@ impl Renderer {
             command_buffer_allocator,
             memory_allocator,
             vertex_buffer,
+            index_buffer,
             render_pass,
             framebuffers,
             pipeline,
-            descriptor_set_allocator,  // NEW
-            descriptor_set, 
-            frames_in_flight: 2,  // 2 frames in flight (common choice)
+            descriptor_set_allocator,
+            descriptor_set,
+            frames_in_flight: 2,
             current_frame: 0,
-            previous_frame_end: None,  // Will be set after first frame
+            previous_frame_end: None,
             recreate_swapchain: false,
         })
     }
@@ -244,7 +270,8 @@ impl Renderer {
             )?
             // Bind vertex buffer
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
-            .draw(6, 1, 0, 0)?  // Draw 6 vertices (was 3)
+            .bind_index_buffer(self.index_buffer.clone())? 
+            .draw_indexed(6, 1, 0, 0, 0)?
             // End render pass
             .end_render_pass(SubpassEndInfo::default())?;
 
@@ -274,112 +301,183 @@ impl Renderer {
 
         Ok(())
     }
-}
 
-/// Renders a frame: acquire image, clear to color, present
-pub fn render_frame(
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    swapchain: Arc<Swapchain>,
-    framebuffers: &[Arc<Framebuffer>],
-) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Acquire next image from swapchain
-    let (image_index, _suboptimal, acquire_future) =
-        vulkano::swapchain::acquire_next_image(swapchain.clone(), None)?;
+        
+    /// Renders a sprite with 2D transform
+    pub fn render_sprite(
+        &mut self,
+        transform: Transform2D,
+        descriptor_set: Arc<PersistentDescriptorSet>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Acquire image
+        let (image_index, _, acquire_future) =
+            vulkano::swapchain::acquire_next_image(self.swapchain.clone(), None)?;
 
-    // 2. Create command buffer
-    let mut builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )?;
+        // 2. Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
 
-    // 3. Begin render pass
-    builder.begin_render_pass(
-        RenderPassBeginInfo {
-            clear_values: vec![Some([0.0, 0.5, 1.0, 1.0].into())], // Sky blue color
-            ..RenderPassBeginInfo::framebuffer(framebuffers[image_index as usize].clone())
-        },
-        SubpassBeginInfo::default(),
-    )?;
+        // 3. Create push constants data
+        let push_constants = transform_vs::PushConstants {
+            pos: transform.position,
+            rotation: transform.rotation.into(),
+            scale: transform.scale,
+        };
 
-    // 4. End render pass
-    builder.end_render_pass(SubpassEndInfo::default())?;
+        // 4. Begin render pass and draw
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index as usize].clone())
+                },
+                SubpassBeginInfo::default(),
+            )?
+            .bind_pipeline_graphics(self.pipeline.clone())?
+            .bind_descriptor_sets(
+                vulkano::pipeline::PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                descriptor_set.clone(),
+            )?
+            .push_constants(self.pipeline.layout().clone(), 0, push_constants)?  // NEW: Push constants
+            .bind_vertex_buffers(0, self.vertex_buffer.clone())?
+            .bind_index_buffer(self.index_buffer.clone())?
+            .draw_indexed(6, 1, 0, 0, 0)?
+            .end_render_pass(SubpassEndInfo::default())?;
 
-    // 5. Build command buffer
-    let command_buffer = builder.build()?;
+        // 5. Build and submit
+        let command_buffer = builder.build()?;
 
-    // 6. Submit to GPU
-    let future = acquire_future
-        .then_execute(queue.clone(), command_buffer)?
-        .then_swapchain_present(
-            queue.clone(),
-            vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                swapchain.clone(),
-                image_index,
-            ),
-        )
-        .then_signal_fence_and_flush()?;
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush()?;
 
-    // 7. Wait for GPU
-    future.wait(None)?;
+        future.wait(None)?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-/// Renders a triangle: acquire image, draw triangle, present
-pub fn render_triangle(
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: Arc<Queue>,
-    swapchain: Arc<Swapchain>,
-    framebuffers: &[Arc<Framebuffer>],
-    pipeline: Arc<vulkano::pipeline::GraphicsPipeline>,
-    vertex_buffer: Subbuffer<[Vertex]>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Acquire image
-    let (image_index, _, acquire_future) =
-        vulkano::swapchain::acquire_next_image(swapchain.clone(), None)?;
+    /// Renders multiple sprites in one frame
+    pub fn render_sprites(
+        &mut self,
+        sprites: &[(Transform2D, Arc<PersistentDescriptorSet>)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for previous frame and cleanup
+        if let Some(mut previous) = self.previous_frame_end.take() {
+            previous.cleanup_finished();
+        }
 
-    // 2. Build command buffer
-    let mut builder = AutoCommandBufferBuilder::primary(
-        command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )?;
+        // Check if we need to recreate swapchain
+        if self.recreate_swapchain {
+            let (new_swapchain, new_images) = recreate_swapchain(
+                self.device.clone(),
+                self.surface.clone(),
+                self.swapchain.clone(),
+            )?;
+            self.swapchain = new_swapchain;
+            self.images = new_images;
 
-    // 3. Begin render pass
-    builder
-        .begin_render_pass(
+            // Recreate framebuffers for new images
+            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+
+            self.recreate_swapchain = false;
+        }
+
+        // Acquire next image
+        let (image_index, suboptimal, acquire_future) =
+            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate_swapchain = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+        // If suboptimal, recreate on next frame
+        if suboptimal {
+            self.recreate_swapchain = true;
+        }
+
+        // Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        // Begin render pass
+        builder.begin_render_pass(
             RenderPassBeginInfo {
-                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())], // Black background
-                ..RenderPassBeginInfo::framebuffer(framebuffers[image_index as usize].clone())
+                clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                ..RenderPassBeginInfo::framebuffer(
+                    self.framebuffers[image_index as usize].clone()
+                )
             },
             SubpassBeginInfo::default(),
-        )?
-        // 4. Bind pipeline
-        .bind_pipeline_graphics(pipeline.clone())?
-        // 5. Bind vertex buffer
-        .bind_vertex_buffers(0, vertex_buffer.clone())?
-        // 6. Draw!
-        .draw(3, 1, 0, 0)?  // 3 vertices, 1 instance, first vertex 0, first instance 0
-        // 7. End render pass
-        .end_render_pass(SubpassEndInfo::default())?;
+        )?;
 
-    // 8. Build and submit
-    let command_buffer = builder.build()?;
+        builder.bind_pipeline_graphics(self.pipeline.clone())?;
+        builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
+        builder.bind_index_buffer(self.index_buffer.clone())?;
 
-    let future = acquire_future
-        .then_execute(queue.clone(), command_buffer)?
-        .then_swapchain_present(
-            queue.clone(),
-            vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                swapchain.clone(),
-                image_index,
-            ),
-        )
-        .then_signal_fence_and_flush()?;
+        // Draw each sprite
+        for (transform, texture_descriptor) in sprites {
+            let push_constants = transform_vs::PushConstants {
+                pos: transform.position,
+                rotation: transform.rotation.into(),
+                scale: transform.scale,
+            };
 
-    future.wait(None)?;
+            builder
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.pipeline.layout().clone(),
+                    0,
+                    texture_descriptor.clone(),
+                )?
+                .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
+                .draw_indexed(6, 1, 0, 0, 0)?;
+        }
 
-    Ok(())
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        // Execute command buffer and present (DO NOT JOIN - just like render())
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = None;
+            }
+        }
+
+        Ok(())
+    }
 }

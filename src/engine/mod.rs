@@ -7,6 +7,8 @@ pub mod render_pass;
 pub mod framebuffer;
 pub mod pipeline;
 pub mod texture;
+pub mod components;
+pub mod sprite_batch; 
 
 pub use vulkan_context::VulkanContext;
 pub use physical_device::select_physical_device;
@@ -14,3 +16,5 @@ pub use logical_device::{create_logical_device, LogicalDeviceContext};
 //pub use swapchain::create_swapchain;
 pub use renderer::Renderer;
 pub use texture::load_texture;
+pub use components::Transform2D;
+pub use sprite_batch::SpriteBatch;
