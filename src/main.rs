@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         renderer.queue.clone(),
         &renderer.command_buffer_allocator,
         renderer.memory_allocator.clone(),
-        "src/assets/sprite.png",  // Put a test image here
+        "assets/sprite.png",  // Put a test image here
     )?;
     println!("Texture loaded successfully!");
 

@@ -18,6 +18,7 @@ use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::pipeline::Pipeline;
 use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
 
 // Vertex shader module
 mod vs {
