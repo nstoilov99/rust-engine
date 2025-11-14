@@ -2,12 +2,9 @@ mod engine;
 
 use engine::Renderer;
 use std::sync::Arc;
-use winit::event::{Event, WindowEvent};
+use winit::event::{Event, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use engine::render_pass::create_render_pass;
-use engine::framebuffer::create_framebuffers;
-use engine::pipeline::create_pipeline;
-use vulkano::pipeline::graphics::viewport::Viewport;
+use winit::window::Window;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -17,38 +14,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         winit::window::WindowBuilder::new()
             .with_title("Rust Game Engine")
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600))
-            .build(&event_loop)
-            .unwrap(),
+            .build(&event_loop)?,
     );
 
-    let renderer = Renderer::new(window.clone())?;
+    let mut renderer = Renderer::new(window.clone())?;
 
-    // Create render pass
-    let render_pass = create_render_pass(
+    let (texture_view, sampler) = engine::load_texture(
         renderer.device.clone(),
-        renderer.swapchain.clone(),
+        renderer.queue.clone(),
+        &renderer.command_buffer_allocator,
+        renderer.memory_allocator.clone(),
+        "src/assets/sprite.png",  // Put a test image here
     )?;
-
-    // Create framebuffers
-    let framebuffers = create_framebuffers(
-        &renderer.images,
-        render_pass.clone(),
-    )?;
-
-    // Create pipeline
-    let viewport = Viewport {
-        offset: [0.0, 0.0],
-        extent: [800.0, 600.0],
-        depth_range: 0.0..=1.0,
-    };
-    let pipeline = create_pipeline(
-        renderer.device.clone(),
-        render_pass.clone(),
-        viewport,
-    )?;
+    println!("Texture loaded successfully!");
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;  // Changed to Poll for continuous rendering
+        *control_flow = ControlFlow::Poll;
 
         match event {
             Event::WindowEvent { event, .. } => match event {
@@ -56,9 +37,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("👋 Closing...");
                     *control_flow = ControlFlow::Exit;
                 }
+                WindowEvent::Resized(_) => {
+                    println!("Window resized");
+                }
                 WindowEvent::KeyboardInput { input, .. } => {
                     if let Some(keycode) = input.virtual_keycode {
-                        if keycode == winit::event::VirtualKeyCode::Escape {
+                        if keycode == VirtualKeyCode::Escape {
                             println!("👋 ESC pressed");
                             *control_flow = ControlFlow::Exit;
                         }
@@ -67,17 +51,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             },
             Event::RedrawRequested(_) => {
-                    engine::renderer::render_triangle(
-                    &renderer.command_buffer_allocator,
-                    renderer.queue.clone(),
-                    renderer.swapchain.clone(),
-                    &framebuffers,
-                    pipeline.clone(),
-                    renderer.vertex_buffer.clone(),
-                ).expect("Failed to render");
+                if let Err(e) = renderer.render() {
+                    eprintln!("❌ Render error: {}", e);
+                }
             }
             Event::MainEventsCleared => {
-                // Request redraw every frame
                 window.request_redraw();
             }
             _ => {}

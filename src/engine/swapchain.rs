@@ -61,3 +61,44 @@ pub fn create_swapchain(
 
     Ok((swapchain, images))
 }
+
+/// Recreates swapchain when window is resized
+pub fn recreate_swapchain(
+    device: Arc<Device>,
+    surface: Arc<Surface>,
+    old_swapchain: Arc<Swapchain>,
+) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>> {
+    let surface_capabilities = device
+        .physical_device()
+        .surface_capabilities(&surface, Default::default())?;
+
+    let image_format = device
+        .physical_device()
+        .surface_formats(&surface, Default::default())?
+        .into_iter()
+        .find(|(format, _)| {
+            matches!(
+                format,
+                vulkano::format::Format::B8G8R8A8_SRGB | vulkano::format::Format::R8G8B8A8_SRGB
+            )
+        })
+        .unwrap_or_else(|| {
+            device
+                .physical_device()
+                .surface_formats(&surface, Default::default())
+                .unwrap()[0]
+        });
+
+    let window = surface.object().unwrap().downcast_ref::<Window>().unwrap();
+    let window_size = window.inner_size();
+
+    // Reuse old swapchain for efficiency
+    let (swapchain, images) = old_swapchain.recreate(SwapchainCreateInfo {
+        image_extent: [window_size.width, window_size.height],
+        ..old_swapchain.create_info()
+    })?;
+
+    println!("✓ Swapchain recreated: {}x{}", window_size.width, window_size.height);
+
+    Ok((swapchain, images))
+}
