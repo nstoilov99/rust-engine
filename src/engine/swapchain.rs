@@ -92,6 +92,12 @@ pub fn recreate_swapchain(
     let window = surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let window_size = window.inner_size();
 
+    // Check if window is minimized (zero size)
+    if window_size.width == 0 || window_size.height == 0 {
+        // Return the old swapchain unchanged - we can't create a 0x0 swapchain
+        return Ok((old_swapchain, vec![]));
+    }
+
     // Reuse old swapchain for efficiency
     let (swapchain, images) = old_swapchain.recreate(SwapchainCreateInfo {
         image_extent: [window_size.width, window_size.height],

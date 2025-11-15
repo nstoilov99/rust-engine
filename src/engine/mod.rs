@@ -9,6 +9,8 @@ pub mod pipeline;
 pub mod texture;
 pub mod components;
 pub mod sprite_batch; 
+pub mod camera;
+pub mod input;
 
 pub use vulkan_context::VulkanContext;
 pub use physical_device::select_physical_device;
@@ -18,3 +20,5 @@ pub use renderer::Renderer;
 pub use texture::load_texture;
 pub use components::Transform2D;
 pub use sprite_batch::SpriteBatch;
+pub use camera::Camera2D;
+pub use input::InputManager;

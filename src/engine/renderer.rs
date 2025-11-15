@@ -22,8 +22,9 @@ use vulkano::image::sampler::Sampler;
 use crate::engine::render_pass::create_render_pass;
 use crate::engine::framebuffer::create_framebuffers;
 use crate::engine::pipeline::{
-    create_pipeline, create_textured_pipeline, create_texture_descriptor_set, create_transform_pipeline, 
-     create_quad_vertices, create_quad_indices, transform_vs, Vertex, TexturedVertex
+    create_pipeline, create_textured_pipeline, create_texture_descriptor_set, create_transform_pipeline,
+    create_camera_pipeline, create_quad_vertices, create_quad_indices, transform_vs, camera_vs,
+    Vertex, TexturedVertex
 };
 use crate::engine::texture::load_texture;
 use crate::engine::components::Transform2D;
@@ -31,6 +32,7 @@ use crate::engine::{
     create_logical_device, select_physical_device, VulkanContext,
 };
 use crate::engine::swapchain::{recreate_swapchain, create_swapchain};
+use crate::engine::camera::{Camera2D, CameraPushConstants};
 
 pub struct Renderer {
     _instance: Arc<Instance>,
@@ -52,7 +54,8 @@ pub struct Renderer {
     frames_in_flight: usize,
     current_frame: usize,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
-    recreate_swapchain: bool,
+    pub recreate_swapchain: bool,
+    pub camera: Camera2D, 
 }
 
 impl Renderer {
@@ -63,6 +66,9 @@ impl Renderer {
 
         let surface = Surface::from_window(vulkan_context.instance.clone(), window.clone())?;
         println!("✓ Vulkan surface created");
+        
+        let window_size = window.inner_size();
+        let camera = Camera2D::new(window_size.width as f32, window_size.height as f32);
 
         let physical_device = select_physical_device(vulkan_context.instance.clone())?;
 
@@ -144,13 +150,12 @@ impl Renderer {
             depth_range: 0.0..=1.0,
         };
 
-        // Create textured pipeline
-        let pipeline = create_transform_pipeline(
-        device_context.device.clone(),
-        render_pass.clone(),
-        viewport,
+        // Create camera pipeline with view-projection support
+        let pipeline = create_camera_pipeline(
+            device_context.device.clone(),
+            render_pass.clone(),
+            viewport,
         )?;
-        println!("✓ Graphics pipeline created (textured)");
         
         // let pipeline = create_pipeline(device_context.device.clone(), render_pass.clone(), viewport)?;
         // println!("✓ Graphics pipeline created");
@@ -200,6 +205,7 @@ impl Renderer {
             current_frame: 0,
             previous_frame_end: None,
             recreate_swapchain: false,
+            camera
         })
     }
 
@@ -209,6 +215,15 @@ impl Renderer {
             previous.cleanup_finished();
         }
 
+        // Check if window is minimized (zero size) - skip rendering
+        let extent = self.swapchain.image_extent();
+        if extent[0] == 0 || extent[1] == 0 {
+            println!("⏸️  Window minimized ({}x{}), skipping render", extent[0], extent[1]);
+            // Window is minimized, skip rendering but keep the future alive
+            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            return Ok(());
+        }
+
         // Check if we need to recreate swapchain
         if self.recreate_swapchain {
             let (new_swapchain, new_images) = recreate_swapchain(
@@ -216,11 +231,23 @@ impl Renderer {
                 self.surface.clone(),
                 self.swapchain.clone(),
             )?;
+
+            // If images is empty, window is minimized - keep old swapchain and skip rendering
+            if new_images.is_empty() {
+                self.recreate_swapchain = false; // Reset flag but keep old swapchain
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                return Ok(());
+            }
+
             self.swapchain = new_swapchain;
             self.images = new_images;
 
             // Recreate framebuffers for new images
             self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+
+            // Update camera viewport to match new swapchain size
+            let extent = self.images[0].extent();
+            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
 
             self.recreate_swapchain = false;
         }
@@ -378,6 +405,15 @@ impl Renderer {
             previous.cleanup_finished();
         }
 
+        // Check if window is minimized (zero size) - skip rendering
+        let extent = self.swapchain.image_extent();
+        if extent[0] == 0 || extent[1] == 0 {
+            println!("⏸️  Window minimized ({}x{}), skipping render", extent[0], extent[1]);
+            // Window is minimized, skip rendering but keep the future alive
+            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            return Ok(());
+        }
+
         // Check if we need to recreate swapchain
         if self.recreate_swapchain {
             let (new_swapchain, new_images) = recreate_swapchain(
@@ -385,11 +421,23 @@ impl Renderer {
                 self.surface.clone(),
                 self.swapchain.clone(),
             )?;
+
+            // If images is empty, window is minimized - keep old swapchain and skip rendering
+            if new_images.is_empty() {
+                self.recreate_swapchain = false; // Reset flag but keep old swapchain
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                return Ok(());
+            }
+
             self.swapchain = new_swapchain;
             self.images = new_images;
 
             // Recreate framebuffers for new images
             self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+
+            // Update camera viewport to match new swapchain size
+            let extent = self.images[0].extent();
+            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
 
             self.recreate_swapchain = false;
         }
@@ -432,9 +480,13 @@ impl Renderer {
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
         builder.bind_index_buffer(self.index_buffer.clone())?;
 
+        // Get camera view-projection matrix
+        let camera_vp = self.camera.view_projection_matrix();
+
         // Draw each sprite
         for (transform, texture_descriptor) in sprites {
-            let push_constants = transform_vs::PushConstants {
+            let push_constants = camera_vs::PushConstants {
+                view_projection: camera_vp.to_cols_array_2d(),
                 pos: transform.position,
                 rotation: transform.rotation.into(),
                 scale: transform.scale,

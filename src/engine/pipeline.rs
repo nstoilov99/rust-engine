@@ -153,6 +153,67 @@ mod transform_fs {
     }
 }
 
+/// Vertex shader with camera view-projection matrix
+pub mod camera_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        src: "
+            #version 450
+
+            // Vertex inputs
+            layout(location = 0) in vec2 position;
+            layout(location = 1) in vec2 uv;
+
+            // Push constants (per-sprite transform)
+            layout(push_constant) uniform PushConstants {
+                mat4 view_projection;  // Camera matrix
+                vec2 pos;              // Sprite position
+                float rotation;        // Sprite rotation
+                vec2 scale;            // Sprite scale
+            } constants;
+
+            // Output to fragment shader
+            layout(location = 0) out vec2 fragUV;
+
+            void main() {
+                // Apply sprite transform (scale, rotate, translate)
+                vec2 scaled = position * constants.scale;
+
+                float c = cos(constants.rotation);
+                float s = sin(constants.rotation);
+                vec2 rotated = vec2(
+                    scaled.x * c - scaled.y * s,
+                    scaled.x * s + scaled.y * c
+                );
+
+                vec2 world_pos = rotated + constants.pos;
+
+                // Apply camera view-projection
+                gl_Position = constants.view_projection * vec4(world_pos, 0.0, 1.0);
+                fragUV = uv;
+            }
+        "
+    }
+}
+
+// Fragment shader stays the same as before
+mod camera_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: "
+            #version 450
+
+            layout(location = 0) in vec2 fragUV;
+            layout(location = 0) out vec4 outColor;
+            layout(set = 0, binding = 0) uniform sampler2D texSampler;
+
+            void main() {
+                outColor = texture(texSampler, fragUV);
+            }
+        "
+    }
+}
+
 /// Vertex structure matching shader inputs
 #[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
 #[repr(C)]
@@ -330,6 +391,60 @@ pub fn create_transform_pipeline(
     )?;
 
     println!("✓ Transform pipeline created");
+
+    Ok(pipeline)
+}
+
+/// Creates graphics pipeline with camera support (view-projection matrix)
+pub fn create_camera_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+    viewport: Viewport,
+) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
+    // Load camera shaders
+    let vs = camera_vs::load(device.clone())?;
+    let fs = camera_fs::load(device.clone())?;
+
+    let vs_entry_point = vs.entry_point("main").unwrap();
+    let fs_entry_point = fs.entry_point("main").unwrap();
+
+    let vertex_input_state = TexturedVertex::per_vertex()
+        .definition(&vs_entry_point.info().input_interface)?;
+
+    let stages = [
+        PipelineShaderStageCreateInfo::new(vs_entry_point),
+        PipelineShaderStageCreateInfo::new(fs_entry_point),
+    ];
+
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(device.clone())?,
+    )?;
+
+    let pipeline = GraphicsPipeline::new(
+        device.clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: stages.into_iter().collect(),
+            vertex_input_state: Some(vertex_input_state),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            viewport_state: Some(ViewportState {
+                viewports: [viewport].into_iter().collect(),
+                ..Default::default()
+            }),
+            rasterization_state: Some(RasterizationState::default()),
+            multisample_state: Some(MultisampleState::default()),
+            color_blend_state: Some(ColorBlendState::with_attachment_states(
+                1,
+                ColorBlendAttachmentState::default(),
+            )),
+            subpass: Some(render_pass.clone().first_subpass().into()),
+            ..GraphicsPipelineCreateInfo::layout(layout)
+        },
+    )?;
+
+    println!("✓ Camera pipeline created");
 
     Ok(pipeline)
 }
