@@ -57,19 +57,51 @@ impl SpriteSheet {
         frame_width: f32,
         frame_height: f32,
     ) -> Self {
+        // Validate dimensions
+        assert!(texture_width > 0.0, "SpriteSheet: texture_width must be > 0");
+        assert!(texture_height > 0.0, "SpriteSheet: texture_height must be > 0");
+        assert!(frame_width > 0.0, "SpriteSheet: frame_width must be > 0");
+        assert!(frame_height > 0.0, "SpriteSheet: frame_height must be > 0");
+        assert!(frame_width <= texture_width,
+            "SpriteSheet: frame_width ({}) cannot be larger than texture_width ({})",
+            frame_width, texture_width);
+        assert!(frame_height <= texture_height,
+            "SpriteSheet: frame_height ({}) cannot be larger than texture_height ({})",
+            frame_height, texture_height);
+
         let frames_per_row = (texture_width / frame_width) as u32;
         let frames_per_col = (texture_height / frame_height) as u32;
+
+        let total_frames = frames_per_row * frames_per_col;
+
+        if total_frames == 0 {
+            eprintln!("⚠️  Warning: SpriteSheet has 0 frames! Check your dimensions:");
+            eprintln!("    Texture: {}×{}", texture_width, texture_height);
+            eprintln!("    Frame: {}×{}", frame_width, frame_height);
+            eprintln!("    Frames: {} per row, {} per col", frames_per_row, frames_per_col);
+        }
 
         Self {
             texture_size: Vec2::new(texture_width, texture_height),
             frame_size: Vec2::new(frame_width, frame_height),
             frames_per_row,
-            total_frames: frames_per_row * frames_per_col,
+            total_frames,
         }
     }
 
     /// Calculate UV coordinates for a specific frame
     pub fn get_frame_uvs(&self, frame_index: u32) -> [Vec2; 4] {
+        // Handle edge case: no frames
+        if self.total_frames == 0 {
+            // Return full texture as fallback
+            return [
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(0.0, 1.0),
+            ];
+        }
+
         let frame_index = frame_index.min(self.total_frames - 1);
 
         let col = frame_index % self.frames_per_row;

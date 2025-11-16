@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add animated character entity
     let player = scene.add_entity(
-        Transform2D::new([0.0, 0.0], 0.0, [0.3, 0.3]),  // Center, 0.3 world units
+        Transform2D::new([0.0, 0.0], 0.0, [32.0, 32.0]),  // Center, 0.3 world units
         Some(SpriteComponent { texture_id, layer: 10 }),
         Some(anim_controller),
         Some(sprite_sheet.clone()),
@@ -144,6 +144,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Update animations (advance to next frame)
                 scene.update_animations(0.016);  // 60 FPS = ~0.016 seconds per frame
 
+                if let Some(player_entity) = scene.get_entity_mut(player) {
+                    // Move 2 pixels per frame (120 pixels/sec at 60 FPS)
+                    player_entity.transform.position[0] += 2.0;
+                }
+
                 // Request redraw
                 window.request_redraw();
             }
@@ -154,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Update camera position based on input
 fn update_camera(camera: &mut Camera2D, input: &InputManager, delta_time: f32) {
-    let speed = 2.0 * delta_time; // 2 world units per second (slower camera movement)
+    let speed = 300.0 * delta_time; // 2 world units per second (slower camera movement)
 
     // WASD movement (winit 0.28 uses VirtualKeyCode)
     let mut movement = glam::Vec2::ZERO;

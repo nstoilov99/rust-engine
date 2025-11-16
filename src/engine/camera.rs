@@ -82,21 +82,18 @@ impl Camera2D {
     }
 
     /// Calculates the projection matrix (maps world space to NDC)
-    pub fn projection_matrix(&self) -> Mat4 {
-        // Orthographic projection for 2D
-        let aspect = self.viewport_size.x / self.viewport_size.y;
-        let height = 2.0 / self.zoom; // World units visible vertically (affected by zoom)
-        let width = height * aspect;
+pub fn projection_matrix(&self) -> Mat4 {
+    let half_width = (self.viewport_size.x / 2.0) / self.zoom;
+    let half_height = (self.viewport_size.y / 2.0) / self.zoom;
 
-        Mat4::orthographic_rh(
-            -width / 2.0,  // left
-            width / 2.0,   // right
-            -height / 2.0, // bottom
-            height / 2.0,  // top
-            -1.0,          // near
-            1.0,           // far
-        )
-    }
+    Mat4::orthographic_rh(
+        -half_width,   // e.g., -400 for 800×600 at zoom 1.0
+        half_width,    // e.g., +400
+        -half_height,  // -300
+        half_height,   // +300
+        -1.0, 1.0
+    )
+}
 
     /// Combined view-projection matrix (use this in shaders)
     pub fn view_projection_matrix(&self) -> Mat4 {
@@ -117,5 +114,32 @@ impl Camera2D {
         let world_pos = inv_matrix.transform_point3(glam::Vec3::new(ndc_x, ndc_y, 0.0));
 
         Vec2::new(world_pos.x, world_pos.y)
+    }
+    
+    /// Get the visible area in pixels at current zoom
+    pub fn visible_area(&self) -> (f32, f32) {
+        let width = self.viewport_size.x / self.zoom;
+        let height = self.viewport_size.y / self.zoom;
+        (width, height)
+    }
+
+    /// Get world bounds (min, max) in pixel coordinates
+    pub fn world_bounds(&self) -> (Vec2, Vec2) {
+        let half_width = (self.viewport_size.x / 2.0) / self.zoom;
+        let half_height = (self.viewport_size.y / 2.0) / self.zoom;
+
+        let min = self.position - Vec2::new(half_width, half_height);
+        let max = self.position + Vec2::new(half_width, half_height);
+
+        (min, max)
+    }
+
+    /// Check if a point (in pixel coordinates) is visible
+    pub fn is_visible(&self, point: Vec2, margin: f32) -> bool {
+        let (min, max) = self.world_bounds();
+        point.x >= min.x - margin
+            && point.x <= max.x + margin
+            && point.y >= min.y - margin
+            && point.y <= max.y + margin
     }
 }
