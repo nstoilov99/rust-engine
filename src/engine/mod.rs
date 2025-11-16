@@ -11,6 +11,8 @@ pub mod components;
 pub mod sprite_batch; 
 pub mod camera;
 pub mod input;
+pub mod scene;
+
 
 pub use vulkan_context::VulkanContext;
 pub use physical_device::select_physical_device;
@@ -22,3 +24,4 @@ pub use components::Transform2D;
 pub use sprite_batch::SpriteBatch;
 pub use camera::Camera2D;
 pub use input::InputManager;
+pub use scene::{Scene, Entity, EntityId, SpriteComponent};

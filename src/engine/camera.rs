@@ -42,6 +42,8 @@ impl Camera2D {
     /// Updates viewport size (call when window resizes)
     pub fn set_viewport_size(&mut self, width: f32, height: f32) {
         self.viewport_size = Vec2::new(width, height);
+        let aspect = width / height;
+        println!("📐 Camera viewport updated: {}×{} (aspect: {:.2})", width, height, aspect);
     }
 
     /// Moves the camera by an offset

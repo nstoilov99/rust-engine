@@ -4,7 +4,8 @@ use engine::Renderer;
 use std::sync::Arc;
 use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, ElementState};
 use winit::event_loop::{ControlFlow, EventLoop};
-use crate::engine::{Transform2D, InputManager, Camera2D};
+use crate::engine::{Transform2D, InputManager, Camera2D, SpriteBatch, Scene, SpriteComponent};
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -30,17 +31,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!("Texture loaded successfully!");
 
-        // Create transforms for 3 sprites
-    let sprites = vec![
-        // Sprite 1: Center, no rotation
-        (Transform2D::at_position(0.0, 0.0), renderer.descriptor_set.clone()),
+    // Create sprite batch
+    let mut batch = SpriteBatch::new();
 
-        // Sprite 2: Right, rotated 45 degrees
-        (Transform2D::new([0.5, 0.0], std::f32::consts::PI / 4.0, [0.5, 0.5]), renderer.descriptor_set.clone()),
+    // Register texture (do this once)
+    let texture_id = batch.register_texture(renderer.descriptor_set.clone());
 
-        // Sprite 3: Left, scaled 2x
-        (Transform2D::new([-0.5, 0.0], 0.0, [2.0, 2.0]), renderer.descriptor_set.clone()),
-    ];
+    // Create scene
+    let mut scene = Scene::new();
+
+
+    // Add entities with proper world coordinates
+    // Camera shows ±1.0 vertically, and ±(aspect) horizontally
+    // Use small scales so sprites are visible
+
+    let player = scene.add_entity(
+        Transform2D::new([0.0, 0.0], 0.0, [0.3, 0.3]),  // Center, 0.3 world units
+        Some(SpriteComponent { texture_id, layer: 10 })
+    );
+
+    let enemy1 = scene.add_entity(
+        Transform2D::new([0.6, 0.4], 0.0, [0.25, 0.25]),  // Top-right, smaller
+        Some(SpriteComponent { texture_id, layer: 5 })
+    );
+
+    let background = scene.add_entity(
+        Transform2D::new([-0.6, -0.4], 0.0, [0.2, 0.2]),  // Bottom-left, smallest
+        Some(SpriteComponent { texture_id, layer: 0 })  // Layer 0 = drawn first (back)
+    );
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -83,13 +101,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::RedrawRequested(_) => {
                 update_camera(&mut renderer.camera, &input_manager, 0.016); // ~60fps
 
-                if let Err(e) = renderer.render_sprites(&sprites) {
+                // Prepare batch for rendering
+                batch.clear();
+                scene.submit_to_batch(&mut batch);
+
+                // Render the batch
+                if let Err(e) = renderer.render_sprite_batch(&batch) {
                     eprintln!("❌ Render error: {:?}", e);
                 }
 
-                input_manager.new_frame(); // Clear input state after processing
+                // Clear input state after processing
+                input_manager.new_frame();
             }
             Event::MainEventsCleared => {
+                // Update entities (game logic goes here)
+                if let Some(player_entity) = scene.get_entity_mut(player) {
+                    // Example: Move player slowly (0.01 world units per frame at 60fps = ~0.6 units/sec)
+                    player_entity.transform.position[0] += 0.01;
+                }
+
+                // Request redraw
                 window.request_redraw();
             }
             _ => {}

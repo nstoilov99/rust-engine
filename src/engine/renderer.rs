@@ -33,6 +33,7 @@ use crate::engine::{
 };
 use crate::engine::swapchain::{recreate_swapchain, create_swapchain};
 use crate::engine::camera::{Camera2D, CameraPushConstants};
+use crate::engine::SpriteBatch;
 
 pub struct Renderer {
     _instance: Arc<Instance>,
@@ -477,6 +478,15 @@ impl Renderer {
         )?;
 
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
+
+        // Set dynamic viewport (updates with window resize)
+        let extent = self.swapchain.image_extent();
+        builder.set_viewport(0, [Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        }].into_iter().collect())?;
+
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
         builder.bind_index_buffer(self.index_buffer.clone())?;
 
@@ -509,6 +519,138 @@ impl Renderer {
         let command_buffer = builder.build()?;
 
         // Execute command buffer and present (DO NOT JOIN - just like render())
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders sprites using batching (more efficient)
+    pub fn render_sprite_batch(
+        &mut self,
+        batch: &SpriteBatch,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for previous frame and cleanup
+        if let Some(mut previous) = self.previous_frame_end.take() {
+            previous.cleanup_finished();
+        }
+
+        // Check if we need to recreate swapchain
+        if self.recreate_swapchain {
+            let (new_swapchain, new_images) = recreate_swapchain(
+                self.device.clone(),
+                self.surface.clone(),
+                self.swapchain.clone(),
+            )?;
+            self.swapchain = new_swapchain;
+            self.images = new_images;
+            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+            self.recreate_swapchain = false;
+
+            // Update camera viewport
+            let extent = self.images[0].extent();
+            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
+        }
+
+        // Acquire next image
+        let (image_index, suboptimal, acquire_future) =
+            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate_swapchain = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+        if suboptimal {
+            self.recreate_swapchain = true;
+        }
+
+        // Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        // Begin render pass
+        builder.begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                ..RenderPassBeginInfo::framebuffer(
+                    self.framebuffers[image_index as usize].clone()
+                )
+            },
+            SubpassBeginInfo::default(),
+        )?;
+
+        // Bind pipeline and buffers (once for all sprites)
+        builder.bind_pipeline_graphics(self.pipeline.clone())?;
+
+        // Set dynamic viewport (updates with window resize)
+        let extent = self.swapchain.image_extent();
+        builder.set_viewport(0, [Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        }].into_iter().collect())?;
+
+        builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
+        builder.bind_index_buffer(self.index_buffer.clone())?;
+
+        // Get camera view-projection matrix
+        let camera_vp = self.camera.view_projection_matrix();
+
+        // Draw batched sprites
+        for (descriptor_set, transforms) in batch.iter_batches() {
+            // Bind texture once per batch
+            builder.bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                descriptor_set,
+            )?;
+
+            // Draw all sprites with this texture
+            for transform in transforms {
+                let push_constants = camera_vs::PushConstants {
+                    view_projection: camera_vp.to_cols_array_2d(),
+                    pos: transform.position,
+                    rotation: transform.rotation.into(),
+                    scale: transform.scale,
+                };
+
+                builder
+                    .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
+                    .draw_indexed(6, 1, 0, 0, 0)?;
+            }
+        }
+
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        // Execute and present
         let future = acquire_future
             .then_execute(self.queue.clone(), command_buffer)?
             .then_swapchain_present(

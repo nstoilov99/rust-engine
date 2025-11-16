@@ -11,12 +11,12 @@ use vulkano::pipeline::graphics::{
     viewport::{Viewport, ViewportState},
     GraphicsPipelineCreateInfo,
 };
+use vulkano::pipeline::DynamicState;
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
-use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{Pipeline, GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::pipeline::Pipeline;
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
 
@@ -429,22 +429,20 @@ pub fn create_camera_pipeline(
             stages: stages.into_iter().collect(),
             vertex_input_state: Some(vertex_input_state),
             input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState {
-                viewports: [viewport].into_iter().collect(),
-                ..Default::default()
-            }),
+            viewport_state: Some(ViewportState::default()),  // Dynamic viewport - will be set per-frame
             rasterization_state: Some(RasterizationState::default()),
             multisample_state: Some(MultisampleState::default()),
             color_blend_state: Some(ColorBlendState::with_attachment_states(
                 1,
                 ColorBlendAttachmentState::default(),
             )),
+            dynamic_state: [DynamicState::Viewport].into_iter().collect(),  // Enable dynamic viewport
             subpass: Some(render_pass.clone().first_subpass().into()),
             ..GraphicsPipelineCreateInfo::layout(layout)
         },
     )?;
 
-    println!("✓ Camera pipeline created");
+    println!("✓ Camera pipeline created (with dynamic viewport)");
 
     Ok(pipeline)
 }
