@@ -5,10 +5,18 @@ use std::collections::HashMap;
 use vulkano::descriptor_set::PersistentDescriptorSet;
 use crate::engine::components::Transform2D;
 
+/// Sprite instance with UV coordinates (for animations)
+#[derive(Clone, Copy, Debug)]
+pub struct AnimatedSprite {
+    pub transform: Transform2D,
+    pub uv_rect: [f32; 4],  // [u_min, v_min, u_max, v_max]
+}
+
 /// Sprite batch - groups sprites by texture
 pub struct SpriteBatch {
     // Map from texture ID to list of transforms
     batches: HashMap<usize, Vec<Transform2D>>,
+    animated_batches: HashMap<usize, Vec<AnimatedSprite>>,  // NEW: For animated sprites
     descriptor_sets: HashMap<usize, Arc<PersistentDescriptorSet>>,
     next_id: usize,
 }
@@ -23,8 +31,9 @@ impl SpriteBatch {
     pub fn new() -> Self {
         Self {
             batches: HashMap::new(),
+            animated_batches: HashMap::new(),  // Initialize animated batches
             descriptor_sets: HashMap::new(),
-            next_id: 0,   
+            next_id: 0,
         }
     }
 
@@ -36,9 +45,10 @@ impl SpriteBatch {
             .push(transform);
     }
 
-    /// Clear all sprites
+    /// Clear all sprites (both regular and animated)
     pub fn clear(&mut self) {
         self.batches.clear();
+        self.animated_batches.clear();  // Also clear animated batches
     }
 
     /// Get batches for rendering (returns descriptor set + transforms)
@@ -60,9 +70,24 @@ impl SpriteBatch {
     
     /// Register a texture and get its ID
     pub fn register_texture(&mut self, descriptor_set: Arc<PersistentDescriptorSet>) -> usize {
-    let id = self.next_id;
-    self.descriptor_sets.insert(id, descriptor_set);
-    self.next_id += 1;
-    id
-}
+        let id = self.next_id;
+        self.descriptor_sets.insert(id, descriptor_set);
+        self.next_id += 1;
+        id
+    }
+
+    /// Add animated sprite to batch (with UV coordinates)
+    pub fn add_sprite_animated(&mut self, texture_id: usize, transform: Transform2D, uv_rect: [f32; 4]) {
+        self.animated_batches
+            .entry(texture_id)
+            .or_insert_with(Vec::new)
+            .push(AnimatedSprite { transform, uv_rect });
+    }
+
+    /// Iterator for animated batches
+    pub fn iter_animated_batches(&self) -> impl Iterator<Item = (Arc<PersistentDescriptorSet>, &[AnimatedSprite])> + '_ {
+        self.animated_batches.iter().filter_map(move |(id, sprites)| {
+            self.descriptor_sets.get(id).map(|desc_set| (desc_set.clone(), sprites.as_slice()))
+        })
+    }
 }

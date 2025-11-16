@@ -167,7 +167,7 @@ impl Renderer {
             device_context.queue.clone(),
             &command_buffer_allocator,
             memory_allocator.clone(),
-            "assets/sprite.png",
+            "assets/idle_animation.png",
         )?;
                 
         // Create descriptor set allocator
@@ -495,11 +495,12 @@ impl Renderer {
 
         // Draw each sprite
         for (transform, texture_descriptor) in sprites {
-            let push_constants = camera_vs::PushConstants {
+                let push_constants = camera_vs::PushConstants {
                 view_projection: camera_vp.to_cols_array_2d(),
                 pos: transform.position,
                 rotation: transform.rotation.into(),
-                scale: transform.scale,
+                scale: transform.scale.into(),
+                uv_rect: [0.0, 0.0, 0.0, 0.0],  // Use full texture
             };
 
             builder
@@ -634,9 +635,34 @@ impl Renderer {
             for transform in transforms {
                 let push_constants = camera_vs::PushConstants {
                     view_projection: camera_vp.to_cols_array_2d(),
-                    pos: transform.position,
+                    pos: transform.position.into(),
                     rotation: transform.rotation.into(),
-                    scale: transform.scale,
+                    scale: transform.scale.into(),
+                    uv_rect: [0.0, 0.0, 0.0, 0.0].into(), 
+                };
+
+                builder
+                    .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
+                    .draw_indexed(6, 1, 0, 0, 0)?;
+            }
+        }
+
+        // Draw animated sprites
+        for (descriptor_set, animated_sprites) in batch.iter_animated_batches() {
+            builder.bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                descriptor_set,
+            )?;
+
+            for sprite in animated_sprites {
+                let push_constants = camera_vs::PushConstants {
+                    view_projection: camera_vp.to_cols_array_2d(),
+                    pos: sprite.transform.position,
+                    rotation: sprite.transform.rotation.into(),
+                    scale: sprite.transform.scale.into(),
+                    uv_rect: sprite.uv_rect,  // Use sprite sheet frame UVs
                 };
 
                 builder

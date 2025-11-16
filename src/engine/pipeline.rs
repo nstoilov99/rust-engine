@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState},
+    color_blend::{ColorBlendAttachmentState, ColorBlendState, AttachmentBlend, BlendFactor, BlendOp},
     input_assembly::InputAssemblyState,
     multisample::MultisampleState,
     rasterization::RasterizationState,
@@ -156,20 +156,21 @@ mod transform_fs {
 /// Vertex shader with camera view-projection matrix
 pub mod camera_vs {
     vulkano_shaders::shader! {
-        ty: "vertex",
+              ty: "vertex",
         src: "
             #version 450
 
             // Vertex inputs
             layout(location = 0) in vec2 position;
-            layout(location = 1) in vec2 uv;
+            layout(location = 1) in vec2 uv;  // We have UVs but will override them
 
-            // Push constants (per-sprite transform)
+            // Push constants (per-sprite data)
             layout(push_constant) uniform PushConstants {
                 mat4 view_projection;  // Camera matrix
                 vec2 pos;              // Sprite position
                 float rotation;        // Sprite rotation
                 vec2 scale;            // Sprite scale
+                vec4 uv_rect;          // UV coordinates (u_min, v_min, u_max, v_max) - NEW!
             } constants;
 
             // Output to fragment shader
@@ -190,13 +191,31 @@ pub mod camera_vs {
 
                 // Apply camera view-projection
                 gl_Position = constants.view_projection * vec4(world_pos, 0.0, 1.0);
-                fragUV = uv;
+
+                // Calculate UV from position and uv_rect
+                // If uv_rect is (0,0,0,0), use default UVs from vertex
+                // Otherwise, map position to sprite sheet UV rectangle
+                if (constants.uv_rect == vec4(0.0, 0.0, 0.0, 0.0)) {
+                    // Default: use full texture (for non-animated sprites)
+                    fragUV = uv;
+                } else {
+                    // Animation: map position to UV rectangle
+                    // position ranges from -0.5 to 0.5, convert to 0-1
+                    vec2 uv_local = position + 0.5;
+
+                    // Map to sprite sheet UV rectangle
+                    fragUV = mix(
+                        constants.uv_rect.xy,  // (u_min, v_min)
+                        constants.uv_rect.zw,  // (u_max, v_max)
+                        uv_local
+                    );
+                }
             }
         "
     }
 }
 
-// Fragment shader stays the same as before
+// Fragment shader
 mod camera_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
@@ -434,7 +453,10 @@ pub fn create_camera_pipeline(
             multisample_state: Some(MultisampleState::default()),
             color_blend_state: Some(ColorBlendState::with_attachment_states(
                 1,
-                ColorBlendAttachmentState::default(),
+                ColorBlendAttachmentState {
+                    blend: Some(AttachmentBlend::alpha()),  // Enable alpha blending for transparency
+                    ..Default::default()
+                },
             )),
             dynamic_state: [DynamicState::Viewport].into_iter().collect(),  // Enable dynamic viewport
             subpass: Some(render_pass.clone().first_subpass().into()),

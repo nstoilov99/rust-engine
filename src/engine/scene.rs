@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use crate::engine::components::Transform2D;
 use crate::engine::SpriteBatch;
+use crate::engine::components::{SpriteSheet, AnimationController};
 
 /// Entity ID (unique per entity)
 pub type EntityId = usize;
@@ -18,6 +19,8 @@ pub struct Entity {
     pub id: EntityId,
     pub transform: Transform2D,
     pub sprite: Option<SpriteComponent>,
+    pub animation: Option<AnimationController>,
+    pub sprite_sheet: Option<SpriteSheet>,  
     pub active: bool,
 }
 
@@ -36,7 +39,13 @@ impl Scene {
     }
 
     /// Add entity to scene
-    pub fn add_entity(&mut self, transform: Transform2D, sprite: Option<SpriteComponent>) -> EntityId {
+    pub fn add_entity(
+        &mut self,
+        transform: Transform2D,
+        sprite: Option<SpriteComponent>,
+        animation: Option<AnimationController>,
+        sprite_sheet: Option<SpriteSheet>,  
+    ) -> EntityId {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -44,6 +53,8 @@ impl Scene {
             id,
             transform,
             sprite,
+            animation,
+            sprite_sheet, 
             active: true,
         });
 
@@ -76,7 +87,7 @@ impl Scene {
     }
 
     /// Submit all sprites to a batch for rendering (sorted by layer)
-    pub fn submit_to_batch(&self, batch: &mut SpriteBatch) {
+    pub fn submit_to_batch(&self, batch: &mut SpriteBatch, get_uv_rect: impl Fn(&Entity) -> [f32; 4]) {
         // Collect sprites with layers
         let mut sprites: Vec<_> = self.entities.values()
             .filter(|e| e.active && e.sprite.is_some())
@@ -88,7 +99,17 @@ impl Scene {
         // Add to batch
         for entity in sprites {
             if let Some(sprite) = &entity.sprite {
-                batch.add_sprite(sprite.texture_id, entity.transform);
+                let uv_rect = get_uv_rect(entity);
+                batch.add_sprite_animated(sprite.texture_id, entity.transform, uv_rect);
+            }
+        }
+    }
+
+    /// Update all entity animations
+    pub fn update_animations(&mut self, delta_time: f32) {
+        for entity in self.entities.values_mut().filter(|e| e.active) {
+            if let Some(anim) = &mut entity.animation {
+                anim.update(delta_time);
             }
         }
     }

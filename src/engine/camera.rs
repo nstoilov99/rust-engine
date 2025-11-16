@@ -63,32 +63,29 @@ impl Camera2D {
 
     /// Zooms in/out by a delta (useful for mouse wheel)
     /// Uses multiplicative zoom for smooth scaling
+    /// Positive delta = zoom in, Negative delta = zoom out
     pub fn adjust_zoom(&mut self, delta: f32) {
+        // Clamp delta to prevent huge zoom jumps
+        let clamped_delta = delta.clamp(-3.0, 3.0);
+
         // Multiplicative zoom: delta > 0 zooms in, delta < 0 zooms out
         // Factor of 1.1 = 10% change per scroll notch
-        let zoom_factor = 1.0 + (delta * 0.1);
+        let zoom_factor = 1.0 + (clamped_delta * 0.1);
         self.zoom = (self.zoom * zoom_factor).clamp(0.1, 10.0);
     }
 
     /// Calculates the view matrix (transforms world → screen)
     pub fn view_matrix(&self) -> Mat4 {
-        // Start with identity
-        let mut matrix = Mat4::IDENTITY;
-
-        // 1. Apply zoom (scale)
-        matrix = Mat4::from_scale(glam::Vec3::new(self.zoom, self.zoom, 1.0)) * matrix;
-
-        // 2. Apply camera position (translate)
-        matrix = Mat4::from_translation(glam::Vec3::new(-self.position.x, -self.position.y, 0.0)) * matrix;
-
-        matrix
+        // Only apply camera position (translate)
+        // Zoom is now handled in projection matrix
+        Mat4::from_translation(glam::Vec3::new(-self.position.x, -self.position.y, 0.0))
     }
 
     /// Calculates the projection matrix (maps world space to NDC)
     pub fn projection_matrix(&self) -> Mat4 {
         // Orthographic projection for 2D
         let aspect = self.viewport_size.x / self.viewport_size.y;
-        let height = 2.0; // World units visible vertically
+        let height = 2.0 / self.zoom; // World units visible vertically (affected by zoom)
         let width = height * aspect;
 
         Mat4::orthographic_rh(
