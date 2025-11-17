@@ -26,3 +26,27 @@ pub fn create_framebuffers(
 
     Ok(framebuffers)
 }
+
+/// Creates framebuffers with depth attachment for 3D rendering
+pub fn create_framebuffers_3d(
+    images: &[Arc<Image>],
+    render_pass: Arc<RenderPass>,
+    depth_view: Arc<ImageView>,
+) -> Result<Vec<Arc<Framebuffer>>, Box<dyn std::error::Error>> {
+    images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone())?;
+
+            // Create framebuffer with BOTH color and depth attachments
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view, depth_view.clone()],  // Color + Depth
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.into())
+        })
+        .collect::<Result<Vec<_>, _>>()
+}

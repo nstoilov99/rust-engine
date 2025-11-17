@@ -1,39 +1,38 @@
-use std::sync::Arc;
-use winit::window::Window;
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo,
-    SubpassBeginInfo, SubpassEndInfo,
-};
-use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::device::{Device, Queue};
-use vulkano::image::Image;
-use vulkano::instance::Instance;
-use vulkano::render_pass::Framebuffer;
-use vulkano::swapchain::{self as vk_swapchain, Surface, Swapchain};
-use vulkano::{Validated, VulkanError};
-use vulkano::sync::{GpuFuture};
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineLayout, PipelineBindPoint};
-use vulkano::descriptor_set::{PersistentDescriptorSet, allocator::StandardDescriptorSetAllocator};
-use vulkano::image::view::ImageView;
-use vulkano::image::sampler::Sampler;
-use crate::engine::render_pass::create_render_pass;
+use crate::engine::camera::Camera3D;
+use crate::engine::camera::{Camera2D, CameraPushConstants};
+use crate::engine::components::Transform2D;
 use crate::engine::framebuffer::create_framebuffers;
 use crate::engine::pipeline::{
-    create_pipeline, create_textured_pipeline, create_texture_descriptor_set, create_transform_pipeline,
-    create_camera_pipeline, create_quad_vertices, create_quad_indices, transform_vs, camera_vs,
-    Vertex, TexturedVertex
+    camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
+    create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
+    transform_vs, mesh_vs, TexturedVertex, Vertex, Vertex3D,
 };
+use crate::engine::render_pass::create_render_pass;
+use crate::engine::swapchain::{create_swapchain, recreate_swapchain};
 use crate::engine::texture::load_texture;
-use crate::engine::components::Transform2D;
-use crate::engine::{
-    create_logical_device, select_physical_device, VulkanContext,
-};
-use crate::engine::swapchain::{recreate_swapchain, create_swapchain};
-use crate::engine::camera::{Camera2D, CameraPushConstants};
 use crate::engine::SpriteBatch;
+use crate::engine::{create_logical_device, select_physical_device, VulkanContext};
+use glam::Mat4;
+use std::sync::Arc;
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
+    SubpassEndInfo,
+};
+use vulkano::descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet};
+use vulkano::device::{Device, Queue};
+use vulkano::image::view::ImageView;
+use vulkano::image::Image;
+use vulkano::instance::Instance;
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
+use vulkano::render_pass::{Framebuffer, RenderPass};
+use vulkano::swapchain::{self as vk_swapchain, Surface, Swapchain};
+use vulkano::sync::GpuFuture;
+use vulkano::{Validated, VulkanError};
+use winit::window::Window;
 
 pub struct Renderer {
     _instance: Arc<Instance>,
@@ -46,17 +45,22 @@ pub struct Renderer {
     pub memory_allocator: Arc<StandardMemoryAllocator>,
     pub vertex_buffer: Subbuffer<[TexturedVertex]>,
     pub index_buffer: Subbuffer<[u32]>,
-    render_pass: Arc<vulkano::render_pass::RenderPass>,
+    pub render_pass: Arc<vulkano::render_pass::RenderPass>,
     pub framebuffers: Vec<Arc<Framebuffer>>,
     pub pipeline: Arc<GraphicsPipeline>,
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pub descriptor_set: Arc<PersistentDescriptorSet>,
     // Frame-in-flight tracking
     frames_in_flight: usize,
     current_frame: usize,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub recreate_swapchain: bool,
-    pub camera: Camera2D, 
+    pub camera: Camera2D,
+    pub camera_3d: Camera3D,
+    pub render_pass_3d: Arc<RenderPass>,
+    pub framebuffers_3d: Vec<Arc<Framebuffer>>,
+    pub pipeline_3d: Arc<GraphicsPipeline>,
+    pub depth_buffer: Arc<ImageView>,
 }
 
 impl Renderer {
@@ -67,14 +71,9 @@ impl Renderer {
 
         let surface = Surface::from_window(vulkan_context.instance.clone(), window.clone())?;
         println!("✓ Vulkan surface created");
-        
-        let window_size = window.inner_size();
-        let camera = Camera2D::new(window_size.width as f32, window_size.height as f32);
 
         let physical_device = select_physical_device(vulkan_context.instance.clone())?;
-
         let device_context = create_logical_device(physical_device, surface.clone())?;
-
         let (swapchain, images) = create_swapchain(device_context.device.clone(), surface.clone())?;
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -82,26 +81,54 @@ impl Renderer {
             Default::default(),
         ));
 
-        
-        // Create memory allocator
+        // Create memory allocator (MOVED UP - needed by depth buffer)
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(
             device_context.device.clone(),
         ));
 
-        // Create triangle vertices
-        // let vertices = [
-        //     Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },  // Top - Red
-        //     Vertex { position: [0.5, 0.5], color: [0.0, 1.0, 0.0] },   // Right - Green
-        //     Vertex { position: [-0.5, 0.5], color: [0.0, 0.0, 1.0] },  // Left - Blue
-        // ];
+        let window_size = window.inner_size();
 
-        // Create textured quad vertices
+        // === 3D RENDERING SETUP ===
+
+        // Create 3D camera (Z-up coordinates)
+        let camera_3d = Camera3D::new(window_size.width as f32, window_size.height as f32);
+
+        // Create depth buffer for 3D
+        let depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+            device_context.device.clone(),
+            memory_allocator.clone(),
+            images[0].extent()[0],
+            images[0].extent()[1],
+        )?;
+
+        // Create 3D render pass
+        let render_pass_3d = crate::engine::render_pass::create_render_pass_3d(
+            device_context.device.clone(),
+            swapchain.image_format(),
+        )?;
+
+        // Create 3D framebuffers
+        let framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
+            &images,
+            render_pass_3d.clone(),
+            depth_buffer.clone(),
+        )?;
+
+        // Create 3D pipeline
+        let pipeline_3d = crate::engine::pipeline::create_mesh_pipeline(
+            device_context.device.clone(),
+            render_pass_3d.clone(),
+        )?;
+
+        println!("✓ 3D rendering initialized (depth buffer, perspective camera)");
+
+        // === 2D RENDERING SETUP (for UI/sprites) ===
+
+        // Create 2D camera
+        let camera = Camera2D::new(window_size.width as f32, window_size.height as f32);
+
+        // Create 2D quad vertices (for sprites)
         let vertices = create_quad_vertices();
-
-        // Create quad vertices (indexed version - only 4 vertices)
-        let vertices = create_quad_vertices();
-
-        // Create vertex buffer and upload to GPU
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
@@ -116,13 +143,12 @@ impl Renderer {
             vertices.iter().cloned(),
         )?;
 
-                // Create index buffer
+        // Create index buffer
         let indices = create_quad_indices();
-
         let index_buffer = Buffer::from_iter(
             memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::INDEX_BUFFER,  // Note: INDEX_BUFFER
+                usage: BufferUsage::INDEX_BUFFER,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -133,35 +159,25 @@ impl Renderer {
             indices.iter().cloned(),
         )?;
 
-        println!("✓ Vertex buffer created (4 vertices)");
-        println!("✓ Index buffer created (6 indices)");
-
-        // Create render pass
+        // Create 2D render pass
         let render_pass = create_render_pass(device_context.device.clone(), swapchain.clone())?;
-        println!("✓ Render pass created");
 
-        // Create framebuffers
+        // Create 2D framebuffers
         let framebuffers = create_framebuffers(&images, render_pass.clone())?;
-        println!("✓ Framebuffers created ({} framebuffers)", framebuffers.len());
 
-        // Create pipeline
+        // Create 2D pipeline with camera support
         let viewport = Viewport {
             offset: [0.0, 0.0],
             extent: window.inner_size().into(),
             depth_range: 0.0..=1.0,
         };
 
-        // Create camera pipeline with view-projection support
-        let pipeline = create_camera_pipeline(
-            device_context.device.clone(),
-            render_pass.clone(),
-            viewport,
-        )?;
-        
-        // let pipeline = create_pipeline(device_context.device.clone(), render_pass.clone(), viewport)?;
-        // println!("✓ Graphics pipeline created");
+        let pipeline =
+            create_camera_pipeline(device_context.device.clone(), render_pass.clone(), viewport)?;
 
-        // Load texture
+        println!("✓ 2D rendering initialized (camera pipeline, sprite support)");
+
+        // Load texture (for both 2D and 3D)
         let (texture_view, sampler) = load_texture(
             device_context.device.clone(),
             device_context.queue.clone(),
@@ -169,7 +185,7 @@ impl Renderer {
             memory_allocator.clone(),
             "assets/idle_animation.png",
         )?;
-                
+
         // Create descriptor set allocator
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device_context.device.clone(),
@@ -206,7 +222,12 @@ impl Renderer {
             current_frame: 0,
             previous_frame_end: None,
             recreate_swapchain: false,
-            camera
+            camera,
+            camera_3d,
+            render_pass_3d,
+            framebuffers_3d,
+            pipeline_3d,
+            depth_buffer,
         })
     }
 
@@ -219,7 +240,10 @@ impl Renderer {
         // Check if window is minimized (zero size) - skip rendering
         let extent = self.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
-            println!("⏸️  Window minimized ({}x{}), skipping render", extent[0], extent[1]);
+            println!(
+                "⏸️  Window minimized ({}x{}), skipping render",
+                extent[0], extent[1]
+            );
             // Window is minimized, skip rendering but keep the future alive
             self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             return Ok(());
@@ -241,16 +265,37 @@ impl Renderer {
             }
 
             self.swapchain = new_swapchain;
-            self.images = new_images;
+            self.images = new_images.clone();
 
             // Recreate framebuffers for new images
             self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
 
             // Update camera viewport to match new swapchain size
             let extent = self.images[0].extent();
-            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
 
             self.recreate_swapchain = false;
+
+            // Recreate depth buffer for new size
+            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+                self.device.clone(),
+                self.memory_allocator.clone(),
+                new_images[0].extent()[0],
+                new_images[0].extent()[1],
+            )?;
+
+            // Recreate 3D framebuffers
+            self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
+                &new_images,
+                self.render_pass_3d.clone(),
+                self.depth_buffer.clone(),
+            )?;
+
+            // Update 3D camera aspect ratio
+            let extent = new_images[0].extent();
+            self.camera_3d
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
         }
 
         // Acquire next image
@@ -283,7 +328,7 @@ impl Renderer {
                 RenderPassBeginInfo {
                     clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())], // Black background
                     ..RenderPassBeginInfo::framebuffer(
-                        self.framebuffers[image_index as usize].clone()
+                        self.framebuffers[image_index as usize].clone(),
                     )
                 },
                 SubpassBeginInfo::default(),
@@ -291,14 +336,14 @@ impl Renderer {
             // Bind pipeline
             .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
-            PipelineBindPoint::Graphics,
-            self.pipeline.layout().clone(),
-            0,
-            self.descriptor_set.clone(),
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                self.descriptor_set.clone(),
             )?
             // Bind vertex buffer
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
-            .bind_index_buffer(self.index_buffer.clone())? 
+            .bind_index_buffer(self.index_buffer.clone())?
             .draw_indexed(6, 1, 0, 0, 0)?
             // End render pass
             .end_render_pass(SubpassEndInfo::default())?;
@@ -330,7 +375,6 @@ impl Renderer {
         Ok(())
     }
 
-        
     /// Renders a sprite with 2D transform
     pub fn render_sprite(
         &mut self,
@@ -360,7 +404,9 @@ impl Renderer {
             .begin_render_pass(
                 RenderPassBeginInfo {
                     clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                    ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index as usize].clone())
+                    ..RenderPassBeginInfo::framebuffer(
+                        self.framebuffers[image_index as usize].clone(),
+                    )
                 },
                 SubpassBeginInfo::default(),
             )?
@@ -371,7 +417,7 @@ impl Renderer {
                 0,
                 descriptor_set.clone(),
             )?
-            .push_constants(self.pipeline.layout().clone(), 0, push_constants)?  // NEW: Push constants
+            .push_constants(self.pipeline.layout().clone(), 0, push_constants)? // NEW: Push constants
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
             .bind_index_buffer(self.index_buffer.clone())?
             .draw_indexed(6, 1, 0, 0, 0)?
@@ -409,7 +455,10 @@ impl Renderer {
         // Check if window is minimized (zero size) - skip rendering
         let extent = self.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
-            println!("⏸️  Window minimized ({}x{}), skipping render", extent[0], extent[1]);
+            println!(
+                "⏸️  Window minimized ({}x{}), skipping render",
+                extent[0], extent[1]
+            );
             // Window is minimized, skip rendering but keep the future alive
             self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             return Ok(());
@@ -438,7 +487,8 @@ impl Renderer {
 
             // Update camera viewport to match new swapchain size
             let extent = self.images[0].extent();
-            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
 
             self.recreate_swapchain = false;
         }
@@ -470,9 +520,7 @@ impl Renderer {
         builder.begin_render_pass(
             RenderPassBeginInfo {
                 clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
-                ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers[image_index as usize].clone()
-                )
+                ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index as usize].clone())
             },
             SubpassBeginInfo::default(),
         )?;
@@ -481,11 +529,16 @@ impl Renderer {
 
         // Set dynamic viewport (updates with window resize)
         let extent = self.swapchain.image_extent();
-        builder.set_viewport(0, [Viewport {
-            offset: [0.0, 0.0],
-            extent: [extent[0] as f32, extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        }].into_iter().collect())?;
+        builder.set_viewport(
+            0,
+            [Viewport {
+                offset: [0.0, 0.0],
+                extent: [extent[0] as f32, extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            }]
+            .into_iter()
+            .collect(),
+        )?;
 
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
         builder.bind_index_buffer(self.index_buffer.clone())?;
@@ -495,12 +548,12 @@ impl Renderer {
 
         // Draw each sprite
         for (transform, texture_descriptor) in sprites {
-                let push_constants = camera_vs::PushConstants {
+            let push_constants = camera_vs::PushConstants {
                 view_projection: camera_vp.to_cols_array_2d(),
                 pos: transform.position,
                 rotation: transform.rotation.into(),
                 scale: transform.scale.into(),
-                uv_rect: [0.0, 0.0, 0.0, 0.0],  // Use full texture
+                uv_rect: [0.0, 0.0, 0.0, 0.0], // Use full texture
             };
 
             builder
@@ -568,7 +621,8 @@ impl Renderer {
 
             // Update camera viewport
             let extent = self.images[0].extent();
-            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
         }
 
         // Acquire next image
@@ -597,9 +651,7 @@ impl Renderer {
         builder.begin_render_pass(
             RenderPassBeginInfo {
                 clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
-                ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers[image_index as usize].clone()
-                )
+                ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index as usize].clone())
             },
             SubpassBeginInfo::default(),
         )?;
@@ -609,11 +661,16 @@ impl Renderer {
 
         // Set dynamic viewport (updates with window resize)
         let extent = self.swapchain.image_extent();
-        builder.set_viewport(0, [Viewport {
-            offset: [0.0, 0.0],
-            extent: [extent[0] as f32, extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        }].into_iter().collect())?;
+        builder.set_viewport(
+            0,
+            [Viewport {
+                offset: [0.0, 0.0],
+                extent: [extent[0] as f32, extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            }]
+            .into_iter()
+            .collect(),
+        )?;
 
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
         builder.bind_index_buffer(self.index_buffer.clone())?;
@@ -638,7 +695,7 @@ impl Renderer {
                     pos: transform.position.into(),
                     rotation: transform.rotation.into(),
                     scale: transform.scale.into(),
-                    uv_rect: [0.0, 0.0, 0.0, 0.0].into(), 
+                    uv_rect: [0.0, 0.0, 0.0, 0.0].into(),
                 };
 
                 builder
@@ -662,7 +719,7 @@ impl Renderer {
                     pos: sprite.transform.position,
                     rotation: sprite.transform.rotation.into(),
                     scale: sprite.transform.scale.into(),
-                    uv_rect: sprite.uv_rect,  // Use sprite sheet frame UVs
+                    uv_rect: sprite.uv_rect, // Use sprite sheet frame UVs
                 };
 
                 builder
@@ -670,6 +727,199 @@ impl Renderer {
                     .draw_indexed(6, 1, 0, 0, 0)?;
             }
         }
+
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        // Execute and present
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders a single 3D mesh
+    pub fn render_mesh(
+        &mut self,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+        model_matrix: Mat4,
+        texture_descriptor: Arc<PersistentDescriptorSet>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for previous frame
+        if let Some(mut previous) = self.previous_frame_end.take() {
+            previous.cleanup_finished();
+        }
+
+        // Handle swapchain recreation
+        if self.recreate_swapchain {
+            let (new_swapchain, new_images) = recreate_swapchain(
+                self.device.clone(),
+                self.surface.clone(),
+                self.swapchain.clone(),
+            )?;
+
+            // Handle minimized window
+            if new_images.is_empty() {
+                self.recreate_swapchain = false;
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                return Ok(());
+            }
+
+            self.swapchain = new_swapchain;
+            self.images = new_images;
+
+            // Recreate 2D framebuffers
+            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+
+            // Recreate depth buffer for new size
+            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+                self.device.clone(),
+                self.memory_allocator.clone(),
+                self.images[0].extent()[0],
+                self.images[0].extent()[1],
+            )?;
+
+            // Recreate 3D framebuffers
+            self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
+                &self.images,
+                self.render_pass_3d.clone(),
+                self.depth_buffer.clone(),
+            )?;
+
+            // Update both camera viewports
+            let extent = self.images[0].extent();
+            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera_3d.set_viewport_size(extent[0] as f32, extent[1] as f32);
+
+            self.recreate_swapchain = false;
+        }
+
+        // Acquire next image
+        let (image_index, suboptimal, acquire_future) =
+            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate_swapchain = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+        if suboptimal {
+            self.recreate_swapchain = true;
+        }
+
+        // Create vertex and index buffers
+        let vertex_buffer = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices.iter().copied(),
+        )?;
+
+        let index_buffer = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            indices.iter().copied(),
+        )?;
+
+        // Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        // Begin render pass with depth clear
+        builder.begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![
+                    Some([0.1, 0.1, 0.15, 1.0].into()), // Clear color (dark blue)
+                    Some(1.0.into()),                   // Clear depth to 1.0 (far plane)
+                ],
+                ..RenderPassBeginInfo::framebuffer(
+                    self.framebuffers_3d[image_index as usize].clone(),
+                )
+            },
+            SubpassBeginInfo::default(),
+        )?;
+
+        // Bind pipeline
+        builder.bind_pipeline_graphics(self.pipeline_3d.clone())?;
+
+        // Set viewport
+        let extent = self.swapchain.image_extent();
+        builder.set_viewport(
+            0,
+            [Viewport {
+                offset: [0.0, 0.0],
+                extent: [extent[0] as f32, extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            }]
+            .into_iter()
+            .collect(),
+        )?;
+
+        // Bind texture
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            self.pipeline_3d.layout().clone(),
+            0,
+            texture_descriptor,
+        )?;
+
+        // Bind buffers
+        builder
+            .bind_vertex_buffers(0, vertex_buffer)?
+            .bind_index_buffer(index_buffer)?;
+
+        // Create push constants
+        let view_projection = self.camera_3d.view_projection_matrix();
+        let push_constants = mesh_vs::PushConstants {
+            model: model_matrix.to_cols_array_2d(),
+            view_projection: view_projection.to_cols_array_2d(),
+        };
+
+        // Draw
+        builder
+            .push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?
+            .draw_indexed(indices.len() as u32, 1, 0, 0, 0)?;
 
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;

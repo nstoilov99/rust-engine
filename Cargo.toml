@@ -21,6 +21,7 @@ glam = "0.29"
 
 # Image loading (for textures later)
 image = "0.25"
+bytemuck = "1.24.0"
 
 [profile.dev]
 opt-level = 1

@@ -1,4 +1,4 @@
-use glam::{Vec2, Mat4};
+use glam::{Vec2, Vec3, Mat4};
 
 /// Push constants with camera support
 #[derive(Clone, Copy, Debug)]
@@ -115,7 +115,7 @@ pub fn projection_matrix(&self) -> Mat4 {
 
         Vec2::new(world_pos.x, world_pos.y)
     }
-    
+
     /// Get the visible area in pixels at current zoom
     pub fn visible_area(&self) -> (f32, f32) {
         let width = self.viewport_size.x / self.zoom;
@@ -141,5 +141,120 @@ pub fn projection_matrix(&self) -> Mat4 {
             && point.x <= max.x + margin
             && point.y >= min.y - margin
             && point.y <= max.y + margin
+    }
+}
+
+// Keep your existing Camera2D...
+
+/// 3D perspective camera
+///
+/// IMPORTANT: position, target, and up are stored in Y-up render space.
+/// Use set_position_zup() and set_target_zup() to work in Z-up gameplay space.
+pub struct Camera3D {
+    pub position: Vec3,       // Camera position (Y-up render space)
+    pub target: Vec3,         // What the camera looks at (Y-up render space)
+    pub up: Vec3,             // Up direction (Vec3::Y for Y-up render space)
+    pub fov: f32,             // Field of view in radians
+    pub aspect_ratio: f32,    // Width / height
+    pub near: f32,            // Near clip plane
+    pub far: f32,             // Far clip plane
+}
+
+impl Camera3D {
+    /// Creates a new 3D perspective camera
+    /// Uses Z-up coordinates: X=forward, Y=right, Z=up
+    pub fn new(viewport_width: f32, viewport_height: f32) -> Self {
+        use crate::engine::coords::convert_position_zup_to_yup;
+
+        // Position in Z-up space: back 10 units, elevated 5 units
+        let position_zup = Vec3::new(-10.0, 0.0, 5.0);
+
+        Self {
+            position: convert_position_zup_to_yup(position_zup),
+            target: Vec3::ZERO,                   // Looking at origin (Y-up space)
+            up: Vec3::Y,                          // Y is up in render space
+            fov: 45.0_f32.to_radians(),          // 45 degree FOV
+            aspect_ratio: viewport_width / viewport_height,
+            near: 0.1,                            // Don't clip too close
+            far: 100.0,                           // Don't clip too far
+        }
+    }
+
+    /// Alternative constructor for pure Y-up coordinates (rarely needed)
+    /// Only use this if you're NOT using the Z-up coordinate system
+    pub fn new_yup(viewport_width: f32, viewport_height: f32) -> Self {
+        Self {
+            position: Vec3::new(0.0, 2.0, 5.0),  // Y-up: camera back and up
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            fov: 45.0_f32.to_radians(),
+            aspect_ratio: viewport_width / viewport_height,
+            near: 0.1,
+            far: 100.0,
+        }
+    }
+
+    /// Updates aspect ratio when window resizes
+    pub fn set_viewport_size(&mut self, width: f32, height: f32) {
+        self.aspect_ratio = width / height;
+    }
+
+    /// Creates view matrix (world → camera space)
+    /// Note: self.position and self.target are stored in Y-up render space
+    /// (they were converted from Z-up when you called set_position_zup, etc.)
+    pub fn view_matrix(&self) -> Mat4 {
+        Mat4::look_at_rh(self.position, self.target, self.up)
+    }
+
+    /// Creates perspective projection matrix (camera → clip space)
+    pub fn projection_matrix(&self) -> Mat4 {
+        Mat4::perspective_rh(self.fov, self.aspect_ratio, self.near, self.far)
+    }
+
+    /// Combined view-projection matrix (optimization)
+    pub fn view_projection_matrix(&self) -> Mat4 {
+        self.projection_matrix() * self.view_matrix()
+    }
+
+    /// Orbits camera around target (for editor-style controls)
+    pub fn orbit(&mut self, delta_yaw: f32, delta_pitch: f32, distance: f32) {
+        // Calculate current spherical coordinates
+        let offset = self.position - self.target;
+        let radius = offset.length().max(0.1);
+
+        // Convert to spherical coordinates
+        let mut yaw = offset.z.atan2(offset.x);
+        let mut pitch = (offset.y / radius).asin();
+
+        // Apply deltas
+        yaw += delta_yaw;
+        pitch = (pitch + delta_pitch).clamp(-1.5, 1.5); // Prevent gimbal lock
+
+        // Convert back to Cartesian
+        let new_offset = Vec3::new(
+            yaw.cos() * pitch.cos() * distance,
+            pitch.sin() * distance,
+            yaw.sin() * pitch.cos() * distance,
+        );
+
+        self.position = self.target + new_offset;
+    }
+
+    /// Moves camera forward/backward along view direction
+    pub fn dolly(&mut self, delta: f32) {
+        let direction = (self.target - self.position).normalize();
+        self.position += direction * delta;
+        self.target += direction * delta;
+    }
+
+    /// Pans camera (moves target and position together)
+    pub fn pan(&mut self, delta_x: f32, delta_y: f32) {
+        let forward = (self.target - self.position).normalize();
+        let right = forward.cross(self.up).normalize();
+        let up = right.cross(forward);
+
+        let offset = right * delta_x + up * delta_y;
+        self.position += offset;
+        self.target += offset;
     }
 }

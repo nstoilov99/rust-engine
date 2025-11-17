@@ -3,13 +3,16 @@
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState, AttachmentBlend, BlendFactor, BlendOp},
+    color_blend::{ColorBlendAttachmentState, ColorBlendState, AttachmentBlend},
     input_assembly::InputAssemblyState,
     multisample::MultisampleState,
     rasterization::RasterizationState,
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
     viewport::{Viewport, ViewportState},
     GraphicsPipelineCreateInfo,
+    depth_stencil::DepthStencilState,
+    depth_stencil::DepthState,
+    depth_stencil::CompareOp,
 };
 use vulkano::pipeline::DynamicState;
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
@@ -233,6 +236,80 @@ mod camera_fs {
     }
 }
 
+/// Vertex shader for 3D meshes with MVP transformation
+pub mod mesh_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        src: "
+            #version 450
+
+            // Vertex inputs (from Vertex3D struct)
+            layout(location = 0) in vec3 position;
+            layout(location = 1) in vec3 normal;
+            layout(location = 2) in vec2 uv;
+
+            // Push constants (per-draw data)
+            layout(push_constant) uniform PushConstants {
+                mat4 model;             // Model matrix (local → world)
+                mat4 view_projection;   // Combined view + projection
+            } constants;
+
+            // Outputs to fragment shader
+            layout(location = 0) out vec3 fragNormal;  // Normal in world space
+            layout(location = 1) out vec2 fragUV;
+            layout(location = 2) out vec3 fragWorldPos; // Position in world space
+
+            void main() {
+                // Transform position to world space
+                vec4 worldPos = constants.model * vec4(position, 1.0);
+                fragWorldPos = worldPos.xyz;
+
+                // Transform normal to world space (important for lighting!)
+                // Note: Use transpose(inverse(model)) for non-uniform scaling
+                fragNormal = mat3(constants.model) * normal;
+
+                // Transform to clip space for GPU
+                gl_Position = constants.view_projection * worldPos;
+
+                // Pass through UV
+                fragUV = uv;
+            }
+        "
+    }
+}
+
+/// Fragment shader for 3D meshes (simple textured version)
+pub mod mesh_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: "
+            #version 450
+
+            // Inputs from vertex shader
+            layout(location = 0) in vec3 fragNormal;
+            layout(location = 1) in vec2 fragUV;
+            layout(location = 2) in vec3 fragWorldPos;
+
+            // Texture sampler
+            layout(set = 0, binding = 0) uniform sampler2D texSampler;
+
+            // Output color
+            layout(location = 0) out vec4 outColor;
+
+            void main() {
+                // Simple textured output (no lighting yet)
+                vec4 texColor = texture(texSampler, fragUV);
+
+                // Debug: Use normal as color (remove after testing)
+                // vec3 normalColor = normalize(fragNormal) * 0.5 + 0.5;
+                // outColor = vec4(normalColor, 1.0);
+
+                outColor = texColor;
+            }
+        "
+    }
+}
+
 /// Vertex structure matching shader inputs
 #[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
 #[repr(C)]
@@ -250,6 +327,17 @@ pub struct TexturedVertex {
     pub position: [f32; 2],  // Screen position
     #[format(R32G32_SFLOAT)]
     pub uv: [f32; 2],        // Texture coordinate
+}
+/// Vertex format for 3D meshes with lighting support
+#[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+#[repr(C)]
+pub struct Vertex3D {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],  // X, Y, Z position
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],    // Surface normal for lighting
+    #[format(R32G32_SFLOAT)]
+    pub uv: [f32; 2],        // Texture coordinates
 }
 
 /// Creates graphics pipeline with shaders and rendering settings
@@ -465,6 +553,70 @@ pub fn create_camera_pipeline(
     )?;
 
     println!("✓ Camera pipeline created (with dynamic viewport)");
+
+    Ok(pipeline)
+}
+
+/// Creates graphics pipeline for 3D mesh rendering
+pub fn create_mesh_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
+    // Load shaders
+    let vs = mesh_vs::load(device.clone())?.entry_point("main").unwrap();
+    let fs = mesh_fs::load(device.clone())?.entry_point("main").unwrap();
+
+    let stages = [
+        PipelineShaderStageCreateInfo::new(vs),
+        PipelineShaderStageCreateInfo::new(fs),
+    ];
+
+    // Vertex input: Vertex3D format
+    let vertex_input_state = Vertex3D::per_vertex()
+        .definition(&stages[0].entry_point.info().input_interface)?;
+
+    // Pipeline layout (push constants + descriptor set)
+    let layout = PipelineLayout::new(
+        device.clone(),
+        PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
+            .into_pipeline_layout_create_info(device.clone())?,
+    )?;
+
+    let pipeline = GraphicsPipeline::new(
+        device.clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: stages.into_iter().collect(),
+            vertex_input_state: Some(vertex_input_state),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            viewport_state: Some(ViewportState::default()),
+            rasterization_state: Some(RasterizationState::default()),
+            multisample_state: Some(MultisampleState::default()),
+
+            // NEW: Enable depth testing!
+            depth_stencil_state: Some(DepthStencilState {
+                depth: Some(DepthState {
+                    compare_op: CompareOp::Less,  // Closer pixels win
+                    write_enable: true,            // Update depth buffer
+                }),
+                ..Default::default()
+            }),
+
+            // Alpha blending (same as 2D)
+            color_blend_state: Some(ColorBlendState::with_attachment_states(
+                1,
+                ColorBlendAttachmentState {
+                    blend: Some(AttachmentBlend::alpha()),
+                    ..Default::default()
+                },
+            )),
+
+            // Dynamic viewport
+            dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+            subpass: Some(render_pass.clone().first_subpass().into()),
+            ..GraphicsPipelineCreateInfo::layout(layout)
+        },
+    )?;
 
     Ok(pipeline)
 }

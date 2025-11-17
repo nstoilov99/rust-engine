@@ -4,9 +4,12 @@ use engine::Renderer;
 use std::sync::Arc;
 use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, ElementState};
 use winit::event_loop::{ControlFlow, EventLoop};
+use vulkano::pipeline::Pipeline;  // Needed for .layout() method
 use crate::engine::{Transform2D, InputManager, Camera2D, SpriteBatch, Scene, SpriteComponent};
 use crate::engine::{SpriteSheet, Animation, AnimationController};
 use crate::engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
+use crate::engine::{GameplayTransform, zup};
+use glam::{Mat4, Vec3};
 
 
 
@@ -31,42 +34,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         renderer.queue.clone(),
         &renderer.command_buffer_allocator,
         renderer.memory_allocator.clone(),
-        "assets/idle_animation.png",  // Your downloaded 128×32 idle animation
+        "assets/sprite.png",  // Your downloaded 128×32 idle animation
     )?;
-    println!("✅ Idle animation texture loaded successfully!");
+    // Create descriptor set for texture
+    let descriptor_set = engine::pipeline::create_texture_descriptor_set(
+        renderer.descriptor_set_allocator.clone(),
+        renderer.pipeline_3d.clone(),  // Pass the pipeline, not the layout
+        texture_view,
+        sampler,
+    )?;
 
-    // Create sprite batch
-    let mut batch = SpriteBatch::new();
+    // Create cube mesh
+    let (cube_vertices, cube_indices) = engine::create_cube();
 
-    // Register texture (do this once)
-    let texture_id = batch.register_texture(renderer.descriptor_set.clone());
+    // Animation state
+    let mut rotation = 0.0f32;
+    let mut camera_distance = 5.0f32;
 
-    // Create scene
-    let mut scene = Scene::new();
+    // Create game loop for delta time
+    let mut game_loop = engine::GameLoop::new();
 
-    // Define sprite sheet layout for your 128×32 texture with 32×32 frames
-    // 128 pixels wide ÷ 32 pixels per frame = 4 frames horizontally
-    // 32 pixels tall ÷ 32 pixels per frame = 1 row vertically
-    let sprite_sheet = SpriteSheet::new(128.0, 32.0, 32.0, 32.0);
 
-    // Create animation controller
-    let mut anim_controller = AnimationController::new();
 
-    // Add idle animation: frames 0-3 (all 4 frames) at 8 FPS, looping
-    anim_controller.add_animation(Animation::new("idle", 0, 3, 8.0, true));
+    let mut game_loop = engine::GameLoop::new();
 
-    // Start playing idle animation
-    anim_controller.play("idle");
-
-    println!("🎬 Idle animation created: 4 frames at 8 FPS");
-
-    // Add animated character entity
-    let player = scene.add_entity(
-        Transform2D::new([0.0, 0.0], 0.0, [32.0, 32.0]),  // Center, 0.3 world units
-        Some(SpriteComponent { texture_id, layer: 10 }),
-        Some(anim_controller),
-        Some(sprite_sheet.clone()),
-    );
 
     // No background for now - just the animated character
 
@@ -86,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::KeyboardInput { input: keyboard_input, .. } => {
                     input_manager.handle_keyboard(keyboard_input.virtual_keycode, keyboard_input.state);
 
-                    // Still handle ESC for quit
+                    // Handle ESC for quit
                     if let Some(VirtualKeyCode::Escape) = keyboard_input.virtual_keycode {
                         if keyboard_input.state == ElementState::Pressed {
                             *control_flow = ControlFlow::Exit;
@@ -104,53 +95,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MouseScrollDelta::LineDelta(_x, y) => y,
                         MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                     };
-                    input_manager.handle_mouse_wheel(scroll);
+                    camera_distance = (camera_distance - scroll).clamp(2.0, 20.0);
+                    renderer.camera_3d.orbit(0.0, 0.0, camera_distance);
                 }
                 _ => {}
             },
-            Event::RedrawRequested(_) => {
-                // Update camera with current input state
-                update_camera(&mut renderer.camera, &input_manager, 0.016); // ~60fps
+            Event::MainEventsCleared => {
+                // Update delta time
+                let delta_time = game_loop.tick();
 
-                // Clear input state BEFORE rendering (so scroll doesn't accumulate)
-                input_manager.new_frame();
+                // Animate rotation (1 radian per second)
+                let rotation_speed = 1.0; // radians/second
+                rotation += rotation_speed * delta_time;
 
-                // Submit scene to batch with UV calculation
-                for entity in scene.iter_entities() {
-                    if let Some(sprite) = &entity.sprite {
-                        let uv_rect = if let (Some(anim), Some(sheet)) = (&entity.animation, &entity.sprite_sheet) {
-                            // Animated sprite - get current frame UVs
-                            let frame = anim.get_current_frame();
-                            let uvs = sheet.get_frame_uvs(frame);
-                            [uvs[0].x, uvs[0].y, uvs[3].x, uvs[3].y]  // Convert to [u_min, v_min, u_max, v_max]
-                        } else {
-                            // Static sprite - use full texture
-                            [0.0, 0.0, 0.0, 0.0]
-                        };
-
-                        batch.add_sprite_animated(sprite.texture_id, entity.transform, uv_rect);
-                    }
+                // Update 3D camera with arrow keys
+                if input_manager.is_key_pressed(VirtualKeyCode::Left) {
+                    renderer.camera_3d.orbit(0.1, 0.0, camera_distance);
+                }
+                if input_manager.is_key_pressed(VirtualKeyCode::Right) {
+                    renderer.camera_3d.orbit(-0.1, 0.0, camera_distance);
+                }
+                if input_manager.is_key_pressed(VirtualKeyCode::Up) {
+                    renderer.camera_3d.orbit(0.0, 0.1, camera_distance);
+                }
+                if input_manager.is_key_pressed(VirtualKeyCode::Down) {
+                    renderer.camera_3d.orbit(0.0, -0.1, camera_distance);
                 }
 
-                // Render
-                if let Err(e) = renderer.render_sprite_batch(&batch) {
+                window.request_redraw();
+            }
+            Event::RedrawRequested(_) => {
+                // Create model matrix using Z-up coordinates
+                // In Z-up: rotate around Z axis (up)
+                let model = Mat4::from_rotation_z(rotation);
+
+                // Render cube
+                if let Err(e) = renderer.render_mesh(
+                    &cube_vertices,
+                    &cube_indices,
+                    model,
+                    descriptor_set.clone(),
+                ) {
                     eprintln!("❌ Render error: {:?}", e);
                 }
-
-                // Clear batch after rendering to prevent sprite accumulation
-                batch.clear();
-            }
-            Event::MainEventsCleared => {
-                // Update animations (advance to next frame)
-                scene.update_animations(0.016);  // 60 FPS = ~0.016 seconds per frame
-
-                if let Some(player_entity) = scene.get_entity_mut(player) {
-                    // Move 2 pixels per frame (120 pixels/sec at 60 FPS)
-                    player_entity.transform.position[0] += 2.0;
-                }
-
-                // Request redraw
-                window.request_redraw();
             }
             _ => {}
         }

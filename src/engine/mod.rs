@@ -12,6 +12,10 @@ pub mod sprite_batch;
 pub mod camera;
 pub mod input;
 pub mod scene;
+pub mod game_loop;
+pub mod coords;
+pub mod mesh;
+pub mod depth_buffer;
 
 
 pub use vulkan_context::VulkanContext;
@@ -25,3 +29,12 @@ pub use sprite_batch::{SpriteBatch, AnimatedSprite};
 pub use camera::Camera2D;
 pub use input::InputManager;
 pub use scene::{Scene, Entity, EntityId, SpriteComponent};
+pub use game_loop::GameLoop;
+pub use coords::{
+    GameplayTransform, CoordinateSystem,
+    convert_position_zup_to_yup, convert_position_yup_to_zup,
+    convert_rotation_zup_to_yup, convert_transform_zup_to_yup,
+    zup, yup,
+};
+pub use mesh::{create_cube, create_plane};
+pub use depth_buffer::create_depth_buffer;
