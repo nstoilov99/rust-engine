@@ -6,7 +6,7 @@ use crate::engine::framebuffer::{create_framebuffers, create_framebuffers_3d};
 use crate::engine::pipeline::{
     camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
     create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
-    transform_vs, mesh_vs, TexturedVertex, Vertex, Vertex3D,
+    transform_vs, mesh_vs, lit_mesh_vs, TexturedVertex, Vertex, Vertex3D,
 };
 use crate::engine::render_pass::create_render_pass;
 use crate::engine::swapchain::{create_swapchain, recreate_swapchain};
@@ -21,7 +21,7 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
     SubpassEndInfo,
 };
-use vulkano::descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet};
+use vulkano::descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
 use vulkano::image::view::ImageView;
 use vulkano::image::Image;
@@ -34,6 +34,8 @@ use vulkano::swapchain::{self as vk_swapchain, Surface, Swapchain};
 use vulkano::sync::GpuFuture;
 use vulkano::{Validated, VulkanError};
 use winit::window::Window;
+use crate::engine::light::{DirectionalLight, PointLight, AmbientLight};
+use crate::engine::pipeline::{LightingUniformData, create_lit_mesh_pipeline};
 
 pub struct Renderer {
     _instance: Arc<Instance>,
@@ -62,6 +64,13 @@ pub struct Renderer {
     pub framebuffers_3d: Vec<Arc<Framebuffer>>,
     pub pipeline_3d: Arc<GraphicsPipeline>,
     pub depth_buffer: Arc<ImageView>,
+    //Lighting
+    pub pipeline_lit: Arc<GraphicsPipeline>,
+    pub ambient_light: AmbientLight,
+    pub directional_light: Option<DirectionalLight>,
+    pub point_lights: Vec<PointLight>,
+    pub lighting_buffer: Subbuffer<LightingUniformData>,
+    pub lighting_descriptor_set: Arc<PersistentDescriptorSet>,
 }
 
 impl Renderer {
@@ -122,6 +131,47 @@ impl Renderer {
         )?;
 
         println!("✓ 3D rendering initialized (depth buffer, perspective camera)");
+
+        // Create lit mesh pipeline
+        let pipeline_lit = create_lit_mesh_pipeline(
+            device_context.device.clone(),
+            render_pass_3d.clone(),
+        )?;
+
+        // Create descriptor set allocator (needed for lighting descriptor set)
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
+            device_context.device.clone(),
+            Default::default(),
+        ));
+
+        // Create default lighting
+        let ambient_light = AmbientLight::default();
+        let directional_light = Some(DirectionalLight::sun());
+        let point_lights = Vec::new();
+
+        // Create lighting uniform buffer
+        let lighting_data = LightingUniformData::default();
+        let lighting_buffer = Buffer::from_data(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            lighting_data,
+        )?;
+
+        // Create descriptor set for lighting
+        let lighting_descriptor_set = PersistentDescriptorSet::new(
+            &descriptor_set_allocator,
+            pipeline_lit.layout().set_layouts()[1].clone(), // Set 1 = lighting
+            [WriteDescriptorSet::buffer(0, lighting_buffer.clone())],
+            [],
+        )?;
 
         // === 2D RENDERING SETUP (for UI/sprites) ===
 
@@ -187,13 +237,7 @@ impl Renderer {
             "assets/idle_animation.png",
         )?;
 
-        // Create descriptor set allocator
-        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
-            device_context.device.clone(),
-            Default::default(),
-        ));
-
-        // Create descriptor set for texture
+        // Create descriptor set for texture (descriptor_set_allocator already created earlier)
         let descriptor_set = create_texture_descriptor_set(
             descriptor_set_allocator.clone(),
             pipeline.clone(),
@@ -229,6 +273,12 @@ impl Renderer {
             framebuffers_3d,
             pipeline_3d,
             depth_buffer,
+            pipeline_lit,
+            ambient_light,
+            directional_light,
+            point_lights,
+            lighting_buffer,
+            lighting_descriptor_set,
         })
     }
 
@@ -1098,6 +1148,234 @@ impl Renderer {
             Err(e) => {
                 println!("Failed to flush future: {:?}", e);
                 self.previous_frame_end = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Renders a mesh with lighting
+    pub fn render_mesh_lit(
+        &mut self,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+        model_matrix: Mat4,
+        texture_descriptor: Arc<PersistentDescriptorSet>,
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for previous frame
+        if let Some(mut previous) = self.previous_frame_end.take() {
+            previous.cleanup_finished();
+        }
+
+        // Handle swapchain recreation
+        if self.recreate_swapchain {
+            let (new_swapchain, new_images) = recreate_swapchain(
+                self.device.clone(),
+                self.surface.clone(),
+                self.swapchain.clone(),
+            )?;
+
+            if new_images.is_empty() {
+                self.recreate_swapchain = false;
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                return Ok(());
+            }
+
+            self.swapchain = new_swapchain;
+            self.images = new_images;
+
+            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+                self.device.clone(),
+                self.memory_allocator.clone(),
+                self.images[0].extent()[0],
+                self.images[0].extent()[1],
+            )?;
+
+            self.framebuffers_3d = create_framebuffers_3d(
+                &self.images,
+                self.render_pass_3d.clone(),
+                self.depth_buffer.clone(),
+            )?;
+
+            self.recreate_swapchain = false;
+        }
+
+        // Update lighting uniform buffer
+        let camera_pos = self.camera_3d.position;
+        let lighting_data = LightingUniformData {
+            camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
+            _padding1: 0.0,
+
+            ambient_color: [
+                self.ambient_light.color.x,
+                self.ambient_light.color.y,
+                self.ambient_light.color.z,
+            ],
+            ambient_intensity: self.ambient_light.intensity,
+
+            directional_light_dir: if let Some(ref light) = self.directional_light {
+                [light.direction.x, light.direction.y, light.direction.z]
+            } else {
+                [0.0, -1.0, 0.0]
+            },
+            _padding2: 0.0,
+
+            directional_light_color: if let Some(ref light) = self.directional_light {
+                [light.color.x, light.color.y, light.color.z]
+            } else {
+                [0.0, 0.0, 0.0]
+            },
+            directional_light_intensity: if let Some(ref light) = self.directional_light {
+                light.intensity
+            } else {
+                0.0
+            },
+
+            metallic,
+            roughness,
+            _padding3: 0.0,
+            _padding4: 0.0,
+        };
+
+        // Write to buffer
+        *self.lighting_buffer.write()? = lighting_data;
+
+        // Acquire next image
+        let (image_index, suboptimal, acquire_future) =
+            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate_swapchain = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+        if suboptimal {
+            self.recreate_swapchain = true;
+        }
+
+        // Create vertex and index buffers
+        let vertex_buffer = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE |
+                                MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices.iter().copied(),
+        )?;
+
+        let index_buffer = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE |
+                                MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            indices.iter().copied(),
+        )?;
+
+        // Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        // Begin render pass
+        builder.begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![
+                    Some([0.1, 0.1, 0.15, 1.0].into()),
+                    Some(1.0.into()),
+                ],
+                ..RenderPassBeginInfo::framebuffer(
+                    self.framebuffers_3d[image_index as usize].clone()
+                )
+            },
+            SubpassBeginInfo::default(),
+        )?;
+
+        // Bind lit pipeline
+        builder.bind_pipeline_graphics(self.pipeline_lit.clone())?;
+
+        // Set viewport
+        let extent = self.swapchain.image_extent();
+        builder.set_viewport(0, [Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        }].into_iter().collect())?;
+
+        // Bind descriptor sets
+        // Set 0: Texture
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            self.pipeline_lit.layout().clone(),
+            0,
+            texture_descriptor,
+        )?;
+
+        // Set 1: Lighting
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            self.pipeline_lit.layout().clone(),
+            1,
+            self.lighting_descriptor_set.clone(),
+        )?;
+
+        // Bind buffers
+        builder
+            .bind_vertex_buffers(0, vertex_buffer)?
+            .bind_index_buffer(index_buffer)?;
+
+        // Create push constants
+        let view_projection = self.camera_3d.view_projection_matrix();
+        let push_constants = lit_mesh_vs::PushConstants {
+            model: model_matrix.to_cols_array_2d(),
+            view_projection: view_projection.to_cols_array_2d(),
+        };
+
+        // Draw
+        builder
+            .push_constants(self.pipeline_lit.layout().clone(), 0, push_constants)?
+            .draw_indexed(indices.len() as u32, 1, 0, 0, 0)?;
+
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        // Execute and present
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             }
         }
 

@@ -18,6 +18,7 @@ pub mod mesh;
 pub mod depth_buffer;
 pub mod model_loader;
 pub mod mesh_manager;
+pub mod light;
 
 
 pub use vulkan_context::VulkanContext;
@@ -38,7 +39,9 @@ pub use coords::{
     convert_rotation_zup_to_yup, convert_transform_zup_to_yup,
     zup, yup,
 };
+pub use framebuffer::*;
 pub use mesh::{create_cube, create_plane};
 pub use depth_buffer::create_depth_buffer;
 pub use model_loader::{load_gltf, print_gltf_info, load_model, Model, LoadedMesh};
 pub use mesh_manager::{MeshManager, GpuMesh};
+pub use light::{DirectionalLight, PointLight, AmbientLight};

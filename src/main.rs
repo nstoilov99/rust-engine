@@ -9,6 +9,7 @@ use crate::engine::{Transform2D, InputManager, Camera2D, SpriteBatch, Scene, Spr
 use crate::engine::{SpriteSheet, Animation, AnimationController};
 use crate::engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
 use crate::engine::{GameplayTransform, zup};
+use crate::engine::DirectionalLight;
 use glam::{Mat4, Vec3};
 use engine::{load_gltf, print_gltf_info};
 
@@ -105,6 +106,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if input_manager.is_key_pressed(VirtualKeyCode::Down) {
                         renderer.camera_3d.orbit(0.0, -0.1, camera_distance);
                     }
+
+                        // Light controls
+                    if input_manager.is_key_pressed(VirtualKeyCode::Key1) {
+                        // Toggle directional light
+                        if renderer.directional_light.is_some() {
+                            renderer.directional_light = None;
+                            println!("Directional light OFF");
+                        } else {
+                            renderer.directional_light = Some(DirectionalLight::sun());
+                            println!("Directional light ON");
+                        }
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Key2) {
+                        // Increase ambient
+                        renderer.ambient_light.intensity = (renderer.ambient_light.intensity + 0.1).min(1.0);
+                        println!("Ambient: {:.1}", renderer.ambient_light.intensity);
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Key3) {
+                        // Decrease ambient
+                        renderer.ambient_light.intensity = (renderer.ambient_light.intensity - 0.1).max(0.0);
+                        println!("Ambient: {:.1}", renderer.ambient_light.intensity);
+                    }
                 }
                 WindowEvent::MouseInput { button, state, .. } => {
                     input_manager.handle_mouse_button(button, state);
@@ -128,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Animate rotation (1 radian per second)
                 let rotation_speed = 1.0; // radians/second
-                rotation += rotation_speed * delta_time;
+                //rotation += rotation_speed * delta_time;
 
 
                 window.request_redraw();
@@ -137,16 +160,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Create model matrix using Z-up coordinates
                 // In Z-up: rotate around Z axis (up)
                 // Rotate 180 degrees around X axis to flip upside-down models
-                let model = Mat4::from_rotation_x(std::f32::consts::PI) 
-                    * Mat4::from_scale(Vec3::splat(0.01)) 
+                let model = Mat4::from_rotation_x(std::f32::consts::PI)
+                    * Mat4::from_scale(Vec3::splat(1.0))
                     * Mat4::from_rotation_y(rotation);
-                // Render all meshes from the model
+
+                // Render all meshes from the model WITH LIGHTING
                 for &mesh_index in &mesh_indices {
                     if let Some(mesh) = mesh_manager.get(mesh_index) {
-                        if let Err(e) = renderer.render_gpu_mesh(
-                            mesh,
-                            model,
-                            descriptor_set.clone(),
+                        if let Err(e) = renderer.render_mesh_lit(
+                            &cube_vertices,
+                            &cube_indices,     // Mesh indices
+                            model,               // Model transform
+                            descriptor_set.clone(), // Texture
+                            0.0,                 // Metallic (0.0 = non-metal, like plastic/wood)
+                            0.5,                 // Roughness (0.5 = semi-glossy)
                         ) {
                             eprintln!("❌ Render error: {:?}", e);
                         }
