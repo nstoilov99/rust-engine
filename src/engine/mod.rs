@@ -16,6 +16,8 @@ pub mod game_loop;
 pub mod coords;
 pub mod mesh;
 pub mod depth_buffer;
+pub mod model_loader;
+pub mod mesh_manager;
 
 
 pub use vulkan_context::VulkanContext;
@@ -26,7 +28,7 @@ pub use renderer::Renderer;
 pub use texture::load_texture;
 pub use components::{Transform2D, SpriteSheet, Animation, AnimationController, AnimationStateMachine, AnimationTransition, TransitionCondition};
 pub use sprite_batch::{SpriteBatch, AnimatedSprite};
-pub use camera::Camera2D;
+pub use camera::*;
 pub use input::InputManager;
 pub use scene::{Scene, Entity, EntityId, SpriteComponent};
 pub use game_loop::GameLoop;
@@ -38,3 +40,5 @@ pub use coords::{
 };
 pub use mesh::{create_cube, create_plane};
 pub use depth_buffer::create_depth_buffer;
+pub use model_loader::{load_gltf, print_gltf_info, load_model, Model, LoadedMesh};
+pub use mesh_manager::{MeshManager, GpuMesh};

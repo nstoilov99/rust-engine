@@ -1,7 +1,8 @@
 use crate::engine::camera::Camera3D;
 use crate::engine::camera::{Camera2D, CameraPushConstants};
+use crate::engine::mesh_manager::GpuMesh;
 use crate::engine::components::Transform2D;
-use crate::engine::framebuffer::create_framebuffers;
+use crate::engine::framebuffer::{create_framebuffers, create_framebuffers_3d};
 use crate::engine::pipeline::{
     camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
     create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
@@ -920,6 +921,158 @@ impl Renderer {
         builder
             .push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?
             .draw_indexed(indices.len() as u32, 1, 0, 0, 0)?;
+
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        // Execute and present
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    
+    /// Renders a GPU mesh (from mesh manager)
+    pub fn render_gpu_mesh(
+        &mut self,
+        mesh: &GpuMesh,
+        model_matrix: Mat4,
+        texture_descriptor: Arc<PersistentDescriptorSet>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Wait for previous frame
+        if let Some(mut previous) = self.previous_frame_end.take() {
+            previous.cleanup_finished();
+        }
+
+        // Handle swapchain recreation
+        if self.recreate_swapchain {
+            let (new_swapchain, new_images) = recreate_swapchain(
+                self.device.clone(),
+                self.surface.clone(),
+                self.swapchain.clone(),
+            )?;
+
+            // Check if minimized (zero-sized)
+            if new_images.is_empty() {
+                self.recreate_swapchain = false;
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                return Ok(());
+            }
+
+            // Move to self FIRST to avoid borrow errors
+            self.swapchain = new_swapchain;
+            self.images = new_images;
+
+            // Recreate depth buffer for new size
+            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+                self.device.clone(),
+                self.memory_allocator.clone(),
+                self.images[0].extent()[0],
+                self.images[0].extent()[1],
+            )?;
+
+            // Recreate framebuffers with new images and depth buffer
+            self.framebuffers_3d = create_framebuffers_3d(
+                &self.images,
+                self.render_pass_3d.clone(),
+                self.depth_buffer.clone(),
+            )?;
+
+            // Reset flag
+            self.recreate_swapchain = false;
+        }
+
+        // Acquire image
+        let (image_index, suboptimal, acquire_future) =
+            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                    self.recreate_swapchain = true;
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+        if suboptimal {
+            self.recreate_swapchain = true;
+        }
+
+        // Build command buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            &self.command_buffer_allocator,
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        // Begin render pass
+        builder.begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![
+                    Some([0.1, 0.1, 0.15, 1.0].into()),
+                    Some(1.0.into()),
+                ],
+                ..RenderPassBeginInfo::framebuffer(
+                    self.framebuffers_3d[image_index as usize].clone()
+                )
+            },
+            SubpassBeginInfo::default(),
+        )?;
+
+        builder.bind_pipeline_graphics(self.pipeline_3d.clone())?;
+
+        // Set viewport
+        let extent = self.swapchain.image_extent();
+        builder.set_viewport(0, [Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        }].into_iter().collect())?;
+
+        // Bind texture
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            self.pipeline_3d.layout().clone(),
+            0,
+            texture_descriptor,
+        )?;
+
+        // Bind mesh buffers (no need to create them - already on GPU!)
+        builder
+            .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
+            .bind_index_buffer(mesh.index_buffer.clone())?;
+
+        // Push constants
+        let view_projection = self.camera_3d.view_projection_matrix();
+        let push_constants = mesh_vs::PushConstants {
+            model: model_matrix.to_cols_array_2d(),
+            view_projection: view_projection.to_cols_array_2d(),
+        };
+
+        // Draw
+        builder
+            .push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?
+            .draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
 
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;

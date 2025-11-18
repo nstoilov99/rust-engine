@@ -10,6 +10,7 @@ use crate::engine::{SpriteSheet, Animation, AnimationController};
 use crate::engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
 use crate::engine::{GameplayTransform, zup};
 use glam::{Mat4, Vec3};
+use engine::{load_gltf, print_gltf_info};
 
 
 
@@ -25,6 +26,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut renderer = Renderer::new(window.clone())?;
+
+    // Load GLTF model
+    println!("🦆 Loading Duck model...");
+    let model = engine::load_model("assets/models/Duck.glb")?;
+
+    // Create mesh manager and upload model to GPU
+    let mut mesh_manager = engine::MeshManager::new();
+    let mesh_indices = mesh_manager.upload_model(&model, renderer.memory_allocator.clone())?;
 
     let mut input_manager = InputManager::new();
 
@@ -53,13 +62,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create game loop for delta time
     let mut game_loop = engine::GameLoop::new();
-
-
-
-    let mut game_loop = engine::GameLoop::new();
-
-
-    // No background for now - just the animated character
+    
+    println!("✅ GLTF model loaded and ready to render!");
+    println!("Controls:");
+    println!("  Arrow keys: Orbit camera");
+    println!("  Mouse wheel: Zoom in/out");
+    println!("  ESC: Quit\n");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -83,6 +91,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             *control_flow = ControlFlow::Exit;
                         }
                     }
+
+                    // Camera orbit
+                    if input_manager.is_key_pressed(VirtualKeyCode::Left) {
+                        renderer.camera_3d.orbit(0.1, 0.0, camera_distance);
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Right) {
+                        renderer.camera_3d.orbit(-0.1, 0.0, camera_distance);
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Up) {
+                        renderer.camera_3d.orbit(0.0, 0.1, camera_distance);
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Down) {
+                        renderer.camera_3d.orbit(0.0, -0.1, camera_distance);
+                    }
                 }
                 WindowEvent::MouseInput { button, state, .. } => {
                     input_manager.handle_mouse_button(button, state);
@@ -95,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         MouseScrollDelta::LineDelta(_x, y) => y,
                         MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                     };
-                    camera_distance = (camera_distance - scroll).clamp(2.0, 20.0);
+                    camera_distance = (camera_distance - scroll).clamp(2.0, 200.0);
                     renderer.camera_3d.orbit(0.0, 0.0, camera_distance);
                 }
                 _ => {}
@@ -108,35 +130,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rotation_speed = 1.0; // radians/second
                 rotation += rotation_speed * delta_time;
 
-                // Update 3D camera with arrow keys
-                if input_manager.is_key_pressed(VirtualKeyCode::Left) {
-                    renderer.camera_3d.orbit(0.1, 0.0, camera_distance);
-                }
-                if input_manager.is_key_pressed(VirtualKeyCode::Right) {
-                    renderer.camera_3d.orbit(-0.1, 0.0, camera_distance);
-                }
-                if input_manager.is_key_pressed(VirtualKeyCode::Up) {
-                    renderer.camera_3d.orbit(0.0, 0.1, camera_distance);
-                }
-                if input_manager.is_key_pressed(VirtualKeyCode::Down) {
-                    renderer.camera_3d.orbit(0.0, -0.1, camera_distance);
-                }
 
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
                 // Create model matrix using Z-up coordinates
                 // In Z-up: rotate around Z axis (up)
-                let model = Mat4::from_rotation_z(rotation);
-
-                // Render cube
-                if let Err(e) = renderer.render_mesh(
-                    &cube_vertices,
-                    &cube_indices,
-                    model,
-                    descriptor_set.clone(),
-                ) {
-                    eprintln!("❌ Render error: {:?}", e);
+                // Rotate 180 degrees around X axis to flip upside-down models
+                let model = Mat4::from_rotation_x(std::f32::consts::PI) 
+                    * Mat4::from_scale(Vec3::splat(0.01)) 
+                    * Mat4::from_rotation_y(rotation);
+                // Render all meshes from the model
+                for &mesh_index in &mesh_indices {
+                    if let Some(mesh) = mesh_manager.get(mesh_index) {
+                        if let Err(e) = renderer.render_gpu_mesh(
+                            mesh,
+                            model,
+                            descriptor_set.clone(),
+                        ) {
+                            eprintln!("❌ Render error: {:?}", e);
+                        }
+                    }
                 }
             }
             _ => {}
