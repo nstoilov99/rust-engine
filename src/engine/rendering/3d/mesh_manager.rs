@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use crate::engine::pipeline::Vertex3D;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 
 /// Stores vertex and index buffers for a mesh on GPU
 pub struct GpuMesh {
@@ -70,7 +70,7 @@ impl MeshManager {
     /// Uploads a model to GPU
     pub fn upload_model(
         &mut self,
-        model: &crate::engine::model_loader::Model,
+        model: &crate::engine::assets::model_loader::Model,
         memory_allocator: Arc<StandardMemoryAllocator>,
     ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
         let mut mesh_indices = Vec::new();

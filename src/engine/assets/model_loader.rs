@@ -1,6 +1,5 @@
 use std::path::Path;
-use crate::engine::pipeline::Vertex3D;
-use glam::Vec3;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use gltf;
 
 /// Represents a loaded mesh with vertex and index data

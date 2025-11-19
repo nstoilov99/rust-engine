@@ -1,4 +1,4 @@
-use crate::engine::pipeline::Vertex3D;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 
 /// Generates a unit cube (1×1×1) centered at origin
 pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {

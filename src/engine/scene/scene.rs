@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use crate::engine::components::Transform2D;
-use crate::engine::SpriteBatch;
-use crate::engine::components::{SpriteSheet, AnimationController};
+use crate::engine::scene::Transform2D;
+use crate::engine::rendering::rendering_2d::SpriteBatch;
+use crate::engine::scene::{SpriteSheet, AnimationController};
 
 /// Entity ID (unique per entity)
 pub type EntityId = usize;

@@ -1,18 +1,21 @@
-use crate::engine::camera::Camera3D;
-use crate::engine::camera::{Camera2D, CameraPushConstants};
-use crate::engine::mesh_manager::GpuMesh;
-use crate::engine::components::Transform2D;
-use crate::engine::framebuffer::{create_framebuffers, create_framebuffers_3d};
-use crate::engine::pipeline::{
+use crate::engine::camera::{Camera2D, Camera3D};
+use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
+use crate::engine::scene::Transform2D;
+use crate::rendering::common::framebuffer::{create_framebuffers, create_framebuffers_3d};
+use crate::rendering::rendering_2d::pipeline_2d::{
     camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
     create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
-    transform_vs, mesh_vs, lit_mesh_vs, TexturedVertex, Vertex, Vertex3D,
+    transform_vs, TexturedVertex, Vertex,
 };
-use crate::engine::render_pass::create_render_pass;
-use crate::engine::swapchain::{create_swapchain, recreate_swapchain};
-use crate::engine::texture::load_texture;
-use crate::engine::SpriteBatch;
-use crate::engine::{create_logical_device, select_physical_device, VulkanContext};
+use crate::rendering::rendering_3d::pipeline_3d::{
+    mesh_vs, lit_mesh_vs, Vertex3D, LightingUniformData, create_lit_mesh_pipeline,
+};
+use crate::rendering::common::render_pass::create_render_pass;
+use crate::engine::core::swapchain::{create_swapchain, recreate_swapchain};
+use crate::engine::assets::texture::load_texture;
+use crate::engine::rendering::rendering_2d::SpriteBatch;
+use crate::engine::core::{create_logical_device, select_physical_device, VulkanContext};
+use crate::engine::rendering::rendering_3d::light::{DirectionalLight, PointLight, AmbientLight};
 use glam::Mat4;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
@@ -28,14 +31,12 @@ use vulkano::image::Image;
 use vulkano::instance::Instance;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, RenderPass};
 use vulkano::swapchain::{self as vk_swapchain, Surface, Swapchain};
 use vulkano::sync::GpuFuture;
 use vulkano::{Validated, VulkanError};
 use winit::window::Window;
-use crate::engine::light::{DirectionalLight, PointLight, AmbientLight};
-use crate::engine::pipeline::{LightingUniformData, create_lit_mesh_pipeline};
 
 pub struct Renderer {
     _instance: Arc<Instance>,
@@ -125,7 +126,7 @@ impl Renderer {
         )?;
 
         // Create 3D pipeline
-        let pipeline_3d = crate::engine::pipeline::create_mesh_pipeline(
+        let pipeline_3d = crate::engine::rendering::rendering_3d::pipeline_3d::create_mesh_pipeline(
             device_context.device.clone(),
             render_pass_3d.clone(),
         )?;

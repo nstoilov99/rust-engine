@@ -1,47 +1,34 @@
-pub mod vulkan_context;
-pub mod physical_device;
-pub mod logical_device;
-pub mod swapchain;
-pub mod renderer;
-pub mod render_pass;
-pub mod framebuffer;
-pub mod pipeline;
-pub mod texture;
-pub mod components;
-pub mod sprite_batch; 
-pub mod camera;
-pub mod input;
+// Core Vulkan systems
+pub mod core;
+
+// Rendering systems
+pub mod rendering;
+
+// Scene management (includes components)
 pub mod scene;
-pub mod game_loop;
-pub mod coords;
-pub mod mesh;
-pub mod depth_buffer;
-pub mod model_loader;
-pub mod mesh_manager;
-pub mod light;
 
+// Camera systems
+pub mod camera;
 
-pub use vulkan_context::VulkanContext;
-pub use physical_device::select_physical_device;
-pub use logical_device::{create_logical_device, LogicalDeviceContext};
-//pub use swapchain::create_swapchain;
-pub use renderer::Renderer;
-pub use texture::load_texture;
-pub use components::{Transform2D, SpriteSheet, Animation, AnimationController, AnimationStateMachine, AnimationTransition, TransitionCondition};
-pub use sprite_batch::{SpriteBatch, AnimatedSprite};
-pub use camera::*;
+// Input handling
+pub mod input;
+
+// Asset loading
+pub mod assets;
+
+// Utilities
+pub mod utils;
+
+// Re-export commonly used types
+pub use core::{VulkanContext, select_physical_device, create_logical_device, LogicalDeviceContext};
+pub use rendering::common::*;  // Renderer, framebuffer functions, etc.
+pub use rendering::rendering_2d::{SpriteBatch, AnimatedSprite};
+pub use rendering::rendering_3d::{GpuMesh, MeshManager, DirectionalLight, PointLight, AmbientLight, create_cube, create_plane};
+pub use scene::*;  // Scene, Entity, SpriteComponent, Transform2D, SpriteSheet, Animation, etc.
+pub use camera::*;  // Camera2D, Camera3D, CameraPushConstants
 pub use input::InputManager;
-pub use scene::{Scene, Entity, EntityId, SpriteComponent};
-pub use game_loop::GameLoop;
-pub use coords::{
-    GameplayTransform, CoordinateSystem,
-    convert_position_zup_to_yup, convert_position_yup_to_zup,
-    convert_rotation_zup_to_yup, convert_transform_zup_to_yup,
-    zup, yup,
-};
-pub use framebuffer::*;
-pub use mesh::{create_cube, create_plane};
-pub use depth_buffer::create_depth_buffer;
-pub use model_loader::{load_gltf, print_gltf_info, load_model, Model, LoadedMesh};
-pub use mesh_manager::{MeshManager, GpuMesh};
-pub use light::{DirectionalLight, PointLight, AmbientLight};
+pub use assets::{load_texture, load_gltf, load_model, Model, LoadedMesh};
+pub use utils::*;  // GameLoop, coords functions
+
+// Commonly used external types (optional, for convenience)
+pub use glam::{Vec2, Vec3, Mat4};

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use vulkano::descriptor_set::PersistentDescriptorSet;
-use crate::engine::components::Transform2D;
+use crate::engine::scene::Transform2D;
 
 /// Sprite instance with UV coordinates (for animations)
 #[derive(Clone, Copy, Debug)]

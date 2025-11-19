@@ -1,7 +1,18 @@
+
 [package]
-name = "rust_engine"
+name = "rust-engine"
 version = "0.1.0"
 edition = "2021"
+
+# Define both library and binary
+[lib]
+name = "rust_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "game"
+path = "src/game/main.rs"
+
 
 [dependencies]
 # Window and event handling

@@ -1,19 +1,11 @@
-pub mod engine;
-
-use engine::Renderer;
+use rust_engine::Renderer;
 use std::sync::Arc;
 use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, ElementState};
 use winit::event_loop::{ControlFlow, EventLoop};
-use vulkano::pipeline::Pipeline;  // Needed for .layout() method
-use crate::engine::{Transform2D, InputManager, Camera2D, SpriteBatch, Scene, SpriteComponent};
-use crate::engine::{SpriteSheet, Animation, AnimationController};
-use crate::engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
-use crate::engine::{GameplayTransform, zup};
-use crate::engine::DirectionalLight;
+use rust_engine::{InputManager, Camera2D};
+use rust_engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
+use rust_engine::DirectionalLight;
 use glam::{Mat4, Vec3};
-use engine::{load_gltf, print_gltf_info};
-
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -30,16 +22,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load GLTF model
     println!("🦆 Loading Duck model...");
-    let model = engine::load_model("assets/models/Duck.glb")?;
+    let model = rust_engine::load_model("assets/models/Duck.glb")?;
 
     // Create mesh manager and upload model to GPU
-    let mut mesh_manager = engine::MeshManager::new();
+    let mut mesh_manager = rust_engine::MeshManager::new();
     let mesh_indices = mesh_manager.upload_model(&model, renderer.memory_allocator.clone())?;
 
     let mut input_manager = InputManager::new();
 
     // Load your idle animation sprite sheet (128×32 = 4 frames of 32×32 each)
-    let (texture_view, sampler) = engine::load_texture(
+    let (texture_view, sampler) = rust_engine::load_texture(
         renderer.device.clone(),
         renderer.queue.clone(),
         &renderer.command_buffer_allocator,
@@ -47,7 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assets/sprite.png",  // Your downloaded 128×32 idle animation
     )?;
     // Create descriptor set for texture
-    let descriptor_set = engine::pipeline::create_texture_descriptor_set(
+    use rust_engine::rendering::rendering_2d::pipeline_2d::create_texture_descriptor_set;
+    let descriptor_set = create_texture_descriptor_set(
         renderer.descriptor_set_allocator.clone(),
         renderer.pipeline_3d.clone(),  // Pass the pipeline, not the layout
         texture_view,
@@ -55,14 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // Create cube mesh
-    let (cube_vertices, cube_indices) = engine::create_cube();
+    let (cube_vertices, cube_indices) = rust_engine::create_cube();
 
     // Animation state
     let mut rotation = 0.0f32;
     let mut camera_distance = 5.0f32;
 
     // Create game loop for delta time
-    let mut game_loop = engine::GameLoop::new();
+    let mut game_loop = rust_engine::GameLoop::new();
     
     println!("✅ GLTF model loaded and ready to render!");
     println!("Controls:");

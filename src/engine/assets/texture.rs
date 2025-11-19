@@ -10,7 +10,7 @@ use vulkano::command_buffer::{
     PrimaryCommandBufferAbstract,
 };
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::sync::{self, GpuFuture};
+use vulkano::sync::{GpuFuture};
 use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode};
 
 /// Loads image from file, uploads to GPU, and returns ImageView + Sampler
