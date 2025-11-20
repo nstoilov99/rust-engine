@@ -16,11 +16,14 @@ use vulkano::pipeline::graphics::{
     depth_stencil::CompareOp,
 };
 use vulkano::shader::ShaderStages;
-use vulkano::pipeline::DynamicState;
+use vulkano::pipeline::{DynamicState, Pipeline};
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
-use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType}};
+use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType}, PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
 use smallvec::smallvec;
 
 
@@ -53,6 +56,20 @@ pub mod lit_mesh_fs {
     }
 }
 
+mod pbr_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/engine/rendering/shaders/3d/pbr_vs.glsl",
+    }
+}
+
+mod pbr_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/engine/rendering/shaders/3d/pbr_fs.glsl",
+    }
+}
+
 /// Vertex format for 3D meshes with lighting support
 #[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
 #[repr(C)]
@@ -63,6 +80,9 @@ pub struct Vertex3D {
     pub normal: [f32; 3],    // Surface normal for lighting
     #[format(R32G32_SFLOAT)]
     pub uv: [f32; 2],        // Texture coordinates
+
+    #[format(R32G32B32A32_SFLOAT)]  // W component = bitangent handedness
+    pub tangent: [f32; 4],
 }
 
 /// Lighting data passed to fragment shader
@@ -269,4 +289,136 @@ pub fn create_lit_mesh_pipeline(
     )?;
 
     Ok(pipeline)
+}
+
+/// Creates PBR graphics pipeline with 4 texture slots
+pub fn create_pbr_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
+    let vs = pbr_vs::load(device.clone())?;
+    let fs = pbr_fs::load(device.clone())?;
+
+    let vs_entry = vs.entry_point("main").ok_or("Vertex shader missing 'main' entry point")?;
+    let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
+
+    let vertex_input_state = Vertex3D::per_vertex()
+        .definition(&vs_entry.info().input_interface)?;
+
+    let pipeline = GraphicsPipeline::new(
+        device.clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: smallvec![
+                PipelineShaderStageCreateInfo::new(vs_entry),
+                PipelineShaderStageCreateInfo::new(fs_entry),
+            ],
+            vertex_input_state: Some(vertex_input_state),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            viewport_state: Some(ViewportState::default()),
+            rasterization_state: Some(RasterizationState::default()),
+            multisample_state: Some(MultisampleState::default()),
+            depth_stencil_state: Some(DepthStencilState {
+                depth: Some(DepthState::simple()),
+                ..Default::default()
+            }),
+            color_blend_state: Some(ColorBlendState::with_attachment_states(
+                1,
+                ColorBlendAttachmentState::default(),
+            )),
+            dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+            subpass: Some(render_pass.clone().first_subpass().into()),
+            ..GraphicsPipelineCreateInfo::layout(PipelineLayout::new(
+                device.clone(),
+                PipelineLayoutCreateInfo {
+                    set_layouts: vec![
+                        // Set 0: Material textures (4 slots)
+                        DescriptorSetLayout::new(
+                            device.clone(),
+                            DescriptorSetLayoutCreateInfo {
+                                bindings: [
+                                    (0, DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::CombinedImageSampler
+                                        )
+                                    }),
+                                    (1, DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::CombinedImageSampler
+                                        )
+                                    }),
+                                    (2, DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::CombinedImageSampler
+                                        )
+                                    }),
+                                    (3, DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::CombinedImageSampler
+                                        )
+                                    }),
+                                ].into(),
+                                ..Default::default()
+                            },
+                        )?,
+                        // Set 1: Lighting
+                        DescriptorSetLayout::new(
+                            device.clone(),
+                            DescriptorSetLayoutCreateInfo {
+                                bindings: [(
+                                    0,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::UniformBuffer
+                                        )
+                                    },
+                                )].into(),
+                                ..Default::default()
+                            },
+                        )?,
+                    ],
+                    push_constant_ranges: vec![PushConstantRange {
+                        stages: ShaderStages::VERTEX,
+                        offset: 0,
+                        size: size_of::<pbr_vs::PushConstants>() as u32,
+                    }],
+                    ..Default::default()
+                },
+            )?)
+        },
+    )?;
+
+    Ok(pipeline)
+}
+
+/// Creates PBR material descriptor set
+pub fn create_pbr_material_descriptor_set(
+    allocator: Arc<StandardDescriptorSetAllocator>,
+    pipeline: Arc<GraphicsPipeline>,
+    albedo: Arc<ImageView>,
+    normal: Arc<ImageView>,
+    metallic_roughness: Arc<ImageView>,
+    ao: Arc<ImageView>,
+    sampler: Arc<Sampler>,
+) -> Result<Arc<PersistentDescriptorSet>, Box<dyn std::error::Error>> {
+    let layout = pipeline.layout().set_layouts()[0].clone();
+
+    let descriptor_set = PersistentDescriptorSet::new(
+        &allocator,
+        layout,
+        [
+            WriteDescriptorSet::image_view_sampler(0, albedo, sampler.clone()),
+            WriteDescriptorSet::image_view_sampler(1, normal, sampler.clone()),
+            WriteDescriptorSet::image_view_sampler(2, metallic_roughness, sampler.clone()),
+            WriteDescriptorSet::image_view_sampler(3, ao, sampler),
+        ],
+        [],
+    )?;
+
+    Ok(descriptor_set)
 }

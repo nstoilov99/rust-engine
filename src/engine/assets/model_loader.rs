@@ -1,5 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
+use vulkano::image::sampler::Sampler;
+use vulkano::device::Device;
+use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::pipeline::GraphicsPipeline;
+use vulkano::image::view::ImageView;
+use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
+use crate::engine::rendering::rendering_3d::material::*;
 use gltf;
 
 /// Represents a loaded mesh with vertex and index data
@@ -132,6 +141,106 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
     Ok(model)
 }
 
+/// Calculates tangent vectors for a mesh using vertex positions, normals, UVs, and indices
+fn calculate_tangents(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+) -> Vec<[f32; 4]> {
+    let vertex_count = positions.len();
+    let mut tangents = vec![[0.0f32; 3]; vertex_count];
+    let mut bitangents = vec![[0.0f32; 3]; vertex_count];
+
+    // Calculate tangents per triangle
+    for i in (0..indices.len()).step_by(3) {
+        let i0 = indices[i] as usize;
+        let i1 = indices[i + 1] as usize;
+        let i2 = indices[i + 2] as usize;
+
+        let pos0 = positions[i0];
+        let pos1 = positions[i1];
+        let pos2 = positions[i2];
+
+        let uv0 = uvs[i0];
+        let uv1 = uvs[i1];
+        let uv2 = uvs[i2];
+
+        // Calculate edge vectors
+        let edge1 = [pos1[0] - pos0[0], pos1[1] - pos0[1], pos1[2] - pos0[2]];
+        let edge2 = [pos2[0] - pos0[0], pos2[1] - pos0[1], pos2[2] - pos0[2]];
+
+        let delta_uv1 = [uv1[0] - uv0[0], uv1[1] - uv0[1]];
+        let delta_uv2 = [uv2[0] - uv0[0], uv2[1] - uv0[1]];
+
+        // Calculate tangent and bitangent
+        let f = 1.0 / (delta_uv1[0] * delta_uv2[1] - delta_uv2[0] * delta_uv1[1]);
+
+        let tangent = [
+            f * (delta_uv2[1] * edge1[0] - delta_uv1[1] * edge2[0]),
+            f * (delta_uv2[1] * edge1[1] - delta_uv1[1] * edge2[1]),
+            f * (delta_uv2[1] * edge1[2] - delta_uv1[1] * edge2[2]),
+        ];
+
+        let bitangent = [
+            f * (-delta_uv2[0] * edge1[0] + delta_uv1[0] * edge2[0]),
+            f * (-delta_uv2[0] * edge1[1] + delta_uv1[0] * edge2[1]),
+            f * (-delta_uv2[0] * edge1[2] + delta_uv1[0] * edge2[2]),
+        ];
+
+        // Accumulate tangents/bitangents for each vertex of the triangle
+        for &idx in &[i0, i1, i2] {
+            tangents[idx][0] += tangent[0];
+            tangents[idx][1] += tangent[1];
+            tangents[idx][2] += tangent[2];
+
+            bitangents[idx][0] += bitangent[0];
+            bitangents[idx][1] += bitangent[1];
+            bitangents[idx][2] += bitangent[2];
+        }
+    }
+
+    // Orthogonalize and normalize tangents using Gram-Schmidt
+    let mut result = Vec::with_capacity(vertex_count);
+    for i in 0..vertex_count {
+        let n = normals[i];
+        let t = tangents[i];
+        let b = bitangents[i];
+
+        // Gram-Schmidt orthogonalize: t' = normalize(t - n * dot(n, t))
+        let dot_nt = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+        let t_orth = [
+            t[0] - n[0] * dot_nt,
+            t[1] - n[1] * dot_nt,
+            t[2] - n[2] * dot_nt,
+        ];
+
+        // Normalize
+        let len = (t_orth[0] * t_orth[0] + t_orth[1] * t_orth[1] + t_orth[2] * t_orth[2]).sqrt();
+        let t_norm = if len > 0.0001 {
+            [t_orth[0] / len, t_orth[1] / len, t_orth[2] / len]
+        } else {
+            [1.0, 0.0, 0.0] // Fallback tangent
+        };
+
+        // Calculate handedness (cross(n, t) dot b)
+        let cross = [
+            n[1] * t_norm[2] - n[2] * t_norm[1],
+            n[2] * t_norm[0] - n[0] * t_norm[2],
+            n[0] * t_norm[1] - n[1] * t_norm[0],
+        ];
+        let handedness = if cross[0] * b[0] + cross[1] * b[1] + cross[2] * b[2] < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+
+        result.push([t_norm[0], t_norm[1], t_norm[2], handedness]);
+    }
+
+    result
+}
+
 /// Extracts mesh data from a GLTF primitive
 fn extract_mesh_from_primitive(
     primitive: &gltf::Primitive,
@@ -165,6 +274,23 @@ fn extract_mesh_from_primitive(
         return Err("Vertex attribute count mismatch".into());
     }
 
+    // Read indices first (needed for tangent calculation)
+    let indices = if let Some(indices_reader) = reader.read_indices() {
+        indices_reader.into_u32().collect::<Vec<u32>>()
+    } else {
+        // No indices - generate them (0, 1, 2, 3, ...)
+        (0..vertex_count as u32).collect()
+    };
+
+    // Read tangents (optional, will be calculated if missing)
+    let tangents = if let Some(tangent_iter) = reader.read_tangents() {
+        tangent_iter.collect::<Vec<[f32; 4]>>()
+    } else {
+        // Calculate tangents from geometry
+        println!("      ⚙️  Calculating tangents...");
+        calculate_tangents(&positions, &normals, &uvs, &indices)
+    };
+
     // Combine into Vertex3D format
     let mut vertices = Vec::with_capacity(vertex_count);
     for i in 0..vertex_count {
@@ -172,16 +298,9 @@ fn extract_mesh_from_primitive(
             position: positions[i],
             normal: normals[i],
             uv: uvs[i],
+            tangent: tangents[i],
         });
     }
-
-    // Read indices (convert to u32)
-    let indices = if let Some(indices_reader) = reader.read_indices() {
-        indices_reader.into_u32().collect::<Vec<u32>>()
-    } else {
-        // No indices - generate them (0, 1, 2, 3, ...)
-        (0..vertex_count as u32).collect()
-    };
 
     // Get material index
     let material_index = primitive.material().index();
@@ -224,4 +343,113 @@ pub fn extract_texture_from_gltf(
             Ok(img.to_rgba8())
         }
     }
+}
+
+/// Extracts PBR material from GLTF
+pub fn extract_material_from_gltf(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+    material_index: usize,
+    device: Arc<Device>,
+    allocator: Arc<StandardMemoryAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pipeline: Arc<GraphicsPipeline>,
+    sampler: Arc<Sampler>,
+) -> Result<PbrMaterial, Box<dyn std::error::Error>> {
+    let material = document.materials().nth(material_index)
+        .ok_or("Material not found")?;
+
+    let pbr = material.pbr_metallic_roughness();
+
+    // Extract base color (albedo) texture
+    let albedo_view = if let Some(info) = pbr.base_color_texture() {
+        let texture = info.texture();
+        let image_index = texture.source().index();
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+    } else {
+        // Default white texture
+        create_default_texture(
+            device.clone(),
+            allocator.clone(),
+            [255, 255, 255, 255],
+        )?
+    };
+
+    // Extract normal map
+    let normal_view = if let Some(normal_texture) = material.normal_texture() {
+        let texture = normal_texture.texture();
+        let image_index = texture.source().index();
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+    } else {
+        // Default normal map (pointing up: 128, 128, 255)
+        create_default_texture(
+            device.clone(),
+            allocator.clone(),
+            [128, 128, 255, 255],
+        )?
+    };
+
+    // Extract metallic-roughness map
+    let metallic_roughness_view = if let Some(info) = pbr.metallic_roughness_texture() {
+        let texture = info.texture();
+        let image_index = texture.source().index();
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+    } else {
+        // Default: non-metallic (B=0), half-rough (G=128)
+        create_default_texture(
+            device.clone(),
+            allocator.clone(),
+            [0, 128, 0, 255],
+        )?
+    };
+
+    // Extract ambient occlusion map
+    let ao_view = if let Some(ao_texture) = material.occlusion_texture() {
+        let texture = ao_texture.texture();
+        let image_index = texture.source().index();
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+    } else {
+        // Default: no occlusion (white = 255)
+        create_default_texture(
+            device.clone(),
+            allocator.clone(),
+            [255, 255, 255, 255],
+        )?
+    };
+
+    // Create descriptor set
+    let descriptor_set = create_pbr_material_descriptor_set(
+        descriptor_set_allocator,
+        pipeline,
+        albedo_view.clone(),
+        normal_view.clone(),
+        metallic_roughness_view.clone(),
+        ao_view.clone(),
+        sampler,
+    )?;
+
+    Ok(PbrMaterial::new(
+        albedo_view,
+        normal_view,
+        metallic_roughness_view,
+        ao_view,
+        descriptor_set,
+    ))
+}
+
+/// Helper: Load GLTF image data to Vulkan texture
+fn load_gltf_image(
+    image_data: &gltf::image::Data,
+    device: Arc<Device>,
+    allocator: Arc<StandardMemoryAllocator>,
+) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    // Convert GLTF image format to Vulkan format
+    // TODO: Implement texture upload from image_data.pixels
+    // For now, create placeholder
+    create_default_texture(
+        device,
+        allocator,
+        [255, 0, 255, 255],  // Magenta = "texture not loaded"
+    )
 }
