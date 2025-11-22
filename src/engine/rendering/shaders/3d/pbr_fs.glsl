@@ -4,7 +4,8 @@
 layout(location = 0) in vec3 frag_position;
 layout(location = 1) in vec3 frag_normal;
 layout(location = 2) in vec2 frag_uv;
-layout(location = 3) in mat3 frag_TBN;
+layout(location = 3) in mat3 frag_TBN;  // Takes locations 3, 4, 5
+layout(location = 6) in vec4 frag_pos_light_space;
 
 // Output
 layout(location = 0) out vec4 out_color;
@@ -29,6 +30,8 @@ layout(set = 1, binding = 0) uniform LightingData {
     vec3 directional_light_color;
     float directional_light_intensity;
 } lighting;
+
+layout(set = 2, binding = 0) uniform sampler2DShadow shadow_map;
 
 const float PI = 3.14159265359;
 
@@ -72,6 +75,40 @@ float geometry_smith(vec3 N, vec3 V, vec3 L, float roughness) {
 // Fresnel-Schlick approximation
 vec3 fresnel_schlick(float cos_theta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Calculates shadow factor: 0.0 = fully shadowed, 1.0 = fully lit
+float calculate_shadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
+    // Perspective divide
+    vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
+
+    // Transform to [0,1] range
+    proj_coords = proj_coords * 0.5 + 0.5;
+
+    // Outside shadow map = fully lit
+    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
+        return 1.0;
+    }
+
+    // Bias prevents shadow acne
+    float bias = max(0.05 * (1.0 - dot(normal, light_dir)), 0.005);
+    float current_depth = proj_coords.z - bias;
+
+    // PCF (Percentage-Closer Filtering) for soft shadows
+    // Sample 3x3 kernel around fragment
+    float shadow = 0.0;
+    vec2 texel_size = 1.0 / textureSize(shadow_map, 0);
+
+    for(int x = -1; x <= 1; ++x) {
+        for(int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(x, y) * texel_size;
+            shadow += texture(shadow_map, vec3(proj_coords.xy + offset, current_depth));
+        }
+    }
+    shadow /= 9.0; // Average 9 samples
+
+    return shadow;
 }
 
 void main() {
@@ -128,7 +165,11 @@ void main() {
     // Ambient (simple approximation, IBL would be better)
     vec3 ambient = lighting.ambient_color * lighting.ambient_intensity * albedo * ao;
 
-    vec3 color = ambient + Lo;
+    // Calculate shadow
+    float shadow = calculate_shadow(frag_pos_light_space, N, L);
+
+    // Apply shadow to direct lighting (not ambient)
+    vec3 color = ambient + shadow * Lo;
 
     // HDR tonemapping (Reinhard)
     color = color / (color + vec3(1.0));

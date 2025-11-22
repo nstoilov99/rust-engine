@@ -24,6 +24,7 @@ use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSet
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
+use vulkano::pipeline::graphics::rasterization::DepthBiasState;
 use smallvec::smallvec;
 
 
@@ -56,14 +57,30 @@ pub mod lit_mesh_fs {
     }
 }
 
-mod pbr_vs {
+// Shadow shaders
+pub mod shadow_vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/engine/rendering/shaders/3d/shadow_vs.glsl",
+    }
+}
+
+pub mod shadow_fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/engine/rendering/shaders/3d/shadow_fs.glsl",
+    }
+}
+
+// PBR shaders
+pub mod pbr_vs {
     vulkano_shaders::shader! {
         ty: "vertex",
         path: "src/engine/rendering/shaders/3d/pbr_vs.glsl",
     }
 }
 
-mod pbr_fs {
+pub mod pbr_fs {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "src/engine/rendering/shaders/3d/pbr_fs.glsl",
@@ -381,11 +398,91 @@ pub fn create_pbr_pipeline(
                                 ..Default::default()
                             },
                         )?,
+                        // Set 2: Shadow map
+                        DescriptorSetLayout::new(
+                            device.clone(),
+                            DescriptorSetLayoutCreateInfo {
+                                bindings: [(
+                                    0,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::FRAGMENT,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::CombinedImageSampler
+                                        )
+                                    },
+                                )].into(),
+                                ..Default::default()
+                            },
+                        )?,
                     ],
                     push_constant_ranges: vec![PushConstantRange {
                         stages: ShaderStages::VERTEX,
                         offset: 0,
                         size: size_of::<pbr_vs::PushConstants>() as u32,
+                    }],
+                    ..Default::default()
+                },
+            )?)
+        },
+    )?;
+
+    Ok(pipeline)
+}
+
+/// Creates shadow rendering pipeline (depth-only)
+pub fn create_shadow_pipeline(
+    device: Arc<Device>,
+    render_pass: Arc<RenderPass>,
+) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
+    let vs = shadow_vs::load(device.clone())?;
+    let fs = shadow_fs::load(device.clone())?;
+
+    let vs_entry = vs.entry_point("main").ok_or("Vertex shader missing 'main' entry point")?;
+    let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
+
+    let vertex_input_state = Vertex3D::per_vertex()
+        .definition(&vs_entry.info().input_interface)?;
+
+    let pipeline = GraphicsPipeline::new(
+        device.clone(),
+        None,
+        GraphicsPipelineCreateInfo {
+            stages: smallvec![
+                PipelineShaderStageCreateInfo::new(vs_entry),
+                PipelineShaderStageCreateInfo::new(fs_entry),
+            ],
+            vertex_input_state: Some(vertex_input_state),
+            input_assembly_state: Some(InputAssemblyState::default()),
+            viewport_state: Some(ViewportState::default()),
+            rasterization_state: Some(RasterizationState {
+                depth_bias: Some(DepthBiasState {
+                    constant_factor: 1.25,  // Prevents shadow acne
+                    clamp: 0.0,
+                    slope_factor: 1.75,
+                }),
+                ..Default::default()
+            }),
+            multisample_state: Some(MultisampleState::default()),
+            depth_stencil_state: Some(DepthStencilState {
+                depth: Some(DepthState {
+                    write_enable: true,
+                    compare_op: CompareOp::Less,
+                }),
+                ..Default::default()
+            }),
+            color_blend_state: None, // No color attachment
+            dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+            subpass: Some(render_pass.clone().first_subpass().into()),
+            ..GraphicsPipelineCreateInfo::layout(PipelineLayout::new(
+                device.clone(),
+                PipelineLayoutCreateInfo {
+                    set_layouts: vec![
+                        
+                    ],
+                    push_constant_ranges: vec![PushConstantRange {
+                        stages: ShaderStages::VERTEX,
+                        offset: 0,
+                        size: size_of::<shadow_vs::PushConstants>() as u32,
                     }],
                     ..Default::default()
                 },

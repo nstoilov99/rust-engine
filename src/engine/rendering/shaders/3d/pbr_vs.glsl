@@ -10,18 +10,21 @@ layout(location = 3) in vec4 tangent;  // NEW: xyz=tangent, w=handedness
 layout(location = 0) out vec3 frag_position;
 layout(location = 1) out vec3 frag_normal;
 layout(location = 2) out vec2 frag_uv;
-layout(location = 3) out mat3 frag_TBN;  // Tangent-Bitangent-Normal matrix
+layout(location = 3) out mat3 frag_TBN;  // Tangent-Bitangent-Normal matrix (takes locations 3, 4, 5)
+layout(location = 6) out vec4 frag_pos_light_space;
 
 // Push constants
 layout(push_constant) uniform PushConstants {
     mat4 model;
     mat4 view_projection;
+    mat4 light_vp;
 } pc;
 
 void main() {
     // Transform to world space
     vec4 world_pos = pc.model * vec4(position, 1.0);
     frag_position = world_pos.xyz;
+    frag_pos_light_space = pc.light_vp * world_pos;
 
     // Transform normal and tangent to world space
     mat3 normal_matrix = mat3(pc.model);
