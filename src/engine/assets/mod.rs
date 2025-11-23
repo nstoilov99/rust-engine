@@ -1,5 +1,19 @@
 pub mod texture;
 pub mod model_loader;
+pub mod handle;
+pub mod texture_manager;
+pub mod asset_manager;
+pub mod model_manager;
+pub mod hot_reload;
+pub mod dependencies;
+pub mod async_loader;
 
-pub use texture::load_texture;
-pub use model_loader::*;
+pub use handle::{Handle, AssetId};
+pub use texture::{load_texture};
+pub use texture_manager::TextureManager;
+pub use model_manager::ModelManager;
+pub use asset_manager::{AssetManager, CacheStats};
+pub use hot_reload::{HotReloadWatcher, ReloadEvent};
+pub use dependencies::{AssetDependencies, DependencyStats};
+pub use async_loader::{AsyncAssetLoader, LoadRequest, LoadResult};
+pub use model_loader::{Model, LoadedMesh, load_model, load_gltf}; 

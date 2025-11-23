@@ -39,6 +39,18 @@ gltf = "1.4"
 # Small vector optimization
 smallvec = "1.13"
 
+# File watching for hot-reload
+notify = "6.1"
+
+# Thread-safe locking primitives
+parking_lot = "0.12"
+
+# Math library (nalgebra for glm-style functions)
+nalgebra-glm = "0.18"
+
+# Async runtime for background loading
+tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"] }
+
 [profile.dev]
 opt-level = 1
 

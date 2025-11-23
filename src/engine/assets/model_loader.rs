@@ -12,16 +12,19 @@ use crate::engine::rendering::rendering_3d::material::*;
 use gltf;
 
 /// Represents a loaded mesh with vertex and index data
+#[derive(Debug)]
 pub struct LoadedMesh {
     pub vertices: Vec<Vertex3D>,
     pub indices: Vec<u32>,
     pub material_index: Option<usize>,
 }
 
-/// Represents a complete 3D model with all meshes
+/// Represents a complete 3D model with all meshes and textures
+#[derive(Debug)]
 pub struct Model {
     pub meshes: Vec<LoadedMesh>,
     pub name: String,
+    pub textures: Vec<image::RgbaImage>, // Extracted textures from GLTF
 }
 
 impl Model {
@@ -29,24 +32,26 @@ impl Model {
         Self {
             meshes: Vec::new(),
             name,
+            textures: Vec::new(),
         }
     }
 }
 
 /// Loads a GLTF/GLB file and returns the parsed document
-pub fn load_gltf(path: &str) -> Result<(gltf::Document, Vec<gltf::buffer::Data>), Box<dyn std::error::Error>> {
+pub fn load_gltf(path: &str) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
     println!("📦 Loading GLTF model: {}", path);
 
     // Load GLTF file (handles both .gltf and .glb)
-    let (document, buffers, _images) = gltf::import(path)?;
+    let (document, buffers, images) = gltf::import(path)?;
 
     println!("✅ GLTF loaded successfully!");
     println!("   Meshes: {}", document.meshes().count());
     println!("   Materials: {}", document.materials().count());
     println!("   Textures: {}", document.textures().count());
+    println!("   Images: {}", images.len());
     println!("   Nodes: {}", document.nodes().count());
 
-    Ok((document, buffers))
+    Ok((document, buffers, images))
 }
 
 /// Prints detailed information about a GLTF file (for debugging)
@@ -98,7 +103,7 @@ pub fn print_gltf_info(document: &gltf::Document) {
 
 /// Loads a complete model from GLTF file
 pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
-    let (document, buffers) = load_gltf(path)?;
+    let (document, buffers, images) = load_gltf(path)?;
 
     // Get model name from file path
     let name = Path::new(path)
@@ -136,7 +141,53 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\n✅ Model loaded: {} meshes extracted\n", model.meshes.len());
+    // Extract textures from images
+    println!("\n🖼️  Extracting textures...");
+    for (i, image_data) in images.iter().enumerate() {
+        println!("  Texture {}: {}x{} ({:?})",
+            i,
+            image_data.width,
+            image_data.height,
+            image_data.format
+        );
+
+        // Convert to RgbaImage
+        let rgba_image = match image_data.format {
+            gltf::image::Format::R8G8B8A8 => {
+                image::RgbaImage::from_raw(
+                    image_data.width,
+                    image_data.height,
+                    image_data.pixels.clone(),
+                ).ok_or("Failed to create RGBA image")?
+            }
+            gltf::image::Format::R8G8B8 => {
+                // Convert RGB to RGBA
+                let mut rgba_pixels = Vec::with_capacity(image_data.pixels.len() * 4 / 3);
+                for chunk in image_data.pixels.chunks(3) {
+                    rgba_pixels.push(chunk[0]); // R
+                    rgba_pixels.push(chunk[1]); // G
+                    rgba_pixels.push(chunk[2]); // B
+                    rgba_pixels.push(255);      // A
+                }
+                image::RgbaImage::from_raw(
+                    image_data.width,
+                    image_data.height,
+                    rgba_pixels,
+                ).ok_or("Failed to create RGBA image from RGB")?
+            }
+            _ => {
+                println!("    ⚠️  Unsupported format {:?}, using default white texture", image_data.format);
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]))
+            }
+        };
+
+        model.textures.push(rgba_image);
+    }
+
+    println!("\n✅ Model loaded: {} meshes, {} textures extracted\n",
+        model.meshes.len(),
+        model.textures.len()
+    );
 
     Ok(model)
 }

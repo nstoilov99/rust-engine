@@ -1,11 +1,13 @@
 use rust_engine::Renderer;
 use std::sync::Arc;
+use std::sync::mpsc;
 use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, ElementState};
 use winit::event_loop::{ControlFlow, EventLoop};
 use rust_engine::{InputManager, Camera2D};
 use rust_engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
 use rust_engine::DirectionalLight;
 use glam::{Mat4, Vec3};
+use rust_engine::assets::{AssetManager, HotReloadWatcher, AsyncAssetLoader, ReloadEvent};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -20,48 +22,136 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut renderer = Renderer::new(window.clone())?;
 
-    // Load GLTF model
-    println!("🦆 Loading Duck model...");
-    let model = rust_engine::load_model("assets/models/Duck.glb")?;
+    // ========== Asset Manager Setup ==========
+    println!("📦 Setting up Asset Manager...");
+    let asset_manager = Arc::new(AssetManager::new(
+        renderer.device.clone(),
+        renderer.queue.clone(),
+        renderer.memory_allocator.clone(),
+        renderer.command_buffer_allocator.clone(),
+    ));
 
-    // Create mesh manager and upload model to GPU
-    let mut mesh_manager = rust_engine::MeshManager::new();
-    let mesh_indices = mesh_manager.upload_model(&model, renderer.memory_allocator.clone())?;
+    // Setup hot-reload channel
+    let (reload_tx, reload_rx) = mpsc::channel::<ReloadEvent>();
+
+    // Setup hot-reload watcher
+    let mut hot_reload = HotReloadWatcher::new(asset_manager.clone(), reload_tx);
+    hot_reload.watch_directory("assets/")?;
+    hot_reload.track_asset("assets/models/Duck.glb");
+    println!("✅ Hot-reload enabled for assets/ directory (auto-reload active!)");
+
+    // Setup async loader
+    let _async_loader = AsyncAssetLoader::new(asset_manager.clone());
+    println!("✅ Async asset loader ready");
+
+    // Load GLTF model using asset manager (automatically uploads to GPU)
+    println!("🦆 Loading Duck model...");
+    let (mut mesh_indices, duck_model) = asset_manager.load_model_gpu("assets/models/Duck.glb")?;
+    let model = duck_model.get();
 
     let mut input_manager = InputManager::new();
 
-    // Load your idle animation sprite sheet (128×32 = 4 frames of 32×32 each)
-    let (texture_view, sampler) = rust_engine::load_texture(
-        renderer.device.clone(),
-        renderer.queue.clone(),
-        &renderer.command_buffer_allocator,
+    // Extract Duck's embedded texture or use white fallback
+    use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+    use vulkano::image::view::ImageView;
+    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+    use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryCommandBufferAbstract};
+    use vulkano::sync::GpuFuture;
+    use vulkano::format::Format;
+    use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode};
+
+    // Use Duck's embedded texture if available, otherwise white
+    let (texture_pixels, texture_width, texture_height) = if !model.textures.is_empty() {
+        let duck_texture = &model.textures[0];
+        println!("🖼️  Using Duck texture: {}x{}", duck_texture.width(), duck_texture.height());
+        (duck_texture.clone().into_raw(), duck_texture.width(), duck_texture.height())
+    } else {
+        println!("⚠️  No textures in model, using white texture");
+        (vec![255u8, 255, 255, 255], 1, 1) // 1x1 white
+    };
+
+    let image = Image::new(
         renderer.memory_allocator.clone(),
-        "assets/sprite.png",  // Your downloaded 128×32 idle animation
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8G8B8A8_SRGB,
+            extent: [texture_width, texture_height, 1],
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
     )?;
+
+    let buffer = Buffer::from_iter(
+        renderer.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        texture_pixels,
+    )?;
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        renderer.command_buffer_allocator.as_ref(),
+        renderer.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )?;
+
+    builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+        buffer,
+        image.clone(),
+    ))?;
+
+    let command_buffer = builder.build()?;
+    command_buffer.execute(renderer.queue.clone())?
+        .then_signal_fence_and_flush()?
+        .wait(None)?;
+
+    let texture_view = ImageView::new_default(image)?;
+    let sampler = Sampler::new(
+        renderer.device.clone(),
+        SamplerCreateInfo {
+            mag_filter: Filter::Linear,
+            min_filter: Filter::Linear,
+            address_mode: [SamplerAddressMode::Repeat; 3],
+            ..Default::default()
+        },
+    )?;
+
     // Create descriptor set for texture
     use rust_engine::rendering::rendering_2d::pipeline_2d::create_texture_descriptor_set;
     let descriptor_set = create_texture_descriptor_set(
         renderer.descriptor_set_allocator.clone(),
-        renderer.pipeline_3d.clone(),  // Pass the pipeline, not the layout
+        renderer.pipeline_3d.clone(),
         texture_view,
         sampler,
     )?;
 
-    // Create cube mesh
-    let (cube_vertices, cube_indices) = rust_engine::create_cube();
-
     // Animation state
-    let mut rotation = 0.0f32;
+    let rotation = 0.0f32;
     let mut camera_distance = 5.0f32;
 
     // Create game loop for delta time
     let mut game_loop = rust_engine::GameLoop::new();
     
+    // Camera movement speed
+    let camera_speed = 0.1;
+
     println!("✅ GLTF model loaded and ready to render!");
     println!("Controls:");
-    println!("  Arrow keys: Orbit camera");
-    println!("  Mouse wheel: Zoom in/out");
+    println!("  WASD: Move camera (forward/left/back/right)");
+    println!("  Space/Shift: Move up/down");
+    println!("  Arrow keys: Look around");
+    println!("  1-3: Light controls");
+    println!("  R: Reload assets (hot-reload demo)");
+    println!("  C: Show cache stats");
     println!("  ESC: Quit\n");
+    println!("💡 TIP: Edit Duck.glb in Blender and save - it will reload automatically!\n");
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -86,18 +176,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // Camera orbit
+                    // Free camera movement (WASD)
+                    let forward = (renderer.camera_3d.target - renderer.camera_3d.position).normalize();
+                    let right = forward.cross(renderer.camera_3d.up).normalize();
+
+                    if input_manager.is_key_pressed(VirtualKeyCode::W) {
+                        renderer.camera_3d.position += forward * camera_speed;
+                        renderer.camera_3d.target += forward * camera_speed;
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::S) {
+                        renderer.camera_3d.position -= forward * camera_speed;
+                        renderer.camera_3d.target -= forward * camera_speed;
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::A) {
+                        renderer.camera_3d.position -= right * camera_speed;
+                        renderer.camera_3d.target -= right * camera_speed;
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::D) {
+                        renderer.camera_3d.position += right * camera_speed;
+                        renderer.camera_3d.target += right * camera_speed;
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::Space) {
+                        renderer.camera_3d.position += renderer.camera_3d.up * camera_speed;
+                        renderer.camera_3d.target += renderer.camera_3d.up * camera_speed;
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::LShift) {
+                        renderer.camera_3d.position -= renderer.camera_3d.up * camera_speed;
+                        renderer.camera_3d.target -= renderer.camera_3d.up * camera_speed;
+                    }
+
+                    // Camera look around (Arrow keys)
+                    let look_speed = 0.05f32;
                     if input_manager.is_key_pressed(VirtualKeyCode::Left) {
-                        renderer.camera_3d.orbit(0.1, 0.0, camera_distance);
+                        // Rotate target left around position
+                        let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                        let angle = look_speed;
+                        let cos = angle.cos();
+                        let sin = angle.sin();
+                        let new_x = direction.x * cos + direction.z * sin;
+                        let new_z = -direction.x * sin + direction.z * cos;
+                        renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
                     }
                     if input_manager.is_key_pressed(VirtualKeyCode::Right) {
-                        renderer.camera_3d.orbit(-0.1, 0.0, camera_distance);
+                        // Rotate target right around position
+                        let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                        let angle = -look_speed;
+                        let cos = angle.cos();
+                        let sin = angle.sin();
+                        let new_x = direction.x * cos + direction.z * sin;
+                        let new_z = -direction.x * sin + direction.z * cos;
+                        renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
                     }
                     if input_manager.is_key_pressed(VirtualKeyCode::Up) {
-                        renderer.camera_3d.orbit(0.0, 0.1, camera_distance);
+                        // Look up
+                        let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                        let new_y = (direction.y + look_speed).clamp(-1.5, 1.5);
+                        renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
                     }
                     if input_manager.is_key_pressed(VirtualKeyCode::Down) {
-                        renderer.camera_3d.orbit(0.0, -0.1, camera_distance);
+                        // Look down
+                        let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                        let new_y = (direction.y - look_speed).clamp(-1.5, 1.5);
+                        renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
                     }
 
                         // Light controls
@@ -121,6 +261,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         renderer.ambient_light.intensity = (renderer.ambient_light.intensity - 0.1).max(0.0);
                         println!("Ambient: {:.1}", renderer.ambient_light.intensity);
                     }
+
+                    // Asset management controls
+                    if input_manager.is_key_pressed(VirtualKeyCode::R) {
+                        println!("\n🔄 Manual reload requested...");
+                        match asset_manager.reload_model_gpu("assets/models/Duck.glb") {
+                            Ok((new_indices, _new_model)) => {
+                                mesh_indices = new_indices;
+                                // TODO: Re-upload texture
+                                println!("✅ Duck model reloaded and re-uploaded to GPU");
+                            }
+                            Err(e) => eprintln!("❌ Reload failed: {}", e),
+                        }
+                    }
+                    if input_manager.is_key_pressed(VirtualKeyCode::C) {
+                        let stats = asset_manager.cache_stats();
+                        println!("\n📊 Asset Cache Stats: {}", stats);
+                    }
                 }
                 WindowEvent::MouseInput { button, state, .. } => {
                     input_manager.handle_mouse_button(button, state);
@@ -139,34 +296,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             },
             Event::MainEventsCleared => {
+                // Check for hot-reload events (non-blocking)
+                while let Ok(event) = reload_rx.try_recv() {
+                    match event {
+                        ReloadEvent::ModelChanged { path, mesh_indices: new_indices, model: _new_model } => {
+                            mesh_indices = new_indices;
+                            // TODO: Re-upload texture when model changes
+                            println!("✨ Auto-reload complete: {} (texture re-upload coming soon)", path);
+                        }
+                        ReloadEvent::TextureChanged { path } => {
+                            println!("✨ Texture auto-reloaded: {}", path);
+                        }
+                        ReloadEvent::ReloadFailed { path, error } => {
+                            eprintln!("❌ Auto-reload failed for {}: {}", path, error);
+                        }
+                    }
+                }
+
                 // Update delta time
-                let delta_time = game_loop.tick();
+                let _delta_time = game_loop.tick();
 
                 // Animate rotation (1 radian per second)
-                let rotation_speed = 1.0; // radians/second
+                let _rotation_speed = 1.0; // radians/second
                 //rotation += rotation_speed * delta_time;
-
 
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
                 // Create model matrix using Z-up coordinates
-                // In Z-up: rotate around Z axis (up)
+                // Scale down the Duck (it's quite large!)
                 // Rotate 180 degrees around X axis to flip upside-down models
-                let model = Mat4::from_rotation_x(std::f32::consts::PI)
-                    * Mat4::from_scale(Vec3::splat(1.0))
+                let model_matrix = Mat4::from_rotation_x(std::f32::consts::PI)
+                    * Mat4::from_scale(Vec3::splat(0.01)) // Scale down to 1% size
                     * Mat4::from_rotation_y(rotation);
 
-                // Render all meshes from the model WITH LIGHTING
+                // Render all meshes from the Duck model
+                let meshes = asset_manager.meshes.read();
                 for &mesh_index in &mesh_indices {
-                    if let Some(mesh) = mesh_manager.get(mesh_index) {
-                        if let Err(e) = renderer.render_mesh_lit(
-                            &cube_vertices,
-                            &cube_indices,     // Mesh indices
-                            model,               // Model transform
-                            descriptor_set.clone(), // Texture
-                            0.0,                 // Metallic (0.0 = non-metal, like plastic/wood)
-                            0.5,                 // Roughness (0.5 = semi-glossy)
+                    if let Some(gpu_mesh) = meshes.get(mesh_index) {
+                        // Render using GPU buffers with Duck's embedded texture
+                        if let Err(e) = renderer.render_gpu_mesh(
+                            gpu_mesh,
+                            model_matrix,
+                            descriptor_set.clone(),
                         ) {
                             eprintln!("❌ Render error: {:?}", e);
                         }
