@@ -39,6 +39,9 @@ gltf = "1.4"
 # Small vector optimization
 smallvec = "1.13"
 
+# ECS
+hecs = "0.10"
+
 # File watching for hot-reload
 notify = "6.1"
 

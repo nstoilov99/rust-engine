@@ -7,6 +7,7 @@ use crate::rendering::rendering_2d::pipeline_2d::{
     create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
     transform_vs, TexturedVertex, Vertex,
 };
+use crate::engine::ecs::components::{Transform, MeshRenderer, Camera};
 use crate::rendering::rendering_3d::pipeline_3d::{
     mesh_vs, lit_mesh_vs, Vertex3D, LightingUniformData, create_lit_mesh_pipeline,
 };
@@ -17,6 +18,7 @@ use crate::engine::rendering::rendering_2d::SpriteBatch;
 use crate::engine::core::{create_logical_device, select_physical_device, VulkanContext};
 use crate::engine::rendering::rendering_3d::light::{DirectionalLight, PointLight, AmbientLight};
 use glam::Mat4;
+use hecs::World;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -1381,5 +1383,45 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// Render all mesh entities from ECS world
+    pub fn render_ecs_meshes(
+        &mut self,
+        world: &World,
+        mesh_manager: &crate::MeshManager,
+        texture_descriptor: Arc<PersistentDescriptorSet>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Query all entities with Transform + MeshRenderer
+        for (_entity, (transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter() {
+            // Get mesh from manager
+            if let Some(gpu_mesh) = mesh_manager.get(mesh_renderer.mesh_index) {
+                // Get model matrix from ECS transform (nalgebra-glm)
+                let model_glm = transform.model_matrix();
+
+                // Convert nalgebra-glm Mat4 to glam Mat4
+                use crate::engine::utils::math_convert::mat4_from_glm;
+                let model = mat4_from_glm(&model_glm);
+
+                // Render mesh using existing method
+                self.render_gpu_mesh(
+                    gpu_mesh,
+                    model,
+                    texture_descriptor.clone(),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get active camera from ECS world
+    pub fn get_active_camera(world: &World) -> Option<(nalgebra_glm::Vec3, nalgebra_glm::Quat, Camera)> {
+        for (_entity, (transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
+            if camera.active {
+                return Some((transform.position, transform.rotation, camera.clone()));
+            }
+        }
+        None
     }
 }

@@ -19,6 +19,9 @@ pub mod assets;
 // Utilities
 pub mod utils;
 
+// Entity Component System
+pub mod ecs; 
+
 // Re-export commonly used types
 pub use core::{VulkanContext, select_physical_device, create_logical_device, LogicalDeviceContext};
 pub use rendering::common::*;  // Renderer, framebuffer functions, etc.
