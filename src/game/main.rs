@@ -76,7 +76,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Spawn Duck entity (using mesh_indices from AssetManager)
         // Apply 180° rotation around X-axis to flip upside-down models
         let flip_rotation = glm::quat_angle_axis(std::f32::consts::PI, &glm::vec3(1.0, 0.0, 0.0));
-        println!("DEBUG: flip_rotation = ({}, {}, {}, {})", flip_rotation.i, flip_rotation.j, flip_rotation.k, flip_rotation.w);
         world.spawn((
             Transform::new(glm::vec3(0.0, 0.0, 0.0))
                 .with_rotation(flip_rotation)

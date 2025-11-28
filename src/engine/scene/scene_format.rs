@@ -1,6 +1,5 @@
 //! Scene file format structures for serialization
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Top-level scene file structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
