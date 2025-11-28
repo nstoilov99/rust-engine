@@ -1,0 +1,51 @@
+(
+    version: "1.0",
+    name: "Main Scene",
+    entities: [
+        (
+            name: "Main Camera",
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 5.0, 10.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                (
+                    type: "Camera",
+                    fov: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                    active: true,
+                ),
+            ],
+        ),
+        (
+            name: "Duck",
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (1.0, 0.0, 0.0, -0.00000004371139),
+                    scale: (0.01, 0.01, 0.01),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 0,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
+            name: "Sun",
+            components: [
+                (
+                    type: "DirectionalLight",
+                    direction: (0.0, -1.0, -1.0),
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 1.0,
+                ),
+            ],
+        ),
+    ],
+)

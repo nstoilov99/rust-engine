@@ -54,6 +54,11 @@ nalgebra-glm = "0.18"
 # Async runtime for background loading
 tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"] }
 
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.8"  # Rusty Object Notation
+typetag = "0.2"  # Polymorphic serialization
+
 [profile.dev]
 opt-level = 1
 

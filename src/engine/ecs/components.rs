@@ -1,12 +1,15 @@
 //! Core ECS components
-
+use serde::{Serialize, Deserialize};
 use nalgebra_glm as glm;
 
 /// 3D transform component
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
+    #[serde(with = "vec3_serde")]
     pub position: glm::Vec3,
+    #[serde(with = "quat_serde")]
     pub rotation: glm::Quat,
+    #[serde(with = "vec3_serde")]
     pub scale: glm::Vec3,
 }
 
@@ -49,14 +52,14 @@ impl Default for Transform {
 }
 
 /// Mesh renderer component
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshRenderer {
     pub mesh_index: usize,
     pub material_index: usize,
 }
 
 /// Camera component for 3D rendering
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Camera {
     pub fov: f32,
     pub near: f32,
@@ -76,9 +79,11 @@ impl Default for Camera {
 }
 
 /// Directional light component
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DirectionalLight {
+    #[serde(with = "vec3_serde")]
     pub direction: glm::Vec3,
+    #[serde(with = "vec3_serde")]
     pub color: glm::Vec3,
     pub intensity: f32,
 }
@@ -94,8 +99,9 @@ impl Default for DirectionalLight {
 }
 
 /// Point light component
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PointLight {
+    #[serde(with = "vec3_serde")]
     pub color: glm::Vec3,
     pub intensity: f32,
     pub radius: f32,
@@ -112,15 +118,83 @@ impl Default for PointLight {
 }
 
 /// Tag component for player-controlled entities
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Player;
 
 /// Tag component for naming entities
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Name(pub String);
 
 impl Name {
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
+    }
+}
+
+// ========== Custom Serde for nalgebra-glm types ==========
+
+mod vec3_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use nalgebra_glm as glm;
+
+    #[derive(Serialize, Deserialize)]
+    struct Vec3Surrogate {
+        x: f32,
+        y: f32,
+        z: f32,
+    }
+
+    pub fn serialize<S>(vec: &glm::Vec3, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let surrogate = Vec3Surrogate {
+            x: vec.x,
+            y: vec.y,
+            z: vec.z,
+        };
+        surrogate.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<glm::Vec3, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let surrogate = Vec3Surrogate::deserialize(deserializer)?;
+        Ok(glm::vec3(surrogate.x, surrogate.y, surrogate.z))
+    }
+}
+
+mod quat_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use nalgebra_glm as glm;
+
+    #[derive(Serialize, Deserialize)]
+    struct QuatSurrogate {
+        x: f32,
+        y: f32,
+        z: f32,
+        w: f32,
+    }
+
+    pub fn serialize<S>(quat: &glm::Quat, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let surrogate = QuatSurrogate {
+            x: quat.coords.x,
+            y: quat.coords.y,
+            z: quat.coords.z,
+            w: quat.coords.w,
+        };
+        surrogate.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<glm::Quat, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let surrogate = QuatSurrogate::deserialize(deserializer)?;
+        Ok(glm::quat(surrogate.w, surrogate.x, surrogate.y, surrogate.z))
     }
 }

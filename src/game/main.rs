@@ -5,9 +5,14 @@ use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, Element
 use winit::event_loop::{ControlFlow, EventLoop};
 use rust_engine::{InputManager, Camera2D};
 use rust_engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
-use rust_engine::DirectionalLight;
 use glam::{Mat4, Vec3};
+use rust_engine::DirectionalLight;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, AsyncAssetLoader, ReloadEvent};
+use hecs::World;
+use rust_engine::engine::ecs::components::{Transform, MeshRenderer, Camera, Name};
+use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
+use rust_engine::engine::scene::load_scene;
+use nalgebra_glm as glm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -51,6 +56,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input_manager = InputManager::new();
 
+    println!("🌍 Setting up ECS World...");
+    let mut world = World::new();
+
+        // Try to load scene from file, or create default scene
+    if std::path::Path::new("assets/scenes/main.scene.ron").exists() {
+        println!("📂 Loading scene from file...");
+        load_scene(&mut world, "assets/scenes/main.scene.ron")?;
+    } else {
+        println!("⚠️  No scene file found, creating default scene...");
+
+        // Spawn Camera entity
+        world.spawn((
+            Transform::new(glm::vec3(0.0, 5.0, 10.0)),
+            Camera::default(),
+            Name::new("Main Camera"),
+        ));
+
+        // Spawn Duck entity (using mesh_indices from AssetManager)
+        // Apply 180° rotation around X-axis to flip upside-down models
+        let flip_rotation = glm::quat_angle_axis(std::f32::consts::PI, &glm::vec3(1.0, 0.0, 0.0));
+        println!("DEBUG: flip_rotation = ({}, {}, {}, {})", flip_rotation.i, flip_rotation.j, flip_rotation.k, flip_rotation.w);
+        world.spawn((
+            Transform::new(glm::vec3(0.0, 0.0, 0.0))
+                .with_rotation(flip_rotation)
+                .with_scale(glm::vec3(0.01, 0.01, 0.01)),
+            MeshRenderer {
+                mesh_index: mesh_indices[0],  // First mesh from Duck model
+                material_index: 0,
+            },
+            Name::new("Duck"),
+        ));
+
+        // Spawn Directional Light
+        world.spawn((
+            EcsDirectionalLight {
+                direction: glm::vec3(0.0, -1.0, -1.0),
+                color: glm::vec3(1.0, 1.0, 1.0),
+                intensity: 1.0,
+            },
+            Name::new("Sun"),
+        ));
+
+        println!("✅ Default scene created with {} entities", world.len());
+    }
+
     // Extract Duck's embedded texture or use white fallback
     use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::image::view::ImageView;
@@ -61,14 +111,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use vulkano::format::Format;
     use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode};
 
-    // Use Duck's embedded texture if available, otherwise white
-    let (texture_pixels, texture_width, texture_height) = if !model.textures.is_empty() {
-        let duck_texture = &model.textures[0];
+    // Get duck model from asset manager to extract texture
+    let duck_model_handle = asset_manager.models.load("assets/models/Duck.glb")?;
+    let duck_model = duck_model_handle.get();
+
+    let (texture_pixels, texture_width, texture_height) = if !duck_model.textures.is_empty() {
+        let duck_texture = &duck_model.textures[0];
         println!("🖼️  Using Duck texture: {}x{}", duck_texture.width(), duck_texture.height());
         (duck_texture.clone().into_raw(), duck_texture.width(), duck_texture.height())
     } else {
         println!("⚠️  No textures in model, using white texture");
-        (vec![255u8, 255, 255, 255], 1, 1) // 1x1 white
+        (vec![255u8, 255, 255, 255], 1, 1)
     };
 
     let image = Image::new(
@@ -150,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  1-3: Light controls");
     println!("  R: Reload assets (hot-reload demo)");
     println!("  C: Show cache stats");
+    println!("  S: Save scene");
     println!("  ESC: Quit\n");
     println!("💡 TIP: Edit Duck.glb in Blender and save - it will reload automatically!\n");
 
@@ -173,6 +227,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(VirtualKeyCode::Escape) = keyboard_input.virtual_keycode {
                         if keyboard_input.state == ElementState::Pressed {
                             *control_flow = ControlFlow::Exit;
+                        }
+                    }
+
+                    if input_manager.is_key_pressed(VirtualKeyCode::LControl) {
+                           if input_manager.is_key_just_pressed(VirtualKeyCode::S) {
+                            use rust_engine::engine::scene::save_scene;
+                            match save_scene(&world, "assets/scenes/main.scene.ron", "Main Scene") {
+                                Ok(_) => println!("💾 Scene saved!"),
+                                Err(e) => eprintln!("❌ Save failed: {}", e),
+                            }
                         }
                     }
 
@@ -300,9 +364,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 while let Ok(event) = reload_rx.try_recv() {
                     match event {
                         ReloadEvent::ModelChanged { path, mesh_indices: new_indices, model: _new_model } => {
-                            mesh_indices = new_indices;
-                            // TODO: Re-upload texture when model changes
-                            println!("✨ Auto-reload complete: {} (texture re-upload coming soon)", path);
+                            // Update mesh indices in ECS entities
+                            for (_entity, mesh_renderer) in world.query_mut::<&mut MeshRenderer>() {
+                                if !new_indices.is_empty() {
+                                    mesh_renderer.mesh_index = new_indices[0];
+                                }
+                            }
+                            println!("✨ Auto-reload complete: {}", path);
                         }
                         ReloadEvent::TextureChanged { path } => {
                             println!("✨ Texture auto-reloaded: {}", path);
@@ -323,26 +391,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
-                // Create model matrix using Z-up coordinates
-                // Scale down the Duck (it's quite large!)
-                // Rotate 180 degrees around X axis to flip upside-down models
-                let model_matrix = Mat4::from_rotation_x(std::f32::consts::PI)
-                    * Mat4::from_scale(Vec3::splat(0.01)) // Scale down to 1% size
-                    * Mat4::from_rotation_y(rotation);
-
-                // Render all meshes from the Duck model
+                // Render all entities with MeshRenderer using ECS
                 let meshes = asset_manager.meshes.read();
-                for &mesh_index in &mesh_indices {
-                    if let Some(gpu_mesh) = meshes.get(mesh_index) {
-                        // Render using GPU buffers with Duck's embedded texture
-                        if let Err(e) = renderer.render_gpu_mesh(
-                            gpu_mesh,
-                            model_matrix,
-                            descriptor_set.clone(),
-                        ) {
-                            eprintln!("❌ Render error: {:?}", e);
-                        }
-                    }
+                if let Err(e) = renderer.render_ecs_meshes(
+                    &world,
+                    &*meshes,
+                    descriptor_set.clone(),
+                ) {
+                    eprintln!("❌ Render error: {:?}", e);
                 }
             }
             _ => {}
