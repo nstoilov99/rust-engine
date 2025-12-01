@@ -5,14 +5,16 @@ use winit::event::{Event, VirtualKeyCode, WindowEvent, MouseScrollDelta, Element
 use winit::event_loop::{ControlFlow, EventLoop};
 use rust_engine::{InputManager, Camera2D};
 use rust_engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
-use glam::{Mat4, Vec3};
-use rust_engine::DirectionalLight;
+use glam::Vec3;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, AsyncAssetLoader, ReloadEvent};
 use hecs::World;
 use rust_engine::engine::ecs::components::{Transform, MeshRenderer, Camera, Name};
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::scene::load_scene;
 use nalgebra_glm as glm;
+use rust_engine::engine::rendering::rendering_3d::{
+    DeferredRenderer, DebugView, MeshRenderData, PushConstantData, LightUniformData
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -190,19 +192,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create game loop for delta time
     let mut game_loop = rust_engine::GameLoop::new();
-    
+
     // Camera movement speed
     let camera_speed = 0.1;
+
+    // Create deferred renderer
+    println!("🎨 Creating deferred renderer...");
+    let mut deferred_renderer = DeferredRenderer::new(
+        renderer.device.clone(),
+        renderer.queue.clone(),
+        renderer.memory_allocator.clone(),
+        renderer.command_buffer_allocator.clone(),
+        renderer.descriptor_set_allocator.clone(),
+        800,  // Match window width
+        600,  // Match window height
+    )?;
+    let mut current_debug_view = DebugView::None;
+    println!("✅ Deferred renderer ready!");
+
+    // Frame synchronization
+    use vulkano::sync;
+    let mut previous_frame_end: Option<Box<dyn GpuFuture>> = Some(sync::now(renderer.device.clone()).boxed());
 
     println!("✅ GLTF model loaded and ready to render!");
     println!("Controls:");
     println!("  WASD: Move camera (forward/left/back/right)");
     println!("  Space/Shift: Move up/down");
     println!("  Arrow keys: Look around");
-    println!("  1-3: Light controls");
+    println!("  0: Normal rendering (deferred)");
+    println!("  1: Debug - Position buffer");
+    println!("  2: Debug - Normal buffer");
+    println!("  3: Debug - Albedo buffer");
+    println!("  4: Debug - Material buffer");
+    println!("  5: Debug - Depth buffer");
     println!("  R: Reload assets (hot-reload demo)");
     println!("  C: Show cache stats");
-    println!("  S: Save scene");
+    println!("  Ctrl+S: Save scene");
     println!("  ESC: Quit\n");
     println!("💡 TIP: Edit Duck.glb in Blender and save - it will reload automatically!\n");
 
@@ -218,6 +243,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::Resized(new_size) => {
                     println!("Window resized to {}x{}", new_size.width, new_size.height);
                     renderer.recreate_swapchain = true;
+
+                    // Recreate deferred renderer with new dimensions
+                    match DeferredRenderer::new(
+                        renderer.device.clone(),
+                        renderer.queue.clone(),
+                        renderer.memory_allocator.clone(),
+                        renderer.command_buffer_allocator.clone(),
+                        renderer.descriptor_set_allocator.clone(),
+                        new_size.width,
+                        new_size.height,
+                    ) {
+                        Ok(new_renderer) => {
+                            deferred_renderer = new_renderer;
+                            deferred_renderer.set_debug_view(current_debug_view); // Preserve debug view
+                            println!("✅ Deferred renderer recreated");
+                        }
+                        Err(e) => eprintln!("❌ Failed to recreate deferred renderer: {}", e),
+                    }
                 }
                 WindowEvent::KeyboardInput { input: keyboard_input, .. } => {
                     input_manager.handle_keyboard(keyboard_input.virtual_keycode, keyboard_input.state);
@@ -303,26 +346,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
                     }
 
-                        // Light controls
-                    if input_manager.is_key_pressed(VirtualKeyCode::Key1) {
-                        // Toggle directional light
-                        if renderer.directional_light.is_some() {
-                            renderer.directional_light = None;
-                            println!("Directional light OFF");
-                        } else {
-                            renderer.directional_light = Some(DirectionalLight::sun());
-                            println!("Directional light ON");
-                        }
+                    // Debug view controls (Keys 0-5)
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key0) {
+                        current_debug_view = DebugView::None;
+                        deferred_renderer.set_debug_view(DebugView::None);
+                        println!("🔍 Debug: Normal rendering");
                     }
-                    if input_manager.is_key_pressed(VirtualKeyCode::Key2) {
-                        // Increase ambient
-                        renderer.ambient_light.intensity = (renderer.ambient_light.intensity + 0.1).min(1.0);
-                        println!("Ambient: {:.1}", renderer.ambient_light.intensity);
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key1) {
+                        current_debug_view = DebugView::Position;
+                        deferred_renderer.set_debug_view(DebugView::Position);
+                        println!("🔍 Debug: Position buffer");
                     }
-                    if input_manager.is_key_pressed(VirtualKeyCode::Key3) {
-                        // Decrease ambient
-                        renderer.ambient_light.intensity = (renderer.ambient_light.intensity - 0.1).max(0.0);
-                        println!("Ambient: {:.1}", renderer.ambient_light.intensity);
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key2) {
+                        current_debug_view = DebugView::Normal;
+                        deferred_renderer.set_debug_view(DebugView::Normal);
+                        println!("🔍 Debug: Normal buffer");
+                    }
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key3) {
+                        current_debug_view = DebugView::Albedo;
+                        deferred_renderer.set_debug_view(DebugView::Albedo);
+                        println!("🔍 Debug: Albedo buffer");
+                    }
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key4) {
+                        current_debug_view = DebugView::Material;
+                        deferred_renderer.set_debug_view(DebugView::Material);
+                        println!("🔍 Debug: Material buffer");
+                    }
+                    if input_manager.is_key_just_pressed(VirtualKeyCode::Key5) {
+                        current_debug_view = DebugView::Depth;
+                        deferred_renderer.set_debug_view(DebugView::Depth);
+                        println!("🔍 Debug: Depth buffer");
                     }
 
                     // Asset management controls
@@ -390,14 +443,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
-                // Render all entities with MeshRenderer using ECS
+                // Prepare mesh data from ECS for deferred rendering
+                let mut mesh_data_vec = Vec::new();
                 let meshes = asset_manager.meshes.read();
-                if let Err(e) = renderer.render_ecs_meshes(
-                    &world,
-                    &*meshes,
-                    descriptor_set.clone(),
-                ) {
-                    eprintln!("❌ Render error: {:?}", e);
+
+                for (_entity, (transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter() {
+                    if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
+                        // Build transformation matrices
+                        let model_matrix = transform.model_matrix();
+                        let view_matrix = renderer.camera_3d.view_matrix();
+                        let projection_matrix = renderer.camera_3d.projection_matrix();
+                        let view_projection = projection_matrix * view_matrix;
+
+                        // Convert nalgebra_glm Mat4 to [[f32; 4]; 4]
+                        // Use bytemuck to safely transmute the matrix data
+                        let model_array: [[f32; 4]; 4] = unsafe {
+                            std::mem::transmute(model_matrix)
+                        };
+                        let vp_array: [[f32; 4]; 4] = unsafe {
+                            std::mem::transmute(view_projection)
+                        };
+
+                        mesh_data_vec.push(MeshRenderData {
+                            vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+                            index_buffer: gpu_mesh.index_buffer.clone(),
+                            index_count: gpu_mesh.index_count,
+                            push_constants: PushConstantData {
+                                model: model_array,
+                                view_projection: vp_array,
+                            },
+                        });
+                    }
+                }
+
+                // Prepare light data from ECS
+                let camera_pos = renderer.camera_3d.position;
+                let mut light_data = LightUniformData {
+                    camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
+                    _pad0: 0.0,
+                    directional_light_dir: [0.0, -1.0, -1.0],
+                    _pad1: 0.0,
+                    directional_light_color: [1.0, 1.0, 1.0],
+                    directional_light_intensity: 1.0,
+                    ambient_color: [0.1, 0.1, 0.15],
+                    ambient_intensity: 0.3,
+                };
+
+                // Query ECS for directional light
+                for (_entity, dir_light) in world.query::<&EcsDirectionalLight>().iter() {
+                    light_data.directional_light_dir = [dir_light.direction.x, dir_light.direction.y, dir_light.direction.z];
+                    light_data.directional_light_color = [dir_light.color.x, dir_light.color.y, dir_light.color.z];
+                    light_data.directional_light_intensity = dir_light.intensity;
+                    break; // Use first light
+                }
+
+                // Clean up previous frame
+                if let Some(mut prev_future) = previous_frame_end.take() {
+                    prev_future.cleanup_finished();
+                }
+
+                // Acquire swapchain image
+                use vulkano::swapchain::acquire_next_image;
+
+                match acquire_next_image(renderer.swapchain.clone(), None) {
+                    Ok((image_index, _suboptimal, acquire_future)) => {
+                        let target_image = renderer.images[image_index as usize].clone();
+
+                        // Render with deferred pipeline
+                        match deferred_renderer.render(&mesh_data_vec, &light_data, target_image) {
+                            Ok(command_buffer) => {
+                                // Submit and present
+                                let future = acquire_future
+                                    .then_execute(renderer.queue.clone(), command_buffer)
+                                    .unwrap()
+                                    .then_swapchain_present(
+                                        renderer.queue.clone(),
+                                        vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
+                                            renderer.swapchain.clone(),
+                                            image_index,
+                                        ),
+                                    )
+                                    .then_signal_fence_and_flush();
+
+                                match future {
+                                    Ok(future) => {
+                                        // Store the future for next frame
+                                        previous_frame_end = Some(future.boxed());
+                                    }
+                                    Err(e) => {
+                                        eprintln!("❌ Present/flush error: {:?}", e);
+                                        previous_frame_end = Some(sync::now(renderer.device.clone()).boxed());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Render error: {}", e);
+                                previous_frame_end = Some(sync::now(renderer.device.clone()).boxed());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Failed to acquire swapchain image: {:?}", e);
+                        previous_frame_end = Some(sync::now(renderer.device.clone()).boxed());
+                    }
                 }
             }
             _ => {}
