@@ -1,22 +1,23 @@
+use crate::engine::assets::texture::load_texture;
 use crate::engine::camera::{Camera2D, Camera3D};
+use crate::engine::core::swapchain::{create_swapchain, recreate_swapchain};
+use crate::engine::core::{create_logical_device, select_physical_device, VulkanContext};
+use crate::engine::ecs::components::{Camera, MeshRenderer, Transform};
+use crate::engine::rendering::rendering_2d::SpriteBatch;
+use crate::engine::rendering::rendering_3d::light::{AmbientLight, DirectionalLight, PointLight};
 use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
 use crate::engine::scene::Transform2D;
 use crate::rendering::common::framebuffer::{create_framebuffers, create_framebuffers_3d};
+use crate::rendering::common::render_pass::create_render_pass;
 use crate::rendering::rendering_2d::pipeline_2d::{
     camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
     create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
     transform_vs, TexturedVertex, Vertex,
 };
-use crate::engine::ecs::components::{Transform, MeshRenderer, Camera};
 use crate::rendering::rendering_3d::pipeline_3d::{
-    mesh_vs, lit_mesh_vs, Vertex3D, LightingUniformData, create_lit_mesh_pipeline,
+    create_lit_mesh_pipeline, lit_mesh_vs, mesh_vs, LightingUniformData, Vertex3D,
 };
-use crate::rendering::common::render_pass::create_render_pass;
-use crate::engine::core::swapchain::{create_swapchain, recreate_swapchain};
-use crate::engine::assets::texture::load_texture;
-use crate::engine::rendering::rendering_2d::SpriteBatch;
-use crate::engine::core::{create_logical_device, select_physical_device, VulkanContext};
-use crate::engine::rendering::rendering_3d::light::{DirectionalLight, PointLight, AmbientLight};
+// use egui_winit_vulkano::Gui; // No compatible version for Vulkano 0.34
 use glam::Mat4;
 use hecs::World;
 use std::sync::Arc;
@@ -26,7 +27,9 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
     SubpassEndInfo,
 };
-use vulkano::descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{
+    allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+};
 use vulkano::device::{Device, Queue};
 use vulkano::image::view::ImageView;
 use vulkano::image::Image;
@@ -74,6 +77,7 @@ pub struct Renderer {
     pub point_lights: Vec<PointLight>,
     pub lighting_buffer: Subbuffer<LightingUniformData>,
     pub lighting_descriptor_set: Arc<PersistentDescriptorSet>,
+    // pub gui: Gui, // No compatible version for Vulkano 0.34
 }
 
 impl Renderer {
@@ -128,18 +132,17 @@ impl Renderer {
         )?;
 
         // Create 3D pipeline
-        let pipeline_3d = crate::engine::rendering::rendering_3d::pipeline_3d::create_mesh_pipeline(
-            device_context.device.clone(),
-            render_pass_3d.clone(),
-        )?;
+        let pipeline_3d =
+            crate::engine::rendering::rendering_3d::pipeline_3d::create_mesh_pipeline(
+                device_context.device.clone(),
+                render_pass_3d.clone(),
+            )?;
 
         println!("✓ 3D rendering initialized (depth buffer, perspective camera)");
 
         // Create lit mesh pipeline
-        let pipeline_lit = create_lit_mesh_pipeline(
-            device_context.device.clone(),
-            render_pass_3d.clone(),
-        )?;
+        let pipeline_lit =
+            create_lit_mesh_pipeline(device_context.device.clone(), render_pass_3d.clone())?;
 
         // Create descriptor set allocator (needed for lighting descriptor set)
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
@@ -248,6 +251,9 @@ impl Renderer {
             sampler,
         )?;
 
+        // Initialize egui (no compatible version for Vulkano 0.34)
+        // let gui = Gui::new(...);
+
         println!("\n✅ Renderer initialized successfully!\n");
 
         Ok(Self {
@@ -282,6 +288,7 @@ impl Renderer {
             point_lights,
             lighting_buffer,
             lighting_descriptor_set,
+            // gui, // No compatible version for Vulkano 0.34
         })
     }
 
@@ -863,8 +870,10 @@ impl Renderer {
 
             // Update both camera viewports
             let extent = self.images[0].extent();
-            self.camera.set_viewport_size(extent[0] as f32, extent[1] as f32);
-            self.camera_3d.set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
+            self.camera_3d
+                .set_viewport_size(extent[0] as f32, extent[1] as f32);
 
             self.recreate_swapchain = false;
         }
@@ -1005,7 +1014,6 @@ impl Renderer {
         Ok(())
     }
 
-    
     /// Renders a GPU mesh (from mesh manager)
     pub fn render_gpu_mesh(
         &mut self,
@@ -1081,12 +1089,9 @@ impl Renderer {
         // Begin render pass
         builder.begin_render_pass(
             RenderPassBeginInfo {
-                clear_values: vec![
-                    Some([0.1, 0.1, 0.15, 1.0].into()),
-                    Some(1.0.into()),
-                ],
+                clear_values: vec![Some([0.1, 0.1, 0.15, 1.0].into()), Some(1.0.into())],
                 ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers_3d[image_index as usize].clone()
+                    self.framebuffers_3d[image_index as usize].clone(),
                 )
             },
             SubpassBeginInfo::default(),
@@ -1096,11 +1101,16 @@ impl Renderer {
 
         // Set viewport
         let extent = self.swapchain.image_extent();
-        builder.set_viewport(0, [Viewport {
-            offset: [0.0, 0.0],
-            extent: [extent[0] as f32, extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        }].into_iter().collect())?;
+        builder.set_viewport(
+            0,
+            [Viewport {
+                offset: [0.0, 0.0],
+                extent: [extent[0] as f32, extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            }]
+            .into_iter()
+            .collect(),
+        )?;
 
         // Bind texture
         builder.bind_descriptor_sets(
@@ -1268,8 +1278,8 @@ impl Renderer {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE |
-                                MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             vertices.iter().copied(),
@@ -1282,8 +1292,8 @@ impl Renderer {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE |
-                                MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             indices.iter().copied(),
@@ -1299,12 +1309,9 @@ impl Renderer {
         // Begin render pass
         builder.begin_render_pass(
             RenderPassBeginInfo {
-                clear_values: vec![
-                    Some([0.1, 0.1, 0.15, 1.0].into()),
-                    Some(1.0.into()),
-                ],
+                clear_values: vec![Some([0.1, 0.1, 0.15, 1.0].into()), Some(1.0.into())],
                 ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers_3d[image_index as usize].clone()
+                    self.framebuffers_3d[image_index as usize].clone(),
                 )
             },
             SubpassBeginInfo::default(),
@@ -1315,11 +1322,16 @@ impl Renderer {
 
         // Set viewport
         let extent = self.swapchain.image_extent();
-        builder.set_viewport(0, [Viewport {
-            offset: [0.0, 0.0],
-            extent: [extent[0] as f32, extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        }].into_iter().collect())?;
+        builder.set_viewport(
+            0,
+            [Viewport {
+                offset: [0.0, 0.0],
+                extent: [extent[0] as f32, extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            }]
+            .into_iter()
+            .collect(),
+        )?;
 
         // Bind descriptor sets
         // Set 0: Texture
@@ -1393,7 +1405,9 @@ impl Renderer {
         texture_descriptor: Arc<PersistentDescriptorSet>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Query all entities with Transform + MeshRenderer
-        for (_entity, (transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter() {
+        for (_entity, (transform, mesh_renderer)) in
+            world.query::<(&Transform, &MeshRenderer)>().iter()
+        {
             // Get mesh from manager
             if let Some(gpu_mesh) = mesh_manager.get(mesh_renderer.mesh_index) {
                 // Get model matrix from ECS transform (nalgebra-glm)
@@ -1404,11 +1418,7 @@ impl Renderer {
                 let model = mat4_from_glm(&model_glm);
 
                 // Render mesh using existing method
-                self.render_gpu_mesh(
-                    gpu_mesh,
-                    model,
-                    texture_descriptor.clone(),
-                )?;
+                self.render_gpu_mesh(gpu_mesh, model, texture_descriptor.clone())?;
             }
         }
 
@@ -1416,7 +1426,9 @@ impl Renderer {
     }
 
     /// Get active camera from ECS world
-    pub fn get_active_camera(world: &World) -> Option<(nalgebra_glm::Vec3, nalgebra_glm::Quat, Camera)> {
+    pub fn get_active_camera(
+        world: &World,
+    ) -> Option<(nalgebra_glm::Vec3, nalgebra_glm::Quat, Camera)> {
         for (_entity, (transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
             if camera.active {
                 return Some((transform.position, transform.rotation, camera.clone()));

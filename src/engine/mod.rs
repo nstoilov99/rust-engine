@@ -20,7 +20,10 @@ pub mod assets;
 pub mod utils;
 
 // Entity Component System
-pub mod ecs; 
+pub mod ecs;
+
+// GUI (egui integration)
+pub mod gui; 
 
 // Re-export commonly used types
 pub use core::{VulkanContext, select_physical_device, create_logical_device, LogicalDeviceContext};
