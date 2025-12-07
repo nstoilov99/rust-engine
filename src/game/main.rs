@@ -1,3 +1,4 @@
+use egui;
 use glam::Vec3;
 use hecs::World;
 use nalgebra_glm as glm;
@@ -15,7 +16,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use winit::event::{ElementState, Event, MouseScrollDelta, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use egui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎮 Rust Game Engine - Starting up...\n");
@@ -258,6 +258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match event {
             Event::WindowEvent { event, .. } => {
+
+                gui.handle_event(&event);
                 match event {
                         WindowEvent::CloseRequested => {
                             println!("👋 Closing...");
@@ -269,137 +271,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             gui.set_screen_size(new_size.width as f32, new_size.height as f32);
                         }
                         WindowEvent::KeyboardInput { input: keyboard_input, .. } => {
+                            // Only collect input, don't process game logic here
                             input_manager.handle_keyboard(keyboard_input.virtual_keycode, keyboard_input.state);
-
-                            // Handle ESC for quit
-                            if let Some(VirtualKeyCode::Escape) = keyboard_input.virtual_keycode {
-                                if keyboard_input.state == ElementState::Pressed {
-                                    *control_flow = ControlFlow::Exit;
-                                }
-                            }
-
-                            if input_manager.is_key_pressed(VirtualKeyCode::LControl) {
-                                if input_manager.is_key_just_pressed(VirtualKeyCode::S) {
-                                    use rust_engine::engine::scene::save_scene;
-                                    match save_scene(&world, "assets/scenes/main.scene.ron", "Main Scene") {
-                                        Ok(_) => println!("💾 Scene saved!"),
-                                        Err(e) => eprintln!("❌ Save failed: {}", e),
-                                    }
-                                }
-                            }
-
-                            // Free camera movement (WASD)
-                            let forward = (renderer.camera_3d.target - renderer.camera_3d.position).normalize();
-                            let right = forward.cross(renderer.camera_3d.up).normalize();
-
-                            if input_manager.is_key_pressed(VirtualKeyCode::W) {
-                                renderer.camera_3d.position += forward * camera_speed;
-                                renderer.camera_3d.target += forward * camera_speed;
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::S) {
-                                renderer.camera_3d.position -= forward * camera_speed;
-                                renderer.camera_3d.target -= forward * camera_speed;
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::A) {
-                                renderer.camera_3d.position -= right * camera_speed;
-                                renderer.camera_3d.target -= right * camera_speed;
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::D) {
-                                renderer.camera_3d.position += right * camera_speed;
-                                renderer.camera_3d.target += right * camera_speed;
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::Space) {
-                                renderer.camera_3d.position += renderer.camera_3d.up * camera_speed;
-                                renderer.camera_3d.target += renderer.camera_3d.up * camera_speed;
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::LShift) {
-                                renderer.camera_3d.position -= renderer.camera_3d.up * camera_speed;
-                                renderer.camera_3d.target -= renderer.camera_3d.up * camera_speed;
-                            }
-
-                            // Camera look around (Arrow keys)
-                            let look_speed = 0.05f32;
-                            if input_manager.is_key_pressed(VirtualKeyCode::Left) {
-                                // Rotate target left around position
-                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
-                                let angle = look_speed;
-                                let cos = angle.cos();
-                                let sin = angle.sin();
-                                let new_x = direction.x * cos + direction.z * sin;
-                                let new_z = -direction.x * sin + direction.z * cos;
-                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::Right) {
-                                // Rotate target right around position
-                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
-                                let angle = -look_speed;
-                                let cos = angle.cos();
-                                let sin = angle.sin();
-                                let new_x = direction.x * cos + direction.z * sin;
-                                let new_z = -direction.x * sin + direction.z * cos;
-                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::Up) {
-                                // Look up
-                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
-                                let new_y = (direction.y + look_speed).clamp(-1.5, 1.5);
-                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::Down) {
-                                // Look down
-                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
-                                let new_y = (direction.y - look_speed).clamp(-1.5, 1.5);
-                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
-                            }
-
-                            // Debug view controls (Keys 0-5)
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key0) {
-                                current_debug_view = DebugView::None;
-                                deferred_renderer.set_debug_view(DebugView::None);
-                                println!("🔍 Debug: Normal rendering");
-                            }
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key1) {
-                                current_debug_view = DebugView::Position;
-                                deferred_renderer.set_debug_view(DebugView::Position);
-                                println!("🔍 Debug: Position buffer");
-                            }
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key2) {
-                                current_debug_view = DebugView::Normal;
-                                deferred_renderer.set_debug_view(DebugView::Normal);
-                                println!("🔍 Debug: Normal buffer");
-                            }
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key3) {
-                                current_debug_view = DebugView::Albedo;
-                                deferred_renderer.set_debug_view(DebugView::Albedo);
-                                println!("🔍 Debug: Albedo buffer");
-                            }
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key4) {
-                                current_debug_view = DebugView::Material;
-                                deferred_renderer.set_debug_view(DebugView::Material);
-                                println!("🔍 Debug: Material buffer");
-                            }
-                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key5) {
-                                current_debug_view = DebugView::Depth;
-                                deferred_renderer.set_debug_view(DebugView::Depth);
-                                println!("🔍 Debug: Depth buffer");
-                            }
-
-                            // Asset management controls
-                            if input_manager.is_key_pressed(VirtualKeyCode::R) {
-                                println!("\n🔄 Manual reload requested...");
-                                match asset_manager.reload_model_gpu("assets/models/Duck.glb") {
-                                    Ok((new_indices, _new_model)) => {
-                                        mesh_indices = new_indices;
-                                        // TODO: Re-upload texture
-                                        println!("✅ Duck model reloaded and re-uploaded to GPU");
-                                    }
-                                    Err(e) => eprintln!("❌ Reload failed: {}", e),
-                                }
-                            }
-                            if input_manager.is_key_pressed(VirtualKeyCode::C) {
-                                let stats = asset_manager.cache_stats();
-                                println!("\n📊 Asset Cache Stats: {}", stats);
-                            }
                         }
                         WindowEvent::MouseInput { button, state, .. } => {
                             input_manager.handle_mouse_button(button, state);
@@ -408,12 +281,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             input_manager.handle_mouse_move(position.x as f32, position.y as f32);
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
+                            // Only collect input, don't process game logic here
                             let scroll = match delta {
                                 MouseScrollDelta::LineDelta(_x, y) => y,
                                 MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                             };
-                            camera_distance = (camera_distance - scroll).clamp(2.0, 200.0);
-                            renderer.camera_3d.orbit(0.0, 0.0, camera_distance);
+                            input_manager.handle_mouse_wheel(scroll);
                         }
                         _ => {}
                 }
@@ -585,25 +458,180 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Draw GUI here
                                     egui::Window::new("Engine Stats")
                                         .default_pos([10.0, 10.0])
+                                        .default_size([300.0, 400.0])
+                                        .resizable(true)
+                                        .vscroll(true)
                                         .show(ctx, |ui| {
                                             ui.heading("Rust Game Engine");
                                             ui.separator();
+
                                             ui.label(format!("Entities: {}", world.len()));
                                             ui.label(format!("FPS: {:.1}", game_loop.fps()));
                                             ui.label(format!("Camera Distance: {:.1}", camera_distance));
+
                                             ui.separator();
-                                            ui.label("Controls:");
+                                            ui.heading("Camera Position");
+                                            let pos = renderer.camera_3d.position;
+                                            ui.label(format!("X: {:.2}", pos.x));
+                                            ui.label(format!("Y: {:.2}", pos.y));
+                                            ui.label(format!("Z: {:.2}", pos.z));
+
+                                            ui.separator();
+                                            ui.heading("Controls");
                                             ui.label("  WASD - Move camera");
                                             ui.label("  Space/Shift - Up/Down");
+                                            ui.label("  Arrow Keys - Look around");
+                                            ui.label("  Mouse Wheel - Zoom");
                                             ui.label("  0-5 - Debug views");
+                                            ui.label("  R - Reload assets");
+                                            ui.label("  C - Cache stats");
+                                            ui.label("  Ctrl+S - Save scene");
+                                            ui.label("  ESC - Quit");
                                         });
                                 }) {
-                                    Ok(gui_cb) => {
+                                    Ok(gui_result) => {
+                                        // ESC always works (even if GUI is focused)
+                                        if input_manager.is_key_just_pressed(VirtualKeyCode::Escape) {
+                                            *control_flow = ControlFlow::Exit;
+                                        }
+
+                                        // Only process game keyboard input if GUI didn't consume it
+                                        if !gui_result.wants_keyboard {
+                                            // Ctrl+S to save scene
+                                            if input_manager.is_key_pressed(VirtualKeyCode::LControl) {
+                                                if input_manager.is_key_just_pressed(VirtualKeyCode::S) {
+                                                    use rust_engine::engine::scene::save_scene;
+                                                    match save_scene(&world, "assets/scenes/main.scene.ron", "Main Scene") {
+                                                        Ok(_) => println!("💾 Scene saved!"),
+                                                        Err(e) => eprintln!("❌ Save failed: {}", e),
+                                                    }
+                                                }
+                                            }
+
+                                            // Free camera movement (WASD)
+                                            let forward = (renderer.camera_3d.target - renderer.camera_3d.position).normalize();
+                                            let right = forward.cross(renderer.camera_3d.up).normalize();
+
+                                            if input_manager.is_key_pressed(VirtualKeyCode::W) {
+                                                renderer.camera_3d.position += forward * camera_speed;
+                                                renderer.camera_3d.target += forward * camera_speed;
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::S) {
+                                                renderer.camera_3d.position -= forward * camera_speed;
+                                                renderer.camera_3d.target -= forward * camera_speed;
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::A) {
+                                                renderer.camera_3d.position -= right * camera_speed;
+                                                renderer.camera_3d.target -= right * camera_speed;
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::D) {
+                                                renderer.camera_3d.position += right * camera_speed;
+                                                renderer.camera_3d.target += right * camera_speed;
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::Space) {
+                                                renderer.camera_3d.position += renderer.camera_3d.up * camera_speed;
+                                                renderer.camera_3d.target += renderer.camera_3d.up * camera_speed;
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::LShift) {
+                                                renderer.camera_3d.position -= renderer.camera_3d.up * camera_speed;
+                                                renderer.camera_3d.target -= renderer.camera_3d.up * camera_speed;
+                                            }
+
+                                            // Camera look around (Arrow keys)
+                                            let look_speed = 0.05f32;
+                                            if input_manager.is_key_pressed(VirtualKeyCode::Left) {
+                                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                                                let angle = look_speed;
+                                                let cos = angle.cos();
+                                                let sin = angle.sin();
+                                                let new_x = direction.x * cos + direction.z * sin;
+                                                let new_z = -direction.x * sin + direction.z * cos;
+                                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::Right) {
+                                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                                                let angle = -look_speed;
+                                                let cos = angle.cos();
+                                                let sin = angle.sin();
+                                                let new_x = direction.x * cos + direction.z * sin;
+                                                let new_z = -direction.x * sin + direction.z * cos;
+                                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, direction.y, new_z);
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::Up) {
+                                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                                                let new_y = (direction.y + look_speed).clamp(-1.5, 1.5);
+                                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::Down) {
+                                                let direction = renderer.camera_3d.target - renderer.camera_3d.position;
+                                                let new_y = (direction.y - look_speed).clamp(-1.5, 1.5);
+                                                renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(direction.x, new_y, direction.z);
+                                            }
+
+                                            // Debug view controls (Keys 0-5)
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key0) {
+                                                current_debug_view = DebugView::None;
+                                                deferred_renderer.set_debug_view(DebugView::None);
+                                                println!("🔍 Debug: Normal rendering");
+                                            }
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key1) {
+                                                current_debug_view = DebugView::Position;
+                                                deferred_renderer.set_debug_view(DebugView::Position);
+                                                println!("🔍 Debug: Position buffer");
+                                            }
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key2) {
+                                                current_debug_view = DebugView::Normal;
+                                                deferred_renderer.set_debug_view(DebugView::Normal);
+                                                println!("🔍 Debug: Normal buffer");
+                                            }
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key3) {
+                                                current_debug_view = DebugView::Albedo;
+                                                deferred_renderer.set_debug_view(DebugView::Albedo);
+                                                println!("🔍 Debug: Albedo buffer");
+                                            }
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key4) {
+                                                current_debug_view = DebugView::Material;
+                                                deferred_renderer.set_debug_view(DebugView::Material);
+                                                println!("🔍 Debug: Material buffer");
+                                            }
+                                            if input_manager.is_key_just_pressed(VirtualKeyCode::Key5) {
+                                                current_debug_view = DebugView::Depth;
+                                                deferred_renderer.set_debug_view(DebugView::Depth);
+                                                println!("🔍 Debug: Depth buffer");
+                                            }
+
+                                            // Asset management controls
+                                            if input_manager.is_key_pressed(VirtualKeyCode::R) {
+                                                println!("\n🔄 Manual reload requested...");
+                                                match asset_manager.reload_model_gpu("assets/models/Duck.glb") {
+                                                    Ok((new_indices, _new_model)) => {
+                                                        mesh_indices = new_indices;
+                                                        println!("✅ Duck model reloaded and re-uploaded to GPU");
+                                                    }
+                                                    Err(e) => eprintln!("❌ Reload failed: {}", e),
+                                                }
+                                            }
+                                            if input_manager.is_key_pressed(VirtualKeyCode::C) {
+                                                let stats = asset_manager.cache_stats();
+                                                println!("\n📊 Asset Cache Stats: {}", stats);
+                                            }
+                                        }
+
+                                        // Only process mouse input if GUI didn't consume it
+                                        if !gui_result.wants_pointer {
+                                            // Mouse wheel zoom (only if GUI doesn't want pointer)
+                                            let scroll = input_manager.scroll_delta();
+                                            if scroll != 0.0 {
+                                                camera_distance = (camera_distance - scroll).clamp(2.0, 200.0);
+                                                renderer.camera_3d.orbit(0.0, 0.0, camera_distance);
+                                            }
+                                        }
+
                                         // Submit both command buffers and present
                                         let future = acquire_future
                                             .then_execute(renderer.queue.clone(), deferred_cb)
                                             .unwrap()
-                                            .then_execute(renderer.queue.clone(), gui_cb)
+                                            .then_execute(renderer.queue.clone(), gui_result.command_buffer)
                                             .unwrap()
                                             .then_swapchain_present(
                                                 renderer.queue.clone(),
