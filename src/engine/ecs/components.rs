@@ -1,6 +1,9 @@
 //! Core ECS components
-use serde::{Serialize, Deserialize};
+pub use super::physics::{
+    collision_groups, Collider, CollisionGroups, ColliderShape, RigidBody, RigidBodyType, Velocity,
+};
 use nalgebra_glm as glm;
+use serde::{Deserialize, Serialize};
 
 /// 3D transform component
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -134,8 +137,8 @@ impl Name {
 // ========== Custom Serde for nalgebra-glm types ==========
 
 mod vec3_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use nalgebra_glm as glm;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]
     struct Vec3Surrogate {
@@ -166,8 +169,8 @@ mod vec3_serde {
 }
 
 mod quat_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use nalgebra_glm as glm;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]
     struct QuatSurrogate {
@@ -195,6 +198,11 @@ mod quat_serde {
         D: Deserializer<'de>,
     {
         let surrogate = QuatSurrogate::deserialize(deserializer)?;
-        Ok(glm::quat(surrogate.w, surrogate.x, surrogate.y, surrogate.z))
+        Ok(glm::quat(
+            surrogate.w,
+            surrogate.x,
+            surrogate.y,
+            surrogate.z,
+        ))
     }
 }

@@ -23,7 +23,10 @@ pub mod utils;
 pub mod ecs;
 
 // GUI (egui integration)
-pub mod gui; 
+pub mod gui;
+
+// Physics system (Rapier3D integration)
+pub mod physics; 
 
 // Re-export commonly used types
 pub use core::{VulkanContext, select_physical_device, create_logical_device, LogicalDeviceContext};
@@ -35,6 +38,7 @@ pub use camera::*;  // Camera2D, Camera3D, CameraPushConstants
 pub use input::InputManager;
 pub use assets::{load_texture, load_gltf, load_model, Model, LoadedMesh};
 pub use utils::*;  // GameLoop, coords functions
+pub use physics::PhysicsSystem;
 
 // Commonly used external types (optional, for convenience)
 pub use glam::{Vec2, Vec3, Mat4};

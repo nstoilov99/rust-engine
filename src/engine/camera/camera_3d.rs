@@ -30,7 +30,7 @@ impl Camera3D {
             fov: 45.0_f32.to_radians(),
             aspect_ratio: viewport_width / viewport_height,
             near: 0.1,
-            far: 100.0,
+            far: 1000.0,
         }
     }
 
@@ -43,7 +43,7 @@ impl Camera3D {
             fov: 45.0_f32.to_radians(),
             aspect_ratio: viewport_width / viewport_height,
             near: 0.1,
-            far: 100.0,
+            far: 1000.0,
         }
     }
 

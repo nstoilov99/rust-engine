@@ -1,0 +1,31 @@
+#!/bin/sh
+# Git hook to clean up commit messages
+# This runs automatically before you edit the commit message
+# Removes automated footers and unwanted text from vibe-kanban or other tools
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+
+# Only modify commits that aren't merges, rebases, or amendments
+if [ -z "$COMMIT_SOURCE" ]; then
+    # Remove "Generated with Claude Code" and similar attribution
+    sed -i.bak '/🤖 Generated with.*Claude/d' "$COMMIT_MSG_FILE"
+    sed -i.bak '/Generated with.*Claude Code/d' "$COMMIT_MSG_FILE"
+
+    # Remove Co-Authored-By lines for Claude/AI
+    sed -i.bak '/Co-Authored-By:.*Claude/d' "$COMMIT_MSG_FILE"
+    sed -i.bak '/Co-Authored-By:.*noreply@anthropic/d' "$COMMIT_MSG_FILE"
+
+    # Remove common vibe-kanban automated markers (customize these)
+    sed -i.bak '/\[vibe-kanban\]/d' "$COMMIT_MSG_FILE"
+    sed -i.bak '/^🤖 Auto-commit/d' "$COMMIT_MSG_FILE"
+
+    # Remove trailing empty lines
+    sed -i.bak -e :a -e '/^\s*$/d;N;ba' "$COMMIT_MSG_FILE"
+
+    # Clean up backup file
+    rm -f "${COMMIT_MSG_FILE}.bak"
+fi
+
+# Exit with 0 to allow the commit to proceed
+exit 0
