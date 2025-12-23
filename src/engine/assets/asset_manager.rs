@@ -6,6 +6,8 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use super::texture_manager::TextureManager;
 use super::model_manager::ModelManager;
 use crate::MeshManager;
+use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 
 /// Master asset manager - provides access to all asset types
 pub struct AssetManager {
@@ -61,6 +63,19 @@ impl AssetManager {
 
         // Load and upload new version
         self.load_model_gpu(path)
+    }
+
+    /// Upload procedural geometry to GPU, returns mesh index
+    pub fn upload_procedural_mesh(
+        &self,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut meshes = self.meshes.write();
+        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices)?;
+        let index = meshes.meshes.len();
+        meshes.meshes.push(gpu_mesh);
+        Ok(index)
     }
 
     /// Clear all caches

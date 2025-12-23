@@ -63,9 +63,8 @@ typetag = "0.2"                                    # Polymorphic serialization
 egui = "0.33.2"
 egui-winit = "0.33.2"
 
-# Physics Engine
-rapier3d = "0.18"
-nalgebra = "0.32"
+# Physics Engine (Rapier 3D)
+rapier3d = "0.25"
 
 [profile.dev]
 opt-level = 1

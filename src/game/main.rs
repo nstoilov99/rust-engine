@@ -6,7 +6,6 @@ use rust_engine::assets::{AssetManager, AsyncAssetLoader, HotReloadWatcher, Relo
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::*;
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
-use rust_engine::engine::physics::{PhysicsSystem, PhysicsDebugRenderer};
 use rust_engine::engine::rendering::rendering_3d::{
     DebugView, DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
 };
@@ -14,6 +13,8 @@ use rust_engine::engine::scene::load_scene;
 use rust_engine::Renderer;
 use rust_engine::{AnimationStateMachine, AnimationTransition, TransitionCondition};
 use rust_engine::{Camera2D, InputManager};
+use rust_engine::engine::physics::{PhysicsWorld, RigidBody, Collider, ColliderShape};
+use rust_engine::engine::rendering::rendering_3d::mesh::{create_plane, create_cube};
 use std::sync::mpsc;
 use std::sync::Arc;
 use winit::event::{ElementState, Event, MouseScrollDelta, VirtualKeyCode, WindowEvent};
@@ -70,6 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut mesh_indices, duck_model) = asset_manager.load_model_gpu("assets/models/Duck.glb")?;
     let model = duck_model.get();
 
+    // Create procedural meshes for physics objects
+    println!("📐 Creating procedural geometry...");
+    let (plane_verts, plane_idx) = create_plane(1.0);
+    let plane_mesh_index = asset_manager.upload_procedural_mesh(&plane_verts, &plane_idx)?;
+    let (cube_verts, cube_idx) = create_cube();
+    let cube_mesh_index = asset_manager.upload_procedural_mesh(&cube_verts, &cube_idx)?;
+    println!("✅ Procedural meshes created (plane: {}, cube: {})", plane_mesh_index, cube_mesh_index);
+
     let mut input_manager = InputManager::new();
 
     println!("🌍 Setting up ECS World...");
@@ -115,6 +124,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("✅ Default scene created with {} entities", world.len());
     }
+
+    // ========== Physics Test Objects (always spawn for demo) ==========
+    println!("🧪 Adding physics test objects...");
+
+    // Ground plane (static - never moves) - using procedural plane mesh
+    world.spawn((
+        Transform::new(glm::vec3(0.0, -0.5, 0.0))
+            .with_scale(glm::vec3(10.0, 1.0, 10.0)),  // 10x10 ground
+        MeshRenderer {
+            mesh_index: plane_mesh_index,
+            material_index: 0,
+        },
+        RigidBody::fixed(),
+        Collider::cuboid(5.0, 0.01, 5.0),
+        Name::new("Ground"),
+    ));
+
+    // Falling cube 1 (dynamic - affected by gravity) - using procedural cube mesh
+    world.spawn((
+        Transform::new(glm::vec3(0.0, 3.0, 0.0))
+            .with_scale(glm::vec3(0.5, 0.5, 0.5)),  // 0.5 unit cube
+        MeshRenderer {
+            mesh_index: cube_mesh_index,
+            material_index: 0,
+        },
+        RigidBody::dynamic().with_mass(1.0),
+        Collider::cuboid(0.25, 0.25, 0.25).with_restitution(0.7),
+        Name::new("FallingCube1"),
+    ));
+
+    // Falling cube 2 (offset position)
+    world.spawn((
+        Transform::new(glm::vec3(1.0, 5.0, 0.5))
+            .with_scale(glm::vec3(0.4, 0.4, 0.4)),  // 0.4 unit cube
+        MeshRenderer {
+            mesh_index: cube_mesh_index,
+            material_index: 0,
+        },
+        RigidBody::dynamic().with_mass(0.5),
+        Collider::cuboid(0.2, 0.2, 0.2).with_restitution(0.5),
+        Name::new("FallingCube2"),
+    ));
+
+    // Falling cube 3 (using cube for sphere visual since we don't have sphere mesh)
+    world.spawn((
+        Transform::new(glm::vec3(-1.0, 7.0, 0.0))
+            .with_scale(glm::vec3(0.6, 0.6, 0.6)),  // 0.6 unit cube
+        MeshRenderer {
+            mesh_index: cube_mesh_index,
+            material_index: 0,
+        },
+        RigidBody::dynamic().with_mass(2.0),
+        Collider::ball(0.3).with_restitution(0.9), // Very bouncy ball collider!
+        Name::new("BouncyBox"),
+    ));
+
+    println!("✅ Physics test objects added ({} total entities)", world.len());
+
+    // ========== Physics Setup ==========
+    println!("🔧 Setting up Physics...");
+    let mut physics_world = PhysicsWorld::new();
+
+    // Register any entities that have physics components
+    for (_, (transform, rigidbody, collider)) in
+        world.query::<(&Transform, &mut RigidBody, &mut Collider)>().iter()
+    {
+        physics_world.register_entity(transform, rigidbody, collider);
+    }
+    println!("✅ Physics initialized");
 
     // Extract Duck's embedded texture or use white fallback
     use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
@@ -254,14 +332,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Ctrl+S: Save scene");
     println!("  ESC: Quit\n");
     println!("💡 TIP: Edit Duck.glb in Blender and save - it will reload automatically!\n");
-    // Create physics system
-    let mut physics_system = PhysicsSystem::new();
-
-    // Physics debug renderer
-    let mut physics_debug = PhysicsDebugRenderer::default();
-
-    // Create test scene with physics
-    create_physics_test_scene(&mut world, &mut physics_system);
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -324,13 +394,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Update delta time
-                let _delta_time = game_loop.tick();
+                let delta_time = game_loop.tick();
 
-                // Step physics simulation
-                physics_system.step(_delta_time, &mut world);
-                // Animate rotation (1 radian per second)
-                let _rotation_speed = 1.0; // radians/second
-                //rotation += rotation_speed * delta_time;
+                // Step physics simulation (fixed timestep internally)
+                physics_world.step(delta_time, &mut world);
 
                 window.request_redraw();
             }
@@ -499,12 +566,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui.label("  C - Cache stats");
                                             ui.label("  Ctrl+S - Save scene");
                                             ui.label("  ESC - Quit");
-                                        });
-
-                                        egui::Window::new("Physics Debug").show(ctx, |ui| {
-                                            ui.checkbox(&mut physics_debug.enabled, "Enable Physics Debug");
-                                            ui.checkbox(&mut physics_debug.draw_colliders, "Draw Colliders");
-                                            ui.checkbox(&mut physics_debug.draw_rigid_bodies, "Draw Rigid Bodies");
                                         });
                                 }) {
                                     Ok(gui_result) => {
@@ -762,68 +823,3 @@ fn create_character_animations() -> AnimationStateMachine {
     fsm
 }
 
-/// Create test scene with physics objects
-fn create_physics_test_scene(world: &mut World, physics: &mut PhysicsSystem) {
-    // Ground plane (static)
-    let ground = world.spawn((
-        Name("Ground".into()),
-        Transform {
-            position: glm::vec3(0.0, -1.0, 0.0),
-            scale: glm::vec3(5.0, 0.1, 5.0),
-            ..Default::default()
-        },
-        MeshRenderer {
-            mesh_index: 0, // Cube mesh
-            material_index: 0,
-        },
-        RigidBody {
-            body_type: RigidBodyType::Static,
-            ..Default::default()
-        },
-        Collider {
-            shape: ColliderShape::Cuboid {
-                half_extents: Vec3::new(2.5, 0.05, 2.5),
-            },
-            ..Default::default()
-        },
-    ));
-
-    // Create rigidbody in physics world
-    if let Ok(mut query) = world.query_one::<(&Transform, &mut RigidBody, &Collider)>(ground) {
-        if let Some((transform, rigidbody, collider)) = query.get() {
-            physics.create_rigidbody(transform, rigidbody, collider);
-        }
-    }
-
-    // Falling cube (dynamic)
-    let cube = world.spawn((
-        Name("Falling Cube".into()),
-        Transform {
-            position: glm::vec3(0.0, 2.0, 0.0),
-            scale: glm::vec3(0.01, 0.01, 0.01),
-            ..Default::default()
-        },
-        MeshRenderer {
-            mesh_index: 0,
-            material_index: 0,
-        },
-        RigidBody {
-            body_type: RigidBodyType::Dynamic,
-            mass: 1.0,
-            ..Default::default()
-        },
-        Collider {
-            shape: ColliderShape::Cuboid {
-                half_extents: Vec3::new(0.025, 0.025, 0.025),
-            },
-            ..Default::default()
-        },
-        Velocity::default(),
-    ));
-
-    if let Ok(mut query) = world.query_one::<(&Transform, &mut RigidBody, &Collider)>(cube) {
-        if let Some((transform, rigidbody, collider)) = query.get() {
-            physics.create_rigidbody(transform, rigidbody, collider);
-        }
-    }
-}

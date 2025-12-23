@@ -1,7 +1,4 @@
 //! Core ECS components
-pub use super::physics::{
-    collision_groups, Collider, CollisionGroups, ColliderShape, RigidBody, RigidBodyType, Velocity,
-};
 use nalgebra_glm as glm;
 use serde::{Deserialize, Serialize};
 
