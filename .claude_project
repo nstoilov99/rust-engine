@@ -1,0 +1,39 @@
+# Rust Engine Project Conventions
+
+## Coordinate System (CRITICAL - ALWAYS FOLLOW)
+
+**This project uses Z-up, X-forward coordinate system:**
+- **X-axis = FORWARD** (NOT Y!)
+- **Y-axis = RIGHT**
+- **Z-axis = UP** (NOT Y!)
+
+### Code Implications:
+- Transform positions: `Vec3(x, y, z)` where `z` is height/elevation
+- Camera forward direction: positive X-axis
+- Gravity direction: negative Z-axis (e.g., `Vec3::new(0.0, 0.0, -9.81)`)
+- "Up" vector: `Vec3::new(0.0, 0.0, 1.0)` (NOT Vec3::Y)
+
+### Conversions:
+- Physics engine (Rapier3D) uses Y-up internally
+- We convert Z-up (gameplay) → Y-up (render) using `convert_position_zup_to_yup()`
+- Always work in Z-up in gameplay code, convert only at render boundaries
+
+### Common Mistakes to Avoid:
+- ❌ Using `Vec3::Y` for up direction
+- ❌ Assuming Y is the vertical axis
+- ❌ Setting gravity as `Vec3::new(0.0, -9.81, 0.0)` (this is Y-up!)
+- ✅ Always use Z for vertical/height
+- ✅ Always use X for forward direction
+
+## Architecture
+
+- ECS: Using `hecs` entity component system
+- Physics: Rapier3D (internally Y-up, converted at boundaries)
+- Renderer: Vulkano 0.34 with deferred rendering
+- Coordinate conversion utilities in `src/engine/coords.rs`
+
+## Important Files
+
+- Coordinate system conversions: `src/engine/coords.rs`
+- Transform component: `src/engine/ecs/components.rs`
+- Camera setup: `src/engine/camera/camera_3d.rs`
