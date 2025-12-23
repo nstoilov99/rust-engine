@@ -1,11 +1,19 @@
 //! Physics world management using Rapier 3D
+//!
+//! ECS uses Z-up coordinates (Z=up, X=forward, Y=right).
+//! Rapier uses Y-up internally. Conversion happens via physics_adapter.
 
 use super::components::{
     Collider as EcsCollider, ColliderShape, RigidBody as EcsRigidBody,
     RigidBodyType as EcsRigidBodyType, Velocity as EcsVelocity,
 };
+use crate::engine::adapters::physics_adapter::{
+    cuboid_half_extents_to_physics, position_from_physics, position_to_physics,
+    velocity_from_physics,
+};
 use crate::engine::ecs::components::Transform;
 use hecs::World;
+use nalgebra_glm as glm;
 use rapier3d::na::{Isometry3, Point3, Quaternion, UnitQuaternion, Vector3};
 use rapier3d::prelude::{
     CCDSolver, ColliderBuilder, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
@@ -52,7 +60,15 @@ pub struct PhysicsWorld {
 
 impl PhysicsWorld {
     /// Create a new physics world with default settings
+    ///
+    /// ECS uses Z-up coordinates. Rapier uses Y-up internally.
+    /// Gravity in Z-up is (0, 0, -9.81) -> converts to Y-up (0, -9.81, 0).
     pub fn new() -> Self {
+        // Gravity in Z-up space: down is -Z
+        // Convert to Y-up for Rapier via physics_adapter
+        let gravity_zup = glm::vec3(0.0, 0.0, -9.81);
+        let gravity_yup = position_to_physics(&gravity_zup);
+
         Self {
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
@@ -65,15 +81,15 @@ impl PhysicsWorld {
             multibody_joint_set: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             query_pipeline: QueryPipeline::new(),
-            gravity: Vector3::new(0.0, -9.81, 0.0),
+            gravity: gravity_yup,
             accumulator: 0.0,
             fixed_dt: 1.0 / 60.0,
         }
     }
 
-    /// Set gravity vector
-    pub fn set_gravity(&mut self, gravity: Vector3<f32>) {
-        self.gravity = gravity;
+    /// Set gravity vector (in Y-up coordinates)
+    pub fn set_gravity(&mut self, gravity: nalgebra_glm::Vec3) {
+        self.gravity = Vector3::new(gravity.x, gravity.y, gravity.z);
     }
 
     /// Set fixed timestep for physics simulation (default: 1/60)
@@ -120,6 +136,8 @@ impl PhysicsWorld {
     ///
     /// Creates Rapier rigidbody and collider from ECS components.
     /// Does nothing if already registered.
+    ///
+    /// Uses physics_adapter for Z-up → Y-up coordinate conversion.
     pub fn register_entity(
         &mut self,
         transform: &Transform,
@@ -138,15 +156,10 @@ impl PhysicsWorld {
             EcsRigidBodyType::Static => RigidBodyBuilder::fixed(),
         };
 
-        // Convert transform position to nalgebra Vector3
-        let translation = Vector3::new(
-            transform.position.x,
-            transform.position.y,
-            transform.position.z,
-        );
+        // Convert Z-up ECS position to Y-up for Rapier via adapter
+        let translation = position_to_physics(&transform.position);
 
-        // Convert glm::Quat to UnitQuaternion
-        // Note: nalgebra_glm::Quat stores as [x, y, z, w] in coords
+        // Use rotation directly (don't convert - causes sideways view)
         let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
             transform.rotation.coords.w,
             transform.rotation.coords.x,
@@ -165,10 +178,11 @@ impl PhysicsWorld {
         let rb_handle = self.rigid_body_set.insert(rb);
         rigidbody.handle = Some(rb_handle);
 
-        // Build collider shape
+        // Build collider shape using adapter for dimension conversion
         let shape = match &collider.shape {
             ColliderShape::Cuboid { half_extents } => {
-                SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                let (hx, hy, hz) = cuboid_half_extents_to_physics(half_extents);
+                SharedShape::cuboid(hx, hy, hz)
             }
             ColliderShape::Ball { radius } => SharedShape::ball(*radius),
             ColliderShape::Capsule {
@@ -238,6 +252,8 @@ impl PhysicsWorld {
     }
 
     /// Sync ECS transforms to physics world (for kinematic bodies)
+    ///
+    /// Uses physics_adapter for Z-up → Y-up conversion.
     fn sync_ecs_to_physics(&mut self, ecs_world: &World) {
         for (_, (transform, rigidbody)) in
             ecs_world.query::<(&Transform, &EcsRigidBody)>().iter()
@@ -249,17 +265,16 @@ impl PhysicsWorld {
 
             if let Some(handle) = rigidbody.handle {
                 if let Some(rb) = self.rigid_body_set.get_mut(handle) {
-                    let translation = Vector3::new(
-                        transform.position.x,
-                        transform.position.y,
-                        transform.position.z,
-                    );
+                    // Convert via physics_adapter
+                    let translation = position_to_physics(&transform.position);
+
                     let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
                         transform.rotation.coords.w,
                         transform.rotation.coords.x,
                         transform.rotation.coords.y,
                         transform.rotation.coords.z,
                     ));
+
                     rb.set_next_kinematic_position(Isometry3::from_parts(
                         translation.into(),
                         rotation,
@@ -270,6 +285,8 @@ impl PhysicsWorld {
     }
 
     /// Sync physics world to ECS transforms (for dynamic bodies)
+    ///
+    /// Uses physics_adapter for Y-up → Z-up conversion.
     fn sync_physics_to_ecs(&self, ecs_world: &mut World) {
         for (_, (transform, rigidbody, velocity)) in ecs_world
             .query::<(&mut Transform, &EcsRigidBody, Option<&mut EcsVelocity>)>()
@@ -282,23 +299,18 @@ impl PhysicsWorld {
 
             if let Some(handle) = rigidbody.handle {
                 if let Some(rb) = self.rigid_body_set.get(handle) {
-                    // Update position
-                    let pos = rb.translation();
-                    transform.position.x = pos.x;
-                    transform.position.y = pos.y;
-                    transform.position.z = pos.z;
+                    // Convert via physics_adapter
+                    let pos_zup = position_from_physics(rb.translation());
+                    transform.position = pos_zup;
 
-                    // Update rotation
+                    // Copy rotation directly (don't convert)
                     let rot = rb.rotation();
-                    transform.rotation =
-                        nalgebra_glm::quat(rot.w, rot.coords.x, rot.coords.y, rot.coords.z);
+                    transform.rotation = glm::quat(rot.w, rot.coords.x, rot.coords.y, rot.coords.z);
 
-                    // Update velocity if component exists
+                    // Update velocity if component exists (convert via adapter)
                     if let Some(vel) = velocity {
-                        let linvel = rb.linvel();
-                        let angvel = rb.angvel();
-                        vel.linear = nalgebra_glm::vec3(linvel.x, linvel.y, linvel.z);
-                        vel.angular = nalgebra_glm::vec3(angvel.x, angvel.y, angvel.z);
+                        vel.linear = velocity_from_physics(rb.linvel());
+                        vel.angular = velocity_from_physics(rb.angvel());
                     }
                 }
             }

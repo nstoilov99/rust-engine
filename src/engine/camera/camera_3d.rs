@@ -2,12 +2,13 @@ use glam::{Vec3, Mat4};
 
 /// 3D perspective camera
 ///
-/// IMPORTANT: position, target, and up are stored in Y-up render space.
-/// Use set_position_zup() and set_target_zup() to work in Z-up gameplay space.
+/// Uses Y-up coordinate system directly (render space).
+/// No conversion needed - camera works in Vulkan-native coordinates.
+/// GUI displays Z-up equivalent for user convenience.
 pub struct Camera3D {
     pub position: Vec3,       // Camera position (Y-up render space)
     pub target: Vec3,         // What the camera looks at (Y-up render space)
-    pub up: Vec3,             // Up direction (Vec3::Y for Y-up render space)
+    pub up: Vec3,             // Up direction (Vec3::Y in Y-up space)
     pub fov: f32,             // Field of view in radians
     pub aspect_ratio: f32,    // Width / height
     pub near: f32,            // Near clip plane
@@ -16,30 +17,14 @@ pub struct Camera3D {
 
 impl Camera3D {
     /// Creates a new 3D perspective camera
-    /// Uses Z-up coordinates: X=forward, Y=right, Z=up
+    ///
+    /// Y-up: position is 5 units up (+Y) and 10 units back (+Z)
     pub fn new(viewport_width: f32, viewport_height: f32) -> Self {
-        use crate::engine::coords::convert_position_zup_to_yup;
-
-        // Position in Z-up space: back 10 units, elevated 5 units
-        let position_zup = Vec3::new(-10.0, 0.0, 5.0);
-
         Self {
-            position: convert_position_zup_to_yup(position_zup),
+            // Y-up: elevated 5 units in +Y, back 10 units in +Z
+            position: Vec3::new(0.0, 5.0, 10.0),
             target: Vec3::ZERO,
-            up: Vec3::Y,
-            fov: 45.0_f32.to_radians(),
-            aspect_ratio: viewport_width / viewport_height,
-            near: 0.1,
-            far: 1000.0,
-        }
-    }
-
-    /// Alternative constructor for pure Y-up coordinates (rarely needed)
-    pub fn new_yup(viewport_width: f32, viewport_height: f32) -> Self {
-        Self {
-            position: Vec3::new(0.0, 2.0, 5.0),
-            target: Vec3::ZERO,
-            up: Vec3::Y,
+            up: Vec3::Y,  // Y is up in render space
             fov: 45.0_f32.to_radians(),
             aspect_ratio: viewport_width / viewport_height,
             near: 0.1,
@@ -53,13 +38,21 @@ impl Camera3D {
     }
 
     /// Creates view matrix (world → camera space)
+    ///
+    /// No conversion needed - camera already uses Y-up coordinates.
     pub fn view_matrix(&self) -> Mat4 {
         Mat4::look_at_rh(self.position, self.target, self.up)
     }
 
     /// Creates perspective projection matrix (camera → clip space)
+    ///
+    /// Includes Vulkan Y-flip: Vulkan has Y-down in NDC space (Y=0 at top),
+    /// but glam's perspective_rh uses OpenGL conventions (Y=0 at bottom).
     pub fn projection_matrix(&self) -> Mat4 {
-        Mat4::perspective_rh(self.fov, self.aspect_ratio, self.near, self.far)
+        let mut proj = Mat4::perspective_rh(self.fov, self.aspect_ratio, self.near, self.far);
+        // Vulkan Y-flip: NDC Y is inverted compared to OpenGL
+        proj.y_axis.y *= -1.0;
+        proj
     }
 
     /// Combined view-projection matrix (optimization)

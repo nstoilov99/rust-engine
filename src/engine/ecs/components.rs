@@ -33,11 +33,11 @@ impl Transform {
     }
 
     /// Calculate the model matrix for this transform
+    ///
+    /// ECS uses Z-up coordinates. Vulkan uses Y-up for rendering.
+    /// Delegates to render_adapter for centralized coordinate conversion.
     pub fn model_matrix(&self) -> glm::Mat4 {
-        let translation = glm::translation(&self.position);
-        let rotation = glm::quat_to_mat4(&self.rotation);
-        let scale = glm::scaling(&self.scale);
-        translation * rotation * scale
+        crate::engine::adapters::render_adapter::transform_to_model_matrix(self)
     }
 }
 

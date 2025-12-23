@@ -26,8 +26,8 @@
                 (
                     type: "Transform",
                     position: (0.0, 0.0, 0.0),
-                    rotation: (1.0, 0.0, 0.0, -0.00000004371139),
-                    scale: (0.1, 0.1, 0.1),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (0.01, 0.01, 0.01),
                 ),
                 (
                     type: "MeshRenderer",
@@ -44,38 +44,6 @@
                     direction: (0.0, -1.0, -1.0),
                     color: (1.0, 1.0, 1.0),
                     intensity: 1.0,
-                ),
-            ],
-        ),
-        (
-            name: "Ground",
-            components: [
-                (
-                    type: "Transform",
-                    position: (0.0, -1.0, 0.0),
-                    rotation: (1.0, 0.0, 0.0, 0.0),
-                    scale: (5.0, 0.1, 5.0),
-                ),
-                (
-                    type: "MeshRenderer",
-                    mesh_index: 0,
-                    material_index: 0,
-                ),
-            ],
-        ),
-        (
-            name: "Falling Cube",
-            components: [
-                (
-                    type: "Transform",
-                    position: (-0.23953155, -0.92630553, -0.57866573),
-                    rotation: (0.4729415, -0.47235438, -0.5255038, -0.52635866),
-                    scale: (0.01, 0.01, 0.01),
-                ),
-                (
-                    type: "MeshRenderer",
-                    mesh_index: 0,
-                    material_index: 0,
                 ),
             ],
         ),

@@ -86,6 +86,13 @@ pub fn convert_rotation_zup_to_yup(rot: Quat) -> Quat {
     conversion * rot
 }
 
+/// Converts Y-up rotation to Z-up rotation
+pub fn convert_rotation_yup_to_zup(rot: Quat) -> Quat {
+    // Inverse rotation conversion: -90° rotation around X axis
+    let conversion = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    conversion * rot
+}
+
 /// Converts Z-up transform to Y-up transform matrix
 pub fn convert_transform_zup_to_yup(position: Vec3, rotation: Quat, scale: Vec3) -> Mat4 {
     let render_pos = convert_position_zup_to_yup(position);

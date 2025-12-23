@@ -183,15 +183,20 @@ impl EguiRenderer {
     fn upload_texture(&mut self, texture_id: egui::TextureId, image_delta: &egui::epaint::ImageDelta) -> Result<(), Box<dyn std::error::Error>> {
         let delta_size = image_delta.image.size();
 
-        // In egui 0.33, ImageData only has Color variant (fonts are also Color32)
-        let color_image = match &image_delta.image {
-            egui::ImageData::Color(img) => img,
+        // Handle both Color and Font image types
+        let pixels: Vec<u8> = match &image_delta.image {
+            egui::ImageData::Color(img) => {
+                img.pixels.iter()
+                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+                    .collect()
+            }
+            egui::ImageData::Font(font_img) => {
+                // Font images are single-channel coverage values, expand to RGBA
+                font_img.srgba_pixels(None)
+                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+                    .collect()
+            }
         };
-
-        // Convert Color32 to bytes
-        let pixels: Vec<u8> = color_image.pixels.iter()
-            .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
-            .collect();
 
         // Check if this is a partial update or a full texture creation
         if let Some(pos) = image_delta.pos {

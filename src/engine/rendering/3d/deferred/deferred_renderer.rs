@@ -1,8 +1,13 @@
 //! Deferred rendering orchestration
+//!
+//! Performance optimizations:
+//! - Cached G-Buffer descriptor set (created once on init/resize)
+//! - Cached swapchain framebuffers (one per swapchain image)
 
 use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
 use super::lighting_pass::LightingPass;
+use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::{
@@ -11,6 +16,7 @@ use vulkano::command_buffer::{
     SubpassEndInfo,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::PersistentDescriptorSet;
 use vulkano::device::{Device, Queue};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::PipelineBindPoint;
@@ -28,6 +34,9 @@ pub struct DeferredRenderer {
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     debug_view: DebugView,
+    // Cached resources for performance
+    gbuffer_descriptor_set: Arc<PersistentDescriptorSet>,
+    framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,9 +63,7 @@ impl DeferredRenderer {
         let geometry_pass = GeometryPass::new(device.clone(), gbuffer.render_pass.clone())?;
 
         // Create a separate render pass for lighting (outputs to swapchain, no depth)
-        use vulkano::render_pass::{RenderPass, AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp};
         use vulkano::format::Format;
-        use vulkano::image::ImageLayout;
 
         let lighting_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -76,6 +83,15 @@ impl DeferredRenderer {
 
         let lighting_pass = LightingPass::new(device.clone(), lighting_render_pass)?;
 
+        // Cache G-Buffer descriptor set (created once, reused every frame)
+        let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
+            descriptor_set_allocator.as_ref(),
+            gbuffer.position.clone(),
+            gbuffer.normal.clone(),
+            gbuffer.albedo.clone(),
+            gbuffer.material.clone(),
+        )?;
+
         Ok(Self {
             gbuffer,
             geometry_pass,
@@ -86,7 +102,40 @@ impl DeferredRenderer {
             command_buffer_allocator,
             descriptor_set_allocator,
             debug_view: DebugView::None,
+            gbuffer_descriptor_set,
+            framebuffer_cache: HashMap::new(),
         })
+    }
+
+    /// Get or create a cached framebuffer for the given swapchain image
+    fn get_or_create_framebuffer(
+        &mut self,
+        target_image: Arc<Image>,
+    ) -> Result<Arc<Framebuffer>, Box<dyn std::error::Error>> {
+        // Use image pointer as cache key
+        let cache_key = Arc::as_ptr(&target_image) as usize;
+
+        if let Some(fb) = self.framebuffer_cache.get(&cache_key) {
+            return Ok(fb.clone());
+        }
+
+        // Create new framebuffer and cache it
+        let target_view = ImageView::new_default(target_image)?;
+        let framebuffer = Framebuffer::new(
+            self.lighting_pass.render_pass(),
+            FramebufferCreateInfo {
+                attachments: vec![target_view],
+                ..Default::default()
+            },
+        )?;
+
+        self.framebuffer_cache.insert(cache_key, framebuffer.clone());
+        Ok(framebuffer)
+    }
+
+    /// Clear the framebuffer cache (call on swapchain recreation)
+    pub fn clear_framebuffer_cache(&mut self) {
+        self.framebuffer_cache.clear();
     }
 
     /// Render scene using deferred pipeline
@@ -96,15 +145,8 @@ impl DeferredRenderer {
         light_data: &LightUniformData,        // Your light data structure
         target_image: Arc<Image>, // Swapchain image
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
-        // Create framebuffer for lighting pass (just color, no depth)
-        let target_view = ImageView::new_default(target_image)?;
-        let target_framebuffer = Framebuffer::new(
-            self.lighting_pass.render_pass(),
-            FramebufferCreateInfo {
-                attachments: vec![target_view],
-                ..Default::default()
-            },
-        )?;
+        // Get cached framebuffer for this swapchain image
+        let target_framebuffer = self.get_or_create_framebuffer(target_image)?;
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.as_ref(),
             self.queue.queue_family_index(),
@@ -163,14 +205,8 @@ impl DeferredRenderer {
 
         // ========== PASS 2: Lighting Pass (Read G-Buffer, Output to Screen) ==========
 
-        // Create descriptor set for G-Buffer textures
-        let gbuffer_descriptor_set = self.lighting_pass.create_descriptor_set(
-            self.descriptor_set_allocator.as_ref(),
-            self.gbuffer.position.clone(),
-            self.gbuffer.normal.clone(),
-            self.gbuffer.albedo.clone(),
-            self.gbuffer.material.clone(),
-        )?;
+        // Use cached G-Buffer descriptor set (no per-frame allocation)
+        let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
 
         // Get target framebuffer dimensions for lighting pass viewport
         let target_extent = target_framebuffer.extent();
