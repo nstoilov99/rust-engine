@@ -114,6 +114,10 @@ impl Prefab {
                 ComponentData::Player => {
                     builder.add(Player);
                 }
+                ComponentData::Parent { .. } => {
+                    // Parent relationships are not applicable for prefabs
+                    // They are handled separately during scene loading
+                }
             }
         }
 

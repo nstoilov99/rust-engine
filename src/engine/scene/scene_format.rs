@@ -46,6 +46,9 @@ pub enum ComponentData {
         radius: f32,
     },
     Player,
+    Parent {
+        parent_name: String, // Reference parent entity by name
+    },
 }
 
 impl Default for SceneFile {

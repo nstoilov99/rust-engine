@@ -3,6 +3,22 @@
     name: "Main Scene",
     entities: [
         (
+            name: "FallingCube2",
+            components: [
+                (
+                    type: "Transform",
+                    position: (1.5021949, 0.5156814, -0.2912761),
+                    rotation: (0.63926286, 0.30222863, 0.30223024, 0.63926345),
+                    scale: (0.4, 0.4, 0.4),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
             name: "Main Camera",
             components: [
                 (
@@ -17,6 +33,17 @@
                     near: 0.1,
                     far: 1000.0,
                     active: true,
+                ),
+            ],
+        ),
+        (
+            name: "Sun",
+            components: [
+                (
+                    type: "DirectionalLight",
+                    direction: (0.0, -1.0, -1.0),
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 1.0,
                 ),
             ],
         ),
@@ -37,13 +64,50 @@
             ],
         ),
         (
-            name: "Sun",
+            name: "Ground",
             components: [
                 (
-                    type: "DirectionalLight",
-                    direction: (0.0, -1.0, -1.0),
-                    color: (1.0, 1.0, 1.0),
-                    intensity: 1.0,
+                    type: "Transform",
+                    position: (0.0, 0.0, -0.5),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (10.0, 1.0, 10.0),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 1,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
+            name: "BouncyBox",
+            components: [
+                (
+                    type: "Transform",
+                    position: (1.0984617, 1.1080307, -0.1913319),
+                    rotation: (-0.3362995, -0.29328078, -0.6679992, -0.59553844),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
+            name: "FallingCube1",
+            components: [
+                (
+                    type: "Transform",
+                    position: (-1.3045073, -0.15293574, -0.24127619),
+                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
+                    scale: (0.5, 0.5, 0.5),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
                 ),
             ],
         ),

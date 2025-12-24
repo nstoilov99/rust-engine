@@ -6,6 +6,7 @@
 use super::{game_setup, gui_panel, input_handler, render_loop};
 use hecs::World;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
+use rust_engine::engine::editor::{HierarchyPanel, Selection};
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
@@ -38,6 +39,9 @@ pub struct App {
     pub descriptor_set: Arc<PersistentDescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub show_profiler: bool,
+    // Editor state
+    pub hierarchy_panel: HierarchyPanel,
+    pub selection: Selection,
 }
 
 impl App {
@@ -71,10 +75,20 @@ impl App {
         let mut world = World::new();
 
         // Load or create scene
-        game_setup::load_or_create_scene(&mut world, mesh_indices[0])?;
+        let (scene_loaded, root_entities) =
+            game_setup::load_or_create_scene(&mut world, mesh_indices[0])?;
 
-        // Spawn physics test objects
-        game_setup::spawn_physics_test_objects(&mut world, plane_mesh_index, cube_mesh_index);
+        // Only spawn physics test objects for new scenes (not loaded ones)
+        // This prevents duplicates when the scene file already contains these entities
+        if !scene_loaded {
+            game_setup::spawn_physics_test_objects(&mut world, plane_mesh_index, cube_mesh_index);
+        }
+
+        // Initialize hierarchy panel with root entity order from loaded scene
+        let mut hierarchy_panel = HierarchyPanel::new();
+        if !root_entities.is_empty() {
+            hierarchy_panel.set_root_order(root_entities);
+        }
 
         // Setup physics
         let mut physics_world = PhysicsWorld::new();
@@ -117,6 +131,8 @@ impl App {
             descriptor_set,
             previous_frame_end,
             show_profiler: false,
+            hierarchy_panel,
+            selection: Selection::new(),
         })
     }
 
@@ -201,6 +217,21 @@ impl App {
                     if keyboard_input.virtual_keycode == Some(VirtualKeyCode::F12) {
                         self.show_profiler = !self.show_profiler;
                         println!("Profiler: {}", if self.show_profiler { "ON" } else { "OFF" });
+                    }
+
+                    // Handle Ctrl+S immediately for scene save
+                    if keyboard_input.virtual_keycode == Some(VirtualKeyCode::S)
+                        && self.input_manager.is_key_pressed(VirtualKeyCode::LControl)
+                    {
+                        match save_scene(
+                            &self.world,
+                            "assets/scenes/main.scene.ron",
+                            "Main Scene",
+                            self.hierarchy_panel.root_order(),
+                        ) {
+                            Ok(_) => println!("Scene saved!"),
+                            Err(e) => eprintln!("Save failed: {}", e),
+                        }
                     }
                 }
                 self.input_manager
@@ -287,10 +318,16 @@ impl App {
         let camera_distance = self.camera_distance;
         let renderer = &self.renderer;
         let show_profiler = &mut self.show_profiler;
+        let hierarchy_panel = &mut self.hierarchy_panel;
+        let world = &mut self.world;
+        let selection = &mut self.selection;
 
         let gui_result = match self.gui.render(window, target_image, |ctx| {
             gui_panel::create_stats_window(ctx, entity_count, game_loop, camera_distance, renderer);
             gui_panel::render_profiler_window(ctx, show_profiler, game_loop);
+
+            // Hierarchy panel
+            hierarchy_panel.show(ctx, world, selection);
         }) {
             Ok(result) => result,
             Err(e) => {
@@ -338,20 +375,11 @@ impl App {
             std::process::exit(0);
         }
 
-        // F12 is handled in handle_window_event() to avoid timing issues
+        // F12 and Ctrl+S are handled in handle_window_event() to avoid timing issues
+        // (begin_frame clears keys_just_pressed before render is called)
 
         // Only process game keyboard input if GUI didn't consume it
         if !gui_result.wants_keyboard {
-            // Ctrl+S to save scene
-            if self.input_manager.is_key_pressed(VirtualKeyCode::LControl)
-                && self.input_manager.is_key_just_pressed(VirtualKeyCode::S)
-            {
-                match save_scene(&self.world, "assets/scenes/main.scene.ron", "Main Scene") {
-                    Ok(_) => println!("Scene saved!"),
-                    Err(e) => eprintln!("Save failed: {}", e),
-                }
-            }
-
             // Camera movement
             input_handler::handle_camera_movement(&mut self.renderer, &self.input_manager, 0.1);
 

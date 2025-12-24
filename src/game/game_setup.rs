@@ -9,6 +9,7 @@ use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLigh
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
 use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
 use rust_engine::engine::rendering::rendering_3d::mesh::{create_cube, create_plane};
+use hecs::Entity;
 use rust_engine::engine::scene::load_scene;
 use rust_engine::Renderer;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -122,18 +123,22 @@ pub fn create_default_scene(world: &mut World, mesh_index: usize) {
 }
 
 /// Load scene from file or create default
+/// Returns (scene_was_loaded, root_entities_in_order)
+/// - scene_was_loaded: true if loaded from file, false if default was created
+/// - root_entities_in_order: order of root entities (for HierarchyPanel)
 pub fn load_or_create_scene(
     world: &mut World,
     mesh_index: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(bool, Vec<Entity>), Box<dyn std::error::Error>> {
     if std::path::Path::new("assets/scenes/main.scene.ron").exists() {
         println!("Loading scene from file...");
-        load_scene(world, "assets/scenes/main.scene.ron")?;
+        let (_scene_name, root_entities) = load_scene(world, "assets/scenes/main.scene.ron")?;
+        Ok((true, root_entities)) // Loaded existing scene with root order
     } else {
         println!("No scene file found, creating default scene...");
         create_default_scene(world, mesh_index);
+        Ok((false, Vec::new())) // Created new scene, no specific order
     }
-    Ok(())
 }
 
 /// Configuration for spawning a physics test object
