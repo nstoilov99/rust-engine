@@ -37,17 +37,6 @@
             ],
         ),
         (
-            name: "Sun",
-            components: [
-                (
-                    type: "DirectionalLight",
-                    direction: (0.0, -1.0, -1.0),
-                    color: (1.0, 1.0, 1.0),
-                    intensity: 1.0,
-                ),
-            ],
-        ),
-        (
             name: "Duck",
             components: [
                 (
@@ -61,21 +50,44 @@
                     mesh_index: 0,
                     material_index: 0,
                 ),
+                (
+                    type: "Parent",
+                    parent_name: "Main Camera",
+                ),
             ],
         ),
         (
-            name: "Ground",
+            name: "Sun",
+            components: [
+                (
+                    type: "DirectionalLight",
+                    direction: (0.0, -1.0, -1.0),
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 1.0,
+                ),
+                (
+                    type: "Parent",
+                    parent_name: "Duck",
+                ),
+            ],
+        ),
+        (
+            name: "FallingCube1",
             components: [
                 (
                     type: "Transform",
-                    position: (0.0, 0.0, -0.5),
-                    rotation: (0.0, 0.0, 0.0, 1.0),
-                    scale: (10.0, 1.0, 10.0),
+                    position: (-1.3045073, -0.15293574, -0.24127619),
+                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
+                    scale: (0.5, 0.5, 0.5),
                 ),
                 (
                     type: "MeshRenderer",
-                    mesh_index: 1,
+                    mesh_index: 2,
                     material_index: 0,
+                ),
+                (
+                    type: "Parent",
+                    parent_name: "Sun",
                 ),
             ],
         ),
@@ -93,20 +105,31 @@
                     mesh_index: 2,
                     material_index: 0,
                 ),
+                (
+                    type: "Camera",
+                    fov: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                    active: true,
+                ),
+                (
+                    type: "Parent",
+                    parent_name: "FallingCube1",
+                ),
             ],
         ),
         (
-            name: "FallingCube1",
+            name: "Ground",
             components: [
                 (
                     type: "Transform",
-                    position: (-1.3045073, -0.15293574, -0.24127619),
-                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
-                    scale: (0.5, 0.5, 0.5),
+                    position: (0.0, 0.0, -0.5),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (10.0, 1.0, 10.0),
                 ),
                 (
                     type: "MeshRenderer",
-                    mesh_index: 2,
+                    mesh_index: 1,
                     material_index: 0,
                 ),
             ],

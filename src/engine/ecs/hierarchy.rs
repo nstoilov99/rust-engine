@@ -88,8 +88,40 @@ impl Children {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Root;
 
+/// Check if `ancestor` is an ancestor of `descendant` in the hierarchy.
+/// Used to prevent creating cycles when reparenting.
+pub fn is_ancestor_of(world: &World, ancestor: Entity, descendant: Entity) -> bool {
+    let mut current = descendant;
+    while let Ok(parent) = world.get::<&Parent>(current) {
+        if parent.0 == ancestor {
+            return true;
+        }
+        current = parent.0;
+    }
+    false
+}
+
+/// Check if reparenting would create a cycle
+/// Returns true if the operation is valid (no cycle would be created)
+pub fn can_set_parent(world: &World, child: Entity, new_parent: Entity) -> bool {
+    // Cannot parent to self
+    if child == new_parent {
+        return false;
+    }
+    // Cannot parent to a descendant (would create cycle)
+    if is_ancestor_of(world, child, new_parent) {
+        return false;
+    }
+    true
+}
+
 /// Set parent-child relationship
-pub fn set_parent(world: &mut World, child: Entity, parent: Entity) {
+/// Returns false if operation would create a cycle (and does nothing in that case)
+pub fn set_parent(world: &mut World, child: Entity, parent: Entity) -> bool {
+    // Prevent cycles
+    if !can_set_parent(world, child, parent) {
+        return false;
+    }
     // Remove from old parent if exists
     if let Ok(old_parent) = world.get::<&Parent>(child) {
         let old_parent_entity = old_parent.0;
@@ -123,6 +155,8 @@ pub fn set_parent(world: &mut World, child: Entity, parent: Entity) {
         children.add(child);
         let _ = world.insert_one(parent, children);
     }
+
+    true
 }
 
 /// Remove parent (make entity a root)

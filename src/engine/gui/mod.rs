@@ -49,6 +49,15 @@ impl Gui {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let context = Context::default();
 
+        // Configure dark theme with better text visibility
+        let mut visuals = egui::Visuals::dark();
+        visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(220);
+        visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_gray(200);
+        visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+        visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+        visuals.override_text_color = Some(egui::Color32::from_gray(230));
+        context.set_visuals(visuals);
+
         // Create Vulkan renderer
         let renderer = EguiRenderer::new(device, queue, swapchain_format)?;
 
@@ -62,7 +71,7 @@ impl Gui {
             pointer_pos: None,
             modifiers: egui::Modifiers::default(),
             events: Vec::new(),
-            pixels_per_point: 1.0,
+            pixels_per_point: 1.15, // Slightly larger for better readability
         })
     }
 
@@ -242,6 +251,27 @@ impl Gui {
     /// Get egui context for custom usage
     pub fn context(&self) -> &Context {
         &self.context
+    }
+
+    /// Register an external Vulkan image view as an egui texture
+    ///
+    /// Used for render-to-texture scenarios like the viewport.
+    pub fn register_native_texture(
+        &mut self,
+        image_view: std::sync::Arc<vulkano::image::view::ImageView>,
+    ) -> egui::TextureId {
+        self.renderer.register_native_texture(image_view)
+    }
+
+    /// Update an existing native texture with a new image view
+    ///
+    /// Used when the viewport is resized and the texture needs to be recreated.
+    pub fn update_native_texture(
+        &mut self,
+        texture_id: egui::TextureId,
+        image_view: std::sync::Arc<vulkano::image::view::ImageView>,
+    ) {
+        self.renderer.update_native_texture(texture_id, image_view);
     }
 }
 

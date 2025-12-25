@@ -6,7 +6,12 @@
 use super::{game_setup, gui_panel, input_handler, render_loop};
 use hecs::World;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
-use rust_engine::engine::editor::{HierarchyPanel, Selection};
+use egui_dock::DockArea;
+use rust_engine::engine::editor::{
+    create_editor_dock_style, render_menu_bar, CommandHistory, EditorContext, EditorDockState,
+    EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter, LogMessage, MenuAction, Selection,
+    ViewportTexture, WindowConfig,
+};
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
@@ -23,6 +28,7 @@ use winit::window::Window;
 
 /// Main application state
 pub struct App {
+    pub window: Arc<Window>,
     pub renderer: Renderer,
     pub gui: Gui,
     pub asset_manager: Arc<AssetManager>,
@@ -41,7 +47,16 @@ pub struct App {
     pub show_profiler: bool,
     // Editor state
     pub hierarchy_panel: HierarchyPanel,
+    pub inspector_panel: InspectorPanel,
     pub selection: Selection,
+    pub command_history: CommandHistory,
+    pub dock_state: EditorDockState,
+    pub console_messages: Vec<LogMessage>,
+    pub log_filter: LogFilter,
+    // Viewport rendering
+    pub viewport_texture: ViewportTexture,
+    pub viewport_texture_id: Option<egui::TextureId>,
+    pub viewport_size: (u32, u32),
 }
 
 impl App {
@@ -110,6 +125,16 @@ impl App {
         )?;
         println!("Deferred renderer ready!");
 
+        // Create viewport texture for rendering scene to egui panel
+        println!("Creating viewport texture...");
+        let viewport_texture = ViewportTexture::new(
+            renderer.device.clone(),
+            renderer.memory_allocator.clone(),
+            800,
+            600,
+        )?;
+        println!("Viewport texture ready!");
+
         // Frame synchronization
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
@@ -117,6 +142,7 @@ impl App {
         Ok(Self {
             renderer,
             gui,
+            window,
             asset_manager,
             hot_reload,
             reload_rx,
@@ -132,13 +158,51 @@ impl App {
             previous_frame_end,
             show_profiler: false,
             hierarchy_panel,
+            inspector_panel: InspectorPanel::new(),
             selection: Selection::new(),
+            command_history: CommandHistory::new(100),
+            dock_state: EditorDockState::load_or_default(),
+            console_messages: vec![
+                LogMessage::info("Engine initialized successfully"),
+                LogMessage::info("Scene loaded"),
+            ],
+            log_filter: LogFilter::default(),
+            viewport_texture,
+            viewport_texture_id: None, // Registered on first render
+            viewport_size: (800, 600),
         })
     }
 
     /// Print control instructions
     pub fn print_controls(&self) {
         game_setup::print_controls();
+    }
+
+    /// Save the layout and window state on exit (silently fails on error)
+    fn save_layout_on_exit(&self) {
+        // Save dock layout
+        if let Err(e) = self.dock_state.save_to_default() {
+            eprintln!("Warning: Failed to save layout on exit: {}", e);
+        }
+
+        // Save window state (size, position, fullscreen)
+        let size = self.window.inner_size();
+        let position = self.window.outer_position().unwrap_or_default();
+        let is_fullscreen = self.window.fullscreen().is_some();
+        let is_maximized = self.window.is_maximized();
+
+        let window_config = WindowConfig {
+            width: size.width,
+            height: size.height,
+            x: position.x,
+            y: position.y,
+            maximized: is_maximized,
+            fullscreen: is_fullscreen,
+        };
+
+        if let Err(e) = window_config.save_to_default() {
+            eprintln!("Warning: Failed to save window config on exit: {}", e);
+        }
     }
 
     /// Begin a new frame (call at start of MainEventsCleared)
@@ -199,6 +263,7 @@ impl App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.save_layout_on_exit();
                 println!("Closing...");
                 *control_flow = ControlFlow::Exit;
             }
@@ -259,6 +324,15 @@ impl App {
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
         puffin::profile_function!();
 
+        // Register viewport texture with egui if not done yet
+        if self.viewport_texture_id.is_none() {
+            let texture_id = self
+                .gui
+                .register_native_texture(self.viewport_texture.image_view());
+            self.viewport_texture_id = Some(texture_id);
+            println!("Viewport texture registered with egui");
+        }
+
         // Prepare render data
         let mesh_data =
             render_loop::prepare_mesh_data(&self.world, &self.asset_manager, &self.renderer);
@@ -299,10 +373,30 @@ impl App {
                 }
             };
 
-        // Render with deferred pipeline
+        // Handle viewport resize if needed
+        let (vp_width, vp_height) = self.viewport_size;
+        if vp_width != self.viewport_texture.width() || vp_height != self.viewport_texture.height() {
+            if vp_width > 0 && vp_height > 0 {
+                if let Ok(resized) = self.viewport_texture.resize(vp_width, vp_height) {
+                    if resized {
+                        // Update the egui texture registration with new image view
+                        if let Some(texture_id) = self.viewport_texture_id {
+                            self.gui
+                                .update_native_texture(texture_id, self.viewport_texture.image_view());
+                        }
+                        // Update camera aspect ratio to match new viewport dimensions
+                        self.renderer.camera_3d.set_viewport_size(vp_width as f32, vp_height as f32);
+                        // Clear deferred renderer framebuffer cache since we're using a new target
+                        self.deferred_renderer.clear_framebuffer_cache();
+                    }
+                }
+            }
+        }
+
+        // Render with deferred pipeline to the VIEWPORT TEXTURE (not swapchain)
         let deferred_cb = match self
             .deferred_renderer
-            .render(&mesh_data, &light_data, target_image.clone())
+            .render(&mesh_data, &light_data, self.viewport_texture.image())
         {
             Ok(cb) => cb,
             Err(e) => {
@@ -312,22 +406,54 @@ impl App {
             }
         };
 
-        // Render GUI
+        // Render GUI with dock layout
         let entity_count = self.world.len() as usize;
         let game_loop = &self.game_loop;
         let camera_distance = self.camera_distance;
         let renderer = &self.renderer;
         let show_profiler = &mut self.show_profiler;
         let hierarchy_panel = &mut self.hierarchy_panel;
+        let inspector_panel = &mut self.inspector_panel;
         let world = &mut self.world;
         let selection = &mut self.selection;
+        let command_history = &mut self.command_history;
+        let dock_state = &mut self.dock_state;
+        let console_messages = &self.console_messages;
+        let log_filter = &mut self.log_filter;
+        let viewport_texture_id = self.viewport_texture_id;
+        let viewport_size = &mut self.viewport_size;
+
+        // We need to capture menu action outside the closure
+        let mut menu_action = MenuAction::None;
 
         let gui_result = match self.gui.render(window, target_image, |ctx| {
-            gui_panel::create_stats_window(ctx, entity_count, game_loop, camera_distance, renderer);
-            gui_panel::render_profiler_window(ctx, show_profiler, game_loop);
+            // Render menu bar first (at top)
+            menu_action = render_menu_bar(ctx, dock_state, command_history);
 
-            // Hierarchy panel
-            hierarchy_panel.show(ctx, world, selection);
+            // Stats window (floating, always visible)
+            gui_panel::create_stats_window(ctx, entity_count, game_loop, camera_distance, renderer);
+
+            // Create editor context for tab viewer
+            let editor_ctx = EditorContext {
+                world,
+                selection,
+                hierarchy_panel,
+                inspector_panel,
+                command_history,
+                show_profiler,
+                console_messages,
+                log_filter,
+                viewport_texture_id,
+                viewport_size,
+            };
+
+            // Create tab viewer
+            let mut tab_viewer = EditorTabViewer { ctx: editor_ctx };
+
+            // Render dock area with all panels
+            DockArea::new(&mut dock_state.dock_state)
+                .style(create_editor_dock_style(ctx))
+                .show(ctx, &mut tab_viewer);
         }) {
             Ok(result) => result,
             Err(e) => {
@@ -336,6 +462,49 @@ impl App {
                 return Ok(());
             }
         };
+
+        // Handle menu actions
+        match menu_action {
+            MenuAction::None => {}
+            MenuAction::SaveScene => {
+                match save_scene(
+                    &self.world,
+                    "assets/scenes/main.scene.ron",
+                    "Main Scene",
+                    self.hierarchy_panel.root_order(),
+                ) {
+                    Ok(_) => println!("Scene saved!"),
+                    Err(e) => eprintln!("Save failed: {}", e),
+                }
+            }
+            MenuAction::Exit => {
+                self.save_layout_on_exit();
+                println!("Closing...");
+                std::process::exit(0);
+            }
+            MenuAction::Undo => {
+                if let Some(desc) = self.command_history.undo(&mut self.world) {
+                    println!("Undo: {}", desc);
+                }
+            }
+            MenuAction::Redo => {
+                if let Some(desc) = self.command_history.redo(&mut self.world) {
+                    println!("Redo: {}", desc);
+                }
+            }
+            MenuAction::SaveLayout => {
+                match self.dock_state.save_to_default() {
+                    Ok(()) => println!("Layout saved to {}", EditorDockState::default_layout_path().display()),
+                    Err(e) => eprintln!("Failed to save layout: {}", e),
+                }
+            }
+            MenuAction::ResetLayout => {
+                self.dock_state = EditorDockState::new();
+                // Also save the reset layout so it persists
+                let _ = self.dock_state.save_to_default();
+                println!("Layout reset to default");
+            }
+        }
 
         // Handle input
         self.handle_frame_input(&gui_result);
@@ -377,6 +546,20 @@ impl App {
 
         // F12 and Ctrl+S are handled in handle_window_event() to avoid timing issues
         // (begin_frame clears keys_just_pressed before render is called)
+
+        // Undo/Redo shortcuts (work even when GUI has focus for editor workflow)
+        if self.input_manager.is_key_pressed(VirtualKeyCode::LControl) {
+            if self.input_manager.is_key_just_pressed(VirtualKeyCode::Z) {
+                if let Some(desc) = self.command_history.undo(&mut self.world) {
+                    println!("Undo: {}", desc);
+                }
+            }
+            if self.input_manager.is_key_just_pressed(VirtualKeyCode::Y) {
+                if let Some(desc) = self.command_history.redo(&mut self.world) {
+                    println!("Redo: {}", desc);
+                }
+            }
+        }
 
         // Only process game keyboard input if GUI didn't consume it
         if !gui_result.wants_keyboard {

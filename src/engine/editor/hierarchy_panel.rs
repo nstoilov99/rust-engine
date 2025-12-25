@@ -2,12 +2,25 @@
 
 use super::Selection;
 use crate::engine::ecs::{
-    hierarchy::{despawn_recursive, get_root_entities, remove_parent, set_parent},
+    hierarchy::{can_set_parent, despawn_recursive, get_root_entities, remove_parent, set_parent},
     Camera, Children, DirectionalLight, MeshRenderer, Name, Parent, PointLight, Transform,
 };
-use egui::{Context, RichText, ScrollArea, SidePanel, TextEdit, Ui};
+use egui::{pos2, Color32, Context, RichText, ScrollArea, SidePanel, Stroke, TextEdit, Ui};
 use hecs::{Entity, World};
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+/// Drop mode for drag-and-drop operations
+/// Determined by mouse Y position within the row
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DropMode {
+    /// Insert above target (top 25% of row) - makes sibling before target
+    InsertAbove,
+    /// Make child of target (middle 50% of row) - makes child of target
+    MakeChild,
+    /// Insert below target (bottom 25% of row) - makes sibling after target
+    InsertBelow,
+}
 
 /// Scene Hierarchy Panel state
 pub struct HierarchyPanel {
@@ -25,6 +38,10 @@ pub struct HierarchyPanel {
     expanded: HashSet<u64>,
     /// Explicit ordering of root entities
     root_order: Vec<Entity>,
+    /// Entity being hovered during drag (for auto-expand)
+    drag_hover_entity: Option<Entity>,
+    /// When drag hover started (for auto-expand delay)
+    drag_hover_start: Option<Instant>,
 }
 
 impl Default for HierarchyPanel {
@@ -43,6 +60,8 @@ impl HierarchyPanel {
             filter_active: false,
             expanded: HashSet::new(),
             root_order: Vec::new(),
+            drag_hover_entity: None,
+            drag_hover_start: None,
         }
     }
 
@@ -56,19 +75,24 @@ impl HierarchyPanel {
         self.root_order = order;
     }
 
-    /// Render the hierarchy panel
+    /// Render the hierarchy panel as a side panel
     pub fn show(&mut self, ctx: &Context, world: &mut World, selection: &mut Selection) {
         SidePanel::left("hierarchy_panel")
             .resizable(true)
             .default_width(250.0)
             .min_width(150.0)
             .show(ctx, |ui| {
-                self.render_header(ui, world);
-                ui.separator();
-                self.render_search(ui);
-                ui.separator();
-                self.render_tree(ui, world, selection);
+                self.show_contents(ui, world, selection);
             });
+    }
+
+    /// Render just the contents (for use inside dock tabs)
+    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection) {
+        self.render_header(ui, world);
+        ui.separator();
+        self.render_search(ui);
+        ui.separator();
+        self.render_tree(ui, world, selection);
     }
 
     /// Render panel header with title and add button
@@ -131,11 +155,18 @@ impl HierarchyPanel {
         // Sync root order with world state first
         self.sync_root_order(world);
 
+        // ESC to cancel drag
+        if self.drag_source.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.drag_source = None;
+            self.drag_hover_entity = None;
+            self.drag_hover_start = None;
+        }
+
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.root_order.is_empty() {
-                    ui.label(RichText::new("No entities in scene").italics().weak());
+                    ui.label(RichText::new("No entities in scene").weak());
                     return;
                 }
 
@@ -155,6 +186,8 @@ impl HierarchyPanel {
         // Clear drag source after mouse release (once per frame, not per entity)
         if ui.input(|i| i.pointer.any_released()) {
             self.drag_source = None;
+            self.drag_hover_entity = None;
+            self.drag_hover_start = None;
         }
     }
 
@@ -190,16 +223,54 @@ impl HierarchyPanel {
         let entity_id = entity.id() as u64;
         let is_expanded = self.expanded.contains(&entity_id);
 
+        // Check if this is a valid drop target (for visual feedback)
+        let is_valid_drop_target = self.drag_source.map_or(false, |source| {
+            source != entity && can_set_parent(world, source, entity)
+        });
+
         // Create a horizontal layout for the row
-        ui.horizontal(|ui| {
+        let row_response = ui.horizontal(|ui| {
+            // Draw tree guide lines for depth
+            self.draw_tree_guides(ui, depth);
+
             // Indentation
             let indent = depth as f32 * 16.0;
             ui.add_space(indent);
 
             // Expand/collapse arrow for entities with children
             if has_children {
-                let arrow = if is_expanded { "v" } else { ">" };
-                if ui.small_button(arrow).clicked() {
+                // Minimalist painted triangle instead of button
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+
+                let center = rect.center();
+                let size = 3.5;
+                let color = if response.hovered() {
+                    Color32::WHITE
+                } else {
+                    Color32::from_gray(165)  // Increased from 140 for better visibility
+                };
+
+                let points = if is_expanded {
+                    // Down arrow
+                    vec![
+                        pos2(center.x - size, center.y - size * 0.4),
+                        pos2(center.x + size, center.y - size * 0.4),
+                        pos2(center.x, center.y + size * 0.6),
+                    ]
+                } else {
+                    // Right arrow
+                    vec![
+                        pos2(center.x - size * 0.4, center.y - size),
+                        pos2(center.x + size * 0.6, center.y),
+                        pos2(center.x - size * 0.4, center.y + size),
+                    ]
+                };
+
+                ui.painter()
+                    .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+
+                if response.clicked() {
                     if is_expanded {
                         self.expanded.remove(&entity_id);
                     } else {
@@ -208,12 +279,12 @@ impl HierarchyPanel {
                 }
             } else {
                 // Spacer for alignment
-                ui.add_space(20.0);
+                ui.add_space(16.0);
             }
 
-            // Entity icon based on components
-            let icon = self.get_entity_icon(world, entity);
-            ui.label(icon);
+            // Entity icon with color
+            let (icon, icon_color) = self.get_entity_icon_with_color(world, entity);
+            ui.label(RichText::new(icon).color(icon_color).small());
 
             // Entity name (or rename field)
             if is_renaming {
@@ -237,16 +308,24 @@ impl HierarchyPanel {
                     self.renaming_entity = None;
                 }
             } else {
-                // Selectable label
+                // Custom selection rendering (avoids egui's harsh cyan default)
                 let label = if is_selected {
-                    RichText::new(&name).strong()
+                    RichText::new(&name).strong().color(Color32::WHITE)
                 } else {
                     RichText::new(&name)
                 };
 
-                let response = ui.selectable_label(is_selected, label);
-                // Enable drag sensing (selectable_label only senses clicks by default)
-                let response = response.interact(egui::Sense::drag());
+                // Use regular label with click+drag sensing
+                let response = ui.label(label).interact(egui::Sense::click_and_drag());
+
+                // Draw custom selection background (muted blue-gray, increased alpha for visibility)
+                if is_selected {
+                    ui.painter().rect_filled(
+                        response.rect.expand(2.0),
+                        3.0,
+                        Color32::from_rgba_unmultiplied(60, 90, 140, 160),
+                    );
+                }
 
                 // Handle selection
                 if response.clicked() {
@@ -268,9 +347,49 @@ impl HierarchyPanel {
                 });
 
                 // Drag-and-drop
-                self.handle_drag_drop(ui, &response, world, entity);
+                self.handle_drag_drop(ui, &response, world, entity, is_valid_drop_target, has_children, is_expanded);
             }
         });
+
+        // Draw row hover/drop target highlight
+        let row_rect = row_response.response.rect;
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let is_hovered = pointer_pos.map(|p| row_rect.contains(p)).unwrap_or(false);
+
+        // Hover highlight (when not dragging) - increased alpha for visibility
+        if is_hovered && self.drag_source.is_none() && !is_renaming {
+            ui.painter().rect_filled(
+                row_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+            );
+        }
+
+        // Drop target highlight (when dragging) - increased alpha for visibility
+        if is_hovered && is_valid_drop_target {
+            ui.painter().rect_filled(
+                row_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(255, 200, 0, 60),
+            );
+        }
+
+        // Auto-expand on drag hover (after 500ms)
+        if self.drag_source.is_some() && is_hovered && has_children && !is_expanded && is_valid_drop_target {
+            if self.drag_hover_entity != Some(entity) {
+                self.drag_hover_entity = Some(entity);
+                self.drag_hover_start = Some(Instant::now());
+            } else if let Some(start) = self.drag_hover_start {
+                if start.elapsed() > Duration::from_millis(500) {
+                    self.expanded.insert(entity_id);
+                    self.drag_hover_entity = None;
+                    self.drag_hover_start = None;
+                }
+            }
+        } else if self.drag_hover_entity == Some(entity) && !is_hovered {
+            self.drag_hover_entity = None;
+            self.drag_hover_start = None;
+        }
 
         // Render children (if expanded and has children)
         if has_children && is_expanded {
@@ -280,25 +399,48 @@ impl HierarchyPanel {
         }
     }
 
-    /// Get icon for entity based on its components
-    fn get_entity_icon(&self, world: &World, entity: Entity) -> &'static str {
+    /// Draw tree guide lines to show hierarchy depth
+    fn draw_tree_guides(&self, ui: &mut Ui, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+
+        let row_rect = ui.max_rect();
+        let guide_color = Color32::from_gray(75);
+
+        for d in 0..depth {
+            let x = 8.0 + (d as f32 * 16.0);
+            ui.painter().line_segment(
+                [pos2(x, row_rect.top()), pos2(x, row_rect.bottom())],
+                Stroke::new(1.0, guide_color),
+            );
+        }
+    }
+
+    /// Get icon and color for entity based on its components
+    fn get_entity_icon_with_color(&self, world: &World, entity: Entity) -> (&'static str, Color32) {
         // Check for specific component types
         if world.get::<&Camera>(entity).is_ok() {
-            return "CAM";
+            return ("[CAM]", Color32::from_rgb(100, 180, 255)); // Blue
         }
         if world.get::<&DirectionalLight>(entity).is_ok() {
-            return "SUN";
+            return ("[SUN]", Color32::from_rgb(255, 220, 100)); // Yellow
         }
         if world.get::<&PointLight>(entity).is_ok() {
-            return "LIT";
+            return ("[LIT]", Color32::from_rgb(255, 180, 100)); // Orange
         }
         if world.get::<&MeshRenderer>(entity).is_ok() {
-            return "MSH";
+            return ("[MSH]", Color32::from_rgb(150, 150, 255)); // Purple
         }
         if world.get::<&Children>(entity).is_ok() {
-            return "GRP";
+            return ("[GRP]", Color32::from_rgb(180, 180, 180)); // Gray
         }
-        "ENT" // Default icon
+        ("[ENT]", Color32::from_rgb(140, 140, 140)) // Default - dim gray
+    }
+
+    /// Get icon for entity based on its components (legacy, for ghost)
+    fn get_entity_icon(&self, world: &World, entity: Entity) -> &'static str {
+        self.get_entity_icon_with_color(world, entity).0
     }
 
     /// Check if entity matches current filter
@@ -411,6 +553,44 @@ impl HierarchyPanel {
         despawn_recursive(world, entity);
     }
 
+    /// Calculate drop mode from mouse Y position within the row
+    fn calculate_drop_mode(&self, mouse_y: f32, rect: &egui::Rect) -> DropMode {
+        let row_height = rect.height();
+        let top_zone = rect.top() + row_height * 0.25;
+        let bottom_zone = rect.bottom() - row_height * 0.25;
+
+        if mouse_y < top_zone {
+            DropMode::InsertAbove
+        } else if mouse_y > bottom_zone {
+            DropMode::InsertBelow
+        } else {
+            DropMode::MakeChild
+        }
+    }
+
+    /// Check if a drop is valid for the given mode
+    fn is_valid_drop(&self, world: &World, source: Entity, target: Entity, mode: DropMode) -> bool {
+        if source == target {
+            return false;
+        }
+
+        match mode {
+            DropMode::MakeChild => {
+                // Check if source can become a child of target
+                can_set_parent(world, source, target)
+            }
+            DropMode::InsertAbove | DropMode::InsertBelow => {
+                // For sibling insert, check if we can become child of target's parent
+                if let Ok(parent) = world.get::<&Parent>(target) {
+                    can_set_parent(world, source, parent.0)
+                } else {
+                    // Target is root - always valid to become a root sibling
+                    true
+                }
+            }
+        }
+    }
+
     /// Handle drag-and-drop for reordering and reparenting
     fn handle_drag_drop(
         &mut self,
@@ -418,6 +598,9 @@ impl HierarchyPanel {
         response: &egui::Response,
         world: &mut World,
         entity: Entity,
+        _is_valid_drop_target: bool, // No longer used - we calculate per-mode
+        _has_children: bool,
+        _is_expanded: bool,
     ) {
         // Make this item a drag source - use dragged() which is more reliable
         if response.dragged() {
@@ -426,64 +609,136 @@ impl HierarchyPanel {
 
         // Drop target detection with position feedback
         if let Some(source) = self.drag_source {
+            if source == entity {
+                return; // Can't drop on self
+            }
+
             // Manually check if pointer is over this item's rect (response.hovered() doesn't work during drag)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
             let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
-            if source != entity && is_hovered {
-                // Determine drop position (above or below center of target)
-                let mouse_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y).unwrap_or(0.0));
-                let center_y = response.rect.center().y;
-                let drop_above = mouse_y < center_y;
 
-                // Visual feedback - show line above or below to indicate insertion point
-                let line_y = if drop_above {
-                    response.rect.top()
+            if is_hovered {
+                let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
+                let drop_mode = self.calculate_drop_mode(mouse_y, &response.rect);
+                let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
+
+                if is_valid {
+                    // Visual feedback based on drop mode
+                    match drop_mode {
+                        DropMode::InsertAbove => {
+                            // Line at top of row
+                            self.draw_insertion_line(ui, response.rect.top(), &response.rect);
+                        }
+                        DropMode::InsertBelow => {
+                            // Line at bottom of row
+                            self.draw_insertion_line(ui, response.rect.bottom(), &response.rect);
+                        }
+                        DropMode::MakeChild => {
+                            // Highlight the entire row + indent indicator
+                            ui.painter().rect_filled(
+                                response.rect,
+                                2.0,
+                                Color32::from_rgba_unmultiplied(100, 200, 100, 50),
+                            );
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                Stroke::new(2.0, Color32::from_rgb(100, 200, 100)),
+                            );
+                            // Draw a small "+" icon to indicate "add as child"
+                            let icon_pos = pos2(response.rect.right() - 16.0, response.rect.center().y);
+                            ui.painter().text(
+                                icon_pos,
+                                egui::Align2::CENTER_CENTER,
+                                "+",
+                                egui::FontId::proportional(14.0),
+                                Color32::from_rgb(100, 200, 100),
+                            );
+                        }
+                    }
                 } else {
-                    response.rect.bottom()
-                };
-                ui.painter().hline(
-                    response.rect.x_range(),
-                    line_y,
-                    egui::Stroke::new(2.0, egui::Color32::YELLOW),
-                );
-
-                // Add a small triangle/arrow at the left to show insertion point
-                let arrow_left = response.rect.left() - 8.0;
-                let arrow_size = 5.0;
-                let arrow_points = vec![
-                    egui::pos2(arrow_left, line_y - arrow_size),
-                    egui::pos2(arrow_left + arrow_size * 1.5, line_y),
-                    egui::pos2(arrow_left, line_y + arrow_size),
-                ];
-                ui.painter().add(egui::Shape::convex_polygon(
-                    arrow_points,
-                    egui::Color32::YELLOW,
-                    egui::Stroke::NONE,
-                ));
+                    // Show "invalid" indicator
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        2.0,
+                        Stroke::new(2.0, Color32::from_rgb(200, 60, 60)),
+                    );
+                }
             }
         }
 
         // Complete the drop when mouse is released
         if ui.input(|i| i.pointer.any_released()) {
             if let Some(source) = self.drag_source {
-                // Check if we're hovering over a valid target
+                if source == entity {
+                    return;
+                }
+
                 // Use interact_pos() instead of hover_pos() - hover_pos() returns None on release
                 let pointer_pos = ui.input(|i| i.pointer.interact_pos());
                 let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
-                if source != entity && is_hovered {
-                    let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
-                    let center_y = response.rect.center().y;
-                    let drop_above = mouse_y < center_y;
 
-                    self.perform_drop(world, source, entity, drop_above);
+                if is_hovered {
+                    let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
+                    let drop_mode = self.calculate_drop_mode(mouse_y, &response.rect);
+                    let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
+
+                    if is_valid {
+                        self.perform_drop(world, source, entity, drop_mode);
+                    }
                 }
             }
             // Note: drag_source is cleared in render_tree() after all entities are processed
         }
     }
 
-    /// Perform the drop operation - either sibling reorder or reparent
+    /// Draw insertion line indicator for sibling drops
+    fn draw_insertion_line(&self, ui: &mut Ui, line_y: f32, rect: &egui::Rect) {
+        ui.painter().hline(
+            rect.x_range(),
+            line_y,
+            Stroke::new(2.0, Color32::YELLOW),
+        );
+
+        // Add a small triangle/arrow at the left to show insertion point
+        let arrow_left = rect.left() - 8.0;
+        let arrow_size = 5.0;
+        let arrow_points = vec![
+            pos2(arrow_left, line_y - arrow_size),
+            pos2(arrow_left + arrow_size * 1.5, line_y),
+            pos2(arrow_left, line_y + arrow_size),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(
+            arrow_points,
+            Color32::YELLOW,
+            Stroke::NONE,
+        ));
+    }
+
+    /// Perform the drop operation based on drop mode
     fn perform_drop(
+        &mut self,
+        world: &mut World,
+        source: Entity,
+        target: Entity,
+        drop_mode: DropMode,
+    ) {
+        match drop_mode {
+            DropMode::MakeChild => {
+                // Make source a child of target
+                set_parent(world, source, target);
+                // Expand target to show the new child
+                self.expanded.insert(target.id() as u64);
+            }
+            DropMode::InsertAbove | DropMode::InsertBelow => {
+                let drop_above = drop_mode == DropMode::InsertAbove;
+                self.perform_sibling_drop(world, source, target, drop_above);
+            }
+        }
+    }
+
+    /// Perform sibling drop (insert above/below target)
+    fn perform_sibling_drop(
         &mut self,
         world: &mut World,
         source: Entity,
@@ -531,10 +786,9 @@ impl HierarchyPanel {
                 }
             }
         } else {
-            // Different parents = reparent
-            // Make source a sibling of target (same parent as target)
+            // Different parents = reparent as sibling of target
             if let Some(parent) = target_parent {
-                // Target has a parent - make source a child of that parent
+                // Target has a parent - make source a child of that parent (sibling of target)
                 set_parent(world, source, parent);
                 // Then reorder to be near target
                 if let Ok(mut children) = world.get::<&mut Children>(parent) {
@@ -556,7 +810,6 @@ impl HierarchyPanel {
                     self.move_root(source, insert_idx);
                 }
             }
-            self.expanded.insert(target.id() as u64);
         }
     }
 

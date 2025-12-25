@@ -70,6 +70,9 @@ pub struct EguiRenderer {
     textures: HashMap<egui::TextureId, Arc<ImageView>>,
 }
 
+/// Counter for generating unique user texture IDs
+static NEXT_USER_TEXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl EguiRenderer {
     pub fn new(
         device: Arc<Device>,
@@ -297,6 +300,29 @@ impl EguiRenderer {
         }
 
         Ok(())
+    }
+
+    /// Register an external Vulkan image view as an egui texture
+    ///
+    /// This is used for render-to-texture scenarios like the viewport.
+    /// Returns an egui TextureId that can be used to display the image.
+    pub fn register_native_texture(&mut self, image_view: Arc<ImageView>) -> egui::TextureId {
+        let id = NEXT_USER_TEXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let texture_id = egui::TextureId::User(id);
+        self.textures.insert(texture_id, image_view);
+        texture_id
+    }
+
+    /// Update an existing native texture with a new image view
+    ///
+    /// Used when the viewport is resized and the texture needs to be recreated.
+    pub fn update_native_texture(&mut self, texture_id: egui::TextureId, image_view: Arc<ImageView>) {
+        self.textures.insert(texture_id, image_view);
+    }
+
+    /// Remove a native texture
+    pub fn unregister_native_texture(&mut self, texture_id: egui::TextureId) {
+        self.textures.remove(&texture_id);
     }
 
     pub fn render(

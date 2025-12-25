@@ -70,6 +70,9 @@ rapier3d = "0.25"
 puffin = "0.19"
 puffin_egui = "0.29"
 
+# Docking layout system for egui (editor panels)
+egui_dock = { version = "0.13", features = ["serde"] }
+
 [profile.dev]
 opt-level = 1
 

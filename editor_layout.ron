@@ -1,0 +1,191 @@
+(
+    surfaces: [
+        Main((
+            nodes: [
+                Horizontal(
+                    rect: (
+                        min: (
+                            x: 0.0,
+                            y: 24.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    fraction: 0.74179715,
+                ),
+                Vertical(
+                    rect: (
+                        min: (
+                            x: 0.0,
+                            y: 24.0,
+                        ),
+                        max: (
+                            x: 1898.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    fraction: 0.7490713,
+                ),
+                Vertical(
+                    rect: (
+                        min: (
+                            x: 1900.0,
+                            y: 24.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    fraction: 0.5,
+                ),
+                Leaf(
+                    rect: (
+                        min: (
+                            x: 0.0,
+                            y: 24.0,
+                        ),
+                        max: (
+                            x: 1898.0,
+                            y: 1031.0,
+                        ),
+                    ),
+                    viewport: (
+                        min: (
+                            x: 0.0,
+                            y: 48.0,
+                        ),
+                        max: (
+                            x: 1898.0,
+                            y: 1031.0,
+                        ),
+                    ),
+                    tabs: [
+                        Viewport,
+                    ],
+                    active: (0),
+                    scroll: 0.0,
+                ),
+                Leaf(
+                    rect: (
+                        min: (
+                            x: 0.0,
+                            y: 1033.0,
+                        ),
+                        max: (
+                            x: 1898.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    viewport: (
+                        min: (
+                            x: 0.0,
+                            y: 1057.0,
+                        ),
+                        max: (
+                            x: 1898.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    tabs: [
+                        Console,
+                        Profiler,
+                    ],
+                    active: (0),
+                    scroll: 0.0,
+                ),
+                Leaf(
+                    rect: (
+                        min: (
+                            x: 1900.0,
+                            y: 24.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 696.0,
+                        ),
+                    ),
+                    viewport: (
+                        min: (
+                            x: 1900.0,
+                            y: 48.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 696.0,
+                        ),
+                    ),
+                    tabs: [
+                        Hierarchy,
+                    ],
+                    active: (0),
+                    scroll: 0.0,
+                ),
+                Leaf(
+                    rect: (
+                        min: (
+                            x: 1900.0,
+                            y: 698.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    viewport: (
+                        min: (
+                            x: 1900.0,
+                            y: 722.0,
+                        ),
+                        max: (
+                            x: 2560.0,
+                            y: 1369.0,
+                        ),
+                    ),
+                    tabs: [
+                        Inspector,
+                    ],
+                    active: (0),
+                    scroll: 0.0,
+                ),
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+            ],
+            focused_node: Some((5)),
+        )),
+    ],
+    focused_surface: Some((0)),
+    translations: (
+        tab_context_menu: (
+            close_button: "Close",
+            eject_button: "Eject",
+        ),
+        window: (
+            close_button_tooltip: "This window contains non-closable tabs.",
+        ),
+    ),
+)
