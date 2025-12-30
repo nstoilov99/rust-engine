@@ -19,7 +19,7 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
     PrimaryCommandBufferAbstract,
 };
-use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::format::Format;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
@@ -35,7 +35,7 @@ pub struct SetupResult {
     pub mesh_indices: Vec<usize>,
     pub plane_mesh_index: usize,
     pub cube_mesh_index: usize,
-    pub descriptor_set: Arc<PersistentDescriptorSet>,
+    pub descriptor_set: Arc<DescriptorSet>,
 }
 
 /// Setup asset manager and hot-reload system
@@ -43,7 +43,6 @@ pub fn setup_asset_system(
     renderer: &Renderer,
 ) -> Result<(Arc<AssetManager>, HotReloadWatcher, Receiver<ReloadEvent>), Box<dyn std::error::Error>>
 {
-    println!("Setting up Asset Manager...");
     let asset_manager = Arc::new(AssetManager::new(
         renderer.device.clone(),
         renderer.queue.clone(),
@@ -58,7 +57,6 @@ pub fn setup_asset_system(
     let mut hot_reload = HotReloadWatcher::new(asset_manager.clone(), reload_tx);
     hot_reload.watch_directory("assets/")?;
     hot_reload.track_asset("assets/models/Duck.glb");
-    println!("Hot-reload enabled for assets/ directory");
 
     Ok((asset_manager, hot_reload, reload_rx))
 }
@@ -67,27 +65,19 @@ pub fn setup_asset_system(
 pub fn load_assets(
     asset_manager: &Arc<AssetManager>,
 ) -> Result<(Vec<usize>, usize, usize), Box<dyn std::error::Error>> {
-    println!("Loading Duck model...");
     let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("assets/models/Duck.glb")?;
 
-    println!("Creating procedural geometry...");
     let (plane_verts, plane_idx) = create_plane(1.0);
     let plane_mesh_index = asset_manager.upload_procedural_mesh(&plane_verts, &plane_idx)?;
 
     let (cube_verts, cube_idx) = create_cube();
     let cube_mesh_index = asset_manager.upload_procedural_mesh(&cube_verts, &cube_idx)?;
 
-    println!(
-        "Procedural meshes created (plane: {}, cube: {})",
-        plane_mesh_index, cube_mesh_index
-    );
-
     Ok((mesh_indices, plane_mesh_index, cube_mesh_index))
 }
 
 /// Create default scene with camera, duck, and light
 pub fn create_default_scene(world: &mut World, mesh_index: usize) {
-    println!("Creating default scene...");
 
     // Spawn Camera entity
     world.spawn((
@@ -119,7 +109,6 @@ pub fn create_default_scene(world: &mut World, mesh_index: usize) {
         Name::new("Sun"),
     ));
 
-    println!("Default scene created with {} entities", world.len());
 }
 
 /// Load scene from file or create default
@@ -131,11 +120,9 @@ pub fn load_or_create_scene(
     mesh_index: usize,
 ) -> Result<(bool, Vec<Entity>), Box<dyn std::error::Error>> {
     if std::path::Path::new("assets/scenes/main.scene.ron").exists() {
-        println!("Loading scene from file...");
         let (_scene_name, root_entities) = load_scene(world, "assets/scenes/main.scene.ron")?;
         Ok((true, root_entities)) // Loaded existing scene with root order
     } else {
-        println!("No scene file found, creating default scene...");
         create_default_scene(world, mesh_index);
         Ok((false, Vec::new())) // Created new scene, no specific order
     }
@@ -177,7 +164,6 @@ fn spawn_physics_object(world: &mut World, config: PhysicsObjectConfig) {
 ///
 /// Now uses Z-up coordinates: objects spawn at Z heights and fall in -Z direction.
 pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mesh: usize) {
-    println!("Adding physics test objects...");
 
     // Ground plane (static - never moves)
     // In Z-up: ground is at Z = -0.5
@@ -227,45 +213,35 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
     for config in cubes {
         spawn_physics_object(world, config);
     }
-
-    println!("Physics test objects added ({} total entities)", world.len());
 }
 
 /// Register physics entities with the physics world
 pub fn register_physics_entities(physics_world: &mut PhysicsWorld, world: &mut World) {
-    println!("Setting up Physics...");
     for (_, (transform, rigidbody, collider)) in world
         .query::<(&Transform, &mut RigidBody, &mut Collider)>()
         .iter()
     {
         physics_world.register_entity(transform, rigidbody, collider);
     }
-    println!("Physics initialized");
 }
 
 /// Upload model texture and create descriptor set
 pub fn upload_model_texture(
     renderer: &Renderer,
     asset_manager: &Arc<AssetManager>,
-) -> Result<Arc<PersistentDescriptorSet>, Box<dyn std::error::Error>> {
+) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
     // Get duck model to extract texture
     let duck_model_handle = asset_manager.models.load("assets/models/Duck.glb")?;
     let duck_model = duck_model_handle.get();
 
     let (texture_pixels, texture_width, texture_height) = if !duck_model.textures.is_empty() {
         let duck_texture = &duck_model.textures[0];
-        println!(
-            "Using Duck texture: {}x{}",
-            duck_texture.width(),
-            duck_texture.height()
-        );
         (
             duck_texture.clone().into_raw(),
             duck_texture.width(),
             duck_texture.height(),
         )
     } else {
-        println!("No textures in model, using white texture");
         (vec![255u8, 255, 255, 255], 1, 1)
     };
 
@@ -295,7 +271,7 @@ pub fn upload_model_texture(
     )?;
 
     let mut builder = AutoCommandBufferBuilder::primary(
-        renderer.command_buffer_allocator.as_ref(),
+        renderer.command_buffer_allocator.clone(),
         renderer.queue.queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )?;
@@ -331,17 +307,7 @@ pub fn upload_model_texture(
     Ok(descriptor_set)
 }
 
-/// Print controls help
+/// Print controls help (available via H key or help menu)
 pub fn print_controls() {
-    println!("Controls:");
-    println!("  WASD: Move camera (forward/left/back/right)");
-    println!("  Space/Shift: Move up/down");
-    println!("  Arrow keys: Look around");
-    println!("  0: Normal rendering (deferred)");
-    println!("  1-5: Debug G-Buffer views");
-    println!("  R: Reload assets");
-    println!("  C: Show cache stats");
-    println!("  Ctrl+S: Save scene");
-    println!("  F12: Toggle profiler (Spacebar to pause)");
-    println!("  ESC: Quit\n");
+    // Controls are now shown in the Engine Stats panel instead of console
 }

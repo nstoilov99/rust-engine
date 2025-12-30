@@ -12,8 +12,152 @@ mod render_loop;
 use app::App;
 use rust_engine::engine::editor::WindowConfig;
 use std::sync::Arc;
-use winit::event::Event;
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::{Window, WindowAttributes, WindowId};
+
+/// Main application wrapper that implements the winit 0.30 ApplicationHandler trait
+struct GameApp {
+    /// The window (created in resumed())
+    window: Option<Arc<Window>>,
+    /// The actual game application (created after window)
+    app: Option<App>,
+    /// Saved window configuration
+    window_config: WindowConfig,
+    /// Whether the app should exit
+    should_exit: bool,
+}
+
+impl GameApp {
+    fn new(window_config: WindowConfig) -> Self {
+        Self {
+            window: None,
+            app: None,
+            window_config,
+            should_exit: false,
+        }
+    }
+}
+
+impl ApplicationHandler for GameApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Only create window if we don't have one yet
+        if self.window.is_some() {
+            return;
+        }
+
+        // Build window attributes from saved config
+        let mut window_attrs = WindowAttributes::default()
+            .with_title("Rust Game Engine")
+            .with_inner_size(LogicalSize::new(
+                self.window_config.width,
+                self.window_config.height,
+            ))
+            .with_position(LogicalPosition::new(
+                self.window_config.x,
+                self.window_config.y,
+            ));
+
+        // Apply fullscreen or maximized state
+        if self.window_config.fullscreen {
+            window_attrs =
+                window_attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        } else if self.window_config.maximized {
+            window_attrs = window_attrs.with_maximized(true);
+        }
+
+        // Create window
+        let window = match event_loop.create_window(window_attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("Failed to create window: {}", e);
+                event_loop.exit();
+                return;
+            }
+        };
+
+        // Initialize application
+        match App::new(window.clone()) {
+            Ok(mut app) => {
+                app.print_controls();
+                println!("Engine ready!\n");
+                self.app = Some(app);
+            }
+            Err(e) => {
+                eprintln!("Failed to initialize application: {}", e);
+                event_loop.exit();
+                return;
+            }
+        }
+
+        self.window = Some(window);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(app) = &mut self.app else { return };
+        let Some(window) = &self.window else { return };
+
+        match &event {
+            WindowEvent::CloseRequested => {
+                app.save_layout_on_exit();
+                println!("Closing...");
+                self.should_exit = true;
+                event_loop.exit();
+                return;
+            }
+            WindowEvent::RedrawRequested => {
+                if let Err(e) = app.render(window) {
+                    eprintln!("Render error: {}", e);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Pass event to app for handling
+        app.handle_window_event(&event, event_loop);
+
+        // Check if app requested exit
+        if self.should_exit {
+            event_loop.exit();
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let Some(app) = &mut self.app else { return };
+        let Some(window) = &self.window else { return };
+
+        // Begin new frame
+        app.begin_frame();
+
+        // Update game state
+        app.update();
+
+        // Request redraw
+        window.request_redraw();
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // On suspend, we could release resources if needed
+        // For now, just log
+        println!("Application suspended");
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Final cleanup before exit
+        if let Some(app) = &self.app {
+            app.save_layout_on_exit();
+        }
+        println!("Application exiting");
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize profiler (1ns overhead when disabled, ~50-200ns when enabled)
@@ -22,54 +166,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load saved window configuration
     let window_config = WindowConfig::load_or_default();
 
-    // Create window with saved size/position
-    let event_loop = EventLoop::new();
-    let mut window_builder = winit::window::WindowBuilder::new()
-        .with_title("Rust Game Engine")
-        .with_inner_size(winit::dpi::LogicalSize::new(
-            window_config.width,
-            window_config.height,
-        ))
-        .with_position(winit::dpi::LogicalPosition::new(
-            window_config.x,
-            window_config.y,
-        ));
+    // Create event loop
+    let event_loop = EventLoop::new()?;
 
-    // Apply fullscreen or maximized state
-    if window_config.fullscreen {
-        window_builder =
-            window_builder.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-    } else if window_config.maximized {
-        window_builder = window_builder.with_maximized(true);
-    }
+    // Create game app
+    let mut game_app = GameApp::new(window_config);
 
-    let window = Arc::new(window_builder.build(&event_loop)?);
+    // Run the event loop with our application handler
+    event_loop.run_app(&mut game_app)?;
 
-    // Initialize application
-    let mut app = App::new(window.clone())?;
-    app.print_controls();
-
-    println!("Engine ready!\n");
-
-    // Run event loop
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
-
-        match event {
-            Event::WindowEvent { event, .. } => {
-                app.handle_window_event(&event, control_flow);
-            }
-            Event::MainEventsCleared => {
-                app.begin_frame();
-                app.update();
-                window.request_redraw();
-            }
-            Event::RedrawRequested(_) => {
-                if let Err(e) = app.render(&window) {
-                    eprintln!("Render error: {}", e);
-                }
-            }
-            _ => {}
-        }
-    });
+    Ok(())
 }

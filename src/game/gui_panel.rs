@@ -1,11 +1,10 @@
 //! GUI panels for engine stats and profiler
 //!
-//! Uses puffin_egui for in-engine flamegraph profiling.
+//! Uses puffin for profiling data (custom egui integration coming later).
 
 use egui;
 use rust_engine::GameLoop;
 use rust_engine::Renderer;
-use puffin_egui;
 
 /// Render the engine stats panel
 pub fn render_engine_stats(
@@ -45,15 +44,21 @@ pub fn render_engine_stats(
     ui.label("  ESC - Quit");
 }
 
-/// Render the puffin_egui profiler window
+/// Render the profiler panel placeholder
 ///
-/// Shows full in-engine flamegraph profiling visualization.
-pub fn render_profiler_window(ctx: &egui::Context, show_profiler: &mut bool, _game_loop: &GameLoop) {
-    if !*show_profiler {
-        return;
-    }
+/// TODO: Implement custom puffin integration for egui 0.33
+pub fn render_profiler_panel(ui: &mut egui::Ui) {
+    ui.heading("Profiler");
+    ui.separator();
 
-    puffin_egui::profiler_window(ctx);
+    // Note: puffin 0.19 API has changed significantly
+    // The detailed frame data API requires more complex setup
+    // For now, just show that profiling is enabled
+    ui.label("Profiling is enabled.");
+    ui.label("Use puffin::profile_scope!() to instrument code.");
+    ui.separator();
+    ui.label(egui::RichText::new("Note: Full profiler UI coming soon.").weak());
+    ui.label("For detailed profiling, use puffin_viewer.");
 }
 
 /// Create the main stats window

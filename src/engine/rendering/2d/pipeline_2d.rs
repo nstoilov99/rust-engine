@@ -14,7 +14,7 @@ use vulkano::pipeline::DynamicState;
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
 use vulkano::pipeline::{Pipeline, GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
@@ -110,7 +110,7 @@ pub fn create_pipeline(
     let fs_entry_point = fs.entry_point("main").unwrap();
 
     let vertex_input_state = Vertex::per_vertex()
-        .definition(&vs_entry_point.info().input_interface)?;
+        .definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -164,7 +164,7 @@ pub fn create_textured_pipeline(
     let fs_entry_point = fs.entry_point("main").unwrap();
 
     let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point.info().input_interface)?;
+        .definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -218,7 +218,7 @@ pub fn create_transform_pipeline(
     let fs_entry_point = fs.entry_point("main").unwrap();
 
     let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point.info().input_interface)?;
+        .definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -272,7 +272,7 @@ pub fn create_camera_pipeline(
     let fs_entry_point = fs.entry_point("main").unwrap();
 
     let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point.info().input_interface)?;
+        .definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -319,11 +319,11 @@ pub fn create_texture_descriptor_set(
     pipeline: Arc<GraphicsPipeline>,
     texture_view: Arc<ImageView>,
     sampler: Arc<Sampler>,
-) -> Result<Arc<PersistentDescriptorSet>, Box<dyn std::error::Error>> {
+) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
     let layout = pipeline.layout().set_layouts().get(0).unwrap();
 
-    let descriptor_set = PersistentDescriptorSet::new(
-        &descriptor_set_allocator,
+    let descriptor_set = DescriptorSet::new(
+        descriptor_set_allocator,
         layout.clone(),
         [WriteDescriptorSet::image_view_sampler(0, texture_view, sampler)],
         [],

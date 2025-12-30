@@ -32,7 +32,7 @@ pub struct EditorContext<'a> {
 
 /// Tab viewer that renders each panel type
 pub struct EditorTabViewer<'a> {
-    pub ctx: EditorContext<'a>,
+    pub editor: EditorContext<'a>,
 }
 
 impl<'a> TabViewer for EditorTabViewer<'a> {
@@ -66,10 +66,10 @@ impl<'a> EditorTabViewer<'a> {
         // Track the desired viewport size (for texture resizing)
         let new_width = (available_size.x.max(1.0)) as u32;
         let new_height = (available_size.y.max(1.0)) as u32;
-        *self.ctx.viewport_size = (new_width, new_height);
+        *self.editor.viewport_size = (new_width, new_height);
 
         // If we have a viewport texture, display it
-        if let Some(texture_id) = self.ctx.viewport_texture_id {
+        if let Some(texture_id) = self.editor.viewport_texture_id {
             // Display the rendered scene texture filling the available space
             let image = egui::Image::new(egui::load::SizedTexture::new(
                 texture_id,
@@ -92,16 +92,16 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Render the hierarchy panel
     fn render_hierarchy(&mut self, ui: &mut Ui) {
-        self.ctx
+        self.editor
             .hierarchy_panel
-            .show_contents(ui, self.ctx.world, self.ctx.selection);
+            .show_contents(ui, self.editor.world, self.editor.selection);
     }
 
     /// Render the inspector panel
     fn render_inspector(&mut self, ui: &mut Ui) {
-        self.ctx
+        self.editor
             .inspector_panel
-            .show_contents(ui, self.ctx.world, self.ctx.selection);
+            .show_contents(ui, self.editor.world, self.editor.selection);
     }
 
     /// Render the asset browser (placeholder)
@@ -136,7 +136,7 @@ impl<'a> EditorTabViewer<'a> {
     fn render_console(&mut self, ui: &mut Ui) {
         // Count messages by level
         let (info_count, warn_count, error_count) =
-            LogFilter::count_by_level(self.ctx.console_messages);
+            LogFilter::count_by_level(self.editor.console_messages);
 
         // Header with filter toggles (custom styled buttons instead of selectable_label)
         ui.horizontal(|ui| {
@@ -144,51 +144,51 @@ impl<'a> EditorTabViewer<'a> {
             ui.separator();
 
             // Error filter button - dark red when active
-            let error_fill = if self.ctx.log_filter.show_error {
+            let error_fill = if self.editor.log_filter.show_error {
                 Color32::from_rgba_unmultiplied(100, 50, 50, 180)
             } else {
                 Color32::from_gray(45)
             };
             let error_text = RichText::new(format!("Errors ({})", error_count))
-                .color(if self.ctx.log_filter.show_error {
+                .color(if self.editor.log_filter.show_error {
                     LogLevel::Error.color()
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(error_text).fill(error_fill).rounding(3.0)).clicked() {
-                self.ctx.log_filter.show_error = !self.ctx.log_filter.show_error;
+            if ui.add(egui::Button::new(error_text).fill(error_fill).corner_radius(3.0)).clicked() {
+                self.editor.log_filter.show_error = !self.editor.log_filter.show_error;
             }
 
             // Warning filter button - dark orange when active
-            let warn_fill = if self.ctx.log_filter.show_warning {
+            let warn_fill = if self.editor.log_filter.show_warning {
                 Color32::from_rgba_unmultiplied(100, 80, 40, 180)
             } else {
                 Color32::from_gray(45)
             };
             let warn_text = RichText::new(format!("Warnings ({})", warn_count))
-                .color(if self.ctx.log_filter.show_warning {
+                .color(if self.editor.log_filter.show_warning {
                     LogLevel::Warning.color()
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(warn_text).fill(warn_fill).rounding(3.0)).clicked() {
-                self.ctx.log_filter.show_warning = !self.ctx.log_filter.show_warning;
+            if ui.add(egui::Button::new(warn_text).fill(warn_fill).corner_radius(3.0)).clicked() {
+                self.editor.log_filter.show_warning = !self.editor.log_filter.show_warning;
             }
 
             // Info filter button - dark blue-gray when active
-            let info_fill = if self.ctx.log_filter.show_info {
+            let info_fill = if self.editor.log_filter.show_info {
                 Color32::from_rgba_unmultiplied(60, 70, 90, 180)
             } else {
                 Color32::from_gray(45)
             };
             let info_text = RichText::new(format!("Info ({})", info_count))
-                .color(if self.ctx.log_filter.show_info {
+                .color(if self.editor.log_filter.show_info {
                     LogLevel::Info.color()
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(info_text).fill(info_fill).rounding(3.0)).clicked() {
-                self.ctx.log_filter.show_info = !self.ctx.log_filter.show_info;
+            if ui.add(egui::Button::new(info_text).fill(info_fill).corner_radius(3.0)).clicked() {
+                self.editor.log_filter.show_info = !self.editor.log_filter.show_info;
             }
         });
         ui.separator();
@@ -198,8 +198,8 @@ impl<'a> EditorTabViewer<'a> {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 let mut shown_count = 0;
-                for message in self.ctx.console_messages.iter() {
-                    if self.ctx.log_filter.should_show(message) {
+                for message in self.editor.console_messages.iter() {
+                    if self.editor.log_filter.should_show(message) {
                         ui.label(message.rich_text());
                         shown_count += 1;
                     }
@@ -211,16 +211,22 @@ impl<'a> EditorTabViewer<'a> {
             });
     }
 
-    /// Render the profiler panel
+    /// Render the profiler panel (custom puffin integration)
     fn render_profiler(&mut self, ui: &mut Ui) {
         ui.heading("Profiler");
         ui.separator();
 
-        ui.checkbox(self.ctx.show_profiler, "Enable Profiling (F12)");
+        ui.checkbox(self.editor.show_profiler, "Enable Profiling (F12)");
 
-        if *self.ctx.show_profiler {
-            // Use puffin_egui profiler
-            puffin_egui::profiler_ui(ui);
+        if *self.editor.show_profiler {
+            // Placeholder for custom puffin profiler integration
+            // puffin_egui was removed for egui 0.33 compatibility
+            // TODO: Implement custom profiler visualization
+            ui.heading("Profiler");
+            ui.label("Profiling is enabled. Use puffin::profile_scope!() to instrument code.");
+            ui.separator();
+            ui.label(egui::RichText::new("Note: Custom profiler UI coming soon.").weak());
+            ui.label("For now, use puffin_viewer for detailed profiling data.");
         } else {
             ui.label("Profiling disabled. Enable to see performance data.");
         }

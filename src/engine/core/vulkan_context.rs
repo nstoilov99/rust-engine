@@ -27,8 +27,6 @@ impl VulkanContext {
             },
         )?;
 
-        println!("✓ Vulkan instance created");
-
         Ok(Self { instance })
     }
 }

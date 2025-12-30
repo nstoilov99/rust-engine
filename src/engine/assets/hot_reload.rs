@@ -43,16 +43,6 @@ impl HotReloadWatcher {
 
         let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
-                // Debug: Log ALL events to see what's happening
-                for path in &event.paths {
-                    if let Some(path_str) = path.to_str() {
-                        let normalized = path_str.replace('\\', "/");
-                        if normalized.contains("Duck.glb") {
-                            println!("🔍 Debug: Event {:?} for {}", event.kind, normalized);
-                        }
-                    }
-                }
-
                 match event.kind {
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any => {
                         for path in event.paths {
@@ -74,21 +64,18 @@ impl HotReloadWatcher {
                                         .unwrap()
                                         .clone();
 
-                                    println!("🔄 File changed: {} (event: {:?})", tracked_path, event.kind);
-
                                     // Determine asset type and reload (use tracked_path for consistency)
                                     if tracked_path.ends_with(".png") ||
                                        tracked_path.ends_with(".jpg") ||
                                        tracked_path.ends_with(".jpeg") {
                                         match assets.textures.reload(&tracked_path) {
                                             Ok(_) => {
-                                                println!("✅ Texture reloaded: {}", tracked_path);
                                                 let _ = reload_sender.send(ReloadEvent::TextureChanged {
                                                     path: tracked_path.clone(),
                                                 });
                                             }
                                             Err(e) => {
-                                                eprintln!("❌ Failed to reload texture: {}", e);
+                                                eprintln!("Failed to reload texture: {}", e);
                                                 let _ = reload_sender.send(ReloadEvent::ReloadFailed {
                                                     path: tracked_path.clone(),
                                                     error: e.to_string(),
@@ -99,7 +86,6 @@ impl HotReloadWatcher {
                                               tracked_path.ends_with(".glb") {
                                         match assets.reload_model_gpu(&tracked_path) {
                                             Ok((new_indices, model_handle)) => {
-                                                println!("✅ Model reloaded and uploaded to GPU: {}", tracked_path);
                                                 let _ = reload_sender.send(ReloadEvent::ModelChanged {
                                                     path: tracked_path.clone(),
                                                     mesh_indices: new_indices,
@@ -107,7 +93,7 @@ impl HotReloadWatcher {
                                                 });
                                             }
                                             Err(e) => {
-                                                eprintln!("❌ Failed to reload model: {}", e);
+                                                eprintln!("Failed to reload model: {}", e);
                                                 let _ = reload_sender.send(ReloadEvent::ReloadFailed {
                                                     path: tracked_path.clone(),
                                                     error: e.to_string(),
@@ -130,7 +116,6 @@ impl HotReloadWatcher {
         // Start watching the directory
         if let Some(watcher) = &mut self._watcher {
             watcher.watch(Path::new(path), RecursiveMode::Recursive)?;
-            println!("👁️  Watching directory for changes: {}", path);
         }
 
         Ok(())
@@ -141,7 +126,6 @@ impl HotReloadWatcher {
         let normalized_path = path.replace('\\', "/");
         let mut watched = self.watched_paths.write();
         watched.insert(normalized_path.clone());
-        println!("📌 Tracking asset: {}", normalized_path);
     }
 
     /// Untrack an asset path

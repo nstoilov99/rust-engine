@@ -42,12 +42,12 @@ pub fn render_menu_bar(
                 ui.menu_button("File", |ui| {
                     if ui.button("Save Scene (Ctrl+S)").clicked() {
                         action = MenuAction::SaveScene;
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         action = MenuAction::Exit;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -64,7 +64,7 @@ pub fn render_menu_bar(
                         .clicked()
                     {
                         action = MenuAction::Undo;
-                        ui.close_menu();
+                        ui.close();
                     }
 
                     let redo_text = if let Some(desc) = command_history.redo_description() {
@@ -78,7 +78,7 @@ pub fn render_menu_bar(
                         .clicked()
                     {
                         action = MenuAction::Redo;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -111,7 +111,7 @@ pub fn render_menu_bar(
                             } else {
                                 dock_state.open_tab(tab);
                             }
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
 
@@ -119,12 +119,12 @@ pub fn render_menu_bar(
 
                     if ui.button("Save Layout").clicked() {
                         action = MenuAction::SaveLayout;
-                        ui.close_menu();
+                        ui.close();
                     }
 
                     if ui.button("Reset Layout").clicked() {
                         action = MenuAction::ResetLayout;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -132,7 +132,7 @@ pub fn render_menu_bar(
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
                         // Could show an about dialog
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Rust Game Engine").weak());

@@ -1,7 +1,7 @@
-//! Custom egui-vulkano integration for Vulkano 0.34
+//! Custom egui-vulkano integration for Vulkano 0.34 and egui 0.33
 //!
 //! This module provides a minimal egui integration tailored for our engine.
-//! Based on patterns from egui_winit_vulkano but adapted for Vulkano 0.34.
+//! Supports egui 0.33 with winit 0.30 event handling.
 
 mod renderer;
 
@@ -9,25 +9,22 @@ pub use renderer::EguiRenderer;
 
 use egui::Context;
 use std::sync::Arc;
-use winit::event::VirtualKeyCode;
 use winit::event::WindowEvent;
+use winit::keyboard::{Key, NamedKey, PhysicalKey, KeyCode};
 use winit::window::Window;
 
 /// Result from GUI rendering including input consumption flags
 pub struct GuiRenderResult {
-    pub command_buffer: Arc<
-        vulkano::command_buffer::PrimaryAutoCommandBuffer<
-            Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
-        >,
-    >,
+    pub command_buffer: Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     pub wants_keyboard: bool,
     pub wants_pointer: bool,
+    pub cursor_icon: egui::CursorIcon,
 }
 
 /// Main GUI integration struct
 pub struct Gui {
-    /// egui context
-    context: Context,
+    /// egui context (persistent across frames)
+    egui_ctx: Context,
     /// Vulkan renderer for egui
     renderer: EguiRenderer,
     /// Screen size for calculating input coordinates
@@ -37,6 +34,10 @@ pub struct Gui {
     modifiers: egui::Modifiers,
     events: Vec<egui::Event>,
     pixels_per_point: f32,
+    /// Clipboard for copy/paste support
+    clipboard: Option<arboard::Clipboard>,
+    /// Current cursor icon
+    current_cursor: egui::CursorIcon,
 }
 
 impl Gui {
@@ -47,7 +48,7 @@ impl Gui {
         swapchain_format: vulkano::format::Format,
         window: &Window,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let context = Context::default();
+        let egui_ctx = Context::default();
 
         // Configure dark theme with better text visibility
         let mut visuals = egui::Visuals::dark();
@@ -56,7 +57,7 @@ impl Gui {
         visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
         visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
         visuals.override_text_color = Some(egui::Color32::from_gray(230));
-        context.set_visuals(visuals);
+        egui_ctx.set_visuals(visuals);
 
         // Create Vulkan renderer
         let renderer = EguiRenderer::new(device, queue, swapchain_format)?;
@@ -64,14 +65,19 @@ impl Gui {
         let size = window.inner_size();
         let screen_size = [size.width as f32, size.height as f32];
 
+        // Initialize clipboard
+        let clipboard = arboard::Clipboard::new().ok();
+
         Ok(Self {
-            context,
+            egui_ctx,
             renderer,
             screen_size,
             pointer_pos: None,
             modifiers: egui::Modifiers::default(),
             events: Vec::new(),
             pixels_per_point: 1.15, // Slightly larger for better readability
+            clipboard,
+            current_cursor: egui::CursorIcon::Default,
         })
     }
 
@@ -83,17 +89,18 @@ impl Gui {
         mut ui_fn: impl FnMut(&egui::Context),
     ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
         // Build RawInput with collected events
+        // Use unwrap_or to handle potential clock skew gracefully
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(self.screen_size[0], self.screen_size[1]),
             )),
-            time: Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs_f64(),
-            ),
+            time: Some(current_time),
             predicted_dt: 1.0 / 60.0,
             modifiers: self.modifiers,
             events: std::mem::take(&mut self.events), // Take events, clearing the vec
@@ -101,19 +108,31 @@ impl Gui {
         };
 
         // Run egui with UI code
-        let full_output = self.context.run(raw_input, &mut ui_fn);
+        let full_output = self.egui_ctx.run(raw_input, &mut ui_fn);
 
         // Store what egui wants to consume
         let wants_keyboard =
-            full_output.platform_output.ime.is_some() || self.context.wants_keyboard_input();
-        let wants_pointer = self.context.wants_pointer_input();
+            full_output.platform_output.ime.is_some() || self.egui_ctx.wants_keyboard_input();
+        let wants_pointer = self.egui_ctx.wants_pointer_input();
+
+        // Handle clipboard copy via commands (egui 0.33 API)
+        for command in &full_output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                if let Some(clipboard) = &mut self.clipboard {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+        }
+
+        // Get cursor icon
+        let cursor_icon = full_output.platform_output.cursor_icon;
 
         // Update pixels_per_point for next frame
         self.pixels_per_point = full_output.pixels_per_point;
 
         // Tessellate and render
         let clipped_primitives = self
-            .context
+            .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
         // Create screen rect from our stored size
@@ -133,11 +152,12 @@ impl Gui {
             command_buffer,
             wants_keyboard,
             wants_pointer,
+            cursor_icon,
         })
     }
 
-    /// Process winit event and convert to egui event
-    pub fn handle_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+    /// Process winit 0.30 event and convert to egui event
+    pub fn handle_event(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_pos = Some(egui::pos2(
@@ -160,7 +180,7 @@ impl Gui {
                         self.events.push(egui::Event::PointerButton {
                             pos,
                             button: egui_button,
-                            pressed: *state == winit::event::ElementState::Pressed,
+                            pressed: state.is_pressed(),
                             modifiers: self.modifiers,
                         });
                         true
@@ -190,53 +210,93 @@ impl Gui {
                 true
             }
 
-            WindowEvent::ReceivedCharacter(ch) => {
-                if !ch.is_control() {
-                    self.events.push(egui::Event::Text(ch.to_string()));
-                    true
-                } else {
-                    false
+            WindowEvent::Ime(ime) => {
+                match ime {
+                    winit::event::Ime::Preedit(text, cursor) => {
+                        if text.is_empty() {
+                            // Preedit cleared
+                            self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(String::new())));
+                        } else {
+                            // Preedit text with optional cursor position
+                            let cursor_range = cursor.map(|(start, end)| {
+                                egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(start),
+                                    egui::text::CCursor::new(end),
+                                )
+                            });
+                            self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
+                        }
+                        true
+                    }
+                    winit::event::Ime::Commit(text) => {
+                        self.events.push(egui::Event::Text(text.clone()));
+                        true
+                    }
+                    winit::event::Ime::Enabled => {
+                        self.events.push(egui::Event::Ime(egui::ImeEvent::Enabled));
+                        true
+                    }
+                    winit::event::Ime::Disabled => {
+                        self.events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
+                        true
+                    }
                 }
             }
 
-            WindowEvent::KeyboardInput { input, .. } => {
-                if let Some(keycode) = input.virtual_keycode {
-                    let pressed = input.state == winit::event::ElementState::Pressed;
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.modifiers = egui::Modifiers {
+                    alt: state.alt_key(),
+                    ctrl: state.control_key(),
+                    shift: state.shift_key(),
+                    mac_cmd: false,
+                    command: state.control_key(), // On Windows/Linux, Ctrl is the command key
+                };
+                true
+            }
 
-                    // Update modifiers
-                    match keycode {
-                        VirtualKeyCode::LShift | VirtualKeyCode::RShift => {
+            WindowEvent::KeyboardInput { event: key_event, .. } => {
+                let pressed = key_event.state.is_pressed();
+
+                // Update modifiers based on physical key
+                if let PhysicalKey::Code(key) = key_event.physical_key {
+                    match key {
+                        KeyCode::ShiftLeft | KeyCode::ShiftRight => {
                             self.modifiers.shift = pressed;
                         }
-                        VirtualKeyCode::LControl | VirtualKeyCode::RControl => {
+                        KeyCode::ControlLeft | KeyCode::ControlRight => {
                             self.modifiers.ctrl = pressed;
-                        }
-                        VirtualKeyCode::LAlt | VirtualKeyCode::RAlt => {
-                            self.modifiers.alt = pressed;
-                        }
-                        VirtualKeyCode::LWin | VirtualKeyCode::RWin => {
-                            self.modifiers.mac_cmd = pressed;
                             self.modifiers.command = pressed;
+                        }
+                        KeyCode::AltLeft | KeyCode::AltRight => {
+                            self.modifiers.alt = pressed;
                         }
                         _ => {}
                     }
-
-                    // Convert to egui key
-                    if let Some(key) = translate_virtual_key_code(keycode) {
-                        self.events.push(egui::Event::Key {
-                            key,
-                            physical_key: None,
-                            pressed,
-                            repeat: false,
-                            modifiers: self.modifiers,
-                        });
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
                 }
+
+                // Translate to egui key
+                if let Some(key) = translate_key(&key_event.logical_key) {
+                    self.events.push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: key_event.repeat,
+                        modifiers: self.modifiers,
+                    });
+                }
+
+                // Handle text input (replaces ReceivedCharacter in winit 0.30)
+                if pressed && !key_event.repeat {
+                    if let Key::Character(ch) = &key_event.logical_key {
+                        // Only add text if no modifier keys are pressed (except shift)
+                        if !self.modifiers.ctrl && !self.modifiers.alt && !self.modifiers.command {
+                            self.events.push(egui::Event::Text(ch.to_string()));
+                        }
+                    }
+                }
+
+                true
             }
 
             _ => false,
@@ -245,12 +305,15 @@ impl Gui {
 
     /// Update screen size (call when window is resized)
     pub fn set_screen_size(&mut self, width: f32, height: f32) {
-        self.screen_size = [width, height];
+        // Skip zero-size updates (window minimized) to prevent NaN in egui layout
+        if width > 0.0 && height > 0.0 {
+            self.screen_size = [width, height];
+        }
     }
 
     /// Get egui context for custom usage
     pub fn context(&self) -> &Context {
-        &self.context
+        &self.egui_ctx
     }
 
     /// Register an external Vulkan image view as an egui texture
@@ -275,64 +338,82 @@ impl Gui {
     }
 }
 
-fn translate_virtual_key_code(key: winit::event::VirtualKeyCode) -> Option<egui::Key> {
-    use winit::event::VirtualKeyCode;
-
-    Some(match key {
-        VirtualKeyCode::Escape => egui::Key::Escape,
-        VirtualKeyCode::Insert => egui::Key::Insert,
-        VirtualKeyCode::Home => egui::Key::Home,
-        VirtualKeyCode::Delete => egui::Key::Delete,
-        VirtualKeyCode::End => egui::Key::End,
-        VirtualKeyCode::PageDown => egui::Key::PageDown,
-        VirtualKeyCode::PageUp => egui::Key::PageUp,
-        VirtualKeyCode::Left => egui::Key::ArrowLeft,
-        VirtualKeyCode::Up => egui::Key::ArrowUp,
-        VirtualKeyCode::Right => egui::Key::ArrowRight,
-        VirtualKeyCode::Down => egui::Key::ArrowDown,
-        VirtualKeyCode::Back => egui::Key::Backspace,
-        VirtualKeyCode::Return => egui::Key::Enter,
-        VirtualKeyCode::Tab => egui::Key::Tab,
-        VirtualKeyCode::Space => egui::Key::Space,
-
-        VirtualKeyCode::A => egui::Key::A,
-        VirtualKeyCode::B => egui::Key::B,
-        VirtualKeyCode::C => egui::Key::C,
-        VirtualKeyCode::D => egui::Key::D,
-        VirtualKeyCode::E => egui::Key::E,
-        VirtualKeyCode::F => egui::Key::F,
-        VirtualKeyCode::G => egui::Key::G,
-        VirtualKeyCode::H => egui::Key::H,
-        VirtualKeyCode::I => egui::Key::I,
-        VirtualKeyCode::J => egui::Key::J,
-        VirtualKeyCode::K => egui::Key::K,
-        VirtualKeyCode::L => egui::Key::L,
-        VirtualKeyCode::M => egui::Key::M,
-        VirtualKeyCode::N => egui::Key::N,
-        VirtualKeyCode::O => egui::Key::O,
-        VirtualKeyCode::P => egui::Key::P,
-        VirtualKeyCode::Q => egui::Key::Q,
-        VirtualKeyCode::R => egui::Key::R,
-        VirtualKeyCode::S => egui::Key::S,
-        VirtualKeyCode::T => egui::Key::T,
-        VirtualKeyCode::U => egui::Key::U,
-        VirtualKeyCode::V => egui::Key::V,
-        VirtualKeyCode::W => egui::Key::W,
-        VirtualKeyCode::X => egui::Key::X,
-        VirtualKeyCode::Y => egui::Key::Y,
-        VirtualKeyCode::Z => egui::Key::Z,
-
-        VirtualKeyCode::Key0 => egui::Key::Num0,
-        VirtualKeyCode::Key1 => egui::Key::Num1,
-        VirtualKeyCode::Key2 => egui::Key::Num2,
-        VirtualKeyCode::Key3 => egui::Key::Num3,
-        VirtualKeyCode::Key4 => egui::Key::Num4,
-        VirtualKeyCode::Key5 => egui::Key::Num5,
-        VirtualKeyCode::Key6 => egui::Key::Num6,
-        VirtualKeyCode::Key7 => egui::Key::Num7,
-        VirtualKeyCode::Key8 => egui::Key::Num8,
-        VirtualKeyCode::Key9 => egui::Key::Num9,
-
-        _ => return None,
-    })
+/// Translate winit 0.30 Key to egui Key
+fn translate_key(key: &Key) -> Option<egui::Key> {
+    match key {
+        Key::Named(named) => Some(match named {
+            NamedKey::Escape => egui::Key::Escape,
+            NamedKey::Enter => egui::Key::Enter,
+            NamedKey::Tab => egui::Key::Tab,
+            NamedKey::Space => egui::Key::Space,
+            NamedKey::Backspace => egui::Key::Backspace,
+            NamedKey::Delete => egui::Key::Delete,
+            NamedKey::Insert => egui::Key::Insert,
+            NamedKey::Home => egui::Key::Home,
+            NamedKey::End => egui::Key::End,
+            NamedKey::PageUp => egui::Key::PageUp,
+            NamedKey::PageDown => egui::Key::PageDown,
+            NamedKey::ArrowLeft => egui::Key::ArrowLeft,
+            NamedKey::ArrowRight => egui::Key::ArrowRight,
+            NamedKey::ArrowUp => egui::Key::ArrowUp,
+            NamedKey::ArrowDown => egui::Key::ArrowDown,
+            NamedKey::F1 => egui::Key::F1,
+            NamedKey::F2 => egui::Key::F2,
+            NamedKey::F3 => egui::Key::F3,
+            NamedKey::F4 => egui::Key::F4,
+            NamedKey::F5 => egui::Key::F5,
+            NamedKey::F6 => egui::Key::F6,
+            NamedKey::F7 => egui::Key::F7,
+            NamedKey::F8 => egui::Key::F8,
+            NamedKey::F9 => egui::Key::F9,
+            NamedKey::F10 => egui::Key::F10,
+            NamedKey::F11 => egui::Key::F11,
+            NamedKey::F12 => egui::Key::F12,
+            _ => return None,
+        }),
+        Key::Character(ch) => {
+            // Get the first character
+            let c = ch.chars().next()?;
+            match c.to_ascii_uppercase() {
+                'A' => Some(egui::Key::A),
+                'B' => Some(egui::Key::B),
+                'C' => Some(egui::Key::C),
+                'D' => Some(egui::Key::D),
+                'E' => Some(egui::Key::E),
+                'F' => Some(egui::Key::F),
+                'G' => Some(egui::Key::G),
+                'H' => Some(egui::Key::H),
+                'I' => Some(egui::Key::I),
+                'J' => Some(egui::Key::J),
+                'K' => Some(egui::Key::K),
+                'L' => Some(egui::Key::L),
+                'M' => Some(egui::Key::M),
+                'N' => Some(egui::Key::N),
+                'O' => Some(egui::Key::O),
+                'P' => Some(egui::Key::P),
+                'Q' => Some(egui::Key::Q),
+                'R' => Some(egui::Key::R),
+                'S' => Some(egui::Key::S),
+                'T' => Some(egui::Key::T),
+                'U' => Some(egui::Key::U),
+                'V' => Some(egui::Key::V),
+                'W' => Some(egui::Key::W),
+                'X' => Some(egui::Key::X),
+                'Y' => Some(egui::Key::Y),
+                'Z' => Some(egui::Key::Z),
+                '0' => Some(egui::Key::Num0),
+                '1' => Some(egui::Key::Num1),
+                '2' => Some(egui::Key::Num2),
+                '3' => Some(egui::Key::Num3),
+                '4' => Some(egui::Key::Num4),
+                '5' => Some(egui::Key::Num5),
+                '6' => Some(egui::Key::Num6),
+                '7' => Some(egui::Key::Num7),
+                '8' => Some(egui::Key::Num8),
+                '9' => Some(egui::Key::Num9),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }

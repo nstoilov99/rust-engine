@@ -1,44 +1,4 @@
 use glam::Vec2;
-use std::sync::Arc;
-use vulkano::descriptor_set::PersistentDescriptorSet;
-use std::collections::HashMap;
-use crate::Transform2D;
-
-/// Sprite instance with UV coordinates (for animations)
-#[derive(Clone, Copy, Debug)]
-pub struct AnimatedSprite {
-    pub transform: Transform2D,
-    pub uv_rect: [f32; 4],  // [u_min, v_min, u_max, v_max]
-}
-
-pub struct SpriteBatch {
-    batches: HashMap<usize, Vec<Transform2D>>,
-    animated_batches: HashMap<usize, Vec<AnimatedSprite>>,
-    descriptor_sets: HashMap<usize, Arc<PersistentDescriptorSet>>,
-    next_id: usize,
-}
-
-impl SpriteBatch {
-    pub fn add_sprite_animated(&mut self, texture_id: usize, transform: Transform2D, uv_rect: [f32; 4]) {
-    self.animated_batches
-        .entry(texture_id)
-        .or_insert_with(Vec::new)
-        .push(AnimatedSprite { transform, uv_rect });
-    }
-
-    /// Clear all batches (call each frame)
-    pub fn clear(&mut self) {
-        self.batches.clear();
-        self.animated_batches.clear();  // Also clear animated batches
-    }
-
-    /// Iterator for animated batches
-    pub fn iter_animated_batches(&self) -> impl Iterator<Item = (Arc<PersistentDescriptorSet>, &[AnimatedSprite])> + '_ {
-        self.animated_batches.iter().filter_map(move |(id, sprites)| {
-            self.descriptor_sets.get(id).map(|desc_set| (desc_set.clone(), sprites.as_slice()))
-        })
-    }
-}
 
 /// Defines a sprite sheet with frame layout
 #[derive(Debug, Clone)]
@@ -75,9 +35,9 @@ impl SpriteSheet {
         let total_frames = frames_per_row * frames_per_col;
 
         if total_frames == 0 {
-            eprintln!("⚠️  Warning: SpriteSheet has 0 frames! Check your dimensions:");
-            eprintln!("    Texture: {}×{}", texture_width, texture_height);
-            eprintln!("    Frame: {}×{}", frame_width, frame_height);
+            eprintln!("Warning: SpriteSheet has 0 frames! Check your dimensions:");
+            eprintln!("    Texture: {}x{}", texture_width, texture_height);
+            eprintln!("    Frame: {}x{}", frame_width, frame_height);
             eprintln!("    Frames: {} per row, {} per col", frames_per_row, frames_per_col);
         }
 

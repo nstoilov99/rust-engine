@@ -94,7 +94,6 @@ pub fn prepare_light_data(world: &World, renderer: &Renderer) -> LightUniformDat
 pub fn handle_swapchain_recreation(
     renderer: &mut Renderer,
     deferred_renderer: &mut DeferredRenderer,
-    current_debug_view: rust_engine::engine::rendering::rendering_3d::DebugView,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use rust_engine::engine::core::swapchain::recreate_swapchain;
 
@@ -113,28 +112,16 @@ pub fn handle_swapchain_recreation(
             renderer.swapchain = new_swapchain;
             renderer.images = new_images.clone();
 
-            // Update camera aspect ratio
-            let extent = new_images[0].extent();
-            renderer
-                .camera_3d
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
+            // NOTE: Do NOT update camera aspect ratio here!
+            // The camera should use VIEWPORT PANEL dimensions, not window dimensions.
+            // Camera aspect ratio is updated in app.rs when viewport_size changes.
 
-            // Recreate deferred renderer with new dimensions
-            *deferred_renderer = DeferredRenderer::new(
-                renderer.device.clone(),
-                renderer.queue.clone(),
-                renderer.memory_allocator.clone(),
-                renderer.command_buffer_allocator.clone(),
-                renderer.descriptor_set_allocator.clone(),
-                extent[0],
-                extent[1],
-            )?;
-            deferred_renderer.set_debug_view(current_debug_view);
-
-            println!(
-                "Swapchain and deferred renderer recreated: {}x{}",
-                extent[0], extent[1]
-            );
+            // Clear the deferred renderer's framebuffer cache (output framebuffers changed)
+            // NOTE: We do NOT recreate the DeferredRenderer here because:
+            // - The G-Buffer should match the VIEWPORT size, not the window size
+            // - The viewport resize logic in app.rs handles G-Buffer resizing
+            // - Recreating at window size caused stretching after minimize/restore
+            deferred_renderer.clear_framebuffer_cache();
 
             renderer.recreate_swapchain = false;
             Ok(true)

@@ -1,11 +1,13 @@
-use winit::event::{ElementState, MouseButton, VirtualKeyCode};
+use winit::event::{ElementState, MouseButton};
+use winit::keyboard::KeyCode;
 use std::collections::HashSet;
 
 /// Tracks input state (keyboard and mouse)
+/// Updated for winit 0.30 - uses KeyCode instead of VirtualKeyCode
 pub struct InputManager {
-    keys_pressed: HashSet<VirtualKeyCode>,
-    keys_just_pressed: HashSet<VirtualKeyCode>,
-    keys_just_released: HashSet<VirtualKeyCode>,
+    keys_pressed: HashSet<KeyCode>,
+    keys_just_pressed: HashSet<KeyCode>,
+    keys_just_released: HashSet<KeyCode>,
 
     mouse_buttons_pressed: HashSet<MouseButton>,
     mouse_position: (f32, f32),
@@ -34,8 +36,8 @@ impl InputManager {
         self.scroll_delta = 0.0;
     }
 
-    /// Handle keyboard input (winit 0.28)
-    pub fn handle_keyboard(&mut self, keycode: Option<VirtualKeyCode>, state: ElementState) {
+    /// Handle keyboard input (winit 0.30)
+    pub fn handle_keyboard(&mut self, keycode: Option<KeyCode>, state: ElementState) {
         if let Some(keycode) = keycode {
             match state {
                 ElementState::Pressed => {
@@ -79,17 +81,17 @@ impl InputManager {
     // Query methods
 
     /// Is key currently held down?
-    pub fn is_key_pressed(&self, keycode: VirtualKeyCode) -> bool {
+    pub fn is_key_pressed(&self, keycode: KeyCode) -> bool {
         self.keys_pressed.contains(&keycode)
     }
 
     /// Was key just pressed this frame?
-    pub fn is_key_just_pressed(&self, keycode: VirtualKeyCode) -> bool {
+    pub fn is_key_just_pressed(&self, keycode: KeyCode) -> bool {
         self.keys_just_pressed.contains(&keycode)
     }
 
     /// Was key just released this frame?
-    pub fn is_key_just_released(&self, keycode: VirtualKeyCode) -> bool {
+    pub fn is_key_just_released(&self, keycode: KeyCode) -> bool {
         self.keys_just_released.contains(&keycode)
     }
 

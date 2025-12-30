@@ -16,16 +16,15 @@ path = "src/game/main.rs"
 
 [dependencies]
 # Window and event handling
-winit = "0.28"
+winit = "0.30"
 
 # Vulkano - Safe Vulkan wrapper
-vulkano = "0.34"
+vulkano = "0.35"
 
 # Shader compilation at build time
-vulkano-shaders = "0.34"
+vulkano-shaders = "0.35"
 
-# Window surface integration
-vulkano-win = "0.34"
+# vulkano-win removed - deprecated, Surface::from_window now works with winit 0.30
 
 # Math library
 glam = { version = "0.29", features = ["serde"] }
@@ -59,19 +58,20 @@ serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"                                        # Rusty Object Notation
 typetag = "0.2"                                    # Polymorphic serialization
 
-# Immediate Mode GUI (downgraded for puffin_egui compatibility)
-egui = "0.28"
-egui-winit = "0.28"
+# Immediate Mode GUI (latest version with custom Vulkano integration)
+egui = "0.33"
 
 # Physics Engine (Rapier 3D)
 rapier3d = "0.25"
 
-# Profiling (Puffin - Windows-friendly in-engine profiler with egui integration)
+# Profiling (Puffin core - custom egui integration will be implemented)
 puffin = "0.19"
-puffin_egui = "0.29"
 
 # Docking layout system for egui (editor panels)
-egui_dock = { version = "0.13", features = ["serde"] }
+egui_dock = { version = "0.18", features = ["serde"] }
+
+# Clipboard support
+arboard = "3.4"
 
 [profile.dev]
 opt-level = 1

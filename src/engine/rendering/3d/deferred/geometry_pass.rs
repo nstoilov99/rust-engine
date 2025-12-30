@@ -49,14 +49,14 @@ impl GeometryPass {
         let vs = gbuffer_vs::load(device.clone())?.entry_point("main").unwrap();
         let fs = gbuffer_fs::load(device.clone())?.entry_point("main").unwrap();
 
+        // Vertex input: Vertex3D format (must be done before stages consumes vs)
+        let vertex_input_state = Vertex3D::per_vertex()
+            .definition(&vs)?;
+
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
             PipelineShaderStageCreateInfo::new(fs),
         ];
-
-        // Vertex input: Vertex3D format
-        let vertex_input_state = Vertex3D::per_vertex()
-            .definition(&stages[0].entry_point.info().input_interface)?;
 
         // Pipeline layout (push constants + descriptor sets)
         let layout = PipelineLayout::new(

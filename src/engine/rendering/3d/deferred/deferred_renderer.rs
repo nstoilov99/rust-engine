@@ -7,6 +7,7 @@
 use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
 use super::lighting_pass::LightingPass;
+use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
@@ -16,7 +17,7 @@ use vulkano::command_buffer::{
     SubpassEndInfo,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::{Device, Queue};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::PipelineBindPoint;
@@ -35,7 +36,7 @@ pub struct DeferredRenderer {
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     debug_view: DebugView,
     // Cached resources for performance
-    gbuffer_descriptor_set: Arc<PersistentDescriptorSet>,
+    gbuffer_descriptor_set: Arc<DescriptorSet>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
 }
 
@@ -85,7 +86,7 @@ impl DeferredRenderer {
 
         // Cache G-Buffer descriptor set (created once, reused every frame)
         let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
-            descriptor_set_allocator.as_ref(),
+            descriptor_set_allocator.clone(),
             gbuffer.position.clone(),
             gbuffer.normal.clone(),
             gbuffer.albedo.clone(),
@@ -138,6 +139,42 @@ impl DeferredRenderer {
         self.framebuffer_cache.clear();
     }
 
+    /// Resize the G-Buffer (call when viewport size changes)
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
+        // Skip if dimensions are invalid
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        // Check current G-Buffer size - skip if already the right size
+        let current_extent = self.gbuffer.position.image().extent();
+        if current_extent[0] == width && current_extent[1] == height {
+            return Ok(());
+        }
+
+        // Recreate G-Buffer with new dimensions
+        self.gbuffer = GBuffer::new(
+            self.device.clone(),
+            self.allocator.clone(),
+            width,
+            height,
+        )?;
+
+        // Recreate the G-Buffer descriptor set for lighting pass
+        self.gbuffer_descriptor_set = self.lighting_pass.create_descriptor_set(
+            self.descriptor_set_allocator.clone(),
+            self.gbuffer.position.clone(),
+            self.gbuffer.normal.clone(),
+            self.gbuffer.albedo.clone(),
+            self.gbuffer.material.clone(),
+        )?;
+
+        // Clear framebuffer cache as well
+        self.framebuffer_cache.clear();
+
+        Ok(())
+    }
+
     /// Render scene using deferred pipeline
     pub fn render(
         &mut self,
@@ -148,7 +185,7 @@ impl DeferredRenderer {
         // Get cached framebuffer for this swapchain image
         let target_framebuffer = self.get_or_create_framebuffer(target_image)?;
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.as_ref(),
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -185,8 +222,8 @@ impl DeferredRenderer {
                 },
             )?
             .bind_pipeline_graphics(self.geometry_pass.pipeline())?
-            .set_viewport(0, [viewport.clone()].into_iter().collect())?
-            .set_scissor(0, [scissor.clone()].into_iter().collect())?;
+            .set_viewport(0, smallvec![viewport.clone()])?
+            .set_scissor(0, smallvec![scissor.clone()])?;
 
         // Render all meshes to G-Buffer
         for mesh in mesh_data {
@@ -197,8 +234,8 @@ impl DeferredRenderer {
                     self.geometry_pass.layout(),
                     0,
                     mesh.push_constants, // Model + view-projection matrices
-                )?
-                .draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                )?;
+            unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
         }
 
         builder.end_render_pass(SubpassEndInfo::default())?;
@@ -232,8 +269,8 @@ impl DeferredRenderer {
                 },
             )?
             .bind_pipeline_graphics(self.lighting_pass.pipeline())?
-            .set_viewport(0, [target_viewport.clone()].into_iter().collect())?
-            .set_scissor(0, [target_scissor.clone()].into_iter().collect())?
+            .set_viewport(0, smallvec![target_viewport.clone()])?
+            .set_scissor(0, smallvec![target_scissor.clone()])?
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.lighting_pass.layout(),
@@ -244,10 +281,10 @@ impl DeferredRenderer {
                 self.lighting_pass.layout(),
                 0,
                 *light_data,
-            )?
-            // Draw fullscreen triangle (no vertex buffer - generated in shader)
-            .draw(3, 1, 0, 0)?
-            .end_render_pass(SubpassEndInfo::default())?;
+            )?;
+        // Draw fullscreen triangle (no vertex buffer - generated in shader)
+        unsafe { builder.draw(3, 1, 0, 0)?; }
+        builder.end_render_pass(SubpassEndInfo::default())?;
 
         // Build command buffer
         let command_buffer = builder.build()?;
@@ -278,6 +315,11 @@ pub struct PushConstantData {
 unsafe impl bytemuck::Pod for PushConstantData {}
 unsafe impl bytemuck::Zeroable for PushConstantData {}
 
+/// Light data for deferred lighting pass (push constants).
+///
+/// Note: This layout matches the `lighting.frag` shader's push_constant block.
+/// It differs from `LightingUniformData` in pipeline_3d.rs which is used for
+/// forward rendering with additional metallic/roughness fields.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LightUniformData {

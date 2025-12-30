@@ -1,13 +1,14 @@
 //! Input handling for camera controls, debug views, and hotkeys
 //!
 //! Uses table-driven approach to reduce code duplication.
+//! Updated for winit 0.30 - uses KeyCode instead of VirtualKeyCode.
 
 use glam::Vec3;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::DeferredRenderer;
 use rust_engine::InputManager;
 use rust_engine::Renderer;
-use winit::event::VirtualKeyCode;
+use winit::keyboard::KeyCode;
 
 /// Handle camera movement with WASD + Space/Shift
 ///
@@ -20,13 +21,13 @@ pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, spe
     let up = Vec3::Y;  // Y is up in render space
 
     // Table-driven: (key, direction multiplier)
-    let movements: &[(VirtualKeyCode, Vec3)] = &[
-        (VirtualKeyCode::W, forward),
-        (VirtualKeyCode::S, -forward),
-        (VirtualKeyCode::A, -right),
-        (VirtualKeyCode::D, right),
-        (VirtualKeyCode::Space, up),      // +Y (up in Y-up)
-        (VirtualKeyCode::LShift, -up),    // -Y (down in Y-up)
+    let movements: &[(KeyCode, Vec3)] = &[
+        (KeyCode::KeyW, forward),
+        (KeyCode::KeyS, -forward),
+        (KeyCode::KeyA, -right),
+        (KeyCode::KeyD, right),
+        (KeyCode::Space, up),        // +Y (up in Y-up)
+        (KeyCode::ShiftLeft, -up),   // -Y (down in Y-up)
     ];
 
     for (key, direction) in movements {
@@ -45,16 +46,16 @@ pub fn handle_camera_rotation(renderer: &mut Renderer, input: &InputManager, loo
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
 
-    if input.is_key_pressed(VirtualKeyCode::Left) {
+    if input.is_key_pressed(KeyCode::ArrowLeft) {
         yaw_delta += look_speed;
     }
-    if input.is_key_pressed(VirtualKeyCode::Right) {
+    if input.is_key_pressed(KeyCode::ArrowRight) {
         yaw_delta -= look_speed;
     }
-    if input.is_key_pressed(VirtualKeyCode::Up) {
+    if input.is_key_pressed(KeyCode::ArrowUp) {
         pitch_delta += look_speed;
     }
-    if input.is_key_pressed(VirtualKeyCode::Down) {
+    if input.is_key_pressed(KeyCode::ArrowDown) {
         pitch_delta -= look_speed;
     }
 
@@ -83,13 +84,13 @@ pub fn handle_debug_views(
     deferred_renderer: &mut DeferredRenderer,
     current_view: &mut DebugView,
 ) {
-    let view_mappings: &[(VirtualKeyCode, DebugView, &str)] = &[
-        (VirtualKeyCode::Key0, DebugView::None, "Normal rendering"),
-        (VirtualKeyCode::Key1, DebugView::Position, "Position buffer"),
-        (VirtualKeyCode::Key2, DebugView::Normal, "Normal buffer"),
-        (VirtualKeyCode::Key3, DebugView::Albedo, "Albedo buffer"),
-        (VirtualKeyCode::Key4, DebugView::Material, "Material buffer"),
-        (VirtualKeyCode::Key5, DebugView::Depth, "Depth buffer"),
+    let view_mappings: &[(KeyCode, DebugView, &str)] = &[
+        (KeyCode::Digit0, DebugView::None, "Normal rendering"),
+        (KeyCode::Digit1, DebugView::Position, "Position buffer"),
+        (KeyCode::Digit2, DebugView::Normal, "Normal buffer"),
+        (KeyCode::Digit3, DebugView::Albedo, "Albedo buffer"),
+        (KeyCode::Digit4, DebugView::Material, "Material buffer"),
+        (KeyCode::Digit5, DebugView::Depth, "Depth buffer"),
     ];
 
     for (key, view, name) in view_mappings {

@@ -10,16 +10,16 @@ use crate::engine::scene::Transform2D;
 use crate::rendering::common::framebuffer::{create_framebuffers, create_framebuffers_3d};
 use crate::rendering::common::render_pass::create_render_pass;
 use crate::rendering::rendering_2d::pipeline_2d::{
-    camera_vs, create_camera_pipeline, create_pipeline, create_quad_indices, create_quad_vertices,
-    create_texture_descriptor_set, create_textured_pipeline, create_transform_pipeline,
-    transform_vs, TexturedVertex, Vertex,
+    camera_vs, create_camera_pipeline, create_quad_indices, create_quad_vertices,
+    create_texture_descriptor_set, transform_vs, TexturedVertex,
 };
 use crate::rendering::rendering_3d::pipeline_3d::{
-    create_lit_mesh_pipeline, lit_mesh_vs, mesh_vs, LightingUniformData, Vertex3D,
+    create_lit_mesh_pipeline, mesh_vs, LightingUniformData,
 };
 // use egui_winit_vulkano::Gui; // No compatible version for Vulkano 0.34
 use glam::Mat4;
 use hecs::World;
+use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -28,7 +28,7 @@ use vulkano::command_buffer::{
     SubpassEndInfo,
 };
 use vulkano::descriptor_set::{
-    allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
+    allocator::StandardDescriptorSetAllocator, DescriptorSet, WriteDescriptorSet,
 };
 use vulkano::device::{Device, Queue};
 use vulkano::image::view::ImageView;
@@ -44,7 +44,8 @@ use vulkano::{Validated, VulkanError};
 use winit::window::Window;
 
 pub struct Renderer {
-    _instance: Arc<Instance>,
+    #[allow(dead_code)] // Kept alive for Vulkan instance lifetime
+    instance: Arc<Instance>,
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
     pub surface: Arc<Surface>,
@@ -58,36 +59,35 @@ pub struct Renderer {
     pub framebuffers: Vec<Arc<Framebuffer>>,
     pub pipeline: Arc<GraphicsPipeline>,
     pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    pub descriptor_set: Arc<PersistentDescriptorSet>,
+    pub descriptor_set: Arc<DescriptorSet>,
     // Frame-in-flight tracking
     frames_in_flight: usize,
     current_frame: usize,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub recreate_swapchain: bool,
+    /// Tracks if we've already logged the minimized state (prevents log spam)
+    was_minimized: bool,
     pub camera: Camera2D,
     pub camera_3d: Camera3D,
     pub render_pass_3d: Arc<RenderPass>,
     pub framebuffers_3d: Vec<Arc<Framebuffer>>,
     pub pipeline_3d: Arc<GraphicsPipeline>,
     pub depth_buffer: Arc<ImageView>,
-    //Lighting
-    pub pipeline_lit: Arc<GraphicsPipeline>,
+    // Lit mesh pipeline (uses lighting uniform data)
+    pub lit_mesh_pipeline: Arc<GraphicsPipeline>,
     pub ambient_light: AmbientLight,
     pub directional_light: Option<DirectionalLight>,
     pub point_lights: Vec<PointLight>,
     pub lighting_buffer: Subbuffer<LightingUniformData>,
-    pub lighting_descriptor_set: Arc<PersistentDescriptorSet>,
+    pub lighting_descriptor_set: Arc<DescriptorSet>,
     // pub gui: Gui, // No compatible version for Vulkano 0.34
 }
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        println!("🎨 Initializing Vulkan renderer...\n");
-
         let vulkan_context = VulkanContext::new("Rust Engine")?;
 
         let surface = Surface::from_window(vulkan_context.instance.clone(), window.clone())?;
-        println!("✓ Vulkan surface created");
 
         let physical_device = select_physical_device(vulkan_context.instance.clone())?;
         let device_context = create_logical_device(physical_device, surface.clone())?;
@@ -138,7 +138,6 @@ impl Renderer {
                 render_pass_3d.clone(),
             )?;
 
-        println!("✓ 3D rendering initialized (depth buffer, perspective camera)");
 
         // Create lit mesh pipeline
         let pipeline_lit =
@@ -172,8 +171,8 @@ impl Renderer {
         )?;
 
         // Create descriptor set for lighting
-        let lighting_descriptor_set = PersistentDescriptorSet::new(
-            &descriptor_set_allocator,
+        let lighting_descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator.clone(),
             pipeline_lit.layout().set_layouts()[1].clone(), // Set 1 = lighting
             [WriteDescriptorSet::buffer(0, lighting_buffer.clone())],
             [],
@@ -232,13 +231,12 @@ impl Renderer {
         let pipeline =
             create_camera_pipeline(device_context.device.clone(), render_pass.clone(), viewport)?;
 
-        println!("✓ 2D rendering initialized (camera pipeline, sprite support)");
 
         // Load texture (for both 2D and 3D)
         let (texture_view, sampler) = load_texture(
             device_context.device.clone(),
             device_context.queue.clone(),
-            &command_buffer_allocator,
+            command_buffer_allocator.clone(),
             memory_allocator.clone(),
             "assets/idle_animation.png",
         )?;
@@ -251,13 +249,8 @@ impl Renderer {
             sampler,
         )?;
 
-        // Initialize egui (no compatible version for Vulkano 0.34)
-        // let gui = Gui::new(...);
-
-        println!("\n✅ Renderer initialized successfully!\n");
-
         Ok(Self {
-            _instance: vulkan_context.instance,
+            instance: vulkan_context.instance,
             device: device_context.device,
             queue: device_context.queue,
             surface,
@@ -276,13 +269,14 @@ impl Renderer {
             current_frame: 0,
             previous_frame_end: None,
             recreate_swapchain: false,
+            was_minimized: false,
             camera,
             camera_3d,
             render_pass_3d,
             framebuffers_3d,
             pipeline_3d,
             depth_buffer,
-            pipeline_lit,
+            lit_mesh_pipeline: pipeline_lit,
             ambient_light,
             directional_light,
             point_lights,
@@ -301,13 +295,18 @@ impl Renderer {
         // Check if window is minimized (zero size) - skip rendering
         let extent = self.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
-            println!(
-                "⏸️  Window minimized ({}x{}), skipping render",
-                extent[0], extent[1]
-            );
+            // Only log once when entering minimized state
+            if !self.was_minimized {
+                println!("Window minimized, pausing render");
+                self.was_minimized = true;
+            }
             // Window is minimized, skip rendering but keep the future alive
             self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             return Ok(());
+        } else if self.was_minimized {
+            // Window restored - log once and reset flag
+            println!("Window restored, resuming render");
+            self.was_minimized = false;
         }
 
         // Check if we need to recreate swapchain
@@ -378,7 +377,7 @@ impl Renderer {
 
         // Build command buffer to draw triangle
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -404,10 +403,10 @@ impl Renderer {
             )?
             // Bind vertex buffer
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
-            .bind_index_buffer(self.index_buffer.clone())?
-            .draw_indexed(6, 1, 0, 0, 0)?
-            // End render pass
-            .end_render_pass(SubpassEndInfo::default())?;
+            .bind_index_buffer(self.index_buffer.clone())?;
+        unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+        // End render pass
+        builder.end_render_pass(SubpassEndInfo::default())?;
 
         let command_buffer = builder.build()?;
 
@@ -427,9 +426,18 @@ impl Renderer {
             Ok(future) => {
                 self.previous_frame_end = Some(future.boxed());
             }
+            Err(Validated::Error(VulkanError::DeviceLost)) => {
+                eprintln!("FATAL: GPU device lost. This is unrecoverable.");
+                return Err("GPU device lost".into());
+            }
+            Err(Validated::Error(VulkanError::OutOfDate)) => {
+                // Swapchain out of date during present - queue recreation
+                self.recreate_swapchain = true;
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            }
             Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = None;
+                eprintln!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             }
         }
 
@@ -440,7 +448,7 @@ impl Renderer {
     pub fn render_sprite(
         &mut self,
         transform: Transform2D,
-        descriptor_set: Arc<PersistentDescriptorSet>,
+        descriptor_set: Arc<DescriptorSet>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // 1. Acquire image
         let (image_index, _, acquire_future) =
@@ -448,7 +456,7 @@ impl Renderer {
 
         // 2. Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -478,11 +486,11 @@ impl Renderer {
                 0,
                 descriptor_set.clone(),
             )?
-            .push_constants(self.pipeline.layout().clone(), 0, push_constants)? // NEW: Push constants
+            .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
-            .bind_index_buffer(self.index_buffer.clone())?
-            .draw_indexed(6, 1, 0, 0, 0)?
-            .end_render_pass(SubpassEndInfo::default())?;
+            .bind_index_buffer(self.index_buffer.clone())?;
+        unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+        builder.end_render_pass(SubpassEndInfo::default())?;
 
         // 5. Build and submit
         let command_buffer = builder.build()?;
@@ -506,7 +514,7 @@ impl Renderer {
     /// Renders multiple sprites in one frame
     pub fn render_sprites(
         &mut self,
-        sprites: &[(Transform2D, Arc<PersistentDescriptorSet>)],
+        sprites: &[(Transform2D, Arc<DescriptorSet>)],
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Wait for previous frame and cleanup
         if let Some(mut previous) = self.previous_frame_end.take() {
@@ -516,13 +524,17 @@ impl Renderer {
         // Check if window is minimized (zero size) - skip rendering
         let extent = self.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
-            println!(
-                "⏸️  Window minimized ({}x{}), skipping render",
-                extent[0], extent[1]
-            );
+            // Only log once when entering minimized state
+            if !self.was_minimized {
+                println!("Window minimized, pausing render");
+                self.was_minimized = true;
+            }
             // Window is minimized, skip rendering but keep the future alive
             self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
             return Ok(());
+        } else if self.was_minimized {
+            println!("Window restored, resuming render");
+            self.was_minimized = false;
         }
 
         // Check if we need to recreate swapchain
@@ -572,7 +584,7 @@ impl Renderer {
 
         // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -592,13 +604,11 @@ impl Renderer {
         let extent = self.swapchain.image_extent();
         builder.set_viewport(
             0,
-            [Viewport {
+            smallvec![Viewport {
                 offset: [0.0, 0.0],
                 extent: [extent[0] as f32, extent[1] as f32],
                 depth_range: 0.0..=1.0,
-            }]
-            .into_iter()
-            .collect(),
+            }],
         )?;
 
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
@@ -624,8 +634,8 @@ impl Renderer {
                     0,
                     texture_descriptor.clone(),
                 )?
-                .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
-                .draw_indexed(6, 1, 0, 0, 0)?;
+                .push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
+            unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
         }
 
         // End render pass
@@ -703,7 +713,7 @@ impl Renderer {
 
         // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -724,13 +734,11 @@ impl Renderer {
         let extent = self.swapchain.image_extent();
         builder.set_viewport(
             0,
-            [Viewport {
+            smallvec![Viewport {
                 offset: [0.0, 0.0],
                 extent: [extent[0] as f32, extent[1] as f32],
                 depth_range: 0.0..=1.0,
-            }]
-            .into_iter()
-            .collect(),
+            }],
         )?;
 
         builder.bind_vertex_buffers(0, self.vertex_buffer.clone())?;
@@ -759,9 +767,8 @@ impl Renderer {
                     uv_rect: [0.0, 0.0, 0.0, 0.0].into(),
                 };
 
-                builder
-                    .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
-                    .draw_indexed(6, 1, 0, 0, 0)?;
+                builder.push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
+                unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
             }
         }
 
@@ -783,206 +790,10 @@ impl Renderer {
                     uv_rect: sprite.uv_rect, // Use sprite sheet frame UVs
                 };
 
-                builder
-                    .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
-                    .draw_indexed(6, 1, 0, 0, 0)?;
+                builder.push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
+                unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
             }
         }
-
-        // End render pass
-        builder.end_render_pass(SubpassEndInfo::default())?;
-
-        let command_buffer = builder.build()?;
-
-        // Execute and present
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = None;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Renders a single 3D mesh
-    pub fn render_mesh(
-        &mut self,
-        vertices: &[Vertex3D],
-        indices: &[u32],
-        model_matrix: Mat4,
-        texture_descriptor: Arc<PersistentDescriptorSet>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame
-        if let Some(mut previous) = self.previous_frame_end.take() {
-            previous.cleanup_finished();
-        }
-
-        // Handle swapchain recreation
-        if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-
-            // Handle minimized window
-            if new_images.is_empty() {
-                self.recreate_swapchain = false;
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-                return Ok(());
-            }
-
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-
-            // Recreate 2D framebuffers
-            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
-
-            // Recreate depth buffer for new size
-            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
-                self.device.clone(),
-                self.memory_allocator.clone(),
-                self.images[0].extent()[0],
-                self.images[0].extent()[1],
-            )?;
-
-            // Recreate 3D framebuffers
-            self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
-                &self.images,
-                self.render_pass_3d.clone(),
-                self.depth_buffer.clone(),
-            )?;
-
-            // Update both camera viewports
-            let extent = self.images[0].extent();
-            self.camera
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
-            self.camera_3d
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
-
-            self.recreate_swapchain = false;
-        }
-
-        // Acquire next image
-        let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-        if suboptimal {
-            self.recreate_swapchain = true;
-        }
-
-        // Create vertex and index buffers
-        let vertex_buffer = Buffer::from_iter(
-            self.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices.iter().copied(),
-        )?;
-
-        let index_buffer = Buffer::from_iter(
-            self.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            indices.iter().copied(),
-        )?;
-
-        // Build command buffer
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )?;
-
-        // Begin render pass with depth clear
-        builder.begin_render_pass(
-            RenderPassBeginInfo {
-                clear_values: vec![
-                    Some([0.1, 0.1, 0.15, 1.0].into()), // Clear color (dark blue)
-                    Some(1.0.into()),                   // Clear depth to 1.0 (far plane)
-                ],
-                ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers_3d[image_index as usize].clone(),
-                )
-            },
-            SubpassBeginInfo::default(),
-        )?;
-
-        // Bind pipeline
-        builder.bind_pipeline_graphics(self.pipeline_3d.clone())?;
-
-        // Set viewport
-        let extent = self.swapchain.image_extent();
-        builder.set_viewport(
-            0,
-            [Viewport {
-                offset: [0.0, 0.0],
-                extent: [extent[0] as f32, extent[1] as f32],
-                depth_range: 0.0..=1.0,
-            }]
-            .into_iter()
-            .collect(),
-        )?;
-
-        // Bind texture
-        builder.bind_descriptor_sets(
-            PipelineBindPoint::Graphics,
-            self.pipeline_3d.layout().clone(),
-            0,
-            texture_descriptor,
-        )?;
-
-        // Bind buffers
-        builder
-            .bind_vertex_buffers(0, vertex_buffer)?
-            .bind_index_buffer(index_buffer)?;
-
-        // Create push constants
-        let view_projection = self.camera_3d.view_projection_matrix();
-        let push_constants = mesh_vs::PushConstants {
-            model: model_matrix.to_cols_array_2d(),
-            view_projection: view_projection.to_cols_array_2d(),
-        };
-
-        // Draw
-        builder
-            .push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?
-            .draw_indexed(indices.len() as u32, 1, 0, 0, 0)?;
 
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;
@@ -1019,7 +830,7 @@ impl Renderer {
         &mut self,
         mesh: &GpuMesh,
         model_matrix: Mat4,
-        texture_descriptor: Arc<PersistentDescriptorSet>,
+        texture_descriptor: Arc<DescriptorSet>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Wait for previous frame
         if let Some(mut previous) = self.previous_frame_end.take() {
@@ -1081,7 +892,7 @@ impl Renderer {
 
         // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -1103,13 +914,11 @@ impl Renderer {
         let extent = self.swapchain.image_extent();
         builder.set_viewport(
             0,
-            [Viewport {
+            smallvec![Viewport {
                 offset: [0.0, 0.0],
                 extent: [extent[0] as f32, extent[1] as f32],
                 depth_range: 0.0..=1.0,
-            }]
-            .into_iter()
-            .collect(),
+            }],
         )?;
 
         // Bind texture
@@ -1133,9 +942,8 @@ impl Renderer {
         };
 
         // Draw
-        builder
-            .push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?
-            .draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+        builder.push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?;
+        unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
 
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;
@@ -1167,242 +975,12 @@ impl Renderer {
         Ok(())
     }
 
-    /// Renders a mesh with lighting
-    pub fn render_mesh_lit(
-        &mut self,
-        vertices: &[Vertex3D],
-        indices: &[u32],
-        model_matrix: Mat4,
-        texture_descriptor: Arc<PersistentDescriptorSet>,
-        metallic: f32,
-        roughness: f32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame
-        if let Some(mut previous) = self.previous_frame_end.take() {
-            previous.cleanup_finished();
-        }
-
-        // Handle swapchain recreation
-        if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-
-            if new_images.is_empty() {
-                self.recreate_swapchain = false;
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-                return Ok(());
-            }
-
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-
-            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
-                self.device.clone(),
-                self.memory_allocator.clone(),
-                self.images[0].extent()[0],
-                self.images[0].extent()[1],
-            )?;
-
-            self.framebuffers_3d = create_framebuffers_3d(
-                &self.images,
-                self.render_pass_3d.clone(),
-                self.depth_buffer.clone(),
-            )?;
-
-            self.recreate_swapchain = false;
-        }
-
-        // Update lighting uniform buffer
-        let camera_pos = self.camera_3d.position;
-        let lighting_data = LightingUniformData {
-            camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
-            _padding1: 0.0,
-
-            ambient_color: [
-                self.ambient_light.color.x,
-                self.ambient_light.color.y,
-                self.ambient_light.color.z,
-            ],
-            ambient_intensity: self.ambient_light.intensity,
-
-            directional_light_dir: if let Some(ref light) = self.directional_light {
-                [light.direction.x, light.direction.y, light.direction.z]
-            } else {
-                [0.0, -1.0, 0.0]
-            },
-            _padding2: 0.0,
-
-            directional_light_color: if let Some(ref light) = self.directional_light {
-                [light.color.x, light.color.y, light.color.z]
-            } else {
-                [0.0, 0.0, 0.0]
-            },
-            directional_light_intensity: if let Some(ref light) = self.directional_light {
-                light.intensity
-            } else {
-                0.0
-            },
-
-            metallic,
-            roughness,
-            _padding3: 0.0,
-            _padding4: 0.0,
-        };
-
-        // Write to buffer
-        *self.lighting_buffer.write()? = lighting_data;
-
-        // Acquire next image
-        let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-        if suboptimal {
-            self.recreate_swapchain = true;
-        }
-
-        // Create vertex and index buffers
-        let vertex_buffer = Buffer::from_iter(
-            self.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices.iter().copied(),
-        )?;
-
-        let index_buffer = Buffer::from_iter(
-            self.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            indices.iter().copied(),
-        )?;
-
-        // Build command buffer
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )?;
-
-        // Begin render pass
-        builder.begin_render_pass(
-            RenderPassBeginInfo {
-                clear_values: vec![Some([0.1, 0.1, 0.15, 1.0].into()), Some(1.0.into())],
-                ..RenderPassBeginInfo::framebuffer(
-                    self.framebuffers_3d[image_index as usize].clone(),
-                )
-            },
-            SubpassBeginInfo::default(),
-        )?;
-
-        // Bind lit pipeline
-        builder.bind_pipeline_graphics(self.pipeline_lit.clone())?;
-
-        // Set viewport
-        let extent = self.swapchain.image_extent();
-        builder.set_viewport(
-            0,
-            [Viewport {
-                offset: [0.0, 0.0],
-                extent: [extent[0] as f32, extent[1] as f32],
-                depth_range: 0.0..=1.0,
-            }]
-            .into_iter()
-            .collect(),
-        )?;
-
-        // Bind descriptor sets
-        // Set 0: Texture
-        builder.bind_descriptor_sets(
-            PipelineBindPoint::Graphics,
-            self.pipeline_lit.layout().clone(),
-            0,
-            texture_descriptor,
-        )?;
-
-        // Set 1: Lighting
-        builder.bind_descriptor_sets(
-            PipelineBindPoint::Graphics,
-            self.pipeline_lit.layout().clone(),
-            1,
-            self.lighting_descriptor_set.clone(),
-        )?;
-
-        // Bind buffers
-        builder
-            .bind_vertex_buffers(0, vertex_buffer)?
-            .bind_index_buffer(index_buffer)?;
-
-        // Create push constants
-        let view_projection = self.camera_3d.view_projection_matrix();
-        let push_constants = lit_mesh_vs::PushConstants {
-            model: model_matrix.to_cols_array_2d(),
-            view_projection: view_projection.to_cols_array_2d(),
-        };
-
-        // Draw
-        builder
-            .push_constants(self.pipeline_lit.layout().clone(), 0, push_constants)?
-            .draw_indexed(indices.len() as u32, 1, 0, 0, 0)?;
-
-        // End render pass
-        builder.end_render_pass(SubpassEndInfo::default())?;
-
-        let command_buffer = builder.build()?;
-
-        // Execute and present
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-            }
-        }
-
-        Ok(())
-    }
-
     /// Render all mesh entities from ECS world
     pub fn render_ecs_meshes(
         &mut self,
         world: &World,
         mesh_manager: &crate::MeshManager,
-        texture_descriptor: Arc<PersistentDescriptorSet>,
+        texture_descriptor: Arc<DescriptorSet>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Query all entities with Transform + MeshRenderer
         for (_entity, (transform, mesh_renderer)) in

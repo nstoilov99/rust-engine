@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::DescriptorSet;
 use crate::engine::scene::Transform2D;
 
 /// Sprite instance with UV coordinates (for animations)
@@ -17,7 +17,7 @@ pub struct SpriteBatch {
     // Map from texture ID to list of transforms
     batches: HashMap<usize, Vec<Transform2D>>,
     animated_batches: HashMap<usize, Vec<AnimatedSprite>>,  // NEW: For animated sprites
-    descriptor_sets: HashMap<usize, Arc<PersistentDescriptorSet>>,
+    descriptor_sets: HashMap<usize, Arc<DescriptorSet>>,
     next_id: usize,
 }
 
@@ -52,7 +52,7 @@ impl SpriteBatch {
     }
 
     /// Get batches for rendering (returns descriptor set + transforms)
-    pub fn iter_batches(&self) -> impl Iterator<Item = (Arc<PersistentDescriptorSet>, &[Transform2D])> + '_ {
+    pub fn iter_batches(&self) -> impl Iterator<Item = (Arc<DescriptorSet>, &[Transform2D])> + '_ {
         self.batches.iter().filter_map(move |(id, transforms)| {
             self.descriptor_sets.get(id).map(|desc_set| (desc_set.clone(), transforms.as_slice()))
         })
@@ -69,7 +69,7 @@ impl SpriteBatch {
     }
     
     /// Register a texture and get its ID
-    pub fn register_texture(&mut self, descriptor_set: Arc<PersistentDescriptorSet>) -> usize {
+    pub fn register_texture(&mut self, descriptor_set: Arc<DescriptorSet>) -> usize {
         let id = self.next_id;
         self.descriptor_sets.insert(id, descriptor_set);
         self.next_id += 1;
@@ -85,7 +85,7 @@ impl SpriteBatch {
     }
 
     /// Iterator for animated batches
-    pub fn iter_animated_batches(&self) -> impl Iterator<Item = (Arc<PersistentDescriptorSet>, &[AnimatedSprite])> + '_ {
+    pub fn iter_animated_batches(&self) -> impl Iterator<Item = (Arc<DescriptorSet>, &[AnimatedSprite])> + '_ {
         self.animated_batches.iter().filter_map(move |(id, sprites)| {
             self.descriptor_sets.get(id).map(|desc_set| (desc_set.clone(), sprites.as_slice()))
         })

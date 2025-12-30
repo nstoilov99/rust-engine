@@ -284,7 +284,7 @@ impl HierarchyPanel {
 
             // Entity icon with color
             let (icon, icon_color) = self.get_entity_icon_with_color(world, entity);
-            ui.label(RichText::new(icon).color(icon_color).small());
+            ui.label(RichText::new(icon).color(icon_color));
 
             // Entity name (or rename field)
             if is_renaming {
@@ -419,23 +419,23 @@ impl HierarchyPanel {
 
     /// Get icon and color for entity based on its components
     fn get_entity_icon_with_color(&self, world: &World, entity: Entity) -> (&'static str, Color32) {
-        // Check for specific component types
+        // Check for specific component types (using Unicode symbols for cleaner look)
         if world.get::<&Camera>(entity).is_ok() {
-            return ("[CAM]", Color32::from_rgb(100, 180, 255)); // Blue
+            return ("\u{1F3A5}", Color32::from_rgb(100, 180, 255)); // 🎥 Camera - Blue
         }
         if world.get::<&DirectionalLight>(entity).is_ok() {
-            return ("[SUN]", Color32::from_rgb(255, 220, 100)); // Yellow
+            return ("\u{2600}", Color32::from_rgb(255, 220, 100)); // ☀ Sun - Yellow
         }
         if world.get::<&PointLight>(entity).is_ok() {
-            return ("[LIT]", Color32::from_rgb(255, 180, 100)); // Orange
+            return ("\u{1F4A1}", Color32::from_rgb(255, 180, 100)); // 💡 Light bulb - Orange
         }
         if world.get::<&MeshRenderer>(entity).is_ok() {
-            return ("[MSH]", Color32::from_rgb(150, 150, 255)); // Purple
+            return ("\u{25A6}", Color32::from_rgb(150, 150, 255)); // ▦ Mesh grid - Purple
         }
         if world.get::<&Children>(entity).is_ok() {
-            return ("[GRP]", Color32::from_rgb(180, 180, 180)); // Gray
+            return ("\u{1F4C1}", Color32::from_rgb(180, 180, 180)); // 📁 Folder - Gray
         }
-        ("[ENT]", Color32::from_rgb(140, 140, 140)) // Default - dim gray
+        ("\u{25CB}", Color32::from_rgb(140, 140, 140)) // ○ Circle - Default dim gray
     }
 
     /// Get icon for entity based on its components (legacy, for ghost)
@@ -512,24 +512,24 @@ impl HierarchyPanel {
             set_parent(world, child, entity);
             // Expand parent to show new child
             self.expanded.insert(entity.id() as u64);
-            ui.close_menu();
+            ui.close();
         }
 
         if ui.button("Rename").clicked() {
             self.start_rename(world, entity);
-            ui.close_menu();
+            ui.close();
         }
 
         if ui.button("Duplicate").clicked() {
             self.duplicate_entity(world, entity);
-            ui.close_menu();
+            ui.close();
         }
 
         ui.separator();
 
         if ui.button("Delete").clicked() {
             self.delete_entity(world, selection, entity);
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -644,6 +644,7 @@ impl HierarchyPanel {
                                 response.rect,
                                 2.0,
                                 Stroke::new(2.0, Color32::from_rgb(100, 200, 100)),
+                                egui::epaint::StrokeKind::Outside,
                             );
                             // Draw a small "+" icon to indicate "add as child"
                             let icon_pos = pos2(response.rect.right() - 16.0, response.rect.center().y);
@@ -662,6 +663,7 @@ impl HierarchyPanel {
                         response.rect,
                         2.0,
                         Stroke::new(2.0, Color32::from_rgb(200, 60, 60)),
+                        egui::epaint::StrokeKind::Outside,
                     );
                 }
             }
@@ -861,6 +863,7 @@ impl HierarchyPanel {
                     bg_rect,
                     4.0,
                     egui::Stroke::new(1.5, egui::Color32::YELLOW),
+                    egui::epaint::StrokeKind::Outside,
                 );
 
                 // Ghost text

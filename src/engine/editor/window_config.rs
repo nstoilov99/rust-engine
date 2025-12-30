@@ -65,6 +65,21 @@ impl WindowConfig {
 
     /// Load config from the default file path, or return default config
     pub fn load_or_default() -> Self {
-        Self::load(&Self::default_path()).unwrap_or_default()
+        Self::load(&Self::default_path())
+            .filter(|config| config.is_valid())
+            .unwrap_or_default()
+    }
+
+    /// Check if the config has valid values
+    pub fn is_valid(&self) -> bool {
+        // Window must have non-zero dimensions
+        if self.width == 0 || self.height == 0 {
+            return false;
+        }
+        // Window position must be reasonable (not minimized at -32000 etc)
+        if self.x < -10000 || self.y < -10000 {
+            return false;
+        }
+        true
     }
 }

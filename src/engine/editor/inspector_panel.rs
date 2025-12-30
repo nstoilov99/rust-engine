@@ -12,6 +12,11 @@ use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::collections::{HashMap, HashSet};
 
+/// Axis colors (industry standard: X=red, Y=green, Z=blue)
+const AXIS_COLOR_X: Color32 = Color32::from_rgb(220, 80, 80);   // Red
+const AXIS_COLOR_Y: Color32 = Color32::from_rgb(80, 180, 80);   // Green
+const AXIS_COLOR_Z: Color32 = Color32::from_rgb(80, 120, 220);  // Blue
+
 /// Component categories for visual grouping
 #[derive(Clone, Copy)]
 enum ComponentCategory {
@@ -326,21 +331,12 @@ impl InspectorPanel {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.add(
-                            DragValue::new(&mut transform.position.x)
-                                .prefix("X: ")
-                                .speed(0.1),
-                        );
-                        ui.add(
-                            DragValue::new(&mut transform.position.y)
-                                .prefix("Y: ")
-                                .speed(0.1),
-                        );
-                        ui.add(
-                            DragValue::new(&mut transform.position.z)
-                                .prefix("Z: ")
-                                .speed(0.1),
-                        );
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        ui.add(DragValue::new(&mut transform.position.x).speed(0.1));
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        ui.add(DragValue::new(&mut transform.position.y).speed(0.1));
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        ui.add(DragValue::new(&mut transform.position.z).speed(0.1));
                     });
 
                     // Rotation (as Euler angles in degrees)
@@ -359,24 +355,12 @@ impl InspectorPanel {
                     });
 
                     ui.horizontal(|ui| {
-                        let response_x = ui.add(
-                            DragValue::new(&mut euler[0])
-                                .prefix("X: ")
-                                .speed(1.0)
-                                .suffix("°"),
-                        );
-                        let response_y = ui.add(
-                            DragValue::new(&mut euler[1])
-                                .prefix("Y: ")
-                                .speed(1.0)
-                                .suffix("°"),
-                        );
-                        let response_z = ui.add(
-                            DragValue::new(&mut euler[2])
-                                .prefix("Z: ")
-                                .speed(1.0)
-                                .suffix("°"),
-                        );
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        let response_x = ui.add(DragValue::new(&mut euler[0]).speed(1.0).suffix("°"));
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        let response_y = ui.add(DragValue::new(&mut euler[1]).speed(1.0).suffix("°"));
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        let response_z = ui.add(DragValue::new(&mut euler[2]).speed(1.0).suffix("°"));
 
                         if response_x.changed() || response_y.changed() || response_z.changed() {
                             transform.rotation = euler_degrees_to_quaternion(euler);
@@ -391,24 +375,12 @@ impl InspectorPanel {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.add(
-                            DragValue::new(&mut transform.scale.x)
-                                .prefix("X: ")
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
-                        ui.add(
-                            DragValue::new(&mut transform.scale.y)
-                                .prefix("Y: ")
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
-                        ui.add(
-                            DragValue::new(&mut transform.scale.z)
-                                .prefix("Z: ")
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        ui.add(DragValue::new(&mut transform.scale.x).speed(0.01).range(0.001..=1000.0));
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        ui.add(DragValue::new(&mut transform.scale.y).speed(0.01).range(0.001..=1000.0));
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        ui.add(DragValue::new(&mut transform.scale.z).speed(0.01).range(0.001..=1000.0));
                     });
                 });
 
@@ -441,7 +413,7 @@ impl InspectorPanel {
                         ui.add(
                             egui::Slider::new(&mut camera.fov, 30.0..=120.0)
                                 .suffix("°")
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Field of view angle. Wider = more visible area");
                     });
@@ -474,7 +446,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemoveCamera);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -519,7 +491,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemoveMeshRenderer);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -575,7 +547,7 @@ impl InspectorPanel {
                         ui.label("Intensity:");
                         ui.add(
                             egui::Slider::new(&mut light.intensity, 0.0..=10.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Light brightness multiplier");
                     });
@@ -585,7 +557,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemoveDirectionalLight);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -627,7 +599,7 @@ impl InspectorPanel {
                         ui.label("Intensity:");
                         ui.add(
                             egui::Slider::new(&mut light.intensity, 0.0..=100.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Light brightness multiplier");
                     });
@@ -648,7 +620,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemovePointLight);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -678,7 +650,7 @@ impl InspectorPanel {
                         ui.label("Type:").on_hover_text(
                             "Dynamic: Affected by forces\nKinematic: Moved by code only\nStatic: Never moves",
                         );
-                        egui::ComboBox::from_id_source("rb_type")
+                        egui::ComboBox::from_id_salt("rb_type")
                             .selected_text(format!("{:?}", rb.body_type))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -717,7 +689,7 @@ impl InspectorPanel {
                         ui.label("Linear Damping:");
                         ui.add(
                             egui::Slider::new(&mut rb.linear_damping, 0.0..=10.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Air resistance. Higher values slow movement faster");
                     });
@@ -726,7 +698,7 @@ impl InspectorPanel {
                         ui.label("Angular Damping:");
                         ui.add(
                             egui::Slider::new(&mut rb.angular_damping, 0.0..=10.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Rotational resistance. Higher values stop spinning faster");
                     });
@@ -739,7 +711,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemoveRigidBody);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -788,7 +760,7 @@ impl InspectorPanel {
                         ui.label("Friction:");
                         ui.add(
                             egui::Slider::new(&mut collider.friction, 0.0..=2.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Surface grip. 0 = ice, 1 = rubber, 2 = very sticky");
                     });
@@ -798,7 +770,7 @@ impl InspectorPanel {
                         ui.label("Restitution:");
                         ui.add(
                             egui::Slider::new(&mut collider.restitution, 0.0..=1.0)
-                                .clamp_to_range(true),
+                                .clamping(egui::SliderClamping::Always),
                         )
                         .on_hover_text("Bounciness. 0 = no bounce, 1 = perfect bounce");
                     });
@@ -811,7 +783,7 @@ impl InspectorPanel {
             header.header_response.context_menu(|ui| {
                 if ui.button("Remove Component").clicked() {
                     action = Some(ComponentAction::RemoveCollider);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use vulkano::image::view::ImageView;
-use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::DescriptorSet;
 
 /// PBR material with all texture maps
 pub struct PbrMaterial {
@@ -8,7 +8,7 @@ pub struct PbrMaterial {
     pub normal: Arc<ImageView>,
     pub metallic_roughness: Arc<ImageView>,
     pub ao: Arc<ImageView>,
-    pub descriptor_set: Arc<PersistentDescriptorSet>,
+    pub descriptor_set: Arc<DescriptorSet>,
 }
 
 impl PbrMaterial {
@@ -17,7 +17,7 @@ impl PbrMaterial {
         normal: Arc<ImageView>,
         metallic_roughness: Arc<ImageView>,
         ao: Arc<ImageView>,
-        descriptor_set: Arc<PersistentDescriptorSet>,
+        descriptor_set: Arc<DescriptorSet>,
     ) -> Self {
         Self {
             albedo,

@@ -20,10 +20,11 @@ use rust_engine::engine::scene::save_scene;
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use vulkano::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::sync::GpuFuture;
-use winit::event::{MouseScrollDelta, VirtualKeyCode, WindowEvent};
-use winit::event_loop::ControlFlow;
+use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 /// Main application state
@@ -42,7 +43,7 @@ pub struct App {
     pub current_debug_view: DebugView,
     pub camera_distance: f32,
     pub mesh_indices: Vec<usize>,
-    pub descriptor_set: Arc<PersistentDescriptorSet>,
+    pub descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub show_profiler: bool,
     // Editor state
@@ -57,18 +58,19 @@ pub struct App {
     pub viewport_texture: ViewportTexture,
     pub viewport_texture_id: Option<egui::TextureId>,
     pub viewport_size: (u32, u32),
+    /// Flag to force viewport/G-Buffer sync on next frame (after swapchain recreation)
+    pub pending_viewport_sync: bool,
 }
 
 impl App {
     /// Create and initialize the application
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        println!("Rust Game Engine - Starting up...\n");
+        println!("Rust Game Engine - Starting up...");
 
         // Initialize renderer
         let mut renderer = Renderer::new(window.clone())?;
 
         // Setup GUI
-        println!("Setting up GUI...");
         let swapchain_format = renderer.images[0].format();
         let gui = Gui::new(
             renderer.device.clone(),
@@ -76,7 +78,6 @@ impl App {
             swapchain_format,
             &window,
         )?;
-        println!("GUI initialized");
 
         // Setup asset system
         let (asset_manager, hot_reload, reload_rx) = game_setup::setup_asset_system(&renderer)?;
@@ -86,7 +87,6 @@ impl App {
             game_setup::load_assets(&asset_manager)?;
 
         // Setup ECS World
-        println!("Setting up ECS World...");
         let mut world = World::new();
 
         // Load or create scene
@@ -113,7 +113,6 @@ impl App {
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
         // Create deferred renderer
-        println!("Creating deferred renderer...");
         let deferred_renderer = DeferredRenderer::new(
             renderer.device.clone(),
             renderer.queue.clone(),
@@ -123,17 +122,14 @@ impl App {
             800,
             600,
         )?;
-        println!("Deferred renderer ready!");
 
         // Create viewport texture for rendering scene to egui panel
-        println!("Creating viewport texture...");
         let viewport_texture = ViewportTexture::new(
             renderer.device.clone(),
             renderer.memory_allocator.clone(),
             800,
             600,
         )?;
-        println!("Viewport texture ready!");
 
         // Frame synchronization
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
@@ -170,6 +166,7 @@ impl App {
             viewport_texture,
             viewport_texture_id: None, // Registered on first render
             viewport_size: (800, 600),
+            pending_viewport_sync: false,
         })
     }
 
@@ -179,7 +176,7 @@ impl App {
     }
 
     /// Save the layout and window state on exit (silently fails on error)
-    fn save_layout_on_exit(&self) {
+    pub fn save_layout_on_exit(&self) {
         // Save dock layout
         if let Err(e) = self.dock_state.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
@@ -257,36 +254,34 @@ impl App {
         }
     }
 
-    /// Handle window events
-    pub fn handle_window_event(&mut self, event: &WindowEvent, control_flow: &mut ControlFlow) {
+    /// Handle window events (winit 0.30 API)
+    pub fn handle_window_event(&mut self, event: &WindowEvent, _event_loop: &ActiveEventLoop) {
         self.gui.handle_event(event);
 
         match event {
-            WindowEvent::CloseRequested => {
-                self.save_layout_on_exit();
-                println!("Closing...");
-                *control_flow = ControlFlow::Exit;
-            }
+            // CloseRequested is handled in main.rs
             WindowEvent::Resized(new_size) => {
-                println!("Window resized to {}x{}", new_size.width, new_size.height);
                 self.renderer.recreate_swapchain = true;
                 self.gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
-            WindowEvent::KeyboardInput {
-                input: keyboard_input,
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event: key_event, .. } => {
+                // Extract physical key code
+                let keycode = match key_event.physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    _ => None,
+                };
+
                 // Handle F12 immediately (before begin_frame clears keys_just_pressed)
-                if keyboard_input.state == winit::event::ElementState::Pressed {
-                    if keyboard_input.virtual_keycode == Some(VirtualKeyCode::F12) {
+                if key_event.state.is_pressed() {
+                    if keycode == Some(KeyCode::F12) {
                         self.show_profiler = !self.show_profiler;
                         println!("Profiler: {}", if self.show_profiler { "ON" } else { "OFF" });
                     }
 
                     // Handle Ctrl+S immediately for scene save
-                    if keyboard_input.virtual_keycode == Some(VirtualKeyCode::S)
-                        && self.input_manager.is_key_pressed(VirtualKeyCode::LControl)
+                    if keycode == Some(KeyCode::KeyS)
+                        && self.input_manager.is_key_pressed(KeyCode::ControlLeft)
                     {
                         match save_scene(
                             &self.world,
@@ -299,8 +294,7 @@ impl App {
                         }
                     }
                 }
-                self.input_manager
-                    .handle_keyboard(keyboard_input.virtual_keycode, keyboard_input.state);
+                self.input_manager.handle_keyboard(keycode, key_event.state);
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 self.input_manager.handle_mouse_button(*button, *state);
@@ -330,7 +324,6 @@ impl App {
                 .gui
                 .register_native_texture(self.viewport_texture.image_view());
             self.viewport_texture_id = Some(texture_id);
-            println!("Viewport texture registered with egui");
         }
 
         // Prepare render data
@@ -343,19 +336,47 @@ impl App {
             prev_future.cleanup_finished();
         }
 
-        // Handle swapchain recreation
+        // FIRST: Apply pending viewport sync from PREVIOUS frame's swapchain recreation
+        // This runs BEFORE swapchain recreation check, so the flag set this frame
+        // won't be processed until NEXT frame (when viewport_size is fresh from GUI)
+        if self.pending_viewport_sync {
+            let (vp_width, vp_height) = self.viewport_size;
+            if vp_width > 0 && vp_height > 0 {
+                // Force viewport texture to match panel size
+                if let Ok(true) = self.viewport_texture.resize(vp_width, vp_height) {
+                    if let Some(texture_id) = self.viewport_texture_id {
+                        self.gui
+                            .update_native_texture(texture_id, self.viewport_texture.image_view());
+                    }
+                    self.renderer
+                        .camera_3d
+                        .set_viewport_size(vp_width as f32, vp_height as f32);
+                }
+                // Force G-Buffer to match panel size
+                if let Err(e) = self.deferred_renderer.resize(vp_width, vp_height) {
+                    eprintln!("Failed to sync deferred renderer after swapchain recreation: {}", e);
+                }
+            }
+            self.pending_viewport_sync = false;
+        }
+
+        // THEN: Handle swapchain recreation (may set flag for NEXT frame)
         if self.renderer.recreate_swapchain {
             match render_loop::handle_swapchain_recreation(
                 &mut self.renderer,
                 &mut self.deferred_renderer,
-                self.current_debug_view,
             ) {
                 Ok(false) => {
                     // Window minimized
                     self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
                     return Ok(());
                 }
-                Ok(true) => {}
+                Ok(true) => {
+                    // Swapchain recreated successfully - schedule viewport/G-Buffer sync for next frame
+                    // The flag will be processed at the START of the next frame (above)
+                    // By then, viewport_size will be fresh from THIS frame's GUI render
+                    self.pending_viewport_sync = true;
+                }
                 Err(e) => {
                     self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
                     return Err(e);
@@ -373,7 +394,7 @@ impl App {
                 }
             };
 
-        // Handle viewport resize if needed
+        // Handle viewport resize if needed (normal case when panel is resized)
         let (vp_width, vp_height) = self.viewport_size;
         if vp_width != self.viewport_texture.width() || vp_height != self.viewport_texture.height() {
             if vp_width > 0 && vp_height > 0 {
@@ -386,8 +407,10 @@ impl App {
                         }
                         // Update camera aspect ratio to match new viewport dimensions
                         self.renderer.camera_3d.set_viewport_size(vp_width as f32, vp_height as f32);
-                        // Clear deferred renderer framebuffer cache since we're using a new target
-                        self.deferred_renderer.clear_framebuffer_cache();
+                        // Resize deferred renderer G-Buffer to match new viewport dimensions
+                        if let Err(e) = self.deferred_renderer.resize(vp_width, vp_height) {
+                            eprintln!("Failed to resize deferred renderer: {}", e);
+                        }
                     }
                 }
             }
@@ -448,7 +471,7 @@ impl App {
             };
 
             // Create tab viewer
-            let mut tab_viewer = EditorTabViewer { ctx: editor_ctx };
+            let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
 
             // Render dock area with all panels
             DockArea::new(&mut dock_state.dock_state)
@@ -528,8 +551,9 @@ impl App {
             Ok(future) => {
                 self.previous_frame_end = Some(future.boxed());
             }
-            Err(e) => {
-                eprintln!("Present/flush error: {:?}", e);
+            Err(_) => {
+                // Expected during minimize/restore - surface becomes incompatible
+                // Swapchain will be recreated on next frame
                 self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
             }
         }
@@ -540,7 +564,7 @@ impl App {
     /// Handle input during frame rendering
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
         // ESC always works
-        if self.input_manager.is_key_just_pressed(VirtualKeyCode::Escape) {
+        if self.input_manager.is_key_just_pressed(KeyCode::Escape) {
             std::process::exit(0);
         }
 
@@ -548,13 +572,13 @@ impl App {
         // (begin_frame clears keys_just_pressed before render is called)
 
         // Undo/Redo shortcuts (work even when GUI has focus for editor workflow)
-        if self.input_manager.is_key_pressed(VirtualKeyCode::LControl) {
-            if self.input_manager.is_key_just_pressed(VirtualKeyCode::Z) {
+        if self.input_manager.is_key_pressed(KeyCode::ControlLeft) {
+            if self.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
                 if let Some(desc) = self.command_history.undo(&mut self.world) {
                     println!("Undo: {}", desc);
                 }
             }
-            if self.input_manager.is_key_just_pressed(VirtualKeyCode::Y) {
+            if self.input_manager.is_key_just_pressed(KeyCode::KeyY) {
                 if let Some(desc) = self.command_history.redo(&mut self.world) {
                     println!("Redo: {}", desc);
                 }
@@ -577,7 +601,7 @@ impl App {
             );
 
             // Asset management controls
-            if self.input_manager.is_key_pressed(VirtualKeyCode::R) {
+            if self.input_manager.is_key_pressed(KeyCode::KeyR) {
                 println!("\nManual reload requested...");
                 match self
                     .asset_manager
@@ -591,7 +615,7 @@ impl App {
                 }
             }
 
-            if self.input_manager.is_key_pressed(VirtualKeyCode::C) {
+            if self.input_manager.is_key_pressed(KeyCode::KeyC) {
                 let stats = self.asset_manager.cache_stats();
                 println!("\nAsset Cache Stats: {}", stats);
             }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use smallvec::smallvec;
-use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::Device;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
@@ -108,15 +108,15 @@ impl LightingPass {
     /// Create descriptor set for G-Buffer sampling
     pub fn create_descriptor_set(
         &self,
-        descriptor_set_allocator: &StandardDescriptorSetAllocator,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         position: Arc<ImageView>,
         normal: Arc<ImageView>,
         albedo: Arc<ImageView>,
         material: Arc<ImageView>,
-    ) -> Result<Arc<PersistentDescriptorSet>, Box<dyn std::error::Error>> {
+    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
         let layout = self.layout.set_layouts().get(0).unwrap();
 
-        let set = PersistentDescriptorSet::new(
+        let set = DescriptorSet::new(
             descriptor_set_allocator,
             layout.clone(),
             [

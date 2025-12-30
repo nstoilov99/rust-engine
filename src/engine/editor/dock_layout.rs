@@ -78,8 +78,8 @@ impl EditorDockState {
     pub fn is_tab_open(&self, tab: EditorTab) -> bool {
         // Iterate through all tabs in the dock state
         for (_surface_index, node) in self.dock_state.iter_all_nodes() {
-            if let egui_dock::Node::Leaf { tabs, .. } = node {
-                if tabs.contains(&tab) {
+            if let egui_dock::Node::Leaf(leaf_data) = node {
+                if leaf_data.tabs.contains(&tab) {
                     return true;
                 }
             }
@@ -170,8 +170,8 @@ pub fn create_editor_dock_style(ctx: &egui::Context) -> egui_dock::Style {
     style.tab_bar.fill_tab_bar = true;
     style.tab_bar.height = 24.0;
 
-    // Customize tab appearance
-    style.tab.tab_body.inner_margin = egui::Margin::same(4.0);
+    // Customize tab appearance (egui 0.31+ uses i8 for Margin)
+    style.tab.tab_body.inner_margin = egui::Margin::same(4);
 
     // Customize separator appearance
     style.separator.width = 2.0;

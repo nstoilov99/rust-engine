@@ -17,7 +17,7 @@ use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddress
 pub fn load_texture(
     device: Arc<Device>,
     queue: Arc<Queue>,
-    command_buffer_allocator: &StandardCommandBufferAllocator,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     path: &str,
 ) -> Result<(Arc<ImageView>, Arc<Sampler>), Box<dyn std::error::Error>> {
@@ -25,8 +25,6 @@ pub fn load_texture(
     let image_data = image::open(path)?.to_rgba8();
     let (width, height) = image_data.dimensions();
     let image_bytes = image_data.into_raw();
-
-    println!("📷 Loaded texture: {} ({}x{})", path, width, height);
 
     // Create Vulkan image
     let image = Image::new(
@@ -53,11 +51,8 @@ pub fn load_texture(
         &image_bytes,
     )?;
 
-    println!("✓ Texture uploaded to GPU");
-
     // Create image view (how shaders access the image)
     let image_view = ImageView::new_default(image)?;
-    println!("✓ Image view created");
 
     // Create sampler (texture filtering settings)
     let sampler = create_sampler(device)?;
@@ -67,7 +62,7 @@ pub fn load_texture(
 
 /// Uploads image data from CPU to GPU
 pub fn upload_texture_data(
-    command_buffer_allocator: &StandardCommandBufferAllocator,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     queue: Arc<Queue>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     image: Arc<Image>,
@@ -122,8 +117,6 @@ pub fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, Box<dyn std::
             ..Default::default()
         },
     )?;
-
-    println!("✓ Sampler created");
 
     Ok(sampler)
 }

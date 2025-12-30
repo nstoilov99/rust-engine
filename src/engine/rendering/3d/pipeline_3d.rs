@@ -20,7 +20,7 @@ use vulkano::pipeline::{DynamicState, Pipeline};
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
-use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType}, PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType}, DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
@@ -102,26 +102,30 @@ pub struct Vertex3D {
     pub tangent: [f32; 4],
 }
 
-/// Lighting data passed to fragment shader
+/// Lighting data for forward rendering pipeline (uniform buffer).
+///
+/// Note: This layout is for forward lit meshes with PBR material properties.
+/// It differs from `LightUniformData` in deferred_renderer.rs which is used
+/// for deferred lighting pass (push constants, no material properties).
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct LightingUniformData {
     pub camera_position: [f32; 3],
-    pub _padding1: f32,
+    pub _pad0: f32,
 
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
 
     pub directional_light_dir: [f32; 3],
-    pub _padding2: f32,
+    pub _pad1: f32,
 
     pub directional_light_color: [f32; 3],
     pub directional_light_intensity: f32,
 
     pub metallic: f32,
     pub roughness: f32,
-    pub _padding3: f32,
-    pub _padding4: f32,
+    pub _pad2: f32,
+    pub _pad3: f32,
 }
 
 unsafe impl bytemuck::Pod for LightingUniformData {}
@@ -131,21 +135,21 @@ impl Default for LightingUniformData {
     fn default() -> Self {
         Self {
             camera_position: [0.0, 0.0, 5.0],
-            _padding1: 0.0,
+            _pad0: 0.0,
 
             ambient_color: [1.0, 1.0, 1.0],
             ambient_intensity: 0.2,
 
             directional_light_dir: [0.3, -1.0, 0.2],
-            _padding2: 0.0,
+            _pad1: 0.0,
 
             directional_light_color: [1.0, 0.95, 0.8],
             directional_light_intensity: 1.0,
 
             metallic: 0.0,
             roughness: 0.5,
-            _padding3: 0.0,
-            _padding4: 0.0,
+            _pad2: 0.0,
+            _pad3: 0.0,
         }
     }
 }
@@ -159,14 +163,14 @@ pub fn create_mesh_pipeline(
     let vs = mesh_vs::load(device.clone())?.entry_point("main").unwrap();
     let fs = mesh_fs::load(device.clone())?.entry_point("main").unwrap();
 
+    // Vertex input: Vertex3D format (must be done before stages consumes vs)
+    let vertex_input_state = Vertex3D::per_vertex()
+        .definition(&vs)?;
+
     let stages = [
         PipelineShaderStageCreateInfo::new(vs),
         PipelineShaderStageCreateInfo::new(fs),
     ];
-
-    // Vertex input: Vertex3D format
-    let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&stages[0].entry_point.info().input_interface)?;
 
     // Pipeline layout (push constants + descriptor set)
     let layout = PipelineLayout::new(
@@ -227,7 +231,7 @@ pub fn create_lit_mesh_pipeline(
     let fs_entry_point = fs.entry_point("main").unwrap();
 
     let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry_point.info().input_interface)?;
+        .definition(&vs_entry_point)?;
 
     // Create pipeline layout with two descriptor sets:
     // - Set 0: Texture (albedo)
@@ -320,7 +324,7 @@ pub fn create_pbr_pipeline(
     let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
 
     let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry.info().input_interface)?;
+        .definition(&vs_entry)?;
 
     let pipeline = GraphicsPipeline::new(
         device.clone(),
@@ -441,7 +445,7 @@ pub fn create_shadow_pipeline(
     let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
 
     let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry.info().input_interface)?;
+        .definition(&vs_entry)?;
 
     let pipeline = GraphicsPipeline::new(
         device.clone(),
@@ -502,11 +506,11 @@ pub fn create_pbr_material_descriptor_set(
     metallic_roughness: Arc<ImageView>,
     ao: Arc<ImageView>,
     sampler: Arc<Sampler>,
-) -> Result<Arc<PersistentDescriptorSet>, Box<dyn std::error::Error>> {
+) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
     let layout = pipeline.layout().set_layouts()[0].clone();
 
-    let descriptor_set = PersistentDescriptorSet::new(
-        &allocator,
+    let descriptor_set = DescriptorSet::new(
+        allocator,
         layout,
         [
             WriteDescriptorSet::image_view_sampler(0, albedo, sampler.clone()),

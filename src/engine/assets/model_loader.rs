@@ -39,17 +39,8 @@ impl Model {
 
 /// Loads a GLTF/GLB file and returns the parsed document
 pub fn load_gltf(path: &str) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
-    println!("📦 Loading GLTF model: {}", path);
-
     // Load GLTF file (handles both .gltf and .glb)
     let (document, buffers, images) = gltf::import(path)?;
-
-    println!("✅ GLTF loaded successfully!");
-    println!("   Meshes: {}", document.meshes().count());
-    println!("   Materials: {}", document.materials().count());
-    println!("   Textures: {}", document.textures().count());
-    println!("   Images: {}", images.len());
-    println!("   Nodes: {}", document.nodes().count());
 
     Ok((document, buffers, images))
 }
@@ -114,18 +105,11 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
 
     let mut model = Model::new(name.clone());
 
-    println!("📥 Extracting meshes from '{}'...", name);
-
     // Extract all meshes
-    for (mesh_index, mesh) in document.meshes().enumerate() {
-        println!("\n  Mesh {}: {:?}", mesh_index, mesh.name());
-
-        for (prim_index, primitive) in mesh.primitives().enumerate() {
-            println!("    Primitive {}:", prim_index);
-
+    for (_mesh_index, mesh) in document.meshes().enumerate() {
+        for (_prim_index, primitive) in mesh.primitives().enumerate() {
             // Only handle triangle meshes
             if primitive.mode() != gltf::mesh::Mode::Triangles {
-                println!("      ⚠️  Skipping non-triangle primitive");
                 continue;
             }
 
@@ -135,22 +119,14 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
                     model.meshes.push(loaded_mesh);
                 }
                 Err(e) => {
-                    eprintln!("      ❌ Failed to extract primitive: {}", e);
+                    eprintln!("Failed to extract mesh primitive: {}", e);
                 }
             }
         }
     }
 
     // Extract textures from images
-    println!("\n🖼️  Extracting textures...");
-    for (i, image_data) in images.iter().enumerate() {
-        println!("  Texture {}: {}x{} ({:?})",
-            i,
-            image_data.width,
-            image_data.height,
-            image_data.format
-        );
-
+    for (_i, image_data) in images.iter().enumerate() {
         // Convert to RgbaImage
         let rgba_image = match image_data.format {
             gltf::image::Format::R8G8B8A8 => {
@@ -176,7 +152,7 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
                 ).ok_or("Failed to create RGBA image from RGB")?
             }
             _ => {
-                println!("    ⚠️  Unsupported format {:?}, using default white texture", image_data.format);
+                // Unsupported format, use default white texture
                 image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]))
             }
         };
@@ -184,10 +160,7 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
         model.textures.push(rgba_image);
     }
 
-    println!("\n✅ Model loaded: {} meshes, {} textures extracted\n",
-        model.meshes.len(),
-        model.textures.len()
-    );
+    println!("✓ Model loaded: {} (meshes: {}, textures: {})", name, model.meshes.len(), model.textures.len());
 
     Ok(model)
 }
@@ -338,7 +311,6 @@ fn extract_mesh_from_primitive(
         tangent_iter.collect::<Vec<[f32; 4]>>()
     } else {
         // Calculate tangents from geometry
-        println!("      ⚙️  Calculating tangents...");
         calculate_tangents(&positions, &normals, &uvs, &indices)
     };
 
@@ -355,8 +327,6 @@ fn extract_mesh_from_primitive(
 
     // Get material index
     let material_index = primitive.material().index();
-
-    println!("  ✓ Extracted mesh: {} vertices, {} indices", vertices.len(), indices.len());
 
     Ok(LoadedMesh {
         vertices,

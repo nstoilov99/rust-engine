@@ -1,6 +1,7 @@
-//! Vulkan renderer for egui using Vulkano 0.34
+//! Vulkan renderer for egui using Vulkano 0.35
 
 use egui::{ClippedPrimitive, Rect, TexturesDelta};
+use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::{
@@ -10,7 +11,7 @@ use vulkano::{
         PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassBeginInfo, SubpassEndInfo,
     },
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet,
+        allocator::StandardDescriptorSetAllocator, DescriptorSet,
         WriteDescriptorSet,
     },
     device::{Device, Queue},
@@ -41,15 +42,16 @@ use vulkano::{
 };
 
 /// egui vertex format
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, Vertex)]
 #[repr(C)]
 pub struct EguiVertex {
+    #[format(R32G32_SFLOAT)]
     pub position: [f32; 2],
+    #[format(R32G32_SFLOAT)]
     pub tex_coords: [f32; 2],
+    #[format(R32G32B32A32_SFLOAT)]
     pub color: [f32; 4],
 }
-
-vulkano::impl_vertex!(EguiVertex, position, tex_coords, color);
 
 /// Push constants for screen size
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -67,7 +69,12 @@ pub struct EguiRenderer {
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
     sampler: Arc<Sampler>,
-    textures: HashMap<egui::TextureId, Arc<ImageView>>,
+    /// Cached texture image views (uploaded textures)
+    texture_cache: HashMap<egui::TextureId, Arc<ImageView>>,
+    /// Cached descriptor sets per texture (avoids re-creating per primitive)
+    descriptor_set_cache: HashMap<egui::TextureId, Arc<DescriptorSet>>,
+    /// Reusable scratch buffer for vertex conversion (avoids per-primitive allocation)
+    vertex_scratch: Vec<EguiVertex>,
 }
 
 /// Counter for generating unique user texture IDs
@@ -129,7 +136,9 @@ impl EguiRenderer {
             pipeline,
             render_pass,
             sampler,
-            textures: HashMap::new(),
+            texture_cache: HashMap::new(),
+            descriptor_set_cache: HashMap::new(),
+            vertex_scratch: Vec::with_capacity(1024), // Pre-allocate for typical UI
         })
     }
 
@@ -141,12 +150,14 @@ impl EguiRenderer {
         let vs = vs::load(device.clone())?;
         let fs = fs::load(device.clone())?;
 
+        let vs_entry = vs.entry_point("main").unwrap();
         let vertex_input_state = EguiVertex::per_vertex()
-            .definition(&vs.entry_point("main").unwrap().info().input_interface)?;
+            .definition(&vs_entry)?;
 
+        let fs_entry = fs.entry_point("main").unwrap();
         let stages = [
-            PipelineShaderStageCreateInfo::new(vs.entry_point("main").unwrap()),
-            PipelineShaderStageCreateInfo::new(fs.entry_point("main").unwrap()),
+            PipelineShaderStageCreateInfo::new(vs_entry),
+            PipelineShaderStageCreateInfo::new(fs_entry),
         ];
 
         let layout = PipelineLayout::new(
@@ -186,16 +197,10 @@ impl EguiRenderer {
     fn upload_texture(&mut self, texture_id: egui::TextureId, image_delta: &egui::epaint::ImageDelta) -> Result<(), Box<dyn std::error::Error>> {
         let delta_size = image_delta.image.size();
 
-        // Handle both Color and Font image types
+        // In egui 0.33, all images are Color (Font variant was removed)
         let pixels: Vec<u8> = match &image_delta.image {
             egui::ImageData::Color(img) => {
                 img.pixels.iter()
-                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
-                    .collect()
-            }
-            egui::ImageData::Font(font_img) => {
-                // Font images are single-channel coverage values, expand to RGBA
-                font_img.srgba_pixels(None)
                     .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
                     .collect()
             }
@@ -204,7 +209,7 @@ impl EguiRenderer {
         // Check if this is a partial update or a full texture creation
         if let Some(pos) = image_delta.pos {
             // Partial update - update existing texture at offset
-            if let Some(existing_view) = self.textures.get(&texture_id) {
+            if let Some(existing_view) = self.texture_cache.get(&texture_id) {
                 let existing_image = existing_view.image();
 
                 // Upload pixels via staging buffer
@@ -222,7 +227,7 @@ impl EguiRenderer {
                 )?;
 
                 let mut builder = AutoCommandBufferBuilder::primary(
-                    &self.command_buffer_allocator,
+                    self.command_buffer_allocator.clone(),
                     self.queue.queue_family_index(),
                     CommandBufferUsage::OneTimeSubmit,
                 )?;
@@ -281,7 +286,7 @@ impl EguiRenderer {
             )?;
 
             let mut builder = AutoCommandBufferBuilder::primary(
-                &self.command_buffer_allocator,
+                self.command_buffer_allocator.clone(),
                 self.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )?;
@@ -296,7 +301,9 @@ impl EguiRenderer {
 
             // Create image view and store
             let view = ImageView::new_default(image)?;
-            self.textures.insert(texture_id, view);
+            self.texture_cache.insert(texture_id, view);
+            // Invalidate cached descriptor set since texture was replaced
+            self.descriptor_set_cache.remove(&texture_id);
         }
 
         Ok(())
@@ -309,7 +316,7 @@ impl EguiRenderer {
     pub fn register_native_texture(&mut self, image_view: Arc<ImageView>) -> egui::TextureId {
         let id = NEXT_USER_TEXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let texture_id = egui::TextureId::User(id);
-        self.textures.insert(texture_id, image_view);
+        self.texture_cache.insert(texture_id, image_view);
         texture_id
     }
 
@@ -317,12 +324,15 @@ impl EguiRenderer {
     ///
     /// Used when the viewport is resized and the texture needs to be recreated.
     pub fn update_native_texture(&mut self, texture_id: egui::TextureId, image_view: Arc<ImageView>) {
-        self.textures.insert(texture_id, image_view);
+        self.texture_cache.insert(texture_id, image_view);
+        // Invalidate cached descriptor set since texture changed
+        self.descriptor_set_cache.remove(&texture_id);
     }
 
     /// Remove a native texture
     pub fn unregister_native_texture(&mut self, texture_id: egui::TextureId) {
-        self.textures.remove(&texture_id);
+        self.texture_cache.remove(&texture_id);
+        self.descriptor_set_cache.remove(&texture_id);
     }
 
     pub fn render(
@@ -331,7 +341,7 @@ impl EguiRenderer {
         clipped_primitives: Vec<ClippedPrimitive>,
         textures_delta: TexturesDelta,
         screen_rect: Rect,
-    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer<Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>>>, Box<dyn std::error::Error>> {
+    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         // Handle texture updates
         for (texture_id, image_delta) in &textures_delta.set {
             self.upload_texture(*texture_id, image_delta)?;
@@ -349,7 +359,7 @@ impl EguiRenderer {
 
         // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            &self.command_buffer_allocator,
+            self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
@@ -376,7 +386,7 @@ impl EguiRenderer {
             extent: [extent[0] as f32, extent[1] as f32],
             depth_range: 0.0..=1.0,
         };
-        builder.set_viewport(0, [viewport].into_iter().collect())?;
+        builder.set_viewport(0, smallvec![viewport])?;
 
         // Render each primitive
         for clipped_primitive in clipped_primitives {
@@ -389,21 +399,19 @@ impl EguiRenderer {
                 continue;
             }
 
-            // Convert egui vertices to our format
-            let vertices: Vec<EguiVertex> = mesh.vertices.iter().map(|v| {
+            // Convert egui vertices to our format using scratch buffer (avoids allocation)
+            // Use egui::Rgba for proper sRGB to linear color conversion
+            self.vertex_scratch.clear();
+            self.vertex_scratch.extend(mesh.vertices.iter().map(|v| {
+                let linear: egui::Rgba = v.color.into();
                 EguiVertex {
                     position: [v.pos.x, v.pos.y],
                     tex_coords: [v.uv.x, v.uv.y],
-                    color: [
-                        v.color.r() as f32 / 255.0,
-                        v.color.g() as f32 / 255.0,
-                        v.color.b() as f32 / 255.0,
-                        v.color.a() as f32 / 255.0,
-                    ],
+                    color: [linear.r(), linear.g(), linear.b(), linear.a()],
                 }
-            }).collect();
+            }));
 
-            // Create vertex buffer
+            // Create vertex buffer from scratch buffer
             let vertex_buffer: Subbuffer<[EguiVertex]> = Buffer::from_iter(
                 self.memory_allocator.clone(),
                 BufferCreateInfo {
@@ -414,7 +422,7 @@ impl EguiRenderer {
                     memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                     ..Default::default()
                 },
-                vertices,
+                self.vertex_scratch.iter().copied(),
             )?;
 
             // Create index buffer
@@ -431,22 +439,31 @@ impl EguiRenderer {
                 mesh.indices.iter().copied(),
             )?;
 
-            // Get texture for this primitive
-            let texture_view = self.textures.get(&mesh.texture_id)
-                .ok_or("Texture not found")?;
+            // Get or create cached descriptor set for this texture
+            let texture_id = mesh.texture_id;
+            let descriptor_set = if let Some(cached) = self.descriptor_set_cache.get(&texture_id) {
+                cached.clone()
+            } else {
+                // Get texture for this primitive
+                let texture_view = self.texture_cache.get(&texture_id)
+                    .ok_or("Texture not found")?;
 
-            // Create descriptor set for this texture
-            let layout = self.pipeline.layout().set_layouts().get(0)
-                .ok_or("No descriptor set layout")?;
+                // Create descriptor set for this texture
+                let layout = self.pipeline.layout().set_layouts().get(0)
+                    .ok_or("No descriptor set layout")?;
 
-            let descriptor_set = PersistentDescriptorSet::new(
-                &self.descriptor_set_allocator,
-                layout.clone(),
-                [
-                    WriteDescriptorSet::image_view_sampler(0, texture_view.clone(), self.sampler.clone()),
-                ],
-                [],
-            )?;
+                let new_set = DescriptorSet::new(
+                    self.descriptor_set_allocator.clone(),
+                    layout.clone(),
+                    [
+                        WriteDescriptorSet::image_view_sampler(0, texture_view.clone(), self.sampler.clone()),
+                    ],
+                    [],
+                )?;
+
+                self.descriptor_set_cache.insert(texture_id, new_set.clone());
+                new_set
+            };
 
             // Push constants for screen size
             let push_constants = PushConstants {
@@ -466,7 +483,7 @@ impl EguiRenderer {
                 ],
             };
 
-            builder.set_scissor(0, [scissor].into_iter().collect())?;
+            builder.set_scissor(0, smallvec![scissor])?;
 
             // Bind descriptor set
             builder.bind_descriptor_sets(
@@ -486,14 +503,15 @@ impl EguiRenderer {
             // Bind buffers and draw
             builder.bind_vertex_buffers(0, vertex_buffer)?;
             builder.bind_index_buffer(index_buffer)?;
-            builder.draw_indexed(mesh.indices.len() as u32, 1, 0, 0, 0)?;
+            unsafe { builder.draw_indexed(mesh.indices.len() as u32, 1, 0, 0, 0)?; }
         }
 
         builder.end_render_pass(SubpassEndInfo::default())?;
 
-        // Handle texture deletions
+        // Handle texture deletions (also invalidate cached descriptor sets)
         for texture_id in &textures_delta.free {
-            self.textures.remove(texture_id);
+            self.texture_cache.remove(texture_id);
+            self.descriptor_set_cache.remove(texture_id);
         }
 
         Ok(builder.build()?)
