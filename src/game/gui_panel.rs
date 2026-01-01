@@ -44,23 +44,6 @@ pub fn render_engine_stats(
     ui.label("  ESC - Quit");
 }
 
-/// Render the profiler panel placeholder
-///
-/// TODO: Implement custom puffin integration for egui 0.33
-pub fn render_profiler_panel(ui: &mut egui::Ui) {
-    ui.heading("Profiler");
-    ui.separator();
-
-    // Note: puffin 0.19 API has changed significantly
-    // The detailed frame data API requires more complex setup
-    // For now, just show that profiling is enabled
-    ui.label("Profiling is enabled.");
-    ui.label("Use puffin::profile_scope!() to instrument code.");
-    ui.separator();
-    ui.label(egui::RichText::new("Note: Full profiler UI coming soon.").weak());
-    ui.label("For detailed profiling, use puffin_viewer.");
-}
-
 /// Create the main stats window
 pub fn create_stats_window(
     ctx: &egui::Context,

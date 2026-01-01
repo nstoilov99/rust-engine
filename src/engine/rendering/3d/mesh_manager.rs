@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use glam::Vec3;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
@@ -8,6 +9,10 @@ pub struct GpuMesh {
     pub vertex_buffer: Subbuffer<[Vertex3D]>,
     pub index_buffer: Subbuffer<[u32]>,
     pub index_count: u32,
+    /// Bounding sphere center in local/model space (for frustum culling)
+    pub center: Vec3,
+    /// Bounding sphere radius (for frustum culling)
+    pub radius: f32,
 }
 
 impl GpuMesh {
@@ -16,6 +21,8 @@ impl GpuMesh {
         memory_allocator: Arc<StandardMemoryAllocator>,
         vertices: &[Vertex3D],
         indices: &[u32],
+        center: Vec3,
+        radius: f32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create vertex buffer
         let vertex_buffer = Buffer::from_iter(
@@ -51,6 +58,8 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
+            center,
+            radius,
         })
     }
 }
@@ -80,6 +89,8 @@ impl MeshManager {
                 memory_allocator.clone(),
                 &loaded_mesh.vertices,
                 &loaded_mesh.indices,
+                loaded_mesh.center,
+                loaded_mesh.radius,
             )?;
 
             let index = self.meshes.len();

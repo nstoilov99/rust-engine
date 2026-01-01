@@ -34,6 +34,9 @@ pub mod adapters;
 // Editor systems and UI panels
 pub mod editor;
 
+// Math utilities (frustum culling, etc.)
+pub mod math;
+
 // Re-export commonly used types
 pub use core::{VulkanContext, select_physical_device, create_logical_device, LogicalDeviceContext};
 pub use rendering::common::*;  // Renderer, framebuffer functions, etc.

@@ -28,6 +28,8 @@ struct GameApp {
     window_config: WindowConfig,
     /// Whether the app should exit
     should_exit: bool,
+    /// Whether the window is minimized (0x0 size)
+    is_minimized: bool,
 }
 
 impl GameApp {
@@ -37,6 +39,7 @@ impl GameApp {
             app: None,
             window_config,
             should_exit: false,
+            is_minimized: false,
         }
     }
 }
@@ -113,10 +116,18 @@ impl ApplicationHandler for GameApp {
                 return;
             }
             WindowEvent::RedrawRequested => {
+                // Don't render when minimized
+                if self.is_minimized {
+                    return;
+                }
                 if let Err(e) = app.render(window) {
                     eprintln!("Render error: {}", e);
                 }
                 return;
+            }
+            WindowEvent::Resized(new_size) => {
+                // Detect minimized state (0x0 window size)
+                self.is_minimized = new_size.width == 0 || new_size.height == 0;
             }
             _ => {}
         }
@@ -131,6 +142,14 @@ impl ApplicationHandler for GameApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Skip all updates when minimized to avoid:
+        // - CPU spinning (busy loop)
+        // - Profiler accumulating unbounded data
+        // - Physics stepping needlessly
+        if self.is_minimized {
+            return;
+        }
+
         let Some(app) = &mut self.app else { return };
         let Some(window) = &self.window else { return };
 
@@ -162,6 +181,11 @@ impl ApplicationHandler for GameApp {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize profiler (1ns overhead when disabled, ~50-200ns when enabled)
     puffin::set_scopes_on(true);
+
+    // Start Tracy client FIRST, before any profiling calls
+    // The client must be started before any span!() macros are used
+    #[cfg(feature = "tracy")]
+    let _tracy_client = tracy_client::Client::start();
 
     // Load saved window configuration
     let window_config = WindowConfig::load_or_default();

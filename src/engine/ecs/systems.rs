@@ -13,6 +13,7 @@ pub struct TransformSystem;
 
 impl System for TransformSystem {
     fn update(&mut self, world: &mut World, _delta_time: f32) {
+        crate::profile_scope!("transform_system");
         // Example: validate transforms, compute hierarchies, etc.
         for (_id, transform) in world.query_mut::<&mut Transform>() {
             // Clamp scale to prevent negative values
@@ -43,6 +44,7 @@ impl SystemScheduler {
 
     /// Run all systems in order
     pub fn update(&mut self, world: &mut World, delta_time: f32) {
+        crate::profile_function!();
         for system in &mut self.systems {
             system.update(world, delta_time);
         }
@@ -62,6 +64,7 @@ pub struct MovementSystem {
 
 impl System for MovementSystem {
     fn update(&mut self, world: &mut World, delta_time: f32) {
+        crate::profile_scope!("movement_system");
         use super::components::{Transform, Player};
 
         // Move player entities
@@ -79,6 +82,7 @@ pub struct RotationSystem {
 
 impl System for RotationSystem {
     fn update(&mut self, world: &mut World, delta_time: f32) {
+        crate::profile_scope!("rotation_system");
         use super::components::Transform;
         use nalgebra_glm as glm;
 

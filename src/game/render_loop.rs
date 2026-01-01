@@ -2,10 +2,12 @@
 //!
 //! Handles mesh/light data preparation, swapchain management, and frame rendering.
 
+use glam::Vec3;
 use hecs::World;
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
+use rust_engine::engine::math::Frustum;
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
 };
@@ -16,35 +18,63 @@ use vulkano::swapchain::acquire_next_image;
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError};
 
-/// Prepare mesh render data from ECS world
+/// Prepare mesh render data from ECS world into a reusable buffer
 ///
-/// Performance optimized: view_projection is calculated once per frame,
-/// not per mesh.
+/// Performance optimized:
+/// - view_projection is calculated once per frame, not per mesh
+/// - Reuses the provided Vec buffer (clears and refills) to avoid per-frame allocation
+/// - Frustum culling: skips meshes outside camera view
 pub fn prepare_mesh_data(
     world: &World,
     asset_manager: &Arc<AssetManager>,
     renderer: &Renderer,
-) -> Vec<MeshRenderData> {
-    puffin::profile_function!();
+    mesh_data_buffer: &mut Vec<MeshRenderData>,
+) {
+    rust_engine::profile_function!();
 
-    let mut mesh_data_vec = Vec::new();
+    // Clear buffer but retain capacity (no allocation)
+    mesh_data_buffer.clear();
+
     let meshes = asset_manager.meshes.read();
 
     // Calculate view_projection ONCE per frame (same for all meshes)
     let view_matrix = renderer.camera_3d.view_matrix();
     let projection_matrix = renderer.camera_3d.projection_matrix();
     let view_projection = projection_matrix * view_matrix;
+
+    // Compute frustum planes once per frame for culling
+    let frustum = Frustum::from_view_projection(view_projection);
+
     let vp_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(view_projection) };
 
     for (_entity, (transform, mesh_renderer)) in
         world.query::<(&Transform, &MeshRenderer)>().iter()
     {
         if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
-            // Only model matrix is per-mesh
+            // Compute model matrix
             let model_matrix = transform.model_matrix();
+
+            // FRUSTUM CULLING: Transform bounding sphere to world space
+            // Manually apply model_matrix (glm::Mat4/nalgebra) to center (glam::Vec3)
+            let c = gpu_mesh.center;
+            let m = &model_matrix;
+            let world_center = Vec3::new(
+                m[(0, 0)] * c.x + m[(0, 1)] * c.y + m[(0, 2)] * c.z + m[(0, 3)],
+                m[(1, 0)] * c.x + m[(1, 1)] * c.y + m[(1, 2)] * c.z + m[(1, 3)],
+                m[(2, 0)] * c.x + m[(2, 1)] * c.y + m[(2, 2)] * c.z + m[(2, 3)],
+            );
+            // Scale radius by maximum scale component for non-uniform scaling
+            let max_scale = transform.scale.x.max(transform.scale.y).max(transform.scale.z);
+            let world_radius = gpu_mesh.radius * max_scale;
+
+            // Skip mesh if completely outside frustum
+            if !frustum.contains_sphere(world_center, world_radius) {
+                continue;
+            }
+
             let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
-            mesh_data_vec.push(MeshRenderData {
+            mesh_data_buffer.push(MeshRenderData {
                 vertex_buffer: gpu_mesh.vertex_buffer.clone(),
                 index_buffer: gpu_mesh.index_buffer.clone(),
                 index_count: gpu_mesh.index_count,
@@ -55,13 +85,11 @@ pub fn prepare_mesh_data(
             });
         }
     }
-
-    mesh_data_vec
 }
 
 /// Prepare light uniform data from ECS world
 pub fn prepare_light_data(world: &World, renderer: &Renderer) -> LightUniformData {
-    puffin::profile_function!();
+    rust_engine::profile_function!();
 
     let camera_pos = renderer.camera_3d.position;
     let mut light_data = LightUniformData {
@@ -144,7 +172,7 @@ pub fn acquire_swapchain_image(
     ),
     SwapchainError,
 > {
-    puffin::profile_function!();
+    rust_engine::profile_function!();
 
     match acquire_next_image(renderer.swapchain.clone(), None) {
         Ok((image_index, suboptimal, acquire_future)) => {

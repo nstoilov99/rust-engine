@@ -1,8 +1,11 @@
-
 [package]
 name = "rust-engine"
 version = "0.1.0"
 edition = "2021"
+
+[features]
+default = []
+tracy = ["tracy-client"]
 
 # Define both library and binary
 [lib]
@@ -66,6 +69,9 @@ rapier3d = "0.25"
 
 # Profiling (Puffin core - custom egui integration will be implemented)
 puffin = "0.19"
+
+# Tracy profiler integration (optional - build with --features tracy)
+tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }
 
 # Docking layout system for egui (editor panels)
 egui_dock = { version = "0.18", features = ["serde"] }

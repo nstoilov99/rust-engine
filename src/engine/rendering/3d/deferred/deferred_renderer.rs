@@ -182,6 +182,8 @@ impl DeferredRenderer {
         light_data: &LightUniformData,        // Your light data structure
         target_image: Arc<Image>, // Swapchain image
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
+        crate::profile_function!();
+
         // Get cached framebuffer for this swapchain image
         let target_framebuffer = self.get_or_create_framebuffer(target_image)?;
         let mut builder = AutoCommandBufferBuilder::primary(
@@ -191,100 +193,109 @@ impl DeferredRenderer {
         )?;
 
         // ========== PASS 1: Geometry Pass (Render to G-Buffer) ==========
+        {
+            crate::profile_scope!("geometry_pass");
 
-        // Get G-Buffer dimensions for viewport
-        let gbuffer_extent = self.gbuffer.framebuffer.extent();
-        let viewport = vulkano::pipeline::graphics::viewport::Viewport {
-            offset: [0.0, 0.0],
-            extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        };
-        let scissor = vulkano::pipeline::graphics::viewport::Scissor {
-            offset: [0, 0],
-            extent: [gbuffer_extent[0], gbuffer_extent[1]],
-        };
+            // Get G-Buffer dimensions for viewport
+            let gbuffer_extent = self.gbuffer.framebuffer.extent();
+            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [gbuffer_extent[0], gbuffer_extent[1]],
+            };
 
-        builder
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    clear_values: vec![
-                        Some([0.0, 0.0, 0.0, 1.0].into()), // Position
-                        Some([0.0, 0.0, 0.0, 1.0].into()), // Normal
-                        Some([0.0, 0.0, 0.0, 1.0].into()), // Albedo
-                        Some([0.0, 0.0, 0.0, 1.0].into()), // Material
-                        Some(1.0.into()),                  // Depth
-                    ],
-                    ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
-                },
-                SubpassBeginInfo {
-                    contents: SubpassContents::Inline,
-                    ..Default::default()
-                },
-            )?
-            .bind_pipeline_graphics(self.geometry_pass.pipeline())?
-            .set_viewport(0, smallvec![viewport.clone()])?
-            .set_scissor(0, smallvec![scissor.clone()])?;
-
-        // Render all meshes to G-Buffer
-        for mesh in mesh_data {
             builder
-                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
-                .bind_index_buffer(mesh.index_buffer.clone())?
-                .push_constants(
-                    self.geometry_pass.layout(),
-                    0,
-                    mesh.push_constants, // Model + view-projection matrices
-                )?;
-            unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![
+                            Some([0.0, 0.0, 0.0, 1.0].into()), // Position
+                            Some([0.0, 0.0, 0.0, 1.0].into()), // Normal
+                            Some([0.0, 0.0, 0.0, 1.0].into()), // Albedo
+                            Some([0.0, 0.0, 0.0, 1.0].into()), // Material
+                            Some(1.0.into()),                  // Depth
+                        ],
+                        ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.geometry_pass.pipeline())?
+                .set_viewport(0, smallvec![viewport.clone()])?
+                .set_scissor(0, smallvec![scissor.clone()])?;
+
+            // Render all meshes to G-Buffer
+            {
+                crate::profile_scope!("mesh_loop");
+                for mesh in mesh_data {
+                    builder
+                        .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
+                        .bind_index_buffer(mesh.index_buffer.clone())?
+                        .push_constants(
+                            self.geometry_pass.layout(),
+                            0,
+                            mesh.push_constants, // Model + view-projection matrices
+                        )?;
+                    unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
+                }
+            }
+
+            builder.end_render_pass(SubpassEndInfo::default())?;
         }
 
-        builder.end_render_pass(SubpassEndInfo::default())?;
-
         // ========== PASS 2: Lighting Pass (Read G-Buffer, Output to Screen) ==========
+        {
+            crate::profile_scope!("lighting_pass");
 
-        // Use cached G-Buffer descriptor set (no per-frame allocation)
-        let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
+            // Use cached G-Buffer descriptor set (no per-frame allocation)
+            let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
 
-        // Get target framebuffer dimensions for lighting pass viewport
-        let target_extent = target_framebuffer.extent();
-        let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-            offset: [0.0, 0.0],
-            extent: [target_extent[0] as f32, target_extent[1] as f32],
-            depth_range: 0.0..=1.0,
-        };
-        let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-            offset: [0, 0],
-            extent: [target_extent[0], target_extent[1]],
-        };
+            // Get target framebuffer dimensions for lighting pass viewport
+            let target_extent = target_framebuffer.extent();
+            let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [target_extent[0] as f32, target_extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [target_extent[0], target_extent[1]],
+            };
 
-        builder
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                    ..RenderPassBeginInfo::framebuffer(target_framebuffer)
-                },
-                SubpassBeginInfo {
-                    contents: SubpassContents::Inline,
-                    ..Default::default()
-                },
-            )?
-            .bind_pipeline_graphics(self.lighting_pass.pipeline())?
-            .set_viewport(0, smallvec![target_viewport.clone()])?
-            .set_scissor(0, smallvec![target_scissor.clone()])?
-            .bind_descriptor_sets(
-                PipelineBindPoint::Graphics,
-                self.lighting_pass.layout(),
-                0,
-                gbuffer_descriptor_set,
-            )?
-            .push_constants(
-                self.lighting_pass.layout(),
-                0,
-                *light_data,
-            )?;
-        // Draw fullscreen triangle (no vertex buffer - generated in shader)
-        unsafe { builder.draw(3, 1, 0, 0)?; }
-        builder.end_render_pass(SubpassEndInfo::default())?;
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                        ..RenderPassBeginInfo::framebuffer(target_framebuffer)
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.lighting_pass.pipeline())?
+                .set_viewport(0, smallvec![target_viewport.clone()])?
+                .set_scissor(0, smallvec![target_scissor.clone()])?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.lighting_pass.layout(),
+                    0,
+                    gbuffer_descriptor_set,
+                )?
+                .push_constants(
+                    self.lighting_pass.layout(),
+                    0,
+                    *light_data,
+                )?;
+            // Draw fullscreen triangle (no vertex buffer - generated in shader)
+            unsafe { builder.draw(3, 1, 0, 0)?; }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
 
         // Build command buffer
         let command_buffer = builder.build()?;

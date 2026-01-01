@@ -73,8 +73,12 @@ pub struct EguiRenderer {
     texture_cache: HashMap<egui::TextureId, Arc<ImageView>>,
     /// Cached descriptor sets per texture (avoids re-creating per primitive)
     descriptor_set_cache: HashMap<egui::TextureId, Arc<DescriptorSet>>,
-    /// Reusable scratch buffer for vertex conversion (avoids per-primitive allocation)
-    vertex_scratch: Vec<EguiVertex>,
+    /// Cached framebuffers by target image pointer (avoids per-frame creation)
+    framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
+    /// Batched vertex data for entire frame (avoids per-primitive buffer allocation)
+    batched_vertices: Vec<EguiVertex>,
+    /// Batched index data for entire frame
+    batched_indices: Vec<u32>,
 }
 
 /// Counter for generating unique user texture IDs
@@ -138,8 +142,15 @@ impl EguiRenderer {
             sampler,
             texture_cache: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
-            vertex_scratch: Vec::with_capacity(1024), // Pre-allocate for typical UI
+            framebuffer_cache: HashMap::new(),
+            batched_vertices: Vec::with_capacity(16384), // Pre-allocate for typical UI (~16k vertices)
+            batched_indices: Vec::with_capacity(32768),  // Pre-allocate for typical UI (~32k indices)
         })
+    }
+
+    /// Clear framebuffer cache (call on swapchain recreation)
+    pub fn clear_framebuffer_cache(&mut self) {
+        self.framebuffer_cache.clear();
     }
 
     fn create_pipeline(
@@ -233,7 +244,6 @@ impl EguiRenderer {
                 )?;
 
                 // Copy to region of existing texture
-                use vulkano::command_buffer::CopyBufferToImageInfo;
                 use vulkano::image::ImageSubresourceLayers;
 
                 builder.copy_buffer_to_image(CopyBufferToImageInfo {
@@ -252,6 +262,7 @@ impl EguiRenderer {
                 })?;
 
                 let command_buffer = builder.build()?;
+                // Must block - texture must be uploaded before render pass uses it
                 command_buffer
                     .execute(self.queue.clone())?
                     .then_signal_fence_and_flush()?
@@ -294,6 +305,7 @@ impl EguiRenderer {
             builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
 
             let command_buffer = builder.build()?;
+            // Must block - texture must be uploaded before render pass uses it
             command_buffer
                 .execute(self.queue.clone())?
                 .then_signal_fence_and_flush()?
@@ -342,30 +354,152 @@ impl EguiRenderer {
         textures_delta: TexturesDelta,
         screen_rect: Rect,
     ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
+        crate::profile_function!();
+
         // Handle texture updates
-        for (texture_id, image_delta) in &textures_delta.set {
-            self.upload_texture(*texture_id, image_delta)?;
+        {
+            crate::profile_scope!("texture_updates");
+            for (texture_id, image_delta) in &textures_delta.set {
+                self.upload_texture(*texture_id, image_delta)?;
+            }
         }
 
-        // Create framebuffer
-        let view = ImageView::new_default(target_image.clone())?;
-        let framebuffer = Framebuffer::new(
-            self.render_pass.clone(),
-            FramebufferCreateInfo {
-                attachments: vec![view],
+        // Get or create cached framebuffer for this target image
+        let cache_key = Arc::as_ptr(&target_image) as usize;
+        let framebuffer = if let Some(fb) = self.framebuffer_cache.get(&cache_key) {
+            fb.clone()
+        } else {
+            let view = ImageView::new_default(target_image.clone())?;
+            let fb = Framebuffer::new(
+                self.render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )?;
+            self.framebuffer_cache.insert(cache_key, fb.clone());
+            fb
+        };
+
+        let extent = target_image.extent();
+        let screen_size = [screen_rect.width(), screen_rect.height()];
+
+        // Phase 1: Batch all primitives into single vertex/index buffers
+        // This avoids per-primitive GPU buffer allocation (major performance win)
+        crate::profile_scope!("primitive_batching");
+
+        // Clear batched data from previous frame (capacity preserved)
+        self.batched_vertices.clear();
+        self.batched_indices.clear();
+
+        // Collect draw commands with their offsets into the batched buffers
+        struct DrawCommand {
+            vertex_offset: u32,
+            index_offset: u32,
+            index_count: u32,
+            texture_id: egui::TextureId,
+            clip_rect: egui::Rect,
+        }
+        let mut draw_commands = Vec::with_capacity(clipped_primitives.len());
+
+        for clipped_primitive in &clipped_primitives {
+            let mesh = match &clipped_primitive.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => mesh,
+                egui::epaint::Primitive::Callback(_) => continue,
+            };
+
+            if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                continue;
+            }
+
+            let vertex_offset = self.batched_vertices.len() as u32;
+            let index_offset = self.batched_indices.len() as u32;
+
+            // Append vertices (convert egui format to our format)
+            // Must use egui::Rgba for proper sRGB→linear conversion
+            // (GPU expects linear colors when writing to sRGB framebuffer)
+            self.batched_vertices.extend(mesh.vertices.iter().map(|v| {
+                let linear: egui::Rgba = v.color.into();
+                EguiVertex {
+                    position: [v.pos.x, v.pos.y],
+                    tex_coords: [v.uv.x, v.uv.y],
+                    color: [linear.r(), linear.g(), linear.b(), linear.a()],
+                }
+            }));
+
+            // Append indices (offset by vertex_offset since we're batching)
+            self.batched_indices.extend(mesh.indices.iter().copied());
+
+            draw_commands.push(DrawCommand {
+                vertex_offset,
+                index_offset,
+                index_count: mesh.indices.len() as u32,
+                texture_id: mesh.texture_id,
+                clip_rect: clipped_primitive.clip_rect,
+            });
+        }
+
+        // Early exit if nothing to draw
+        if draw_commands.is_empty() {
+            // Still need to build a valid command buffer
+            let mut builder = AutoCommandBufferBuilder::primary(
+                self.command_buffer_allocator.clone(),
+                self.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )?;
+            builder.begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![None],
+                    ..RenderPassBeginInfo::framebuffer(framebuffer)
+                },
+                SubpassBeginInfo {
+                    contents: vulkano::command_buffer::SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?;
+            builder.end_render_pass(SubpassEndInfo::default())?;
+
+            // Handle texture deletions
+            for texture_id in &textures_delta.free {
+                self.texture_cache.remove(texture_id);
+                self.descriptor_set_cache.remove(texture_id);
+            }
+            return Ok(builder.build()?);
+        }
+
+        // Phase 2: Create single vertex and index buffer for entire frame (just 2 allocations!)
+        let vertex_buffer: Subbuffer<[EguiVertex]> = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
             },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            self.batched_vertices.iter().copied(),
         )?;
 
-        // Build command buffer
+        let index_buffer: Subbuffer<[u32]> = Buffer::from_iter(
+            self.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            self.batched_indices.iter().copied(),
+        )?;
+
+        // Phase 3: Build command buffer with draw calls
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
-
-        let extent = target_image.extent();
-        let screen_size = [screen_rect.width(), screen_rect.height()];
 
         builder.begin_render_pass(
             RenderPassBeginInfo {
@@ -388,67 +522,28 @@ impl EguiRenderer {
         };
         builder.set_viewport(0, smallvec![viewport])?;
 
-        // Render each primitive
-        for clipped_primitive in clipped_primitives {
-            let mesh = match &clipped_primitive.primitive {
-                egui::epaint::Primitive::Mesh(mesh) => mesh,
-                egui::epaint::Primitive::Callback(_) => continue, // Skip paint callbacks
-            };
+        // Bind the batched buffers once
+        builder.bind_vertex_buffers(0, vertex_buffer)?;
+        builder.bind_index_buffer(index_buffer)?;
 
-            if mesh.vertices.is_empty() || mesh.indices.is_empty() {
-                continue;
-            }
+        // Push constants (same for all draws)
+        let push_constants = PushConstants { screen_size };
+        builder.push_constants(
+            self.pipeline.layout().clone(),
+            0,
+            push_constants,
+        )?;
 
-            // Convert egui vertices to our format using scratch buffer (avoids allocation)
-            // Use egui::Rgba for proper sRGB to linear color conversion
-            self.vertex_scratch.clear();
-            self.vertex_scratch.extend(mesh.vertices.iter().map(|v| {
-                let linear: egui::Rgba = v.color.into();
-                EguiVertex {
-                    position: [v.pos.x, v.pos.y],
-                    tex_coords: [v.uv.x, v.uv.y],
-                    color: [linear.r(), linear.g(), linear.b(), linear.a()],
-                }
-            }));
-
-            // Create vertex buffer from scratch buffer
-            let vertex_buffer: Subbuffer<[EguiVertex]> = Buffer::from_iter(
-                self.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                self.vertex_scratch.iter().copied(),
-            )?;
-
-            // Create index buffer
-            let index_buffer: Subbuffer<[u32]> = Buffer::from_iter(
-                self.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::INDEX_BUFFER,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                mesh.indices.iter().copied(),
-            )?;
-
+        // Issue draw commands
+        crate::profile_scope!("draw_commands");
+        for cmd in &draw_commands {
             // Get or create cached descriptor set for this texture
-            let texture_id = mesh.texture_id;
-            let descriptor_set = if let Some(cached) = self.descriptor_set_cache.get(&texture_id) {
+            let descriptor_set = if let Some(cached) = self.descriptor_set_cache.get(&cmd.texture_id) {
                 cached.clone()
             } else {
-                // Get texture for this primitive
-                let texture_view = self.texture_cache.get(&texture_id)
+                let texture_view = self.texture_cache.get(&cmd.texture_id)
                     .ok_or("Texture not found")?;
 
-                // Create descriptor set for this texture
                 let layout = self.pipeline.layout().set_layouts().get(0)
                     .ok_or("No descriptor set layout")?;
 
@@ -461,28 +556,21 @@ impl EguiRenderer {
                     [],
                 )?;
 
-                self.descriptor_set_cache.insert(texture_id, new_set.clone());
+                self.descriptor_set_cache.insert(cmd.texture_id, new_set.clone());
                 new_set
             };
 
-            // Push constants for screen size
-            let push_constants = PushConstants {
-                screen_size,
-            };
-
             // Set scissor rectangle for clipping
-            let clip_rect = clipped_primitive.clip_rect;
             let scissor = vulkano::pipeline::graphics::viewport::Scissor {
                 offset: [
-                    clip_rect.min.x.max(0.0) as u32,
-                    clip_rect.min.y.max(0.0) as u32,
+                    cmd.clip_rect.min.x.max(0.0) as u32,
+                    cmd.clip_rect.min.y.max(0.0) as u32,
                 ],
                 extent: [
-                    (clip_rect.max.x - clip_rect.min.x).max(0.0) as u32,
-                    (clip_rect.max.y - clip_rect.min.y).max(0.0) as u32,
+                    (cmd.clip_rect.max.x - cmd.clip_rect.min.x).max(0.0) as u32,
+                    (cmd.clip_rect.max.y - cmd.clip_rect.min.y).max(0.0) as u32,
                 ],
             };
-
             builder.set_scissor(0, smallvec![scissor])?;
 
             // Bind descriptor set
@@ -493,17 +581,16 @@ impl EguiRenderer {
                 descriptor_set,
             )?;
 
-            // Push constants
-            builder.push_constants(
-                self.pipeline.layout().clone(),
-                0,
-                push_constants,
-            )?;
-
-            // Bind buffers and draw
-            builder.bind_vertex_buffers(0, vertex_buffer)?;
-            builder.bind_index_buffer(index_buffer)?;
-            unsafe { builder.draw_indexed(mesh.indices.len() as u32, 1, 0, 0, 0)?; }
+            // Draw with offset into batched buffers
+            unsafe {
+                builder.draw_indexed(
+                    cmd.index_count,
+                    1,
+                    cmd.index_offset,
+                    cmd.vertex_offset as i32,
+                    0,
+                )?;
+            }
         }
 
         builder.end_render_pass(SubpassEndInfo::default())?;

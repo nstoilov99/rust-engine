@@ -107,6 +107,7 @@ impl Scene {
 
     /// Update all entity animations
     pub fn update_animations(&mut self, delta_time: f32) {
+        crate::profile_scope!("scene_update_animations");
         for entity in self.entities.values_mut().filter(|e| e.active) {
             if let Some(anim) = &mut entity.animation {
                 anim.update(delta_time);

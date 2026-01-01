@@ -30,6 +30,7 @@ impl InputManager {
 
     /// Call this at the start of each frame
     pub fn new_frame(&mut self) {
+        crate::profile_scope!("input_processing");
         self.keys_just_pressed.clear();
         self.keys_just_released.clear();
         self.mouse_delta = (0.0, 0.0);

@@ -102,31 +102,42 @@ impl PhysicsWorld {
     /// This accumulates frame time and runs physics at a fixed rate
     /// to ensure deterministic simulation.
     pub fn step(&mut self, delta_time: f32, ecs_world: &mut World) {
+        crate::profile_function!();
+
         self.accumulator += delta_time;
 
         while self.accumulator >= self.fixed_dt {
             // Sync ECS -> Physics (kinematic bodies)
-            self.sync_ecs_to_physics(ecs_world);
+            {
+                crate::profile_scope!("physics_sync_to_rapier");
+                self.sync_ecs_to_physics(ecs_world);
+            }
 
             // Run physics step
-            self.physics_pipeline.step(
-                &self.gravity,
-                &self.integration_parameters,
-                &mut self.island_manager,
-                &mut self.broad_phase,
-                &mut self.narrow_phase,
-                &mut self.rigid_body_set,
-                &mut self.collider_set,
-                &mut self.impulse_joint_set,
-                &mut self.multibody_joint_set,
-                &mut self.ccd_solver,
-                Some(&mut self.query_pipeline),
-                &(),
-                &(),
-            );
+            {
+                crate::profile_scope!("physics_pipeline_step");
+                self.physics_pipeline.step(
+                    &self.gravity,
+                    &self.integration_parameters,
+                    &mut self.island_manager,
+                    &mut self.broad_phase,
+                    &mut self.narrow_phase,
+                    &mut self.rigid_body_set,
+                    &mut self.collider_set,
+                    &mut self.impulse_joint_set,
+                    &mut self.multibody_joint_set,
+                    &mut self.ccd_solver,
+                    Some(&mut self.query_pipeline),
+                    &(),
+                    &(),
+                );
+            }
 
             // Sync Physics -> ECS (dynamic bodies)
-            self.sync_physics_to_ecs(ecs_world);
+            {
+                crate::profile_scope!("physics_sync_from_rapier");
+                self.sync_physics_to_ecs(ecs_world);
+            }
 
             self.accumulator -= self.fixed_dt;
         }

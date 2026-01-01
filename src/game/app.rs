@@ -9,13 +9,13 @@ use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, CommandHistory, EditorContext, EditorDockState,
-    EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter, LogMessage, MenuAction, Selection,
-    ViewportTexture, WindowConfig,
+    EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
+    ProfilerPanel, Selection, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::DeferredRenderer;
+use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
 use rust_engine::engine::scene::save_scene;
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
@@ -49,6 +49,7 @@ pub struct App {
     // Editor state
     pub hierarchy_panel: HierarchyPanel,
     pub inspector_panel: InspectorPanel,
+    pub profiler_panel: ProfilerPanel,
     pub selection: Selection,
     pub command_history: CommandHistory,
     pub dock_state: EditorDockState,
@@ -56,6 +57,8 @@ pub struct App {
     pub log_filter: LogFilter,
     // Viewport rendering
     pub viewport_texture: ViewportTexture,
+    /// Reusable buffer for mesh render data (avoids per-frame allocation)
+    mesh_data_buffer: Vec<MeshRenderData>,
     pub viewport_texture_id: Option<egui::TextureId>,
     pub viewport_size: (u32, u32),
     /// Flag to force viewport/G-Buffer sync on next frame (after swapchain recreation)
@@ -135,6 +138,10 @@ impl App {
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
 
+        // Create and register profiler panel
+        let mut profiler_panel = ProfilerPanel::new();
+        profiler_panel.register_sink();
+
         Ok(Self {
             renderer,
             gui,
@@ -155,6 +162,7 @@ impl App {
             show_profiler: false,
             hierarchy_panel,
             inspector_panel: InspectorPanel::new(),
+            profiler_panel,
             selection: Selection::new(),
             command_history: CommandHistory::new(100),
             dock_state: EditorDockState::load_or_default(),
@@ -164,6 +172,7 @@ impl App {
             ],
             log_filter: LogFilter::default(),
             viewport_texture,
+            mesh_data_buffer: Vec::with_capacity(64), // Pre-allocate for typical scene
             viewport_texture_id: None, // Registered on first render
             viewport_size: (800, 600),
             pending_viewport_sync: false,
@@ -205,12 +214,14 @@ impl App {
     /// Begin a new frame (call at start of MainEventsCleared)
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
+        #[cfg(feature = "tracy")]
+        tracy_client::Client::running().map(|c| c.frame_mark());
         self.input_manager.new_frame();
     }
 
     /// Update game state (physics, hot-reload)
     pub fn update(&mut self) {
-        puffin::profile_function!();
+        rust_engine::profile_function!();
 
         // Process hot-reload events
         self.process_hot_reload();
@@ -219,7 +230,7 @@ impl App {
         let delta_time = self.game_loop.tick();
 
         {
-            puffin::profile_scope!("physics_step");
+            rust_engine::profile_scope!("physics_step");
             self.physics_world.step(delta_time, &mut self.world);
         }
     }
@@ -316,7 +327,7 @@ impl App {
 
     /// Render a frame
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
-        puffin::profile_function!();
+        rust_engine::profile_function!();
 
         // Register viewport texture with egui if not done yet
         if self.viewport_texture_id.is_none() {
@@ -326,9 +337,13 @@ impl App {
             self.viewport_texture_id = Some(texture_id);
         }
 
-        // Prepare render data
-        let mesh_data =
-            render_loop::prepare_mesh_data(&self.world, &self.asset_manager, &self.renderer);
+        // Prepare render data (reuses mesh_data_buffer to avoid allocation)
+        render_loop::prepare_mesh_data(
+            &self.world,
+            &self.asset_manager,
+            &self.renderer,
+            &mut self.mesh_data_buffer,
+        );
         let light_data = render_loop::prepare_light_data(&self.world, &self.renderer);
 
         // Clean up previous frame
@@ -376,6 +391,8 @@ impl App {
                     // The flag will be processed at the START of the next frame (above)
                     // By then, viewport_size will be fresh from THIS frame's GUI render
                     self.pending_viewport_sync = true;
+                    // Also clear GUI framebuffer cache (swapchain images changed)
+                    self.gui.clear_framebuffer_cache();
                 }
                 Err(e) => {
                     self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
@@ -419,7 +436,7 @@ impl App {
         // Render with deferred pipeline to the VIEWPORT TEXTURE (not swapchain)
         let deferred_cb = match self
             .deferred_renderer
-            .render(&mesh_data, &light_data, self.viewport_texture.image())
+            .render(&self.mesh_data_buffer, &light_data, self.viewport_texture.image())
         {
             Ok(cb) => cb,
             Err(e) => {
@@ -437,6 +454,7 @@ impl App {
         let show_profiler = &mut self.show_profiler;
         let hierarchy_panel = &mut self.hierarchy_panel;
         let inspector_panel = &mut self.inspector_panel;
+        let profiler_panel = &mut self.profiler_panel;
         let world = &mut self.world;
         let selection = &mut self.selection;
         let command_history = &mut self.command_history;
@@ -468,6 +486,7 @@ impl App {
                 log_filter,
                 viewport_texture_id,
                 viewport_size,
+                profiler_panel,
             };
 
             // Create tab viewer
@@ -533,28 +552,31 @@ impl App {
         self.handle_frame_input(&gui_result);
 
         // Submit command buffers and present
-        let future = acquire_future
-            .then_execute(self.renderer.queue.clone(), deferred_cb)
-            .unwrap()
-            .then_execute(self.renderer.queue.clone(), gui_result.command_buffer)
-            .unwrap()
-            .then_swapchain_present(
-                self.renderer.queue.clone(),
-                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.renderer.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
+        {
+            rust_engine::profile_scope!("gpu_submit");
+            let future = acquire_future
+                .then_execute(self.renderer.queue.clone(), deferred_cb)
+                .unwrap()
+                .then_execute(self.renderer.queue.clone(), gui_result.command_buffer)
+                .unwrap()
+                .then_swapchain_present(
+                    self.renderer.queue.clone(),
+                    vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
+                        self.renderer.swapchain.clone(),
+                        image_index,
+                    ),
+                )
+                .then_signal_fence_and_flush();
 
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(_) => {
-                // Expected during minimize/restore - surface becomes incompatible
-                // Swapchain will be recreated on next frame
-                self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+            match future {
+                Ok(future) => {
+                    self.previous_frame_end = Some(future.boxed());
+                }
+                Err(_) => {
+                    // Expected during minimize/restore - surface becomes incompatible
+                    // Swapchain will be recreated on next frame
+                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+                }
             }
         }
 

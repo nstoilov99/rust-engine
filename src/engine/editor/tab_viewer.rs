@@ -5,6 +5,7 @@
 use super::{
     console::{LogFilter, LogLevel, LogMessage},
     dock_layout::EditorTab,
+    profiler::ProfilerPanel,
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
 };
 use egui::{Color32, RichText, Ui};
@@ -28,6 +29,8 @@ pub struct EditorContext<'a> {
     pub viewport_texture_id: Option<egui::TextureId>,
     /// Current viewport size (for detecting resize)
     pub viewport_size: &'a mut (u32, u32),
+    /// Profiler panel
+    pub profiler_panel: &'a mut ProfilerPanel,
 }
 
 /// Tab viewer that renders each panel type
@@ -211,24 +214,8 @@ impl<'a> EditorTabViewer<'a> {
             });
     }
 
-    /// Render the profiler panel (custom puffin integration)
+    /// Render the profiler panel
     fn render_profiler(&mut self, ui: &mut Ui) {
-        ui.heading("Profiler");
-        ui.separator();
-
-        ui.checkbox(self.editor.show_profiler, "Enable Profiling (F12)");
-
-        if *self.editor.show_profiler {
-            // Placeholder for custom puffin profiler integration
-            // puffin_egui was removed for egui 0.33 compatibility
-            // TODO: Implement custom profiler visualization
-            ui.heading("Profiler");
-            ui.label("Profiling is enabled. Use puffin::profile_scope!() to instrument code.");
-            ui.separator();
-            ui.label(egui::RichText::new("Note: Custom profiler UI coming soon.").weak());
-            ui.label("For now, use puffin_viewer for detailed profiling data.");
-        } else {
-            ui.label("Profiling disabled. Enable to see performance data.");
-        }
+        self.editor.profiler_panel.show_contents(ui);
     }
 }

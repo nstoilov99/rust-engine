@@ -9,6 +9,7 @@ use vulkano::pipeline::GraphicsPipeline;
 use vulkano::image::view::ImageView;
 use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
 use crate::engine::rendering::rendering_3d::material::*;
+use glam::Vec3;
 use gltf;
 
 /// Represents a loaded mesh with vertex and index data
@@ -17,6 +18,35 @@ pub struct LoadedMesh {
     pub vertices: Vec<Vertex3D>,
     pub indices: Vec<u32>,
     pub material_index: Option<usize>,
+    /// Bounding sphere center in local/model space
+    pub center: Vec3,
+    /// Bounding sphere radius
+    pub radius: f32,
+}
+
+/// Compute bounding sphere for a set of vertices
+fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
+    if vertices.is_empty() {
+        return (Vec3::ZERO, 0.0);
+    }
+
+    // Compute center as average of all positions
+    let sum: Vec3 = vertices
+        .iter()
+        .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2]))
+        .sum();
+    let center = sum / vertices.len() as f32;
+
+    // Compute radius as max distance from center
+    let radius = vertices
+        .iter()
+        .map(|v| {
+            let pos = Vec3::new(v.position[0], v.position[1], v.position[2]);
+            (pos - center).length()
+        })
+        .fold(0.0f32, f32::max);
+
+    (center, radius)
 }
 
 /// Represents a complete 3D model with all meshes and textures
@@ -94,7 +124,12 @@ pub fn print_gltf_info(document: &gltf::Document) {
 
 /// Loads a complete model from GLTF file
 pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
-    let (document, buffers, images) = load_gltf(path)?;
+    crate::profile_function!();
+
+    let (document, buffers, images) = {
+        crate::profile_scope!("gltf_parse");
+        load_gltf(path)?
+    };
 
     // Get model name from file path
     let name = Path::new(path)
@@ -106,26 +141,30 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
     let mut model = Model::new(name.clone());
 
     // Extract all meshes
-    for (_mesh_index, mesh) in document.meshes().enumerate() {
-        for (_prim_index, primitive) in mesh.primitives().enumerate() {
-            // Only handle triangle meshes
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
-                continue;
-            }
-
-            // Extract mesh data
-            match extract_mesh_from_primitive(&primitive, &buffers) {
-                Ok(loaded_mesh) => {
-                    model.meshes.push(loaded_mesh);
+    {
+        crate::profile_scope!("vertex_processing");
+        for (_mesh_index, mesh) in document.meshes().enumerate() {
+            for (_prim_index, primitive) in mesh.primitives().enumerate() {
+                // Only handle triangle meshes
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                    continue;
                 }
-                Err(e) => {
-                    eprintln!("Failed to extract mesh primitive: {}", e);
+
+                // Extract mesh data
+                match extract_mesh_from_primitive(&primitive, &buffers) {
+                    Ok(loaded_mesh) => {
+                        model.meshes.push(loaded_mesh);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to extract mesh primitive: {}", e);
+                    }
                 }
             }
         }
     }
 
     // Extract textures from images
+    crate::profile_scope!("texture_extraction");
     for (_i, image_data) in images.iter().enumerate() {
         // Convert to RgbaImage
         let rgba_image = match image_data.format {
@@ -328,10 +367,15 @@ fn extract_mesh_from_primitive(
     // Get material index
     let material_index = primitive.material().index();
 
+    // Compute bounding sphere for frustum culling
+    let (center, radius) = compute_bounding_sphere(&vertices);
+
     Ok(LoadedMesh {
         vertices,
         indices,
         material_index,
+        center,
+        radius,
     })
 }
 

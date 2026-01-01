@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use glam::Vec3;
 use vulkano::device::{Device, Queue};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::memory::allocator::StandardMemoryAllocator;
@@ -39,13 +40,18 @@ impl AssetManager {
 
     /// Load a model and upload it to GPU, returns (mesh indices, model handle)
     pub fn load_model_gpu(&self, path: &str) -> Result<(Vec<usize>, super::handle::Handle<super::model_loader::Model>), Box<dyn std::error::Error>> {
+        crate::profile_function!();
+
         // Load model from cache
         let model_handle = self.models.load(path)?;
         let model = model_handle.get();
 
         // Upload to GPU mesh manager
         let mut meshes = self.meshes.write();
-        let indices = meshes.upload_model(&model, self.allocator.clone())?;
+        let indices = {
+            crate::profile_scope!("gpu_mesh_upload");
+            meshes.upload_model(&model, self.allocator.clone())?
+        };
 
         Ok((indices, model_handle))
     }
@@ -71,8 +77,13 @@ impl AssetManager {
         vertices: &[Vertex3D],
         indices: &[u32],
     ) -> Result<usize, Box<dyn std::error::Error>> {
+        crate::profile_scope!("upload_procedural_mesh");
+
+        // Compute bounding sphere for frustum culling
+        let (center, radius) = compute_bounding_sphere(vertices);
+
         let mut meshes = self.meshes.write();
-        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices)?;
+        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices, center, radius)?;
         let index = meshes.meshes.len();
         meshes.meshes.push(gpu_mesh);
         Ok(index)
@@ -91,6 +102,31 @@ impl AssetManager {
             models: self.models.cache_size(),
         }
     }
+}
+
+/// Compute bounding sphere for a set of vertices
+fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
+    if vertices.is_empty() {
+        return (Vec3::ZERO, 0.0);
+    }
+
+    // Compute center as average of all positions
+    let sum: Vec3 = vertices
+        .iter()
+        .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2]))
+        .sum();
+    let center = sum / vertices.len() as f32;
+
+    // Compute radius as max distance from center
+    let radius = vertices
+        .iter()
+        .map(|v| {
+            let pos = Vec3::new(v.position[0], v.position[1], v.position[2]);
+            (pos - center).length()
+        })
+        .fold(0.0f32, f32::max);
+
+    (center, radius)
 }
 
 #[derive(Debug, Clone, Copy)]

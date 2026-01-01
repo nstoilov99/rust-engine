@@ -1,8 +1,8 @@
 (
-    width: 2560,
-    height: 1369,
-    x: -8,
-    y: -8,
+    width: 1920,
+    height: 1009,
+    x: -1928,
+    y: 355,
     maximized: true,
     fullscreen: false,
 )

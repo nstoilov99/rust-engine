@@ -170,9 +170,9 @@ impl HierarchyPanel {
                     return;
                 }
 
-                // Render roots in explicit order
-                let roots = self.root_order.clone();
-                for root in roots {
+                // Render roots in explicit order (Entity is Copy, so we can iterate by value)
+                for i in 0..self.root_order.len() {
+                    let root = self.root_order[i]; // Entity is Copy
                     self.render_entity_node(ui, world, selection, root, 0);
                 }
             });

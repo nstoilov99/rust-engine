@@ -88,6 +88,8 @@ impl Gui {
         swapchain_image: Arc<vulkano::image::Image>,
         mut ui_fn: impl FnMut(&egui::Context),
     ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
+        crate::profile_function!();
+
         // Build RawInput with collected events
         // Use unwrap_or to handle potential clock skew gracefully
         let current_time = std::time::SystemTime::now()
@@ -108,7 +110,10 @@ impl Gui {
         };
 
         // Run egui with UI code
-        let full_output = self.egui_ctx.run(raw_input, &mut ui_fn);
+        let full_output = {
+            crate::profile_scope!("egui_run");
+            self.egui_ctx.run(raw_input, &mut ui_fn)
+        };
 
         // Store what egui wants to consume
         let wants_keyboard =
@@ -131,9 +136,11 @@ impl Gui {
         self.pixels_per_point = full_output.pixels_per_point;
 
         // Tessellate and render
-        let clipped_primitives = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let clipped_primitives = {
+            crate::profile_scope!("egui_tessellate");
+            self.egui_ctx
+                .tessellate(full_output.shapes, full_output.pixels_per_point)
+        };
 
         // Create screen rect from our stored size
         let screen_rect = egui::Rect::from_min_size(
@@ -335,6 +342,11 @@ impl Gui {
         image_view: std::sync::Arc<vulkano::image::view::ImageView>,
     ) {
         self.renderer.update_native_texture(texture_id, image_view);
+    }
+
+    /// Clear framebuffer cache (call on swapchain recreation)
+    pub fn clear_framebuffer_cache(&mut self) {
+        self.renderer.clear_framebuffer_cache();
     }
 }
 
