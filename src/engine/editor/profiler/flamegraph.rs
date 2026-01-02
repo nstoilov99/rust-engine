@@ -1032,8 +1032,8 @@ fn handle_interactions(
             state.scroll_offset_y = (state.scroll_offset_y + scroll_step).min(max_scroll);
         }
 
-        // Space to toggle pause
-        if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+        // Space to toggle pause (only when no text input is focused)
+        if !ui.ctx().wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Space)) {
             state.toggle_pause();
         }
     }

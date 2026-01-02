@@ -2,6 +2,7 @@
 
 mod commands;
 mod console;
+pub mod console_cmd;
 mod dock_layout;
 mod hierarchy_panel;
 mod inspector_panel;
@@ -14,6 +15,7 @@ mod window_config;
 
 pub use commands::*;
 pub use console::*;
+pub use console_cmd::ConsoleCommandSystem;
 pub use dock_layout::*;
 pub use hierarchy_panel::*;
 pub use inspector_panel::*;

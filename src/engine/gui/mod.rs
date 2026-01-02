@@ -301,6 +301,12 @@ impl Gui {
                             self.events.push(egui::Event::Text(ch.to_string()));
                         }
                     }
+                    // Space is Key::Named, not Key::Character, so handle it separately
+                    if let Key::Named(NamedKey::Space) = &key_event.logical_key {
+                        if !self.modifiers.ctrl && !self.modifiers.alt && !self.modifiers.command {
+                            self.events.push(egui::Event::Text(" ".to_string()));
+                        }
+                    }
                 }
 
                 true

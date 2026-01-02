@@ -4,6 +4,7 @@
 
 use super::{
     console::{LogFilter, LogLevel, LogMessage},
+    console_cmd::{CommandContext, ConsoleCommandSystem},
     dock_layout::EditorTab,
     profiler::ProfilerPanel,
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
@@ -21,8 +22,8 @@ pub struct EditorContext<'a> {
     pub command_history: &'a mut CommandHistory,
     /// Show profiler flag
     pub show_profiler: &'a mut bool,
-    /// Console log messages
-    pub console_messages: &'a [LogMessage],
+    /// Console log messages (mutable for command output)
+    pub console_messages: &'a mut Vec<LogMessage>,
     /// Console log filter settings
     pub log_filter: &'a mut LogFilter,
     /// Viewport texture ID for rendering the 3D scene
@@ -31,6 +32,16 @@ pub struct EditorContext<'a> {
     pub viewport_size: &'a mut (u32, u32),
     /// Profiler panel
     pub profiler_panel: &'a mut ProfilerPanel,
+    /// Console command system
+    pub console_command_system: &'a mut ConsoleCommandSystem,
+    /// Console input text
+    pub console_input: &'a mut String,
+    /// Toggle for stat fps overlay (Unreal-style)
+    pub show_stat_fps: &'a mut bool,
+    /// Current FPS for overlay display
+    pub fps: f32,
+    /// Current frame time in milliseconds for overlay display
+    pub delta_ms: f32,
 }
 
 /// Tab viewer that renders each panel type
@@ -71,6 +82,9 @@ impl<'a> EditorTabViewer<'a> {
         let new_height = (available_size.y.max(1.0)) as u32;
         *self.editor.viewport_size = (new_width, new_height);
 
+        // Get the rect where we'll render the viewport
+        let viewport_rect = ui.available_rect_before_wrap();
+
         // If we have a viewport texture, display it
         if let Some(texture_id) = self.editor.viewport_texture_id {
             // Display the rendered scene texture filling the available space
@@ -90,6 +104,52 @@ impl<'a> EditorTabViewer<'a> {
                     ui.label(egui::RichText::new("Initializing viewport texture...").weak());
                 });
             });
+        }
+
+        // Render stat fps overlay if enabled (Unreal Engine style)
+        if *self.editor.show_stat_fps {
+            let painter = ui.painter();
+            let padding = 8.0;
+            let line_height = 18.0;
+
+            // Position in top-left corner of viewport
+            let overlay_pos = egui::pos2(viewport_rect.left() + padding, viewport_rect.top() + padding);
+
+            // Format stats
+            let fps_text = format!("FPS: {:.1}", self.editor.fps);
+            let ms_text = format!("Frame: {:.2} ms", self.editor.delta_ms);
+
+            // Calculate background size
+            let text_width = 120.0;
+            let bg_rect = egui::Rect::from_min_size(
+                overlay_pos,
+                egui::vec2(text_width, line_height * 2.0 + padding),
+            );
+
+            // Draw semi-transparent background
+            painter.rect_filled(
+                bg_rect,
+                4.0, // corner radius
+                Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+
+            // Draw FPS text
+            painter.text(
+                egui::pos2(overlay_pos.x + 4.0, overlay_pos.y + 2.0),
+                egui::Align2::LEFT_TOP,
+                &fps_text,
+                egui::FontId::monospace(14.0),
+                Color32::from_rgb(100, 255, 100), // Green for FPS
+            );
+
+            // Draw frame time text
+            painter.text(
+                egui::pos2(overlay_pos.x + 4.0, overlay_pos.y + line_height + 2.0),
+                egui::Align2::LEFT_TOP,
+                &ms_text,
+                egui::FontId::monospace(14.0),
+                Color32::from_rgb(255, 255, 100), // Yellow for frame time
+            );
         }
     }
 
@@ -158,7 +218,10 @@ impl<'a> EditorTabViewer<'a> {
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(error_text).fill(error_fill).corner_radius(3.0)).clicked() {
+            if ui
+                .add(egui::Button::new(error_text).fill(error_fill).corner_radius(3.0))
+                .clicked()
+            {
                 self.editor.log_filter.show_error = !self.editor.log_filter.show_error;
             }
 
@@ -174,7 +237,10 @@ impl<'a> EditorTabViewer<'a> {
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(warn_text).fill(warn_fill).corner_radius(3.0)).clicked() {
+            if ui
+                .add(egui::Button::new(warn_text).fill(warn_fill).corner_radius(3.0))
+                .clicked()
+            {
                 self.editor.log_filter.show_warning = !self.editor.log_filter.show_warning;
             }
 
@@ -190,16 +256,25 @@ impl<'a> EditorTabViewer<'a> {
                 } else {
                     Color32::GRAY
                 });
-            if ui.add(egui::Button::new(info_text).fill(info_fill).corner_radius(3.0)).clicked() {
+            if ui
+                .add(egui::Button::new(info_text).fill(info_fill).corner_radius(3.0))
+                .clicked()
+            {
                 self.editor.log_filter.show_info = !self.editor.log_filter.show_info;
             }
         });
         ui.separator();
 
+        // Message display area
+        let available_height = ui.available_height() - 30.0; // Reserve space for input
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(true)
+            .max_height(available_height.max(50.0))
             .show(ui, |ui| {
+                // Enable text selection for console messages
+                ui.style_mut().interaction.selectable_labels = true;
+
                 let mut shown_count = 0;
                 for message in self.editor.console_messages.iter() {
                     if self.editor.log_filter.should_show(message) {
@@ -212,6 +287,62 @@ impl<'a> EditorTabViewer<'a> {
                     ui.label(RichText::new("No messages").weak().italics());
                 }
             });
+
+        ui.separator();
+
+        // Command input field
+        let response = ui.add(
+            egui::TextEdit::singleline(self.editor.console_input)
+                .hint_text("Enter command (type 'help' for available commands)")
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Monospace),
+        );
+
+        // Handle Enter key to execute command
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let input = std::mem::take(self.editor.console_input);
+            if !input.is_empty() {
+                // Echo the command input
+                self.editor
+                    .console_messages
+                    .push(LogMessage::info(format!("> {}", input)));
+
+                // Create execution context with access to toggles
+                let mut ctx = CommandContext::new(self.editor.world, self.editor.show_stat_fps);
+
+                // Execute command
+                let output = self.editor.console_command_system.execute(&input, &mut ctx);
+
+                // Handle clear command specially
+                if output.len() == 1 && output[0].text == "__CLEAR__" {
+                    self.editor.console_messages.clear();
+                } else {
+                    // Append output messages
+                    self.editor.console_messages.extend(output);
+                }
+            }
+            // Re-focus the input field
+            response.request_focus();
+        }
+
+        // Handle Up/Down keys for history navigation
+        if response.has_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                if let Some(prev) = self
+                    .editor
+                    .console_command_system
+                    .history
+                    .previous(self.editor.console_input)
+                {
+                    *self.editor.console_input = prev.to_string();
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                if let Some(next) = self.editor.console_command_system.history.next() {
+                    *self.editor.console_input = next.to_string();
+                }
+            }
+        }
     }
 
     /// Render the profiler panel

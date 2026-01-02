@@ -5,7 +5,6 @@
 
 mod app;
 mod game_setup;
-mod gui_panel;
 mod input_handler;
 mod render_loop;
 

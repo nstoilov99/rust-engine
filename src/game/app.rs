@@ -3,14 +3,14 @@
 //! The App struct holds all engine state and provides methods for
 //! initialization, update, and rendering.
 
-use super::{game_setup, gui_panel, input_handler, render_loop};
+use super::{game_setup, input_handler, render_loop};
 use hecs::World;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
-    create_editor_dock_style, render_menu_bar, CommandHistory, EditorContext, EditorDockState,
-    EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
-    ProfilerPanel, Selection, ViewportTexture, WindowConfig,
+    create_editor_dock_style, render_menu_bar, CommandHistory, ConsoleCommandSystem,
+    EditorContext, EditorDockState, EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter,
+    LogMessage, MenuAction, ProfilerPanel, Selection, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
@@ -55,6 +55,10 @@ pub struct App {
     pub dock_state: EditorDockState,
     pub console_messages: Vec<LogMessage>,
     pub log_filter: LogFilter,
+    pub console_command_system: ConsoleCommandSystem,
+    pub console_input: String,
+    /// Toggle for stat fps overlay (Unreal-style)
+    pub show_stat_fps: bool,
     // Viewport rendering
     pub viewport_texture: ViewportTexture,
     /// Reusable buffer for mesh render data (avoids per-frame allocation)
@@ -171,6 +175,9 @@ impl App {
                 LogMessage::info("Scene loaded"),
             ],
             log_filter: LogFilter::default(),
+            console_command_system: ConsoleCommandSystem::new(),
+            console_input: String::new(),
+            show_stat_fps: false,
             viewport_texture,
             mesh_data_buffer: Vec::with_capacity(64), // Pre-allocate for typical scene
             viewport_texture_id: None, // Registered on first render
@@ -447,10 +454,6 @@ impl App {
         };
 
         // Render GUI with dock layout
-        let entity_count = self.world.len() as usize;
-        let game_loop = &self.game_loop;
-        let camera_distance = self.camera_distance;
-        let renderer = &self.renderer;
         let show_profiler = &mut self.show_profiler;
         let hierarchy_panel = &mut self.hierarchy_panel;
         let inspector_panel = &mut self.inspector_panel;
@@ -459,8 +462,13 @@ impl App {
         let selection = &mut self.selection;
         let command_history = &mut self.command_history;
         let dock_state = &mut self.dock_state;
-        let console_messages = &self.console_messages;
+        let console_messages = &mut self.console_messages;
         let log_filter = &mut self.log_filter;
+        let console_command_system = &mut self.console_command_system;
+        let console_input = &mut self.console_input;
+        let show_stat_fps = &mut self.show_stat_fps;
+        let fps = self.game_loop.fps();
+        let delta_ms = self.game_loop.delta_ms();
         let viewport_texture_id = self.viewport_texture_id;
         let viewport_size = &mut self.viewport_size;
 
@@ -470,9 +478,6 @@ impl App {
         let gui_result = match self.gui.render(window, target_image, |ctx| {
             // Render menu bar first (at top)
             menu_action = render_menu_bar(ctx, dock_state, command_history);
-
-            // Stats window (floating, always visible)
-            gui_panel::create_stats_window(ctx, entity_count, game_loop, camera_distance, renderer);
 
             // Create editor context for tab viewer
             let editor_ctx = EditorContext {
@@ -487,6 +492,11 @@ impl App {
                 viewport_texture_id,
                 viewport_size,
                 profiler_panel,
+                console_command_system,
+                console_input,
+                show_stat_fps,
+                fps,
+                delta_ms,
             };
 
             // Create tab viewer

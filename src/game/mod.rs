@@ -5,11 +5,9 @@
 //! - Input handling
 //! - Scene setup
 //! - Rendering orchestration
-//! - GUI panels
 
 pub mod app;
 pub mod game_setup;
-pub mod gui_panel;
 pub mod input_handler;
 pub mod render_loop;
 
