@@ -32,7 +32,26 @@ impl Transform {
         self
     }
 
-    /// Calculate the model matrix for this transform
+    /// Build the local transform matrix in Z-up space (no coordinate conversion).
+    ///
+    /// This composes Translation * Rotation * Scale in the game's native Z-up
+    /// coordinate system. Use this for:
+    /// - Hierarchy composition (parent * child matrices)
+    /// - Physics calculations
+    /// - Any game logic that needs world-space matrices
+    ///
+    /// For rendering, convert the result using `render_adapter::world_matrix_to_render()`.
+    pub fn local_matrix_zup(&self) -> glm::Mat4 {
+        let translation = glm::translation(&self.position);
+        let rotation = glm::quat_to_mat4(&self.rotation);
+        let scale = glm::scaling(&self.scale);
+        translation * rotation * scale
+    }
+
+    /// Calculate the model matrix for this transform, converted to render space (Y-up).
+    ///
+    /// **Note**: This returns only the LOCAL transform. For entities with parents,
+    /// use `hierarchy::get_world_transform()` followed by `render_adapter::world_matrix_to_render()`.
     ///
     /// ECS uses Z-up coordinates. Vulkan uses Y-up for rendering.
     /// Delegates to render_adapter for centralized coordinate conversion.

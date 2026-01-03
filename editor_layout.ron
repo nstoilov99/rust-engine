@@ -161,7 +161,7 @@
                     collapsed: false,
                 )),
             ],
-            focused_node: Some((4)),
+            focused_node: Some((6)),
             collapsed: false,
             collapsed_leaf_count: 0,
         )),

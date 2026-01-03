@@ -211,17 +211,20 @@ pub fn despawn_recursive(world: &mut World, entity: Entity) {
     let _ = world.despawn(entity);
 }
 
-/// Calculate world transform for an entity (recursive up the hierarchy)
+/// Calculate world transform for an entity in Z-up space (recursive up the hierarchy).
+///
+/// Returns the composed world matrix in the game's native Z-up coordinate system.
+/// This correctly handles non-uniform scaling combined with rotation in hierarchies.
+///
+/// For rendering, convert the result using `render_adapter::world_matrix_to_render()`:
+/// ```ignore
+/// let world_zup = get_world_transform(world, entity);
+/// let render_matrix = render_adapter::world_matrix_to_render(&world_zup);
+/// ```
 pub fn get_world_transform(world: &World, entity: Entity) -> glm::Mat4 {
     let local_transform = world
         .get::<&Transform>(entity)
-        .map(|t| {
-            // Build local transform matrix (translation * rotation * scale)
-            let translation = glm::translation(&t.position);
-            let rotation = glm::quat_to_mat4(&t.rotation);
-            let scale = glm::scaling(&t.scale);
-            translation * rotation * scale
-        })
+        .map(|t| t.local_matrix_zup())
         .unwrap_or_else(|_| glm::identity());
 
     // Check for parent
@@ -234,15 +237,22 @@ pub fn get_world_transform(world: &World, entity: Entity) -> glm::Mat4 {
 }
 
 /// Cache for world transforms (optional optimization)
+///
+/// Stores both Z-up world matrices and Y-up render matrices to avoid
+/// recomputation each frame.
 pub struct TransformCache {
-    cache: HashMap<Entity, glm::Mat4>,
+    /// World transforms in Z-up space (for game logic, physics)
+    world_cache: HashMap<Entity, glm::Mat4>,
+    /// Render transforms in Y-up space (for GPU submission)
+    render_cache: HashMap<Entity, glm::Mat4>,
     dirty: bool,
 }
 
 impl TransformCache {
     pub fn new() -> Self {
         Self {
-            cache: HashMap::new(),
+            world_cache: HashMap::new(),
+            render_cache: HashMap::new(),
             dirty: true,
         }
     }
@@ -252,20 +262,44 @@ impl TransformCache {
         self.dirty = true;
     }
 
-    /// Get cached world transform, or calculate and cache
-    pub fn get_world_transform(&mut self, world: &World, entity: Entity) -> glm::Mat4 {
+    fn ensure_clean(&mut self) {
         if self.dirty {
-            self.cache.clear();
+            self.world_cache.clear();
+            self.render_cache.clear();
             self.dirty = false;
         }
+    }
 
-        if let Some(&cached) = self.cache.get(&entity) {
+    /// Get cached world transform in Z-up space, or calculate and cache.
+    ///
+    /// Use this for game logic, physics, and hierarchy operations.
+    pub fn get_world_transform(&mut self, world: &World, entity: Entity) -> glm::Mat4 {
+        self.ensure_clean();
+
+        if let Some(&cached) = self.world_cache.get(&entity) {
             return cached;
         }
 
         let transform = get_world_transform(world, entity);
-        self.cache.insert(entity, transform);
+        self.world_cache.insert(entity, transform);
         transform
+    }
+
+    /// Get cached render transform in Y-up space, or calculate and cache.
+    ///
+    /// Use this for GPU submission and rendering.
+    pub fn get_render_transform(&mut self, world: &World, entity: Entity) -> glm::Mat4 {
+        self.ensure_clean();
+
+        if let Some(&cached) = self.render_cache.get(&entity) {
+            return cached;
+        }
+
+        let world_transform = self.get_world_transform(world, entity);
+        let render_transform =
+            crate::engine::adapters::render_adapter::world_matrix_to_render(&world_transform);
+        self.render_cache.insert(entity, render_transform);
+        render_transform
     }
 }
 

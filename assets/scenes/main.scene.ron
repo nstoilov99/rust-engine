@@ -19,84 +19,11 @@
             ],
         ),
         (
-            name: "Main Camera",
-            components: [
-                (
-                    type: "Transform",
-                    position: (0.0, 5.0, 10.0),
-                    rotation: (0.0, 0.0, 0.0, 1.0),
-                    scale: (1.0, 1.0, 1.0),
-                ),
-                (
-                    type: "Camera",
-                    fov: 60.0,
-                    near: 0.1,
-                    far: 1000.0,
-                    active: true,
-                ),
-            ],
-        ),
-        (
-            name: "Duck",
-            components: [
-                (
-                    type: "Transform",
-                    position: (0.0, 0.0, 0.0),
-                    rotation: (0.0, 0.0, 0.0, 1.0),
-                    scale: (0.01, 0.01, 0.01),
-                ),
-                (
-                    type: "MeshRenderer",
-                    mesh_index: 0,
-                    material_index: 0,
-                ),
-                (
-                    type: "Parent",
-                    parent_name: "Main Camera",
-                ),
-            ],
-        ),
-        (
-            name: "Sun",
-            components: [
-                (
-                    type: "DirectionalLight",
-                    direction: (0.0, -1.0, -1.0),
-                    color: (1.0, 1.0, 1.0),
-                    intensity: 1.0,
-                ),
-                (
-                    type: "Parent",
-                    parent_name: "Duck",
-                ),
-            ],
-        ),
-        (
-            name: "FallingCube1",
-            components: [
-                (
-                    type: "Transform",
-                    position: (-1.3045073, -0.15293574, -0.24127619),
-                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
-                    scale: (0.5, 0.5, 0.5),
-                ),
-                (
-                    type: "MeshRenderer",
-                    mesh_index: 2,
-                    material_index: 0,
-                ),
-                (
-                    type: "Parent",
-                    parent_name: "Sun",
-                ),
-            ],
-        ),
-        (
             name: "BouncyBox",
             components: [
                 (
                     type: "Transform",
-                    position: (1.0984617, 1.1080307, -0.1913319),
+                    position: (1.0984617, 1.1080307, 1.0),
                     rotation: (-0.3362995, -0.29328078, -0.6679992, -0.59553844),
                     scale: (0.6, 0.6, 0.6),
                 ),
@@ -112,9 +39,66 @@
                     far: 1000.0,
                     active: true,
                 ),
+            ],
+        ),
+        (
+            name: "FallingCube1",
+            components: [
                 (
-                    type: "Parent",
-                    parent_name: "FallingCube1",
+                    type: "Transform",
+                    position: (0.0, 0.0, 1.0),
+                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
+                    scale: (0.5, 0.5, 0.5),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
+            name: "Sun",
+            components: [
+                (
+                    type: "DirectionalLight",
+                    direction: (0.0, -0.7071068, -0.7071068),
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 1.0,
+                ),
+            ],
+        ),
+        (
+            name: "Duck",
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 1.0, -0.00000004371139),
+                    scale: (0.01, 0.01, 0.01),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 0,
+                    material_index: 0,
+                ),
+            ],
+        ),
+        (
+            name: "Main Camera",
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 5.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                (
+                    type: "Camera",
+                    fov: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                    active: true,
                 ),
             ],
         ),
@@ -123,9 +107,9 @@
             components: [
                 (
                     type: "Transform",
-                    position: (0.0, 0.0, -0.5),
+                    position: (0.0, 0.0, 0.0),
                     rotation: (0.0, 0.0, 0.0, 1.0),
-                    scale: (10.0, 1.0, 10.0),
+                    scale: (10.0, 10.0, 1.0),
                 ),
                 (
                     type: "MeshRenderer",

@@ -62,7 +62,7 @@ ron = "0.8"                                        # Rusty Object Notation
 typetag = "0.2"                                    # Polymorphic serialization
 
 # Immediate Mode GUI (latest version with custom Vulkano integration)
-egui = "0.33"
+egui = "0.33.3"
 
 # Physics Engine (Rapier 3D)
 rapier3d = "0.25"
@@ -85,3 +85,8 @@ opt-level = 1
 [profile.release]
 opt-level = 3
 lto = true
+
+# Patch emath to fix smart_aim bug that causes crash when dragging DragValue
+# See: https://github.com/emilk/egui/issues/7747
+[patch.crates-io]
+emath = { path = "crates/emath-patched" }

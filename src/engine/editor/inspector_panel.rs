@@ -330,6 +330,10 @@ impl InspectorPanel {
                             transform.position = glm::vec3(0.0, 0.0, 0.0);
                         }
                     });
+                    // Sanitize position values to prevent NaN/Infinity issues
+                    if !transform.position.x.is_finite() { transform.position.x = 0.0; }
+                    if !transform.position.y.is_finite() { transform.position.y = 0.0; }
+                    if !transform.position.z.is_finite() { transform.position.z = 0.0; }
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
                         ui.add(DragValue::new(&mut transform.position.x).speed(0.1));
@@ -354,13 +358,20 @@ impl InspectorPanel {
                         quaternion_to_euler_degrees(&transform.rotation)
                     });
 
+                    // Sanitize cached euler values to prevent DragValue crash
+                    for i in 0..3 {
+                        if !euler[i].is_finite() {
+                            euler[i] = 0.0;
+                        }
+                    }
+
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        let response_x = ui.add(DragValue::new(&mut euler[0]).speed(1.0).suffix("°"));
+                        let response_x = ui.add(DragValue::new(&mut euler[0]).speed(1.0).suffix("°").range(-180.0..=180.0));
                         ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        let response_y = ui.add(DragValue::new(&mut euler[1]).speed(1.0).suffix("°"));
+                        let response_y = ui.add(DragValue::new(&mut euler[1]).speed(1.0).suffix("°").range(-180.0..=180.0));
                         ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        let response_z = ui.add(DragValue::new(&mut euler[2]).speed(1.0).suffix("°"));
+                        let response_z = ui.add(DragValue::new(&mut euler[2]).speed(1.0).suffix("°").range(-180.0..=180.0));
 
                         if response_x.changed() || response_y.changed() || response_z.changed() {
                             transform.rotation = euler_degrees_to_quaternion(euler);
@@ -374,6 +385,10 @@ impl InspectorPanel {
                             transform.scale = glm::vec3(1.0, 1.0, 1.0);
                         }
                     });
+                    // Sanitize scale values to prevent DragValue crash
+                    if !transform.scale.x.is_finite() { transform.scale.x = 1.0; }
+                    if !transform.scale.y.is_finite() { transform.scale.y = 1.0; }
+                    if !transform.scale.z.is_finite() { transform.scale.z = 1.0; }
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
                         ui.add(DragValue::new(&mut transform.scale.x).speed(0.01).range(0.001..=1000.0));
@@ -407,6 +422,11 @@ impl InspectorPanel {
                     ui.checkbox(&mut camera.active, "Active")
                         .on_hover_text("Whether this camera is currently rendering");
 
+                    // Sanitize camera values to prevent DragValue crash
+                    if !camera.fov.is_finite() { camera.fov = 60.0; }
+                    if !camera.near.is_finite() || camera.near <= 0.0 { camera.near = 0.1; }
+                    if !camera.far.is_finite() || camera.far <= camera.near { camera.far = 1000.0; }
+
                     // FOV slider (30-120 degrees)
                     ui.horizontal(|ui| {
                         ui.label("FOV:");
@@ -418,9 +438,9 @@ impl InspectorPanel {
                         .on_hover_text("Field of view angle. Wider = more visible area");
                     });
 
-                    // Near/Far planes - store values to avoid borrow issues
-                    let near_max = camera.far - 0.001;
-                    let far_min = camera.near + 0.001;
+                    // Near/Far planes - calculate safe dynamic ranges
+                    let near_max = (camera.far - 0.001).max(0.002);
+                    let far_min = (camera.near + 0.001).min(99999.0);
 
                     ui.horizontal(|ui| {
                         ui.label("Near:");
@@ -518,13 +538,17 @@ impl InspectorPanel {
                 .show(ui, |ui| {
                     // Direction
                     ui.label("Direction:").on_hover_text("Direction the light is pointing (normalized)");
+                    // Sanitize direction to prevent DragValue crash
+                    if !light.direction.x.is_finite() { light.direction.x = 0.0; }
+                    if !light.direction.y.is_finite() { light.direction.y = -1.0; }
+                    if !light.direction.z.is_finite() { light.direction.z = 0.0; }
                     ui.horizontal(|ui| {
-                        ui.add(DragValue::new(&mut light.direction.x).prefix("X: ").speed(0.01));
-                        ui.add(DragValue::new(&mut light.direction.y).prefix("Y: ").speed(0.01));
-                        ui.add(DragValue::new(&mut light.direction.z).prefix("Z: ").speed(0.01));
+                        ui.add(DragValue::new(&mut light.direction.x).prefix("X: ").speed(0.01).range(-1.0..=1.0));
+                        ui.add(DragValue::new(&mut light.direction.y).prefix("Y: ").speed(0.01).range(-1.0..=1.0));
+                        ui.add(DragValue::new(&mut light.direction.z).prefix("Z: ").speed(0.01).range(-1.0..=1.0));
                     });
 
-                    // Normalize direction
+                    // Normalize direction (safe - values are now bounded)
                     let len = glm::length(&light.direction);
                     if len > 0.001 {
                         light.direction = light.direction / len;
@@ -582,6 +606,10 @@ impl InspectorPanel {
             let header = CollapsingHeader::new(RichText::new("Point Light").strong())
                 .default_open(true)
                 .show(ui, |ui| {
+                    // Sanitize light values to prevent DragValue crash
+                    if !light.intensity.is_finite() { light.intensity = 1.0; }
+                    if !light.radius.is_finite() { light.radius = 10.0; }
+
                     // Color
                     ui.horizontal(|ui| {
                         ui.label("Color:");
@@ -645,6 +673,11 @@ impl InspectorPanel {
             let header = CollapsingHeader::new(RichText::new("Rigid Body").strong())
                 .default_open(true)
                 .show(ui, |ui| {
+                    // Sanitize rigidbody values to prevent DragValue crash
+                    if !rb.mass.is_finite() { rb.mass = 1.0; }
+                    if !rb.linear_damping.is_finite() { rb.linear_damping = 0.0; }
+                    if !rb.angular_damping.is_finite() { rb.angular_damping = 0.0; }
+
                     // Body type dropdown
                     ui.horizontal(|ui| {
                         ui.label("Type:").on_hover_text(
@@ -852,12 +885,18 @@ impl InspectorPanel {
 }
 
 /// Convert quaternion to Euler angles (degrees)
+///
+/// Guards against NaN values that can occur from numerical edge cases
+/// in the quaternion-to-euler conversion (e.g., gimbal lock regions).
+/// Normalizes the quaternion first to prevent denormalization drift.
 fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
-    let euler = glm::quat_euler_angles(q);
+    // Normalize quaternion to prevent NaN from denormalized quats
+    let q_norm = glm::quat_normalize(q);
+    let euler = glm::quat_euler_angles(&q_norm);
     [
-        euler.x.to_degrees(),
-        euler.y.to_degrees(),
-        euler.z.to_degrees(),
+        if euler.x.is_finite() { euler.x.to_degrees() } else { 0.0 },
+        if euler.y.is_finite() { euler.y.to_degrees() } else { 0.0 },
+        if euler.z.is_finite() { euler.z.to_degrees() } else { 0.0 },
     ]
 }
 
@@ -872,5 +911,6 @@ fn euler_degrees_to_quaternion(euler: &[f32; 3]) -> glm::Quat {
     let qy = glm::quat_angle_axis(rad_y, &glm::vec3(0.0, 1.0, 0.0));
     let qz = glm::quat_angle_axis(rad_z, &glm::vec3(0.0, 0.0, 1.0));
 
-    qz * qy * qx
+    // Normalize to prevent drift accumulation
+    glm::quat_normalize(&(qz * qy * qx))
 }

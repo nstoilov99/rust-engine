@@ -4,9 +4,12 @@
 
 use glam::Vec3;
 use hecs::World;
+use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
+use rust_engine::engine::adapters::render_adapter::world_matrix_to_render;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
+use rust_engine::engine::ecs::hierarchy::get_world_transform;
 use rust_engine::engine::math::Frustum;
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
@@ -24,6 +27,7 @@ use vulkano::{Validated, VulkanError};
 /// - view_projection is calculated once per frame, not per mesh
 /// - Reuses the provided Vec buffer (clears and refills) to avoid per-frame allocation
 /// - Frustum culling: skips meshes outside camera view
+/// - Properly handles hierarchical transforms with non-uniform scaling
 pub fn prepare_mesh_data(
     world: &World,
     asset_manager: &Arc<AssetManager>,
@@ -47,15 +51,18 @@ pub fn prepare_mesh_data(
 
     let vp_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(view_projection) };
 
-    for (_entity, (transform, mesh_renderer)) in
+    for (entity, (_transform, mesh_renderer)) in
         world.query::<(&Transform, &MeshRenderer)>().iter()
     {
         if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
-            // Compute model matrix
-            let model_matrix = transform.model_matrix();
+            // Get WORLD transform in Z-up space (includes parent hierarchy)
+            let world_matrix_zup = get_world_transform(world, entity);
+
+            // Convert to Y-up for rendering
+            let model_matrix = world_matrix_to_render(&world_matrix_zup);
 
             // FRUSTUM CULLING: Transform bounding sphere to world space
-            // Manually apply model_matrix (glm::Mat4/nalgebra) to center (glam::Vec3)
+            // Use the render matrix (Y-up) since frustum is in render space
             let c = gpu_mesh.center;
             let m = &model_matrix;
             let world_center = Vec3::new(
@@ -63,8 +70,25 @@ pub fn prepare_mesh_data(
                 m[(1, 0)] * c.x + m[(1, 1)] * c.y + m[(1, 2)] * c.z + m[(1, 3)],
                 m[(2, 0)] * c.x + m[(2, 1)] * c.y + m[(2, 2)] * c.z + m[(2, 3)],
             );
-            // Scale radius by maximum scale component for non-uniform scaling
-            let max_scale = transform.scale.x.max(transform.scale.y).max(transform.scale.z);
+
+            // Extract scale from Z-up world matrix for correct bounding radius
+            // Scale magnitude is preserved regardless of coordinate system
+            let scale_x = glm::length(&glm::vec3(
+                world_matrix_zup[(0, 0)],
+                world_matrix_zup[(1, 0)],
+                world_matrix_zup[(2, 0)],
+            ));
+            let scale_y = glm::length(&glm::vec3(
+                world_matrix_zup[(0, 1)],
+                world_matrix_zup[(1, 1)],
+                world_matrix_zup[(2, 1)],
+            ));
+            let scale_z = glm::length(&glm::vec3(
+                world_matrix_zup[(0, 2)],
+                world_matrix_zup[(1, 2)],
+                world_matrix_zup[(2, 2)],
+            ));
+            let max_scale = scale_x.max(scale_y).max(scale_z);
             let world_radius = gpu_mesh.radius * max_scale;
 
             // Skip mesh if completely outside frustum
