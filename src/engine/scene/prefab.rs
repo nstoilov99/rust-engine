@@ -65,9 +65,11 @@ impl Prefab {
         for component_data in &self.template.components {
             match component_data {
                 ComponentData::Transform { position, rotation, scale } => {
+                    // glm::quat takes parameters in order (x, y, z, w), NOT (w, x, y, z)!
+                    // rotation array is [x, y, z, w]
                     let mut transform = Transform {
                         position: glm::vec3(position[0], position[1], position[2]),
-                        rotation: glm::quat(rotation[3], rotation[0], rotation[1], rotation[2]),
+                        rotation: glm::quat(rotation[0], rotation[1], rotation[2], rotation[3]),
                         scale: glm::vec3(scale[0], scale[1], scale[2]),
                     };
 

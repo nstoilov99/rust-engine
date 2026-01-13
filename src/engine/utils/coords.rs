@@ -106,19 +106,52 @@ pub fn convert_scale_yup_to_zup(scale: Vec3) -> Vec3 {
     )
 }
 
-/// Converts Z-up rotation to Y-up rotation
+/// Converts Z-up rotation to Y-up rotation using stable component remapping.
+///
+/// The coordinate change involves a reflection (det = -1), which requires
+/// negating the rotation angle. Combined with axis remapping:
+/// - Z-up X (forward) → Y-up -Z (backward)
+/// - Z-up Y (right)   → Y-up X (right)
+/// - Z-up Z (up)      → Y-up Y (up)
+///
+/// This is computed via direct quaternion component manipulation,
+/// avoiding unstable axis-angle decomposition which has numerical issues
+/// for small rotation angles (division by near-zero sin(θ/2)).
+///
+/// For quaternion q = (x, y, z, w) with axis (ax, ay, az) and angle θ:
+///   x = ax * sin(θ/2), y = ay * sin(θ/2), z = az * sin(θ/2), w = cos(θ/2)
+///
+/// With angle negation (sin(-θ/2) = -sin(θ/2), cos(-θ/2) = cos(θ/2)):
+///   x' (Y-up X from Z-up Y) = -rot.y
+///   y' (Y-up Y from Z-up Z) = -rot.z
+///   z' (Y-up Z from -Z-up X) = rot.x (double negation)
+///   w' = rot.w (unchanged)
 pub fn convert_rotation_zup_to_yup(rot: Quat) -> Quat {
-    // Rotation conversion: 90° rotation around X axis
-    // This rotates the coordinate frame from Z-up to Y-up
-    let conversion = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-    conversion * rot
+    // Component remapping is length-preserving, no normalization needed.
+    // Normalizing here would introduce floating-point errors that accumulate
+    // across frames during gizmo interaction, causing flickering.
+    Quat::from_xyzw(-rot.y, -rot.z, rot.x, rot.w)
 }
 
-/// Converts Y-up rotation to Z-up rotation
+/// Converts Y-up rotation to Z-up rotation using stable component remapping.
+///
+/// Inverse of convert_rotation_zup_to_yup:
+/// - Y-up X (right)   → Z-up Y (right)
+/// - Y-up Y (up)      → Z-up Z (up)
+/// - Y-up -Z (backward) → Z-up X (forward)
+///
+/// Uses direct quaternion component manipulation for numerical stability.
+///
+/// Inverse remapping with angle negation:
+///   x' (Z-up X from -Y-up Z) = rot.z (double negation)
+///   y' (Z-up Y from Y-up X) = -rot.x
+///   z' (Z-up Z from Y-up Y) = -rot.y
+///   w' = rot.w (unchanged)
 pub fn convert_rotation_yup_to_zup(rot: Quat) -> Quat {
-    // Inverse rotation conversion: -90° rotation around X axis
-    let conversion = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    conversion * rot
+    // Component remapping is length-preserving, no normalization needed.
+    // Normalizing here would introduce floating-point errors that accumulate
+    // across frames during gizmo interaction, causing flickering.
+    Quat::from_xyzw(rot.z, -rot.x, -rot.y, rot.w)
 }
 
 /// Converts Z-up transform to Y-up transform matrix
@@ -285,5 +318,122 @@ mod tests {
         assert!((scale_x - 3.0).abs() < 0.001); // Y scale -> X
         assert!((scale_y - 4.0).abs() < 0.001); // Z scale -> Y
         assert!((scale_z - 2.0).abs() < 0.001); // X scale -> Z
+    }
+
+    #[test]
+    fn test_rotation_roundtrip() {
+        // Test that rotation round-trip conversion preserves the original rotation
+        let rotations = [
+            Quat::IDENTITY,
+            Quat::from_rotation_x(0.5),
+            Quat::from_rotation_y(0.7),
+            Quat::from_rotation_z(1.2),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.3, 0.4, 0.5),
+        ];
+
+        for rot in rotations {
+            let yup = convert_rotation_zup_to_yup(rot);
+            let back = convert_rotation_yup_to_zup(yup);
+
+            // Quaternions can be negated and still represent same rotation
+            let diff = (back - rot).length().min((back + rot).length());
+            assert!(diff < 0.001, "Round-trip failed for {:?}, got {:?}", rot, back);
+        }
+    }
+
+    #[test]
+    fn test_rotation_axis_mapping() {
+        // The coordinate change Z-up → Y-up has det = -1 (reflection), which flips handedness.
+        // Therefore, rotation angles are negated to maintain the same rotation effect.
+        //
+        // Axis mapping:
+        // - Z-up Z (up) → Y-up Y (up), angle negated
+        // - Z-up X (forward) → Y-up -Z (backward), angle negated
+        // - Z-up Y (right) → Y-up X (right), angle negated
+
+        // Z-up Z rotation → Y-up -Y rotation (angle negated)
+        let rot_around_zup_z = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let converted = convert_rotation_zup_to_yup(rot_around_zup_z);
+        let expected = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4);
+        let diff = (converted - expected).length().min((converted + expected).length());
+        assert!(diff < 0.001, "Z-up Z rotation should map to Y-up -Y rotation");
+
+        // Z-up X rotation → Y-up Z rotation (axis flipped, angle negated → positive Z)
+        let rot_around_zup_x = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
+        let converted_x = convert_rotation_zup_to_yup(rot_around_zup_x);
+        let expected_x = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let diff_x = (converted_x - expected_x).length().min((converted_x + expected_x).length());
+        assert!(diff_x < 0.001, "Z-up X rotation should map to Y-up Z rotation");
+
+        // Z-up Y rotation → Y-up -X rotation (angle negated)
+        let rot_around_zup_y = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        let converted_y = convert_rotation_zup_to_yup(rot_around_zup_y);
+        let expected_y = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4);
+        let diff_y = (converted_y - expected_y).length().min((converted_y + expected_y).length());
+        assert!(diff_y < 0.001, "Z-up Y rotation should map to Y-up -X rotation");
+    }
+
+    #[test]
+    fn test_rotation_arbitrary_axis() {
+        // Test rotation around an arbitrary axis (not aligned with any coordinate axis)
+        // This is the critical test that would fail with simple component remapping
+        let arbitrary_axis = Vec3::new(1.0, 1.0, 1.0).normalize();
+        let angle = std::f32::consts::FRAC_PI_3; // 60 degrees
+        let rot_zup = Quat::from_axis_angle(arbitrary_axis, angle);
+
+        // Convert to Y-up
+        let rot_yup = convert_rotation_zup_to_yup(rot_zup);
+
+        // The axis should be transformed the same way as a position vector
+        let expected_axis_yup = convert_position_zup_to_yup(arbitrary_axis).normalize();
+        let (actual_axis, actual_angle) = rot_yup.to_axis_angle();
+
+        // Axis should match (accounting for sign flip of axis with angle negation)
+        let axis_diff = (actual_axis - expected_axis_yup).length()
+            .min((actual_axis + expected_axis_yup).length());
+        assert!(axis_diff < 0.01, "Axis mismatch: expected {:?}, got {:?}", expected_axis_yup, actual_axis);
+
+        // Angle should be preserved (possibly negated with axis flip)
+        assert!((actual_angle.abs() - angle).abs() < 0.01,
+            "Angle mismatch: expected {}, got {}", angle, actual_angle.abs());
+    }
+
+    #[test]
+    fn test_rotation_preserves_transformed_vectors() {
+        // The most important test: a rotation should transform vectors consistently
+        // after coordinate conversion
+        let test_rotations = [
+            Quat::from_rotation_x(0.3),
+            Quat::from_rotation_y(0.5),
+            Quat::from_rotation_z(0.7),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.2, 0.4, 0.6),
+            Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.8),
+        ];
+
+        let test_vectors = [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::new(1.0, 2.0, 3.0),
+        ];
+
+        for rot_zup in test_rotations {
+            for vec_zup in test_vectors {
+                // Method 1: Rotate in Z-up, then convert result to Y-up
+                let rotated_zup = rot_zup * vec_zup;
+                let result1 = convert_position_zup_to_yup(rotated_zup);
+
+                // Method 2: Convert both to Y-up, then rotate
+                let vec_yup = convert_position_zup_to_yup(vec_zup);
+                let rot_yup = convert_rotation_zup_to_yup(rot_zup);
+                let result2 = rot_yup * vec_yup;
+
+                // Both methods should produce the same result
+                let diff = (result1 - result2).length();
+                assert!(diff < 0.001,
+                    "Vector transformation inconsistent for rot {:?}, vec {:?}: {:?} vs {:?}",
+                    rot_zup, vec_zup, result1, result2);
+            }
+        }
     }
 }

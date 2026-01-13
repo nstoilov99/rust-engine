@@ -1,0 +1,17 @@
+[package]
+name = "transform-gizmo"
+description = "3D transformation gizmo (Z-up fork)"
+version = "0.8.0"
+rust-version = "1.75.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+emath = "0.33"
+epaint = "0.33"
+ecolor = "0.33"
+glam = { version = "0.29", features = ["mint"] }
+mint = "0.5"
+enum_dispatch = "0.3"
+ahash = "0.8"
+enumset = "1.1"

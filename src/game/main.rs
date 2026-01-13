@@ -13,7 +13,7 @@ use rust_engine::engine::editor::WindowConfig;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -137,6 +137,19 @@ impl ApplicationHandler for GameApp {
         // Check if app requested exit
         if self.should_exit {
             event_loop.exit();
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        let Some(app) = &mut self.app else { return };
+
+        if let DeviceEvent::MouseMotion { delta } = event {
+            app.input_manager.handle_raw_mouse_motion(delta.0, delta.1);
         }
     }
 

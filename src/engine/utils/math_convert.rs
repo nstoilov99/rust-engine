@@ -51,9 +51,10 @@ pub fn mat4_from_glm(m: &glm::Mat4) -> g::Mat4 {
 // ========== Quaternion Conversions ==========
 
 /// Convert glam::Quat to nalgebra_glm::Quat
+/// Note: glm::quat takes parameters in order (x, y, z, w), NOT (w, x, y, z)!
 #[inline]
 pub fn quat_to_glm(q: g::Quat) -> glm::Quat {
-    glm::quat(q.w, q.x, q.y, q.z)
+    glm::quat(q.x, q.y, q.z, q.w)
 }
 
 /// Convert nalgebra_glm::Quat to glam::Quat

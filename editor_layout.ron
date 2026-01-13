@@ -28,7 +28,7 @@
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.55427516,
+                    fraction: 0.667287,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -55,7 +55,7 @@
                         ),
                         max: (
                             x: 1771.0,
-                            y: 769.0,
+                            y: 921.0,
                         ),
                     ),
                     viewport: (
@@ -65,7 +65,7 @@
                         ),
                         max: (
                             x: 1771.0,
-                            y: 769.0,
+                            y: 921.0,
                         ),
                     ),
                     tabs: [
@@ -79,7 +79,7 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 771.0,
+                            y: 923.0,
                         ),
                         max: (
                             x: 1771.0,
@@ -89,7 +89,7 @@
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 795.0,
+                            y: 947.0,
                         ),
                         max: (
                             x: 1771.0,
@@ -100,7 +100,7 @@
                         Console,
                         Profiler,
                     ],
-                    active: (0),
+                    active: (1),
                     scroll: 0.0,
                     collapsed: false,
                 )),
@@ -160,6 +160,14 @@
                     scroll: 0.0,
                     collapsed: false,
                 )),
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
+                Empty,
             ],
             focused_node: Some((6)),
             collapsed: false,

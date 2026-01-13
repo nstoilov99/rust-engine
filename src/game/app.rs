@@ -9,8 +9,9 @@ use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, CommandHistory, ConsoleCommandSystem,
-    EditorContext, EditorDockState, EditorTabViewer, HierarchyPanel, InspectorPanel, LogFilter,
-    LogMessage, MenuAction, ProfilerPanel, Selection, ViewportTexture, WindowConfig,
+    EditorCamera, EditorContext, EditorDockState, EditorTabViewer, GizmoHandler, HierarchyPanel,
+    IconManager, InspectorPanel, LogFilter, LogMessage, MenuAction, ProfilerPanel, Selection,
+    ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
@@ -25,7 +26,9 @@ use vulkano::sync::GpuFuture;
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::Window;
+use winit::window::{CursorGrabMode, Window};
+
+use rust_engine::engine::editor::CameraControlMode;
 
 /// Main application state
 pub struct App {
@@ -67,6 +70,25 @@ pub struct App {
     pub viewport_size: (u32, u32),
     /// Flag to force viewport/G-Buffer sync on next frame (after swapchain recreation)
     pub pending_viewport_sync: bool,
+    // Viewport controls
+    /// Editor camera with Unreal-style controls
+    pub editor_camera: EditorCamera,
+    /// Transform gizmo handler
+    pub gizmo_handler: GizmoHandler,
+    /// Grid visibility toggle
+    pub grid_visible: bool,
+    /// Viewport hover state (set by tab_viewer during render)
+    pub viewport_hovered: bool,
+    /// Track if cursor is locked/hidden during camera drag
+    camera_cursor_locked: bool,
+    /// Saved cursor position when camera drag starts (for restore on release)
+    drag_start_cursor_pos: Option<(f32, f32)>,
+    /// Viewport settings (tool mode, snapping, camera speed)
+    pub viewport_settings: ViewportSettings,
+    /// Icon manager for toolbar icons
+    pub icon_manager: IconManager,
+    /// Whether icons have been loaded (deferred until first render)
+    icons_loaded: bool,
 }
 
 impl App {
@@ -183,6 +205,15 @@ impl App {
             viewport_texture_id: None, // Registered on first render
             viewport_size: (800, 600),
             pending_viewport_sync: false,
+            editor_camera: EditorCamera::new(800.0, 600.0),
+            gizmo_handler: GizmoHandler::new(),
+            grid_visible: true,
+            viewport_hovered: false,
+            camera_cursor_locked: false,
+            drag_start_cursor_pos: None,
+            viewport_settings: ViewportSettings::default(),
+            icon_manager: IconManager::new(20, egui::Color32::WHITE),
+            icons_loaded: false,
         })
     }
 
@@ -344,6 +375,21 @@ impl App {
             self.viewport_texture_id = Some(texture_id);
         }
 
+        // Load toolbar icons if not loaded yet
+        if !self.icons_loaded {
+            let assets_path = std::path::Path::new("assets");
+            self.icon_manager.load_toolbar_icons(self.gui.context(), assets_path);
+            self.icons_loaded = true;
+        }
+
+        // Sync EditorCamera state to renderer.camera_3d for rendering
+        // The EditorCamera is the authoritative source for camera position/target
+        self.renderer.camera_3d.position = self.editor_camera.position;
+        self.renderer.camera_3d.target = self.editor_camera.target;
+        self.renderer.camera_3d.up = self.editor_camera.up;
+        self.renderer.camera_3d.fov = self.editor_camera.fov;
+        self.renderer.camera_3d.aspect_ratio = self.editor_camera.aspect_ratio;
+
         // Prepare render data (reuses mesh_data_buffer to avoid allocation)
         render_loop::prepare_mesh_data(
             &self.world,
@@ -370,6 +416,7 @@ impl App {
                         self.gui
                             .update_native_texture(texture_id, self.viewport_texture.image_view());
                     }
+                    self.editor_camera.set_viewport_size(vp_width as f32, vp_height as f32);
                     self.renderer
                         .camera_3d
                         .set_viewport_size(vp_width as f32, vp_height as f32);
@@ -430,6 +477,7 @@ impl App {
                                 .update_native_texture(texture_id, self.viewport_texture.image_view());
                         }
                         // Update camera aspect ratio to match new viewport dimensions
+                        self.editor_camera.set_viewport_size(vp_width as f32, vp_height as f32);
                         self.renderer.camera_3d.set_viewport_size(vp_width as f32, vp_height as f32);
                         // Resize deferred renderer G-Buffer to match new viewport dimensions
                         if let Err(e) = self.deferred_renderer.resize(vp_width, vp_height) {
@@ -441,10 +489,18 @@ impl App {
         }
 
         // Render with deferred pipeline to the VIEWPORT TEXTURE (not swapchain)
-        let deferred_cb = match self
-            .deferred_renderer
-            .render(&self.mesh_data_buffer, &light_data, self.viewport_texture.image())
-        {
+        // Calculate view-projection and camera position for grid rendering
+        let view_proj = self.editor_camera.view_projection_matrix();
+        let camera_pos = self.editor_camera.position;
+
+        let deferred_cb = match self.deferred_renderer.render(
+            &self.mesh_data_buffer,
+            &light_data,
+            self.viewport_texture.image(),
+            self.grid_visible,
+            view_proj,
+            camera_pos,
+        ) {
             Ok(cb) => cb,
             Err(e) => {
                 eprintln!("Render error: {}", e);
@@ -471,6 +527,18 @@ impl App {
         let delta_ms = self.game_loop.delta_ms();
         let viewport_texture_id = self.viewport_texture_id;
         let viewport_size = &mut self.viewport_size;
+        let editor_camera = &mut self.editor_camera;
+        let gizmo_handler = &mut self.gizmo_handler;
+        let grid_visible = &mut self.grid_visible;
+        let viewport_hovered = &mut self.viewport_hovered;
+        let viewport_settings = &mut self.viewport_settings;
+
+        // Icon manager reference (icons are loaded lazily on first frame)
+        let icon_manager = if self.icon_manager.has_any_icons() {
+            Some(&self.icon_manager)
+        } else {
+            None
+        };
 
         // We need to capture menu action outside the closure
         let mut menu_action = MenuAction::None;
@@ -497,6 +565,12 @@ impl App {
                 show_stat_fps,
                 fps,
                 delta_ms,
+                editor_camera,
+                gizmo_handler,
+                grid_visible,
+                viewport_hovered,
+                viewport_settings,
+                icon_manager,
             };
 
             // Create tab viewer
@@ -617,44 +691,84 @@ impl App {
             }
         }
 
+        // Update EditorCamera with Unreal-style controls
+        // This is done after GUI render so we know viewport hover state
+        let gizmo_active = self.gizmo_handler.is_dragging();
+        let delta_time = self.game_loop.delta();
+
+        // Sync mouse sensitivity from viewport settings
+        self.editor_camera.mouse_sensitivity = self.viewport_settings.mouse_sensitivity;
+
+        // Check if camera should process input
+        // Block camera when a popup is open AND user is interacting (dragging slider, etc)
+        // This prevents camera movement when dragging popup widgets over viewport
+        let viewport_available = self.viewport_hovered && !gui_result.is_using_pointer;
+
+        self.editor_camera.update(
+            &self.input_manager,
+            delta_time,
+            viewport_available,
+            gizmo_active,
+            self.viewport_settings.camera_speed,
+        );
+
+        // If camera adjusted speed via scroll (RMB+scroll), sync back to viewport_settings
+        // The camera's process_fly_mode modifies fly_speed_multiplier when scrolling
+        if (self.editor_camera.fly_speed_multiplier - 1.0).abs() > 0.001 {
+            // The multiplier changed from 1.0, apply the change to camera_speed
+            let new_speed = (self.viewport_settings.camera_speed * self.editor_camera.fly_speed_multiplier)
+                .clamp(0.03, 8.0);
+            self.viewport_settings.camera_speed = new_speed;
+            // Reset multiplier since we absorbed the change into camera_speed
+            self.editor_camera.fly_speed_multiplier = 1.0;
+        }
+
+        // Lock/hide cursor during camera drag for unlimited rotation
+        let camera_mode = self.editor_camera.current_mode();
+        let camera_dragging = matches!(
+            camera_mode,
+            CameraControlMode::Fly | CameraControlMode::Orbit | CameraControlMode::Pan | CameraControlMode::LookDrag
+        );
+
+        if camera_dragging && !self.camera_cursor_locked {
+            // Save cursor position before hiding for restore on release
+            self.drag_start_cursor_pos = Some(self.input_manager.mouse_position());
+            // Starting camera drag - lock and hide cursor
+            if self.window.set_cursor_grab(CursorGrabMode::Confined).is_err() {
+                // Fall back to None if Confined not supported
+                let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            }
+            self.window.set_cursor_visible(false);
+            self.camera_cursor_locked = true;
+            // Switch to raw mouse input for unlimited rotation
+            self.input_manager.set_use_raw_mouse(true);
+        } else if !camera_dragging && self.camera_cursor_locked {
+            // Ending camera drag - unlock and show cursor
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            // Restore cursor position before showing
+            if let Some((x, y)) = self.drag_start_cursor_pos.take() {
+                let pos = winit::dpi::PhysicalPosition::new(x as f64, y as f64);
+                let _ = self.window.set_cursor_position(pos);
+            }
+            self.window.set_cursor_visible(true);
+            self.camera_cursor_locked = false;
+            // Switch back to cursor-based input
+            self.input_manager.set_use_raw_mouse(false);
+        }
+
         // Only process game keyboard input if GUI didn't consume it
         if !gui_result.wants_keyboard {
-            // Camera movement
-            input_handler::handle_camera_movement(&mut self.renderer, &self.input_manager, 0.1);
-
-            // Camera rotation
-            input_handler::handle_camera_rotation(&mut self.renderer, &self.input_manager, 0.05);
-
             // Debug view toggles
             input_handler::handle_debug_views(
                 &self.input_manager,
                 &mut self.deferred_renderer,
                 &mut self.current_debug_view,
             );
-
-            // Asset management controls
-            if self.input_manager.is_key_pressed(KeyCode::KeyR) {
-                println!("\nManual reload requested...");
-                match self
-                    .asset_manager
-                    .reload_model_gpu("assets/models/Duck.glb")
-                {
-                    Ok((new_indices, _)) => {
-                        self.mesh_indices = new_indices;
-                        println!("Duck model reloaded");
-                    }
-                    Err(e) => eprintln!("Reload failed: {}", e),
-                }
-            }
-
-            if self.input_manager.is_key_pressed(KeyCode::KeyC) {
-                let stats = self.asset_manager.cache_stats();
-                println!("\nAsset Cache Stats: {}", stats);
-            }
         }
 
-        // Only process mouse input if GUI didn't consume it
-        if !gui_result.wants_pointer {
+        // Mouse input for non-viewport interactions
+        if !gui_result.wants_pointer && !self.viewport_hovered {
+            // Legacy zoom control (only when not over viewport)
             input_handler::handle_zoom(
                 &mut self.renderer,
                 &self.input_manager,

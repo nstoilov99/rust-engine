@@ -1,0 +1,11 @@
+[package]
+name = "transform-gizmo-egui"
+description = "egui integration for transform-gizmo (Z-up fork)"
+version = "0.8.0"
+rust-version = "1.75.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+transform-gizmo = { path = "../transform-gizmo" }
+egui = "0.33"

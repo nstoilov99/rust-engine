@@ -6,7 +6,9 @@
 
 use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
+use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
+use glam::{Mat4, Vec3};
 use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +31,7 @@ pub struct DeferredRenderer {
     gbuffer: GBuffer,
     geometry_pass: GeometryPass,
     lighting_pass: LightingPass,
+    grid_pass: GridPass,
     device: Arc<Device>,
     queue: Arc<Queue>,
     allocator: Arc<StandardMemoryAllocator>,
@@ -38,6 +41,8 @@ pub struct DeferredRenderer {
     // Cached resources for performance
     gbuffer_descriptor_set: Arc<DescriptorSet>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
+    grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
+    grid_render_pass: Arc<RenderPass>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +89,32 @@ impl DeferredRenderer {
 
         let lighting_pass = LightingPass::new(device.clone(), lighting_render_pass)?;
 
+        // Create render pass for grid (loads existing color + depth, alpha blends on top)
+        // Hardware depth testing for proper occlusion (Unreal-style approach)
+        let grid_render_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: Format::B8G8R8A8_SRGB,
+                    samples: 1,
+                    load_op: Load,  // Load existing content from lighting pass
+                    store_op: Store,
+                },
+                depth: {
+                    format: Format::D32_SFLOAT,
+                    samples: 1,
+                    load_op: Load,      // Load existing depth from geometry pass
+                    store_op: DontCare, // Grid doesn't write depth
+                }
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {depth}
+            }
+        )?;
+
+        let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
+
         // Cache G-Buffer descriptor set (created once, reused every frame)
         let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
             descriptor_set_allocator.clone(),
@@ -97,6 +128,7 @@ impl DeferredRenderer {
             gbuffer,
             geometry_pass,
             lighting_pass,
+            grid_pass,
             device,
             queue,
             allocator,
@@ -105,6 +137,8 @@ impl DeferredRenderer {
             debug_view: DebugView::None,
             gbuffer_descriptor_set,
             framebuffer_cache: HashMap::new(),
+            grid_framebuffer_cache: HashMap::new(),
+            grid_render_pass,
         })
     }
 
@@ -134,9 +168,36 @@ impl DeferredRenderer {
         Ok(framebuffer)
     }
 
+    /// Get or create a cached grid framebuffer for the given swapchain image
+    /// Includes both color (swapchain) and depth (from G-Buffer) attachments
+    fn get_or_create_grid_framebuffer(
+        &mut self,
+        target_image: Arc<Image>,
+    ) -> Result<Arc<Framebuffer>, Box<dyn std::error::Error>> {
+        let cache_key = Arc::as_ptr(&target_image) as usize;
+
+        if let Some(fb) = self.grid_framebuffer_cache.get(&cache_key) {
+            return Ok(fb.clone());
+        }
+
+        let target_view = ImageView::new_default(target_image)?;
+        // Use G-Buffer depth for hardware depth testing (grid occlusion)
+        let framebuffer = Framebuffer::new(
+            self.grid_render_pass.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![target_view, self.gbuffer.depth.clone()],
+                ..Default::default()
+            },
+        )?;
+
+        self.grid_framebuffer_cache.insert(cache_key, framebuffer.clone());
+        Ok(framebuffer)
+    }
+
     /// Clear the framebuffer cache (call on swapchain recreation)
     pub fn clear_framebuffer_cache(&mut self) {
         self.framebuffer_cache.clear();
+        self.grid_framebuffer_cache.clear();
     }
 
     /// Resize the G-Buffer (call when viewport size changes)
@@ -169,23 +230,40 @@ impl DeferredRenderer {
             self.gbuffer.material.clone(),
         )?;
 
-        // Clear framebuffer cache as well
+        // Clear framebuffer caches (grid framebuffer needs new depth attachment)
         self.framebuffer_cache.clear();
+        self.grid_framebuffer_cache.clear();
 
         Ok(())
     }
 
     /// Render scene using deferred pipeline
+    ///
+    /// # Arguments
+    /// * `mesh_data` - Mesh data to render
+    /// * `light_data` - Lighting data
+    /// * `target_image` - Target swapchain image
+    /// * `grid_visible` - Whether to render the grid
+    /// * `view_proj` - View-projection matrix (for grid rendering)
+    /// * `camera_pos` - Camera position in world space (for grid centering and fade)
     pub fn render(
         &mut self,
-        mesh_data: &[MeshRenderData],         // Your mesh data structure
-        light_data: &LightUniformData,        // Your light data structure
-        target_image: Arc<Image>, // Swapchain image
+        mesh_data: &[MeshRenderData],
+        light_data: &LightUniformData,
+        target_image: Arc<Image>,
+        grid_visible: bool,
+        view_proj: Mat4,
+        camera_pos: Vec3,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
-        // Get cached framebuffer for this swapchain image
-        let target_framebuffer = self.get_or_create_framebuffer(target_image)?;
+        // Get cached framebuffers for this swapchain image
+        let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
+        let grid_framebuffer = if grid_visible {
+            Some(self.get_or_create_grid_framebuffer(target_image)?)
+        } else {
+            None
+        };
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -294,6 +372,53 @@ impl DeferredRenderer {
                 )?;
             // Draw fullscreen triangle (no vertex buffer - generated in shader)
             unsafe { builder.draw(3, 1, 0, 0)?; }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        // ========== PASS 3: Grid Pass (Optional, Hardware Depth Testing) ==========
+        // Uses Unreal-style ground plane quad with hardware depth occlusion
+        if let Some(grid_fb) = grid_framebuffer {
+            crate::profile_scope!("grid_pass");
+
+            let grid_extent = grid_fb.extent();
+            let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [grid_extent[0] as f32, grid_extent[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [grid_extent[0], grid_extent[1]],
+            };
+
+            // Grid push constants (simplified - no depth texture needed)
+            let grid_extent_size = 500.0; // Large ground plane extent
+            let grid_push = GridPushConstants::new(
+                view_proj,
+                camera_pos,
+                grid_extent_size,
+                100.0,  // fade_distance: 100 units
+            );
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        // Load existing color content, depth is also loaded (for testing)
+                        clear_values: vec![None, None],
+                        ..RenderPassBeginInfo::framebuffer(grid_fb)
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.grid_pass.pipeline())?
+                .set_viewport(0, smallvec![grid_viewport])?
+                .set_scissor(0, smallvec![grid_scissor])?
+                .push_constants(self.grid_pass.layout(), 0, grid_push)?;
+
+            // Draw ground plane quad (4 vertices as triangle strip)
+            unsafe { builder.draw(4, 1, 0, 0)?; }
             builder.end_render_pass(SubpassEndInfo::default())?;
         }
 

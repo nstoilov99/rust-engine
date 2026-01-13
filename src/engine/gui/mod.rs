@@ -18,6 +18,8 @@ pub struct GuiRenderResult {
     pub command_buffer: Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     pub wants_keyboard: bool,
     pub wants_pointer: bool,
+    /// True if egui is actively using the pointer (dragging a widget, not just hovering)
+    pub is_using_pointer: bool,
     pub cursor_icon: egui::CursorIcon,
 }
 
@@ -120,6 +122,32 @@ impl Gui {
             full_output.platform_output.ime.is_some() || self.egui_ctx.wants_keyboard_input();
         let wants_pointer = self.egui_ctx.wants_pointer_input();
 
+        // Determine if egui is using the pointer for something OTHER than the viewport.
+        // This is tricky because the viewport image itself has click_and_drag sense,
+        // so is_using_pointer() returns true when clicking on viewport too!
+        //
+        // Solution: Check if pointer is over a popup/tooltip layer (above Background order).
+        // Popups render on Foreground or higher layers. The viewport is on Background.
+        // This way, we only block viewport input when interacting with popups/menus.
+        let pointer_over_popup = self.egui_ctx.input(|i| i.pointer.hover_pos()).map_or(false, |pos| {
+            self.egui_ctx.layer_id_at(pos).map_or(false, |layer| {
+                // Block if layer order is above Background (popups, tooltips, etc.)
+                layer.order > egui::Order::Background
+            })
+        });
+
+        // Also check if egui is actively dragging AND the pointer started on a popup layer.
+        // This handles the case where user starts dragging a slider in a popup and moves
+        // the mouse outside the popup - we still want to block viewport input.
+        let dragging_from_popup = self.egui_ctx.is_using_pointer() &&
+            self.egui_ctx.input(|i| i.pointer.press_origin()).map_or(false, |origin_pos| {
+                self.egui_ctx.layer_id_at(origin_pos).map_or(false, |layer| {
+                    layer.order > egui::Order::Background
+                })
+            });
+
+        let is_using_pointer = pointer_over_popup || dragging_from_popup;
+
         // Handle clipboard copy via commands (egui 0.33 API)
         for command in &full_output.platform_output.commands {
             if let egui::OutputCommand::CopyText(text) = command {
@@ -159,6 +187,7 @@ impl Gui {
             command_buffer,
             wants_keyboard,
             wants_pointer,
+            is_using_pointer,
             cursor_icon,
         })
     }

@@ -214,11 +214,12 @@ mod quat_serde {
         D: Deserializer<'de>,
     {
         let surrogate = QuatSurrogate::deserialize(deserializer)?;
+        // glm::quat takes parameters in order (x, y, z, w), NOT (w, x, y, z)!
         Ok(glm::quat(
-            surrogate.w,
             surrogate.x,
             surrogate.y,
             surrogate.z,
+            surrogate.w,
         ))
     }
 }

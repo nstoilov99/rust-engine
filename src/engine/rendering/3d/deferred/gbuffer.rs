@@ -179,13 +179,14 @@ fn create_gbuffer_render_pass(
             ..Default::default()
         },
         // Attachment 4: Depth (D32F)
+        // Use DepthStencilReadOnlyOptimal to allow sampling in subsequent passes (grid shader)
         AttachmentDescription {
             format: Format::D32_SFLOAT,
             samples: SampleCount::Sample1,
             load_op: AttachmentLoadOp::Clear,
             store_op: AttachmentStoreOp::Store,
             initial_layout: vulkano::image::ImageLayout::Undefined,
-            final_layout: vulkano::image::ImageLayout::DepthStencilAttachmentOptimal,
+            final_layout: vulkano::image::ImageLayout::DepthStencilReadOnlyOptimal,
             ..Default::default()
         },
     ];

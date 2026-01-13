@@ -315,8 +315,9 @@ impl PhysicsWorld {
                     transform.position = pos_zup;
 
                     // Copy rotation directly (don't convert)
+                    // glm::quat takes parameters in order (x, y, z, w), NOT (w, x, y, z)!
                     let rot = rb.rotation();
-                    transform.rotation = glm::quat(rot.w, rot.coords.x, rot.coords.y, rot.coords.z);
+                    transform.rotation = glm::quat(rot.coords.x, rot.coords.y, rot.coords.z, rot.w);
 
                     // Update velocity if component exists (convert via adapter)
                     if let Some(vel) = velocity {

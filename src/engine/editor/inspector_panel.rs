@@ -38,8 +38,10 @@ enum ComponentAction {
 
 /// Inspector Panel state
 pub struct InspectorPanel {
-    /// Cache for euler angles (quaternion -> euler conversion)
-    euler_cache: HashMap<u64, [f32; 3]>,
+    /// Cache for euler angles (quaternion -> euler conversion).
+    /// Stores (quaternion, euler_angles) so we can detect when the quaternion
+    /// has been modified externally (e.g., by the gizmo) and recompute euler.
+    euler_cache: HashMap<u64, (glm::Quat, [f32; 3])>,
     /// Last known entity for euler cache invalidation
     last_entity: Option<Entity>,
     /// Track which components are collapsed
@@ -348,15 +350,25 @@ impl InspectorPanel {
                         ui.label("Rotation");
                         if ui.small_button("R").on_hover_text("Reset").clicked() {
                             transform.rotation = glm::quat_identity();
-                            self.euler_cache.insert(entity.id() as u64, [0.0, 0.0, 0.0]);
+                            self.euler_cache.insert(entity.id() as u64, (glm::quat_identity(), [0.0, 0.0, 0.0]));
                         }
                     });
 
-                    // Get or calculate euler angles
+                    // Get or calculate euler angles.
+                    // The cache stores (quaternion, euler) pairs so we can detect when
+                    // the quaternion has been modified externally (e.g., by the gizmo).
                     let entity_id = entity.id() as u64;
-                    let euler = self.euler_cache.entry(entity_id).or_insert_with(|| {
-                        quaternion_to_euler_degrees(&transform.rotation)
-                    });
+                    let needs_recompute = match self.euler_cache.get(&entity_id) {
+                        Some((cached_quat, _)) => !quaternions_approximately_equal(cached_quat, &transform.rotation),
+                        None => true,
+                    };
+                    if needs_recompute {
+                        let new_euler = quaternion_to_euler_degrees(&transform.rotation);
+                        self.euler_cache.insert(entity_id, (transform.rotation.clone(), new_euler));
+                    }
+
+                    // Get a copy of euler to work with (avoids borrow issues with closure)
+                    let mut euler = self.euler_cache.get(&entity_id).unwrap().1;
 
                     // Sanitize cached euler values to prevent DragValue crash
                     for i in 0..3 {
@@ -365,6 +377,7 @@ impl InspectorPanel {
                         }
                     }
 
+                    let mut euler_changed = false;
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
                         let response_x = ui.add(DragValue::new(&mut euler[0]).speed(1.0).suffix("°").range(-180.0..=180.0));
@@ -373,10 +386,15 @@ impl InspectorPanel {
                         ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
                         let response_z = ui.add(DragValue::new(&mut euler[2]).speed(1.0).suffix("°").range(-180.0..=180.0));
 
-                        if response_x.changed() || response_y.changed() || response_z.changed() {
-                            transform.rotation = euler_degrees_to_quaternion(euler);
-                        }
+                        euler_changed = response_x.changed() || response_y.changed() || response_z.changed();
                     });
+
+                    if euler_changed {
+                        let new_quat = euler_degrees_to_quaternion(&euler);
+                        transform.rotation = new_quat.clone();
+                        // Update cache with new quaternion so we don't recompute euler next frame
+                        self.euler_cache.insert(entity_id, (new_quat, euler));
+                    }
 
                     // Scale
                     ui.horizontal(|ui| {
@@ -913,4 +931,15 @@ fn euler_degrees_to_quaternion(euler: &[f32; 3]) -> glm::Quat {
 
     // Normalize to prevent drift accumulation
     glm::quat_normalize(&(qz * qy * qx))
+}
+
+/// Check if two quaternions represent approximately the same rotation.
+/// Accounts for q and -q representing the same rotation.
+fn quaternions_approximately_equal(a: &glm::Quat, b: &glm::Quat) -> bool {
+    let dot = (a.coords.x * b.coords.x
+        + a.coords.y * b.coords.y
+        + a.coords.z * b.coords.z
+        + a.coords.w * b.coords.w)
+        .abs();
+    dot > 0.9999
 }

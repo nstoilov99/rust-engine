@@ -76,6 +76,10 @@ tracy-client = { version = "0.17", optional = true, default-features = false, fe
 # Docking layout system for egui (editor panels)
 egui_dock = { version = "0.18", features = ["serde"] }
 
+# Transform gizmo for viewport manipulation
+transform-gizmo-egui = "0.8"
+mint = "0.5"
+
 # Clipboard support
 arboard = "3.4"
 
@@ -88,5 +92,8 @@ lto = true
 
 # Patch emath to fix smart_aim bug that causes crash when dragging DragValue
 # See: https://github.com/emilk/egui/issues/7747
+# Also patch transform-gizmo to use Z-up coordinate system natively
 [patch.crates-io]
 emath = { path = "crates/emath-patched" }
+transform-gizmo = { path = "crates/transform-gizmo-fork/crates/transform-gizmo" }
+transform-gizmo-egui = { path = "crates/transform-gizmo-fork/crates/transform-gizmo-egui" }

@@ -13,6 +13,11 @@ pub struct InputManager {
     mouse_position: (f32, f32),
     mouse_delta: (f32, f32),
     scroll_delta: f32,
+
+    /// Raw mouse delta from DeviceEvent::MouseMotion (for camera when cursor is locked)
+    raw_mouse_delta: (f32, f32),
+    /// Whether to use raw mouse input (when cursor is locked)
+    use_raw_mouse: bool,
 }
 
 impl InputManager {
@@ -25,6 +30,8 @@ impl InputManager {
             mouse_position: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),
             scroll_delta: 0.0,
+            raw_mouse_delta: (0.0, 0.0),
+            use_raw_mouse: false,
         }
     }
 
@@ -34,6 +41,7 @@ impl InputManager {
         self.keys_just_pressed.clear();
         self.keys_just_released.clear();
         self.mouse_delta = (0.0, 0.0);
+        self.raw_mouse_delta = (0.0, 0.0);
         self.scroll_delta = 0.0;
     }
 
@@ -79,6 +87,26 @@ impl InputManager {
         self.scroll_delta += delta;
     }
 
+    /// Handle raw mouse motion from DeviceEvent::MouseMotion
+    /// This provides delta regardless of cursor position (for camera when cursor is locked)
+    pub fn handle_raw_mouse_motion(&mut self, delta_x: f64, delta_y: f64) {
+        // Accumulate raw delta (multiple events can arrive per frame)
+        self.raw_mouse_delta.0 += delta_x as f32;
+        self.raw_mouse_delta.1 += delta_y as f32;
+    }
+
+    /// Set whether to use raw mouse input (call when cursor lock state changes)
+    pub fn set_use_raw_mouse(&mut self, use_raw: bool) {
+        self.use_raw_mouse = use_raw;
+        if use_raw {
+            // Clear cursor-based delta when switching to raw to avoid jump
+            self.mouse_delta = (0.0, 0.0);
+        } else {
+            // Clear raw delta when switching to cursor-based
+            self.raw_mouse_delta = (0.0, 0.0);
+        }
+    }
+
     // Query methods
 
     /// Is key currently held down?
@@ -107,8 +135,13 @@ impl InputManager {
     }
 
     /// Get mouse movement delta this frame
+    /// Returns raw delta when cursor is locked, cursor-based delta otherwise
     pub fn mouse_delta(&self) -> (f32, f32) {
-        self.mouse_delta
+        if self.use_raw_mouse {
+            self.raw_mouse_delta
+        } else {
+            self.mouse_delta
+        }
     }
 
     /// Get mouse wheel scroll delta this frame
