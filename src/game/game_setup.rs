@@ -55,8 +55,8 @@ pub fn setup_asset_system(
 
     // Setup hot-reload watcher
     let mut hot_reload = HotReloadWatcher::new(asset_manager.clone(), reload_tx);
-    hot_reload.watch_directory("assets/")?;
-    hot_reload.track_asset("assets/models/Duck.glb");
+    hot_reload.watch_directory("content/")?;
+    hot_reload.track_asset("content/models/Duck.glb");
 
     Ok((asset_manager, hot_reload, reload_rx))
 }
@@ -65,7 +65,7 @@ pub fn setup_asset_system(
 pub fn load_assets(
     asset_manager: &Arc<AssetManager>,
 ) -> Result<(Vec<usize>, usize, usize), Box<dyn std::error::Error>> {
-    let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("assets/models/Duck.glb")?;
+    let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("content/models/Duck.glb")?;
 
     let (plane_verts, plane_idx) = create_plane(1.0);
     let plane_mesh_index = asset_manager.upload_procedural_mesh(&plane_verts, &plane_idx)?;
@@ -119,8 +119,8 @@ pub fn load_or_create_scene(
     world: &mut World,
     mesh_index: usize,
 ) -> Result<(bool, Vec<Entity>), Box<dyn std::error::Error>> {
-    if std::path::Path::new("assets/scenes/main.scene.ron").exists() {
-        let (_scene_name, root_entities) = load_scene(world, "assets/scenes/main.scene.ron")?;
+    if std::path::Path::new("content/scenes/main.scene.ron").exists() {
+        let (_scene_name, root_entities) = load_scene(world, "content/scenes/main.scene.ron")?;
         Ok((true, root_entities)) // Loaded existing scene with root order
     } else {
         create_default_scene(world, mesh_index);
@@ -231,7 +231,7 @@ pub fn upload_model_texture(
     asset_manager: &Arc<AssetManager>,
 ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
     // Get duck model to extract texture
-    let duck_model_handle = asset_manager.models.load("assets/models/Duck.glb")?;
+    let duck_model_handle = asset_manager.models.load("content/models/Duck.glb")?;
     let duck_model = duck_model_handle.get();
 
     let (texture_pixels, texture_width, texture_height) = if !duck_model.textures.is_empty() {

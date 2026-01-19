@@ -88,6 +88,17 @@ impl HierarchyPanel {
 
     /// Render just the contents (for use inside dock tabs)
     pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection) {
+        // Handle Escape key - priority: cancel rename → clear selection
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.renaming_entity.is_some() {
+                // Cancel rename
+                self.renaming_entity = None;
+            } else if !selection.is_empty() {
+                // Clear selection
+                selection.clear();
+            }
+        }
+
         self.render_header(ui, world);
         ui.separator();
         self.render_search(ui);

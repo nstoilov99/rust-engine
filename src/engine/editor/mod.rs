@@ -1,5 +1,6 @@
 //! Editor systems and UI panels
 
+pub mod asset_browser;
 mod commands;
 mod console;
 pub mod console_cmd;
@@ -15,6 +16,11 @@ pub mod viewport;
 mod viewport_texture;
 mod window_config;
 
+pub use asset_browser::{
+    AssetBrowserEvent, AssetBrowserPanel, AssetDragPayload, AssetEventQueue, AssetFilter,
+    AssetRegistry, AssetSelection, FolderNode, GridView, ListView, RenameTarget, ScanResult,
+    SortCriteria, ThumbnailCache, ViewMode,
+};
 pub use commands::*;
 pub use console::*;
 pub use console_cmd::ConsoleCommandSystem;

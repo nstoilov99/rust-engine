@@ -8,16 +8,17 @@ use hecs::World;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
-    create_editor_dock_style, render_menu_bar, CommandHistory, ConsoleCommandSystem,
-    EditorCamera, EditorContext, EditorDockState, EditorTabViewer, GizmoHandler, HierarchyPanel,
-    IconManager, InspectorPanel, LogFilter, LogMessage, MenuAction, ProfilerPanel, Selection,
-    ViewportSettings, ViewportTexture, WindowConfig,
+    create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, CommandHistory,
+    ConsoleCommandSystem, EditorCamera, EditorContext, EditorDockState, EditorTabViewer,
+    GizmoHandler, HierarchyPanel, IconManager, InspectorPanel, LogFilter, LogMessage, MenuAction,
+    ProfilerPanel, RenameTarget, Selection, ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
-use rust_engine::engine::scene::save_scene;
+use rust_engine::engine::scene::{save_scene, load_scene};
+use rust_engine::assets::AssetType;
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -89,6 +90,8 @@ pub struct App {
     pub icon_manager: IconManager,
     /// Whether icons have been loaded (deferred until first render)
     icons_loaded: bool,
+    /// Asset browser panel
+    pub asset_browser: AssetBrowserPanel,
 }
 
 impl App {
@@ -214,6 +217,7 @@ impl App {
             viewport_settings: ViewportSettings::default(),
             icon_manager: IconManager::new(20, egui::Color32::WHITE),
             icons_loaded: false,
+            asset_browser: AssetBrowserPanel::new(std::path::PathBuf::from("content")),
         })
     }
 
@@ -377,8 +381,9 @@ impl App {
 
         // Load toolbar icons if not loaded yet
         if !self.icons_loaded {
-            let assets_path = std::path::Path::new("assets");
-            self.icon_manager.load_toolbar_icons(self.gui.context(), assets_path);
+            let engine_path = std::path::Path::new("engine");
+            self.icon_manager.load_toolbar_icons(self.gui.context(), engine_path);
+            self.icon_manager.load_asset_browser_icons(self.gui.context(), engine_path);
             self.icons_loaded = true;
         }
 
@@ -540,6 +545,9 @@ impl App {
             None
         };
 
+        // Asset browser panel
+        let asset_browser = &mut self.asset_browser;
+
         // We need to capture menu action outside the closure
         let mut menu_action = MenuAction::None;
 
@@ -571,6 +579,7 @@ impl App {
                 viewport_hovered,
                 viewport_settings,
                 icon_manager,
+                asset_browser,
             };
 
             // Create tab viewer
@@ -632,6 +641,414 @@ impl App {
             }
         }
 
+        // Process asset browser events (collect first to avoid borrow conflicts)
+        let asset_events: Vec<_> = self.asset_browser.events.drain().collect();
+        for event in asset_events {
+            match event {
+                AssetBrowserEvent::AssetOpened { id } => {
+                    if let Some(metadata) = self.asset_browser.registry.get(id) {
+                        match metadata.asset_type {
+                            AssetType::Scene => {
+                                // Build full path to scene file
+                                let scene_path = self.asset_browser.registry.root_path()
+                                    .join(&metadata.path);
+                                let scene_path_str = scene_path.to_string_lossy();
+
+                                // Clear existing world
+                                self.world.clear();
+                                self.selection.clear();
+
+                                // Load the scene
+                                match load_scene(&mut self.world, &scene_path_str) {
+                                    Ok((scene_name, root_entities)) => {
+                                        self.hierarchy_panel.set_root_order(root_entities);
+                                        self.console_messages.push(LogMessage::info(
+                                            format!("Loaded scene: {}", scene_name)
+                                        ));
+                                        println!("Scene loaded: {}", metadata.display_name);
+                                    }
+                                    Err(e) => {
+                                        self.console_messages.push(LogMessage::error(
+                                            format!("Failed to load scene: {}", e)
+                                        ));
+                                        eprintln!("Failed to load scene: {}", e);
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Other asset types - could open in inspector or external app
+                            }
+                        }
+                    }
+                }
+                AssetBrowserEvent::AssetDroppedInViewport { id, position, .. } => {
+                    // Will be implemented when viewport drop detection is added
+                    println!("Asset {} dropped at {:?}", id.0, position);
+                }
+                AssetBrowserEvent::RevealInExplorer { path } => {
+                    // Open file explorer to the asset's location
+                    let full_path = self.asset_browser.registry.root_path().join(&path);
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = std::process::Command::new("explorer")
+                            .arg("/select,")
+                            .arg(&full_path)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = std::process::Command::new("open")
+                            .arg("-R")
+                            .arg(&full_path)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(full_path.parent().unwrap_or(&full_path))
+                            .spawn();
+                    }
+                }
+                AssetBrowserEvent::AssetDeleted { id, path } => {
+                    // Delete the file from disk
+                    let full_path = self.asset_browser.registry.root_path().join(&path);
+                    match std::fs::remove_file(&full_path) {
+                        Ok(()) => {
+                            self.console_messages.push(LogMessage::info(
+                                format!("Deleted: {}", path.display())
+                            ));
+                            // Clear selection if deleted asset was selected
+                            if self.asset_browser.selection.is_selected(id) {
+                                self.asset_browser.selection.remove(id);
+                            }
+                            // Request rescan to update the registry
+                            self.asset_browser.request_rescan();
+                        }
+                        Err(e) => {
+                            self.console_messages.push(LogMessage::error(
+                                format!("Failed to delete {}: {}", path.display(), e)
+                            ));
+                            eprintln!("Failed to delete file: {}", e);
+                        }
+                    }
+                }
+                AssetBrowserEvent::AssetRenamed { id, old_name, new_name } => {
+                    // Rename the file on disk
+                    if let Some(metadata) = self.asset_browser.registry.get(id) {
+                        let old_path = self.asset_browser.registry.root_path().join(&metadata.path);
+
+                        // Build new path with new name but preserve extension
+                        let extension = old_path.extension()
+                            .map(|e| format!(".{}", e.to_string_lossy()))
+                            .unwrap_or_default();
+                        let new_filename = format!("{}{}", new_name, extension);
+                        let new_path = old_path.parent()
+                            .map(|p| p.join(&new_filename))
+                            .unwrap_or_else(|| std::path::PathBuf::from(&new_filename));
+
+                        // Check if target already exists
+                        if new_path.exists() && new_path != old_path {
+                            self.console_messages.push(LogMessage::error(
+                                format!("Cannot rename: '{}' already exists", new_filename)
+                            ));
+                        } else if new_name.is_empty() || new_name.trim().is_empty() {
+                            self.console_messages.push(LogMessage::error(
+                                "Cannot rename: name cannot be empty".to_string()
+                            ));
+                        } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+                            self.console_messages.push(LogMessage::error(
+                                "Cannot rename: name contains invalid characters".to_string()
+                            ));
+                        } else {
+                            match std::fs::rename(&old_path, &new_path) {
+                                Ok(()) => {
+                                    self.console_messages.push(LogMessage::info(
+                                        format!("Renamed '{}' to '{}'", old_name, new_name)
+                                    ));
+                                    // Request rescan to update the registry
+                                    self.asset_browser.request_rescan();
+                                }
+                                Err(e) => {
+                                    self.console_messages.push(LogMessage::error(
+                                        format!("Failed to rename '{}': {}", old_name, e)
+                                    ));
+                                    eprintln!("Failed to rename file: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                AssetBrowserEvent::CreateFolder { parent_path } => {
+                    // Create a new folder inside the specified parent
+                    let full_parent = self.asset_browser.registry.root_path().join(&parent_path);
+
+                    // Generate a unique folder name
+                    let base_name = "New Folder";
+                    let mut new_name = base_name.to_string();
+                    let mut counter = 1;
+
+                    while full_parent.join(&new_name).exists() {
+                        new_name = format!("{} {}", base_name, counter);
+                        counter += 1;
+                    }
+
+                    let new_folder_path = full_parent.join(&new_name);
+                    match std::fs::create_dir(&new_folder_path) {
+                        Ok(()) => {
+                            self.console_messages.push(LogMessage::info(
+                                format!("Created folder: {}", new_name)
+                            ));
+                            // Expand parent in folder tree
+                            if !parent_path.as_os_str().is_empty() {
+                                self.asset_browser.folder_expanded.insert(parent_path.clone());
+                            }
+                            // Request rescan to show new folder
+                            self.asset_browser.request_rescan();
+
+                            // Automatically enter rename mode for the new folder
+                            let relative_new_folder_path = parent_path.join(&new_name);
+                            self.asset_browser.renaming = Some(RenameTarget::Folder {
+                                path: relative_new_folder_path,
+                                current_name: new_name.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            self.console_messages.push(LogMessage::error(
+                                format!("Failed to create folder: {}", e)
+                            ));
+                            eprintln!("Failed to create folder: {}", e);
+                        }
+                    }
+                }
+                AssetBrowserEvent::FolderDeleted { path } => {
+                    // Delete the folder from disk
+                    let full_path = self.asset_browser.registry.root_path().join(&path);
+
+                    // Try to delete empty folder first, fall back to recursive delete
+                    let result = std::fs::remove_dir(&full_path)
+                        .or_else(|_| std::fs::remove_dir_all(&full_path));
+
+                    match result {
+                        Ok(()) => {
+                            self.console_messages.push(LogMessage::info(
+                                format!("Deleted folder: {}", path.display())
+                            ));
+                            // If current folder was the deleted one (or inside it), navigate up
+                            if self.asset_browser.current_folder == path ||
+                               self.asset_browser.current_folder.starts_with(&path) {
+                                if let Some(parent) = path.parent() {
+                                    self.asset_browser.current_folder = parent.to_path_buf();
+                                } else {
+                                    self.asset_browser.current_folder = std::path::PathBuf::new();
+                                }
+                            }
+                            // Request rescan
+                            self.asset_browser.request_rescan();
+                        }
+                        Err(e) => {
+                            self.console_messages.push(LogMessage::error(
+                                format!("Failed to delete folder: {}", e)
+                            ));
+                            eprintln!("Failed to delete folder: {}", e);
+                        }
+                    }
+                }
+                AssetBrowserEvent::RevealFolderInExplorer { path } => {
+                    // Open file explorer to the folder's location
+                    let full_path = self.asset_browser.registry.root_path().join(&path);
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(&full_path)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = std::process::Command::new("open")
+                            .arg(&full_path)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(&full_path)
+                            .spawn();
+                    }
+                }
+                AssetBrowserEvent::AssetMoved { id: _, old_path, new_path } => {
+                    // Move asset to new folder
+                    let full_old_path = self.asset_browser.registry.root_path().join(&old_path);
+                    let full_new_path = self.asset_browser.registry.root_path().join(&new_path);
+
+                    // Ensure target directory exists
+                    if let Some(parent) = full_new_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+
+                    // Check if target already exists
+                    if full_new_path.exists() {
+                        self.console_messages.push(LogMessage::error(
+                            format!("Cannot move: '{}' already exists in target folder",
+                                new_path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| new_path.display().to_string()))
+                        ));
+                    } else {
+                        match std::fs::rename(&full_old_path, &full_new_path) {
+                            Ok(()) => {
+                                self.console_messages.push(LogMessage::info(
+                                    format!("Moved '{}' to '{}'",
+                                        old_path.file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| old_path.display().to_string()),
+                                        new_path.parent()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "root".to_string()))
+                                ));
+                                self.asset_browser.request_rescan();
+                            }
+                            Err(e) => {
+                                self.console_messages.push(LogMessage::error(
+                                    format!("Failed to move file: {}", e)
+                                ));
+                                eprintln!("Failed to move file: {}", e);
+                            }
+                        }
+                    }
+                }
+                AssetBrowserEvent::FolderMoved { old_path, new_path } => {
+                    // Move folder to new location
+                    let full_old_path = self.asset_browser.registry.root_path().join(&old_path);
+                    let mut full_new_path = self.asset_browser.registry.root_path().join(&new_path);
+                    let mut final_new_path = new_path.clone();
+                    let mut was_renamed = false;
+
+                    // If target already exists, find a unique name with suffix
+                    if full_new_path.exists() {
+                        let base_name = new_path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let parent = new_path.parent().unwrap_or(std::path::Path::new(""));
+
+                        let mut counter = 1;
+                        loop {
+                            let new_name = format!("{} ({})", base_name, counter);
+                            let candidate = parent.join(&new_name);
+                            let full_candidate = self.asset_browser.registry.root_path().join(&candidate);
+                            if !full_candidate.exists() {
+                                final_new_path = candidate;
+                                full_new_path = full_candidate;
+                                was_renamed = true;
+                                break;
+                            }
+                            counter += 1;
+                            if counter > 100 {
+                                // Safety limit - show error and abort
+                                self.console_messages.push(LogMessage::error(
+                                    format!("Cannot move: too many folders named '{}' in target location", base_name)
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+
+                    match std::fs::rename(&full_old_path, &full_new_path) {
+                        Ok(()) => {
+                            let original_name = old_path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| old_path.display().to_string());
+                            let target_dir = final_new_path.parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "root".to_string());
+
+                            if was_renamed {
+                                let new_name = final_new_path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                self.console_messages.push(LogMessage::info(
+                                    format!("Moved folder '{}' to '{}' (renamed to '{}')",
+                                        original_name, target_dir, new_name)
+                                ));
+                            } else {
+                                self.console_messages.push(LogMessage::info(
+                                    format!("Moved folder '{}' to '{}'", original_name, target_dir)
+                                ));
+                            }
+
+                            // Update current folder if we were inside the moved folder
+                            if self.asset_browser.current_folder.starts_with(&old_path) {
+                                // Calculate relative path and apply to new location
+                                if let Ok(relative) = self.asset_browser.current_folder.strip_prefix(&old_path) {
+                                    self.asset_browser.current_folder = final_new_path.join(relative);
+                                } else {
+                                    self.asset_browser.current_folder = final_new_path.clone();
+                                }
+                            }
+                            self.asset_browser.request_rescan();
+                        }
+                        Err(e) => {
+                            self.console_messages.push(LogMessage::error(
+                                format!("Failed to move folder: {}", e)
+                            ));
+                            eprintln!("Failed to move folder: {}", e);
+                        }
+                    }
+                }
+                AssetBrowserEvent::FolderRenamed { old_path, new_path } => {
+                    // Rename folder on disk
+                    let full_old_path = self.asset_browser.registry.root_path().join(&old_path);
+                    let full_new_path = self.asset_browser.registry.root_path().join(&new_path);
+
+                    // Validate new name
+                    let new_name = new_path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    if new_name.is_empty() || new_name.trim().is_empty() {
+                        self.console_messages.push(LogMessage::error(
+                            "Cannot rename: folder name cannot be empty".to_string()
+                        ));
+                    } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+                        self.console_messages.push(LogMessage::error(
+                            "Cannot rename: folder name contains invalid characters".to_string()
+                        ));
+                    } else if full_new_path.exists() && full_new_path != full_old_path {
+                        self.console_messages.push(LogMessage::error(
+                            format!("Cannot rename: folder '{}' already exists", new_name)
+                        ));
+                    } else {
+                        match std::fs::rename(&full_old_path, &full_new_path) {
+                            Ok(()) => {
+                                let old_name = old_path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| old_path.display().to_string());
+                                self.console_messages.push(LogMessage::info(
+                                    format!("Renamed folder '{}' to '{}'", old_name, new_name)
+                                ));
+                                // Update current folder if we were inside the renamed folder
+                                if self.asset_browser.current_folder == old_path ||
+                                   self.asset_browser.current_folder.starts_with(&old_path) {
+                                    if let Ok(relative) = self.asset_browser.current_folder.strip_prefix(&old_path) {
+                                        self.asset_browser.current_folder = new_path.join(relative);
+                                    } else {
+                                        self.asset_browser.current_folder = new_path.clone();
+                                    }
+                                }
+                                self.asset_browser.request_rescan();
+                            }
+                            Err(e) => {
+                                self.console_messages.push(LogMessage::error(
+                                    format!("Failed to rename folder: {}", e)
+                                ));
+                                eprintln!("Failed to rename folder: {}", e);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Handle input
         self.handle_frame_input(&gui_result);
 
@@ -669,10 +1086,9 @@ impl App {
 
     /// Handle input during frame rendering
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
-        // ESC always works
-        if self.input_manager.is_key_just_pressed(KeyCode::Escape) {
-            std::process::exit(0);
-        }
+        // Note: Escape is handled by individual UI components (asset browser, dialogs, etc.)
+        // to provide context-aware behavior (cancel rename, close dialogs, etc.)
+        // Use File > Exit menu or Alt+F4 to close the application
 
         // F12 and Ctrl+S are handled in handle_window_event() to avoid timing issues
         // (begin_frame clears keys_just_pressed before render is called)

@@ -100,11 +100,15 @@ impl InspectorPanel {
             // Search/filter box
             ui.horizontal(|ui| {
                 ui.label("Filter:");
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut self.search_filter)
                         .hint_text("Search components...")
                         .desired_width(ui.available_width()),
                 );
+                // Clear filter on Escape
+                if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.search_filter.clear();
+                }
             });
             ui.separator();
 

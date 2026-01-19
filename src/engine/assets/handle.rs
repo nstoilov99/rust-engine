@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::hash::{Hash, Hasher};
 use std::fmt;
@@ -15,8 +16,11 @@ struct HandleInner<T> {
 }
 
 /// Unique identifier for an asset
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AssetId(u64);
+///
+/// Generated from the asset's path using a hash function.
+/// Two assets with the same path will have the same ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssetId(pub u64);
 
 impl AssetId {
     pub fn from_path(path: &str) -> Self {

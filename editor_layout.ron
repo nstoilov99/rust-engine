@@ -28,7 +28,7 @@
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.667287,
+                    fraction: 0.6144995,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -55,7 +55,7 @@
                         ),
                         max: (
                             x: 1771.0,
-                            y: 921.0,
+                            y: 850.0,
                         ),
                     ),
                     viewport: (
@@ -65,7 +65,7 @@
                         ),
                         max: (
                             x: 1771.0,
-                            y: 921.0,
+                            y: 850.0,
                         ),
                     ),
                     tabs: [
@@ -79,7 +79,7 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 923.0,
+                            y: 852.0,
                         ),
                         max: (
                             x: 1771.0,
@@ -89,7 +89,7 @@
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 947.0,
+                            y: 876.0,
                         ),
                         max: (
                             x: 1771.0,
@@ -99,8 +99,9 @@
                     tabs: [
                         Console,
                         Profiler,
+                        AssetBrowser,
                     ],
-                    active: (1),
+                    active: (2),
                     scroll: 0.0,
                     collapsed: false,
                 )),
@@ -169,7 +170,7 @@
                 Empty,
                 Empty,
             ],
-            focused_node: Some((6)),
+            focused_node: Some((4)),
             collapsed: false,
             collapsed_leaf_count: 0,
         )),

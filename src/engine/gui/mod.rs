@@ -320,6 +320,27 @@ impl Gui {
                         repeat: key_event.repeat,
                         modifiers: self.modifiers,
                     });
+
+                    // Handle clipboard shortcuts (Ctrl+C, Ctrl+X, Ctrl+V)
+                    if pressed && self.modifiers.ctrl {
+                        match key {
+                            egui::Key::C => {
+                                self.events.push(egui::Event::Copy);
+                            }
+                            egui::Key::X => {
+                                self.events.push(egui::Event::Cut);
+                            }
+                            egui::Key::V => {
+                                // Get text from clipboard and push as Paste event
+                                if let Some(clipboard) = &mut self.clipboard {
+                                    if let Ok(text) = clipboard.get_text() {
+                                        self.events.push(egui::Event::Paste(text));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
                 // Handle text input (replaces ReceivedCharacter in winit 0.30)

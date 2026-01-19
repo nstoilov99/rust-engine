@@ -7,6 +7,8 @@ pub mod model_manager;
 pub mod hot_reload;
 pub mod dependencies;
 pub mod async_loader;
+pub mod asset_type;
+pub mod metadata;
 
 pub use handle::{Handle, AssetId};
 pub use texture::{load_texture};
@@ -16,4 +18,6 @@ pub use asset_manager::{AssetManager, CacheStats};
 pub use hot_reload::{HotReloadWatcher, ReloadEvent};
 pub use dependencies::{AssetDependencies, DependencyStats};
 pub use async_loader::{AsyncAssetLoader, LoadRequest, LoadResult};
-pub use model_loader::{Model, LoadedMesh, load_model, load_gltf}; 
+pub use model_loader::{Model, LoadedMesh, load_model, load_gltf};
+pub use asset_type::AssetType;
+pub use metadata::AssetMetadata; 

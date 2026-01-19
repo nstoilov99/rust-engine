@@ -1,7 +1,7 @@
 //! Icon management for the editor toolbar
 //!
 //! This module provides PNG icon loading and rendering for the viewport toolbar.
-//! Icons are loaded from assets/icons/ directory.
+//! Icons are loaded from engine/icons/ directory (separate from game content).
 
 use egui::{Color32, ColorImage, Context, TextureHandle, TextureOptions, Vec2};
 use std::collections::HashMap;
@@ -24,6 +24,55 @@ pub enum ToolbarIcon {
     ScaleSnap,
     // Camera icons
     CameraSpeed,
+}
+
+/// Asset browser icon identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssetBrowserIcon {
+    // Folder icons
+    Folder,
+    FolderOpen,
+    FolderPlus,
+    // File type icons
+    FileMesh,
+    FileImage,
+    FileDocument,
+    FileCode,
+    // Arrow icons for expand/collapse
+    ArrowDown,
+    ArrowRight,
+}
+
+impl AssetBrowserIcon {
+    /// Get the filename for this icon (without extension)
+    pub fn filename(&self) -> &'static str {
+        match self {
+            AssetBrowserIcon::Folder => "folder",
+            AssetBrowserIcon::FolderOpen => "opened-folder",
+            AssetBrowserIcon::FolderPlus => "folder-plus-fill",
+            AssetBrowserIcon::FileMesh => "file-mesh",
+            AssetBrowserIcon::FileImage => "image-file",
+            AssetBrowserIcon::FileDocument => "file-document",
+            AssetBrowserIcon::FileCode => "code-file",
+            AssetBrowserIcon::ArrowDown => "arrow-down",
+            AssetBrowserIcon::ArrowRight => "arrow-right",
+        }
+    }
+
+    /// Get all asset browser icons
+    pub fn all() -> &'static [AssetBrowserIcon] {
+        &[
+            AssetBrowserIcon::Folder,
+            AssetBrowserIcon::FolderOpen,
+            AssetBrowserIcon::FolderPlus,
+            AssetBrowserIcon::FileMesh,
+            AssetBrowserIcon::FileImage,
+            AssetBrowserIcon::FileDocument,
+            AssetBrowserIcon::FileCode,
+            AssetBrowserIcon::ArrowDown,
+            AssetBrowserIcon::ArrowRight,
+        ]
+    }
 }
 
 impl ToolbarIcon {
@@ -64,6 +113,8 @@ impl ToolbarIcon {
 pub struct IconManager {
     /// Loaded texture handles indexed by icon type
     textures: HashMap<ToolbarIcon, TextureHandle>,
+    /// Loaded asset browser icons
+    asset_icons: HashMap<AssetBrowserIcon, TextureHandle>,
     /// Icon display size
     icon_size: u32,
     /// Icon tint color
@@ -75,6 +126,7 @@ impl IconManager {
     pub fn new(icon_size: u32, tint_color: Color32) -> Self {
         Self {
             textures: HashMap::new(),
+            asset_icons: HashMap::new(),
             icon_size,
             tint_color,
         }
@@ -106,6 +158,22 @@ impl IconManager {
                 self.textures.insert(icon, texture);
             } else {
                 eprintln!("Warning: Failed to load icon: {}", path.display());
+            }
+        }
+    }
+
+    /// Load asset browser icons from the assets directory
+    pub fn load_asset_browser_icons(&mut self, ctx: &Context, assets_path: &Path) {
+        let icons_dir = assets_path.join("icons");
+
+        for icon in AssetBrowserIcon::all() {
+            let filename = format!("{}.png", icon.filename());
+            let path = icons_dir.join(&filename);
+
+            if let Some(texture) = self.load_png_icon(ctx, &path, icon.filename()) {
+                self.asset_icons.insert(*icon, texture);
+            } else {
+                eprintln!("Warning: Failed to load asset browser icon: {}", path.display());
             }
         }
     }
@@ -144,9 +212,14 @@ impl IconManager {
         Some(texture)
     }
 
-    /// Get a texture handle for an icon
+    /// Get a texture handle for a toolbar icon
     pub fn get(&self, icon: ToolbarIcon) -> Option<&TextureHandle> {
         self.textures.get(&icon)
+    }
+
+    /// Get a texture handle for an asset browser icon
+    pub fn get_asset_icon(&self, icon: AssetBrowserIcon) -> Option<&TextureHandle> {
+        self.asset_icons.get(&icon)
     }
 
     /// Get the icon display size

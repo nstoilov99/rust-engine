@@ -3,6 +3,7 @@
 //! Handles rendering of each tab type in the dock layout.
 
 use super::{
+    asset_browser::AssetBrowserPanel,
     console::{LogFilter, LogLevel, LogMessage},
     console_cmd::{CommandContext, ConsoleCommandSystem},
     dock_layout::EditorTab,
@@ -60,6 +61,8 @@ pub struct EditorContext<'a> {
     pub viewport_settings: &'a mut ViewportSettings,
     /// Icon manager for toolbar icons (optional, falls back to text if None)
     pub icon_manager: Option<&'a IconManager>,
+    /// Asset browser panel
+    pub asset_browser: &'a mut AssetBrowserPanel,
 }
 
 /// Tab viewer that renders each panel type
@@ -307,32 +310,9 @@ impl<'a> EditorTabViewer<'a> {
             .show_contents(ui, self.editor.world, self.editor.selection);
     }
 
-    /// Render the asset browser (placeholder)
+    /// Render the asset browser panel
     fn render_asset_browser(&mut self, ui: &mut Ui) {
-        ui.heading("Asset Browser");
-        ui.separator();
-        ui.label("Drag assets from here into the viewport or hierarchy.");
-
-        ui.add_space(10.0);
-
-        // Placeholder grid of assets
-        ui.horizontal_wrapped(|ui| {
-            for i in 0..12 {
-                ui.group(|ui| {
-                    ui.set_min_size(egui::vec2(64.0, 80.0));
-                    ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new("[ ]").size(24.0));
-                        ui.small(format!("Asset {}", i));
-                    });
-                });
-            }
-        });
-
-        ui.add_space(10.0);
-        ui.label(
-            egui::RichText::new("(Asset browser will be fully implemented in a future tutorial)")
-                .weak(),
-        );
+        self.editor.asset_browser.show(ui, self.editor.icon_manager);
     }
 
     /// Render the console panel
@@ -465,8 +445,9 @@ impl<'a> EditorTabViewer<'a> {
             response.request_focus();
         }
 
-        // Handle Up/Down keys for history navigation
+        // Handle keyboard shortcuts when input is focused
         if response.has_focus() {
+            // Up/Down for history navigation
             if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                 if let Some(prev) = self
                     .editor
@@ -481,6 +462,10 @@ impl<'a> EditorTabViewer<'a> {
                 if let Some(next) = self.editor.console_command_system.history.next() {
                     *self.editor.console_input = next.to_string();
                 }
+            }
+            // Escape to clear input
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.editor.console_input.clear();
             }
         }
     }
