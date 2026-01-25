@@ -40,6 +40,9 @@ pub struct Gui {
     clipboard: Option<arboard::Clipboard>,
     /// Current cursor icon
     current_cursor: egui::CursorIcon,
+    /// Viewport rect captured when pointer drag started.
+    /// Used for consistent "outside viewport" detection during drags.
+    drag_start_viewport_rect: Option<egui::Rect>,
 }
 
 impl Gui {
@@ -80,14 +83,19 @@ impl Gui {
             pixels_per_point: 1.15, // Slightly larger for better readability
             clipboard,
             current_cursor: egui::CursorIcon::Default,
+            drag_start_viewport_rect: None,
         })
     }
 
     /// Run GUI and render - call this once per frame
+    ///
+    /// `viewport_rect` is the previous frame's viewport rect (in egui screen coordinates),
+    /// used to detect drags from outside the viewport (e.g., dock separator drags).
     pub fn render(
         &mut self,
         _window: &Window,
         swapchain_image: Arc<vulkano::image::Image>,
+        viewport_rect: Option<egui::Rect>,
         mut ui_fn: impl FnMut(&egui::Context),
     ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
         crate::profile_function!();
@@ -146,7 +154,37 @@ impl Gui {
                 })
             });
 
-        let is_using_pointer = pointer_over_popup || dragging_from_popup;
+        // Block viewport input when dragging from OUTSIDE the viewport rect.
+        // This catches egui_dock separator drags (which are on Background layer, not popup).
+        //
+        // To handle fast drags where viewport size changes between frames, we capture
+        // the viewport rect at drag start and use it for the entire drag duration.
+        // The rect is shrunk by separator width + buffer (3px) so separator clicks
+        // are always detected as "outside".
+        let is_dragging = self.egui_ctx.is_using_pointer();
+        let press_origin = self.egui_ctx.input(|i| i.pointer.press_origin());
+
+        // Manage drag start viewport rect state
+        let effective_viewport_rect = if is_dragging {
+            if self.drag_start_viewport_rect.is_none() {
+                // New drag starting - capture viewport rect shrunk by separator width + buffer
+                self.drag_start_viewport_rect = viewport_rect.map(|r| r.shrink(3.0));
+            }
+            self.drag_start_viewport_rect
+        } else {
+            // Not dragging - clear for next drag
+            self.drag_start_viewport_rect = None;
+            None
+        };
+
+        let dragging_from_outside_viewport = is_dragging &&
+            effective_viewport_rect.map_or(false, |vp_rect| {
+                press_origin.map_or(false, |origin_pos| {
+                    !vp_rect.contains(origin_pos)
+                })
+            });
+
+        let is_using_pointer = pointer_over_popup || dragging_from_popup || dragging_from_outside_viewport;
 
         // Handle clipboard copy via commands (egui 0.33 API)
         for command in &full_output.platform_output.commands {

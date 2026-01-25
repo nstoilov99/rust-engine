@@ -13,7 +13,7 @@
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.69218737,
+                    fraction: 0.50312483,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -24,18 +24,18 @@
                             y: 24.0,
                         ),
                         max: (
-                            x: 1771.0,
+                            x: 1287.0,
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.6144995,
+                    fraction: 0.4869878,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
                 Vertical((
                     rect: (
                         min: (
-                            x: 1773.0,
+                            x: 1289.0,
                             y: 24.0,
                         ),
                         max: (
@@ -54,8 +54,8 @@
                             y: 24.0,
                         ),
                         max: (
-                            x: 1771.0,
-                            y: 850.0,
+                            x: 1287.0,
+                            y: 678.0,
                         ),
                     ),
                     viewport: (
@@ -64,8 +64,8 @@
                             y: 48.0,
                         ),
                         max: (
-                            x: 1771.0,
-                            y: 850.0,
+                            x: 1287.0,
+                            y: 678.0,
                         ),
                     ),
                     tabs: [
@@ -79,20 +79,20 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 852.0,
+                            y: 680.0,
                         ),
                         max: (
-                            x: 1771.0,
+                            x: 1287.0,
                             y: 1369.0,
                         ),
                     ),
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 876.0,
+                            y: 704.0,
                         ),
                         max: (
-                            x: 1771.0,
+                            x: 1287.0,
                             y: 1369.0,
                         ),
                     ),
@@ -101,14 +101,14 @@
                         Profiler,
                         AssetBrowser,
                     ],
-                    active: (2),
+                    active: (1),
                     scroll: 0.0,
                     collapsed: false,
                 )),
                 Leaf((
                     rect: (
                         min: (
-                            x: 1773.0,
+                            x: 1289.0,
                             y: 24.0,
                         ),
                         max: (
@@ -118,7 +118,7 @@
                     ),
                     viewport: (
                         min: (
-                            x: 1773.0,
+                            x: 1289.0,
                             y: 48.0,
                         ),
                         max: (
@@ -136,7 +136,7 @@
                 Leaf((
                     rect: (
                         min: (
-                            x: 1773.0,
+                            x: 1289.0,
                             y: 698.0,
                         ),
                         max: (
@@ -146,7 +146,7 @@
                     ),
                     viewport: (
                         min: (
-                            x: 1773.0,
+                            x: 1289.0,
                             y: 722.0,
                         ),
                         max: (

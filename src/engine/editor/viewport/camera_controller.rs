@@ -59,6 +59,8 @@ pub struct EditorCamera {
     current_mode: CameraControlMode,
     /// Track if we consumed input this frame
     consumed_input: bool,
+    /// Whether we're in an active drag operation (started in viewport, button still held)
+    is_active_drag: bool,
 }
 
 impl EditorCamera {
@@ -78,6 +80,7 @@ impl EditorCamera {
             orbit_distance: 10.0,
             current_mode: CameraControlMode::None,
             consumed_input: false,
+            is_active_drag: false,
         }
     }
 
@@ -128,6 +131,24 @@ impl EditorCamera {
         self.consumed_input
     }
 
+    /// Returns true if camera is in an active drag operation
+    ///
+    /// A drag is active from when a mouse button is pressed while viewport is hovered
+    /// until all mouse buttons are released. This prevents mode flickering when the
+    /// cursor momentarily leaves a small viewport during camera movement.
+    pub fn is_active_drag(&self) -> bool {
+        self.is_active_drag
+    }
+
+    /// Resets the active drag state
+    ///
+    /// Call this when the window loses focus or when the viewport becomes unusable
+    /// (e.g., resized too small) to ensure cursor lock state stays synchronized.
+    pub fn reset_active_drag(&mut self) {
+        self.is_active_drag = false;
+        self.current_mode = CameraControlMode::None;
+    }
+
     /// Process input and update camera. Returns true if camera consumed input.
     ///
     /// # Arguments
@@ -149,17 +170,31 @@ impl EditorCamera {
         // Don't process if gizmo is being manipulated
         if gizmo_active {
             self.current_mode = CameraControlMode::None;
-            return false;
-        }
-
-        if !viewport_hovered {
-            self.current_mode = CameraControlMode::None;
+            self.is_active_drag = false;
             return false;
         }
 
         let rmb = input.is_mouse_pressed(MouseButton::Right);
         let lmb = input.is_mouse_pressed(MouseButton::Left);
         let mmb = input.is_mouse_pressed(MouseButton::Middle);
+        let any_camera_button = rmb || lmb || mmb;
+
+        // Track active drag state:
+        // - Start drag when button pressed while viewport is hovered
+        // - End drag when all buttons are released
+        if viewport_hovered && any_camera_button && !self.is_active_drag {
+            self.is_active_drag = true;
+        } else if !any_camera_button {
+            self.is_active_drag = false;
+        }
+
+        // Only reset mode if NOT in active drag AND not hovered
+        // This prevents flickering when cursor momentarily leaves a small viewport
+        if !self.is_active_drag && !viewport_hovered {
+            self.current_mode = CameraControlMode::None;
+            return false;
+        }
+
         let alt = input.is_key_pressed(KeyCode::AltLeft) || input.is_key_pressed(KeyCode::AltRight);
 
         // Determine control mode based on input combination

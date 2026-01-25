@@ -29,7 +29,9 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
-use rust_engine::engine::editor::CameraControlMode;
+/// Minimum viewport dimension (pixels) for camera control to be enabled.
+/// Below this size, camera interactions are disabled to prevent erratic behavior.
+const MIN_VIEWPORT_SIZE_FOR_CAMERA: u32 = 50;
 
 /// Main application state
 pub struct App {
@@ -80,6 +82,8 @@ pub struct App {
     pub grid_visible: bool,
     /// Viewport hover state (set by tab_viewer during render)
     pub viewport_hovered: bool,
+    /// Previous frame's viewport rect for input blocking (egui screen coordinates)
+    pub viewport_rect: egui::Rect,
     /// Track if cursor is locked/hidden during camera drag
     camera_cursor_locked: bool,
     /// Saved cursor position when camera drag starts (for restore on release)
@@ -212,6 +216,7 @@ impl App {
             gizmo_handler: GizmoHandler::new(),
             grid_visible: true,
             viewport_hovered: false,
+            viewport_rect: egui::Rect::NOTHING,
             camera_cursor_locked: false,
             drag_start_cursor_pos: None,
             viewport_settings: ViewportSettings::default(),
@@ -362,6 +367,18 @@ impl App {
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                 };
                 self.input_manager.handle_mouse_wheel(scroll);
+            }
+            WindowEvent::Focused(false) => {
+                // Reset camera drag state when window loses focus
+                // This prevents cursor from staying locked after Alt+Tab
+                self.editor_camera.reset_active_drag();
+                if self.camera_cursor_locked {
+                    let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+                    self.window.set_cursor_visible(true);
+                    self.camera_cursor_locked = false;
+                    self.input_manager.set_use_raw_mouse(false);
+                    self.drag_start_cursor_pos = None;
+                }
             }
             _ => {}
         }
@@ -536,6 +553,9 @@ impl App {
         let gizmo_handler = &mut self.gizmo_handler;
         let grid_visible = &mut self.grid_visible;
         let viewport_hovered = &mut self.viewport_hovered;
+        // Store previous frame's viewport rect for input blocking, will be updated by render
+        let prev_viewport_rect = self.viewport_rect;
+        let mut new_viewport_rect = self.viewport_rect;
         let viewport_settings = &mut self.viewport_settings;
 
         // Icon manager reference (icons are loaded lazily on first frame)
@@ -551,7 +571,7 @@ impl App {
         // We need to capture menu action outside the closure
         let mut menu_action = MenuAction::None;
 
-        let gui_result = match self.gui.render(window, target_image, |ctx| {
+        let gui_result = match self.gui.render(window, target_image, Some(prev_viewport_rect), |ctx| {
             // Render menu bar first (at top)
             menu_action = render_menu_bar(ctx, dock_state, command_history);
 
@@ -577,6 +597,7 @@ impl App {
                 gizmo_handler,
                 grid_visible,
                 viewport_hovered,
+                viewport_rect: &mut new_viewport_rect,
                 viewport_settings,
                 icon_manager,
                 asset_browser,
@@ -597,6 +618,9 @@ impl App {
                 return Ok(());
             }
         };
+
+        // Store updated viewport rect for next frame's input blocking
+        self.viewport_rect = new_viewport_rect;
 
         // Handle menu actions
         match menu_action {
@@ -1116,9 +1140,22 @@ impl App {
         self.editor_camera.mouse_sensitivity = self.viewport_settings.mouse_sensitivity;
 
         // Check if camera should process input
-        // Block camera when a popup is open AND user is interacting (dragging slider, etc)
-        // This prevents camera movement when dragging popup widgets over viewport
-        let viewport_available = self.viewport_hovered && !gui_result.is_using_pointer;
+        // Block camera when:
+        // - A popup is open AND user is interacting (dragging slider, etc)
+        // - Viewport is too small (< MIN_VIEWPORT_SIZE_FOR_CAMERA pixels)
+        // Allow camera to continue if already in an active drag (prevents flickering)
+        let (vp_w, vp_h) = self.viewport_size;
+        let viewport_usable = vp_w >= MIN_VIEWPORT_SIZE_FOR_CAMERA && vp_h >= MIN_VIEWPORT_SIZE_FOR_CAMERA;
+
+        // If viewport becomes unusable during active drag, force end the drag
+        // This prevents cursor staying locked when viewport is resized very small
+        if !viewport_usable && self.editor_camera.is_active_drag() {
+            self.editor_camera.reset_active_drag();
+        }
+
+        let viewport_available = (self.viewport_hovered || self.editor_camera.is_active_drag())
+            && !gui_result.is_using_pointer
+            && viewport_usable;
 
         self.editor_camera.update(
             &self.input_manager,
@@ -1140,11 +1177,9 @@ impl App {
         }
 
         // Lock/hide cursor during camera drag for unlimited rotation
-        let camera_mode = self.editor_camera.current_mode();
-        let camera_dragging = matches!(
-            camera_mode,
-            CameraControlMode::Fly | CameraControlMode::Orbit | CameraControlMode::Pan | CameraControlMode::LookDrag
-        );
+        // Use is_active_drag() instead of just current_mode() for stable cursor locking.
+        // This prevents cursor flickering when viewport_hovered toggles rapidly on small viewports.
+        let camera_dragging = self.editor_camera.is_active_drag();
 
         if camera_dragging && !self.camera_cursor_locked {
             // Save cursor position before hiding for restore on release

@@ -57,6 +57,8 @@ pub struct EditorContext<'a> {
     pub grid_visible: &'a mut bool,
     /// Output: viewport is hovered (set during render_viewport)
     pub viewport_hovered: &'a mut bool,
+    /// Output: viewport rect in screen coordinates (set during render_viewport)
+    pub viewport_rect: &'a mut egui::Rect,
     /// Viewport settings (tool mode, snapping, camera speed)
     pub viewport_settings: &'a mut ViewportSettings,
     /// Icon manager for toolbar icons (optional, falls back to text if None)
@@ -131,6 +133,9 @@ impl<'a> EditorTabViewer<'a> {
 
             // Use the ACTUAL image rect for gizmo positioning
             viewport_rect = response.rect;
+
+            // Store viewport rect for next frame's input blocking
+            *self.editor.viewport_rect = viewport_rect;
 
             // Use contains_pointer() instead of hovered() to allow viewport interaction
             // even after clicking in other panels (like hierarchy). hovered() returns false
