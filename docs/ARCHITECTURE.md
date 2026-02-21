@@ -165,21 +165,26 @@ The engine uses a deferred rendering pipeline for efficient multi-light scenes:
 
 ### Custom ECS (wrapping hecs)
 
-The engine uses a **custom ECS architecture** that wraps hecs for entity/component storage while adding Resources, Events, Stages, and Change Detection on top.
+The engine uses a **custom ECS architecture** that wraps hecs for entity/component storage while adding Resources, Events, Commands, ChangeTicks, and Staged Scheduling on top.
+
+Entity IDs use `hecs::Entity` directly (no custom allocator). Component storage is entirely hecs. Our custom layers sit alongside.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Custom ECS Layer                          │
+│                    Custom ECS Layer (GameWorld)              │
 ├─────────────────────────────────────────────────────────────┤
-│  Resources      │  Events         │  Schedule               │
+│  Resources      │  Events          │  Schedule              │
 │  ├── Time       │  ├── EntitySpawned    ├── First          │
-│  ├── Input      │  ├── SelectionChanged │  ├── PreUpdate   │
-│  ├── EditorState│  ├── PlayModeChanged  │  ├── Update      │
-│  └── Assets     │  └── ComponentChanged │  ├── PostUpdate  │
-│                 │                       │  └── Last         │
+│  ├── EditorState│  ├── EntityDeleted    ├── PreUpdate      │
+│  └── CommandBuf │  ├── SelectionChanged ├── Update         │
+│                 │  └── PlayModeChanged  ├── PostUpdate     │
+│  ChangeTicks    │                       └── Last           │
+│  ├── added map  │  Commands                                │
+│  └── changed map│  ├── Spawn / Despawn                     │
+│                 │  └── Insert / Remove                     │
 ├─────────────────────────────────────────────────────────────┤
 │                    hecs Layer (wrapped)                      │
-│  ├── Entity archetype storage                               │
+│  ├── Entity archetype storage (hecs::Entity IDs)            │
 │  ├── Component queries                                       │
 │  └── Iteration                                               │
 └─────────────────────────────────────────────────────────────┘
@@ -194,7 +199,7 @@ pub struct Transform {
 }
 
 // Systems use Resources for global state
-fn movement_system(world: &mut World, resources: &mut Resources) {
+fn movement_system(world: &mut hecs::World, resources: &mut Resources) {
     let delta = resources.get::<Time>().map(|t| t.scaled_delta()).unwrap_or(0.0);
 
     for (id, (transform, velocity)) in world.query_mut::<(&mut Transform, &Velocity)>() {
@@ -208,6 +213,13 @@ schedule.add_system_with_criteria(
     Stage::Update,
     RunIfPlaying,  // Only runs during play mode
 );
+
+// Deferred ops via Commands (no borrow conflicts during iteration)
+fn spawner_system(world: &mut hecs::World, resources: &mut Resources) {
+    let commands = resources.get_mut::<CommandBuffer>().unwrap();
+    commands.spawn((Transform::default(), Name::new("New Entity")));
+    // Applied between stages by Schedule
+}
 ```
 
 ### Core Components
@@ -427,10 +439,12 @@ let device = create_device(&instance)
 
 ## Future Architecture Plans
 
-See [VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md](roadmap/VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md) for planned ECS improvements:
+See [VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md](roadmap/VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md) for the full ECS architecture spec:
 
-- Resource system (global state)
-- Event system (entity communication)
-- System stages (ordered execution)
-- Change detection (dirty tracking)
-- Run criteria (conditional systems)
+- Resource system (global typed state: Time, EditorState)
+- Event system (double-buffered channels)
+- Commands (deferred spawn/despawn/insert/remove)
+- ChangeTicks (frame-stamped change detection)
+- System stages (First → PreUpdate → Update → PostUpdate → Last)
+- Run criteria (conditional system execution)
+- GameWorld wrapper (hecs + resources + events + commands + changeticks)
