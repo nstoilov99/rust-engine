@@ -34,6 +34,7 @@ impl EntityBuilder {
             MeshRenderer {
                 mesh_index,
                 material_index,
+                ..Default::default()
             },
         ))
     }
@@ -66,6 +67,7 @@ impl EntityBuilder {
                 direction,
                 color,
                 intensity,
+                ..Default::default()
             },
             crate::engine::ecs::components::Name::new("Directional Light"),
         ))

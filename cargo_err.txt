@@ -1,0 +1,527 @@
+warning: field `rotation_angle` is never read
+  --> crates\transform-gizmo-fork\crates\transform-gizmo\src\subgizmo\rotation.rs:42:5
+   |
+40 | pub struct RotationPickResult {
+   |            ------------------ field in this struct
+41 |     angle: f64,
+42 |     rotation_angle: f64,
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `transform-gizmo` (lib) generated 1 warning
+warning: unused import: `MemoryTypeFilter`
+  --> src\engine\rendering\3d\material.rs:40:60
+   |
+40 |     use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+   |                                                            ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `BufferCreateInfo`, `BufferUsage`, and `Buffer`
+  --> src\engine\rendering\3d\material.rs:41:27
+   |
+41 |     use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+   |                           ^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `Handle`
+ --> src\engine\assets\async_loader.rs:7:21
+  |
+7 | use super::handle::{Handle, AssetId};
+  |                     ^^^^^^
+
+warning: unused import: `PrimaryAutoCommandBuffer`
+  --> src\engine\gui\renderer.rs:11:9
+   |
+11 |         PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassBeginInfo, SubpassEndInfo,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DynamicImage`, `GenericImageView`, `ImageBuffer`, and `Rgba`
+ --> src\engine\editor\asset_browser\thumbnail.rs:8:13
+  |
+8 | use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
+  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^  ^^^^
+
+warning: unused import: `FolderTreeResponse`
+  --> src\engine\editor\asset_browser\views\mod.rs:12:44
+   |
+12 | pub use folder_tree::{FolderContextAction, FolderTreeResponse, FolderTreeView};
+   |                                            ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Color32`
+  --> src\engine\editor\asset_browser\mod.rs:25:12
+   |
+25 | use egui::{Color32, RichText, Ui};
+   |            ^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:461:19
+    |
+461 |             egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("asset_tooltip"), |ui| {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\icons.rs:317:15
+    |
+317 |         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::menu::bar`: Use `egui::MenuBar::new().ui(` instead
+  --> src\engine\editor\menu_bar.rs:40:25
+   |
+40 |             egui::menu::bar(ui, |ui| {
+   |                         ^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\profiler\flamegraph.rs:677:15
+    |
+677 |         egui::show_tooltip_at_pointer(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\profiler\frame_history.rs:206:19
+    |
+206 |             egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("frame_tooltip"), |ui| {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\viewport\toolbar.rs:104:19
+    |
+104 |             egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\viewport\toolbar.rs:162:19
+    |
+162 |             egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\viewport\toolbar.rs:292:15
+    |
+292 |         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(icon_tooltip), |ui| {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src\engine\editor\viewport\toolbar.rs:314:11
+    |
+314 |     egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupClose...
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\viewport\toolbar.rs:441:15
+    |
+441 |         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("camera_speed_tooltip"), |ui| {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src\engine\editor\viewport\toolbar.rs:461:11
+    |
+461 |     egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupClose...
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::show_tooltip_at_pointer`: Use `egui::Tooltip` instead
+   --> src\engine\editor\viewport\toolbar.rs:666:15
+    |
+666 |         egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("rotation_snap_tooltip"), |ui| {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `egui::popup_below_widget`: Use `egui::Popup` instead
+   --> src\engine\editor\viewport\toolbar.rs:686:11
+    |
+686 |     egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupClose...
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:331:24
+    |
+331 |                     ui.close_menu();
+    |                        ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:338:28
+    |
+338 |                         ui.close_menu();
+    |                            ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:345:28
+    |
+345 |                         ui.close_menu();
+    |                            ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:353:28
+    |
+353 |                         ui.close_menu();
+    |                            ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:360:28
+    |
+360 |                         ui.close_menu();
+    |                            ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:405:20
+    |
+405 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:410:20
+    |
+410 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:417:20
+    |
+417 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:422:20
+    |
+422 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\grid_view.rs:429:20
+    |
+429 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\list_view.rs:317:20
+    |
+317 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\list_view.rs:322:20
+    |
+322 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\list_view.rs:329:20
+    |
+329 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\list_view.rs:334:20
+    |
+334 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Ui::close_menu`: Use `ui.close()` or `ui.close_kind(UiKind::Menu)` instead
+   --> src\engine\editor\asset_browser\views\list_view.rs:341:20
+    |
+341 |                 ui.close_menu();
+    |                    ^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src\engine\editor\viewport\toolbar.rs:310:33
+    |
+310 |         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src\engine\editor\viewport\toolbar.rs:323:41
+    |
+323 |                 ui.memory_mut(|mem| mem.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src\engine\editor\viewport\toolbar.rs:458:33
+    |
+458 |         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::toggle_popup`: Use Popup::toggle_id instead
+   --> src\engine\editor\viewport\toolbar.rs:683:33
+    |
+683 |         ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+    |                                 ^^^^^^^^^^^^
+
+warning: use of deprecated method `egui::Memory::close_popup`: Use Popup::close_id instead
+   --> src\engine\editor\viewport\toolbar.rs:696:41
+    |
+696 |                 ui.memory_mut(|mem| mem.close_popup(popup_id));
+    |                                         ^^^^^^^^^^^
+
+warning: unused variable: `surface_capabilities`
+  --> src\engine\core\swapchain.rs:90:9
+   |
+90 |     let surface_capabilities = device
+   |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface_capabilities`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `image_format`
+  --> src\engine\core\swapchain.rs:94:9
+   |
+94 |     let image_format = device
+   |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_image_format`
+
+warning: unused variable: `device`
+  --> src\engine\rendering\common\depth_buffer.rs:10:5
+   |
+10 |     device: Arc<Device>,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `viewport`
+   --> src\engine\rendering\2d\pipeline_2d.rs:265:5
+    |
+265 |     viewport: Viewport,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_viewport`
+
+warning: unused variable: `device`
+  --> src\engine\rendering\3d\material.rs:34:5
+   |
+34 |     device: Arc<vulkano::device::Device>,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `color`
+  --> src\engine\rendering\3d\material.rs:36:5
+   |
+36 |     color: [u8; 4],
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_color`
+
+warning: unused variable: `device`
+  --> src\engine\rendering\3d\shadow.rs:35:5
+   |
+35 |     device: Arc<Device>,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `buffers`
+   --> src\engine\assets\model_loader.rs:416:5
+    |
+416 |     buffers: &[gltf::buffer::Data],
+    |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_buffers`
+
+warning: unused variable: `image_data`
+   --> src\engine\assets\model_loader.rs:508:5
+    |
+508 |     image_data: &gltf::image::Data,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_image_data`
+
+warning: unused variable: `id`
+   --> src\engine\assets\async_loader.rs:144:13
+    |
+144 |         let id = AssetId::from_path(path);
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `cursor_range`
+   --> src\engine\gui\mod.rs:295:33
+    |
+295 | ...                   let cursor_range = cursor.map(|(start, end)| {
+    |                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cursor_range`
+
+warning: irrefutable `let...else` pattern
+  --> src\engine\editor\profiler\collector.rs:60:9
+   |
+60 |         let Ok(unpacked) = frame_data.unpacked() else {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this pattern will always match, so the `else` clause is useless
+   = help: consider removing the `else` clause
+   = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: unused variable: `content_height`
+   --> src\engine\editor\profiler\flamegraph.rs:911:5
+    |
+911 |     content_height: f32,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_content_height`
+
+warning: fields `frames_in_flight` and `current_frame` are never read
+  --> src\engine\rendering\common\renderer.rs:64:5
+   |
+46 | pub struct Renderer {
+   |            -------- fields in this struct
+...
+64 |     frames_in_flight: usize,
+   |     ^^^^^^^^^^^^^^^^
+65 |     current_frame: usize,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `device` is never read
+  --> src\engine\assets\texture_manager.rs:14:5
+   |
+13 | pub struct TextureManager {
+   |            -------------- field in this struct
+14 |     device: Arc<Device>,
+   |     ^^^^^^
+
+warning: fields `device` and `allocator` are never read
+  --> src\engine\assets\model_manager.rs:12:5
+   |
+11 | pub struct ModelManager {
+   |            ------------ fields in this struct
+12 |     device: Arc<Device>,
+   |     ^^^^^^
+13 |     allocator: Arc<StandardMemoryAllocator>,
+   |     ^^^^^^^^^
+
+warning: field `runtime` is never read
+  --> src\engine\assets\async_loader.rs:23:5
+   |
+22 | pub struct AsyncAssetLoader {
+   |            ---------------- field in this struct
+23 |     runtime: Arc<Runtime>,
+   |     ^^^^^^^
+
+warning: field `current_cursor` is never read
+  --> src\engine\gui\mod.rs:42:5
+   |
+27 | pub struct Gui {
+   |            --- field in this struct
+...
+42 |     current_cursor: egui::CursorIcon,
+   |     ^^^^^^^^^^^^^^
+
+warning: field `device` is never read
+  --> src\engine\gui\renderer.rs:64:5
+   |
+63 | pub struct EguiRenderer {
+   |            ------------ field in this struct
+64 |     device: Arc<Device>,
+   |     ^^^^^^
+
+warning: field `error` is never read
+  --> src\engine\editor\asset_browser\thumbnail.rs:30:5
+   |
+27 | struct ThumbnailResult {
+   |        --------------- field in this struct
+...
+30 |     error: Option<String>,
+   |     ^^^^^
+   |
+   = note: `ThumbnailResult` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `assets_root` and `type_icons` are never read
+  --> src\engine\editor\asset_browser\thumbnail.rs:53:5
+   |
+43 | pub struct ThumbnailCache {
+   |            -------------- fields in this struct
+...
+53 |     assets_root: PathBuf,
+   |     ^^^^^^^^^^^
+...
+59 |     type_icons: HashMap<AssetType, TextureHandle>,
+   |     ^^^^^^^^^^
+
+warning: function `render_simple_folder_tree` is never used
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:522:8
+    |
+522 | pub fn render_simple_folder_tree(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_simple_folder_recursive` is never used
+   --> src\engine\editor\asset_browser\views\folder_tree.rs:564:4
+    |
+564 | fn render_simple_folder_recursive(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `collapsed_components` is never read
+  --> src\engine\editor\inspector_panel.rs:48:5
+   |
+40 | pub struct InspectorPanel {
+   |            -------------- field in this struct
+...
+48 |     collapsed_components: HashSet<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `frame_bar_color_settings` is never used
+  --> src\engine\editor\profiler\scope_colors.rs:89:8
+   |
+89 | pub fn frame_bar_color_settings(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ROTATION_DIVISIONS_360` is never used
+  --> src\engine\editor\viewport\settings.rs:39:11
+   |
+39 | pub const ROTATION_DIVISIONS_360: &[f32] = &[2.8125, 5.625, 11.25, 22.5];
+   |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `tool_button` is never used
+   --> src\engine\editor\viewport\toolbar.rs:115:4
+    |
+115 | fn tool_button(
+    |    ^^^^^^^^^^^
+
+warning: `rust-engine` (lib) generated 67 warnings (run `cargo fix --lib -p rust-engine` to apply 7 suggestions)
+warning: variable does not need to be mutable
+   --> src\game\app.rs:107:13
+    |
+107 |         let mut renderer = Renderer::new(window.clone())?;
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+  --> src\game\main.rs:85:16
+   |
+85 |             Ok(mut app) => {
+   |                ----^^^
+   |                |
+   |                help: remove this `mut`
+
+warning: fields `hot_reload`, `mesh_indices`, and `descriptor_set` are never read
+  --> src\game\app.rs:42:9
+   |
+37 | pub struct App {
+   |            --- fields in this struct
+...
+42 |     pub hot_reload: HotReloadWatcher,
+   |         ^^^^^^^^^^
+...
+51 |     pub mesh_indices: Vec<usize>,
+   |         ^^^^^^^^^^^^
+52 |     pub descriptor_set: Arc<DescriptorSet>,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: struct `SetupResult` is never constructed
+  --> src\game\game_setup.rs:31:12
+   |
+31 | pub struct SetupResult {
+   |            ^^^^^^^^^^^
+
+warning: function `handle_camera_movement` is never used
+  --> src\game\input_handler.rs:17:8
+   |
+17 | pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, speed: f32) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_camera_rotation` is never used
+  --> src\game\input_handler.rs:45:8
+   |
+45 | pub fn handle_camera_rotation(renderer: &mut Renderer, input: &InputManager, look_speed: f32) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> src\game\render_loop.rs:222:19
+    |
+222 |     AcquireFailed(String),
+    |     ------------- ^^^^^^
+    |     |
+    |     field in this variant
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+222 -     AcquireFailed(String),
+222 +     AcquireFailed(()),
+    |
+
+warning: `rust-engine` (bin "game") generated 7 warnings (run `cargo fix --bin "game"` to apply 2 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.45s

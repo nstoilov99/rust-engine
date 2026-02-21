@@ -1,8 +1,14 @@
 //! Scene serialization and deserialization
 
-use super::scene_format::{ComponentData, EntityData, SceneFile};
+use super::scene_format::{
+    CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
+    RigidBodyTypeData, SceneFile,
+};
 use crate::engine::ecs::components::*;
 use crate::engine::ecs::hierarchy::{set_parent, Children, Parent};
+use crate::engine::physics::{
+    Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
+};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::fs;
@@ -35,6 +41,9 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         components.push(ComponentData::MeshRenderer {
             mesh_index: mesh_renderer.mesh_index,
             material_index: mesh_renderer.material_index,
+            visible: mesh_renderer.visible,
+            cast_shadows: mesh_renderer.cast_shadows,
+            receive_shadows: mesh_renderer.receive_shadows,
         });
     }
 
@@ -44,27 +53,89 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
             near: camera.near,
             far: camera.far,
             active: camera.active,
+            projection: match camera.projection {
+                CameraProjection::Perspective => CameraProjectionData::Perspective,
+                CameraProjection::Orthographic { size } => {
+                    CameraProjectionData::Orthographic { size }
+                }
+            },
+            clear_color: camera.clear_color,
+            priority: camera.priority,
         });
     }
 
     if let Ok(dir_light) = world.get::<&DirectionalLight>(entity) {
         components.push(ComponentData::DirectionalLight {
-            direction: [dir_light.direction.x, dir_light.direction.y, dir_light.direction.z],
+            direction: [
+                dir_light.direction.x,
+                dir_light.direction.y,
+                dir_light.direction.z,
+            ],
             color: [dir_light.color.x, dir_light.color.y, dir_light.color.z],
             intensity: dir_light.intensity,
+            shadow_enabled: dir_light.shadow_enabled,
+            shadow_bias: dir_light.shadow_bias,
         });
     }
 
     if let Ok(point_light) = world.get::<&PointLight>(entity) {
         components.push(ComponentData::PointLight {
-            color: [point_light.color.x, point_light.color.y, point_light.color.z],
+            color: [
+                point_light.color.x,
+                point_light.color.y,
+                point_light.color.z,
+            ],
             intensity: point_light.intensity,
             radius: point_light.radius,
+            shadow_enabled: point_light.shadow_enabled,
+            falloff: match point_light.falloff {
+                LightFalloff::Linear => LightFalloffData::Linear,
+                LightFalloff::Quadratic => LightFalloffData::Quadratic,
+                LightFalloff::InverseSquare => LightFalloffData::InverseSquare,
+            },
         });
     }
 
     if world.get::<&Player>(entity).is_ok() {
         components.push(ComponentData::Player);
+    }
+
+    if let Ok(rb) = world.get::<&PhysRigidBody>(entity) {
+        components.push(ComponentData::RigidBody {
+            body_type: match rb.body_type {
+                RigidBodyType::Dynamic => RigidBodyTypeData::Dynamic,
+                RigidBodyType::Kinematic => RigidBodyTypeData::Kinematic,
+                RigidBodyType::Static => RigidBodyTypeData::Static,
+            },
+            mass: rb.mass,
+            linear_damping: rb.linear_damping,
+            angular_damping: rb.angular_damping,
+            can_sleep: rb.can_sleep,
+            gravity_scale: rb.gravity_scale,
+            lock_rotation: rb.lock_rotation,
+            continuous_collision: rb.continuous_collision,
+        });
+    }
+
+    if let Ok(col) = world.get::<&PhysCollider>(entity) {
+        components.push(ComponentData::Collider {
+            shape: match &col.shape {
+                ColliderShape::Cuboid { half_extents } => ColliderShapeData::Cuboid {
+                    half_extents: [half_extents.x, half_extents.y, half_extents.z],
+                },
+                ColliderShape::Ball { radius } => ColliderShapeData::Ball { radius: *radius },
+                ColliderShape::Capsule {
+                    half_height,
+                    radius,
+                } => ColliderShapeData::Capsule {
+                    half_height: *half_height,
+                    radius: *radius,
+                },
+            },
+            friction: col.friction,
+            restitution: col.restitution,
+            is_sensor: col.is_sensor,
+        });
     }
 
     // Save parent relationship (hierarchy)
@@ -242,10 +313,16 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             ComponentData::MeshRenderer {
                 mesh_index,
                 material_index,
+                visible,
+                cast_shadows,
+                receive_shadows,
             } => {
                 builder.add(MeshRenderer {
                     mesh_index: *mesh_index,
                     material_index: *material_index,
+                    visible: *visible,
+                    cast_shadows: *cast_shadows,
+                    receive_shadows: *receive_shadows,
                 });
             }
             ComponentData::Camera {
@@ -253,34 +330,115 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                 near,
                 far,
                 active,
+                projection,
+                clear_color,
+                priority,
             } => {
                 builder.add(Camera {
                     fov: *fov,
                     near: *near,
                     far: *far,
                     active: *active,
+                    projection: match projection {
+                        CameraProjectionData::Perspective => CameraProjection::Perspective,
+                        CameraProjectionData::Orthographic { size } => {
+                            CameraProjection::Orthographic { size: *size }
+                        }
+                    },
+                    clear_color: *clear_color,
+                    priority: *priority,
                 });
             }
             ComponentData::DirectionalLight {
                 direction,
                 color,
                 intensity,
+                shadow_enabled,
+                shadow_bias,
             } => {
                 builder.add(DirectionalLight {
                     direction: glm::vec3(direction[0], direction[1], direction[2]),
                     color: glm::vec3(color[0], color[1], color[2]),
                     intensity: *intensity,
+                    shadow_enabled: *shadow_enabled,
+                    shadow_bias: *shadow_bias,
                 });
             }
             ComponentData::PointLight {
                 color,
                 intensity,
                 radius,
+                shadow_enabled,
+                falloff,
             } => {
                 builder.add(PointLight {
                     color: glm::vec3(color[0], color[1], color[2]),
                     intensity: *intensity,
                     radius: *radius,
+                    shadow_enabled: *shadow_enabled,
+                    falloff: match falloff {
+                        LightFalloffData::Linear => LightFalloff::Linear,
+                        LightFalloffData::Quadratic => LightFalloff::Quadratic,
+                        LightFalloffData::InverseSquare => LightFalloff::InverseSquare,
+                    },
+                });
+            }
+            ComponentData::RigidBody {
+                body_type,
+                mass,
+                linear_damping,
+                angular_damping,
+                can_sleep,
+                gravity_scale,
+                lock_rotation,
+                continuous_collision,
+            } => {
+                builder.add(PhysRigidBody {
+                    body_type: match body_type {
+                        RigidBodyTypeData::Dynamic => RigidBodyType::Dynamic,
+                        RigidBodyTypeData::Kinematic => RigidBodyType::Kinematic,
+                        RigidBodyTypeData::Static => RigidBodyType::Static,
+                    },
+                    mass: *mass,
+                    linear_damping: *linear_damping,
+                    angular_damping: *angular_damping,
+                    can_sleep: *can_sleep,
+                    gravity_scale: *gravity_scale,
+                    lock_rotation: *lock_rotation,
+                    continuous_collision: *continuous_collision,
+                    handle: None,
+                });
+            }
+            ComponentData::Collider {
+                shape,
+                friction,
+                restitution,
+                is_sensor,
+            } => {
+                builder.add(PhysCollider {
+                    shape: match shape {
+                        ColliderShapeData::Cuboid { half_extents } => ColliderShape::Cuboid {
+                            half_extents: glm::vec3(
+                                half_extents[0],
+                                half_extents[1],
+                                half_extents[2],
+                            ),
+                        },
+                        ColliderShapeData::Ball { radius } => {
+                            ColliderShape::Ball { radius: *radius }
+                        }
+                        ColliderShapeData::Capsule {
+                            half_height,
+                            radius,
+                        } => ColliderShape::Capsule {
+                            half_height: *half_height,
+                            radius: *radius,
+                        },
+                    },
+                    friction: *friction,
+                    restitution: *restitution,
+                    is_sensor: *is_sensor,
+                    handle: None,
                 });
             }
             ComponentData::Player => {

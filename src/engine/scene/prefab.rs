@@ -1,11 +1,17 @@
 //! Prefab system for reusable entity templates
 
-use super::scene_format::{EntityData, ComponentData};
+use super::scene_format::{
+    CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
+    RigidBodyTypeData,
+};
 use crate::engine::ecs::components::*;
-use hecs::{World, Entity, EntityBuilder};
-use serde::{Serialize, Deserialize};
-use std::fs;
+use crate::engine::physics::{
+    Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
+};
+use hecs::{Entity, EntityBuilder, World};
 use nalgebra_glm as glm;
+use serde::{Deserialize, Serialize};
+use std::fs;
 
 /// Prefab file format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,32 +91,135 @@ impl Prefab {
 
                     builder.add(transform);
                 }
-                ComponentData::MeshRenderer { mesh_index, material_index } => {
+                ComponentData::MeshRenderer {
+                    mesh_index,
+                    material_index,
+                    visible,
+                    cast_shadows,
+                    receive_shadows,
+                } => {
                     builder.add(MeshRenderer {
                         mesh_index: *mesh_index,
                         material_index: *material_index,
+                        visible: *visible,
+                        cast_shadows: *cast_shadows,
+                        receive_shadows: *receive_shadows,
                     });
                 }
-                ComponentData::Camera { fov, near, far, active } => {
+                ComponentData::Camera {
+                    fov,
+                    near,
+                    far,
+                    active,
+                    projection,
+                    clear_color,
+                    priority,
+                } => {
                     builder.add(Camera {
                         fov: *fov,
                         near: *near,
                         far: *far,
                         active: *active,
+                        projection: match projection {
+                            CameraProjectionData::Perspective => CameraProjection::Perspective,
+                            CameraProjectionData::Orthographic { size } => {
+                                CameraProjection::Orthographic { size: *size }
+                            }
+                        },
+                        clear_color: *clear_color,
+                        priority: *priority,
                     });
                 }
-                ComponentData::DirectionalLight { direction, color, intensity } => {
+                ComponentData::DirectionalLight {
+                    direction,
+                    color,
+                    intensity,
+                    shadow_enabled,
+                    shadow_bias,
+                } => {
                     builder.add(DirectionalLight {
                         direction: glm::vec3(direction[0], direction[1], direction[2]),
                         color: glm::vec3(color[0], color[1], color[2]),
                         intensity: *intensity,
+                        shadow_enabled: *shadow_enabled,
+                        shadow_bias: *shadow_bias,
                     });
                 }
-                ComponentData::PointLight { color, intensity, radius } => {
+                ComponentData::PointLight {
+                    color,
+                    intensity,
+                    radius,
+                    shadow_enabled,
+                    falloff,
+                } => {
                     builder.add(PointLight {
                         color: glm::vec3(color[0], color[1], color[2]),
                         intensity: *intensity,
                         radius: *radius,
+                        shadow_enabled: *shadow_enabled,
+                        falloff: match falloff {
+                            LightFalloffData::Linear => LightFalloff::Linear,
+                            LightFalloffData::Quadratic => LightFalloff::Quadratic,
+                            LightFalloffData::InverseSquare => LightFalloff::InverseSquare,
+                        },
+                    });
+                }
+                ComponentData::RigidBody {
+                    body_type,
+                    mass,
+                    linear_damping,
+                    angular_damping,
+                    can_sleep,
+                    gravity_scale,
+                    lock_rotation,
+                    continuous_collision,
+                } => {
+                    builder.add(PhysRigidBody {
+                        body_type: match body_type {
+                            RigidBodyTypeData::Dynamic => RigidBodyType::Dynamic,
+                            RigidBodyTypeData::Kinematic => RigidBodyType::Kinematic,
+                            RigidBodyTypeData::Static => RigidBodyType::Static,
+                        },
+                        mass: *mass,
+                        linear_damping: *linear_damping,
+                        angular_damping: *angular_damping,
+                        can_sleep: *can_sleep,
+                        gravity_scale: *gravity_scale,
+                        lock_rotation: *lock_rotation,
+                        continuous_collision: *continuous_collision,
+                        handle: None,
+                    });
+                }
+                ComponentData::Collider {
+                    shape,
+                    friction,
+                    restitution,
+                    is_sensor,
+                } => {
+                    builder.add(PhysCollider {
+                        shape: match shape {
+                            ColliderShapeData::Cuboid { half_extents } => ColliderShape::Cuboid {
+                                half_extents: glm::vec3(
+                                    half_extents[0],
+                                    half_extents[1],
+                                    half_extents[2],
+                                ),
+                            },
+                            ColliderShapeData::Ball { radius } => {
+                                ColliderShape::Ball { radius: *radius }
+                            }
+                            ColliderShapeData::Capsule {
+                                half_height,
+                                radius,
+                            } => ColliderShape::Capsule {
+                                half_height: *half_height,
+                                radius: *radius,
+                            },
+                        },
+                        friction: *friction,
+                        restitution: *restitution,
+                        is_sensor: *is_sensor,
+                        handle: None,
                     });
                 }
                 ComponentData::Player => {

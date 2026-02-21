@@ -75,6 +75,40 @@ impl Default for Transform {
 pub struct MeshRenderer {
     pub mesh_index: usize,
     pub material_index: usize,
+    /// Whether this mesh is rendered
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// Whether this mesh casts shadows (when shadow mapping is active)
+    #[serde(default = "default_true")]
+    pub cast_shadows: bool,
+    /// Whether this mesh receives shadows from other objects
+    #[serde(default = "default_true")]
+    pub receive_shadows: bool,
+}
+
+impl Default for MeshRenderer {
+    fn default() -> Self {
+        Self {
+            mesh_index: 0,
+            material_index: 0,
+            visible: true,
+            cast_shadows: true,
+            receive_shadows: true,
+        }
+    }
+}
+
+/// Camera projection type
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum CameraProjection {
+    Perspective,
+    Orthographic { size: f32 },
+}
+
+impl Default for CameraProjection {
+    fn default() -> Self {
+        Self::Perspective
+    }
 }
 
 /// Camera component for 3D rendering
@@ -84,6 +118,15 @@ pub struct Camera {
     pub near: f32,
     pub far: f32,
     pub active: bool,
+    /// Projection type (perspective or orthographic)
+    #[serde(default)]
+    pub projection: CameraProjection,
+    /// Background clear color (RGB)
+    #[serde(default = "default_clear_color")]
+    pub clear_color: [f32; 3],
+    /// Render priority (higher renders on top)
+    #[serde(default)]
+    pub priority: i32,
 }
 
 impl Default for Camera {
@@ -93,6 +136,9 @@ impl Default for Camera {
             near: 0.1,
             far: 1000.0,
             active: true,
+            projection: CameraProjection::default(),
+            clear_color: default_clear_color(),
+            priority: 0,
         }
     }
 }
@@ -105,6 +151,12 @@ pub struct DirectionalLight {
     #[serde(with = "vec3_serde")]
     pub color: glm::Vec3,
     pub intensity: f32,
+    /// Enable shadow mapping for this light
+    #[serde(default)]
+    pub shadow_enabled: bool,
+    /// Shadow bias to prevent shadow acne artifacts
+    #[serde(default = "default_shadow_bias")]
+    pub shadow_bias: f32,
 }
 
 impl Default for DirectionalLight {
@@ -113,8 +165,22 @@ impl Default for DirectionalLight {
             direction: glm::vec3(0.0, -1.0, 0.0),
             color: glm::vec3(1.0, 1.0, 1.0),
             intensity: 1.0,
+            shadow_enabled: false,
+            shadow_bias: default_shadow_bias(),
         }
     }
+}
+
+/// Light attenuation falloff model
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LightFalloff {
+    /// Light fades linearly with distance
+    Linear,
+    /// Physically-based quadratic falloff
+    #[default]
+    Quadratic,
+    /// Realistic inverse-square law
+    InverseSquare,
 }
 
 /// Point light component
@@ -124,6 +190,12 @@ pub struct PointLight {
     pub color: glm::Vec3,
     pub intensity: f32,
     pub radius: f32,
+    /// Enable shadow mapping for this light
+    #[serde(default)]
+    pub shadow_enabled: bool,
+    /// Attenuation falloff model
+    #[serde(default)]
+    pub falloff: LightFalloff,
 }
 
 impl Default for PointLight {
@@ -132,8 +204,22 @@ impl Default for PointLight {
             color: glm::vec3(1.0, 1.0, 1.0),
             intensity: 1.0,
             radius: 10.0,
+            shadow_enabled: false,
+            falloff: LightFalloff::default(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_clear_color() -> [f32; 3] {
+    [0.1, 0.1, 0.15]
+}
+
+fn default_shadow_bias() -> f32 {
+    0.005
 }
 
 /// Tag component for player-controlled entities

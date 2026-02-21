@@ -54,6 +54,9 @@ pub fn prepare_mesh_data(
     for (entity, (_transform, mesh_renderer)) in
         world.query::<(&Transform, &MeshRenderer)>().iter()
     {
+        if !mesh_renderer.visible {
+            continue;
+        }
         if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
             // Get WORLD transform in Z-up space (includes parent hierarchy)
             let world_matrix_zup = get_world_transform(world, entity);

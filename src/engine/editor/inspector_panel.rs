@@ -4,7 +4,8 @@
 
 use super::Selection;
 use crate::engine::ecs::{
-    Camera, DirectionalLight, MeshRenderer, Name, PointLight, Transform,
+    Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
+    Transform,
 };
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{Color32, CollapsingHeader, DragValue, RichText, ScrollArea, Stroke, Ui};
@@ -444,21 +445,58 @@ impl InspectorPanel {
                     ui.checkbox(&mut camera.active, "Active")
                         .on_hover_text("Whether this camera is currently rendering");
 
+                    // Projection type
+                    ui.horizontal(|ui| {
+                        ui.label("Projection:");
+                        let current_label = match camera.projection {
+                            CameraProjection::Perspective => "Perspective",
+                            CameraProjection::Orthographic { .. } => "Orthographic",
+                        };
+                        egui::ComboBox::from_id_salt("cam_projection")
+                            .selected_text(current_label)
+                            .show_ui(ui, |ui| {
+                                let is_perspective = matches!(camera.projection, CameraProjection::Perspective);
+                                if ui.selectable_label(is_perspective, "Perspective").clicked() {
+                                    camera.projection = CameraProjection::Perspective;
+                                }
+                                let is_ortho = matches!(camera.projection, CameraProjection::Orthographic { .. });
+                                if ui.selectable_label(is_ortho, "Orthographic").clicked() {
+                                    camera.projection = CameraProjection::Orthographic { size: 10.0 };
+                                }
+                            });
+                    });
+
                     // Sanitize camera values to prevent DragValue crash
                     if !camera.fov.is_finite() { camera.fov = 60.0; }
                     if !camera.near.is_finite() || camera.near <= 0.0 { camera.near = 0.1; }
                     if !camera.far.is_finite() || camera.far <= camera.near { camera.far = 1000.0; }
 
-                    // FOV slider (30-120 degrees)
-                    ui.horizontal(|ui| {
-                        ui.label("FOV:");
-                        ui.add(
-                            egui::Slider::new(&mut camera.fov, 30.0..=120.0)
-                                .suffix("°")
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Field of view angle. Wider = more visible area");
-                    });
+                    // FOV or Ortho Size depending on projection
+                    match &mut camera.projection {
+                        CameraProjection::Perspective => {
+                            ui.horizontal(|ui| {
+                                ui.label("FOV:");
+                                ui.add(
+                                    egui::Slider::new(&mut camera.fov, 30.0..=120.0)
+                                        .suffix("°")
+                                        .clamping(egui::SliderClamping::Always),
+                                )
+                                .on_hover_text("Field of view angle. Wider = more visible area");
+                            });
+                        }
+                        CameraProjection::Orthographic { size } => {
+                            if !size.is_finite() { *size = 10.0; }
+                            ui.horizontal(|ui| {
+                                ui.label("Ortho Size:");
+                                ui.add(
+                                    DragValue::new(size)
+                                        .speed(0.1)
+                                        .range(0.1..=1000.0),
+                                )
+                                .on_hover_text("Orthographic camera view size");
+                            });
+                        }
+                    }
 
                     // Near/Far planes - calculate safe dynamic ranges
                     let near_max = (camera.far - 0.001).max(0.002);
@@ -481,6 +519,24 @@ impl InspectorPanel {
                                 .range(far_min..=100000.0),
                         )
                         .on_hover_text("Far clipping plane. Objects farther than this won't render");
+                    });
+
+                    // Clear color
+                    ui.horizontal(|ui| {
+                        ui.label("Clear Color:");
+                        ui.color_edit_button_rgb(&mut camera.clear_color)
+                            .on_hover_text("Background color when nothing is rendered");
+                    });
+
+                    // Priority
+                    ui.horizontal(|ui| {
+                        ui.label("Priority:");
+                        ui.add(
+                            DragValue::new(&mut camera.priority)
+                                .speed(1)
+                                .range(-100..=100),
+                        )
+                        .on_hover_text("Camera render order. Higher priority renders on top");
                     });
                 });
 
@@ -513,6 +569,9 @@ impl InspectorPanel {
             let header = CollapsingHeader::new(RichText::new("Mesh Renderer").strong())
                 .default_open(true)
                 .show(ui, |ui| {
+                    ui.checkbox(&mut renderer.visible, "Visible")
+                        .on_hover_text("Whether this mesh is rendered");
+
                     ui.horizontal(|ui| {
                         ui.label("Mesh Index:");
                         ui.add(DragValue::new(&mut renderer.mesh_index).range(0..=1000));
@@ -522,6 +581,11 @@ impl InspectorPanel {
                         ui.label("Material Index:");
                         ui.add(DragValue::new(&mut renderer.material_index).range(0..=1000));
                     });
+
+                    ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
+                        .on_hover_text("Whether this mesh casts shadows");
+                    ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
+                        .on_hover_text("Whether this mesh receives shadows from other objects");
 
                     ui.label(
                         RichText::new("Tip: Use Asset Browser for mesh/material selection")
@@ -597,6 +661,22 @@ impl InspectorPanel {
                         )
                         .on_hover_text("Light brightness multiplier");
                     });
+
+                    // Shadows
+                    ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
+                        .on_hover_text("Enable shadow casting from this light");
+                    if light.shadow_enabled {
+                        if !light.shadow_bias.is_finite() { light.shadow_bias = 0.005; }
+                        ui.horizontal(|ui| {
+                            ui.label("Shadow Bias:");
+                            ui.add(
+                                DragValue::new(&mut light.shadow_bias)
+                                    .speed(0.001)
+                                    .range(0.0..=0.1),
+                            )
+                            .on_hover_text("Bias to prevent shadow acne artifacts");
+                        });
+                    }
                 });
 
             // Context menu for component removal
@@ -664,6 +744,25 @@ impl InspectorPanel {
                         )
                         .on_hover_text("Maximum distance the light reaches");
                     });
+
+                    // Falloff
+                    ui.horizontal(|ui| {
+                        ui.label("Falloff:");
+                        egui::ComboBox::from_id_salt("pl_falloff")
+                            .selected_text(format!("{:?}", light.falloff))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut light.falloff, LightFalloff::Linear, "Linear")
+                                    .on_hover_text("Light decreases linearly with distance");
+                                ui.selectable_value(&mut light.falloff, LightFalloff::Quadratic, "Quadratic")
+                                    .on_hover_text("Realistic falloff (default)");
+                                ui.selectable_value(&mut light.falloff, LightFalloff::InverseSquare, "Inverse Square")
+                                    .on_hover_text("Physically accurate inverse-square law");
+                            });
+                    });
+
+                    // Shadows
+                    ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
+                        .on_hover_text("Enable shadow casting from this light");
                 });
 
             // Context menu for component removal
@@ -760,6 +859,32 @@ impl InspectorPanel {
 
                     ui.checkbox(&mut rb.can_sleep, "Can Sleep")
                         .on_hover_text("Allow physics to deactivate this body when at rest");
+
+                    // Gravity scale (dynamic only)
+                    if rb.body_type == RigidBodyType::Dynamic {
+                        if !rb.gravity_scale.is_finite() { rb.gravity_scale = 1.0; }
+                        ui.horizontal(|ui| {
+                            ui.label("Gravity Scale:");
+                            ui.add(
+                                DragValue::new(&mut rb.gravity_scale)
+                                    .speed(0.1)
+                                    .range(-10.0..=10.0),
+                            )
+                            .on_hover_text("Gravity multiplier. 0 = no gravity, negative = anti-gravity");
+                        });
+                    }
+
+                    // CCD
+                    ui.checkbox(&mut rb.continuous_collision, "CCD (Continuous)")
+                        .on_hover_text("Continuous collision detection. Prevents fast objects from tunneling through thin walls");
+
+                    // Lock rotation axes
+                    ui.label("Lock Rotation:");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut rb.lock_rotation[0], RichText::new("X").color(AXIS_COLOR_X));
+                        ui.checkbox(&mut rb.lock_rotation[1], RichText::new("Y").color(AXIS_COLOR_Y));
+                        ui.checkbox(&mut rb.lock_rotation[2], RichText::new("Z").color(AXIS_COLOR_Z));
+                    });
                 });
 
             // Context menu for component removal
@@ -791,24 +916,71 @@ impl InspectorPanel {
             let header = CollapsingHeader::new(RichText::new("Collider").strong())
                 .default_open(true)
                 .show(ui, |ui| {
-                    // Shape type (read-only display)
+                    // Shape type dropdown
+                    let current_shape_name = match &collider.shape {
+                        ColliderShape::Cuboid { .. } => "Cuboid",
+                        ColliderShape::Ball { .. } => "Ball",
+                        ColliderShape::Capsule { .. } => "Capsule",
+                    };
                     ui.horizontal(|ui| {
                         ui.label("Shape:").on_hover_text("Collision shape geometry");
-                        match &collider.shape {
-                            ColliderShape::Cuboid { half_extents } => {
-                                ui.label(format!(
-                                    "Cuboid ({:.2}, {:.2}, {:.2})",
-                                    half_extents.x, half_extents.y, half_extents.z
-                                ));
-                            }
-                            ColliderShape::Ball { radius } => {
-                                ui.label(format!("Ball (r={:.2})", radius));
-                            }
-                            ColliderShape::Capsule { half_height, radius } => {
-                                ui.label(format!("Capsule (h={:.2}, r={:.2})", half_height, radius));
-                            }
-                        }
+                        egui::ComboBox::from_id_salt("collider_shape")
+                            .selected_text(current_shape_name)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Cuboid { .. }), "Cuboid").clicked() {
+                                    if !matches!(&collider.shape, ColliderShape::Cuboid { .. }) {
+                                        collider.shape = ColliderShape::Cuboid { half_extents: glm::vec3(0.5, 0.5, 0.5) };
+                                    }
+                                }
+                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Ball { .. }), "Ball").clicked() {
+                                    if !matches!(&collider.shape, ColliderShape::Ball { .. }) {
+                                        collider.shape = ColliderShape::Ball { radius: 0.5 };
+                                    }
+                                }
+                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Capsule { .. }), "Capsule").clicked() {
+                                    if !matches!(&collider.shape, ColliderShape::Capsule { .. }) {
+                                        collider.shape = ColliderShape::Capsule { half_height: 0.5, radius: 0.25 };
+                                    }
+                                }
+                            });
                     });
+
+                    // Shape-specific parameters
+                    match &mut collider.shape {
+                        ColliderShape::Cuboid { half_extents } => {
+                            if !half_extents.x.is_finite() { half_extents.x = 0.5; }
+                            if !half_extents.y.is_finite() { half_extents.y = 0.5; }
+                            if !half_extents.z.is_finite() { half_extents.z = 0.5; }
+                            ui.label("Half Extents:");
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                                ui.add(DragValue::new(&mut half_extents.x).speed(0.01).range(0.001..=1000.0));
+                                ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                                ui.add(DragValue::new(&mut half_extents.y).speed(0.01).range(0.001..=1000.0));
+                                ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                                ui.add(DragValue::new(&mut half_extents.z).speed(0.01).range(0.001..=1000.0));
+                            });
+                        }
+                        ColliderShape::Ball { radius } => {
+                            if !radius.is_finite() { *radius = 0.5; }
+                            ui.horizontal(|ui| {
+                                ui.label("Radius:");
+                                ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0));
+                            });
+                        }
+                        ColliderShape::Capsule { half_height, radius } => {
+                            if !half_height.is_finite() { *half_height = 0.5; }
+                            if !radius.is_finite() { *radius = 0.25; }
+                            ui.horizontal(|ui| {
+                                ui.label("Half Height:");
+                                ui.add(DragValue::new(half_height).speed(0.01).range(0.001..=1000.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Radius:");
+                                ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0));
+                            });
+                        }
+                    }
 
                     // Friction
                     ui.horizontal(|ui| {
@@ -853,51 +1025,80 @@ impl InspectorPanel {
         action
     }
 
-    /// Render "Add Component" UI
+    /// Render "Add Component" UI with compatibility validation
     fn render_add_component(&self, ui: &mut Ui, world: &mut World, entity: Entity) {
+        // Physics pairing warnings
+        let has_rigidbody = world.get::<&RigidBody>(entity).is_ok();
+        let has_collider = world.get::<&Collider>(entity).is_ok();
+        if has_rigidbody && !has_collider {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Warning: RigidBody without Collider").color(Color32::from_rgb(220, 180, 50)));
+            });
+        } else if !has_rigidbody && has_collider {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Warning: Collider without RigidBody").color(Color32::from_rgb(220, 180, 50)));
+            });
+        }
+
         ui.add_space(10.0);
+
+        // Detect existing light/camera components for conflict checks
+        let has_camera = world.get::<&Camera>(entity).is_ok();
+        let has_dir_light = world.get::<&DirectionalLight>(entity).is_ok();
+        let has_point_light = world.get::<&PointLight>(entity).is_ok();
 
         egui::ComboBox::from_label("")
             .selected_text("Add Component...")
             .show_ui(ui, |ui| {
-                // Only show components the entity doesn't have
-                if world.get::<&Camera>(entity).is_err() {
-                    if ui.selectable_label(false, "Camera").clicked() {
+                // Camera — conflicts with lights
+                if !has_camera {
+                    let conflicts = has_dir_light || has_point_light;
+                    if conflicts {
+                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Camera"))
+                            .on_disabled_hover_text("Conflicts with existing light component");
+                    } else if ui.selectable_label(false, "Camera").clicked() {
                         let _ = world.insert_one(entity, Camera::default());
                     }
                 }
 
-                if world.get::<&DirectionalLight>(entity).is_err() {
-                    if ui.selectable_label(false, "Directional Light").clicked() {
+                // Directional Light — conflicts with Camera and PointLight
+                if !has_dir_light {
+                    let conflicts = has_camera || has_point_light;
+                    if conflicts {
+                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Directional Light"))
+                            .on_disabled_hover_text("Conflicts with existing Camera or Point Light");
+                    } else if ui.selectable_label(false, "Directional Light").clicked() {
                         let _ = world.insert_one(entity, DirectionalLight::default());
                     }
                 }
 
-                if world.get::<&PointLight>(entity).is_err() {
-                    if ui.selectable_label(false, "Point Light").clicked() {
+                // Point Light — conflicts with Camera and DirectionalLight
+                if !has_point_light {
+                    let conflicts = has_camera || has_dir_light;
+                    if conflicts {
+                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Point Light"))
+                            .on_disabled_hover_text("Conflicts with existing Camera or Directional Light");
+                    } else if ui.selectable_label(false, "Point Light").clicked() {
                         let _ = world.insert_one(entity, PointLight::default());
                     }
                 }
 
+                // MeshRenderer — no conflicts
                 if world.get::<&MeshRenderer>(entity).is_err() {
                     if ui.selectable_label(false, "Mesh Renderer").clicked() {
-                        let _ = world.insert_one(
-                            entity,
-                            MeshRenderer {
-                                mesh_index: 0,
-                                material_index: 0,
-                            },
-                        );
+                        let _ = world.insert_one(entity, MeshRenderer::default());
                     }
                 }
 
-                if world.get::<&RigidBody>(entity).is_err() {
+                // RigidBody — no conflicts
+                if !has_rigidbody {
                     if ui.selectable_label(false, "Rigid Body").clicked() {
                         let _ = world.insert_one(entity, RigidBody::default());
                     }
                 }
 
-                if world.get::<&Collider>(entity).is_err() {
+                // Collider — no conflicts
+                if !has_collider {
                     if ui.selectable_label(false, "Collider").clicked() {
                         let _ = world.insert_one(entity, Collider::default());
                     }

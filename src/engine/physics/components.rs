@@ -15,10 +15,23 @@ pub struct RigidBody {
     pub linear_damping: f32,
     pub angular_damping: f32,
     pub can_sleep: bool,
+    /// Gravity multiplier (1.0 = normal, 0 = no gravity, -1 = anti-gravity)
+    #[serde(default = "default_gravity_scale")]
+    pub gravity_scale: f32,
+    /// Lock rotation per axis [X, Y, Z]
+    #[serde(default)]
+    pub lock_rotation: [bool; 3],
+    /// Continuous collision detection (prevents tunneling for fast objects)
+    #[serde(default)]
+    pub continuous_collision: bool,
 
     /// Rapier handle (runtime only, not serialized)
     #[serde(skip)]
     pub(crate) handle: Option<RigidBodyHandle>,
+}
+
+fn default_gravity_scale() -> f32 {
+    1.0
 }
 
 impl Default for RigidBody {
@@ -29,6 +42,9 @@ impl Default for RigidBody {
             linear_damping: 0.05,
             angular_damping: 0.05,
             can_sleep: true,
+            gravity_scale: 1.0,
+            lock_rotation: [false; 3],
+            continuous_collision: false,
             handle: None,
         }
     }
@@ -71,6 +87,24 @@ impl RigidBody {
     /// Set angular damping (builder pattern)
     pub fn with_angular_damping(mut self, damping: f32) -> Self {
         self.angular_damping = damping;
+        self
+    }
+
+    /// Set gravity scale (builder pattern)
+    pub fn with_gravity_scale(mut self, scale: f32) -> Self {
+        self.gravity_scale = scale;
+        self
+    }
+
+    /// Lock rotation axes (builder pattern)
+    pub fn with_locked_rotation(mut self, x: bool, y: bool, z: bool) -> Self {
+        self.lock_rotation = [x, y, z];
+        self
+    }
+
+    /// Enable continuous collision detection (builder pattern)
+    pub fn with_ccd(mut self) -> Self {
+        self.continuous_collision = true;
         self
     }
 }

@@ -4,8 +4,10 @@
 //! initialization, update, and rendering.
 
 use super::{game_setup, input_handler, render_loop};
-use hecs::World;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
+use rust_engine::engine::ecs::game_world::GameWorld;
+use rust_engine::engine::ecs::resources::Time;
+use rust_engine::engine::ecs::schedule::Schedule;
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, CommandHistory,
@@ -41,7 +43,8 @@ pub struct App {
     pub asset_manager: Arc<AssetManager>,
     pub hot_reload: HotReloadWatcher,
     pub reload_rx: Receiver<ReloadEvent>,
-    pub world: World,
+    pub game_world: GameWorld,
+    pub schedule: Schedule,
     pub physics_world: PhysicsWorld,
     pub input_manager: InputManager,
     pub deferred_renderer: DeferredRenderer,
@@ -123,16 +126,16 @@ impl App {
             game_setup::load_assets(&asset_manager)?;
 
         // Setup ECS World
-        let mut world = World::new();
+        let mut game_world = GameWorld::new();
 
         // Load or create scene
         let (scene_loaded, root_entities) =
-            game_setup::load_or_create_scene(&mut world, mesh_indices[0])?;
+            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0])?;
 
         // Only spawn physics test objects for new scenes (not loaded ones)
         // This prevents duplicates when the scene file already contains these entities
         if !scene_loaded {
-            game_setup::spawn_physics_test_objects(&mut world, plane_mesh_index, cube_mesh_index);
+            game_setup::spawn_physics_test_objects(game_world.hecs_mut(), plane_mesh_index, cube_mesh_index);
         }
 
         // Initialize hierarchy panel with root entity order from loaded scene
@@ -143,7 +146,7 @@ impl App {
 
         // Setup physics
         let mut physics_world = PhysicsWorld::new();
-        game_setup::register_physics_entities(&mut physics_world, &mut world);
+        game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
 
         // Upload model texture
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
@@ -182,7 +185,8 @@ impl App {
             asset_manager,
             hot_reload,
             reload_rx,
-            world,
+            game_world,
+            schedule: Schedule::new(),
             physics_world,
             input_manager: InputManager::new(),
             deferred_renderer,
@@ -264,21 +268,31 @@ impl App {
         #[cfg(feature = "tracy")]
         tracy_client::Client::running().map(|c| c.frame_mark());
         self.input_manager.new_frame();
+        self.game_world.begin_frame();
     }
 
-    /// Update game state (physics, hot-reload)
+    /// Update game state (physics, hot-reload, schedule)
     pub fn update(&mut self) {
         rust_engine::profile_function!();
 
         // Process hot-reload events
         self.process_hot_reload();
 
-        // Update delta time and step physics
+        // Update delta time
         let delta_time = self.game_loop.tick();
 
+        // Advance Time resource
+        if let Some(time) = self.game_world.resource_mut::<Time>() {
+            time.advance(delta_time);
+        }
+
+        // Run scheduled systems
+        self.game_world.run_schedule(&mut self.schedule);
+
+        // Step physics
         {
             rust_engine::profile_scope!("physics_step");
-            self.physics_world.step(delta_time, &mut self.world);
+            self.physics_world.step(delta_time, self.game_world.hecs_mut());
         }
     }
 
@@ -293,7 +307,8 @@ impl App {
                 } => {
                     // Update mesh indices in ECS entities
                     for (_entity, mesh_renderer) in self
-                        .world
+                        .game_world
+                        .hecs_mut()
                         .query_mut::<&mut rust_engine::engine::ecs::components::MeshRenderer>()
                     {
                         if !new_indices.is_empty() {
@@ -342,7 +357,7 @@ impl App {
                         && self.input_manager.is_key_pressed(KeyCode::ControlLeft)
                     {
                         match save_scene(
-                            &self.world,
+                            self.game_world.hecs(),
                             "assets/scenes/main.scene.ron",
                             "Main Scene",
                             self.hierarchy_panel.root_order(),
@@ -414,12 +429,12 @@ impl App {
 
         // Prepare render data (reuses mesh_data_buffer to avoid allocation)
         render_loop::prepare_mesh_data(
-            &self.world,
+            self.game_world.hecs(),
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
         );
-        let light_data = render_loop::prepare_light_data(&self.world, &self.renderer);
+        let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
         // Clean up previous frame
         if let Some(mut prev_future) = self.previous_frame_end.take() {
@@ -536,7 +551,7 @@ impl App {
         let hierarchy_panel = &mut self.hierarchy_panel;
         let inspector_panel = &mut self.inspector_panel;
         let profiler_panel = &mut self.profiler_panel;
-        let world = &mut self.world;
+        let world = self.game_world.hecs_mut();
         let selection = &mut self.selection;
         let command_history = &mut self.command_history;
         let dock_state = &mut self.dock_state;
@@ -627,7 +642,7 @@ impl App {
             MenuAction::None => {}
             MenuAction::SaveScene => {
                 match save_scene(
-                    &self.world,
+                    self.game_world.hecs(),
                     "assets/scenes/main.scene.ron",
                     "Main Scene",
                     self.hierarchy_panel.root_order(),
@@ -642,12 +657,12 @@ impl App {
                 std::process::exit(0);
             }
             MenuAction::Undo => {
-                if let Some(desc) = self.command_history.undo(&mut self.world) {
+                if let Some(desc) = self.command_history.undo(self.game_world.hecs_mut()) {
                     println!("Undo: {}", desc);
                 }
             }
             MenuAction::Redo => {
-                if let Some(desc) = self.command_history.redo(&mut self.world) {
+                if let Some(desc) = self.command_history.redo(self.game_world.hecs_mut()) {
                     println!("Redo: {}", desc);
                 }
             }
@@ -679,11 +694,11 @@ impl App {
                                 let scene_path_str = scene_path.to_string_lossy();
 
                                 // Clear existing world
-                                self.world.clear();
+                                self.game_world.hecs_mut().clear();
                                 self.selection.clear();
 
                                 // Load the scene
-                                match load_scene(&mut self.world, &scene_path_str) {
+                                match load_scene(self.game_world.hecs_mut(), &scene_path_str) {
                                     Ok((scene_name, root_entities)) => {
                                         self.hierarchy_panel.set_root_order(root_entities);
                                         self.console_messages.push(LogMessage::info(
@@ -1120,12 +1135,12 @@ impl App {
         // Undo/Redo shortcuts (work even when GUI has focus for editor workflow)
         if self.input_manager.is_key_pressed(KeyCode::ControlLeft) {
             if self.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
-                if let Some(desc) = self.command_history.undo(&mut self.world) {
+                if let Some(desc) = self.command_history.undo(self.game_world.hecs_mut()) {
                     println!("Undo: {}", desc);
                 }
             }
             if self.input_manager.is_key_just_pressed(KeyCode::KeyY) {
-                if let Some(desc) = self.command_history.redo(&mut self.world) {
+                if let Some(desc) = self.command_history.redo(self.game_world.hecs_mut()) {
                     println!("Redo: {}", desc);
                 }
             }

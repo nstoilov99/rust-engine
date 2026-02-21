@@ -95,6 +95,7 @@ pub fn create_default_scene(world: &mut World, mesh_index: usize) {
         MeshRenderer {
             mesh_index,
             material_index: 0,
+            ..Default::default()
         },
         Name::new("Duck"),
     ));
@@ -105,6 +106,7 @@ pub fn create_default_scene(world: &mut World, mesh_index: usize) {
             direction: glm::vec3(0.0, -1.0, -1.0),
             color: glm::vec3(1.0, 1.0, 1.0),
             intensity: 1.0,
+            ..Default::default()
         },
         Name::new("Sun"),
     ));
@@ -153,6 +155,7 @@ fn spawn_physics_object(world: &mut World, config: PhysicsObjectConfig) {
         MeshRenderer {
             mesh_index: config.mesh_index,
             material_index: 0,
+            ..Default::default()
         },
         RigidBody::dynamic().with_mass(config.mass),
         collider,
@@ -172,6 +175,7 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
         MeshRenderer {
             mesh_index: plane_mesh,
             material_index: 0,
+            ..Default::default()
         },
         RigidBody::fixed(),
         Collider::cuboid(5.0, 5.0, 0.01),
