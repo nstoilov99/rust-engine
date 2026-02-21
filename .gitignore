@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 *.pdb
-/docs/
+/docs/roadmap
 
 # Cargo.lock  # <-- DON'T uncomment this for applications
 
