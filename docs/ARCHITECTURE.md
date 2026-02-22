@@ -175,12 +175,12 @@ Entity IDs use `hecs::Entity` directly (no custom allocator). Component storage 
 ├─────────────────────────────────────────────────────────────┤
 │  Resources      │  Events          │  Schedule              │
 │  ├── Time       │  ├── EntitySpawned    ├── First          │
-│  ├── EditorState│  ├── EntityDeleted    ├── PreUpdate      │
-│  └── CommandBuf │  ├── SelectionChanged ├── Update         │
-│                 │  └── PlayModeChanged  ├── PostUpdate     │
-│  ChangeTicks    │                       └── Last           │
-│  ├── added map  │  Commands                                │
-│  └── changed map│  ├── Spawn / Despawn                     │
+│  └── EditorState│  ├── EntityDeleted    ├── PreUpdate      │
+│                 │  ├── SelectionChanged ├── Update         │
+│  ChangeTicks    │  └── PlayModeChanged  ├── PostUpdate     │
+│  ├── added map  │                       └── Last           │
+│  └── changed map│  CommandBuffer (in GameWorld only)       │
+│                 │  ├── Spawn / Despawn                     │
 │                 │  └── Insert / Remove                     │
 ├─────────────────────────────────────────────────────────────┤
 │                    hecs Layer (wrapped)                      │
@@ -437,14 +437,38 @@ let device = create_device(&instance)
     .expect("Failed to create Vulkan device");
 ```
 
+## Play Mode Architecture (Planned)
+
+See [VULKANO-24-PLAY-MODE.md](roadmap/VULKANO-24-PLAY-MODE.md) for the full spec.
+
+### State Machine
+
+```
+Edit ──(Play)──> Playing ──(Pause)──> Paused
+  ^                 │                    │
+  └────(Stop)───────┴────(Stop)──────────┘
+```
+
+### Snapshot/Restore
+
+- **Enter Play**: Serialize scene to in-memory RON string (reuses `save_scene` path)
+- **Stop**: Clear world, deserialize from snapshot, rebuild physics
+- **EntityGuid**: `uuid::Uuid` component on every entity for identity across restore
+- **Selection**: Stored as GUID, remapped to new Entity handle after restore
+
+### Run Criteria Integration
+
+```
+RunIfPlaying    → physics, gameplay systems
+RunIfEditing    → editor-only systems
+RunIfNotPaused  → systems that stop on pause
+Always          → input, profiling, rendering
+```
+
 ## Future Architecture Plans
 
-See [VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md](roadmap/VULKANO-23.5-ADVANCED-ECS-ARCHITECTURE.md) for the full ECS architecture spec:
-
-- Resource system (global typed state: Time, EditorState)
-- Event system (double-buffered channels)
-- Commands (deferred spawn/despawn/insert/remove)
-- ChangeTicks (frame-stamped change detection)
-- System stages (First → PreUpdate → Update → PostUpdate → Last)
-- Run criteria (conditional system execution)
-- GameWorld wrapper (hecs + resources + events + commands + changeticks)
+- Parallel system execution (rayon, read/write access declarations)
+- SparseSet storage and query caching
+- Node-graph visual scripting (outputs Commands)
+- EntityGuid-based parent references (replace name-based)
+- Networking entity replication (via GUID)

@@ -454,6 +454,73 @@ Need more ECS features for complex gameplay without switching to bevy_ecs.
 
 ---
 
+## ADR-012: Play Mode Snapshot via In-Memory RON Serialization
+
+**Date**: 2025
+
+**Status**: Proposed
+
+### Context
+
+Play Mode requires saving scene state before simulation and restoring it on stop. Two approaches:
+
+1. **In-memory RON serialization**: Reuse existing `save_scene`/`load_scene` code path, serialize to a String instead of a file
+2. **In-memory world clone**: Clone hecs::World and all components directly
+
+### Decision
+
+Use **in-memory RON serialization** for Play Mode snapshot/restore.
+
+### Rationale
+
+1. **Proven code path**: Reuses existing, tested serialization logic
+2. **No new code**: Minimal additional surface area
+3. **Correctness**: Scene files already handle hierarchy, all component types
+4. **Physics safety**: Rapier handles (`handle: None`) naturally reset on deserialize
+5. **Clone approach is fragile**: Would require all components to impl Clone, doesn't handle Rapier handles
+
+### Consequences
+
+- Slightly slower than raw memory clone (serialize + deserialize)
+- Acceptable for editor use (< 100ms for typical scenes)
+- Can optimize later with binary format if needed
+- Entity IDs change on restore (requires GUID mapping for selection)
+
+---
+
+## ADR-013: EntityGuid for Persistent Entity Identity
+
+**Date**: 2025
+
+**Status**: Proposed
+
+### Context
+
+`hecs::Entity` IDs are volatile — they change on every save/load cycle. Current entity identification relies on `Name` strings, which aren't guaranteed unique.
+
+Play Mode restore, future networking, prefab instances, and robust undo/redo all need persistent entity identity.
+
+### Decision
+
+Add an **`EntityGuid(uuid::Uuid)`** component to every entity.
+
+### Rationale
+
+1. **Unique**: UUID v4 guarantees uniqueness
+2. **Persistent**: Survives save/load/snapshot/restore
+3. **Cross-cutting**: Benefits play mode, networking, prefabs, undo/redo
+4. **Backward compatible**: Old scene files load fine (`serde(default)`)
+5. **Industry standard**: Unity, Unreal, Godot all use persistent entity IDs
+
+### Consequences
+
+- Every entity spawn path must assign a GUID
+- Scene format gains an optional `guid` field
+- Small memory overhead per entity (16 bytes)
+- Parent references still use names (GUID-based parents are a future migration)
+
+---
+
 ## Decision Template
 
 ```markdown
