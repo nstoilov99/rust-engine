@@ -7,6 +7,7 @@ use crate::engine::ecs::{
     Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
     Transform,
 };
+use crate::engine::ecs::resources::PlayMode;
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{Color32, CollapsingHeader, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
@@ -76,19 +77,21 @@ impl InspectorPanel {
     }
 
     /// Render the inspector panel as a side panel
-    pub fn show(&mut self, ctx: &egui::Context, world: &mut World, selection: &Selection) {
+    pub fn show(&mut self, ctx: &egui::Context, world: &mut World, selection: &Selection, play_mode: PlayMode) {
         egui::SidePanel::right("inspector_panel")
             .resizable(true)
             .default_width(300.0)
             .min_width(200.0)
             .show(ctx, |ui| {
-                self.show_contents(ui, world, selection);
+                self.show_contents(ui, world, selection, play_mode);
             });
     }
 
     /// Render just the contents (for use inside dock tabs)
-    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &Selection) {
-        self.render_header(ui, selection);
+    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &Selection, play_mode: PlayMode) {
+        let read_only = play_mode != PlayMode::Edit;
+
+        self.render_header(ui, selection, read_only);
         ui.separator();
 
         if let Some(entity) = selection.primary() {
@@ -118,9 +121,11 @@ impl InspectorPanel {
                 .show(ui, |ui| {
                     self.render_entity_info(ui, world, entity);
                     ui.separator();
-                    self.render_components(ui, world, entity);
-                    ui.separator();
-                    self.render_add_component(ui, world, entity);
+                    ui.add_enabled_ui(!read_only, |ui| {
+                        self.render_components(ui, world, entity);
+                        ui.separator();
+                        self.render_add_component(ui, world, entity);
+                    });
                 });
         } else {
             self.render_empty_state(ui);
@@ -128,10 +133,12 @@ impl InspectorPanel {
     }
 
     /// Render panel header
-    fn render_header(&self, ui: &mut Ui, selection: &Selection) {
+    fn render_header(&self, ui: &mut Ui, selection: &Selection, read_only: bool) {
         ui.horizontal(|ui| {
             ui.heading("Inspector");
-            if selection.count() > 1 {
+            if read_only {
+                ui.label(RichText::new("(Playing)").weak().italics().small());
+            } else if selection.count() > 1 {
                 ui.label(format!("({} selected)", selection.count()));
             }
         });

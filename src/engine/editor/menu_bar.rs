@@ -2,8 +2,12 @@
 //!
 //! Provides File, Edit, View, and Help menus for the editor.
 //! The View menu allows restoring closed panels.
+//! Play mode icon helpers are defined here and used by the viewport tab bar overlay.
 
+use super::icons::{IconManager, ToolbarIcon};
 use super::{CommandHistory, EditorDockState, EditorTab};
+use crate::engine::ecs::resources::PlayMode;
+use egui::{Color32, Vec2};
 
 /// Actions that can be triggered from the menu bar
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +26,157 @@ pub enum MenuAction {
     SaveLayout,
     /// Reset dock layout to default
     ResetLayout,
+    /// Enter play mode (Edit -> Playing)
+    Play,
+    /// Pause play mode (Playing -> Paused)
+    Pause,
+    /// Resume play mode (Paused -> Playing)
+    Resume,
+    /// Stop play mode and restore snapshot (Playing|Paused -> Edit)
+    Stop,
+}
+
+pub(super) mod play_colors {
+    use egui::Color32;
+
+    pub const PLAY: Color32 = Color32::from_rgb(80, 200, 80);
+    pub const PLAY_HOVER: Color32 = Color32::from_rgb(120, 255, 120);
+    pub const PAUSE: Color32 = Color32::from_rgb(220, 200, 60);
+    pub const PAUSE_HOVER: Color32 = Color32::from_rgb(255, 240, 100);
+    pub const STOP: Color32 = Color32::from_rgb(200, 80, 80);
+    pub const STOP_HOVER: Color32 = Color32::from_rgb(255, 120, 120);
+    pub const RESUME: Color32 = Color32::from_rgb(80, 200, 80);
+    pub const RESUME_HOVER: Color32 = Color32::from_rgb(120, 255, 120);
+    pub const DISABLED: Color32 = Color32::from_gray(80);
+}
+
+/// Render a tinted play-mode icon button.
+/// Returns true if clicked.
+pub(super) fn play_icon_button(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    fallback: &str,
+    tint: Color32,
+    hover_tint: Color32,
+    tooltip: &str,
+    icon_manager: Option<&IconManager>,
+) -> bool {
+    let size = Vec2::new(18.0, 18.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+
+    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+    let in_rect = pointer_pos.map(|p| rect.contains(p)).unwrap_or(false);
+    let primary_released = ui.input(|i| i.pointer.primary_released());
+    let clicked = primary_released && in_rect;
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let current_tint = if in_rect { hover_tint } else { tint };
+
+        let has_icon = icon_manager
+            .and_then(|mgr| mgr.get(icon))
+            .map(|texture| {
+                let image_rect = rect.shrink(1.0);
+                painter.image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    current_tint,
+                );
+                true
+            })
+            .unwrap_or(false);
+
+        if !has_icon {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                fallback,
+                egui::FontId::proportional(12.0),
+                current_tint,
+            );
+        }
+
+        if in_rect {
+            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
+                ui.label(tooltip);
+            });
+        }
+    }
+
+    clicked
+}
+
+/// Render the play/pause/stop icon cluster
+pub(super) fn render_play_controls(
+    ui: &mut egui::Ui,
+    play_mode: PlayMode,
+    icon_manager: Option<&IconManager>,
+    action: &mut MenuAction,
+) {
+    match play_mode {
+        PlayMode::Edit => {
+            if play_icon_button(
+                ui, ToolbarIcon::Play, "▶",
+                play_colors::PLAY, play_colors::PLAY_HOVER,
+                "Play (F5)", icon_manager,
+            ) {
+                *action = MenuAction::Play;
+            }
+            play_icon_button(
+                ui, ToolbarIcon::Pause, "⏸",
+                play_colors::DISABLED, play_colors::DISABLED,
+                "Pause (F6) - not playing", icon_manager,
+            );
+            play_icon_button(
+                ui, ToolbarIcon::Stop, "⏹",
+                play_colors::DISABLED, play_colors::DISABLED,
+                "Stop (F5) - not playing", icon_manager,
+            );
+        }
+        PlayMode::Playing => {
+            play_icon_button(
+                ui, ToolbarIcon::Play, "▶",
+                play_colors::DISABLED, play_colors::DISABLED,
+                "Already playing", icon_manager,
+            );
+            if play_icon_button(
+                ui, ToolbarIcon::Pause, "⏸",
+                play_colors::PAUSE, play_colors::PAUSE_HOVER,
+                "Pause (F6)", icon_manager,
+            ) {
+                *action = MenuAction::Pause;
+            }
+            if play_icon_button(
+                ui, ToolbarIcon::Stop, "⏹",
+                play_colors::STOP, play_colors::STOP_HOVER,
+                "Stop (F5)", icon_manager,
+            ) {
+                *action = MenuAction::Stop;
+            }
+        }
+        PlayMode::Paused => {
+            if play_icon_button(
+                ui, ToolbarIcon::SkipForward, "⏭",
+                play_colors::RESUME, play_colors::RESUME_HOVER,
+                "Resume (F6)", icon_manager,
+            ) {
+                *action = MenuAction::Resume;
+            }
+            play_icon_button(
+                ui, ToolbarIcon::Pause, "⏸",
+                play_colors::DISABLED, play_colors::DISABLED,
+                "Already paused", icon_manager,
+            );
+            if play_icon_button(
+                ui, ToolbarIcon::Stop, "⏹",
+                play_colors::STOP, play_colors::STOP_HOVER,
+                "Stop (F5)", icon_manager,
+            ) {
+                *action = MenuAction::Stop;
+            }
+        }
+    }
 }
 
 /// Render the editor menu bar
@@ -31,6 +186,7 @@ pub fn render_menu_bar(
     ctx: &egui::Context,
     dock_state: &mut EditorDockState,
     command_history: &CommandHistory,
+    play_mode: PlayMode,
 ) -> MenuAction {
     let mut action = MenuAction::None;
 
@@ -52,6 +208,7 @@ pub fn render_menu_bar(
                 });
 
                 // Edit menu
+                let is_edit_mode = play_mode == PlayMode::Edit;
                 ui.menu_button("Edit", |ui| {
                     let undo_text = if let Some(desc) = command_history.undo_description() {
                         format!("Undo: {} (Ctrl+Z)", desc)
@@ -60,7 +217,7 @@ pub fn render_menu_bar(
                     };
 
                     if ui
-                        .add_enabled(command_history.can_undo(), egui::Button::new(undo_text))
+                        .add_enabled(is_edit_mode && command_history.can_undo(), egui::Button::new(undo_text))
                         .clicked()
                     {
                         action = MenuAction::Undo;
@@ -74,7 +231,7 @@ pub fn render_menu_bar(
                     };
 
                     if ui
-                        .add_enabled(command_history.can_redo(), egui::Button::new(redo_text))
+                        .add_enabled(is_edit_mode && command_history.can_redo(), egui::Button::new(redo_text))
                         .clicked()
                     {
                         action = MenuAction::Redo;
@@ -87,8 +244,8 @@ pub fn render_menu_bar(
                     ui.label(egui::RichText::new("Panels").strong());
                     ui.separator();
 
-                    // List all panels with checkmarks for open ones
                     let panels = [
+                        (EditorTab::Viewport, "Viewport"),
                         (EditorTab::Hierarchy, "Hierarchy"),
                         (EditorTab::Inspector, "Inspector"),
                         (EditorTab::AssetBrowser, "Assets"),
@@ -106,8 +263,7 @@ pub fn render_menu_bar(
 
                         if ui.button(label).clicked() {
                             if is_open {
-                                // Already open - could close it, but for simplicity just focus
-                                // Closing tabs is handled by the X button on tabs
+                                // Already open - focus handled by dock
                             } else {
                                 dock_state.open_tab(tab);
                             }
@@ -131,7 +287,6 @@ pub fn render_menu_bar(
                 // Help menu
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
-                        // Could show an about dialog
                         ui.close();
                     }
                     ui.separator();

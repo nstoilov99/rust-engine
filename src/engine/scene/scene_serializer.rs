@@ -12,6 +12,7 @@ use crate::engine::physics::{
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::fs;
+use log;
 
 /// Serialize a single entity to EntityData
 fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
@@ -22,6 +23,12 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         .get::<&Name>(entity)
         .map(|name| name.0.clone())
         .unwrap_or_else(|_| format!("Entity_{:?}", entity));
+
+    // Get GUID if present
+    let guid = world
+        .get::<&EntityGuid>(entity)
+        .ok()
+        .map(|g| g.0.to_string());
 
     // Try to get each component type
     if let Ok(transform) = world.get::<&Transform>(entity) {
@@ -142,8 +149,13 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
     if let Ok(parent) = world.get::<&Parent>(entity) {
         // Get parent entity's name for serialization
         if let Ok(parent_name) = world.get::<&Name>(parent.0) {
+            let parent_guid = world
+                .get::<&EntityGuid>(parent.0)
+                .ok()
+                .map(|g| g.0.to_string());
             components.push(ComponentData::Parent {
                 parent_name: parent_name.0.clone(),
+                parent_guid,
             });
         }
     }
@@ -152,6 +164,7 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
     if !components.is_empty() {
         Some(EntityData {
             name: entity_name,
+            guid,
             components,
         })
     } else {
@@ -215,6 +228,74 @@ pub fn save_scene(
     Ok(())
 }
 
+/// Serialize ECS world to a RON string (in-memory, no file I/O).
+/// Used for play-mode snapshots.
+pub fn serialize_scene_to_string(
+    world: &World,
+    scene_name: &str,
+    root_order: &[Entity],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut entities = Vec::new();
+
+    for &root in root_order {
+        collect_entities_in_order(world, root, &mut entities);
+    }
+
+    let scene_file = SceneFile {
+        version: "1.0".to_string(),
+        name: scene_name.to_string(),
+        entities,
+    };
+
+    let ron_string = ron::ser::to_string_pretty(&scene_file, ron::ser::PrettyConfig::default())?;
+    Ok(ron_string)
+}
+
+/// Load a scene from a RON string (in-memory, no file I/O).
+/// Used for play-mode snapshot restore.
+/// Returns (scene_name, root_entities_in_order).
+pub fn load_scene_from_string(
+    world: &mut World,
+    ron_string: &str,
+) -> Result<(String, Vec<Entity>), Box<dyn std::error::Error>> {
+    let scene_file: SceneFile = ron::from_str(ron_string)?;
+
+    world.clear();
+
+    let mut parent_relationships: Vec<(Entity, String, Option<String>)> = Vec::new();
+    let mut root_entities: Vec<Entity> = Vec::new();
+
+    for entity_data in &scene_file.entities {
+        let entity = spawn_entity_from_data(world, entity_data);
+
+        let mut has_parent = false;
+        for component in &entity_data.components {
+            if let ComponentData::Parent { parent_name, parent_guid } = component {
+                parent_relationships.push((entity, parent_name.clone(), parent_guid.clone()));
+                has_parent = true;
+            }
+        }
+
+        if !has_parent {
+            root_entities.push(entity);
+        }
+    }
+
+    for (child_entity, parent_name, parent_guid) in parent_relationships {
+        let parent_entity = resolve_parent(world, &parent_name, parent_guid.as_deref());
+        if let Some(parent) = parent_entity {
+            set_parent(world, child_entity, parent);
+        } else {
+            log::warn!(
+                "Parent '{}' not found for entity {:?}, entity becomes root",
+                parent_name, child_entity
+            );
+        }
+    }
+
+    Ok((scene_file.name, root_entities))
+}
+
 /// Deserialize scene file into ECS world
 /// Returns (scene_name, root_entities_in_order)
 pub fn load_scene(
@@ -224,66 +305,16 @@ pub fn load_scene(
     // Read file
     let ron_string = fs::read_to_string(path)?;
 
-    // Deserialize from RON
-    let scene_file: SceneFile = ron::from_str(&ron_string)?;
+    println!("Loading scene from: {}", path);
+
+    let result = load_scene_from_string(world, &ron_string)?;
 
     println!(
-        "Loading scene: {} (v{})",
-        scene_file.name, scene_file.version
+        "Scene loaded: {} ({} roots)",
+        result.0, result.1.len()
     );
 
-    // Clear existing world
-    world.clear();
-
-    // First pass: spawn all entities and collect parent relationships
-    let mut parent_relationships: Vec<(Entity, String)> = Vec::new();
-    let mut root_entities: Vec<Entity> = Vec::new();
-
-    for entity_data in &scene_file.entities {
-        let entity = spawn_entity_from_data(world, entity_data);
-
-        // Check if this entity has a parent reference
-        let mut has_parent = false;
-        for component in &entity_data.components {
-            if let ComponentData::Parent { parent_name } = component {
-                parent_relationships.push((entity, parent_name.clone()));
-                has_parent = true;
-            }
-        }
-
-        // Root entities are those without a Parent component
-        if !has_parent {
-            root_entities.push(entity);
-        }
-    }
-
-    // Second pass: establish parent-child relationships by name
-    for (child_entity, parent_name) in parent_relationships {
-        // Find parent entity by name - collect first to avoid borrow issues
-        let parent_entity: Option<Entity> = world
-            .query::<&Name>()
-            .iter()
-            .find(|(_, name)| name.0 == parent_name)
-            .map(|(entity, _)| entity);
-
-        if let Some(parent) = parent_entity {
-            set_parent(world, child_entity, parent);
-        } else {
-            eprintln!(
-                "  Warning: Parent '{}' not found for entity {:?}",
-                parent_name, child_entity
-            );
-        }
-    }
-
-    println!(
-        "Scene loaded: {} ({} entities, {} roots)",
-        scene_file.name,
-        scene_file.entities.len(),
-        root_entities.len()
-    );
-
-    Ok((scene_file.name, root_entities))
+    Ok(result)
 }
 
 /// Spawn a single entity from serialized data
@@ -454,9 +485,40 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
     // Add the name component
     builder.add(Name::new(entity_data.name.clone()));
 
+    // Add EntityGuid - use from scene data if present, else generate new
+    let entity_guid = entity_data
+        .guid
+        .as_ref()
+        .and_then(|s| EntityGuid::from_string(s))
+        .unwrap_or_else(EntityGuid::new);
+    builder.add(entity_guid);
+
     // Spawn the entity
     let entity = world.spawn(builder.build());
     println!("  ↳ Spawned entity: {} ({:?})", entity_data.name, entity);
 
     entity
+}
+
+/// Resolve a parent entity by GUID (preferred) or name (fallback).
+fn resolve_parent(world: &World, parent_name: &str, parent_guid: Option<&str>) -> Option<Entity> {
+    // Try GUID first
+    if let Some(guid_str) = parent_guid {
+        if let Some(guid) = EntityGuid::from_string(guid_str) {
+            let found = world
+                .query::<&EntityGuid>()
+                .iter()
+                .find(|(_, g)| g.0 == guid.0)
+                .map(|(e, _)| e);
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    // Fallback to name
+    world
+        .query::<&Name>()
+        .iter()
+        .find(|(_, name)| name.0 == parent_name)
+        .map(|(entity, _)| entity)
 }

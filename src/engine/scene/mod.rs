@@ -13,5 +13,5 @@ pub use sprite_sheet::SpriteSheet;
 pub use animation::{Animation, AnimationController};
 pub use animation_state::{AnimationStateMachine, AnimationTransition, TransitionCondition};
 pub use scene_format::{SceneFile, EntityData, ComponentData};
-pub use scene_serializer::{save_scene, load_scene};
+pub use scene_serializer::{save_scene, load_scene, serialize_scene_to_string, load_scene_from_string};
 pub use prefab::{Prefab, PrefabInstance, ComponentOverride};

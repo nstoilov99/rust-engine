@@ -13,6 +13,8 @@ pub struct SceneFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityData {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
     pub components: Vec<ComponentData>,
 }
 
@@ -159,6 +161,8 @@ pub enum ComponentData {
     Player,
     Parent {
         parent_name: String, // Reference parent entity by name
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_guid: Option<String>, // Reference parent entity by GUID (preferred)
     },
 }
 

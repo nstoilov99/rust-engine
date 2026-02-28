@@ -97,6 +97,12 @@ impl PhysicsWorld {
         self.fixed_dt = dt;
     }
 
+    /// Reset the fixed-timestep accumulator to zero.
+    /// Call after rebuilding physics to prevent stale time from triggering steps.
+    pub fn reset_accumulator(&mut self) {
+        self.accumulator = 0.0;
+    }
+
     /// Step physics with fixed timestep accumulator
     ///
     /// This accumulates frame time and runs physics at a fixed rate

@@ -3,8 +3,10 @@
 use super::Selection;
 use crate::engine::ecs::{
     hierarchy::{can_set_parent, despawn_recursive, get_root_entities, remove_parent, set_parent},
-    Camera, Children, DirectionalLight, MeshRenderer, Name, Parent, PointLight, Transform,
+    Camera, Children, DirectionalLight, EntityGuid, MeshRenderer, Name, Parent, PointLight,
+    Transform,
 };
+use crate::engine::ecs::resources::PlayMode;
 use egui::{pos2, Color32, Context, RichText, ScrollArea, SidePanel, Stroke, TextEdit, Ui};
 use hecs::{Entity, World};
 use std::collections::HashSet;
@@ -76,18 +78,20 @@ impl HierarchyPanel {
     }
 
     /// Render the hierarchy panel as a side panel
-    pub fn show(&mut self, ctx: &Context, world: &mut World, selection: &mut Selection) {
+    pub fn show(&mut self, ctx: &Context, world: &mut World, selection: &mut Selection, play_mode: PlayMode) {
         SidePanel::left("hierarchy_panel")
             .resizable(true)
             .default_width(250.0)
             .min_width(150.0)
             .show(ctx, |ui| {
-                self.show_contents(ui, world, selection);
+                self.show_contents(ui, world, selection, play_mode);
             });
     }
 
     /// Render just the contents (for use inside dock tabs)
-    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection) {
+    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, play_mode: PlayMode) {
+        let read_only = play_mode != PlayMode::Edit;
+
         // Handle Escape key - priority: cancel rename → clear selection
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.renaming_entity.is_some() {
@@ -99,21 +103,26 @@ impl HierarchyPanel {
             }
         }
 
-        self.render_header(ui, world);
+        self.render_header(ui, world, read_only);
         ui.separator();
         self.render_search(ui);
         ui.separator();
-        self.render_tree(ui, world, selection);
+        self.render_tree(ui, world, selection, read_only);
     }
 
     /// Render panel header with title and add button
-    fn render_header(&mut self, ui: &mut Ui, world: &mut World) {
+    fn render_header(&mut self, ui: &mut Ui, world: &mut World, read_only: bool) {
         ui.horizontal(|ui| {
             ui.heading("Hierarchy");
+            if read_only {
+                ui.label(RichText::new("(Playing)").weak().italics().small());
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+").on_hover_text("Add Entity").clicked() {
-                    self.create_empty_entity(world);
-                }
+                ui.add_enabled_ui(!read_only, |ui| {
+                    if ui.button("+").on_hover_text("Add Entity").clicked() {
+                        self.create_empty_entity(world);
+                    }
+                });
             });
         });
     }
@@ -137,8 +146,9 @@ impl HierarchyPanel {
         });
     }
 
-    /// Sync root_order with world state (call at start of render)
-    fn sync_root_order(&mut self, world: &World) {
+    /// Sync root_order with world state.
+    /// Called at start of render and before play-mode snapshot.
+    pub fn sync_root_order(&mut self, world: &World) {
         let current_roots: HashSet<Entity> = get_root_entities(world).into_iter().collect();
 
         // Remove entities that are no longer roots
@@ -162,11 +172,14 @@ impl HierarchyPanel {
     }
 
     /// Render the entity tree
-    fn render_tree(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection) {
+    fn render_tree(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, read_only: bool) {
         // Sync root order with world state first
         self.sync_root_order(world);
 
-        // ESC to cancel drag
+        // Cancel drag in read-only mode or on ESC
+        if read_only {
+            self.drag_source = None;
+        }
         if self.drag_source.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.drag_source = None;
             self.drag_hover_entity = None;
@@ -184,15 +197,17 @@ impl HierarchyPanel {
                 // Render roots in explicit order (Entity is Copy, so we can iterate by value)
                 for i in 0..self.root_order.len() {
                     let root = self.root_order[i]; // Entity is Copy
-                    self.render_entity_node(ui, world, selection, root, 0);
+                    self.render_entity_node(ui, world, selection, root, 0, read_only);
                 }
             });
 
         // Handle keyboard shortcuts
-        self.handle_keyboard_shortcuts(ui, world, selection);
+        self.handle_keyboard_shortcuts(ui, world, selection, read_only);
 
         // Render drag ghost (floating element following cursor)
-        self.render_drag_ghost(ui, world);
+        if !read_only {
+            self.render_drag_ghost(ui, world);
+        }
 
         // Clear drag source after mouse release (once per frame, not per entity)
         if ui.input(|i| i.pointer.any_released()) {
@@ -210,6 +225,7 @@ impl HierarchyPanel {
         selection: &mut Selection,
         entity: Entity,
         depth: usize,
+        read_only: bool,
     ) {
         // Get entity name
         let name = world
@@ -347,18 +363,20 @@ impl HierarchyPanel {
                     }
                 }
 
-                // Double-click to rename
-                if response.double_clicked() {
-                    self.start_rename(world, entity);
+                if !read_only {
+                    // Double-click to rename
+                    if response.double_clicked() {
+                        self.start_rename(world, entity);
+                    }
+
+                    // Right-click context menu
+                    response.context_menu(|ui| {
+                        self.render_context_menu(ui, world, selection, entity);
+                    });
+
+                    // Drag-and-drop
+                    self.handle_drag_drop(ui, &response, world, entity, is_valid_drop_target, has_children, is_expanded);
                 }
-
-                // Right-click context menu
-                response.context_menu(|ui| {
-                    self.render_context_menu(ui, world, selection, entity);
-                });
-
-                // Drag-and-drop
-                self.handle_drag_drop(ui, &response, world, entity, is_valid_drop_target, has_children, is_expanded);
             }
         });
 
@@ -405,7 +423,7 @@ impl HierarchyPanel {
         // Render children (if expanded and has children)
         if has_children && is_expanded {
             for child in children {
-                self.render_entity_node(ui, world, selection, child, depth + 1);
+                self.render_entity_node(ui, world, selection, child, depth + 1, read_only);
             }
         }
     }
@@ -482,7 +500,11 @@ impl HierarchyPanel {
     /// Create a new empty entity
     fn create_empty_entity(&self, world: &mut World) {
         let count = world.iter().count();
-        world.spawn((Transform::default(), Name::new(format!("Entity {}", count))));
+        world.spawn((
+            Transform::default(),
+            Name::new(format!("Entity {}", count)),
+            EntityGuid::new(),
+        ));
     }
 
     /// Start renaming an entity
@@ -519,7 +541,11 @@ impl HierarchyPanel {
         entity: Entity,
     ) {
         if ui.button("Add Child").clicked() {
-            let child = world.spawn((Transform::default(), Name::new("New Child")));
+            let child = world.spawn((
+                Transform::default(),
+                Name::new("New Child"),
+                EntityGuid::new(),
+            ));
             set_parent(world, child, entity);
             // Expand parent to show new child
             self.expanded.insert(entity.id() as u64);
@@ -555,7 +581,7 @@ impl HierarchyPanel {
         let transform = world.get::<&Transform>(entity).map(|t| *t).unwrap_or_default();
 
         // Create duplicate (simple - doesn't copy all components)
-        world.spawn((transform, Name::new(name)));
+        world.spawn((transform, Name::new(name), EntityGuid::new()));
     }
 
     /// Delete an entity
@@ -895,7 +921,12 @@ impl HierarchyPanel {
         ui: &mut Ui,
         world: &mut World,
         selection: &mut Selection,
+        read_only: bool,
     ) {
+        if read_only {
+            return;
+        }
+
         // Delete key
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
             if let Some(entity) = selection.primary() {

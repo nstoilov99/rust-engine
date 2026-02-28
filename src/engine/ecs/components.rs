@@ -236,6 +236,27 @@ impl Name {
     }
 }
 
+/// Globally unique identifier for entities.
+/// Survives serialization round-trips and is used for snapshot restore.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EntityGuid(pub uuid::Uuid);
+
+impl EntityGuid {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        uuid::Uuid::parse_str(s).ok().map(Self)
+    }
+}
+
+impl Default for EntityGuid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ========== Custom Serde for nalgebra-glm types ==========
 
 mod vec3_serde {

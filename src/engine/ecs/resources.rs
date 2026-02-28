@@ -186,11 +186,10 @@ impl Default for ToolMode {
     }
 }
 
-/// Editor state resource tracking play mode, selection, and tool settings.
+/// Editor state resource tracking play mode and tool settings.
+/// Selection is managed by the `Selection` struct (not stored here).
 #[derive(Debug, Clone)]
 pub struct EditorState {
-    pub selected_entity: Option<hecs::Entity>,
-    pub hovered_entity: Option<hecs::Entity>,
     pub tool_mode: ToolMode,
     pub play_mode: PlayMode,
     pub grid_visible: bool,
@@ -201,8 +200,6 @@ pub struct EditorState {
 impl EditorState {
     pub fn new() -> Self {
         Self {
-            selected_entity: None,
-            hovered_entity: None,
             tool_mode: ToolMode::default(),
             play_mode: PlayMode::default(),
             grid_visible: true,

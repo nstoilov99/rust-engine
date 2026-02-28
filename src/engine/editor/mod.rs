@@ -9,6 +9,7 @@ mod hierarchy_panel;
 pub mod icons;
 mod inspector_panel;
 mod menu_bar;
+pub mod play_mode;
 pub mod profiler;
 mod selection;
 mod tab_viewer;

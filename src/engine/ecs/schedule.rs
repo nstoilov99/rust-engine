@@ -109,13 +109,14 @@ impl RunCriteria for RunIfNotPaused {
     }
 }
 
-/// Run only when an entity is selected in the editor.
+/// Placeholder: selection is managed by the external `Selection` struct,
+/// not by `EditorState`. This always returns false; use `Selection` directly
+/// for selection-dependent logic.
+#[deprecated(note = "Selection is tracked externally via `Selection`, not `EditorState`")]
 pub struct RunIfSelected;
 impl RunCriteria for RunIfSelected {
-    fn should_run(&self, resources: &Resources) -> bool {
-        resources
-            .get::<EditorState>()
-            .map_or(false, |state| state.selected_entity.is_some())
+    fn should_run(&self, _resources: &Resources) -> bool {
+        false
     }
 }
 

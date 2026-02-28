@@ -43,10 +43,7 @@ impl EditorTab {
 
     /// Whether this tab can be closed
     pub fn closable(&self) -> bool {
-        match self {
-            EditorTab::Viewport => false, // Viewport cannot be closed
-            _ => true,
-        }
+        true
     }
 }
 

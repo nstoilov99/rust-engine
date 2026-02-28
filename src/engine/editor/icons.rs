@@ -24,6 +24,11 @@ pub enum ToolbarIcon {
     ScaleSnap,
     // Camera icons
     CameraSpeed,
+    // Play mode icons
+    Play,
+    Pause,
+    Stop,
+    SkipForward,
 }
 
 /// Asset browser icon identifiers
@@ -89,6 +94,10 @@ impl ToolbarIcon {
             ToolbarIcon::RotationSnap => "rotation_snap",
             ToolbarIcon::ScaleSnap => "scale_snap",
             ToolbarIcon::CameraSpeed => "camera_speed",
+            ToolbarIcon::Play => "play-fill",
+            ToolbarIcon::Pause => "pause-fill",
+            ToolbarIcon::Stop => "stop-fill",
+            ToolbarIcon::SkipForward => "skip-forward-fill",
         }
     }
 
@@ -105,6 +114,10 @@ impl ToolbarIcon {
             ToolbarIcon::RotationSnap => "Rotation Snap",
             ToolbarIcon::ScaleSnap => "Scale Snap",
             ToolbarIcon::CameraSpeed => "Camera Speed",
+            ToolbarIcon::Play => "Play (F5)",
+            ToolbarIcon::Pause => "Pause (F6)",
+            ToolbarIcon::Stop => "Stop (F5)",
+            ToolbarIcon::SkipForward => "Resume (F6)",
         }
     }
 }
@@ -148,6 +161,10 @@ impl IconManager {
             ToolbarIcon::RotationSnap,
             ToolbarIcon::ScaleSnap,
             ToolbarIcon::CameraSpeed,
+            ToolbarIcon::Play,
+            ToolbarIcon::Pause,
+            ToolbarIcon::Stop,
+            ToolbarIcon::SkipForward,
         ];
 
         for icon in icons {
@@ -291,6 +308,10 @@ pub fn icon_button(
                 ToolbarIcon::RotationSnap => "∠",
                 ToolbarIcon::ScaleSnap => "⊞",
                 ToolbarIcon::CameraSpeed => "🎥",
+                ToolbarIcon::Play => "▶",
+                ToolbarIcon::Pause => "⏸",
+                ToolbarIcon::Stop => "⏹",
+                ToolbarIcon::SkipForward => "⏭",
             };
             ui.painter().text(
                 rect.center(),

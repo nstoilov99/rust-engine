@@ -8,6 +8,7 @@ use super::{
     console_cmd::{CommandContext, ConsoleCommandSystem},
     dock_layout::EditorTab,
     icons::IconManager,
+    menu_bar::MenuAction,
     profiler::ProfilerPanel,
     viewport::{
         render_viewport_toolbar_overlay, CameraControlMode, EditorCamera, GizmoHandler,
@@ -16,6 +17,7 @@ use super::{
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
 };
 use crate::engine::ecs::components::Transform;
+use crate::engine::ecs::resources::PlayMode;
 use egui::{Color32, RichText, Ui};
 use egui_dock::TabViewer;
 use hecs::World;
@@ -65,6 +67,10 @@ pub struct EditorContext<'a> {
     pub icon_manager: Option<&'a IconManager>,
     /// Asset browser panel
     pub asset_browser: &'a mut AssetBrowserPanel,
+    /// Current play mode for viewport indicator
+    pub play_mode: PlayMode,
+    /// Output: play-mode action from viewport tab bar (set during render)
+    pub toolbar_action: &'a mut MenuAction,
 }
 
 /// Tab viewer that renders each panel type
@@ -76,7 +82,10 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     type Tab = EditorTab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        tab.title().into()
+        match tab {
+            EditorTab::Viewport => "".into(),
+            _ => tab.title().into(),
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
@@ -96,6 +105,58 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
 }
 
 impl<'a> EditorTabViewer<'a> {
+    /// Render play/pause/stop icons centered on the viewport's tab bar header.
+    /// Uses a floating egui::Area positioned over the tab bar strip.
+    fn render_play_controls_on_tab_bar(
+        &mut self,
+        ctx: &egui::Context,
+        viewport_content_rect: egui::Rect,
+    ) {
+        use super::menu_bar::render_play_controls;
+
+        let icon_size = 18.0_f32;
+        let icon_spacing = 4.0_f32;
+        let icon_count = 3.0_f32;
+        let cluster_w = icon_count * icon_size + (icon_count - 1.0) * icon_spacing;
+        let pill_pad_x = 6.0_f32;
+        let pill_pad_y = 3.0_f32;
+        let pill_w = cluster_w + pill_pad_x * 2.0;
+        let pill_h = icon_size + pill_pad_y * 2.0;
+
+        let tab_bar_height = 24.0;
+        let tab_bar_top = viewport_content_rect.top() - tab_bar_height;
+        let bar_center_x = viewport_content_rect.center().x;
+        let pill_top = tab_bar_top + (tab_bar_height - pill_h) / 2.0;
+
+        let pill_bg = Color32::from_rgba_premultiplied(50, 50, 50, 200);
+
+        egui::Area::new(egui::Id::new("play_controls_tab_bar"))
+            .fixed_pos(egui::pos2(bar_center_x - pill_w / 2.0, pill_top))
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let (pill_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(pill_w, pill_h), egui::Sense::hover());
+
+                ui.painter()
+                    .rect_filled(pill_rect, pill_h / 2.0, pill_bg);
+
+                let icons_rect = pill_rect.shrink2(egui::vec2(pill_pad_x, pill_pad_y));
+                let mut child_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(icons_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                child_ui.spacing_mut().item_spacing.x = icon_spacing;
+                render_play_controls(
+                    &mut child_ui,
+                    self.editor.play_mode,
+                    self.editor.icon_manager,
+                    self.editor.toolbar_action,
+                );
+            });
+    }
+
     /// Render the 3D viewport with the rendered scene texture
     fn render_viewport(&mut self, ui: &mut Ui) {
         // Get available size for the viewport (full panel area now, no toolbar taking space)
@@ -109,6 +170,9 @@ impl<'a> EditorTabViewer<'a> {
         // If we have a viewport texture, display it
         // Use the response rect for gizmo positioning (not available_rect_before_wrap)
         let mut viewport_rect = ui.available_rect_before_wrap();
+
+        // Render play controls centered on the tab bar (above viewport content)
+        self.render_play_controls_on_tab_bar(ui.ctx(), viewport_rect);
 
         // Render Unreal-style toolbar as floating overlay FIRST
         // This ensures it gets input priority over the viewport image below
@@ -193,8 +257,9 @@ impl<'a> EditorTabViewer<'a> {
             self.editor.gizmo_handler.snapping_enabled = self.editor.viewport_settings.current_snap_enabled();
             *self.editor.grid_visible = self.editor.viewport_settings.grid_visible;
 
-            // Process gizmo if entity with Transform selected and not in Select mode
-            if self.editor.gizmo_handler.should_show_gizmo() {
+            // Process gizmo only in Edit mode
+            let gizmo_allowed = self.editor.play_mode == PlayMode::Edit;
+            if gizmo_allowed && self.editor.gizmo_handler.should_show_gizmo() {
                 if let Some(entity) = self.editor.selection.primary() {
                     let view = self.editor.editor_camera.view_matrix();
                     // Use gizmo projection (no Vulkan Y-flip) for egui rendering
@@ -252,6 +317,27 @@ impl<'a> EditorTabViewer<'a> {
             });
         }
 
+        // Render play mode indicator bar at top of viewport
+        match self.editor.play_mode {
+            PlayMode::Playing => {
+                let painter = ui.painter();
+                let bar_rect = egui::Rect::from_min_size(
+                    viewport_rect.left_top(),
+                    egui::vec2(viewport_rect.width(), 3.0),
+                );
+                painter.rect_filled(bar_rect, 0.0, Color32::from_rgb(50, 200, 50));
+            }
+            PlayMode::Paused => {
+                let painter = ui.painter();
+                let bar_rect = egui::Rect::from_min_size(
+                    viewport_rect.left_top(),
+                    egui::vec2(viewport_rect.width(), 3.0),
+                );
+                painter.rect_filled(bar_rect, 0.0, Color32::from_rgb(220, 200, 50));
+            }
+            PlayMode::Edit => {}
+        }
+
         // Render stat fps overlay if enabled (Unreal Engine style)
         // Position below the toolbar overlay
         if *self.editor.show_stat_fps {
@@ -305,14 +391,14 @@ impl<'a> EditorTabViewer<'a> {
     fn render_hierarchy(&mut self, ui: &mut Ui) {
         self.editor
             .hierarchy_panel
-            .show_contents(ui, self.editor.world, self.editor.selection);
+            .show_contents(ui, self.editor.world, self.editor.selection, self.editor.play_mode);
     }
 
     /// Render the inspector panel
     fn render_inspector(&mut self, ui: &mut Ui) {
         self.editor
             .inspector_panel
-            .show_contents(ui, self.editor.world, self.editor.selection);
+            .show_contents(ui, self.editor.world, self.editor.selection, self.editor.play_mode);
     }
 
     /// Render the asset browser panel

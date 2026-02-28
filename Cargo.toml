@@ -83,6 +83,12 @@ mint = "0.5"
 # Clipboard support
 arboard = "3.4"
 
+# UUID for entity persistent identity
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Logging (required by engine rules - use log::warn!/error! instead of eprintln!)
+log = "0.4"
+
 [profile.dev]
 opt-level = 1
 

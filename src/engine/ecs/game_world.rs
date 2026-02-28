@@ -137,9 +137,14 @@ impl GameWorld {
     // === Entity operations (convenience, with tracking) ===
 
     /// Spawn an entity with tracking. Sends EntitySpawned event.
+    /// Auto-assigns EntityGuid if not already present.
     /// Prefer using CommandBuffer during system execution.
     pub fn spawn(&mut self, bundle: impl hecs::DynamicBundle) -> Entity {
         let entity = self.hecs_world.spawn(bundle);
+        // Auto-assign GUID if the bundle didn't include one
+        if self.hecs_world.get::<&super::components::EntityGuid>(entity).is_err() {
+            let _ = self.hecs_world.insert_one(entity, super::components::EntityGuid::new());
+        }
         self.events.send(EntitySpawned {
             entity,
             name: None,
@@ -148,12 +153,17 @@ impl GameWorld {
     }
 
     /// Spawn an entity with tracking and a name. Sends EntitySpawned event.
+    /// Auto-assigns EntityGuid if not already present.
     pub fn spawn_named(
         &mut self,
         bundle: impl hecs::DynamicBundle,
         name: impl Into<String>,
     ) -> Entity {
         let entity = self.hecs_world.spawn(bundle);
+        // Auto-assign GUID if the bundle didn't include one
+        if self.hecs_world.get::<&super::components::EntityGuid>(entity).is_err() {
+            let _ = self.hecs_world.insert_one(entity, super::components::EntityGuid::new());
+        }
         self.events.send(EntitySpawned {
             entity,
             name: Some(name.into()),
@@ -236,6 +246,21 @@ impl GameWorld {
             &mut self.resources,
             &mut self.command_buffer,
         );
+    }
+
+    // === Transient state reset ===
+
+    /// Reset all transient ECS state (commands, events, change ticks).
+    /// Used during play mode transitions to prevent stale state from leaking.
+    /// If `flush_commands` is true, pending commands are applied before clearing;
+    /// if false, they are discarded.
+    pub fn reset_transients(&mut self, flush_commands: bool) {
+        if flush_commands {
+            self.apply_commands();
+        }
+        self.command_buffer.clear();
+        self.events.clear_all();
+        self.change_ticks = ChangeTicks::new();
     }
 
     // === Pruning ===

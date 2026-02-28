@@ -19,6 +19,9 @@ use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
+use rust_engine::engine::ecs::events::PlayModeChanged;
+use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
+use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::scene::{save_scene, load_scene};
 use rust_engine::assets::AssetType;
 use rust_engine::{GameLoop, InputManager, Renderer};
@@ -99,6 +102,8 @@ pub struct App {
     icons_loaded: bool,
     /// Asset browser panel
     pub asset_browser: AssetBrowserPanel,
+    /// Play mode snapshot for restoring scene state on Stop
+    play_mode_snapshot: Option<PlayModeSnapshot>,
 }
 
 impl App {
@@ -227,6 +232,7 @@ impl App {
             icon_manager: IconManager::new(20, egui::Color32::WHITE),
             icons_loaded: false,
             asset_browser: AssetBrowserPanel::new(std::path::PathBuf::from("content")),
+            play_mode_snapshot: None,
         })
     }
 
@@ -289,8 +295,8 @@ impl App {
         // Run scheduled systems
         self.game_world.run_schedule(&mut self.schedule);
 
-        // Step physics
-        {
+        // Step physics only during play mode
+        if self.play_mode() == PlayMode::Playing {
             rust_engine::profile_scope!("physics_step");
             self.physics_world.step(delta_time, self.game_world.hecs_mut());
         }
@@ -352,18 +358,39 @@ impl App {
                         println!("Profiler: {}", if self.show_profiler { "ON" } else { "OFF" });
                     }
 
-                    // Handle Ctrl+S immediately for scene save
+                    // F5: Play/Stop toggle
+                    if keycode == Some(KeyCode::F5) {
+                        match self.play_mode() {
+                            PlayMode::Edit => self.enter_play_mode(),
+                            PlayMode::Playing | PlayMode::Paused => self.stop_play_mode(),
+                        }
+                    }
+
+                    // F6: Pause/Resume toggle
+                    if keycode == Some(KeyCode::F6) {
+                        match self.play_mode() {
+                            PlayMode::Playing => self.pause_play_mode(),
+                            PlayMode::Paused => self.resume_play_mode(),
+                            PlayMode::Edit => {}
+                        }
+                    }
+
+                    // Handle Ctrl+S immediately for scene save (blocked during play mode)
                     if keycode == Some(KeyCode::KeyS)
                         && self.input_manager.is_key_pressed(KeyCode::ControlLeft)
                     {
-                        match save_scene(
-                            self.game_world.hecs(),
-                            "assets/scenes/main.scene.ron",
-                            "Main Scene",
-                            self.hierarchy_panel.root_order(),
-                        ) {
-                            Ok(_) => println!("Scene saved!"),
-                            Err(e) => eprintln!("Save failed: {}", e),
+                        if self.play_mode() != PlayMode::Edit {
+                            log::warn!("Cannot save scene during play mode");
+                        } else {
+                            match save_scene(
+                                self.game_world.hecs(),
+                                "assets/scenes/main.scene.ron",
+                                "Main Scene",
+                                self.hierarchy_panel.root_order(),
+                            ) {
+                                Ok(_) => println!("Scene saved!"),
+                                Err(e) => eprintln!("Save failed: {}", e),
+                            }
                         }
                     }
                 }
@@ -546,6 +573,9 @@ impl App {
             }
         };
 
+        // Capture play mode before splitting borrows (read-only access to Resources)
+        let current_play_mode = self.play_mode();
+
         // Render GUI with dock layout
         let show_profiler = &mut self.show_profiler;
         let hierarchy_panel = &mut self.hierarchy_panel;
@@ -583,12 +613,12 @@ impl App {
         // Asset browser panel
         let asset_browser = &mut self.asset_browser;
 
-        // We need to capture menu action outside the closure
         let mut menu_action = MenuAction::None;
+        let mut toolbar_action = MenuAction::None;
 
         let gui_result = match self.gui.render(window, target_image, Some(prev_viewport_rect), |ctx| {
             // Render menu bar first (at top)
-            menu_action = render_menu_bar(ctx, dock_state, command_history);
+            menu_action = render_menu_bar(ctx, dock_state, command_history, current_play_mode);
 
             // Create editor context for tab viewer
             let editor_ctx = EditorContext {
@@ -616,6 +646,8 @@ impl App {
                 viewport_settings,
                 icon_manager,
                 asset_browser,
+                play_mode: current_play_mode,
+                toolbar_action: &mut toolbar_action,
             };
 
             // Create tab viewer
@@ -637,18 +669,27 @@ impl App {
         // Store updated viewport rect for next frame's input blocking
         self.viewport_rect = new_viewport_rect;
 
+        // Merge toolbar action (play controls on viewport tab bar) if no menu action
+        if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
+            menu_action = toolbar_action;
+        }
+
         // Handle menu actions
         match menu_action {
             MenuAction::None => {}
             MenuAction::SaveScene => {
-                match save_scene(
-                    self.game_world.hecs(),
-                    "assets/scenes/main.scene.ron",
-                    "Main Scene",
-                    self.hierarchy_panel.root_order(),
-                ) {
-                    Ok(_) => println!("Scene saved!"),
-                    Err(e) => eprintln!("Save failed: {}", e),
+                if self.play_mode() != PlayMode::Edit {
+                    log::warn!("Cannot save scene during play mode");
+                } else {
+                    match save_scene(
+                        self.game_world.hecs(),
+                        "assets/scenes/main.scene.ron",
+                        "Main Scene",
+                        self.hierarchy_panel.root_order(),
+                    ) {
+                        Ok(_) => println!("Scene saved!"),
+                        Err(e) => eprintln!("Save failed: {}", e),
+                    }
                 }
             }
             MenuAction::Exit => {
@@ -657,13 +698,17 @@ impl App {
                 std::process::exit(0);
             }
             MenuAction::Undo => {
-                if let Some(desc) = self.command_history.undo(self.game_world.hecs_mut()) {
-                    println!("Undo: {}", desc);
+                if self.play_mode() == PlayMode::Edit {
+                    if let Some(desc) = self.command_history.undo(self.game_world.hecs_mut()) {
+                        println!("Undo: {}", desc);
+                    }
                 }
             }
             MenuAction::Redo => {
-                if let Some(desc) = self.command_history.redo(self.game_world.hecs_mut()) {
-                    println!("Redo: {}", desc);
+                if self.play_mode() == PlayMode::Edit {
+                    if let Some(desc) = self.command_history.redo(self.game_world.hecs_mut()) {
+                        println!("Redo: {}", desc);
+                    }
                 }
             }
             MenuAction::SaveLayout => {
@@ -678,6 +723,10 @@ impl App {
                 let _ = self.dock_state.save_to_default();
                 println!("Layout reset to default");
             }
+            MenuAction::Play => self.enter_play_mode(),
+            MenuAction::Pause => self.pause_play_mode(),
+            MenuAction::Resume => self.resume_play_mode(),
+            MenuAction::Stop => self.stop_play_mode(),
         }
 
         // Process asset browser events (collect first to avoid borrow conflicts)
@@ -688,6 +737,13 @@ impl App {
                     if let Some(metadata) = self.asset_browser.registry.get(id) {
                         match metadata.asset_type {
                             AssetType::Scene => {
+                                if self.play_mode() != PlayMode::Edit {
+                                    self.console_messages.push(LogMessage::warning(
+                                        "Stop play mode before loading a scene".to_string()
+                                    ));
+                                    continue;
+                                }
+
                                 // Build full path to scene file
                                 let scene_path = self.asset_browser.registry.root_path()
                                     .join(&metadata.path);
@@ -1123,6 +1179,167 @@ impl App {
         Ok(())
     }
 
+    // === Play Mode Management ===
+
+    /// Enter play mode from Edit. Takes a snapshot and starts simulation.
+    pub fn enter_play_mode(&mut self) {
+        // Guard: only from Edit
+        let current_mode = self.game_world.resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit);
+        if current_mode != PlayMode::Edit {
+            log::warn!("enter_play_mode called but not in Edit mode (current: {:?})", current_mode);
+            return;
+        }
+
+        // Flush pending commands so snapshot captures final state
+        self.game_world.reset_transients(true);
+
+        // Create snapshot (syncs root order with ECS first)
+        match play_mode::create_snapshot(
+            self.game_world.hecs(),
+            &mut self.hierarchy_panel,
+            &self.selection,
+        ) {
+            Ok(snapshot) => {
+                self.play_mode_snapshot = Some(snapshot);
+            }
+            Err(e) => {
+                log::error!("Failed to create play mode snapshot: {}", e);
+                return;
+            }
+        }
+
+        // Set mode to Playing
+        if let Some(state) = self.game_world.resource_mut::<EditorState>() {
+            state.play_mode = PlayMode::Playing;
+        }
+
+        // Rebuild physics for simulation
+        play_mode::rebuild_physics(&mut self.physics_world, self.game_world.hecs_mut());
+
+        // Unpause time
+        if let Some(time) = self.game_world.resource_mut::<Time>() {
+            time.paused = false;
+        }
+
+        // Emit event
+        self.game_world.send_event(PlayModeChanged {
+            previous: PlayMode::Edit,
+            current: PlayMode::Playing,
+        });
+
+        log::info!("Entered play mode");
+    }
+
+    /// Stop play mode and restore the pre-play snapshot.
+    pub fn stop_play_mode(&mut self) {
+        let previous_mode = self.game_world.resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit);
+        if previous_mode == PlayMode::Edit {
+            log::warn!("stop_play_mode called but already in Edit mode");
+            return;
+        }
+
+        // 1. Set mode = Edit, unpause time
+        if let Some(state) = self.game_world.resource_mut::<EditorState>() {
+            state.play_mode = PlayMode::Edit;
+        }
+        if let Some(time) = self.game_world.resource_mut::<Time>() {
+            time.paused = false;
+        }
+
+        // 2. Discard pending transients (don't flush - discard play-session commands)
+        self.game_world.reset_transients(false);
+
+        // 3. Restore from snapshot (borrow first, only consume on success)
+        if let Some(snapshot) = self.play_mode_snapshot.as_ref() {
+            match play_mode::restore_snapshot(
+                snapshot,
+                &mut self.game_world,
+                &mut self.hierarchy_panel,
+                &mut self.selection,
+                &mut self.physics_world,
+                &mut self.command_history,
+            ) {
+                Ok(()) => {
+                    self.play_mode_snapshot = None;
+                }
+                Err(e) => {
+                    log::error!("Failed to restore play mode snapshot (snapshot preserved): {}", e);
+                }
+            }
+        } else {
+            log::warn!("stop_play_mode called but no snapshot exists");
+        }
+
+        // 4. Emit event
+        self.game_world.send_event(PlayModeChanged {
+            previous: previous_mode,
+            current: PlayMode::Edit,
+        });
+
+        log::info!("Stopped play mode, scene restored");
+    }
+
+    /// Pause play mode (Playing -> Paused).
+    pub fn pause_play_mode(&mut self) {
+        let current_mode = self.game_world.resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit);
+        if current_mode != PlayMode::Playing {
+            log::warn!("pause_play_mode called but not Playing (current: {:?})", current_mode);
+            return;
+        }
+
+        if let Some(state) = self.game_world.resource_mut::<EditorState>() {
+            state.play_mode = PlayMode::Paused;
+        }
+        if let Some(time) = self.game_world.resource_mut::<Time>() {
+            time.paused = true;
+        }
+
+        self.game_world.send_event(PlayModeChanged {
+            previous: PlayMode::Playing,
+            current: PlayMode::Paused,
+        });
+
+        log::info!("Play mode paused");
+    }
+
+    /// Resume play mode (Paused -> Playing).
+    pub fn resume_play_mode(&mut self) {
+        let current_mode = self.game_world.resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit);
+        if current_mode != PlayMode::Paused {
+            log::warn!("resume_play_mode called but not Paused (current: {:?})", current_mode);
+            return;
+        }
+
+        if let Some(state) = self.game_world.resource_mut::<EditorState>() {
+            state.play_mode = PlayMode::Playing;
+        }
+        if let Some(time) = self.game_world.resource_mut::<Time>() {
+            time.paused = false;
+        }
+
+        self.game_world.send_event(PlayModeChanged {
+            previous: PlayMode::Paused,
+            current: PlayMode::Playing,
+        });
+
+        log::info!("Play mode resumed");
+    }
+
+    /// Get current play mode.
+    pub fn play_mode(&self) -> PlayMode {
+        self.game_world.resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit)
+    }
+
     /// Handle input during frame rendering
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
         // Note: Escape is handled by individual UI components (asset browser, dialogs, etc.)
@@ -1132,8 +1349,8 @@ impl App {
         // F12 and Ctrl+S are handled in handle_window_event() to avoid timing issues
         // (begin_frame clears keys_just_pressed before render is called)
 
-        // Undo/Redo shortcuts (work even when GUI has focus for editor workflow)
-        if self.input_manager.is_key_pressed(KeyCode::ControlLeft) {
+        // Undo/Redo shortcuts (only in Edit mode; work even when GUI has focus)
+        if self.play_mode() == PlayMode::Edit && self.input_manager.is_key_pressed(KeyCode::ControlLeft) {
             if self.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
                 if let Some(desc) = self.command_history.undo(self.game_world.hecs_mut()) {
                     println!("Undo: {}", desc);

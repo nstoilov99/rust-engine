@@ -715,12 +715,7 @@ fn toolbar_separator(ui: &mut Ui) {
 
 /// Render the viewport toolbar as a floating overlay (Unreal Engine 5 style)
 ///
-/// # Arguments
-/// * `ctx` - egui Context
-/// * `viewport_rect` - The rect of the viewport to position the overlay
-/// * `settings` - Viewport settings (mutable)
-/// * `camera_mode` - Current camera control mode
-/// * `icon_manager` - Optional icon manager for PNG icons (falls back to text if None)
+/// Single row: transform tools, snapping, camera speed, camera mode indicator.
 pub fn render_viewport_toolbar_overlay(
     ctx: &egui::Context,
     viewport_rect: egui::Rect,
@@ -731,10 +726,7 @@ pub fn render_viewport_toolbar_overlay(
     let toolbar_width = viewport_rect.width();
 
     egui::Area::new(egui::Id::new("viewport_toolbar_overlay"))
-        .fixed_pos(egui::pos2(
-            viewport_rect.left(),
-            viewport_rect.top(),
-        ))
+        .fixed_pos(egui::pos2(viewport_rect.left(), viewport_rect.top()))
         .order(egui::Order::Foreground)
         .interactable(true)
         .sense(egui::Sense::click_and_drag())
@@ -749,7 +741,6 @@ pub fn render_viewport_toolbar_overlay(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
 
-                        // Tool mode buttons: Select, Translate, Rotate, Scale
                         let tools = [
                             (ToolMode::Select, ToolbarIcon::Select, "Q", "Select (Q)"),
                             (ToolMode::Translate, ToolbarIcon::Translate, "W", "Translate (W)"),
@@ -766,7 +757,6 @@ pub fn render_viewport_toolbar_overlay(
 
                         toolbar_separator(ui);
 
-                        // Coordinate space: Single toggle button (World/Local)
                         let is_world = settings.gizmo_orientation == GizmoOrientation::World;
                         let (icon, space_label, space_tooltip) = if is_world {
                             (ToolbarIcon::World, "G", "World space (click for Local)")
@@ -783,61 +773,41 @@ pub fn render_viewport_toolbar_overlay(
 
                         toolbar_separator(ui);
 
-                        // Grid snap: pill-shaped merged button with toggle + dropdown
                         if snap_button_with_menu(
-                            ui,
-                            ToolbarIcon::GridSnap,
-                            "▦",
+                            ui, ToolbarIcon::GridSnap, "▦",
                             settings.grid_snap_enabled,
                             format!("{}", settings.snap_translate),
-                            "Grid snapping",
-                            "grid_snap_menu",
-                            GRID_SNAP_VALUES,
-                            &mut settings.snap_translate,
-                            icon_manager,
+                            "Grid snapping", "grid_snap_menu",
+                            GRID_SNAP_VALUES, &mut settings.snap_translate, icon_manager,
                         ) {
                             settings.grid_snap_enabled = !settings.grid_snap_enabled;
                         }
 
-                        // Rotation snap
                         if rotation_snap_button_with_menu(
-                            ui,
-                            settings.rotation_snap_enabled,
+                            ui, settings.rotation_snap_enabled,
                             format!("{}°", settings.snap_rotate as i32),
-                            &mut settings.snap_rotate,
-                            icon_manager,
+                            &mut settings.snap_rotate, icon_manager,
                         ) {
                             settings.rotation_snap_enabled = !settings.rotation_snap_enabled;
                         }
 
-                        // Scale snap: pill-shaped merged button with toggle + dropdown
                         if snap_button_with_menu(
-                            ui,
-                            ToolbarIcon::ScaleSnap,
-                            "⊞",
+                            ui, ToolbarIcon::ScaleSnap, "⊞",
                             settings.scale_snap_enabled,
                             format!("{}", settings.snap_scale),
-                            "Scale snapping",
-                            "scale_snap_menu",
-                            SCALE_SNAP_VALUES,
-                            &mut settings.snap_scale,
-                            icon_manager,
+                            "Scale snapping", "scale_snap_menu",
+                            SCALE_SNAP_VALUES, &mut settings.snap_scale, icon_manager,
                         ) {
                             settings.scale_snap_enabled = !settings.scale_snap_enabled;
                         }
 
                         toolbar_separator(ui);
 
-                        // Camera speed: pill-shaped button with dropdown
                         camera_speed_button_with_menu(
-                            ui,
-                            format!("{:.2}", settings.camera_speed),
-                            &mut settings.camera_speed,
-                            &mut settings.camera_speed_scalar,
-                            icon_manager,
+                            ui, format!("{:.2}", settings.camera_speed),
+                            &mut settings.camera_speed, &mut settings.camera_speed_scalar, icon_manager,
                         );
 
-                        // Camera mode indicator on the right side
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (text, color) = match camera_mode {
                                 CameraControlMode::Fly => {
