@@ -13,16 +13,25 @@ use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::sync::{GpuFuture};
 use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode};
 
-/// Loads image from file, uploads to GPU, and returns ImageView + Sampler
+/// Loads image by content-relative path (e.g. `"textures/idle_animation.png"`),
+/// uploads to GPU, and returns ImageView + Sampler.
+/// Reads through the global asset source (pak or filesystem).
 pub fn load_texture(
     device: Arc<Device>,
     queue: Arc<Queue>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     memory_allocator: Arc<StandardMemoryAllocator>,
-    path: &str,
+    relative: &str,
 ) -> Result<(Arc<ImageView>, Arc<Sampler>), Box<dyn std::error::Error>> {
-    // Load image with image crate
-    let image_data = image::open(path)?.to_rgba8();
+    use super::asset_source;
+
+    let image_data = if asset_source::is_pak() {
+        let bytes = asset_source::read_bytes(relative)?;
+        image::load_from_memory(&bytes)?.to_rgba8()
+    } else {
+        let fs_path = asset_source::resolve(relative);
+        image::open(&fs_path)?.to_rgba8()
+    };
     let (width, height) = image_data.dimensions();
     let image_bytes = image_data.into_raw();
 
@@ -111,9 +120,9 @@ pub fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, Box<dyn std::
     let sampler = Sampler::new(
         device,
         SamplerCreateInfo {
-            mag_filter: Filter::Nearest,  // Pixelated when zoomed in
-            min_filter: Filter::Nearest,  // Pixelated when zoomed out
-            address_mode: [SamplerAddressMode::Repeat; 3],  // Repeat texture
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            address_mode: [SamplerAddressMode::Repeat; 3],
             ..Default::default()
         },
     )?;

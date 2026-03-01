@@ -26,6 +26,7 @@ use vulkano::pipeline::PipelineBindPoint;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::image::Image;
 use vulkano::image::view::ImageView;
+use crate::engine::rendering::render_target::RenderTarget;
 
 pub struct DeferredRenderer {
     gbuffer: GBuffer,
@@ -239,25 +240,22 @@ impl DeferredRenderer {
 
     /// Render scene using deferred pipeline
     ///
-    /// # Arguments
-    /// * `mesh_data` - Mesh data to render
-    /// * `light_data` - Lighting data
-    /// * `target_image` - Target swapchain image
-    /// * `grid_visible` - Whether to render the grid
-    /// * `view_proj` - View-projection matrix (for grid rendering)
-    /// * `camera_pos` - Camera position in world space (for grid centering and fade)
+    /// Accepts a `RenderTarget` that can be either a swapchain image (standalone)
+    /// or a texture (editor viewport). Shadow, G-buffer, and lighting passes
+    /// remain identical; only the compose output differs.
     pub fn render(
         &mut self,
         mesh_data: &[MeshRenderData],
         light_data: &LightUniformData,
-        target_image: Arc<Image>,
+        target: RenderTarget,
         grid_visible: bool,
         view_proj: Mat4,
         camera_pos: Vec3,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
-        // Get cached framebuffers for this swapchain image
+        let target_image = target.image().clone();
+
         let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
         let grid_framebuffer = if grid_visible {
             Some(self.get_or_create_grid_framebuffer(target_image)?)

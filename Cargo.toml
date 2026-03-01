@@ -2,9 +2,11 @@
 name = "rust-engine"
 version = "0.1.0"
 edition = "2021"
+default-run = "game"
 
 [features]
 default = []
+editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:mint", "dep:arboard", "dep:notify", "dep:tokio"]
 tracy = ["tracy-client"]
 
 # Define both library and binary
@@ -15,6 +17,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "game"
 path = "src/game/main.rs"
+
+[[bin]]
+name = "pak_tool"
+path = "src/tools/pak_tool.rs"
 
 
 [dependencies]
@@ -44,8 +50,8 @@ smallvec = "1.13"
 # ECS
 hecs = "0.10"
 
-# File watching for hot-reload
-notify = "6.1"
+# File watching for hot-reload (editor only)
+notify = { version = "6.1", optional = true }
 
 # Thread-safe locking primitives
 parking_lot = "0.12"
@@ -53,16 +59,16 @@ parking_lot = "0.12"
 # Math library (nalgebra for glm-style functions)
 nalgebra-glm = "0.18"
 
-# Async runtime for background loading
-tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"] }
+# Async runtime for background loading (editor only)
+tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"                                        # Rusty Object Notation
 typetag = "0.2"                                    # Polymorphic serialization
 
-# Immediate Mode GUI (latest version with custom Vulkano integration)
-egui = "0.33.3"
+# Immediate Mode GUI (editor only)
+egui = { version = "0.33.3", optional = true }
 
 # Physics Engine (Rapier 3D)
 rapier3d = "0.25"
@@ -73,15 +79,15 @@ puffin = "0.19"
 # Tracy profiler integration (optional - build with --features tracy)
 tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }
 
-# Docking layout system for egui (editor panels)
-egui_dock = { version = "0.18", features = ["serde"] }
+# Docking layout system for egui (editor only)
+egui_dock = { version = "0.18", features = ["serde"], optional = true }
 
-# Transform gizmo for viewport manipulation
-transform-gizmo-egui = "0.8"
-mint = "0.5"
+# Transform gizmo for viewport manipulation (editor only)
+transform-gizmo-egui = { version = "0.8", optional = true }
+mint = { version = "0.5", optional = true }
 
-# Clipboard support
-arboard = "3.4"
+# Clipboard support (editor only)
+arboard = { version = "3.4", optional = true }
 
 # UUID for entity persistent identity
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -95,6 +101,12 @@ opt-level = 1
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.shipping]
+inherits = "release"
+strip = true
+codegen-units = 1
+panic = "abort"
 
 # Patch emath to fix smart_aim bug that causes crash when dragging DragValue
 # See: https://github.com/emilk/egui/issues/7747

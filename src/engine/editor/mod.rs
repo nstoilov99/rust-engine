@@ -1,6 +1,7 @@
 //! Editor systems and UI panels
 
 pub mod asset_browser;
+pub mod build_dialog;
 mod commands;
 mod console;
 pub mod console_cmd;
@@ -36,3 +37,4 @@ pub use tab_viewer::*;
 pub use viewport::*;
 pub use viewport_texture::*;
 pub use window_config::*;
+pub use build_dialog::BuildDialog;

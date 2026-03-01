@@ -56,19 +56,18 @@ impl AssetManager {
         Ok((indices, model_handle))
     }
 
-    /// Reload model and re-upload to GPU, returns (mesh indices, model handle)
-    pub fn reload_model_gpu(&self, path: &str) -> Result<(Vec<usize>, super::handle::Handle<super::model_loader::Model>), Box<dyn std::error::Error>> {
-        // Reload from disk
-        self.models.reload(path)?;
+    /// Reload model from filesystem and re-upload to GPU.
+    /// `fs_path` is the absolute filesystem path (from hot-reload watcher).
+    pub fn reload_model_gpu(&self, fs_path: &str) -> Result<(Vec<usize>, super::handle::Handle<super::model_loader::Model>), Box<dyn std::error::Error>> {
+        self.models.reload(fs_path)?;
 
-        // Clear old GPU meshes and re-upload
         {
             let mut meshes = self.meshes.write();
-            *meshes = MeshManager::new(); // Clear old meshes
+            *meshes = MeshManager::new();
         }
 
-        // Load and upload new version
-        self.load_model_gpu(path)
+        let relative = super::asset_source::to_content_relative(fs_path);
+        self.load_model_gpu(&relative)
     }
 
     /// Upload procedural geometry to GPU, returns mesh index

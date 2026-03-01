@@ -69,9 +69,13 @@ impl Model {
 
 /// Loads a GLTF/GLB file and returns the parsed document
 pub fn load_gltf(path: &str) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
-    // Load GLTF file (handles both .gltf and .glb)
     let (document, buffers, images) = gltf::import(path)?;
+    Ok((document, buffers, images))
+}
 
+/// Loads a GLTF/GLB from in-memory bytes (for pak file loading).
+pub fn load_gltf_from_bytes(data: &[u8]) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
+    let (document, buffers, images) = gltf::import_slice(data)?;
     Ok((document, buffers, images))
 }
 
@@ -122,7 +126,7 @@ pub fn print_gltf_info(document: &gltf::Document) {
     println!("\n========================\n");
 }
 
-/// Loads a complete model from GLTF file
+/// Loads a complete model from GLTF file path (filesystem only).
 pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
     crate::profile_function!();
 
@@ -131,12 +135,33 @@ pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
         load_gltf(path)?
     };
 
-    // Get model name from file path
     let name = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Unnamed")
         .to_string();
+
+    build_model(name, document, buffers, images)
+}
+
+/// Loads a complete model from in-memory GLTF/GLB bytes.
+pub fn load_model_from_bytes(data: &[u8], name: &str) -> Result<Model, Box<dyn std::error::Error>> {
+    crate::profile_function!();
+
+    let (document, buffers, images) = {
+        crate::profile_scope!("gltf_parse");
+        load_gltf_from_bytes(data)?
+    };
+
+    build_model(name.to_string(), document, buffers, images)
+}
+
+fn build_model(
+    name: String,
+    document: gltf::Document,
+    buffers: Vec<gltf::buffer::Data>,
+    images: Vec<gltf::image::Data>,
+) -> Result<Model, Box<dyn std::error::Error>> {
 
     let mut model = Model::new(name.clone());
 

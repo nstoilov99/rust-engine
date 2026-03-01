@@ -38,11 +38,18 @@ pub struct PrefabInstance {
 }
 
 impl Prefab {
-    /// Load prefab from file
+    /// Load prefab from file (uses asset source for pak support).
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let ron_string = fs::read_to_string(path)?;
+        use crate::engine::assets::asset_source;
+
+        let ron_string = if asset_source::is_pak() {
+            let relative = asset_source::to_content_relative(path);
+            asset_source::read_string(&relative)?
+        } else {
+            fs::read_to_string(path)?
+        };
         let prefab: Prefab = ron::from_str(&ron_string)?;
-        println!("📦 Loaded prefab: {} from {}", prefab.name, path);
+        println!("Loaded prefab: {} from {}", prefab.name, path);
         Ok(prefab)
     }
 

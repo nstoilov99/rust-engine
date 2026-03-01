@@ -22,7 +22,8 @@ pub mod utils;
 // Entity Component System
 pub mod ecs;
 
-// GUI (egui integration)
+// GUI (egui integration, editor only)
+#[cfg(feature = "editor")]
 pub mod gui;
 
 // Physics system (Rapier 3D integration)
@@ -31,7 +32,8 @@ pub mod physics;
 // Coordinate system adapters (Z-up ↔ Y-up conversion)
 pub mod adapters;
 
-// Editor systems and UI panels
+// Editor systems and UI panels (editor only)
+#[cfg(feature = "editor")]
 pub mod editor;
 
 // Math utilities (frustum culling, etc.)

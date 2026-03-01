@@ -4,7 +4,9 @@
 
 use hecs::World;
 use nalgebra_glm as glm;
-use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
+use rust_engine::assets::AssetManager;
+#[cfg(feature = "editor")]
+use rust_engine::assets::{HotReloadWatcher, ReloadEvent};
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
 use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
@@ -12,6 +14,7 @@ use rust_engine::engine::rendering::rendering_3d::mesh::{create_cube, create_pla
 use hecs::Entity;
 use rust_engine::engine::scene::load_scene;
 use rust_engine::Renderer;
+#[cfg(feature = "editor")]
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
@@ -27,7 +30,8 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::sync::GpuFuture;
 
-/// Setup result containing all initialized components
+/// Setup result containing all initialized components (editor only)
+#[cfg(feature = "editor")]
 pub struct SetupResult {
     pub asset_manager: Arc<AssetManager>,
     pub hot_reload: HotReloadWatcher,
@@ -38,7 +42,8 @@ pub struct SetupResult {
     pub descriptor_set: Arc<DescriptorSet>,
 }
 
-/// Setup asset manager and hot-reload system
+/// Setup asset manager and hot-reload system (editor only)
+#[cfg(feature = "editor")]
 pub fn setup_asset_system(
     renderer: &Renderer,
 ) -> Result<(Arc<AssetManager>, HotReloadWatcher, Receiver<ReloadEvent>), Box<dyn std::error::Error>>
@@ -55,8 +60,10 @@ pub fn setup_asset_system(
 
     // Setup hot-reload watcher
     let mut hot_reload = HotReloadWatcher::new(asset_manager.clone(), reload_tx);
-    hot_reload.watch_directory("content/")?;
-    hot_reload.track_asset("content/models/Duck.glb");
+    let content_dir = rust_engine::assets::content_root();
+    hot_reload.watch_directory(&content_dir.to_string_lossy())?;
+    let duck_fs_path = rust_engine::assets::asset_source::resolve("models/Duck.glb");
+    hot_reload.track_asset(&duck_fs_path.to_string_lossy());
 
     Ok((asset_manager, hot_reload, reload_rx))
 }
@@ -65,7 +72,7 @@ pub fn setup_asset_system(
 pub fn load_assets(
     asset_manager: &Arc<AssetManager>,
 ) -> Result<(Vec<usize>, usize, usize), Box<dyn std::error::Error>> {
-    let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("content/models/Duck.glb")?;
+    let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("models/Duck.glb")?;
 
     let (plane_verts, plane_idx) = create_plane(1.0);
     let plane_mesh_index = asset_manager.upload_procedural_mesh(&plane_verts, &plane_idx)?;
@@ -121,12 +128,12 @@ pub fn load_or_create_scene(
     world: &mut World,
     mesh_index: usize,
 ) -> Result<(bool, Vec<Entity>), Box<dyn std::error::Error>> {
-    if std::path::Path::new("content/scenes/main.scene.ron").exists() {
-        let (_scene_name, root_entities) = load_scene(world, "content/scenes/main.scene.ron")?;
-        Ok((true, root_entities)) // Loaded existing scene with root order
+    if rust_engine::assets::asset_source::exists("scenes/main.scene.ron") {
+        let (_scene_name, root_entities) = load_scene(world, "scenes/main.scene.ron")?;
+        Ok((true, root_entities))
     } else {
         create_default_scene(world, mesh_index);
-        Ok((false, Vec::new())) // Created new scene, no specific order
+        Ok((false, Vec::new()))
     }
 }
 
@@ -234,8 +241,7 @@ pub fn upload_model_texture(
     renderer: &Renderer,
     asset_manager: &Arc<AssetManager>,
 ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-    // Get duck model to extract texture
-    let duck_model_handle = asset_manager.models.load("content/models/Duck.glb")?;
+    let duck_model_handle = asset_manager.models.load("models/Duck.glb")?;
     let duck_model = duck_model_handle.get();
 
     let (texture_pixels, texture_width, texture_height) = if !duck_model.textures.is_empty() {

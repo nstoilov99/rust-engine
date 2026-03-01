@@ -296,16 +296,23 @@ pub fn load_scene_from_string(
     Ok((scene_file.name, root_entities))
 }
 
-/// Deserialize scene file into ECS world
-/// Returns (scene_name, root_entities_in_order)
+/// Deserialize scene file into ECS world.
+/// `relative` is a content-relative path (e.g. `"scenes/main.scene.ron"`).
+/// Returns (scene_name, root_entities_in_order).
 pub fn load_scene(
     world: &mut World,
-    path: &str,
+    relative: &str,
 ) -> Result<(String, Vec<Entity>), Box<dyn std::error::Error>> {
-    // Read file
-    let ron_string = fs::read_to_string(path)?;
+    use crate::engine::assets::asset_source;
 
-    println!("Loading scene from: {}", path);
+    println!("Loading scene from: {}", relative);
+
+    let ron_string = if asset_source::is_pak() {
+        asset_source::read_string(relative)?
+    } else {
+        let fs_path = asset_source::resolve(relative);
+        fs::read_to_string(&fs_path)?
+    };
 
     let result = load_scene_from_string(world, &ron_string)?;
 

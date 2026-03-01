@@ -4,6 +4,8 @@
 //! The View menu allows restoring closed panels.
 //! Play mode icon helpers are defined here and used by the viewport tab bar overlay.
 
+use super::build_dialog::{BuildDialog, BuildProfile, BuildState};
+use super::console::LogMessage;
 use super::icons::{IconManager, ToolbarIcon};
 use super::{CommandHistory, EditorDockState, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
@@ -187,8 +189,20 @@ pub fn render_menu_bar(
     dock_state: &mut EditorDockState,
     command_history: &CommandHistory,
     play_mode: PlayMode,
+    build_dialog: &mut BuildDialog,
+    console_messages: &mut Vec<LogMessage>,
 ) -> MenuAction {
     let mut action = MenuAction::None;
+
+    let build_msgs = build_dialog.poll();
+    let is_build_active = matches!(
+        build_dialog.state,
+        BuildState::Building | BuildState::CopyingContent
+    );
+    console_messages.extend(build_msgs);
+    if is_build_active {
+        ctx.request_repaint();
+    }
 
     egui::TopBottomPanel::top("menu_bar")
         .exact_height(24.0)
@@ -200,6 +214,96 @@ pub fn render_menu_bar(
                         action = MenuAction::SaveScene;
                         ui.close();
                     }
+                    ui.separator();
+
+                    ui.menu_button("Build Game", |ui| {
+                        ui.set_min_width(260.0);
+
+                        let is_building = matches!(
+                            build_dialog.state,
+                            BuildState::Building | BuildState::CopyingContent
+                        );
+
+                        ui.add_enabled_ui(!is_building, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Platform:");
+                                ui.label(build_dialog.settings.platform.label());
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Profile:");
+                                egui::ComboBox::from_id_salt("build_profile_menu")
+                                    .selected_text(build_dialog.settings.profile.label())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut build_dialog.settings.profile,
+                                            BuildProfile::Release,
+                                            "Release",
+                                        );
+                                        ui.selectable_value(
+                                            &mut build_dialog.settings.profile,
+                                            BuildProfile::Shipping,
+                                            "Shipping",
+                                        );
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Output:");
+                                ui.text_edit_singleline(&mut build_dialog.settings.output_dir);
+                            });
+                        });
+
+                        ui.separator();
+
+                        match &build_dialog.state {
+                            BuildState::Idle => {
+                                if ui.button("Build").clicked() {
+                                    build_dialog.start_build();
+                                }
+                            }
+                            BuildState::Building | BuildState::CopyingContent => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    let label = if build_dialog.state == BuildState::CopyingContent {
+                                        "Packing assets..."
+                                    } else {
+                                        "Building..."
+                                    };
+                                    if let Some(start) = build_dialog.start_time {
+                                        let elapsed = start.elapsed().as_secs();
+                                        ui.label(format!("{} ({}s)", label, elapsed));
+                                    } else {
+                                        ui.label(label);
+                                    }
+                                });
+                                ui.label("See Console for details.");
+                            }
+                            BuildState::Success { binary_size } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(80, 200, 80),
+                                    format!(
+                                        "Done! {:.1} MB",
+                                        *binary_size as f64 / (1024.0 * 1024.0)
+                                    ),
+                                );
+                                if ui.button("Build Again").clicked() {
+                                    build_dialog.start_build();
+                                }
+                            }
+                            BuildState::Failed { error } => {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(200, 80, 80),
+                                    format!("Failed: {}", error),
+                                );
+                                if ui.button("Retry").clicked() {
+                                    build_dialog.start_build();
+                                }
+                            }
+                        }
+
+                    });
+
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         action = MenuAction::Exit;

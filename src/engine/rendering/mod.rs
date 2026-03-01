@@ -1,4 +1,5 @@
 pub mod common;
+pub mod render_target;
 
 #[path = "2d"]
 pub mod rendering_2d {
@@ -29,3 +30,4 @@ pub mod rendering_3d {
 }
 
 pub use common::*;
+pub use render_target::RenderTarget;

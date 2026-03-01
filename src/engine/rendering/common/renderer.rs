@@ -238,7 +238,7 @@ impl Renderer {
             device_context.queue.clone(),
             command_buffer_allocator.clone(),
             memory_allocator.clone(),
-            "content/textures/idle_animation.png",
+            "textures/idle_animation.png",
         )?;
 
         // Create descriptor set for texture (descriptor_set_allocator already created earlier)

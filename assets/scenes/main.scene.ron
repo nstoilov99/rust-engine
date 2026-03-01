@@ -1,0 +1,142 @@
+(
+    version: "1.0",
+    name: "Main Scene",
+    entities: [
+        (
+            name: "FallingCube2",
+            guid: Some("32a96d14-3c2d-42b6-a2f1-9ffb14084900"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (1.5021949, 0.5156814, -0.2912761),
+                    rotation: (0.63926286, 0.30222863, 0.30223024, 0.63926345),
+                    scale: (0.4, 0.4, 0.4),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                ),
+            ],
+        ),
+        (
+            name: "BouncyBox",
+            guid: Some("bf86d6c1-cba0-46fe-b0b0-7a24908b1b8f"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (1.0984617, 1.1080307, 1.0),
+                    rotation: (-0.3362995, -0.29328078, -0.6679992, -0.59553844),
+                    scale: (0.6, 0.6, 0.6),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                ),
+            ],
+        ),
+        (
+            name: "FallingCube1",
+            guid: Some("e14a8ccf-4e5c-4983-be42-9bf198f9614e"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 0.0, 1.0),
+                    rotation: (-0.0000022161742, 0.9997926, -0.00000022044154, 0.020366704),
+                    scale: (0.5, 0.5, 0.5),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 2,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                ),
+            ],
+        ),
+        (
+            name: "Sun",
+            guid: Some("c647e954-5792-4bb1-9b03-80d4ddb91657"),
+            components: [
+                (
+                    type: "DirectionalLight",
+                    direction: (0.0, -0.7071068, -0.7071068),
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 1.0,
+                    shadow_enabled: false,
+                    shadow_bias: 0.005,
+                ),
+            ],
+        ),
+        (
+            name: "Duck",
+            guid: Some("643238b3-888b-458d-a054-539fd1c5c179"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.080367684, 0.0000000070260198, 3.2209096),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (0.01, 0.01, 0.01),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 0,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                ),
+            ],
+        ),
+        (
+            name: "Main Camera",
+            guid: Some("1a518e93-36e8-4173-8a47-9123e7912787"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 5.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                (
+                    type: "Camera",
+                    fov: 60.0,
+                    near: 0.1,
+                    far: 1000.0,
+                    active: true,
+                    projection: Perspective,
+                    clear_color: (0.10000002, 0.1, 0.15),
+                    priority: 0,
+                ),
+            ],
+        ),
+        (
+            name: "Ground",
+            guid: Some("307ebb7f-b6cb-4e63-b635-90ab3932d092"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (10.0, 10.0, 1.0),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_index: 1,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                ),
+            ],
+        ),
+    ],
+)

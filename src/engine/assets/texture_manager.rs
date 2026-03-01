@@ -88,8 +88,9 @@ impl TextureManager {
         self.cache.read().len()
     }
 
-    /// Internal: Load texture from disk
-    fn load_texture_from_disk(&self, path: &str) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    /// Internal: Load texture via asset source (content-relative path).
+    fn load_texture_from_disk(&self, relative: &str) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+        use super::asset_source;
         use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
         use vulkano::memory::allocator::AllocationCreateInfo;
         use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
@@ -97,8 +98,13 @@ impl TextureManager {
         use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryCommandBufferAbstract};
         use vulkano::sync::GpuFuture;
 
-        // Load image file
-        let img = image::open(path)?;
+        let img = if asset_source::is_pak() {
+            let bytes = asset_source::read_bytes(relative)?;
+            image::load_from_memory(&bytes)?
+        } else {
+            let fs_path = asset_source::resolve(relative);
+            image::open(&fs_path)?
+        };
         let img_rgba = img.to_rgba8();
         let (width, height) = img_rgba.dimensions();
 
