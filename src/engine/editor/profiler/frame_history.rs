@@ -203,13 +203,14 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     // Show tooltip for hovered frame
     if let Some(idx) = hovered_index {
         if let Some(frame) = state.frame_history.get(idx) {
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("frame_tooltip"), |ui| {
-                ui.label(format!("Frame #{}", frame.frame_number));
-                ui.label(format!("{:.2} ms ({:.0} FPS)", frame.duration_ms(), 1000.0 / frame.duration_ms()));
-                ui.label(format!("{} threads, {} scopes", frame.thread_count(), frame.total_scopes));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Click to select and pause").weak().small());
-            });
+            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("frame_tooltip"), egui::containers::PopupAnchor::Pointer)
+                .show(|ui| {
+                    ui.label(format!("Frame #{}", frame.frame_number));
+                    ui.label(format!("{:.2} ms ({:.0} FPS)", frame.duration_ms(), 1000.0 / frame.duration_ms()));
+                    ui.label(format!("{} threads, {} scopes", frame.thread_count(), frame.total_scopes));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Click to select and pause").weak().small());
+                });
         }
     }
 

@@ -101,17 +101,15 @@ fn icon_tool_button(
                 egui::StrokeKind::Outside,
             );
             // Tooltip
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
-                ui.label(tooltip);
-            });
+            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
+                .show(|ui| { ui.label(tooltip); });
         }
     }
 
     clicked
 }
 
-/// Helper to render a text button with optional selection state (pill-shaped)
-/// Returns true if clicked
+#[allow(dead_code)]
 fn tool_button(
     ui: &mut Ui,
     label: &str,
@@ -159,9 +157,8 @@ fn tool_button(
                 egui::StrokeKind::Outside,
             );
             // Tooltip
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
-                ui.label(tooltip);
-            });
+            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
+                .show(|ui| { ui.label(tooltip); });
         }
     }
 
@@ -289,9 +286,8 @@ fn snap_button_with_menu(
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(icon_tooltip), |ui| {
-            ui.label(icon_tooltip);
-        });
+        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(icon_tooltip), egui::containers::PopupAnchor::Pointer)
+            .show(|ui| { ui.label(icon_tooltip); });
     }
     if in_dropdown {
         painter.rect_stroke(
@@ -307,23 +303,26 @@ fn snap_button_with_menu(
 
     // Open popup on dropdown click
     if primary_released && in_dropdown {
-        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        egui::Popup::toggle_id(ui.ctx(), popup_id);
     }
 
     // Show popup menu below the dropdown area
-    egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
-        ui.set_min_width(100.0);
-        ui.style_mut().spacing.item_spacing.y = 1.0;
+    egui::Popup::new(popup_id, ui.ctx().clone(), dropdown_rect, ui.layer_id())
+        .open_memory(None)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(100.0);
+            ui.style_mut().spacing.item_spacing.y = 1.0;
 
-        for &value in values {
-            let label = format_snap_value(value);
-            let selected = (*current_value - value).abs() < 0.0001;
-            if ui.selectable_label(selected, egui::RichText::new(&label).size(13.0)).clicked() {
-                *current_value = value;
-                ui.memory_mut(|mem| mem.close_popup(popup_id));
+            for &value in values {
+                let label = format_snap_value(value);
+                let selected = (*current_value - value).abs() < 0.0001;
+                if ui.selectable_label(selected, egui::RichText::new(&label).size(13.0)).clicked() {
+                    *current_value = value;
+                    egui::Popup::close_id(ui.ctx(), popup_id);
+                }
             }
-        }
-    });
+        });
 
     icon_clicked
 }
@@ -438,9 +437,8 @@ fn camera_speed_button_with_menu(
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("camera_speed_tooltip"), |ui| {
-            ui.label("Camera speed");
-        });
+        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("camera_speed_tooltip"), egui::containers::PopupAnchor::Pointer)
+            .show(|ui| { ui.label("Camera speed"); });
     }
     if in_dropdown {
         painter.rect_stroke(
@@ -455,10 +453,13 @@ fn camera_speed_button_with_menu(
     let popup_id = ui.make_persistent_id("camera_speed_menu");
 
     if primary_released && in_dropdown {
-        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        egui::Popup::toggle_id(ui.ctx(), popup_id);
     }
 
-    egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+    egui::Popup::new(popup_id, ui.ctx().clone(), dropdown_rect, ui.layer_id())
+        .open_memory(None)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
         ui.set_min_width(180.0);
         ui.style_mut().spacing.item_spacing.y = 6.0;
 
@@ -663,9 +664,8 @@ fn rotation_snap_button_with_menu(
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("rotation_snap_tooltip"), |ui| {
-            ui.label("Rotation snapping");
-        });
+        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("rotation_snap_tooltip"), egui::containers::PopupAnchor::Pointer)
+            .show(|ui| { ui.label("Rotation snapping"); });
     }
     if in_dropdown {
         painter.rect_stroke(
@@ -680,20 +680,22 @@ fn rotation_snap_button_with_menu(
     let popup_id = ui.make_persistent_id("rotation_snap_menu");
 
     if primary_released && in_dropdown {
-        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        egui::Popup::toggle_id(ui.ctx(), popup_id);
     }
 
-    egui::popup_below_widget(ui, popup_id, &ui.interact(dropdown_rect, popup_id.with("interact"), egui::Sense::hover()), egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+    egui::Popup::new(popup_id, ui.ctx().clone(), dropdown_rect, ui.layer_id())
+        .open_memory(None)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
         ui.set_min_width(80.0);
         ui.style_mut().spacing.item_spacing.y = 1.0;
 
-        // All rotation values in a single list
         for &value in ROTATION_SNAP_VALUES {
             let label = format!("{}°", value as i32);
             let selected = (*current_value - value).abs() < 0.0001;
             if ui.selectable_label(selected, egui::RichText::new(&label).size(13.0)).clicked() {
                 *current_value = value;
-                ui.memory_mut(|mem| mem.close_popup(popup_id));
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
     });

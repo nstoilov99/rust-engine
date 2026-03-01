@@ -4,7 +4,7 @@
 
 use super::{
     asset_browser::AssetBrowserPanel,
-    console::{LogFilter, LogLevel, LogMessage},
+    console::{ConsoleLog, LogFilter, LogLevel, LogMessage},
     console_cmd::{CommandContext, ConsoleCommandSystem},
     dock_layout::EditorTab,
     icons::IconManager,
@@ -32,7 +32,7 @@ pub struct EditorContext<'a> {
     /// Show profiler flag
     pub show_profiler: &'a mut bool,
     /// Console log messages (mutable for command output)
-    pub console_messages: &'a mut Vec<LogMessage>,
+    pub console_messages: &'a mut ConsoleLog,
     /// Console log filter settings
     pub log_filter: &'a mut LogFilter,
     /// Viewport texture ID for rendering the 3D scene
@@ -408,9 +408,8 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Render the console panel
     fn render_console(&mut self, ui: &mut Ui) {
-        // Count messages by level
         let (info_count, warn_count, error_count) =
-            LogFilter::count_by_level(self.editor.console_messages);
+            self.editor.console_messages.counts();
 
         // Header with filter toggles (custom styled buttons instead of selectable_label)
         ui.horizontal(|ui| {

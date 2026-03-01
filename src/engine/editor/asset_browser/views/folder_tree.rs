@@ -328,21 +328,21 @@ impl FolderTreeView {
                 // New Folder - always available
                 if ui.button("New Folder").clicked() {
                     context_action = Some(FolderContextAction::NewFolder);
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 // Only show these for non-root folders
                 if !is_root {
                     if ui.button("Rename").clicked() {
                         context_action = Some(FolderContextAction::Rename);
-                        ui.close_menu();
+                        ui.close();
                     }
 
                     ui.separator();
 
                     if ui.button("Reveal in Explorer").clicked() {
                         context_action = Some(FolderContextAction::RevealInExplorer);
-                        ui.close_menu();
+                        ui.close();
                     }
 
                     ui.separator();
@@ -350,14 +350,14 @@ impl FolderTreeView {
                     // Delete button - styled in red
                     if ui.button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80))).clicked() {
                         context_action = Some(FolderContextAction::Delete);
-                        ui.close_menu();
+                        ui.close();
                     }
                 } else {
                     // Root folder can still be revealed
                     ui.separator();
                     if ui.button("Reveal in Explorer").clicked() {
                         context_action = Some(FolderContextAction::RevealInExplorer);
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -516,121 +516,6 @@ impl FolderTreeView {
 
         tree_response
     }
-}
-
-/// Simple folder tree for quick display without full FolderNode structure
-pub fn render_simple_folder_tree(
-    ui: &mut Ui,
-    folders: &[PathBuf],
-    current_folder: &PathBuf,
-    expanded: &mut HashSet<PathBuf>,
-) -> Option<PathBuf> {
-    let mut clicked = None;
-
-    // Build a simple tree structure from flat folder list
-    let mut root_folders: Vec<&PathBuf> = folders
-        .iter()
-        .filter(|f| f.components().count() == 1)
-        .collect();
-    root_folders.sort();
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Root "assets" entry
-            let is_root_selected = current_folder.as_os_str().is_empty();
-            if ui.selectable_label(is_root_selected, "\u{1F4C1} assets").clicked() {
-                clicked = Some(PathBuf::new());
-            }
-
-            // Render top-level folders
-            for folder in root_folders {
-                if let Some(c) = render_simple_folder_recursive(
-                    ui,
-                    folder,
-                    folders,
-                    current_folder,
-                    expanded,
-                    1,
-                ) {
-                    clicked = Some(c);
-                }
-            }
-        });
-
-    clicked
-}
-
-fn render_simple_folder_recursive(
-    ui: &mut Ui,
-    folder: &PathBuf,
-    all_folders: &[PathBuf],
-    current_folder: &PathBuf,
-    expanded: &mut HashSet<PathBuf>,
-    depth: usize,
-) -> Option<PathBuf> {
-    let mut clicked = None;
-
-    // Find children of this folder
-    let children: Vec<&PathBuf> = all_folders
-        .iter()
-        .filter(|f| {
-            f.parent() == Some(folder.as_path()) && f.components().count() == depth + 1
-        })
-        .collect();
-
-    let has_children = !children.is_empty();
-    let is_expanded = expanded.contains(folder);
-    let is_selected = current_folder == folder;
-
-    let indent = depth as f32 * 16.0;
-
-    ui.horizontal(|ui| {
-        ui.add_space(indent);
-
-        // Arrow
-        if has_children {
-            let arrow = if is_expanded { "\u{25BC}" } else { "\u{25B6}" };
-            if ui.small_button(arrow).clicked() {
-                if is_expanded {
-                    expanded.remove(folder);
-                } else {
-                    expanded.insert(folder.clone());
-                }
-            }
-        } else {
-            ui.add_space(16.0);
-        }
-
-        // Folder name
-        let name = folder
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
-        let icon = if is_expanded && has_children {
-            "\u{1F4C2}"
-        } else {
-            "\u{1F4C1}"
-        };
-
-        let label = format!("{} {}", icon, name);
-        if ui.selectable_label(is_selected, &label).clicked() {
-            clicked = Some(folder.clone());
-        }
-    });
-
-    // Children
-    if is_expanded {
-        for child in children {
-            if let Some(c) =
-                render_simple_folder_recursive(ui, child, all_folders, current_folder, expanded, depth + 1)
-            {
-                clicked = Some(c);
-            }
-        }
-    }
-
-    clicked
 }
 
 /// Render a folder icon (PNG or Unicode fallback)

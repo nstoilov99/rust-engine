@@ -86,6 +86,7 @@ pub fn frame_bar_color_fps(duration_ms: f64) -> Color32 {
 /// - Yellow: warning (< warning_threshold_ms)
 /// - Orange: slow (< slow_threshold_ms)
 /// - Red: critical (>= slow_threshold_ms)
+#[allow(dead_code)]
 pub fn frame_bar_color_settings(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
     if duration_ms < settings.fast_threshold_ms as f64 {
         // Green - excellent performance

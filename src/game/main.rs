@@ -14,7 +14,9 @@ use app::App;
 use rust_engine::engine::utils::WindowConfig;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+#[cfg(feature = "editor")]
+use winit::dpi::LogicalPosition;
+use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -80,7 +82,7 @@ impl ApplicationHandler for GameApp {
         };
 
         match App::new(window.clone()) {
-            Ok(mut app) => {
+            Ok(app) => {
                 app.print_controls();
                 println!("Engine ready!\n");
                 self.app = Some(app);

@@ -35,7 +35,7 @@ pub const GRID_SNAP_VALUES: &[f32] = &[1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.
 /// Predefined snap values for rotation - increments (degrees)
 pub const ROTATION_SNAP_VALUES: &[f32] = &[5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 120.0];
 
-/// Predefined snap values for rotation - divisions of 360 (degrees)
+#[allow(dead_code)]
 pub const ROTATION_DIVISIONS_360: &[f32] = &[2.8125, 5.625, 11.25, 22.5];
 
 /// Predefined snap values for scale (Unreal Engine style - Snap Sizes)

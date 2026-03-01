@@ -674,11 +674,8 @@ fn draw_thread_scopes<'a>(
 
     // Show tooltip for hovered scope
     if let Some(scope) = result.hovered {
-        egui::show_tooltip_at_pointer(
-            ui.ctx(),
-            ui.layer_id(),
-            egui::Id::new("scope_tooltip"),
-            |ui| {
+        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("scope_tooltip"), egui::containers::PopupAnchor::Pointer)
+            .show(|ui| {
                 ui.label(RichText::new(scope.name.as_ref()).strong());
                 ui.label(RichText::new(scope.location.as_ref()).weak().small());
                 ui.separator();
@@ -688,8 +685,7 @@ fn draw_thread_scopes<'a>(
                 }
                 ui.add_space(4.0);
                 ui.label(RichText::new("Click to zoom | R: reset | +/-: zoom | Arrows: pan").weak().small());
-            },
-        );
+            });
     }
 
     result
@@ -908,7 +904,7 @@ fn handle_interactions(
     state: &mut ProfilerState,
     time_range_ms: f64,
     content_width: f32,
-    content_height: f32,
+    _content_height: f32,
     max_scroll: f32,
 ) {
     // Pan with drag

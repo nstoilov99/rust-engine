@@ -24,6 +24,19 @@ enum DropMode {
     InsertBelow,
 }
 
+/// One visible row in the flattened hierarchy list.
+struct VisibleRow {
+    entity: Entity,
+    depth: usize,
+    name: String,
+    has_children: bool,
+    is_expanded: bool,
+    icon: &'static str,
+    icon_color: Color32,
+}
+
+const ROW_HEIGHT: f32 = 22.0;
+
 /// Scene Hierarchy Panel state
 pub struct HierarchyPanel {
     /// Search/filter text
@@ -44,6 +57,8 @@ pub struct HierarchyPanel {
     drag_hover_entity: Option<Entity>,
     /// When drag hover started (for auto-expand delay)
     drag_hover_start: Option<Instant>,
+    /// Reusable buffer for flat visible rows (avoids per-frame allocation).
+    flat_rows: Vec<VisibleRow>,
 }
 
 impl Default for HierarchyPanel {
@@ -64,6 +79,7 @@ impl HierarchyPanel {
             root_order: Vec::new(),
             drag_hover_entity: None,
             drag_hover_start: None,
+            flat_rows: Vec::new(),
         }
     }
 
@@ -92,13 +108,10 @@ impl HierarchyPanel {
     pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, play_mode: PlayMode) {
         let read_only = play_mode != PlayMode::Edit;
 
-        // Handle Escape key - priority: cancel rename → clear selection
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.renaming_entity.is_some() {
-                // Cancel rename
                 self.renaming_entity = None;
             } else if !selection.is_empty() {
-                // Clear selection
                 selection.clear();
             }
         }
@@ -110,7 +123,6 @@ impl HierarchyPanel {
         self.render_tree(ui, world, selection, read_only);
     }
 
-    /// Render panel header with title and add button
     fn render_header(&mut self, ui: &mut Ui, world: &mut World, read_only: bool) {
         ui.horizontal(|ui| {
             ui.heading("Hierarchy");
@@ -127,7 +139,6 @@ impl HierarchyPanel {
         });
     }
 
-    /// Render search box
     fn render_search(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Search:");
@@ -138,7 +149,6 @@ impl HierarchyPanel {
             );
             self.filter_active = !self.search_text.is_empty();
 
-            // Clear search on Escape
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.search_text.clear();
                 self.filter_active = false;
@@ -147,14 +157,9 @@ impl HierarchyPanel {
     }
 
     /// Sync root_order with world state.
-    /// Called at start of render and before play-mode snapshot.
     pub fn sync_root_order(&mut self, world: &World) {
         let current_roots: HashSet<Entity> = get_root_entities(world).into_iter().collect();
-
-        // Remove entities that are no longer roots
         self.root_order.retain(|e| current_roots.contains(e));
-
-        // Add new roots that aren't in our order list (at the end)
         for root in current_roots {
             if !self.root_order.contains(&root) {
                 self.root_order.push(root);
@@ -162,7 +167,6 @@ impl HierarchyPanel {
         }
     }
 
-    /// Move a root entity to a new index
     fn move_root(&mut self, entity: Entity, new_index: usize) {
         if let Some(current) = self.root_order.iter().position(|&e| e == entity) {
             self.root_order.remove(current);
@@ -171,12 +175,61 @@ impl HierarchyPanel {
         }
     }
 
-    /// Render the entity tree
+    // ─── flat-row construction ─────────────────────────────────────────
+
+    /// Build a flat visible-row list by walking the hierarchy top-down.
+    /// Respects expand/collapse and filter state.
+    fn build_visible_rows(&mut self, world: &World) {
+        self.flat_rows.clear();
+
+        let roots: Vec<Entity> = self.root_order.clone();
+        for root in roots {
+            self.collect_rows(world, root, 0);
+        }
+    }
+
+    fn collect_rows(&mut self, world: &World, entity: Entity, depth: usize) {
+        let name = world
+            .get::<&Name>(entity)
+            .map(|n| n.0.clone())
+            .unwrap_or_else(|_| format!("Entity {:?}", entity.id()));
+
+        if self.filter_active && !self.matches_filter(&name, world, entity) {
+            return;
+        }
+
+        let children: Vec<Entity> = world
+            .get::<&Children>(entity)
+            .map(|c| c.0.clone())
+            .unwrap_or_default();
+
+        let has_children = !children.is_empty();
+        let entity_id = entity.id() as u64;
+        let is_expanded = self.expanded.contains(&entity_id);
+        let (icon, icon_color) = Self::entity_icon(world, entity);
+
+        self.flat_rows.push(VisibleRow {
+            entity,
+            depth,
+            name,
+            has_children,
+            is_expanded,
+            icon,
+            icon_color,
+        });
+
+        if has_children && is_expanded {
+            for child in children {
+                self.collect_rows(world, child, depth + 1);
+            }
+        }
+    }
+
+    // ─── render tree with virtualization ────────────────────────────────
+
     fn render_tree(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, read_only: bool) {
-        // Sync root order with world state first
         self.sync_root_order(world);
 
-        // Cancel drag in read-only mode or on ESC
         if read_only {
             self.drag_source = None;
         }
@@ -186,30 +239,46 @@ impl HierarchyPanel {
             self.drag_hover_start = None;
         }
 
+        self.build_visible_rows(world);
+
+        let total_rows = self.flat_rows.len();
+
         ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if self.root_order.is_empty() {
+            .show_rows(ui, ROW_HEIGHT, total_rows, |ui, row_range| {
+                if total_rows == 0 {
                     ui.label(RichText::new("No entities in scene").weak());
                     return;
                 }
 
-                // Render roots in explicit order (Entity is Copy, so we can iterate by value)
-                for i in 0..self.root_order.len() {
-                    let root = self.root_order[i]; // Entity is Copy
-                    self.render_entity_node(ui, world, selection, root, 0, read_only);
+                for idx in row_range {
+                    if idx >= self.flat_rows.len() {
+                        break;
+                    }
+                    // Extract data we need (flat_rows is borrowed immutably for data,
+                    // but we may mutate self for expand/collapse/drag).
+                    let entity = self.flat_rows[idx].entity;
+                    let depth = self.flat_rows[idx].depth;
+                    let has_children = self.flat_rows[idx].has_children;
+                    let is_expanded = self.flat_rows[idx].is_expanded;
+                    let icon = self.flat_rows[idx].icon;
+                    let icon_color = self.flat_rows[idx].icon_color;
+                    // Clone the name to avoid borrow conflicts.
+                    let name = self.flat_rows[idx].name.clone();
+
+                    self.render_row(
+                        ui, world, selection, entity, depth, &name,
+                        has_children, is_expanded, icon, icon_color, read_only,
+                    );
                 }
             });
 
-        // Handle keyboard shortcuts
         self.handle_keyboard_shortcuts(ui, world, selection, read_only);
 
-        // Render drag ghost (floating element following cursor)
         if !read_only {
             self.render_drag_ghost(ui, world);
         }
 
-        // Clear drag source after mouse release (once per frame, not per entity)
         if ui.input(|i| i.pointer.any_released()) {
             self.drag_source = None;
             self.drag_hover_entity = None;
@@ -217,80 +286,58 @@ impl HierarchyPanel {
         }
     }
 
-    /// Render a single entity node in the tree
-    fn render_entity_node(
+    /// Render a single flattened row.
+    fn render_row(
         &mut self,
         ui: &mut Ui,
         world: &mut World,
         selection: &mut Selection,
         entity: Entity,
         depth: usize,
+        name: &str,
+        has_children: bool,
+        is_expanded: bool,
+        icon: &str,
+        icon_color: Color32,
         read_only: bool,
     ) {
-        // Get entity name
-        let name = world
-            .get::<&Name>(entity)
-            .map(|n| n.0.clone())
-            .unwrap_or_else(|_| format!("Entity {:?}", entity.id()));
-
-        // Check if entity matches filter
-        if self.filter_active && !self.matches_filter(&name, world, entity) {
-            return;
-        }
-
-        // Get children
-        let children: Vec<Entity> = world
-            .get::<&Children>(entity)
-            .map(|c| c.0.clone())
-            .unwrap_or_default();
-
-        let has_children = !children.is_empty();
         let is_selected = selection.is_selected(entity);
         let is_renaming = self.renaming_entity == Some(entity);
         let entity_id = entity.id() as u64;
-        let is_expanded = self.expanded.contains(&entity_id);
 
-        // Check if this is a valid drop target (for visual feedback)
         let is_valid_drop_target = self.drag_source.map_or(false, |source| {
             source != entity && can_set_parent(world, source, entity)
         });
 
-        // Create a horizontal layout for the row
         let row_response = ui.horizontal(|ui| {
-            // Draw tree guide lines for depth
-            self.draw_tree_guides(ui, depth);
+            Self::draw_tree_guides(ui, depth);
 
-            // Indentation
             let indent = depth as f32 * 16.0;
             ui.add_space(indent);
 
-            // Expand/collapse arrow for entities with children
             if has_children {
-                // Minimalist painted triangle instead of button
                 let (rect, response) =
                     ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
 
                 let center = rect.center();
-                let size = 3.5;
+                let sz = 3.5;
                 let color = if response.hovered() {
                     Color32::WHITE
                 } else {
-                    Color32::from_gray(165)  // Increased from 140 for better visibility
+                    Color32::from_gray(165)
                 };
 
                 let points = if is_expanded {
-                    // Down arrow
                     vec![
-                        pos2(center.x - size, center.y - size * 0.4),
-                        pos2(center.x + size, center.y - size * 0.4),
-                        pos2(center.x, center.y + size * 0.6),
+                        pos2(center.x - sz, center.y - sz * 0.4),
+                        pos2(center.x + sz, center.y - sz * 0.4),
+                        pos2(center.x, center.y + sz * 0.6),
                     ]
                 } else {
-                    // Right arrow
                     vec![
-                        pos2(center.x - size * 0.4, center.y - size),
-                        pos2(center.x + size * 0.6, center.y),
-                        pos2(center.x - size * 0.4, center.y + size),
+                        pos2(center.x - sz * 0.4, center.y - sz),
+                        pos2(center.x + sz * 0.6, center.y),
+                        pos2(center.x - sz * 0.4, center.y + sz),
                     ]
                 };
 
@@ -305,47 +352,33 @@ impl HierarchyPanel {
                     }
                 }
             } else {
-                // Spacer for alignment
                 ui.add_space(16.0);
             }
 
-            // Entity icon with color
-            let (icon, icon_color) = self.get_entity_icon_with_color(world, entity);
             ui.label(RichText::new(icon).color(icon_color));
 
-            // Entity name (or rename field)
             if is_renaming {
                 let response = ui.add(TextEdit::singleline(&mut self.rename_buffer).desired_width(100.0));
-
-                // Auto-focus on first frame
                 response.request_focus();
 
-                // Check Enter while we have focus - commit rename
                 if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.commit_rename(world, entity);
                     self.renaming_entity = None;
-                }
-                // Check Escape - cancel rename
-                else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.renaming_entity = None;
-                }
-                // Lost focus (clicked elsewhere) - commit rename
-                else if response.lost_focus() {
+                } else if response.lost_focus() {
                     self.commit_rename(world, entity);
                     self.renaming_entity = None;
                 }
             } else {
-                // Custom selection rendering (avoids egui's harsh cyan default)
                 let label = if is_selected {
-                    RichText::new(&name).strong().color(Color32::WHITE)
+                    RichText::new(name).strong().color(Color32::WHITE)
                 } else {
-                    RichText::new(&name)
+                    RichText::new(name)
                 };
 
-                // Use regular label with click+drag sensing
                 let response = ui.label(label).interact(egui::Sense::click_and_drag());
 
-                // Draw custom selection background (muted blue-gray, increased alpha for visibility)
                 if is_selected {
                     ui.painter().rect_filled(
                         response.rect.expand(2.0),
@@ -354,7 +387,6 @@ impl HierarchyPanel {
                     );
                 }
 
-                // Handle selection
                 if response.clicked() {
                     if ui.input(|i| i.modifiers.ctrl) {
                         selection.toggle(entity);
@@ -364,28 +396,23 @@ impl HierarchyPanel {
                 }
 
                 if !read_only {
-                    // Double-click to rename
                     if response.double_clicked() {
                         self.start_rename(world, entity);
                     }
 
-                    // Right-click context menu
                     response.context_menu(|ui| {
                         self.render_context_menu(ui, world, selection, entity);
                     });
 
-                    // Drag-and-drop
-                    self.handle_drag_drop(ui, &response, world, entity, is_valid_drop_target, has_children, is_expanded);
+                    self.handle_drag_drop(ui, &response, world, entity);
                 }
             }
         });
 
-        // Draw row hover/drop target highlight
         let row_rect = row_response.response.rect;
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
         let is_hovered = pointer_pos.map(|p| row_rect.contains(p)).unwrap_or(false);
 
-        // Hover highlight (when not dragging) - increased alpha for visibility
         if is_hovered && self.drag_source.is_none() && !is_renaming {
             ui.painter().rect_filled(
                 row_rect,
@@ -394,7 +421,6 @@ impl HierarchyPanel {
             );
         }
 
-        // Drop target highlight (when dragging) - increased alpha for visibility
         if is_hovered && is_valid_drop_target {
             ui.painter().rect_filled(
                 row_rect,
@@ -403,7 +429,6 @@ impl HierarchyPanel {
             );
         }
 
-        // Auto-expand on drag hover (after 500ms)
         if self.drag_source.is_some() && is_hovered && has_children && !is_expanded && is_valid_drop_target {
             if self.drag_hover_entity != Some(entity) {
                 self.drag_hover_entity = Some(entity);
@@ -419,24 +444,16 @@ impl HierarchyPanel {
             self.drag_hover_entity = None;
             self.drag_hover_start = None;
         }
-
-        // Render children (if expanded and has children)
-        if has_children && is_expanded {
-            for child in children {
-                self.render_entity_node(ui, world, selection, child, depth + 1, read_only);
-            }
-        }
     }
 
-    /// Draw tree guide lines to show hierarchy depth
-    fn draw_tree_guides(&self, ui: &mut Ui, depth: usize) {
+    // ─── helpers ───────────────────────────────────────────────────────
+
+    fn draw_tree_guides(ui: &mut Ui, depth: usize) {
         if depth == 0 {
             return;
         }
-
         let row_rect = ui.max_rect();
         let guide_color = Color32::from_gray(75);
-
         for d in 0..depth {
             let x = 8.0 + (d as f32 * 16.0);
             ui.painter().line_segment(
@@ -446,42 +463,30 @@ impl HierarchyPanel {
         }
     }
 
-    /// Get icon and color for entity based on its components
-    fn get_entity_icon_with_color(&self, world: &World, entity: Entity) -> (&'static str, Color32) {
-        // Check for specific component types (using Unicode symbols for cleaner look)
+    fn entity_icon(world: &World, entity: Entity) -> (&'static str, Color32) {
         if world.get::<&Camera>(entity).is_ok() {
-            return ("\u{1F3A5}", Color32::from_rgb(100, 180, 255)); // 🎥 Camera - Blue
+            return ("\u{1F3A5}", Color32::from_rgb(100, 180, 255));
         }
         if world.get::<&DirectionalLight>(entity).is_ok() {
-            return ("\u{2600}", Color32::from_rgb(255, 220, 100)); // ☀ Sun - Yellow
+            return ("\u{2600}", Color32::from_rgb(255, 220, 100));
         }
         if world.get::<&PointLight>(entity).is_ok() {
-            return ("\u{1F4A1}", Color32::from_rgb(255, 180, 100)); // 💡 Light bulb - Orange
+            return ("\u{1F4A1}", Color32::from_rgb(255, 180, 100));
         }
         if world.get::<&MeshRenderer>(entity).is_ok() {
-            return ("\u{25A6}", Color32::from_rgb(150, 150, 255)); // ▦ Mesh grid - Purple
+            return ("\u{25A6}", Color32::from_rgb(150, 150, 255));
         }
         if world.get::<&Children>(entity).is_ok() {
-            return ("\u{1F4C1}", Color32::from_rgb(180, 180, 180)); // 📁 Folder - Gray
+            return ("\u{1F4C1}", Color32::from_rgb(180, 180, 180));
         }
-        ("\u{25CB}", Color32::from_rgb(140, 140, 140)) // ○ Circle - Default dim gray
+        ("\u{25CB}", Color32::from_rgb(140, 140, 140))
     }
 
-    /// Get icon for entity based on its components (legacy, for ghost)
-    fn get_entity_icon(&self, world: &World, entity: Entity) -> &'static str {
-        self.get_entity_icon_with_color(world, entity).0
-    }
-
-    /// Check if entity matches current filter
     fn matches_filter(&self, name: &str, world: &World, entity: Entity) -> bool {
         let search_lower = self.search_text.to_lowercase();
-
-        // Check name
         if name.to_lowercase().contains(&search_lower) {
             return true;
         }
-
-        // Check children recursively
         if let Ok(children) = world.get::<&Children>(entity) {
             for &child in children.0.iter() {
                 let child_name = world
@@ -493,11 +498,9 @@ impl HierarchyPanel {
                 }
             }
         }
-
         false
     }
 
-    /// Create a new empty entity
     fn create_empty_entity(&self, world: &mut World) {
         let count = world.iter().count();
         world.spawn((
@@ -507,7 +510,6 @@ impl HierarchyPanel {
         ));
     }
 
-    /// Start renaming an entity
     fn start_rename(&mut self, world: &World, entity: Entity) {
         self.renaming_entity = Some(entity);
         self.rename_buffer = world
@@ -516,10 +518,8 @@ impl HierarchyPanel {
             .unwrap_or_default();
     }
 
-    /// Commit the rename
     fn commit_rename(&mut self, world: &mut World, entity: Entity) {
         if !self.rename_buffer.is_empty() {
-            // Check if Name component exists first
             let has_name = world.get::<&Name>(entity).is_ok();
             if has_name {
                 if let Ok(mut name) = world.get::<&mut Name>(entity) {
@@ -532,7 +532,6 @@ impl HierarchyPanel {
         self.renaming_entity = None;
     }
 
-    /// Render right-click context menu
     fn render_context_menu(
         &mut self,
         ui: &mut Ui,
@@ -547,7 +546,6 @@ impl HierarchyPanel {
                 EntityGuid::new(),
             ));
             set_parent(world, child, entity);
-            // Expand parent to show new child
             self.expanded.insert(entity.id() as u64);
             ui.close();
         }
@@ -570,27 +568,20 @@ impl HierarchyPanel {
         }
     }
 
-    /// Duplicate an entity
     fn duplicate_entity(&self, world: &mut World, entity: Entity) {
-        // Get components to copy
         let name = world
             .get::<&Name>(entity)
             .map(|n| format!("{} (Copy)", n.0))
             .unwrap_or_else(|_| "Entity (Copy)".to_string());
-
         let transform = world.get::<&Transform>(entity).map(|t| *t).unwrap_or_default();
-
-        // Create duplicate (simple - doesn't copy all components)
         world.spawn((transform, Name::new(name), EntityGuid::new()));
     }
 
-    /// Delete an entity
     fn delete_entity(&self, world: &mut World, selection: &mut Selection, entity: Entity) {
         selection.remove(entity);
         despawn_recursive(world, entity);
     }
 
-    /// Calculate drop mode from mouse Y position within the row
     fn calculate_drop_mode(&self, mouse_y: f32, rect: &egui::Rect) -> DropMode {
         let row_height = rect.height();
         let top_zone = rect.top() + row_height * 0.25;
@@ -605,52 +596,38 @@ impl HierarchyPanel {
         }
     }
 
-    /// Check if a drop is valid for the given mode
     fn is_valid_drop(&self, world: &World, source: Entity, target: Entity, mode: DropMode) -> bool {
         if source == target {
             return false;
         }
-
         match mode {
-            DropMode::MakeChild => {
-                // Check if source can become a child of target
-                can_set_parent(world, source, target)
-            }
+            DropMode::MakeChild => can_set_parent(world, source, target),
             DropMode::InsertAbove | DropMode::InsertBelow => {
-                // For sibling insert, check if we can become child of target's parent
                 if let Ok(parent) = world.get::<&Parent>(target) {
                     can_set_parent(world, source, parent.0)
                 } else {
-                    // Target is root - always valid to become a root sibling
                     true
                 }
             }
         }
     }
 
-    /// Handle drag-and-drop for reordering and reparenting
     fn handle_drag_drop(
         &mut self,
         ui: &mut Ui,
         response: &egui::Response,
         world: &mut World,
         entity: Entity,
-        _is_valid_drop_target: bool, // No longer used - we calculate per-mode
-        _has_children: bool,
-        _is_expanded: bool,
     ) {
-        // Make this item a drag source - use dragged() which is more reliable
         if response.dragged() {
             self.drag_source = Some(entity);
         }
 
-        // Drop target detection with position feedback
         if let Some(source) = self.drag_source {
             if source == entity {
-                return; // Can't drop on self
+                return;
             }
 
-            // Manually check if pointer is over this item's rect (response.hovered() doesn't work during drag)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
             let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
 
@@ -660,18 +637,14 @@ impl HierarchyPanel {
                 let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
 
                 if is_valid {
-                    // Visual feedback based on drop mode
                     match drop_mode {
                         DropMode::InsertAbove => {
-                            // Line at top of row
                             self.draw_insertion_line(ui, response.rect.top(), &response.rect);
                         }
                         DropMode::InsertBelow => {
-                            // Line at bottom of row
                             self.draw_insertion_line(ui, response.rect.bottom(), &response.rect);
                         }
                         DropMode::MakeChild => {
-                            // Highlight the entire row + indent indicator
                             ui.painter().rect_filled(
                                 response.rect,
                                 2.0,
@@ -683,7 +656,6 @@ impl HierarchyPanel {
                                 Stroke::new(2.0, Color32::from_rgb(100, 200, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
-                            // Draw a small "+" icon to indicate "add as child"
                             let icon_pos = pos2(response.rect.right() - 16.0, response.rect.center().y);
                             ui.painter().text(
                                 icon_pos,
@@ -695,7 +667,6 @@ impl HierarchyPanel {
                         }
                     }
                 } else {
-                    // Show "invalid" indicator
                     ui.painter().rect_stroke(
                         response.rect,
                         2.0,
@@ -706,14 +677,12 @@ impl HierarchyPanel {
             }
         }
 
-        // Complete the drop when mouse is released
         if ui.input(|i| i.pointer.any_released()) {
             if let Some(source) = self.drag_source {
                 if source == entity {
                     return;
                 }
 
-                // Use interact_pos() instead of hover_pos() - hover_pos() returns None on release
                 let pointer_pos = ui.input(|i| i.pointer.interact_pos());
                 let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
 
@@ -727,19 +696,15 @@ impl HierarchyPanel {
                     }
                 }
             }
-            // Note: drag_source is cleared in render_tree() after all entities are processed
         }
     }
 
-    /// Draw insertion line indicator for sibling drops
     fn draw_insertion_line(&self, ui: &mut Ui, line_y: f32, rect: &egui::Rect) {
         ui.painter().hline(
             rect.x_range(),
             line_y,
             Stroke::new(2.0, Color32::YELLOW),
         );
-
-        // Add a small triangle/arrow at the left to show insertion point
         let arrow_left = rect.left() - 8.0;
         let arrow_size = 5.0;
         let arrow_points = vec![
@@ -754,7 +719,6 @@ impl HierarchyPanel {
         ));
     }
 
-    /// Perform the drop operation based on drop mode
     fn perform_drop(
         &mut self,
         world: &mut World,
@@ -764,9 +728,7 @@ impl HierarchyPanel {
     ) {
         match drop_mode {
             DropMode::MakeChild => {
-                // Make source a child of target
                 set_parent(world, source, target);
-                // Expand target to show the new child
                 self.expanded.insert(target.id() as u64);
             }
             DropMode::InsertAbove | DropMode::InsertBelow => {
@@ -776,7 +738,6 @@ impl HierarchyPanel {
         }
     }
 
-    /// Perform sibling drop (insert above/below target)
     fn perform_sibling_drop(
         &mut self,
         world: &mut World,
@@ -784,52 +745,38 @@ impl HierarchyPanel {
         target: Entity,
         drop_above: bool,
     ) {
-        // Get parents
         let source_parent = world.get::<&Parent>(source).ok().map(|p| p.0);
         let target_parent = world.get::<&Parent>(target).ok().map(|p| p.0);
 
-        // Same parent = sibling reorder
         if source_parent == target_parent {
             if let Some(parent) = source_parent {
-                // Both have same parent - reorder within Children
                 if let Ok(mut children) = world.get::<&mut Children>(parent) {
                     if let Some(target_idx) = children.index_of(target) {
-                        // Calculate insert index, accounting for source position
                         let source_idx = children.index_of(source);
                         let mut insert_idx = if drop_above { target_idx } else { target_idx + 1 };
-
-                        // If source is before target and we're moving down, adjust index
                         if let Some(src_idx) = source_idx {
                             if src_idx < target_idx {
                                 insert_idx = insert_idx.saturating_sub(1);
                             }
                         }
-
                         children.move_to_index(source, insert_idx);
                     }
                 }
             } else {
-                // Both are roots - reorder in root_order
                 if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
                     let source_idx = self.root_order.iter().position(|&e| e == source);
                     let mut insert_idx = if drop_above { target_idx } else { target_idx + 1 };
-
-                    // Adjust for source position
                     if let Some(src_idx) = source_idx {
                         if src_idx < target_idx {
                             insert_idx = insert_idx.saturating_sub(1);
                         }
                     }
-
                     self.move_root(source, insert_idx);
                 }
             }
         } else {
-            // Different parents = reparent as sibling of target
             if let Some(parent) = target_parent {
-                // Target has a parent - make source a child of that parent (sibling of target)
                 set_parent(world, source, parent);
-                // Then reorder to be near target
                 if let Ok(mut children) = world.get::<&mut Children>(parent) {
                     if let Some(target_idx) = children.index_of(target) {
                         let insert_idx = if drop_above { target_idx } else { target_idx + 1 };
@@ -837,13 +784,10 @@ impl HierarchyPanel {
                     }
                 }
             } else {
-                // Target is root - make source a root too
                 remove_parent(world, source);
-                // Add source to root_order if not present
                 if !self.root_order.contains(&source) {
                     self.root_order.push(source);
                 }
-                // Reorder in root list
                 if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
                     let insert_idx = if drop_above { target_idx } else { target_idx + 1 };
                     self.move_root(source, insert_idx);
@@ -852,35 +796,25 @@ impl HierarchyPanel {
         }
     }
 
-    /// Render floating ghost element during drag operation
     fn render_drag_ghost(&self, ui: &mut Ui, world: &World) {
         if let Some(source) = self.drag_source {
             if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
-                // Get entity name for the ghost label
                 let name = world
                     .get::<&Name>(source)
                     .map(|n| n.0.clone())
                     .unwrap_or_else(|_| format!("Entity {:?}", source.id()));
-
-                // Get entity icon
-                let icon = self.get_entity_icon(world, source);
-
-                // Create ghost text with icon
+                let (icon, _) = Self::entity_icon(world, source);
                 let ghost_text = format!("{} {}", icon, name);
 
-                // Use a top-level layer to ensure ghost is above everything
                 let layer_id =
                     egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag_ghost"));
                 let painter = ui.ctx().layer_painter(layer_id);
 
-                // Draw ghost slightly offset from cursor
                 let ghost_pos = pointer_pos + egui::vec2(12.0, 0.0);
-
-                // Measure text
                 let galley = painter.layout_no_wrap(
                     ghost_text.clone(),
                     egui::FontId::default(),
-                    egui::Color32::WHITE,
+                    Color32::WHITE,
                 );
 
                 let bg_rect = egui::Rect::from_min_size(
@@ -888,34 +822,28 @@ impl HierarchyPanel {
                     galley.size() + egui::vec2(8.0, 8.0),
                 );
 
-                // Semi-transparent background
                 painter.rect_filled(
                     bg_rect,
                     4.0,
-                    egui::Color32::from_rgba_unmultiplied(30, 30, 30, 220),
+                    Color32::from_rgba_unmultiplied(30, 30, 30, 220),
                 );
-
-                // Yellow border (matches drop indicator)
                 painter.rect_stroke(
                     bg_rect,
                     4.0,
-                    egui::Stroke::new(1.5, egui::Color32::YELLOW),
+                    egui::Stroke::new(1.5, Color32::YELLOW),
                     egui::epaint::StrokeKind::Outside,
                 );
-
-                // Ghost text
                 painter.text(
                     ghost_pos,
                     egui::Align2::LEFT_CENTER,
                     ghost_text,
                     egui::FontId::default(),
-                    egui::Color32::WHITE,
+                    Color32::WHITE,
                 );
             }
         }
     }
 
-    /// Handle keyboard shortcuts
     fn handle_keyboard_shortcuts(
         &mut self,
         ui: &mut Ui,
@@ -926,22 +854,16 @@ impl HierarchyPanel {
         if read_only {
             return;
         }
-
-        // Delete key
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
             if let Some(entity) = selection.primary() {
                 self.delete_entity(world, selection, entity);
             }
         }
-
-        // F2 to rename
         if ui.input(|i| i.key_pressed(egui::Key::F2)) {
             if let Some(entity) = selection.primary() {
                 self.start_rename(world, entity);
             }
         }
-
-        // Ctrl+D to duplicate
         if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) {
             if let Some(entity) = selection.primary() {
                 self.duplicate_entity(world, entity);

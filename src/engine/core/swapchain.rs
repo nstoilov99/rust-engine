@@ -87,11 +87,11 @@ pub fn recreate_swapchain(
     surface: Arc<Surface>,
     old_swapchain: Arc<Swapchain>,
 ) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>> {
-    let surface_capabilities = device
+    let _surface_capabilities = device
         .physical_device()
         .surface_capabilities(&surface, Default::default())?;
 
-    let image_format = device
+    let _image_format = device
         .physical_device()
         .surface_formats(&surface, Default::default())?
         .into_iter()

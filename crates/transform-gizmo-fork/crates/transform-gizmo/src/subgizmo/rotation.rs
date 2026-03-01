@@ -37,6 +37,7 @@ pub(crate) struct RotationState {
 #[derive(Default, Debug, Copy, Clone)]
 pub(crate) struct Rotation;
 
+#[allow(dead_code)]
 pub struct RotationPickResult {
     angle: f64,
     rotation_angle: f64,

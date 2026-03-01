@@ -98,6 +98,13 @@ log = "0.4"
 [profile.dev]
 opt-level = 1
 
+# Compile ALL dependencies at full optimization even in dev builds.
+# vulkano, egui, rapier3d, nalgebra etc. dominate CPU time — this
+# typically gives a 3-10x speedup with minimal impact on compile time
+# (deps are only recompiled when their version changes).
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true

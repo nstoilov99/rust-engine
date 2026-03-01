@@ -22,7 +22,7 @@ pub use views::{FolderTreeView, GridView, ListView};
 
 use crate::engine::assets::{AssetId, AssetMetadata, AssetType};
 use crate::engine::editor::icons::IconManager;
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use std::collections::HashSet;
 use std::path::PathBuf;
 

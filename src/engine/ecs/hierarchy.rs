@@ -236,7 +236,12 @@ pub fn get_world_transform(world: &World, entity: Entity) -> glm::Mat4 {
     }
 }
 
-/// Cache for world transforms (optional optimization)
+/// Authoritative, single-pass transform cache.
+///
+/// Call [`TransformCache::propagate`] once per frame (PostUpdate) to walk the
+/// hierarchy top-down and compute every entity's world-space matrix.  All
+/// downstream consumers (mesh submission, camera sync, editor gizmos) then
+/// read from the cache with zero recursion.
 ///
 /// Stores both Z-up world matrices and Y-up render matrices to avoid
 /// recomputation each frame.
@@ -245,7 +250,6 @@ pub struct TransformCache {
     world_cache: HashMap<Entity, glm::Mat4>,
     /// Render transforms in Y-up space (for GPU submission)
     render_cache: HashMap<Entity, glm::Mat4>,
-    dirty: bool,
 }
 
 impl TransformCache {
@@ -253,53 +257,77 @@ impl TransformCache {
         Self {
             world_cache: HashMap::new(),
             render_cache: HashMap::new(),
-            dirty: true,
         }
     }
 
-    /// Mark cache as dirty (call when transforms change)
-    pub fn invalidate(&mut self) {
-        self.dirty = true;
-    }
-
-    fn ensure_clean(&mut self) {
-        if self.dirty {
-            self.world_cache.clear();
-            self.render_cache.clear();
-            self.dirty = false;
-        }
-    }
-
-    /// Get cached world transform in Z-up space, or calculate and cache.
+    /// Single-pass top-down propagation of every entity's world matrix.
     ///
-    /// Use this for game logic, physics, and hierarchy operations.
-    pub fn get_world_transform(&mut self, world: &World, entity: Entity) -> glm::Mat4 {
-        self.ensure_clean();
+    /// Must be called once per frame before any consumer reads transforms.
+    /// Uses an iterative BFS from root entities so there is no recursion.
+    pub fn propagate(&mut self, world: &World) {
+        self.world_cache.clear();
+        self.render_cache.clear();
 
-        if let Some(&cached) = self.world_cache.get(&entity) {
-            return cached;
+        // Seed with all root entities (no Parent component).
+        let mut queue: Vec<(Entity, glm::Mat4)> = Vec::new();
+
+        // Collect entities with parents for the root-detection pass.
+        let entities_with_parents: std::collections::HashSet<Entity> = world
+            .query::<&Parent>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+
+        for (entity, _) in world.query::<()>().iter() {
+            if !entities_with_parents.contains(&entity) {
+                let local = world
+                    .get::<&Transform>(entity)
+                    .map(|t| t.local_matrix_zup())
+                    .unwrap_or_else(|_| glm::identity());
+                self.world_cache.insert(entity, local);
+                let render = crate::engine::adapters::render_adapter::world_matrix_to_render(&local);
+                self.render_cache.insert(entity, render);
+                queue.push((entity, local));
+            }
         }
 
-        let transform = get_world_transform(world, entity);
-        self.world_cache.insert(entity, transform);
-        transform
+        // BFS: propagate down through Children.
+        let mut head = 0;
+        while head < queue.len() {
+            let (parent_entity, parent_world) = queue[head];
+            head += 1;
+
+            let children: Vec<Entity> = world
+                .get::<&Children>(parent_entity)
+                .map(|c| c.0.clone())
+                .unwrap_or_default();
+
+            for child in children {
+                let local = world
+                    .get::<&Transform>(child)
+                    .map(|t| t.local_matrix_zup())
+                    .unwrap_or_else(|_| glm::identity());
+                let child_world = parent_world * local;
+                self.world_cache.insert(child, child_world);
+                let render = crate::engine::adapters::render_adapter::world_matrix_to_render(&child_world);
+                self.render_cache.insert(child, render);
+                queue.push((child, child_world));
+            }
+        }
     }
 
-    /// Get cached render transform in Y-up space, or calculate and cache.
+    /// Get cached world transform in Z-up space.
     ///
-    /// Use this for GPU submission and rendering.
-    pub fn get_render_transform(&mut self, world: &World, entity: Entity) -> glm::Mat4 {
-        self.ensure_clean();
+    /// Returns identity if the entity was not seen during [`propagate`].
+    pub fn get_world(&self, entity: Entity) -> glm::Mat4 {
+        self.world_cache.get(&entity).copied().unwrap_or_else(glm::identity)
+    }
 
-        if let Some(&cached) = self.render_cache.get(&entity) {
-            return cached;
-        }
-
-        let world_transform = self.get_world_transform(world, entity);
-        let render_transform =
-            crate::engine::adapters::render_adapter::world_matrix_to_render(&world_transform);
-        self.render_cache.insert(entity, render_transform);
-        render_transform
+    /// Get cached render transform in Y-up space.
+    ///
+    /// Returns identity if the entity was not seen during [`propagate`].
+    pub fn get_render(&self, entity: Entity) -> glm::Mat4 {
+        self.render_cache.get(&entity).copied().unwrap_or_else(glm::identity)
     }
 }
 

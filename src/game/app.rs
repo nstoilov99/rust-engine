@@ -11,7 +11,7 @@ use rust_engine::engine::ecs::schedule::Schedule;
 use egui_dock::DockArea;
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
-    CommandHistory, ConsoleCommandSystem, EditorCamera, EditorContext, EditorDockState,
+    CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
     EditorTabViewer, GizmoHandler, HierarchyPanel, IconManager, InspectorPanel, LogFilter,
     LogMessage, MenuAction, ProfilerPanel, RenameTarget, Selection, ViewportSettings,
     ViewportTexture, WindowConfig,
@@ -23,9 +23,8 @@ use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderD
 use rust_engine::engine::rendering::RenderTarget;
 use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::events::PlayModeChanged;
-use rust_engine::engine::ecs::hierarchy::get_world_transform;
+use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
-use rust_engine::engine::adapters::render_adapter::world_matrix_to_render;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::scene::{save_scene, load_scene};
 use rust_engine::assets::AssetType;
@@ -43,7 +42,7 @@ use winit::window::{CursorGrabMode, Window};
 const MIN_VIEWPORT_SIZE_FOR_CAMERA: u32 = 50;
 
 /// Saved editor state for restoring after play mode ends.
-struct PrePlayCameraState {
+pub(crate) struct PrePlayCameraState {
     position: glam::Vec3,
     target: glam::Vec3,
     fov: f32,
@@ -54,6 +53,7 @@ struct PrePlayCameraState {
 
 /// Core engine state: renderer, ECS, physics, assets, input.
 /// Contains zero references to editor or gui types.
+#[allow(dead_code)]
 pub struct CoreApp {
     pub window: Arc<Window>,
     pub renderer: Renderer,
@@ -72,41 +72,67 @@ pub struct CoreApp {
     pub descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    pub transform_cache: TransformCache,
 }
 
-/// Editor-specific state: GUI, panels, gizmos, dock, selection, commands.
-pub struct EditorApp {
-    pub gui: Gui,
-    pub hierarchy_panel: HierarchyPanel,
-    pub inspector_panel: InspectorPanel,
-    pub profiler_panel: ProfilerPanel,
-    pub selection: Selection,
-    pub command_history: CommandHistory,
-    pub dock_state: EditorDockState,
-    pub console_messages: Vec<LogMessage>,
-    pub log_filter: LogFilter,
-    pub console_command_system: ConsoleCommandSystem,
-    pub console_input: String,
-    pub show_stat_fps: bool,
-    pub show_profiler: bool,
-    pub viewport_texture: ViewportTexture,
-    pub viewport_texture_id: Option<egui::TextureId>,
-    pub viewport_size: (u32, u32),
-    pub pending_viewport_sync: bool,
-    pub editor_camera: EditorCamera,
+/// Viewport rendering, camera, gizmo, and interaction state.
+pub struct ViewportState {
+    pub texture: ViewportTexture,
+    pub texture_id: Option<egui::TextureId>,
+    pub size: (u32, u32),
+    pub pending_sync: bool,
+    pub camera: EditorCamera,
     pub gizmo_handler: GizmoHandler,
     pub grid_visible: bool,
-    pub viewport_hovered: bool,
-    pub viewport_rect: egui::Rect,
-    camera_cursor_locked: bool,
-    drag_start_cursor_pos: Option<(f32, f32)>,
-    pub viewport_settings: ViewportSettings,
-    pub icon_manager: IconManager,
-    icons_loaded: bool,
+    pub hovered: bool,
+    pub rect: egui::Rect,
+    pub cursor_locked: bool,
+    pub drag_start_cursor_pos: Option<(f32, f32)>,
+    pub settings: ViewportSettings,
+}
+
+/// Console log, filter, command system.
+pub struct ConsoleState {
+    pub messages: ConsoleLog,
+    pub log_filter: LogFilter,
+    pub command_system: ConsoleCommandSystem,
+    pub input: String,
+}
+
+/// Scene editing panels and undo history.
+pub struct SceneEditorState {
+    pub hierarchy_panel: HierarchyPanel,
+    pub inspector_panel: InspectorPanel,
+    pub selection: Selection,
+    pub command_history: CommandHistory,
     pub asset_browser: AssetBrowserPanel,
-    play_mode_snapshot: Option<PlayModeSnapshot>,
-    pre_play_camera: Option<PrePlayCameraState>,
+}
+
+/// General editor UI state: dock, profiler, icons, overlays.
+pub struct EditorUIState {
+    pub gui: Gui,
+    pub dock_state: EditorDockState,
+    pub show_stat_fps: bool,
+    pub show_profiler: bool,
+    pub icon_manager: IconManager,
+    pub icons_loaded: bool,
+    pub profiler_panel: ProfilerPanel,
+}
+
+/// Play-mode snapshots and build dialog.
+pub struct PlayModeState {
+    pub snapshot: Option<PlayModeSnapshot>,
+    pub pre_play_camera: Option<PrePlayCameraState>,
     pub build_dialog: BuildDialog,
+}
+
+/// Editor-specific state, decomposed into semantic sub-structures.
+pub struct EditorApp {
+    pub viewport: ViewportState,
+    pub console: ConsoleState,
+    pub scene: SceneEditorState,
+    pub ui: EditorUIState,
+    pub play: PlayModeState,
 }
 
 /// Main application combining CoreApp and EditorApp.
@@ -119,7 +145,7 @@ impl App {
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up...");
 
-        let mut renderer = Renderer::new(window.clone())?;
+        let renderer = Renderer::new(window.clone())?;
 
         let swapchain_format = renderer.images[0].format();
         let gui = Gui::new(
@@ -194,43 +220,56 @@ impl App {
             descriptor_set,
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
+            transform_cache: TransformCache::new(),
         };
 
         let editor = EditorApp {
-            gui,
-            hierarchy_panel,
-            inspector_panel: InspectorPanel::new(),
-            profiler_panel,
-            selection: Selection::new(),
-            command_history: CommandHistory::new(100),
-            dock_state: EditorDockState::load_or_default(),
-            console_messages: vec![
-                LogMessage::info("Engine initialized successfully"),
-                LogMessage::info("Scene loaded"),
-            ],
-            log_filter: LogFilter::default(),
-            console_command_system: ConsoleCommandSystem::new(),
-            console_input: String::new(),
-            show_stat_fps: false,
-            show_profiler: false,
-            viewport_texture,
-            viewport_texture_id: None,
-            viewport_size: (800, 600),
-            pending_viewport_sync: false,
-            editor_camera: EditorCamera::new(800.0, 600.0),
-            gizmo_handler: GizmoHandler::new(),
-            grid_visible: true,
-            viewport_hovered: false,
-            viewport_rect: egui::Rect::NOTHING,
-            camera_cursor_locked: false,
-            drag_start_cursor_pos: None,
-            viewport_settings: ViewportSettings::default(),
-            icon_manager: IconManager::new(20, egui::Color32::WHITE),
-            icons_loaded: false,
-            asset_browser: AssetBrowserPanel::new(std::path::PathBuf::from("content")),
-            play_mode_snapshot: None,
-            pre_play_camera: None,
-            build_dialog: BuildDialog::new(),
+            viewport: ViewportState {
+                texture: viewport_texture,
+                texture_id: None,
+                size: (800, 600),
+                pending_sync: false,
+                camera: EditorCamera::new(800.0, 600.0),
+                gizmo_handler: GizmoHandler::new(),
+                grid_visible: true,
+                hovered: false,
+                rect: egui::Rect::NOTHING,
+                cursor_locked: false,
+                drag_start_cursor_pos: None,
+                settings: ViewportSettings::default(),
+            },
+            console: ConsoleState {
+                messages: {
+                    let mut log = ConsoleLog::new();
+                    log.push(LogMessage::info("Engine initialized successfully"));
+                    log.push(LogMessage::info("Scene loaded"));
+                    log
+                },
+                log_filter: LogFilter::default(),
+                command_system: ConsoleCommandSystem::new(),
+                input: String::new(),
+            },
+            scene: SceneEditorState {
+                hierarchy_panel,
+                inspector_panel: InspectorPanel::new(),
+                selection: Selection::new(),
+                command_history: CommandHistory::new(100),
+                asset_browser: AssetBrowserPanel::new(std::path::PathBuf::from("content")),
+            },
+            ui: EditorUIState {
+                gui,
+                dock_state: EditorDockState::load_or_default(),
+                show_stat_fps: false,
+                show_profiler: false,
+                icon_manager: IconManager::new(20, egui::Color32::WHITE),
+                icons_loaded: false,
+                profiler_panel,
+            },
+            play: PlayModeState {
+                snapshot: None,
+                pre_play_camera: None,
+                build_dialog: BuildDialog::new(),
+            },
         };
 
         Ok(Self { core, editor })
@@ -241,7 +280,7 @@ impl App {
     }
 
     pub fn save_layout_on_exit(&self) {
-        if let Err(e) = self.editor.dock_state.save_to_default() {
+        if let Err(e) = self.editor.ui.dock_state.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
         }
 
@@ -322,12 +361,12 @@ impl App {
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent, _event_loop: &ActiveEventLoop) {
-        self.editor.gui.handle_event(event);
+        self.editor.ui.gui.handle_event(event);
 
         match event {
             WindowEvent::Resized(new_size) => {
                 self.core.renderer.recreate_swapchain = true;
-                self.editor.gui
+                self.editor.ui.gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
             WindowEvent::KeyboardInput { event: key_event, .. } => {
@@ -338,8 +377,8 @@ impl App {
 
                 if key_event.state.is_pressed() {
                     if keycode == Some(KeyCode::F12) {
-                        self.editor.show_profiler = !self.editor.show_profiler;
-                        println!("Profiler: {}", if self.editor.show_profiler { "ON" } else { "OFF" });
+                        self.editor.ui.show_profiler = !self.editor.ui.show_profiler;
+                        println!("Profiler: {}", if self.editor.ui.show_profiler { "ON" } else { "OFF" });
                     }
 
                     if keycode == Some(KeyCode::F5) {
@@ -368,7 +407,7 @@ impl App {
                                 self.core.game_world.hecs(),
                                 &scene_path.to_string_lossy(),
                                 "Main Scene",
-                                self.editor.hierarchy_panel.root_order(),
+                                self.editor.scene.hierarchy_panel.root_order(),
                             ) {
                                 Ok(_) => println!("Scene saved to {}", scene_path.display()),
                                 Err(e) => eprintln!("Save failed: {}", e),
@@ -393,13 +432,13 @@ impl App {
                 self.core.input_manager.handle_mouse_wheel(scroll);
             }
             WindowEvent::Focused(false) => {
-                self.editor.editor_camera.reset_active_drag();
-                if self.editor.camera_cursor_locked {
+                self.editor.viewport.camera.reset_active_drag();
+                if self.editor.viewport.cursor_locked {
                     let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
                     self.core.window.set_cursor_visible(true);
-                    self.editor.camera_cursor_locked = false;
+                    self.editor.viewport.cursor_locked = false;
                     self.core.input_manager.set_use_raw_mouse(false);
-                    self.editor.drag_start_cursor_pos = None;
+                    self.editor.viewport.drag_start_cursor_pos = None;
                 }
             }
             _ => {}
@@ -409,35 +448,42 @@ impl App {
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_function!();
 
-        if self.editor.viewport_texture_id.is_none() {
-            let texture_id = self
-                .editor.gui
-                .register_native_texture(self.editor.viewport_texture.image_view());
-            self.editor.viewport_texture_id = Some(texture_id);
+        // Single-pass authoritative transform propagation for the entire hierarchy.
+        {
+            rust_engine::profile_scope!("transform_propagate");
+            self.core.transform_cache.propagate(self.core.game_world.hecs());
         }
 
-        if !self.editor.icons_loaded {
+        if self.editor.viewport.texture_id.is_none() {
+            let texture_id = self
+                .editor.ui.gui
+                .register_native_texture(self.editor.viewport.texture.image_view());
+            self.editor.viewport.texture_id = Some(texture_id);
+        }
+
+        if !self.editor.ui.icons_loaded {
             let engine_path = std::path::Path::new("engine");
-            self.editor.icon_manager.load_toolbar_icons(self.editor.gui.context(), engine_path);
-            self.editor.icon_manager.load_asset_browser_icons(self.editor.gui.context(), engine_path);
-            self.editor.icons_loaded = true;
+            self.editor.ui.icon_manager.load_toolbar_icons(self.editor.ui.gui.context(), engine_path);
+            self.editor.ui.icon_manager.load_asset_browser_icons(self.editor.ui.gui.context(), engine_path);
+            self.editor.ui.icons_loaded = true;
         }
 
         if self.play_mode() != PlayMode::Edit {
             self.sync_camera_from_ecs();
         }
 
-        self.core.renderer.camera_3d.position = self.editor.editor_camera.position;
-        self.core.renderer.camera_3d.target = self.editor.editor_camera.target;
-        self.core.renderer.camera_3d.up = self.editor.editor_camera.up;
-        self.core.renderer.camera_3d.fov = self.editor.editor_camera.fov;
-        self.core.renderer.camera_3d.aspect_ratio = self.editor.editor_camera.aspect_ratio;
+        self.core.renderer.camera_3d.position = self.editor.viewport.camera.position;
+        self.core.renderer.camera_3d.target = self.editor.viewport.camera.target;
+        self.core.renderer.camera_3d.up = self.editor.viewport.camera.up;
+        self.core.renderer.camera_3d.fov = self.editor.viewport.camera.fov;
+        self.core.renderer.camera_3d.aspect_ratio = self.editor.viewport.camera.aspect_ratio;
 
         render_loop::prepare_mesh_data(
             self.core.game_world.hecs(),
             &self.core.asset_manager,
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
+            &self.core.transform_cache,
         );
         let light_data = render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);
 
@@ -445,15 +491,15 @@ impl App {
             prev_future.cleanup_finished();
         }
 
-        if self.editor.pending_viewport_sync {
-            let (vp_width, vp_height) = self.editor.viewport_size;
+        if self.editor.viewport.pending_sync {
+            let (vp_width, vp_height) = self.editor.viewport.size;
             if vp_width > 0 && vp_height > 0 {
-                if let Ok(true) = self.editor.viewport_texture.resize(vp_width, vp_height) {
-                    if let Some(texture_id) = self.editor.viewport_texture_id {
-                        self.editor.gui
-                            .update_native_texture(texture_id, self.editor.viewport_texture.image_view());
+                if let Ok(true) = self.editor.viewport.texture.resize(vp_width, vp_height) {
+                    if let Some(texture_id) = self.editor.viewport.texture_id {
+                        self.editor.ui.gui
+                            .update_native_texture(texture_id, self.editor.viewport.texture.image_view());
                     }
-                    self.editor.editor_camera.set_viewport_size(vp_width as f32, vp_height as f32);
+                    self.editor.viewport.camera.set_viewport_size(vp_width as f32, vp_height as f32);
                     self.core.renderer
                         .camera_3d
                         .set_viewport_size(vp_width as f32, vp_height as f32);
@@ -462,7 +508,7 @@ impl App {
                     eprintln!("Failed to sync deferred renderer after swapchain recreation: {}", e);
                 }
             }
-            self.editor.pending_viewport_sync = false;
+            self.editor.viewport.pending_sync = false;
         }
 
         if self.core.renderer.recreate_swapchain {
@@ -475,8 +521,8 @@ impl App {
                     return Ok(());
                 }
                 Ok(true) => {
-                    self.editor.pending_viewport_sync = true;
-                    self.editor.gui.clear_framebuffer_cache();
+                    self.editor.viewport.pending_sync = true;
+                    self.editor.ui.gui.clear_framebuffer_cache();
                 }
                 Err(e) => {
                     self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
@@ -494,16 +540,16 @@ impl App {
                 }
             };
 
-        let (vp_width, vp_height) = self.editor.viewport_size;
-        if vp_width != self.editor.viewport_texture.width() || vp_height != self.editor.viewport_texture.height() {
+        let (vp_width, vp_height) = self.editor.viewport.size;
+        if vp_width != self.editor.viewport.texture.width() || vp_height != self.editor.viewport.texture.height() {
             if vp_width > 0 && vp_height > 0 {
-                if let Ok(resized) = self.editor.viewport_texture.resize(vp_width, vp_height) {
+                if let Ok(resized) = self.editor.viewport.texture.resize(vp_width, vp_height) {
                     if resized {
-                        if let Some(texture_id) = self.editor.viewport_texture_id {
-                            self.editor.gui
-                                .update_native_texture(texture_id, self.editor.viewport_texture.image_view());
+                        if let Some(texture_id) = self.editor.viewport.texture_id {
+                            self.editor.ui.gui
+                                .update_native_texture(texture_id, self.editor.viewport.texture.image_view());
                         }
-                        self.editor.editor_camera.set_viewport_size(vp_width as f32, vp_height as f32);
+                        self.editor.viewport.camera.set_viewport_size(vp_width as f32, vp_height as f32);
                         self.core.renderer.camera_3d.set_viewport_size(vp_width as f32, vp_height as f32);
                         if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
                             eprintln!("Failed to resize deferred renderer: {}", e);
@@ -513,10 +559,10 @@ impl App {
             }
         }
 
-        let view_proj = self.editor.editor_camera.view_projection_matrix();
-        let camera_pos = self.editor.editor_camera.position;
+        let view_proj = self.editor.viewport.camera.view_projection_matrix();
+        let camera_pos = self.editor.viewport.camera.position;
 
-        let render_target = RenderTarget::Texture { image: self.editor.viewport_texture.image() };
+        let render_target = RenderTarget::Texture { image: self.editor.viewport.texture.image() };
 
         let is_editing = self.play_mode() == PlayMode::Edit;
 
@@ -524,7 +570,7 @@ impl App {
             &self.core.mesh_data_buffer,
             &light_data,
             render_target,
-            self.editor.grid_visible && is_editing,
+            self.editor.viewport.grid_visible && is_editing,
             view_proj,
             camera_pos,
         ) {
@@ -538,44 +584,44 @@ impl App {
 
         let current_play_mode = self.play_mode();
 
-        let show_profiler = &mut self.editor.show_profiler;
-        let hierarchy_panel = &mut self.editor.hierarchy_panel;
-        let inspector_panel = &mut self.editor.inspector_panel;
-        let profiler_panel = &mut self.editor.profiler_panel;
+        let show_profiler = &mut self.editor.ui.show_profiler;
+        let hierarchy_panel = &mut self.editor.scene.hierarchy_panel;
+        let inspector_panel = &mut self.editor.scene.inspector_panel;
+        let profiler_panel = &mut self.editor.ui.profiler_panel;
         let world = self.core.game_world.hecs_mut();
-        let selection = &mut self.editor.selection;
-        let command_history = &mut self.editor.command_history;
-        let dock_state = &mut self.editor.dock_state;
-        let console_messages = &mut self.editor.console_messages;
-        let log_filter = &mut self.editor.log_filter;
-        let console_command_system = &mut self.editor.console_command_system;
-        let console_input = &mut self.editor.console_input;
-        let show_stat_fps = &mut self.editor.show_stat_fps;
+        let selection = &mut self.editor.scene.selection;
+        let command_history = &mut self.editor.scene.command_history;
+        let dock_state = &mut self.editor.ui.dock_state;
+        let console_messages = &mut self.editor.console.messages;
+        let log_filter = &mut self.editor.console.log_filter;
+        let console_command_system = &mut self.editor.console.command_system;
+        let console_input = &mut self.editor.console.input;
+        let show_stat_fps = &mut self.editor.ui.show_stat_fps;
         let fps = self.core.game_loop.fps();
         let delta_ms = self.core.game_loop.delta_ms();
-        let viewport_texture_id = self.editor.viewport_texture_id;
-        let viewport_size = &mut self.editor.viewport_size;
-        let editor_camera = &mut self.editor.editor_camera;
-        let gizmo_handler = &mut self.editor.gizmo_handler;
-        let grid_visible = &mut self.editor.grid_visible;
-        let viewport_hovered = &mut self.editor.viewport_hovered;
-        let prev_viewport_rect = self.editor.viewport_rect;
-        let mut new_viewport_rect = self.editor.viewport_rect;
-        let viewport_settings = &mut self.editor.viewport_settings;
+        let viewport_texture_id = self.editor.viewport.texture_id;
+        let viewport_size = &mut self.editor.viewport.size;
+        let editor_camera = &mut self.editor.viewport.camera;
+        let gizmo_handler = &mut self.editor.viewport.gizmo_handler;
+        let grid_visible = &mut self.editor.viewport.grid_visible;
+        let viewport_hovered = &mut self.editor.viewport.hovered;
+        let prev_viewport_rect = self.editor.viewport.rect;
+        let mut new_viewport_rect = self.editor.viewport.rect;
+        let viewport_settings = &mut self.editor.viewport.settings;
 
-        let icon_manager = if self.editor.icon_manager.has_any_icons() {
-            Some(&self.editor.icon_manager)
+        let icon_manager = if self.editor.ui.icon_manager.has_any_icons() {
+            Some(&self.editor.ui.icon_manager)
         } else {
             None
         };
 
-        let asset_browser = &mut self.editor.asset_browser;
-        let build_dialog = &mut self.editor.build_dialog;
+        let asset_browser = &mut self.editor.scene.asset_browser;
+        let build_dialog = &mut self.editor.play.build_dialog;
 
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
 
-        let gui_result = match self.editor.gui.render(window, target_image, Some(prev_viewport_rect), |ctx| {
+        let gui_result = match self.editor.ui.gui.render(window, target_image, Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(ctx, dock_state, command_history, current_play_mode, build_dialog, console_messages);
 
             let editor_ctx = EditorContext {
@@ -621,7 +667,7 @@ impl App {
             }
         };
 
-        self.editor.viewport_rect = new_viewport_rect;
+        self.editor.viewport.rect = new_viewport_rect;
 
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
@@ -638,7 +684,7 @@ impl App {
                         self.core.game_world.hecs(),
                         &scene_path.to_string_lossy(),
                         "Main Scene",
-                        self.editor.hierarchy_panel.root_order(),
+                        self.editor.scene.hierarchy_panel.root_order(),
                     ) {
                         Ok(_) => println!("Scene saved to {}", scene_path.display()),
                         Err(e) => eprintln!("Save failed: {}", e),
@@ -652,27 +698,27 @@ impl App {
             }
             MenuAction::Undo => {
                 if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self.editor.command_history.undo(self.core.game_world.hecs_mut()) {
+                    if let Some(desc) = self.editor.scene.command_history.undo(self.core.game_world.hecs_mut()) {
                         println!("Undo: {}", desc);
                     }
                 }
             }
             MenuAction::Redo => {
                 if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self.editor.command_history.redo(self.core.game_world.hecs_mut()) {
+                    if let Some(desc) = self.editor.scene.command_history.redo(self.core.game_world.hecs_mut()) {
                         println!("Redo: {}", desc);
                     }
                 }
             }
             MenuAction::SaveLayout => {
-                match self.editor.dock_state.save_to_default() {
+                match self.editor.ui.dock_state.save_to_default() {
                     Ok(()) => println!("Layout saved to {}", EditorDockState::default_layout_path().display()),
                     Err(e) => eprintln!("Failed to save layout: {}", e),
                 }
             }
             MenuAction::ResetLayout => {
-                self.editor.dock_state = EditorDockState::new();
-                let _ = self.editor.dock_state.save_to_default();
+                self.editor.ui.dock_state = EditorDockState::new();
+                let _ = self.editor.ui.dock_state.save_to_default();
                 println!("Layout reset to default");
             }
             MenuAction::Play => self.enter_play_mode(),
@@ -682,15 +728,15 @@ impl App {
         }
 
         // Process asset browser events
-        let asset_events: Vec<_> = self.editor.asset_browser.events.drain().collect();
+        let asset_events: Vec<_> = self.editor.scene.asset_browser.events.drain().collect();
         for event in asset_events {
             match event {
                 AssetBrowserEvent::AssetOpened { id } => {
-                    if let Some(metadata) = self.editor.asset_browser.registry.get(id) {
+                    if let Some(metadata) = self.editor.scene.asset_browser.registry.get(id) {
                         match metadata.asset_type {
                             AssetType::Scene => {
                                 if self.play_mode() != PlayMode::Edit {
-                                    self.editor.console_messages.push(LogMessage::warning(
+                                    self.editor.console.messages.push(LogMessage::warning(
                                         "Stop play mode before loading a scene".to_string()
                                     ));
                                     continue;
@@ -699,18 +745,18 @@ impl App {
                                 let relative = metadata.path.to_string_lossy();
 
                                 self.core.game_world.hecs_mut().clear();
-                                self.editor.selection.clear();
+                                self.editor.scene.selection.clear();
 
                                 match load_scene(self.core.game_world.hecs_mut(), &relative) {
                                     Ok((scene_name, root_entities)) => {
-                                        self.editor.hierarchy_panel.set_root_order(root_entities);
-                                        self.editor.console_messages.push(LogMessage::info(
+                                        self.editor.scene.hierarchy_panel.set_root_order(root_entities);
+                                        self.editor.console.messages.push(LogMessage::info(
                                             format!("Loaded scene: {}", scene_name)
                                         ));
                                         println!("Scene loaded: {}", metadata.display_name);
                                     }
                                     Err(e) => {
-                                        self.editor.console_messages.push(LogMessage::error(
+                                        self.editor.console.messages.push(LogMessage::error(
                                             format!("Failed to load scene: {}", e)
                                         ));
                                         eprintln!("Failed to load scene: {}", e);
@@ -725,7 +771,7 @@ impl App {
                     println!("Asset {} dropped at {:?}", id.0, position);
                 }
                 AssetBrowserEvent::RevealInExplorer { path } => {
-                    let full_path = self.editor.asset_browser.registry.root_path().join(&path);
+                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
                     #[cfg(target_os = "windows")]
                     {
                         let _ = std::process::Command::new("explorer")
@@ -748,19 +794,19 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::AssetDeleted { id, path } => {
-                    let full_path = self.editor.asset_browser.registry.root_path().join(&path);
+                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
                     match std::fs::remove_file(&full_path) {
                         Ok(()) => {
-                            self.editor.console_messages.push(LogMessage::info(
+                            self.editor.console.messages.push(LogMessage::info(
                                 format!("Deleted: {}", path.display())
                             ));
-                            if self.editor.asset_browser.selection.is_selected(id) {
-                                self.editor.asset_browser.selection.remove(id);
+                            if self.editor.scene.asset_browser.selection.is_selected(id) {
+                                self.editor.scene.asset_browser.selection.remove(id);
                             }
-                            self.editor.asset_browser.request_rescan();
+                            self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 format!("Failed to delete {}: {}", path.display(), e)
                             ));
                             eprintln!("Failed to delete file: {}", e);
@@ -768,8 +814,8 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::AssetRenamed { id, old_name, new_name } => {
-                    if let Some(metadata) = self.editor.asset_browser.registry.get(id) {
-                        let old_path = self.editor.asset_browser.registry.root_path().join(&metadata.path);
+                    if let Some(metadata) = self.editor.scene.asset_browser.registry.get(id) {
+                        let old_path = self.editor.scene.asset_browser.registry.root_path().join(&metadata.path);
                         let extension = old_path.extension()
                             .map(|e| format!(".{}", e.to_string_lossy()))
                             .unwrap_or_default();
@@ -779,27 +825,27 @@ impl App {
                             .unwrap_or_else(|| std::path::PathBuf::from(&new_filename));
 
                         if new_path.exists() && new_path != old_path {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 format!("Cannot rename: '{}' already exists", new_filename)
                             ));
                         } else if new_name.is_empty() || new_name.trim().is_empty() {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 "Cannot rename: name cannot be empty".to_string()
                             ));
                         } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 "Cannot rename: name contains invalid characters".to_string()
                             ));
                         } else {
                             match std::fs::rename(&old_path, &new_path) {
                                 Ok(()) => {
-                                    self.editor.console_messages.push(LogMessage::info(
+                                    self.editor.console.messages.push(LogMessage::info(
                                         format!("Renamed '{}' to '{}'", old_name, new_name)
                                     ));
-                                    self.editor.asset_browser.request_rescan();
+                                    self.editor.scene.asset_browser.request_rescan();
                                 }
                                 Err(e) => {
-                                    self.editor.console_messages.push(LogMessage::error(
+                                    self.editor.console.messages.push(LogMessage::error(
                                         format!("Failed to rename '{}': {}", old_name, e)
                                     ));
                                     eprintln!("Failed to rename file: {}", e);
@@ -809,7 +855,7 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::CreateFolder { parent_path } => {
-                    let full_parent = self.editor.asset_browser.registry.root_path().join(&parent_path);
+                    let full_parent = self.editor.scene.asset_browser.registry.root_path().join(&parent_path);
                     let base_name = "New Folder";
                     let mut new_name = base_name.to_string();
                     let mut counter = 1;
@@ -820,21 +866,21 @@ impl App {
                     let new_folder_path = full_parent.join(&new_name);
                     match std::fs::create_dir(&new_folder_path) {
                         Ok(()) => {
-                            self.editor.console_messages.push(LogMessage::info(
+                            self.editor.console.messages.push(LogMessage::info(
                                 format!("Created folder: {}", new_name)
                             ));
                             if !parent_path.as_os_str().is_empty() {
-                                self.editor.asset_browser.folder_expanded.insert(parent_path.clone());
+                                self.editor.scene.asset_browser.folder_expanded.insert(parent_path.clone());
                             }
-                            self.editor.asset_browser.request_rescan();
+                            self.editor.scene.asset_browser.request_rescan();
                             let relative_new_folder_path = parent_path.join(&new_name);
-                            self.editor.asset_browser.renaming = Some(RenameTarget::Folder {
+                            self.editor.scene.asset_browser.renaming = Some(RenameTarget::Folder {
                                 path: relative_new_folder_path,
                                 current_name: new_name.clone(),
                             });
                         }
                         Err(e) => {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 format!("Failed to create folder: {}", e)
                             ));
                             eprintln!("Failed to create folder: {}", e);
@@ -842,26 +888,26 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::FolderDeleted { path } => {
-                    let full_path = self.editor.asset_browser.registry.root_path().join(&path);
+                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
                     let result = std::fs::remove_dir(&full_path)
                         .or_else(|_| std::fs::remove_dir_all(&full_path));
                     match result {
                         Ok(()) => {
-                            self.editor.console_messages.push(LogMessage::info(
+                            self.editor.console.messages.push(LogMessage::info(
                                 format!("Deleted folder: {}", path.display())
                             ));
-                            if self.editor.asset_browser.current_folder == path ||
-                               self.editor.asset_browser.current_folder.starts_with(&path) {
+                            if self.editor.scene.asset_browser.current_folder == path ||
+                               self.editor.scene.asset_browser.current_folder.starts_with(&path) {
                                 if let Some(parent) = path.parent() {
-                                    self.editor.asset_browser.current_folder = parent.to_path_buf();
+                                    self.editor.scene.asset_browser.current_folder = parent.to_path_buf();
                                 } else {
-                                    self.editor.asset_browser.current_folder = std::path::PathBuf::new();
+                                    self.editor.scene.asset_browser.current_folder = std::path::PathBuf::new();
                                 }
                             }
-                            self.editor.asset_browser.request_rescan();
+                            self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 format!("Failed to delete folder: {}", e)
                             ));
                             eprintln!("Failed to delete folder: {}", e);
@@ -869,7 +915,7 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::RevealFolderInExplorer { path } => {
-                    let full_path = self.editor.asset_browser.registry.root_path().join(&path);
+                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
                     #[cfg(target_os = "windows")]
                     {
                         let _ = std::process::Command::new("explorer")
@@ -890,15 +936,15 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::AssetMoved { id: _, old_path, new_path } => {
-                    let full_old_path = self.editor.asset_browser.registry.root_path().join(&old_path);
-                    let full_new_path = self.editor.asset_browser.registry.root_path().join(&new_path);
+                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
+                    let full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
 
                     if let Some(parent) = full_new_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
 
                     if full_new_path.exists() {
-                        self.editor.console_messages.push(LogMessage::error(
+                        self.editor.console.messages.push(LogMessage::error(
                             format!("Cannot move: '{}' already exists in target folder",
                                 new_path.file_name()
                                     .map(|n| n.to_string_lossy().to_string())
@@ -907,7 +953,7 @@ impl App {
                     } else {
                         match std::fs::rename(&full_old_path, &full_new_path) {
                             Ok(()) => {
-                                self.editor.console_messages.push(LogMessage::info(
+                                self.editor.console.messages.push(LogMessage::info(
                                     format!("Moved '{}' to '{}'",
                                         old_path.file_name()
                                             .map(|n| n.to_string_lossy().to_string())
@@ -916,10 +962,10 @@ impl App {
                                             .map(|p| p.display().to_string())
                                             .unwrap_or_else(|| "root".to_string()))
                                 ));
-                                self.editor.asset_browser.request_rescan();
+                                self.editor.scene.asset_browser.request_rescan();
                             }
                             Err(e) => {
-                                self.editor.console_messages.push(LogMessage::error(
+                                self.editor.console.messages.push(LogMessage::error(
                                     format!("Failed to move file: {}", e)
                                 ));
                                 eprintln!("Failed to move file: {}", e);
@@ -928,8 +974,8 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::FolderMoved { old_path, new_path } => {
-                    let full_old_path = self.editor.asset_browser.registry.root_path().join(&old_path);
-                    let mut full_new_path = self.editor.asset_browser.registry.root_path().join(&new_path);
+                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
+                    let mut full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
                     let mut final_new_path = new_path.clone();
                     let mut was_renamed = false;
 
@@ -943,7 +989,7 @@ impl App {
                         loop {
                             let new_name = format!("{} ({})", base_name, counter);
                             let candidate = parent.join(&new_name);
-                            let full_candidate = self.editor.asset_browser.registry.root_path().join(&candidate);
+                            let full_candidate = self.editor.scene.asset_browser.registry.root_path().join(&candidate);
                             if !full_candidate.exists() {
                                 final_new_path = candidate;
                                 full_new_path = full_candidate;
@@ -952,7 +998,7 @@ impl App {
                             }
                             counter += 1;
                             if counter > 100 {
-                                self.editor.console_messages.push(LogMessage::error(
+                                self.editor.console.messages.push(LogMessage::error(
                                     format!("Cannot move: too many folders named '{}' in target location", base_name)
                                 ));
                                 continue;
@@ -973,27 +1019,27 @@ impl App {
                                 let new_name = final_new_path.file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                self.editor.console_messages.push(LogMessage::info(
+                                self.editor.console.messages.push(LogMessage::info(
                                     format!("Moved folder '{}' to '{}' (renamed to '{}')",
                                         original_name, target_dir, new_name)
                                 ));
                             } else {
-                                self.editor.console_messages.push(LogMessage::info(
+                                self.editor.console.messages.push(LogMessage::info(
                                     format!("Moved folder '{}' to '{}'", original_name, target_dir)
                                 ));
                             }
 
-                            if self.editor.asset_browser.current_folder.starts_with(&old_path) {
-                                if let Ok(relative) = self.editor.asset_browser.current_folder.strip_prefix(&old_path) {
-                                    self.editor.asset_browser.current_folder = final_new_path.join(relative);
+                            if self.editor.scene.asset_browser.current_folder.starts_with(&old_path) {
+                                if let Ok(relative) = self.editor.scene.asset_browser.current_folder.strip_prefix(&old_path) {
+                                    self.editor.scene.asset_browser.current_folder = final_new_path.join(relative);
                                 } else {
-                                    self.editor.asset_browser.current_folder = final_new_path.clone();
+                                    self.editor.scene.asset_browser.current_folder = final_new_path.clone();
                                 }
                             }
-                            self.editor.asset_browser.request_rescan();
+                            self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console_messages.push(LogMessage::error(
+                            self.editor.console.messages.push(LogMessage::error(
                                 format!("Failed to move folder: {}", e)
                             ));
                             eprintln!("Failed to move folder: {}", e);
@@ -1001,23 +1047,23 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::FolderRenamed { old_path, new_path } => {
-                    let full_old_path = self.editor.asset_browser.registry.root_path().join(&old_path);
-                    let full_new_path = self.editor.asset_browser.registry.root_path().join(&new_path);
+                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
+                    let full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
 
                     let new_name = new_path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
 
                     if new_name.is_empty() || new_name.trim().is_empty() {
-                        self.editor.console_messages.push(LogMessage::error(
+                        self.editor.console.messages.push(LogMessage::error(
                             "Cannot rename: folder name cannot be empty".to_string()
                         ));
                     } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
-                        self.editor.console_messages.push(LogMessage::error(
+                        self.editor.console.messages.push(LogMessage::error(
                             "Cannot rename: folder name contains invalid characters".to_string()
                         ));
                     } else if full_new_path.exists() && full_new_path != full_old_path {
-                        self.editor.console_messages.push(LogMessage::error(
+                        self.editor.console.messages.push(LogMessage::error(
                             format!("Cannot rename: folder '{}' already exists", new_name)
                         ));
                     } else {
@@ -1026,21 +1072,21 @@ impl App {
                                 let old_name = old_path.file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| old_path.display().to_string());
-                                self.editor.console_messages.push(LogMessage::info(
+                                self.editor.console.messages.push(LogMessage::info(
                                     format!("Renamed folder '{}' to '{}'", old_name, new_name)
                                 ));
-                                if self.editor.asset_browser.current_folder == old_path ||
-                                   self.editor.asset_browser.current_folder.starts_with(&old_path) {
-                                    if let Ok(relative) = self.editor.asset_browser.current_folder.strip_prefix(&old_path) {
-                                        self.editor.asset_browser.current_folder = new_path.join(relative);
+                                if self.editor.scene.asset_browser.current_folder == old_path ||
+                                   self.editor.scene.asset_browser.current_folder.starts_with(&old_path) {
+                                    if let Ok(relative) = self.editor.scene.asset_browser.current_folder.strip_prefix(&old_path) {
+                                        self.editor.scene.asset_browser.current_folder = new_path.join(relative);
                                     } else {
-                                        self.editor.asset_browser.current_folder = new_path.clone();
+                                        self.editor.scene.asset_browser.current_folder = new_path.clone();
                                     }
                                 }
-                                self.editor.asset_browser.request_rescan();
+                                self.editor.scene.asset_browser.request_rescan();
                             }
                             Err(e) => {
-                                self.editor.console_messages.push(LogMessage::error(
+                                self.editor.console.messages.push(LogMessage::error(
                                     format!("Failed to rename folder: {}", e)
                                 ));
                                 eprintln!("Failed to rename folder: {}", e);
@@ -1098,11 +1144,11 @@ impl App {
 
         match play_mode::create_snapshot(
             self.core.game_world.hecs(),
-            &mut self.editor.hierarchy_panel,
-            &self.editor.selection,
+            &mut self.editor.scene.hierarchy_panel,
+            &self.editor.scene.selection,
         ) {
             Ok(snapshot) => {
-                self.editor.play_mode_snapshot = Some(snapshot);
+                self.editor.play.snapshot = Some(snapshot);
             }
             Err(e) => {
                 log::error!("Failed to create play mode snapshot: {}", e);
@@ -1120,12 +1166,12 @@ impl App {
             time.paused = false;
         }
 
-        self.editor.pre_play_camera = Some(PrePlayCameraState {
-            position: self.editor.editor_camera.position,
-            target: self.editor.editor_camera.target,
-            fov: self.editor.editor_camera.fov,
-            near: self.editor.editor_camera.near,
-            far: self.editor.editor_camera.far,
+        self.editor.play.pre_play_camera = Some(PrePlayCameraState {
+            position: self.editor.viewport.camera.position,
+            target: self.editor.viewport.camera.target,
+            fov: self.editor.viewport.camera.fov,
+            near: self.editor.viewport.camera.near,
+            far: self.editor.viewport.camera.far,
             debug_view: self.core.current_debug_view,
         });
 
@@ -1160,17 +1206,17 @@ impl App {
 
         self.core.game_world.reset_transients(false);
 
-        if let Some(snapshot) = self.editor.play_mode_snapshot.as_ref() {
+        if let Some(snapshot) = self.editor.play.snapshot.as_ref() {
             match play_mode::restore_snapshot(
                 snapshot,
                 &mut self.core.game_world,
-                &mut self.editor.hierarchy_panel,
-                &mut self.editor.selection,
+                &mut self.editor.scene.hierarchy_panel,
+                &mut self.editor.scene.selection,
                 &mut self.core.physics_world,
-                &mut self.editor.command_history,
+                &mut self.editor.scene.command_history,
             ) {
                 Ok(()) => {
-                    self.editor.play_mode_snapshot = None;
+                    self.editor.play.snapshot = None;
                 }
                 Err(e) => {
                     log::error!("Failed to restore play mode snapshot (snapshot preserved): {}", e);
@@ -1180,12 +1226,12 @@ impl App {
             log::warn!("stop_play_mode called but no snapshot exists");
         }
 
-        if let Some(saved) = self.editor.pre_play_camera.take() {
-            self.editor.editor_camera.position = saved.position;
-            self.editor.editor_camera.target = saved.target;
-            self.editor.editor_camera.fov = saved.fov;
-            self.editor.editor_camera.near = saved.near;
-            self.editor.editor_camera.far = saved.far;
+        if let Some(saved) = self.editor.play.pre_play_camera.take() {
+            self.editor.viewport.camera.position = saved.position;
+            self.editor.viewport.camera.target = saved.target;
+            self.editor.viewport.camera.fov = saved.fov;
+            self.editor.viewport.camera.near = saved.near;
+            self.editor.viewport.camera.far = saved.far;
             self.core.current_debug_view = saved.debug_view;
             self.core.deferred_renderer.set_debug_view(saved.debug_view);
         }
@@ -1255,25 +1301,25 @@ impl App {
     /// Syncs the editor camera from the first active ECS Camera entity,
     /// matching the standalone build's behavior exactly.
     fn sync_camera_from_ecs(&mut self) {
-        let (vp_w, vp_h) = self.editor.viewport_size;
+        let (vp_w, vp_h) = self.editor.viewport.size;
         let world = self.core.game_world.hecs();
+        let cache = &self.core.transform_cache;
 
         for (entity, (_transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
             if !camera.active {
                 continue;
             }
-            let world_mat = get_world_transform(world, entity);
-            let render_mat = world_matrix_to_render(&world_mat);
+            let render_mat = cache.get_render(entity);
 
             let pos = glam::Vec3::new(render_mat[(0, 3)], render_mat[(1, 3)], render_mat[(2, 3)]);
             let forward = glam::Vec3::new(-render_mat[(0, 2)], -render_mat[(1, 2)], -render_mat[(2, 2)]);
 
-            self.editor.editor_camera.position = pos;
-            self.editor.editor_camera.target = pos + forward;
-            self.editor.editor_camera.fov = camera.fov.to_radians();
-            self.editor.editor_camera.near = camera.near;
-            self.editor.editor_camera.far = camera.far;
-            self.editor.editor_camera.set_viewport_size(vp_w as f32, vp_h as f32);
+            self.editor.viewport.camera.position = pos;
+            self.editor.viewport.camera.target = pos + forward;
+            self.editor.viewport.camera.fov = camera.fov.to_radians();
+            self.editor.viewport.camera.near = camera.near;
+            self.editor.viewport.camera.far = camera.far;
+            self.editor.viewport.camera.set_viewport_size(vp_w as f32, vp_h as f32);
             return;
         }
     }
@@ -1281,72 +1327,72 @@ impl App {
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
         if self.play_mode() == PlayMode::Edit && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft) {
             if self.core.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
-                if let Some(desc) = self.editor.command_history.undo(self.core.game_world.hecs_mut()) {
+                if let Some(desc) = self.editor.scene.command_history.undo(self.core.game_world.hecs_mut()) {
                     println!("Undo: {}", desc);
                 }
             }
             if self.core.input_manager.is_key_just_pressed(KeyCode::KeyY) {
-                if let Some(desc) = self.editor.command_history.redo(self.core.game_world.hecs_mut()) {
+                if let Some(desc) = self.editor.scene.command_history.redo(self.core.game_world.hecs_mut()) {
                     println!("Redo: {}", desc);
                 }
             }
         }
 
-        let gizmo_active = self.editor.gizmo_handler.is_dragging();
+        let gizmo_active = self.editor.viewport.gizmo_handler.is_dragging();
         let delta_time = self.core.game_loop.delta();
 
         let is_playing = self.play_mode() != PlayMode::Edit;
 
-        self.editor.editor_camera.mouse_sensitivity = self.editor.viewport_settings.mouse_sensitivity;
+        self.editor.viewport.camera.mouse_sensitivity = self.editor.viewport.settings.mouse_sensitivity;
 
-        let (vp_w, vp_h) = self.editor.viewport_size;
+        let (vp_w, vp_h) = self.editor.viewport.size;
         let viewport_usable = vp_w >= MIN_VIEWPORT_SIZE_FOR_CAMERA && vp_h >= MIN_VIEWPORT_SIZE_FOR_CAMERA;
 
         if is_playing {
-            self.editor.editor_camera.reset_active_drag();
-        } else if !viewport_usable && self.editor.editor_camera.is_active_drag() {
-            self.editor.editor_camera.reset_active_drag();
+            self.editor.viewport.camera.reset_active_drag();
+        } else if !viewport_usable && self.editor.viewport.camera.is_active_drag() {
+            self.editor.viewport.camera.reset_active_drag();
         }
 
         if !is_playing {
-            let viewport_available = (self.editor.viewport_hovered || self.editor.editor_camera.is_active_drag())
+            let viewport_available = (self.editor.viewport.hovered || self.editor.viewport.camera.is_active_drag())
                 && !gui_result.is_using_pointer
                 && viewport_usable;
 
-            self.editor.editor_camera.update(
+            self.editor.viewport.camera.update(
                 &self.core.input_manager,
                 delta_time,
                 viewport_available,
                 gizmo_active,
-                self.editor.viewport_settings.camera_speed,
+                self.editor.viewport.settings.camera_speed,
             );
 
-            if (self.editor.editor_camera.fly_speed_multiplier - 1.0).abs() > 0.001 {
-                let new_speed = (self.editor.viewport_settings.camera_speed * self.editor.editor_camera.fly_speed_multiplier)
+            if (self.editor.viewport.camera.fly_speed_multiplier - 1.0).abs() > 0.001 {
+                let new_speed = (self.editor.viewport.settings.camera_speed * self.editor.viewport.camera.fly_speed_multiplier)
                     .clamp(0.03, 8.0);
-                self.editor.viewport_settings.camera_speed = new_speed;
-                self.editor.editor_camera.fly_speed_multiplier = 1.0;
+                self.editor.viewport.settings.camera_speed = new_speed;
+                self.editor.viewport.camera.fly_speed_multiplier = 1.0;
             }
         }
 
-        let camera_dragging = !is_playing && self.editor.editor_camera.is_active_drag();
+        let camera_dragging = !is_playing && self.editor.viewport.camera.is_active_drag();
 
-        if camera_dragging && !self.editor.camera_cursor_locked {
-            self.editor.drag_start_cursor_pos = Some(self.core.input_manager.mouse_position());
+        if camera_dragging && !self.editor.viewport.cursor_locked {
+            self.editor.viewport.drag_start_cursor_pos = Some(self.core.input_manager.mouse_position());
             if self.core.window.set_cursor_grab(CursorGrabMode::Confined).is_err() {
                 let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
             }
             self.core.window.set_cursor_visible(false);
-            self.editor.camera_cursor_locked = true;
+            self.editor.viewport.cursor_locked = true;
             self.core.input_manager.set_use_raw_mouse(true);
-        } else if !camera_dragging && self.editor.camera_cursor_locked {
+        } else if !camera_dragging && self.editor.viewport.cursor_locked {
             let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
-            if let Some((x, y)) = self.editor.drag_start_cursor_pos.take() {
+            if let Some((x, y)) = self.editor.viewport.drag_start_cursor_pos.take() {
                 let pos = winit::dpi::PhysicalPosition::new(x as f64, y as f64);
                 let _ = self.core.window.set_cursor_position(pos);
             }
             self.core.window.set_cursor_visible(true);
-            self.editor.camera_cursor_locked = false;
+            self.editor.viewport.cursor_locked = false;
             self.core.input_manager.set_use_raw_mouse(false);
         }
 
@@ -1358,7 +1404,7 @@ impl App {
             );
         }
 
-        if !gui_result.wants_pointer && !self.editor.viewport_hovered {
+        if !gui_result.wants_pointer && !self.editor.viewport.hovered {
             input_handler::handle_zoom(
                 &mut self.core.renderer,
                 &self.core.input_manager,

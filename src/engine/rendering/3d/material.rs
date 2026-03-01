@@ -31,14 +31,13 @@ impl PbrMaterial {
 
 /// Creates default white 1x1 texture for missing maps
 pub fn create_default_texture(
-    device: Arc<vulkano::device::Device>,
+    _device: Arc<vulkano::device::Device>,
     allocator: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
-    color: [u8; 4],
+    _color: [u8; 4],
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
     use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::format::Format;
-    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
-    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+    use vulkano::memory::allocator::AllocationCreateInfo;
 
     // Create 1x1 texture with solid color
     let image = Image::new(

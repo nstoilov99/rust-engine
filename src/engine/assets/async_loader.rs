@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use parking_lot::Mutex;
 
 use super::asset_manager::AssetManager;
-use super::handle::{Handle, AssetId};
+use super::handle::AssetId;
 
 /// Asset loading request
 pub enum LoadRequest {
@@ -20,7 +20,7 @@ pub enum LoadResult {
 
 /// Async asset loader for background loading
 pub struct AsyncAssetLoader {
-    runtime: Arc<Runtime>,
+    _runtime: Arc<Runtime>,
     assets: Arc<AssetManager>,
     result_receiver: Arc<Mutex<mpsc::UnboundedReceiver<LoadResult>>>,
     request_sender: mpsc::UnboundedSender<LoadRequest>,
@@ -104,7 +104,7 @@ impl AsyncAssetLoader {
         });
 
         Self {
-            runtime,
+            _runtime: runtime,
             assets,
             result_receiver: Arc::new(Mutex::new(result_rx)),
             request_sender: request_tx,
@@ -141,9 +141,8 @@ impl AsyncAssetLoader {
 
     /// Check if a specific asset is loaded (synchronous check)
     pub fn is_texture_loaded(&self, path: &str) -> bool {
-        let id = AssetId::from_path(path);
-        // Check if it's in the cache
-        self.assets.textures.cache_size() > 0 // Simplified check
+        let _id = AssetId::from_path(path);
+        self.assets.textures.cache_size() > 0
     }
 
     /// Get number of pending load requests

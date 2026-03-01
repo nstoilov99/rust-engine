@@ -314,31 +314,31 @@ impl ListView {
         sense_response.context_menu(|ui| {
             if ui.button("Open").clicked() {
                 context_action = Some(ContextAction::Open);
-                ui.close_menu();
+                ui.close();
             }
 
             if ui.button("Rename").clicked() {
                 context_action = Some(ContextAction::Rename);
-                ui.close_menu();
+                ui.close();
             }
 
             ui.separator();
 
             if ui.button("Reveal in Explorer").clicked() {
                 context_action = Some(ContextAction::RevealInExplorer);
-                ui.close_menu();
+                ui.close();
             }
 
             if ui.button("Copy Path").clicked() {
                 ui.ctx().copy_text(asset.path.to_string_lossy().to_string());
-                ui.close_menu();
+                ui.close();
             }
 
             ui.separator();
 
             if ui.button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80))).clicked() {
                 context_action = Some(ContextAction::Delete);
-                ui.close_menu();
+                ui.close();
             }
         });
 

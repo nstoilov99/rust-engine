@@ -7,7 +7,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 
 /// Creates a depth buffer image and view
 pub fn create_depth_buffer(
-    device: Arc<Device>,
+    _device: Arc<Device>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     width: u32,
     height: u32,

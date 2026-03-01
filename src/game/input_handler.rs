@@ -14,6 +14,7 @@ use winit::keyboard::KeyCode;
 ///
 /// Camera uses Y-up coordinate system (Y=up, X=right, Z=forward).
 /// Uses table-driven approach to avoid 6 repetitive if-blocks.
+#[allow(dead_code)]
 pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, speed: f32) {
     let forward = (renderer.camera_3d.target - renderer.camera_3d.position).normalize();
     // Y-up: standard cross product forward × up = right
@@ -42,6 +43,7 @@ pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, spe
 ///
 /// Y-up: yaw rotates around Y axis, pitch adjusts Y component.
 /// Consolidated from 4 separate if-blocks.
+#[allow(dead_code)]
 pub fn handle_camera_rotation(renderer: &mut Renderer, input: &InputManager, look_speed: f32) {
     let mut yaw_delta = 0.0f32;
     let mut pitch_delta = 0.0f32;
@@ -103,7 +105,7 @@ pub fn handle_debug_views(
     }
 }
 
-/// Handle mouse wheel zoom
+#[cfg(feature = "editor")]
 pub fn handle_zoom(
     renderer: &mut Renderer,
     input: &InputManager,

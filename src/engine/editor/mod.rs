@@ -24,7 +24,7 @@ pub use asset_browser::{
     SortCriteria, ThumbnailCache, ViewMode,
 };
 pub use commands::*;
-pub use console::*;
+pub use console::{ConsoleLog, LogFilter, LogLevel, LogMessage};
 pub use console_cmd::ConsoleCommandSystem;
 pub use dock_layout::*;
 pub use hierarchy_panel::*;

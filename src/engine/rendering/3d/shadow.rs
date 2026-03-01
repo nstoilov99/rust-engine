@@ -32,7 +32,7 @@ pub fn create_shadow_render_pass(
 
 /// Creates a shadow map (depth texture) - typically 2048x2048
 pub fn create_shadow_map(
-    device: Arc<Device>,
+    _device: Arc<Device>,
     allocator: Arc<StandardMemoryAllocator>,
     size: u32,
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {

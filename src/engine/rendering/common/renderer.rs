@@ -7,7 +7,7 @@ use crate::engine::rendering::rendering_2d::SpriteBatch;
 use crate::engine::rendering::rendering_3d::light::{AmbientLight, DirectionalLight, PointLight};
 use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
 use crate::engine::scene::Transform2D;
-use crate::rendering::common::framebuffer::{create_framebuffers, create_framebuffers_3d};
+use crate::rendering::common::framebuffer::create_framebuffers;
 use crate::rendering::common::render_pass::create_render_pass;
 use crate::rendering::rendering_2d::pipeline_2d::{
     camera_vs, create_camera_pipeline, create_quad_indices, create_quad_vertices,
@@ -60,9 +60,8 @@ pub struct Renderer {
     pub pipeline: Arc<GraphicsPipeline>,
     pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pub descriptor_set: Arc<DescriptorSet>,
-    // Frame-in-flight tracking
-    frames_in_flight: usize,
-    current_frame: usize,
+    _frames_in_flight: usize,
+    _current_frame: usize,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     pub recreate_swapchain: bool,
     /// Tracks if we've already logged the minimized state (prevents log spam)
@@ -265,8 +264,8 @@ impl Renderer {
             pipeline,
             descriptor_set_allocator,
             descriptor_set,
-            frames_in_flight: 2,
-            current_frame: 0,
+            _frames_in_flight: 2,
+            _current_frame: 0,
             previous_frame_end: None,
             recreate_swapchain: false,
             was_minimized: false,
@@ -286,96 +285,144 @@ impl Renderer {
         })
     }
 
-    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame and cleanup
+    /// Begin a render frame: cleanup the previous frame future, handle
+    /// minimized windows, recreate the swapchain when flagged, and acquire
+    /// the next swapchain image.
+    ///
+    /// Returns `Ok(None)` when rendering should be skipped this frame
+    /// (minimized window or out-of-date swapchain queued for recreation).
+    fn begin_render_frame(
+        &mut self,
+    ) -> Result<Option<(u32, vk_swapchain::SwapchainAcquireFuture)>, Box<dyn std::error::Error>> {
         if let Some(mut previous) = self.previous_frame_end.take() {
             previous.cleanup_finished();
         }
 
-        // Check if window is minimized (zero size) - skip rendering
         let extent = self.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
-            // Only log once when entering minimized state
             if !self.was_minimized {
                 println!("Window minimized, pausing render");
                 self.was_minimized = true;
             }
-            // Window is minimized, skip rendering but keep the future alive
             self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-            return Ok(());
+            return Ok(None);
         } else if self.was_minimized {
-            // Window restored - log once and reset flag
             println!("Window restored, resuming render");
             self.was_minimized = false;
         }
 
-        // Check if we need to recreate swapchain
         if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-
-            // If images is empty, window is minimized - keep old swapchain and skip rendering
-            if new_images.is_empty() {
-                self.recreate_swapchain = false; // Reset flag but keep old swapchain
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-                return Ok(());
+            if !self.recreate_swapchain_resources()? {
+                return Ok(None);
             }
-
-            self.swapchain = new_swapchain;
-            self.images = new_images.clone();
-
-            // Recreate framebuffers for new images
-            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
-
-            // Update camera viewport to match new swapchain size
-            let extent = self.images[0].extent();
-            self.camera
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
-
-            self.recreate_swapchain = false;
-
-            // Recreate depth buffer for new size
-            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
-                self.device.clone(),
-                self.memory_allocator.clone(),
-                new_images[0].extent()[0],
-                new_images[0].extent()[1],
-            )?;
-
-            // Recreate 3D framebuffers
-            self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
-                &new_images,
-                self.render_pass_3d.clone(),
-                self.depth_buffer.clone(),
-            )?;
-
-            // Update 3D camera aspect ratio
-            let extent = new_images[0].extent();
-            self.camera_3d
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
         }
 
-        // Acquire next image
         let (image_index, suboptimal, acquire_future) =
             match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
                 Ok(r) => r,
                 Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    // Swapchain is out of date (window resized)
                     self.recreate_swapchain = true;
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(e) => return Err(e.into()),
             };
 
-        // If suboptimal, recreate on next frame
         if suboptimal {
             self.recreate_swapchain = true;
         }
 
-        // Build command buffer to draw triangle
+        Ok(Some((image_index, acquire_future)))
+    }
+
+    /// Recreate all swapchain-dependent resources (framebuffers, depth buffer,
+    /// camera viewports). Returns `false` when the window is minimized
+    /// (zero-sized images) and rendering should be skipped.
+    fn recreate_swapchain_resources(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let (new_swapchain, new_images) = recreate_swapchain(
+            self.device.clone(),
+            self.surface.clone(),
+            self.swapchain.clone(),
+        )?;
+
+        if new_images.is_empty() {
+            self.recreate_swapchain = false;
+            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            return Ok(false);
+        }
+
+        self.swapchain = new_swapchain;
+
+        self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
+            self.device.clone(),
+            self.memory_allocator.clone(),
+            new_images[0].extent()[0],
+            new_images[0].extent()[1],
+        )?;
+
+        self.images = new_images;
+
+        self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+        self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
+            &self.images,
+            self.render_pass_3d.clone(),
+            self.depth_buffer.clone(),
+        )?;
+
+        let extent = self.images[0].extent();
+        self.camera
+            .set_viewport_size(extent[0] as f32, extent[1] as f32);
+        self.camera_3d
+            .set_viewport_size(extent[0] as f32, extent[1] as f32);
+
+        self.recreate_swapchain = false;
+        Ok(true)
+    }
+
+    /// Submit a command buffer, present to the swapchain, and store the
+    /// resulting fence future for the next frame's cleanup.
+    fn submit_and_present(
+        &mut self,
+        acquire_future: impl GpuFuture + 'static,
+        command_buffer: Arc<impl vulkano::command_buffer::PrimaryCommandBufferAbstract + 'static>,
+        image_index: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let future = acquire_future
+            .then_execute(self.queue.clone(), command_buffer)?
+            .then_swapchain_present(
+                self.queue.clone(),
+                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(Validated::Error(VulkanError::DeviceLost)) => {
+                return Err("GPU device lost".into());
+            }
+            Err(Validated::Error(VulkanError::OutOfDate)) => {
+                self.recreate_swapchain = true;
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            }
+            Err(e) => {
+                eprintln!("Failed to flush future: {:?}", e);
+                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (image_index, acquire_future) = match self.begin_render_frame()? {
+            Some(frame) => frame,
+            None => return Ok(()),
+        };
+
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -409,39 +456,7 @@ impl Renderer {
         builder.end_render_pass(SubpassEndInfo::default())?;
 
         let command_buffer = builder.build()?;
-
-        // Execute command buffer and present
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(Validated::Error(VulkanError::DeviceLost)) => {
-                eprintln!("FATAL: GPU device lost. This is unrecoverable.");
-                return Err("GPU device lost".into());
-            }
-            Err(Validated::Error(VulkanError::OutOfDate)) => {
-                // Swapchain out of date during present - queue recreation
-                self.recreate_swapchain = true;
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-            }
-            Err(e) => {
-                eprintln!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-            }
-        }
-
-        Ok(())
+        self.submit_and_present(acquire_future, command_buffer, image_index)
     }
 
     /// Renders a sprite with 2D transform
@@ -516,73 +531,11 @@ impl Renderer {
         &mut self,
         sprites: &[(Transform2D, Arc<DescriptorSet>)],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame and cleanup
-        if let Some(mut previous) = self.previous_frame_end.take() {
-            previous.cleanup_finished();
-        }
+        let (image_index, acquire_future) = match self.begin_render_frame()? {
+            Some(frame) => frame,
+            None => return Ok(()),
+        };
 
-        // Check if window is minimized (zero size) - skip rendering
-        let extent = self.swapchain.image_extent();
-        if extent[0] == 0 || extent[1] == 0 {
-            // Only log once when entering minimized state
-            if !self.was_minimized {
-                println!("Window minimized, pausing render");
-                self.was_minimized = true;
-            }
-            // Window is minimized, skip rendering but keep the future alive
-            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-            return Ok(());
-        } else if self.was_minimized {
-            println!("Window restored, resuming render");
-            self.was_minimized = false;
-        }
-
-        // Check if we need to recreate swapchain
-        if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-
-            // If images is empty, window is minimized - keep old swapchain and skip rendering
-            if new_images.is_empty() {
-                self.recreate_swapchain = false; // Reset flag but keep old swapchain
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-                return Ok(());
-            }
-
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-
-            // Recreate framebuffers for new images
-            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
-
-            // Update camera viewport to match new swapchain size
-            let extent = self.images[0].extent();
-            self.camera
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
-
-            self.recreate_swapchain = false;
-        }
-
-        // Acquire next image
-        let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-        // If suboptimal, recreate on next frame
-        if suboptimal {
-            self.recreate_swapchain = true;
-        }
-
-        // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -642,30 +595,7 @@ impl Renderer {
         builder.end_render_pass(SubpassEndInfo::default())?;
 
         let command_buffer = builder.build()?;
-
-        // Execute command buffer and present (DO NOT JOIN - just like render())
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = None;
-            }
-        }
-
-        Ok(())
+        self.submit_and_present(acquire_future, command_buffer, image_index)
     }
 
     /// Renders sprites using batching (more efficient)
@@ -673,45 +603,11 @@ impl Renderer {
         &mut self,
         batch: &SpriteBatch,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame and cleanup
-        if let Some(mut previous) = self.previous_frame_end.take() {
-            previous.cleanup_finished();
-        }
+        let (image_index, acquire_future) = match self.begin_render_frame()? {
+            Some(frame) => frame,
+            None => return Ok(()),
+        };
 
-        // Check if we need to recreate swapchain
-        if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-            self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
-            self.recreate_swapchain = false;
-
-            // Update camera viewport
-            let extent = self.images[0].extent();
-            self.camera
-                .set_viewport_size(extent[0] as f32, extent[1] as f32);
-        }
-
-        // Acquire next image
-        let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-        if suboptimal {
-            self.recreate_swapchain = true;
-        }
-
-        // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -799,30 +695,7 @@ impl Renderer {
         builder.end_render_pass(SubpassEndInfo::default())?;
 
         let command_buffer = builder.build()?;
-
-        // Execute and present
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = None;
-            }
-        }
-
-        Ok(())
+        self.submit_and_present(acquire_future, command_buffer, image_index)
     }
 
     /// Renders a GPU mesh (from mesh manager)
@@ -832,65 +705,11 @@ impl Renderer {
         model_matrix: Mat4,
         texture_descriptor: Arc<DescriptorSet>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Wait for previous frame
-        if let Some(mut previous) = self.previous_frame_end.take() {
-            previous.cleanup_finished();
-        }
+        let (image_index, acquire_future) = match self.begin_render_frame()? {
+            Some(frame) => frame,
+            None => return Ok(()),
+        };
 
-        // Handle swapchain recreation
-        if self.recreate_swapchain {
-            let (new_swapchain, new_images) = recreate_swapchain(
-                self.device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            )?;
-
-            // Check if minimized (zero-sized)
-            if new_images.is_empty() {
-                self.recreate_swapchain = false;
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
-                return Ok(());
-            }
-
-            // Move to self FIRST to avoid borrow errors
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-
-            // Recreate depth buffer for new size
-            self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
-                self.device.clone(),
-                self.memory_allocator.clone(),
-                self.images[0].extent()[0],
-                self.images[0].extent()[1],
-            )?;
-
-            // Recreate framebuffers with new images and depth buffer
-            self.framebuffers_3d = create_framebuffers_3d(
-                &self.images,
-                self.render_pass_3d.clone(),
-                self.depth_buffer.clone(),
-            )?;
-
-            // Reset flag
-            self.recreate_swapchain = false;
-        }
-
-        // Acquire image
-        let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-        if suboptimal {
-            self.recreate_swapchain = true;
-        }
-
-        // Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -949,30 +768,7 @@ impl Renderer {
         builder.end_render_pass(SubpassEndInfo::default())?;
 
         let command_buffer = builder.build()?;
-
-        // Execute and present
-        let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(e) => {
-                println!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = None;
-            }
-        }
-
-        Ok(())
+        self.submit_and_present(acquire_future, command_buffer, image_index)
     }
 
     /// Render all mesh entities from ECS world

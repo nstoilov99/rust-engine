@@ -6,10 +6,9 @@ use glam::Vec3;
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
-use rust_engine::engine::adapters::render_adapter::world_matrix_to_render;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
-use rust_engine::engine::ecs::hierarchy::get_world_transform;
+use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::engine::math::Frustum;
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
@@ -21,32 +20,28 @@ use vulkano::swapchain::acquire_next_image;
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError};
 
-/// Prepare mesh render data from ECS world into a reusable buffer
+/// Prepare mesh render data from ECS world into a reusable buffer.
 ///
-/// Performance optimized:
-/// - view_projection is calculated once per frame, not per mesh
-/// - Reuses the provided Vec buffer (clears and refills) to avoid per-frame allocation
-/// - Frustum culling: skips meshes outside camera view
-/// - Properly handles hierarchical transforms with non-uniform scaling
+/// Reads pre-computed transforms from `transform_cache` (populated by
+/// `TransformCache::propagate` earlier in the frame).  No recursive
+/// hierarchy traversal happens here.
 pub fn prepare_mesh_data(
     world: &World,
     asset_manager: &Arc<AssetManager>,
     renderer: &Renderer,
     mesh_data_buffer: &mut Vec<MeshRenderData>,
+    transform_cache: &TransformCache,
 ) {
     rust_engine::profile_function!();
 
-    // Clear buffer but retain capacity (no allocation)
     mesh_data_buffer.clear();
 
     let meshes = asset_manager.meshes.read();
 
-    // Calculate view_projection ONCE per frame (same for all meshes)
     let view_matrix = renderer.camera_3d.view_matrix();
     let projection_matrix = renderer.camera_3d.projection_matrix();
     let view_projection = projection_matrix * view_matrix;
 
-    // Compute frustum planes once per frame for culling
     let frustum = Frustum::from_view_projection(view_projection);
 
     let vp_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(view_projection) };
@@ -58,14 +53,9 @@ pub fn prepare_mesh_data(
             continue;
         }
         if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
-            // Get WORLD transform in Z-up space (includes parent hierarchy)
-            let world_matrix_zup = get_world_transform(world, entity);
+            let world_matrix_zup = transform_cache.get_world(entity);
+            let model_matrix = transform_cache.get_render(entity);
 
-            // Convert to Y-up for rendering
-            let model_matrix = world_matrix_to_render(&world_matrix_zup);
-
-            // FRUSTUM CULLING: Transform bounding sphere to world space
-            // Use the render matrix (Y-up) since frustum is in render space
             let c = gpu_mesh.center;
             let m = &model_matrix;
             let world_center = Vec3::new(
@@ -74,8 +64,6 @@ pub fn prepare_mesh_data(
                 m[(2, 0)] * c.x + m[(2, 1)] * c.y + m[(2, 2)] * c.z + m[(2, 3)],
             );
 
-            // Extract scale from Z-up world matrix for correct bounding radius
-            // Scale magnitude is preserved regardless of coordinate system
             let scale_x = glm::length(&glm::vec3(
                 world_matrix_zup[(0, 0)],
                 world_matrix_zup[(1, 0)],
@@ -94,7 +82,6 @@ pub fn prepare_mesh_data(
             let max_scale = scale_x.max(scale_y).max(scale_z);
             let world_radius = gpu_mesh.radius * max_scale;
 
-            // Skip mesh if completely outside frustum
             if !frustum.contains_sphere(world_center, world_radius) {
                 continue;
             }
@@ -219,7 +206,7 @@ pub fn acquire_swapchain_image(
     }
 }
 
-/// Swapchain acquisition errors
+#[allow(dead_code)]
 pub enum SwapchainError {
     OutOfDate,
     AcquireFailed(String),

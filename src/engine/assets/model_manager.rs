@@ -11,16 +11,16 @@ use super::model_loader::{Model, load_model, load_model_from_bytes};
 
 /// Manages 3D model loading and caching
 pub struct ModelManager {
-    device: Arc<Device>,
-    allocator: Arc<StandardMemoryAllocator>,
+    _device: Arc<Device>,
+    _allocator: Arc<StandardMemoryAllocator>,
     cache: RwLock<HashMap<AssetId, Arc<Model>>>,
 }
 
 impl ModelManager {
     pub fn new(device: Arc<Device>, allocator: Arc<StandardMemoryAllocator>) -> Self {
         Self {
-            device,
-            allocator,
+            _device: device,
+            _allocator: allocator,
             cache: RwLock::new(HashMap::new()),
         }
     }

@@ -335,9 +335,8 @@ pub fn icon_button(
 
     // Show tooltip on hover
     if response.hovered() {
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
-            ui.label(tooltip);
-        });
+        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
+            .show(|ui| { ui.label(tooltip); });
     }
 
     response

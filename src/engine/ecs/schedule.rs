@@ -114,6 +114,7 @@ impl RunCriteria for RunIfNotPaused {
 /// for selection-dependent logic.
 #[deprecated(note = "Selection is tracked externally via `Selection`, not `EditorState`")]
 pub struct RunIfSelected;
+#[allow(deprecated)]
 impl RunCriteria for RunIfSelected {
     fn should_run(&self, _resources: &Resources) -> bool {
         false

@@ -39,7 +39,7 @@ pub struct Gui {
     /// Clipboard for copy/paste support
     clipboard: Option<arboard::Clipboard>,
     /// Current cursor icon
-    current_cursor: egui::CursorIcon,
+    _current_cursor: egui::CursorIcon,
     /// Viewport rect captured when pointer drag started.
     /// Used for consistent "outside viewport" detection during drags.
     drag_start_viewport_rect: Option<egui::Rect>,
@@ -82,7 +82,7 @@ impl Gui {
             events: Vec::new(),
             pixels_per_point: 1.15, // Slightly larger for better readability
             clipboard,
-            current_cursor: egui::CursorIcon::Default,
+            _current_cursor: egui::CursorIcon::Default,
             drag_start_viewport_rect: None,
         })
     }
@@ -286,18 +286,11 @@ impl Gui {
 
             WindowEvent::Ime(ime) => {
                 match ime {
-                    winit::event::Ime::Preedit(text, cursor) => {
+                    winit::event::Ime::Preedit(text, _cursor) => {
                         if text.is_empty() {
                             // Preedit cleared
                             self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(String::new())));
                         } else {
-                            // Preedit text with optional cursor position
-                            let cursor_range = cursor.map(|(start, end)| {
-                                egui::text::CCursorRange::two(
-                                    egui::text::CCursor::new(start),
-                                    egui::text::CCursor::new(end),
-                                )
-                            });
                             self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
                         }
                         true

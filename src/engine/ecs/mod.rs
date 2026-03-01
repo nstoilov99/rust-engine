@@ -18,7 +18,7 @@ pub use hecs::{Entity, World};
 pub use hierarchy::*;
 pub use resources::*;
 pub use schedule::{
-    Always, FunctionSystem, RunCriteria, RunIfEditing, RunIfNotPaused, RunIfPlaying, RunIfSelected,
+    Always, FunctionSystem, RunCriteria, RunIfEditing, RunIfNotPaused, RunIfPlaying,
     Schedule, Stage, System,
 };
 pub use systems::*;

@@ -262,7 +262,7 @@ pub fn create_transform_pipeline(
 pub fn create_camera_pipeline(
     device: Arc<Device>,
     render_pass: Arc<RenderPass>,
-    viewport: Viewport,
+    _viewport: Viewport,
 ) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
     // Load camera shaders
     let vs = camera_vs::load(device.clone())?;

@@ -30,17 +30,6 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::sync::GpuFuture;
 
-/// Setup result containing all initialized components (editor only)
-#[cfg(feature = "editor")]
-pub struct SetupResult {
-    pub asset_manager: Arc<AssetManager>,
-    pub hot_reload: HotReloadWatcher,
-    pub reload_rx: Receiver<ReloadEvent>,
-    pub mesh_indices: Vec<usize>,
-    pub plane_mesh_index: usize,
-    pub cube_mesh_index: usize,
-    pub descriptor_set: Arc<DescriptorSet>,
-}
 
 /// Setup asset manager and hot-reload system (editor only)
 #[cfg(feature = "editor")]
@@ -317,7 +306,7 @@ pub fn upload_model_texture(
     Ok(descriptor_set)
 }
 
-/// Print controls help (available via H key or help menu)
+#[cfg(feature = "editor")]
 pub fn print_controls() {
     // Controls are now shown in the Engine Stats panel instead of console
 }

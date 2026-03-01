@@ -56,10 +56,8 @@ impl ProfilerCollector {
             self.scope_collection.insert(scope_detail.clone());
         }
 
-        // Unpack the frame data
-        let Ok(unpacked) = frame_data.unpacked() else {
-            return;
-        };
+        #[allow(irrefutable_let_patterns)]
+        let Ok(unpacked) = frame_data.unpacked() else { return; };
 
         let mut threads = Vec::new();
         let mut total_scopes = 0;

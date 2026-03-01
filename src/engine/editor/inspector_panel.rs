@@ -38,18 +38,52 @@ enum ComponentAction {
     RemoveCollider,
 }
 
+/// Bitflags for which inspectable components an entity has.
+/// Computed once per selection change / component mutation, not per frame.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ComponentPresence {
+    bits: u16,
+}
+
+impl ComponentPresence {
+    const NAME:              u16 = 1 << 0;
+    const TRANSFORM:         u16 = 1 << 1;
+    const CAMERA:            u16 = 1 << 2;
+    const MESH_RENDERER:     u16 = 1 << 3;
+    const DIR_LIGHT:         u16 = 1 << 4;
+    const POINT_LIGHT:       u16 = 1 << 5;
+    const RIGID_BODY:        u16 = 1 << 6;
+    const COLLIDER:          u16 = 1 << 7;
+
+    fn probe(world: &World, entity: Entity) -> Self {
+        let mut bits = 0u16;
+        if world.get::<&Name>(entity).is_ok()             { bits |= Self::NAME; }
+        if world.get::<&Transform>(entity).is_ok()         { bits |= Self::TRANSFORM; }
+        if world.get::<&Camera>(entity).is_ok()            { bits |= Self::CAMERA; }
+        if world.get::<&MeshRenderer>(entity).is_ok()      { bits |= Self::MESH_RENDERER; }
+        if world.get::<&DirectionalLight>(entity).is_ok()  { bits |= Self::DIR_LIGHT; }
+        if world.get::<&PointLight>(entity).is_ok()        { bits |= Self::POINT_LIGHT; }
+        if world.get::<&RigidBody>(entity).is_ok()         { bits |= Self::RIGID_BODY; }
+        if world.get::<&Collider>(entity).is_ok()          { bits |= Self::COLLIDER; }
+        Self { bits }
+    }
+
+    fn has(self, flag: u16) -> bool { self.bits & flag != 0 }
+}
+
 /// Inspector Panel state
 pub struct InspectorPanel {
     /// Cache for euler angles (quaternion -> euler conversion).
-    /// Stores (quaternion, euler_angles) so we can detect when the quaternion
-    /// has been modified externally (e.g., by the gizmo) and recompute euler.
     euler_cache: HashMap<u64, (glm::Quat, [f32; 3])>,
     /// Last known entity for euler cache invalidation
     last_entity: Option<Entity>,
-    /// Track which components are collapsed
-    collapsed_components: HashSet<String>,
+    _collapsed_components: HashSet<String>,
     /// Search/filter text for components
     search_filter: String,
+    /// Cached component presence mask (recomputed on selection change or mutation).
+    cached_presence: ComponentPresence,
+    /// The entity for which `cached_presence` was computed.
+    presence_entity: Option<Entity>,
 }
 
 impl Default for InspectorPanel {
@@ -63,8 +97,10 @@ impl InspectorPanel {
         Self {
             euler_cache: HashMap::new(),
             last_entity: None,
-            collapsed_components: HashSet::new(),
+            _collapsed_components: HashSet::new(),
             search_filter: String::new(),
+            cached_presence: ComponentPresence::default(),
+            presence_entity: None,
         }
     }
 
@@ -95,10 +131,19 @@ impl InspectorPanel {
         ui.separator();
 
         if let Some(entity) = selection.primary() {
-            // Invalidate euler cache if entity changed
+            // Invalidate caches if entity changed
             if self.last_entity != Some(entity) {
                 self.euler_cache.clear();
                 self.last_entity = Some(entity);
+                self.cached_presence = ComponentPresence::probe(world, entity);
+                self.presence_entity = Some(entity);
+            }
+            // Re-probe when the cached entity matches but presence may have changed
+            // (component added/removed). This is still cheaper than probing per-component
+            // per-frame because it's a single pass of lightweight has-component checks.
+            if self.presence_entity != Some(entity) {
+                self.cached_presence = ComponentPresence::probe(world, entity);
+                self.presence_entity = Some(entity);
             }
 
             // Search/filter box
@@ -195,70 +240,59 @@ impl InspectorPanel {
         ui.add_space(8.0);
     }
 
-    /// Render all component editors
+    /// Render all component editors using the cached presence snapshot.
     fn render_components(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
         let mut component_count = 0;
         let mut pending_action = ComponentAction::None;
+        let p = self.cached_presence;
 
         // === CORE COMPONENTS ===
-        if self.matches_filter("name") && world.get::<&Name>(entity).is_ok() {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+        if self.matches_filter("name") && p.has(ComponentPresence::NAME) {
+            if component_count > 0 { Self::draw_component_divider(ui); }
             self.edit_name(ui, world, entity, ComponentCategory::Core);
             component_count += 1;
         }
         if (self.matches_filter("transform") || self.matches_filter("position")
             || self.matches_filter("rotation") || self.matches_filter("scale"))
-            && world.get::<&Transform>(entity).is_ok()
+            && p.has(ComponentPresence::TRANSFORM)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             self.edit_transform(ui, world, entity, ComponentCategory::Core);
             component_count += 1;
         }
 
         // === RENDERING COMPONENTS ===
         if (self.matches_filter("camera") || self.matches_filter("fov"))
-            && world.get::<&Camera>(entity).is_ok()
+            && p.has(ComponentPresence::CAMERA)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_camera(ui, world, entity, ComponentCategory::Rendering) {
                 pending_action = action;
             }
             component_count += 1;
         }
         if (self.matches_filter("mesh") || self.matches_filter("renderer") || self.matches_filter("material"))
-            && world.get::<&MeshRenderer>(entity).is_ok()
+            && p.has(ComponentPresence::MESH_RENDERER)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering) {
                 pending_action = action;
             }
             component_count += 1;
         }
         if (self.matches_filter("directional") || self.matches_filter("light") || self.matches_filter("sun"))
-            && world.get::<&DirectionalLight>(entity).is_ok()
+            && p.has(ComponentPresence::DIR_LIGHT)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_directional_light(ui, world, entity, ComponentCategory::Rendering) {
                 pending_action = action;
             }
             component_count += 1;
         }
         if (self.matches_filter("point") || self.matches_filter("light"))
-            && world.get::<&PointLight>(entity).is_ok()
+            && p.has(ComponentPresence::POINT_LIGHT)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_point_light(ui, world, entity, ComponentCategory::Rendering) {
                 pending_action = action;
             }
@@ -267,28 +301,25 @@ impl InspectorPanel {
 
         // === PHYSICS COMPONENTS ===
         if (self.matches_filter("rigid") || self.matches_filter("body") || self.matches_filter("physics"))
-            && world.get::<&RigidBody>(entity).is_ok()
+            && p.has(ComponentPresence::RIGID_BODY)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_rigidbody(ui, world, entity, ComponentCategory::Physics) {
                 pending_action = action;
             }
             component_count += 1;
         }
         if (self.matches_filter("collider") || self.matches_filter("physics") || self.matches_filter("collision"))
-            && world.get::<&Collider>(entity).is_ok()
+            && p.has(ComponentPresence::COLLIDER)
         {
-            if component_count > 0 {
-                Self::draw_component_divider(ui);
-            }
+            if component_count > 0 { Self::draw_component_divider(ui); }
             if let Some(action) = self.edit_collider(ui, world, entity, ComponentCategory::Physics) {
                 pending_action = action;
             }
         }
 
-        // Execute pending action (deferred to avoid borrow conflicts)
+        // Execute pending action and invalidate snapshot
+        let mutated = !matches!(pending_action, ComponentAction::None);
         match pending_action {
             ComponentAction::None => {}
             ComponentAction::RemoveCamera => { let _ = world.remove_one::<Camera>(entity); }
@@ -297,6 +328,9 @@ impl InspectorPanel {
             ComponentAction::RemovePointLight => { let _ = world.remove_one::<PointLight>(entity); }
             ComponentAction::RemoveRigidBody => { let _ = world.remove_one::<RigidBody>(entity); }
             ComponentAction::RemoveCollider => { let _ = world.remove_one::<Collider>(entity); }
+        }
+        if mutated {
+            self.cached_presence = ComponentPresence::probe(world, entity);
         }
     }
 
@@ -1032,11 +1066,16 @@ impl InspectorPanel {
         action
     }
 
-    /// Render "Add Component" UI with compatibility validation
-    fn render_add_component(&self, ui: &mut Ui, world: &mut World, entity: Entity) {
-        // Physics pairing warnings
-        let has_rigidbody = world.get::<&RigidBody>(entity).is_ok();
-        let has_collider = world.get::<&Collider>(entity).is_ok();
+    /// Render "Add Component" UI with compatibility validation.
+    /// Uses `self.cached_presence` to avoid per-frame world probing.
+    fn render_add_component(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
+        let p = self.cached_presence;
+        let has_rigidbody = p.has(ComponentPresence::RIGID_BODY);
+        let has_collider  = p.has(ComponentPresence::COLLIDER);
+        let has_camera    = p.has(ComponentPresence::CAMERA);
+        let has_dir_light = p.has(ComponentPresence::DIR_LIGHT);
+        let has_point_light = p.has(ComponentPresence::POINT_LIGHT);
+
         if has_rigidbody && !has_collider {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Warning: RigidBody without Collider").color(Color32::from_rgb(220, 180, 50)));
@@ -1049,68 +1088,68 @@ impl InspectorPanel {
 
         ui.add_space(10.0);
 
-        // Detect existing light/camera components for conflict checks
-        let has_camera = world.get::<&Camera>(entity).is_ok();
-        let has_dir_light = world.get::<&DirectionalLight>(entity).is_ok();
-        let has_point_light = world.get::<&PointLight>(entity).is_ok();
-
+        let mut added = false;
         egui::ComboBox::from_label("")
             .selected_text("Add Component...")
             .show_ui(ui, |ui| {
-                // Camera — conflicts with lights
                 if !has_camera {
                     let conflicts = has_dir_light || has_point_light;
                     if conflicts {
-                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Camera"))
+                        ui.add_enabled(false, egui::Button::selectable(false, "Camera"))
                             .on_disabled_hover_text("Conflicts with existing light component");
                     } else if ui.selectable_label(false, "Camera").clicked() {
                         let _ = world.insert_one(entity, Camera::default());
+                        added = true;
                     }
                 }
 
-                // Directional Light — conflicts with Camera and PointLight
                 if !has_dir_light {
                     let conflicts = has_camera || has_point_light;
                     if conflicts {
-                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Directional Light"))
+                        ui.add_enabled(false, egui::Button::selectable(false, "Directional Light"))
                             .on_disabled_hover_text("Conflicts with existing Camera or Point Light");
                     } else if ui.selectable_label(false, "Directional Light").clicked() {
                         let _ = world.insert_one(entity, DirectionalLight::default());
+                        added = true;
                     }
                 }
 
-                // Point Light — conflicts with Camera and DirectionalLight
                 if !has_point_light {
                     let conflicts = has_camera || has_dir_light;
                     if conflicts {
-                        ui.add_enabled(false, egui::SelectableLabel::new(false, "Point Light"))
+                        ui.add_enabled(false, egui::Button::selectable(false, "Point Light"))
                             .on_disabled_hover_text("Conflicts with existing Camera or Directional Light");
                     } else if ui.selectable_label(false, "Point Light").clicked() {
                         let _ = world.insert_one(entity, PointLight::default());
+                        added = true;
                     }
                 }
 
-                // MeshRenderer — no conflicts
-                if world.get::<&MeshRenderer>(entity).is_err() {
+                if !p.has(ComponentPresence::MESH_RENDERER) {
                     if ui.selectable_label(false, "Mesh Renderer").clicked() {
                         let _ = world.insert_one(entity, MeshRenderer::default());
+                        added = true;
                     }
                 }
 
-                // RigidBody — no conflicts
                 if !has_rigidbody {
                     if ui.selectable_label(false, "Rigid Body").clicked() {
                         let _ = world.insert_one(entity, RigidBody::default());
+                        added = true;
                     }
                 }
 
-                // Collider — no conflicts
                 if !has_collider {
                     if ui.selectable_label(false, "Collider").clicked() {
                         let _ = world.insert_one(entity, Collider::default());
+                        added = true;
                     }
                 }
             });
+
+        if added {
+            self.cached_presence = ComponentPresence::probe(world, entity);
+        }
     }
 }
 

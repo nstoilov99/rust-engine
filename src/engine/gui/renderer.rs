@@ -8,7 +8,7 @@ use vulkano::{
     buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
-        PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassBeginInfo, SubpassEndInfo,
+        RenderPassBeginInfo, SubpassBeginInfo, SubpassEndInfo,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, DescriptorSet,
@@ -41,6 +41,14 @@ use vulkano::{
     sync::GpuFuture,
 };
 
+/// A texture upload that has been submitted to the GPU but not yet confirmed complete.
+struct PendingUpload {
+    texture_id: egui::TextureId,
+    fence: vulkano::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>,
+    /// New image view to install once the fence signals (None for partial updates).
+    new_view: Option<Arc<ImageView>>,
+}
+
 /// egui vertex format
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, Vertex)]
 #[repr(C)]
@@ -61,7 +69,7 @@ struct PushConstants {
 }
 
 pub struct EguiRenderer {
-    device: Arc<Device>,
+    _device: Arc<Device>,
     queue: Arc<Queue>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
@@ -79,6 +87,10 @@ pub struct EguiRenderer {
     batched_vertices: Vec<EguiVertex>,
     /// Batched index data for entire frame
     batched_indices: Vec<u32>,
+    /// Texture uploads submitted to GPU but not yet confirmed complete.
+    pending_uploads: Vec<PendingUpload>,
+    /// 1x1 white placeholder texture used while real textures are still uploading.
+    placeholder_view: Arc<ImageView>,
 }
 
 /// Counter for generating unique user texture IDs
@@ -131,8 +143,36 @@ impl EguiRenderer {
             },
         )?;
 
+        // 1x1 white placeholder: shown while a real texture is still uploading.
+        let placeholder_image = Image::new(
+            memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R8G8B8A8_SRGB,
+                extent: [1, 1, 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )?;
+        let placeholder_buf = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+            AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+            [255u8, 255, 255, 255],
+        )?;
+        let mut ph_builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator.clone(),
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+        ph_builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(placeholder_buf, placeholder_image.clone()))?;
+        let ph_cb = ph_builder.build()?;
+        ph_cb.execute(queue.clone())?.then_signal_fence_and_flush()?.wait(None)?;
+        let placeholder_view = ImageView::new_default(placeholder_image)?;
+
         Ok(Self {
-            device,
+            _device: device,
             queue,
             memory_allocator,
             command_buffer_allocator,
@@ -143,8 +183,10 @@ impl EguiRenderer {
             texture_cache: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
             framebuffer_cache: HashMap::new(),
-            batched_vertices: Vec::with_capacity(16384), // Pre-allocate for typical UI (~16k vertices)
-            batched_indices: Vec::with_capacity(32768),  // Pre-allocate for typical UI (~32k indices)
+            batched_vertices: Vec::with_capacity(16384),
+            batched_indices: Vec::with_capacity(32768),
+            pending_uploads: Vec::new(),
+            placeholder_view,
         })
     }
 
@@ -204,11 +246,31 @@ impl EguiRenderer {
         )?)
     }
 
-    /// Upload or update a texture
+    /// Drain pending uploads, ensuring all are complete before returning.
+    ///
+    /// After waiting on each fence we must call `cleanup_finished()` so
+    /// Vulkano marks the upload command buffer as reclaimable.  Without
+    /// this the allocator may hand back the same VkCommandBuffer for the
+    /// render pass, and Vulkano's validator rejects it as "already submitted".
+    fn poll_pending_uploads(&mut self) {
+        for mut upload in self.pending_uploads.drain(..) {
+            let _ = upload.fence.wait(None);
+            upload.fence.cleanup_finished();
+            if let Some(view) = upload.new_view {
+                self.texture_cache.insert(upload.texture_id, view);
+            }
+            self.descriptor_set_cache.remove(&upload.texture_id);
+        }
+    }
+
+    /// Submit a non-blocking texture upload / update.
+    ///
+    /// New textures become visible through the placeholder until the fence
+    /// signals. Partial updates are written in-place to the existing image;
+    /// the old content remains visible until the upload completes.
     fn upload_texture(&mut self, texture_id: egui::TextureId, image_delta: &egui::epaint::ImageDelta) -> Result<(), Box<dyn std::error::Error>> {
         let delta_size = image_delta.image.size();
 
-        // In egui 0.33, all images are Color (Font variant was removed)
         let pixels: Vec<u8> = match &image_delta.image {
             egui::ImageData::Color(img) => {
                 img.pixels.iter()
@@ -217,23 +279,15 @@ impl EguiRenderer {
             }
         };
 
-        // Check if this is a partial update or a full texture creation
         if let Some(pos) = image_delta.pos {
-            // Partial update - update existing texture at offset
+            // Partial update — write into the existing GPU image.
             if let Some(existing_view) = self.texture_cache.get(&texture_id) {
                 let existing_image = existing_view.image();
 
-                // Upload pixels via staging buffer
                 let buffer = Buffer::from_iter(
                     self.memory_allocator.clone(),
-                    BufferCreateInfo {
-                        usage: BufferUsage::TRANSFER_SRC,
-                        ..Default::default()
-                    },
-                    AllocationCreateInfo {
-                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                        ..Default::default()
-                    },
+                    BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+                    AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
                     pixels,
                 )?;
 
@@ -243,9 +297,7 @@ impl EguiRenderer {
                     CommandBufferUsage::OneTimeSubmit,
                 )?;
 
-                // Copy to region of existing texture
                 use vulkano::image::ImageSubresourceLayers;
-
                 builder.copy_buffer_to_image(CopyBufferToImageInfo {
                     regions: [vulkano::command_buffer::BufferImageCopy {
                         image_subresource: ImageSubresourceLayers {
@@ -256,20 +308,19 @@ impl EguiRenderer {
                         image_offset: [pos[0] as u32, pos[1] as u32, 0],
                         image_extent: [delta_size[0] as u32, delta_size[1] as u32, 1],
                         ..Default::default()
-                    }]
-                    .into(),
+                    }].into(),
                     ..CopyBufferToImageInfo::buffer_image(buffer, existing_image.clone())
                 })?;
 
-                let command_buffer = builder.build()?;
-                // Must block - texture must be uploaded before render pass uses it
-                command_buffer
-                    .execute(self.queue.clone())?
-                    .then_signal_fence_and_flush()?
-                    .wait(None)?;
+                let fence = builder.build()?.execute(self.queue.clone()).map(|f| f.boxed())?.then_signal_fence_and_flush()?;
+                self.pending_uploads.push(PendingUpload {
+                    texture_id,
+                    fence,
+                    new_view: None,
+                });
             }
         } else {
-            // Full texture creation
+            // Full texture creation — render with placeholder until ready.
             let image = Image::new(
                 self.memory_allocator.clone(),
                 ImageCreateInfo {
@@ -282,17 +333,10 @@ impl EguiRenderer {
                 AllocationCreateInfo::default(),
             )?;
 
-            // Upload pixels via staging buffer
             let buffer = Buffer::from_iter(
                 self.memory_allocator.clone(),
-                BufferCreateInfo {
-                    usage: BufferUsage::TRANSFER_SRC,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
+                BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+                AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
                 pixels,
             )?;
 
@@ -301,21 +345,22 @@ impl EguiRenderer {
                 self.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )?;
-
             builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
 
-            let command_buffer = builder.build()?;
-            // Must block - texture must be uploaded before render pass uses it
-            command_buffer
-                .execute(self.queue.clone())?
-                .then_signal_fence_and_flush()?
-                .wait(None)?;
-
-            // Create image view and store
+            let fence = builder.build()?.execute(self.queue.clone()).map(|f| f.boxed())?.then_signal_fence_and_flush()?;
             let view = ImageView::new_default(image)?;
-            self.texture_cache.insert(texture_id, view);
-            // Invalidate cached descriptor set since texture was replaced
-            self.descriptor_set_cache.remove(&texture_id);
+
+            // Install placeholder so the texture id is drawable immediately.
+            if !self.texture_cache.contains_key(&texture_id) {
+                self.texture_cache.insert(texture_id, self.placeholder_view.clone());
+                self.descriptor_set_cache.remove(&texture_id);
+            }
+
+            self.pending_uploads.push(PendingUpload {
+                texture_id,
+                fence,
+                new_view: Some(view),
+            });
         }
 
         Ok(())
@@ -356,13 +401,21 @@ impl EguiRenderer {
     ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
-        // Handle texture updates
+        // Submit texture uploads (non-blocking: each gets its own command
+        // buffer + fence, submitted to the GPU queue immediately).
         {
             crate::profile_scope!("texture_updates");
             for (texture_id, image_delta) in &textures_delta.set {
                 self.upload_texture(*texture_id, image_delta)?;
             }
         }
+
+        // Drain ALL pending uploads (previous frames + this frame's) so
+        // every texture uses its real image view before we build the draw
+        // command buffer.  Most uploads complete instantly on the GPU; the
+        // non-blocking poll catches those, and force-wait handles any
+        // stragglers.
+        self.poll_pending_uploads();
 
         // Get or create cached framebuffer for this target image
         let cache_key = Arc::as_ptr(&target_image) as usize;

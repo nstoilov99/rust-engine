@@ -11,7 +11,7 @@ use super::handle::{Handle, AssetId};
 
 /// Manages texture loading and caching
 pub struct TextureManager {
-    device: Arc<Device>,
+    _device: Arc<Device>,
     queue: Arc<Queue>,
     allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
@@ -26,7 +26,7 @@ impl TextureManager {
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     ) -> Self {
         Self {
-            device,
+            _device: device,
             queue,
             allocator,
             command_buffer_allocator,

@@ -5,7 +5,6 @@
 
 use crate::engine::assets::{AssetId, AssetMetadata, AssetType};
 use egui::{ColorImage, Context, TextureHandle, TextureId, TextureOptions};
-use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -27,7 +26,7 @@ struct ThumbnailRequest {
 struct ThumbnailResult {
     id: AssetId,
     image_data: Option<ColorImage>,
-    error: Option<String>,
+    _error: Option<String>,
 }
 
 /// Entry in the thumbnail cache
@@ -49,14 +48,10 @@ pub struct ThumbnailCache {
     request_tx: Option<mpsc::Sender<ThumbnailRequest>>,
     /// Channel to receive results from worker thread
     result_rx: mpsc::Receiver<ThumbnailResult>,
-    /// Root path for assets
-    assets_root: PathBuf,
-    /// Placeholder texture for loading state
+    _assets_root: PathBuf,
     placeholder: Option<TextureHandle>,
-    /// Error placeholder texture
     error_placeholder: Option<TextureHandle>,
-    /// Type icon textures
-    type_icons: HashMap<AssetType, TextureHandle>,
+    _type_icons: HashMap<AssetType, TextureHandle>,
 }
 
 impl ThumbnailCache {
@@ -76,10 +71,10 @@ impl ThumbnailCache {
             pending: std::collections::HashSet::new(),
             request_tx: Some(request_tx),
             result_rx,
-            assets_root,
+            _assets_root: assets_root,
             placeholder: None,
             error_placeholder: None,
-            type_icons: HashMap::new(),
+            _type_icons: HashMap::new(),
         }
     }
 
@@ -236,7 +231,7 @@ fn generate_thumbnail(request: &ThumbnailRequest, assets_root: &Path) -> Thumbna
         _ => ThumbnailResult {
             id: request.id,
             image_data: None,
-            error: Some("Unsupported asset type for thumbnails".to_string()),
+            _error: Some("Unsupported asset type for thumbnails".to_string()),
         },
     }
 }
@@ -260,13 +255,13 @@ fn generate_texture_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
             ThumbnailResult {
                 id,
                 image_data: Some(image_data),
-                error: None,
+                _error: None,
             }
         }
         Err(e) => ThumbnailResult {
             id,
             image_data: None,
-            error: Some(format!("Failed to load image: {}", e)),
+            _error: Some(format!("Failed to load image: {}", e)),
         },
     }
 }
@@ -303,7 +298,7 @@ fn generate_model_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
                             return ThumbnailResult {
                                 id,
                                 image_data: Some(image_data),
-                                error: None,
+                                _error: None,
                             };
                         }
                     }
@@ -325,7 +320,7 @@ fn generate_model_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
                                 return ThumbnailResult {
                                     id,
                                     image_data: Some(image_data),
-                                    error: None,
+                                    _error: None,
                                 };
                             }
                         }
@@ -337,13 +332,13 @@ fn generate_model_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
             ThumbnailResult {
                 id,
                 image_data: Some(create_model_icon_image()),
-                error: None,
+                _error: None,
             }
         }
         Err(e) => ThumbnailResult {
             id,
             image_data: None,
-            error: Some(format!("Failed to load model: {}", e)),
+            _error: Some(format!("Failed to load model: {}", e)),
         },
     }
 }

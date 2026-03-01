@@ -5,7 +5,7 @@
 //! Play mode icon helpers are defined here and used by the viewport tab bar overlay.
 
 use super::build_dialog::{BuildDialog, BuildProfile, BuildState};
-use super::console::LogMessage;
+use super::console::ConsoleLog;
 use super::icons::{IconManager, ToolbarIcon};
 use super::{CommandHistory, EditorDockState, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
@@ -100,9 +100,8 @@ pub(super) fn play_icon_button(
         }
 
         if in_rect {
-            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(tooltip), |ui| {
-                ui.label(tooltip);
-            });
+            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
+                .show(|ui| { ui.label(tooltip); });
         }
     }
 
@@ -190,7 +189,7 @@ pub fn render_menu_bar(
     command_history: &CommandHistory,
     play_mode: PlayMode,
     build_dialog: &mut BuildDialog,
-    console_messages: &mut Vec<LogMessage>,
+    console_messages: &mut ConsoleLog,
 ) -> MenuAction {
     let mut action = MenuAction::None;
 
@@ -207,7 +206,7 @@ pub fn render_menu_bar(
     egui::TopBottomPanel::top("menu_bar")
         .exact_height(24.0)
         .show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 // File menu
                 ui.menu_button("File", |ui| {
                     if ui.button("Save Scene (Ctrl+S)").clicked() {

@@ -11,8 +11,7 @@ use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
 use rust_engine::engine::rendering::RenderTarget;
 use rust_engine::engine::ecs::components::{Camera, Transform};
-use rust_engine::engine::ecs::hierarchy::get_world_transform;
-use rust_engine::engine::adapters::render_adapter::world_matrix_to_render;
+use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
@@ -36,6 +35,7 @@ pub struct StandaloneApp {
     pub _descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    transform_cache: TransformCache,
 }
 
 impl StandaloneApp {
@@ -90,8 +90,11 @@ impl StandaloneApp {
             height,
         )?;
 
+        let mut transform_cache = TransformCache::new();
+        transform_cache.propagate(game_world.hecs());
+
         // Set camera from first Camera entity, or use default
-        Self::sync_camera_from_ecs(&mut renderer, game_world.hecs(), width as f32, height as f32);
+        Self::sync_camera_from_ecs(&mut renderer, game_world.hecs(), &transform_cache, width as f32, height as f32);
 
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
@@ -111,16 +114,16 @@ impl StandaloneApp {
             _descriptor_set: descriptor_set,
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
+            transform_cache,
         })
     }
 
-    fn sync_camera_from_ecs(renderer: &mut Renderer, world: &hecs::World, width: f32, height: f32) {
-        for (_entity, (_transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
+    fn sync_camera_from_ecs(renderer: &mut Renderer, world: &hecs::World, cache: &TransformCache, width: f32, height: f32) {
+        for (entity, (_transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
             if !camera.active {
                 continue;
             }
-            let world_mat = get_world_transform(world, _entity);
-            let render_mat = world_matrix_to_render(&world_mat);
+            let render_mat = cache.get_render(entity);
 
             let pos = glam::Vec3::new(render_mat[(0, 3)], render_mat[(1, 3)], render_mat[(2, 3)]);
             let forward = glam::Vec3::new(-render_mat[(0, 2)], -render_mat[(1, 2)], -render_mat[(2, 2)]);
@@ -184,11 +187,13 @@ impl StandaloneApp {
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
-        // Sync camera from ECS entities
+        self.transform_cache.propagate(self.game_world.hecs());
+
         let size = self.window.inner_size();
         Self::sync_camera_from_ecs(
             &mut self.renderer,
             self.game_world.hecs(),
+            &self.transform_cache,
             size.width as f32,
             size.height as f32,
         );
@@ -198,6 +203,7 @@ impl StandaloneApp {
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
+            &self.transform_cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 

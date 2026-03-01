@@ -438,7 +438,7 @@ pub fn extract_texture_from_gltf(
 /// Extracts PBR material from GLTF
 pub fn extract_material_from_gltf(
     document: &gltf::Document,
-    buffers: &[gltf::buffer::Data],
+    _buffers: &[gltf::buffer::Data],
     images: &[gltf::image::Data],
     material_index: usize,
     device: Arc<Device>,
@@ -530,7 +530,7 @@ pub fn extract_material_from_gltf(
 
 /// Helper: Load GLTF image data to Vulkan texture
 fn load_gltf_image(
-    image_data: &gltf::image::Data,
+    _image_data: &gltf::image::Data,
     device: Arc<Device>,
     allocator: Arc<StandardMemoryAllocator>,
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {

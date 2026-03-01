@@ -9,6 +9,6 @@ mod folder_tree;
 mod grid_view;
 mod list_view;
 
-pub use folder_tree::{FolderContextAction, FolderTreeResponse, FolderTreeView};
+pub use folder_tree::{FolderContextAction, FolderTreeView};
 pub use grid_view::GridView;
 pub use list_view::ListView;

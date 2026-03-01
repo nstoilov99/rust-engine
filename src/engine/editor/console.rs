@@ -1,6 +1,9 @@
 //! Console log system with color-coded messages and filtering
 
 use egui::{Color32, RichText};
+use std::collections::VecDeque;
+
+pub const MAX_CONSOLE_MESSAGES: usize = 2000;
 
 /// Log level for console messages
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,79 @@ impl LogMessage {
     }
 }
 
+/// Capped console log with incrementally maintained per-level counts.
+pub struct ConsoleLog {
+    messages: VecDeque<LogMessage>,
+    info_count: usize,
+    warn_count: usize,
+    error_count: usize,
+}
+
+impl ConsoleLog {
+    pub fn new() -> Self {
+        Self {
+            messages: VecDeque::with_capacity(MAX_CONSOLE_MESSAGES),
+            info_count: 0,
+            warn_count: 0,
+            error_count: 0,
+        }
+    }
+
+    pub fn push(&mut self, msg: LogMessage) {
+        self.increment(&msg);
+        self.messages.push_back(msg);
+        while self.messages.len() > MAX_CONSOLE_MESSAGES {
+            if let Some(evicted) = self.messages.pop_front() {
+                self.decrement(&evicted);
+            }
+        }
+    }
+
+    pub fn extend(&mut self, msgs: impl IntoIterator<Item = LogMessage>) {
+        for msg in msgs {
+            self.push(msg);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.info_count = 0;
+        self.warn_count = 0;
+        self.error_count = 0;
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &LogMessage> {
+        self.messages.iter()
+    }
+
+    /// Pre-computed counts — no per-frame scanning required.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.info_count, self.warn_count, self.error_count)
+    }
+
+    fn increment(&mut self, msg: &LogMessage) {
+        match msg.level {
+            LogLevel::Info => self.info_count += 1,
+            LogLevel::Warning => self.warn_count += 1,
+            LogLevel::Error => self.error_count += 1,
+        }
+    }
+
+    fn decrement(&mut self, msg: &LogMessage) {
+        match msg.level {
+            LogLevel::Info => self.info_count = self.info_count.saturating_sub(1),
+            LogLevel::Warning => self.warn_count = self.warn_count.saturating_sub(1),
+            LogLevel::Error => self.error_count = self.error_count.saturating_sub(1),
+        }
+    }
+}
+
+impl Default for ConsoleLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Filter settings for console log display
 #[derive(Debug, Clone)]
 pub struct LogFilter {
@@ -92,20 +168,5 @@ impl LogFilter {
             LogLevel::Warning => self.show_warning,
             LogLevel::Error => self.show_error,
         }
-    }
-
-    /// Count messages by level
-    pub fn count_by_level(messages: &[LogMessage]) -> (usize, usize, usize) {
-        let mut info = 0;
-        let mut warn = 0;
-        let mut error = 0;
-        for msg in messages {
-            match msg.level {
-                LogLevel::Info => info += 1,
-                LogLevel::Warning => warn += 1,
-                LogLevel::Error => error += 1,
-            }
-        }
-        (info, warn, error)
     }
 }
