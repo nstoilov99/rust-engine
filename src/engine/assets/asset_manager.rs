@@ -7,6 +7,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use super::texture_manager::TextureManager;
 use super::model_manager::ModelManager;
 use crate::MeshManager;
+use crate::engine::math::Aabb;
 use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 
@@ -81,8 +82,13 @@ impl AssetManager {
         // Compute bounding sphere for frustum culling
         let (center, radius) = compute_bounding_sphere(vertices);
 
+        // Compute AABB for frustum culling
+        let aabb = Aabb::from_points(
+            vertices.iter().map(|v| Vec3::new(v.position[0], v.position[1], v.position[2])),
+        );
+
         let mut meshes = self.meshes.write();
-        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices, center, radius)?;
+        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices, center, radius, aabb.min, aabb.max)?;
         let index = meshes.meshes.len();
         meshes.meshes.push(gpu_mesh);
         Ok(index)

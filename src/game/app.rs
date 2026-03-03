@@ -493,10 +493,16 @@ impl App {
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_function!();
 
+        // Forward structural hierarchy changes (spawn/despawn/reparent) to the
+        // transform cache so it performs a full rebuild instead of incremental.
+        if self.core.game_world.take_hierarchy_changed() {
+            self.core.transform_cache.request_full_propagation();
+        }
+
         // Single-pass authoritative transform propagation for the entire hierarchy.
         self.core
             .transform_cache
-            .propagate(self.core.game_world.hecs());
+            .propagate(self.core.game_world.hecs_mut());
 
         if self.editor.viewport.texture_id.is_none() {
             let texture_id = self
@@ -870,7 +876,7 @@ impl App {
                                         self.core.transform_cache = TransformCache::new();
                                         self.core
                                             .transform_cache
-                                            .propagate(self.core.game_world.hecs());
+                                            .propagate(self.core.game_world.hecs_mut());
                                         self.editor.console.messages.push(LogMessage::info(
                                             format!("Loaded scene: {}", scene_name),
                                         ));
@@ -1476,7 +1482,7 @@ impl App {
         self.core.transform_cache = TransformCache::new();
         self.core
             .transform_cache
-            .propagate(self.core.game_world.hecs());
+            .propagate(self.core.game_world.hecs_mut());
 
         self.editor.console.messages.push(LogMessage::info(
             "Loaded benchmark scene".to_string(),

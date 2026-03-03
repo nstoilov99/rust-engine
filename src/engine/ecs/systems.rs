@@ -16,10 +16,18 @@ pub struct TransformSystem;
 impl LegacySystem for TransformSystem {
     fn update(&mut self, world: &mut World, _delta_time: f32) {
         crate::profile_scope!("transform_system");
-        for (_id, transform) in world.query_mut::<&mut Transform>() {
+        let mut clamped = Vec::new();
+        for (id, transform) in world.query_mut::<&mut Transform>() {
+            let before = transform.scale;
             transform.scale.x = transform.scale.x.max(0.001);
             transform.scale.y = transform.scale.y.max(0.001);
             transform.scale.z = transform.scale.z.max(0.001);
+            if transform.scale != before {
+                clamped.push(id);
+            }
+        }
+        for entity in clamped {
+            super::hierarchy::mark_transform_dirty(world, entity);
         }
     }
 }
@@ -64,8 +72,13 @@ impl LegacySystem for MovementSystem {
         crate::profile_scope!("movement_system");
         use super::components::{Player, Transform};
 
-        for (_id, (transform, _player)) in world.query::<(&mut Transform, &Player)>().iter() {
+        let mut moved = Vec::new();
+        for (id, (transform, _player)) in world.query::<(&mut Transform, &Player)>().iter() {
             transform.position.z -= self.speed * delta_time;
+            moved.push(id);
+        }
+        for entity in moved {
+            super::hierarchy::mark_transform_dirty(world, entity);
         }
     }
 }
@@ -81,12 +94,17 @@ impl LegacySystem for RotationSystem {
         use super::components::Transform;
         use nalgebra_glm as glm;
 
-        for (_id, transform) in world.query_mut::<&mut Transform>() {
+        let mut rotated = Vec::new();
+        for (id, transform) in world.query_mut::<&mut Transform>() {
             let rotation = glm::quat_angle_axis(
                 self.rotation_speed * delta_time,
                 &glm::vec3(0.0, 1.0, 0.0),
             );
             transform.rotation = rotation * transform.rotation;
+            rotated.push(id);
+        }
+        for entity in rotated {
+            super::hierarchy::mark_transform_dirty(world, entity);
         }
     }
 }

@@ -2,7 +2,6 @@
 //!
 //! Handles mesh/light data preparation, swapchain management, and frame rendering.
 
-use glam::Vec3;
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
@@ -10,7 +9,7 @@ use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
 use rust_engine::engine::ecs::hierarchy::TransformCache;
-use rust_engine::engine::math::Frustum;
+use rust_engine::engine::math::{Aabb, Frustum};
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
 };
@@ -45,7 +44,7 @@ pub fn prepare_mesh_data(
 
     let frustum = Frustum::from_view_projection(view_projection);
 
-    let vp_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(view_projection) };
+    let vp_array: [[f32; 4]; 4] = view_projection.to_cols_array_2d();
 
     for (entity, (_transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter()
     {
@@ -53,36 +52,17 @@ pub fn prepare_mesh_data(
             continue;
         }
         if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
-            let world_matrix_zup = transform_cache.get_world(entity);
             let model_matrix = transform_cache.get_render(entity);
 
-            let c = gpu_mesh.center;
-            let m = &model_matrix;
-            let world_center = Vec3::new(
-                m[(0, 0)] * c.x + m[(0, 1)] * c.y + m[(0, 2)] * c.z + m[(0, 3)],
-                m[(1, 0)] * c.x + m[(1, 1)] * c.y + m[(1, 2)] * c.z + m[(1, 3)],
-                m[(2, 0)] * c.x + m[(2, 1)] * c.y + m[(2, 2)] * c.z + m[(2, 3)],
-            );
-
-            let scale_x = glm::length(&glm::vec3(
-                world_matrix_zup[(0, 0)],
-                world_matrix_zup[(1, 0)],
-                world_matrix_zup[(2, 0)],
-            ));
-            let scale_y = glm::length(&glm::vec3(
-                world_matrix_zup[(0, 1)],
-                world_matrix_zup[(1, 1)],
-                world_matrix_zup[(2, 1)],
-            ));
-            let scale_z = glm::length(&glm::vec3(
-                world_matrix_zup[(0, 2)],
-                world_matrix_zup[(1, 2)],
-                world_matrix_zup[(2, 2)],
-            ));
-            let max_scale = scale_x.max(scale_y).max(scale_z);
-            let world_radius = gpu_mesh.radius * max_scale;
-
-            if !frustum.contains_sphere(world_center, world_radius) {
+            // AABB frustum culling — uses the local-space AABB precomputed at
+            // asset load time, transformed into world space via the render
+            // matrix. No per-frame scale extraction needed.
+            let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
+            let glam_model = glam::Mat4::from_cols_array_2d(&unsafe {
+                std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(model_matrix)
+            });
+            let world_aabb = local_aabb.transformed(&glam_model);
+            if !frustum.contains_aabb(world_aabb.min, world_aabb.max) {
                 continue;
             }
 

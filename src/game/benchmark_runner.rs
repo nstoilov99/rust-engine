@@ -241,7 +241,7 @@ impl BenchmarkRunner {
         )?;
 
         let mut transform_cache = TransformCache::new();
-        transform_cache.propagate(game_world.hecs());
+        transform_cache.propagate(game_world.hecs_mut());
         Self::sync_camera_from_ecs(
             &mut renderer,
             game_world.hecs(),
@@ -297,7 +297,7 @@ impl BenchmarkRunner {
 
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_scope!("frame_render");
-        self.transform_cache.propagate(self.game_world.hecs());
+        self.transform_cache.propagate(self.game_world.hecs_mut());
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,

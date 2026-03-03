@@ -13,6 +13,10 @@ pub struct GpuMesh {
     pub center: Vec3,
     /// Bounding sphere radius (for frustum culling)
     pub radius: f32,
+    /// Local-space AABB min (computed once at load time).
+    pub aabb_min: Vec3,
+    /// Local-space AABB max (computed once at load time).
+    pub aabb_max: Vec3,
 }
 
 impl GpuMesh {
@@ -23,6 +27,8 @@ impl GpuMesh {
         indices: &[u32],
         center: Vec3,
         radius: f32,
+        aabb_min: Vec3,
+        aabb_max: Vec3,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Create vertex buffer
         let vertex_buffer = Buffer::from_iter(
@@ -60,6 +66,8 @@ impl GpuMesh {
             index_count: indices.len() as u32,
             center,
             radius,
+            aabb_min,
+            aabb_max,
         })
     }
 }
@@ -89,6 +97,8 @@ impl MeshManager {
                 &loaded_mesh.indices,
                 loaded_mesh.center,
                 loaded_mesh.radius,
+                loaded_mesh.aabb_min,
+                loaded_mesh.aabb_max,
             )?;
 
             let index = self.meshes.len();

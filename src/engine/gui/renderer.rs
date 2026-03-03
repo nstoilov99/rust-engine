@@ -246,21 +246,33 @@ impl EguiRenderer {
         )?)
     }
 
-    /// Drain pending uploads, ensuring all are complete before returning.
+    /// Non-blocking poll of pending texture uploads.
     ///
-    /// After waiting on each fence we must call `cleanup_finished()` so
-    /// Vulkano marks the upload command buffer as reclaimable.  Without
-    /// this the allocator may hand back the same VkCommandBuffer for the
-    /// render pass, and Vulkano's validator rejects it as "already submitted".
+    /// Checks each fence with a short timeout.  Completed uploads are
+    /// installed into the texture cache; unfinished ones are kept for next
+    /// frame (the placeholder texture remains visible in the meantime).
+    ///
+    /// After signalling we call `cleanup_finished()` so Vulkano marks the
+    /// upload command buffer as reclaimable.
     fn poll_pending_uploads(&mut self) {
+        let mut still_pending = Vec::new();
         for mut upload in self.pending_uploads.drain(..) {
-            let _ = upload.fence.wait(None);
-            upload.fence.cleanup_finished();
-            if let Some(view) = upload.new_view {
-                self.texture_cache.insert(upload.texture_id, view);
+            // Use a very short wait — if the GPU hasn't finished, keep it pending.
+            match upload.fence.wait(Some(std::time::Duration::from_micros(100))) {
+                Ok(()) => {
+                    upload.fence.cleanup_finished();
+                    if let Some(view) = upload.new_view {
+                        self.texture_cache.insert(upload.texture_id, view);
+                    }
+                    self.descriptor_set_cache.remove(&upload.texture_id);
+                }
+                Err(_) => {
+                    // Not ready yet — keep for next frame.
+                    still_pending.push(upload);
+                }
             }
-            self.descriptor_set_cache.remove(&upload.texture_id);
         }
+        self.pending_uploads = still_pending;
     }
 
     /// Submit a non-blocking texture upload / update.

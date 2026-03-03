@@ -364,6 +364,9 @@ impl InspectorPanel {
 
     /// Edit Transform component
     fn edit_transform(&mut self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) {
+        // Snapshot before editing so we can detect changes and mark dirty.
+        let snapshot = world.get::<&Transform>(entity).ok().map(|t| *t);
+
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
             let color = Self::category_color(category);
             let start_y = ui.cursor().top();
@@ -470,6 +473,19 @@ impl InspectorPanel {
                 egui::pos2(ui.min_rect().left() + 4.0, end_y),
             );
             ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
+
+        // After the mutable borrow is released, check if transform changed
+        // and mark dirty for incremental propagation.
+        if let Some(before) = snapshot {
+            let changed = world.get::<&Transform>(entity).ok().map_or(false, |current| {
+                current.position != before.position
+                    || current.rotation != before.rotation
+                    || current.scale != before.scale
+            });
+            if changed {
+                crate::engine::ecs::hierarchy::mark_transform_dirty(world, entity);
+            }
         }
     }
 

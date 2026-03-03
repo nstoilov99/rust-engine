@@ -95,7 +95,7 @@ impl StandaloneApp {
         )?;
 
         let mut transform_cache = TransformCache::new();
-        transform_cache.propagate(game_world.hecs());
+        transform_cache.propagate(game_world.hecs_mut());
 
         // Set camera from first Camera entity, or use default
         Self::sync_camera_from_ecs(
@@ -210,7 +210,7 @@ impl StandaloneApp {
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
-        self.transform_cache.propagate(self.game_world.hecs());
+        self.transform_cache.propagate(self.game_world.hecs_mut());
 
         let size = self.window.inner_size();
         Self::sync_camera_from_ecs(

@@ -12,7 +12,7 @@ use crate::engine::adapters::physics_adapter::{
     rotation_from_physics, rotation_to_physics, velocity_from_physics,
 };
 use crate::engine::ecs::components::Transform;
-use hecs::World;
+use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use rapier3d::na::{Isometry3, Point3, Vector3};
 use rapier3d::prelude::{
@@ -301,7 +301,8 @@ impl PhysicsWorld {
     ///
     /// Uses physics_adapter for Y-up → Z-up conversion.
     fn sync_physics_to_ecs(&self, ecs_world: &mut World) {
-        for (_, (transform, rigidbody, velocity)) in ecs_world
+        let mut dirty_entities: Vec<Entity> = Vec::new();
+        for (entity, (transform, rigidbody, velocity)) in ecs_world
             .query::<(&mut Transform, &EcsRigidBody, Option<&mut EcsVelocity>)>()
             .iter()
         {
@@ -318,6 +319,8 @@ impl PhysicsWorld {
 
                     transform.rotation = rotation_from_physics(rb.rotation());
 
+                    dirty_entities.push(entity);
+
                     // Update velocity if component exists (convert via adapter)
                     if let Some(vel) = velocity {
                         vel.linear = velocity_from_physics(rb.linvel());
@@ -325,6 +328,9 @@ impl PhysicsWorld {
                     }
                 }
             }
+        }
+        for entity in dirty_entities {
+            crate::engine::ecs::hierarchy::mark_transform_dirty(ecs_world, entity);
         }
     }
 }

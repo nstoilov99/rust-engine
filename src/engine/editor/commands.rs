@@ -131,6 +131,7 @@ impl Command for TransformChangeCommand {
             transform.rotation = self.new_rotation;
             transform.scale = self.new_scale;
         }
+        crate::engine::ecs::hierarchy::mark_transform_dirty(world, self.entity);
     }
 
     fn undo(&mut self, world: &mut World) {
@@ -139,6 +140,7 @@ impl Command for TransformChangeCommand {
             transform.rotation = self.old_rotation;
             transform.scale = self.old_scale;
         }
+        crate::engine::ecs::hierarchy::mark_transform_dirty(world, self.entity);
     }
 
     fn description(&self) -> &str {

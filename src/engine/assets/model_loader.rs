@@ -22,6 +22,9 @@ pub struct LoadedMesh {
     pub center: Vec3,
     /// Bounding sphere radius
     pub radius: f32,
+    /// Local-space axis-aligned bounding box (computed once at load time).
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
 }
 
 /// Compute bounding sphere for a set of vertices
@@ -395,12 +398,21 @@ fn extract_mesh_from_primitive(
     // Compute bounding sphere for frustum culling
     let (center, radius) = compute_bounding_sphere(&vertices);
 
+    // Compute local-space AABB (once, at load time — never recomputed at runtime).
+    let aabb = crate::engine::math::Aabb::from_points(
+        vertices
+            .iter()
+            .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2])),
+    );
+
     Ok(LoadedMesh {
         vertices,
         indices,
         material_index,
         center,
         radius,
+        aabb_min: aabb.min,
+        aabb_max: aabb.max,
     })
 }
 

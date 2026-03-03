@@ -27,6 +27,11 @@ pub struct GameWorld {
     events: EventStorage,
     command_buffer: CommandBuffer,
     change_ticks: ChangeTicks,
+    /// Set to `true` when a structural hierarchy change occurs (spawn, despawn,
+    /// reparent). The frame loop should check this via
+    /// [`take_hierarchy_changed`] and call
+    /// `TransformCache::request_full_propagation()` when it's set.
+    hierarchy_changed: bool,
 }
 
 impl GameWorld {
@@ -41,6 +46,7 @@ impl GameWorld {
             events: EventStorage::new(),
             command_buffer: CommandBuffer::new(),
             change_ticks: ChangeTicks::new(),
+            hierarchy_changed: false,
         }
     }
 
@@ -149,6 +155,7 @@ impl GameWorld {
             entity,
             name: None,
         });
+        self.hierarchy_changed = true;
         entity
     }
 
@@ -168,6 +175,7 @@ impl GameWorld {
             entity,
             name: Some(name.into()),
         });
+        self.hierarchy_changed = true;
         entity
     }
 
@@ -177,6 +185,7 @@ impl GameWorld {
         self.change_ticks.remove_entity(entity);
         self.events.send(EntityDeleted { entity });
         super::hierarchy::despawn_recursive(&mut self.hecs_world, entity);
+        self.hierarchy_changed = true;
     }
 
     /// Insert a component on an entity, marking it as Added in ChangeTicks.
@@ -246,6 +255,21 @@ impl GameWorld {
             &mut self.resources,
             &mut self.command_buffer,
         );
+    }
+
+    // === Hierarchy change tracking ===
+
+    /// Mark that a structural hierarchy change occurred (spawn, despawn, reparent).
+    /// The frame loop should call `take_hierarchy_changed()` and forward to
+    /// `TransformCache::request_full_propagation()`.
+    pub fn mark_hierarchy_changed(&mut self) {
+        self.hierarchy_changed = true;
+    }
+
+    /// Returns `true` if a structural hierarchy change occurred since the last
+    /// call, and resets the flag.
+    pub fn take_hierarchy_changed(&mut self) -> bool {
+        std::mem::replace(&mut self.hierarchy_changed, false)
     }
 
     // === Transient state reset ===

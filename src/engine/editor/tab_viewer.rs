@@ -283,6 +283,10 @@ impl<'a> EditorTabViewer<'a> {
                             if let Ok(mut t) = self.editor.world.get::<&mut Transform>(entity) {
                                 *t = new_transform;
                             }
+                            crate::engine::ecs::hierarchy::mark_transform_dirty(
+                                self.editor.world,
+                                entity,
+                            );
                         }
                         GizmoInteractionResult::DragEnded {
                             entity,

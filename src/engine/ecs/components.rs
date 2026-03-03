@@ -222,6 +222,14 @@ fn default_shadow_bias() -> f32 {
     0.005
 }
 
+/// Marker component indicating that an entity's transform has changed
+/// and its world matrix (and descendants' matrices) need to be recomputed.
+///
+/// Added by mutation sites (inspector, gizmo, physics sync, undo/redo).
+/// Cleared by `TransformCache::propagate_incremental()` after re-propagation.
+#[derive(Debug, Clone, Copy)]
+pub struct TransformDirty;
+
 /// Tag component for player-controlled entities
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Player;
