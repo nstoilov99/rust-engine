@@ -1,31 +1,83 @@
 #!/bin/sh
-# Git hook to clean up commit messages
-# This runs automatically before you edit the commit message
-# Removes automated footers and unwanted text from vibe-kanban or other tools
+# Conventional Commits validation hook
+# https://www.conventionalcommits.org/
+#
+# To enable this hook, run:
+#   git config core.hooksPath .githooks
 
-COMMIT_MSG_FILE=$1
-COMMIT_SOURCE=$2
+commit_msg_file="$1"
+commit_msg=$(cat "$commit_msg_file")
 
-# Only modify commits that aren't merges, rebases, or amendments
-if [ -z "$COMMIT_SOURCE" ]; then
-    # Remove "Generated with Claude Code" and similar attribution
-    sed -i.bak '/🤖 Generated with.*Claude/d' "$COMMIT_MSG_FILE"
-    sed -i.bak '/Generated with.*Claude Code/d' "$COMMIT_MSG_FILE"
-
-    # Remove Co-Authored-By lines for Claude/AI
-    sed -i.bak '/Co-Authored-By:.*Claude/d' "$COMMIT_MSG_FILE"
-    sed -i.bak '/Co-Authored-By:.*noreply@anthropic/d' "$COMMIT_MSG_FILE"
-
-    # Remove common vibe-kanban automated markers (customize these)
-    sed -i.bak '/\[vibe-kanban\]/d' "$COMMIT_MSG_FILE"
-    sed -i.bak '/^🤖 Auto-commit/d' "$COMMIT_MSG_FILE"
-
-    # Remove trailing empty lines
-    sed -i.bak -e :a -e '/^\s*$/d;N;ba' "$COMMIT_MSG_FILE"
-
-    # Clean up backup file
-    rm -f "${COMMIT_MSG_FILE}.bak"
+# Skip merge commits
+if echo "$commit_msg" | grep -qE "^Merge "; then
+    exit 0
 fi
 
-# Exit with 0 to allow the commit to proceed
+# Strip Co-Authored-By lines (we don't want AI co-author attribution)
+sed -i '/^Co-Authored-By:/d' "$commit_msg_file"
+sed -i '/^co-authored-by:/d' "$commit_msg_file"
+
+# Auto-rewrite vibe-kanban commit messages to conventional format
+# Converts: "Task 26: Performance Profiling & Baselines (vibe-kanban ISS-22)"
+# To:       "feat(task-26): performance profiling & baselines"
+if echo "$commit_msg" | grep -qF "vibe-kanban"; then
+    # Extract task number and description
+    task_num=$(echo "$commit_msg" | head -1 | sed -nE 's/^Task ([0-9]+):.*/\1/p')
+    description=$(echo "$commit_msg" | head -1 | sed -E 's/^Task [0-9]+: //' | sed -E 's/ *\(vibe-kanban [^)]*\)//')
+
+    if [ -n "$task_num" ] && [ -n "$description" ]; then
+        # Lowercase the description
+        description=$(echo "$description" | tr '[:upper:]' '[:lower:]')
+        # Build conventional commit message
+        new_msg="feat(task-${task_num}): ${description}"
+        # Preserve any body content (lines after the first)
+        body=$(echo "$commit_msg" | tail -n +2)
+        if [ -n "$body" ]; then
+            printf '%s\n%s\n' "$new_msg" "$body" > "$commit_msg_file"
+        else
+            printf '%s\n' "$new_msg" > "$commit_msg_file"
+        fi
+        exit 0
+    fi
+
+    # If we couldn't parse it but it's still vibe-kanban, let it through
+    exit 0
+fi
+
+# Conventional commit pattern:
+# type(scope)?: description
+#
+# Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore
+pattern="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-zA-Z0-9_-]+\))?(!)?: .{1,}"
+
+if ! echo "$commit_msg" | head -1 | grep -qE "$pattern"; then
+    echo ""
+    echo "ERROR: Commit message does not follow Conventional Commits format."
+    echo ""
+    echo "Expected format: <type>(<scope>): <description>"
+    echo ""
+    echo "Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore"
+    echo ""
+    echo "Examples:"
+    echo "  feat(translator): add flash swap ordering"
+    echo "  fix(router): handle empty tick arrays"
+    echo "  chore(deps): update dependencies"
+    echo "  refactor(query-service): extract pool fetching"
+    echo ""
+    echo "Your commit message was:"
+    echo "  $(head -1 "$commit_msg_file")"
+    echo ""
+    exit 1
+fi
+
+# Check description length (should be meaningful, at least 10 chars)
+description=$(echo "$commit_msg" | head -1 | sed -E 's/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore)(\([a-zA-Z0-9_-]+\))?(!)?: //')
+if [ ${#description} -lt 10 ]; then
+    echo ""
+    echo "ERROR: Commit description is too short (minimum 10 characters)."
+    echo "Your description: '$description'"
+    echo ""
+    exit 1
+fi
+
 exit 0
