@@ -3,6 +3,7 @@
 //! Provides an in-engine profiler UI built on puffin for data collection
 //! and egui for visualization.
 
+mod budget;
 mod collector;
 mod data;
 mod flamegraph;
@@ -12,7 +13,10 @@ mod table_view;
 mod toolbar;
 pub mod tracy;
 
-pub use data::{ProfileFrame, ProfileScope, ProfileThread, ProfilerSettings, ProfilerState, ProfilerView};
+use crate::engine::rendering::{RenderCounters, ResourceCounters};
+pub use data::{
+    ProfileFrame, ProfileScope, ProfileThread, ProfilerSettings, ProfilerState, ProfilerView,
+};
 
 use egui::{RichText, Ui};
 use std::sync::mpsc::Receiver;
@@ -112,6 +116,7 @@ impl ProfilerPanel {
                 "Flamegraph",
             );
             ui.selectable_value(&mut self.state.current_view, ProfilerView::Table, "Table");
+            ui.selectable_value(&mut self.state.current_view, ProfilerView::Budget, "Budget");
 
             // Filter (shared between views)
             ui.separator();
@@ -128,12 +133,22 @@ impl ProfilerPanel {
         match self.state.current_view {
             ProfilerView::Flamegraph => flamegraph::render(ui, &mut self.state),
             ProfilerView::Table => table_view::render(ui, &mut self.state),
+            ProfilerView::Budget => budget::render(ui, &mut self.state),
         }
 
         // Render popups
         toolbar::render_settings_popup(ui, &mut self.state);
         toolbar::render_info_popup(ui, &mut self.state);
         toolbar::render_tracy_popup(ui, &mut self.state);
+    }
+
+    pub fn set_runtime_counters(
+        &mut self,
+        render_counters: RenderCounters,
+        resource_counters: ResourceCounters,
+    ) {
+        self.state
+            .set_runtime_counters(render_counters, resource_counters);
     }
 }
 

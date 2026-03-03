@@ -177,12 +177,158 @@ impl<'de> Deserialize<'de> for RigidBodyTypeData {
     }
 }
 
-/// Collider shape for scene serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Collider shape for scene serialization.
+///
+/// Custom serde keeps existing saved scenes loadable while writing an explicit
+/// `type` field for new files.
+#[derive(Debug, Clone)]
 pub enum ColliderShapeData {
     Cuboid { half_extents: [f32; 3] },
     Ball { radius: f32 },
     Capsule { half_height: f32, radius: f32 },
+}
+
+impl Serialize for ColliderShapeData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            ColliderShapeData::Cuboid { half_extents } => {
+                map.serialize_entry("type", "Cuboid")?;
+                map.serialize_entry("half_extents", half_extents)?;
+            }
+            ColliderShapeData::Ball { radius } => {
+                map.serialize_entry("type", "Ball")?;
+                map.serialize_entry("radius", radius)?;
+            }
+            ColliderShapeData::Capsule {
+                half_height,
+                radius,
+            } => {
+                map.serialize_entry("type", "Capsule")?;
+                map.serialize_entry("half_height", half_height)?;
+                map.serialize_entry("radius", radius)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ColliderShapeData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use ron::Value;
+        use serde::de::Error;
+
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Map(mut map) => {
+                if let Some(kind) = take_string_field(&mut map, "type")? {
+                    return collider_shape_from_fields(kind.as_str(), map);
+                }
+
+                if let Some((kind, inner_map)) = take_variant_map(&mut map)? {
+                    return collider_shape_from_fields(kind.as_str(), inner_map);
+                }
+
+                let inferred_kind = if has_field(&map, "half_extents") {
+                    "Cuboid"
+                } else if has_field(&map, "half_height") {
+                    "Capsule"
+                } else if has_field(&map, "radius") {
+                    "Ball"
+                } else {
+                    return Err(Error::custom("unrecognized collider shape"));
+                };
+
+                collider_shape_from_fields(inferred_kind, map)
+            }
+            _ => Err(Error::custom("expected collider shape map")),
+        }
+    }
+}
+
+fn collider_shape_from_fields<E: serde::de::Error>(
+    kind: &str,
+    mut fields: ron::Map,
+) -> Result<ColliderShapeData, E> {
+    match kind {
+        "Cuboid" => Ok(ColliderShapeData::Cuboid {
+            half_extents: take_required_field(&mut fields, "half_extents")?,
+        }),
+        "Ball" => Ok(ColliderShapeData::Ball {
+            radius: take_required_field(&mut fields, "radius")?,
+        }),
+        "Capsule" => Ok(ColliderShapeData::Capsule {
+            half_height: take_required_field(&mut fields, "half_height")?,
+            radius: take_required_field(&mut fields, "radius")?,
+        }),
+        other => Err(E::unknown_variant(other, &["Cuboid", "Ball", "Capsule"])),
+    }
+}
+
+fn take_variant_map<E: serde::de::Error>(
+    map: &mut ron::Map,
+) -> Result<Option<(String, ron::Map)>, E> {
+    if map.len() != 1 {
+        return Ok(None);
+    }
+
+    let Some((key, _value)) = map.iter().next() else {
+        return Ok(None);
+    };
+
+    let ron::Value::String(kind) = key else {
+        return Ok(None);
+    };
+    if !matches!(kind.as_str(), "Cuboid" | "Ball" | "Capsule") {
+        return Ok(None);
+    }
+
+    let kind = kind.clone();
+    let value = map
+        .remove(&ron::Value::String(kind.clone()))
+        .ok_or_else(|| E::custom("missing collider variant payload"))?;
+    let ron::Value::Map(inner_map) = value else {
+        return Err(E::custom("expected collider variant field map"));
+    };
+
+    Ok(Some((kind, inner_map)))
+}
+
+fn take_string_field<E: serde::de::Error>(
+    fields: &mut ron::Map,
+    name: &str,
+) -> Result<Option<String>, E> {
+    let Some(value) = fields.remove(&ron::Value::String(name.to_string())) else {
+        return Ok(None);
+    };
+    value
+        .into_rust::<String>()
+        .map(Some)
+        .map_err(|error| E::custom(error.to_string()))
+}
+
+fn take_required_field<T, E: serde::de::Error>(fields: &mut ron::Map, name: &str) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = fields
+        .remove(&ron::Value::String(name.to_string()))
+        .ok_or_else(|| E::custom(format!("missing field '{name}'")))?;
+    let value = match value {
+        ron::Value::Option(Some(inner)) => *inner,
+        other => other,
+    };
+    value
+        .into_rust::<T>()
+        .map_err(|error| E::custom(error.to_string()))
+}
+
+fn has_field(fields: &ron::Map, name: &str) -> bool {
+    fields
+        .iter()
+        .any(|(key, _)| matches!(key, ron::Value::String(value) if value == name))
 }
 
 fn default_true() -> bool {
@@ -303,6 +449,56 @@ impl Default for SceneFile {
             version: "1.0".to_string(),
             name: "Untitled Scene".to_string(),
             entities: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collider_shape_loads_legacy_external_variant() {
+        let shape: ColliderShapeData =
+            ron::from_str("Cuboid(half_extents: (1.0, 2.0, 3.0))").unwrap();
+
+        match shape {
+            ColliderShapeData::Cuboid { half_extents } => {
+                assert_eq!(half_extents, [1.0, 2.0, 3.0]);
+            }
+            _ => panic!("expected cuboid shape"),
+        }
+    }
+
+    #[test]
+    fn collider_component_roundtrips_with_explicit_type_map() {
+        let component = ComponentData::Collider {
+            shape: ColliderShapeData::Capsule {
+                half_height: 1.5,
+                radius: 0.75,
+            },
+            friction: 0.5,
+            restitution: 0.25,
+            is_sensor: false,
+        };
+
+        let ron_string = ron::ser::to_string(&component).unwrap();
+        assert!(ron_string.contains("Capsule"));
+
+        let decoded: ComponentData = ron::from_str(&ron_string).unwrap();
+        match decoded {
+            ComponentData::Collider {
+                shape:
+                    ColliderShapeData::Capsule {
+                        half_height,
+                        radius,
+                    },
+                ..
+            } => {
+                assert!((half_height - 1.5).abs() < 0.001);
+                assert!((radius - 0.75).abs() < 0.001);
+            }
+            _ => panic!("expected capsule collider"),
         }
     }
 }

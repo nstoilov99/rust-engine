@@ -4,11 +4,21 @@
 //! The App struct composes both, with EditorApp only present in editor builds.
 
 use super::{game_setup, input_handler, render_loop};
-use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
-use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::ecs::resources::Time;
-use rust_engine::engine::ecs::schedule::Schedule;
 use egui_dock::DockArea;
+use rust_engine::assets::asset_source;
+use rust_engine::assets::AssetType;
+use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
+use rust_engine::engine::benchmark::{
+    load_or_create_benchmark_scene, BenchmarkConfig, BENCHMARK_SCENE_RELATIVE,
+};
+use rust_engine::engine::ecs::components::{Camera, Transform};
+use rust_engine::engine::ecs::events::PlayModeChanged;
+use rust_engine::engine::ecs::game_world::GameWorld;
+use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::ecs::resources::Time;
+use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
+use rust_engine::engine::ecs::schedule::Schedule;
+use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
     CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
@@ -20,15 +30,8 @@ use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
-use rust_engine::engine::rendering::RenderTarget;
-use rust_engine::engine::ecs::components::{Camera, Transform};
-use rust_engine::engine::ecs::events::PlayModeChanged;
-use rust_engine::engine::ecs::hierarchy::TransformCache;
-use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
-use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
-use rust_engine::engine::scene::{save_scene, load_scene};
-use rust_engine::assets::AssetType;
-use rust_engine::assets::asset_source;
+use rust_engine::engine::rendering::{RenderTarget, ResourceCounters};
+use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -40,6 +43,20 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
 const MIN_VIEWPORT_SIZE_FOR_CAMERA: u32 = 50;
+const MAIN_SCENE_RELATIVE: &str = "scenes/main.scene.ron";
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EditorRuntimeFlags {
+    pub benchmark_tools_enabled: bool,
+}
+
+impl EditorRuntimeFlags {
+    pub fn from_args(args: &[String]) -> Self {
+        Self {
+            benchmark_tools_enabled: args.iter().any(|arg| arg == "--editor-benchmark-tools"),
+        }
+    }
+}
 
 /// Saved editor state for restoring after play mode ends.
 pub(crate) struct PrePlayCameraState {
@@ -69,6 +86,8 @@ pub struct CoreApp {
     pub current_debug_view: DebugView,
     pub camera_distance: f32,
     pub mesh_indices: Vec<usize>,
+    pub plane_mesh_index: usize,
+    pub cube_mesh_index: usize,
     pub descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
@@ -106,6 +125,8 @@ pub struct SceneEditorState {
     pub selection: Selection,
     pub command_history: CommandHistory,
     pub asset_browser: AssetBrowserPanel,
+    pub current_scene_relative: String,
+    pub current_scene_name: String,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -139,10 +160,14 @@ pub struct EditorApp {
 pub struct App {
     pub core: CoreApp,
     pub editor: EditorApp,
+    runtime_flags: EditorRuntimeFlags,
 }
 
 impl App {
-    pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        window: Arc<Window>,
+        runtime_flags: EditorRuntimeFlags,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up...");
 
         let renderer = Renderer::new(window.clone())?;
@@ -166,7 +191,11 @@ impl App {
             game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0])?;
 
         if !scene_loaded {
-            game_setup::spawn_physics_test_objects(game_world.hecs_mut(), plane_mesh_index, cube_mesh_index);
+            game_setup::spawn_physics_test_objects(
+                game_world.hecs_mut(),
+                plane_mesh_index,
+                cube_mesh_index,
+            );
         }
 
         let mut hierarchy_panel = HierarchyPanel::new();
@@ -217,11 +246,18 @@ impl App {
             current_debug_view: DebugView::None,
             camera_distance: 5.0,
             mesh_indices,
+            plane_mesh_index,
+            cube_mesh_index,
             descriptor_set,
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
             transform_cache: TransformCache::new(),
         };
+
+        let mut asset_browser = AssetBrowserPanel::new(std::path::PathBuf::from("content"));
+        if !runtime_flags.benchmark_tools_enabled {
+            asset_browser.set_hidden_paths([std::path::PathBuf::from(BENCHMARK_SCENE_RELATIVE)]);
+        }
 
         let editor = EditorApp {
             viewport: ViewportState {
@@ -254,7 +290,9 @@ impl App {
                 inspector_panel: InspectorPanel::new(),
                 selection: Selection::new(),
                 command_history: CommandHistory::new(100),
-                asset_browser: AssetBrowserPanel::new(std::path::PathBuf::from("content")),
+                asset_browser,
+                current_scene_relative: MAIN_SCENE_RELATIVE.to_string(),
+                current_scene_name: "Main Scene".to_string(),
             },
             ui: EditorUIState {
                 gui,
@@ -272,7 +310,11 @@ impl App {
             },
         };
 
-        Ok(Self { core, editor })
+        Ok(Self {
+            core,
+            editor,
+            runtime_flags,
+        })
     }
 
     pub fn print_controls(&self) {
@@ -326,7 +368,9 @@ impl App {
 
         if self.play_mode() == PlayMode::Playing {
             rust_engine::profile_scope!("physics_step");
-            self.core.physics_world.step(delta_time, self.core.game_world.hecs_mut());
+            self.core
+                .physics_world
+                .step(delta_time, self.core.game_world.hecs_mut());
         }
     }
 
@@ -338,11 +382,11 @@ impl App {
                     mesh_indices: new_indices,
                     model: _,
                 } => {
-                    for (_entity, mesh_renderer) in self
-                        .core
-                        .game_world
-                        .hecs_mut()
-                        .query_mut::<&mut rust_engine::engine::ecs::components::MeshRenderer>()
+                    for (_entity, mesh_renderer) in
+                        self.core
+                            .game_world
+                            .hecs_mut()
+                            .query_mut::<&mut rust_engine::engine::ecs::components::MeshRenderer>()
                     {
                         if !new_indices.is_empty() {
                             mesh_renderer.mesh_index = new_indices[0];
@@ -366,10 +410,14 @@ impl App {
         match event {
             WindowEvent::Resized(new_size) => {
                 self.core.renderer.recreate_swapchain = true;
-                self.editor.ui.gui
+                self.editor
+                    .ui
+                    .gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 let keycode = match key_event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
@@ -378,7 +426,14 @@ impl App {
                 if key_event.state.is_pressed() {
                     if keycode == Some(KeyCode::F12) {
                         self.editor.ui.show_profiler = !self.editor.ui.show_profiler;
-                        println!("Profiler: {}", if self.editor.ui.show_profiler { "ON" } else { "OFF" });
+                        println!(
+                            "Profiler: {}",
+                            if self.editor.ui.show_profiler {
+                                "ON"
+                            } else {
+                                "OFF"
+                            }
+                        );
                     }
 
                     if keycode == Some(KeyCode::F5) {
@@ -399,29 +454,19 @@ impl App {
                     if keycode == Some(KeyCode::KeyS)
                         && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft)
                     {
-                        if self.play_mode() != PlayMode::Edit {
-                            log::warn!("Cannot save scene during play mode");
-                        } else {
-                            let scene_path = asset_source::resolve("scenes/main.scene.ron");
-                            match save_scene(
-                                self.core.game_world.hecs(),
-                                &scene_path.to_string_lossy(),
-                                "Main Scene",
-                                self.editor.scene.hierarchy_panel.root_order(),
-                            ) {
-                                Ok(_) => println!("Scene saved to {}", scene_path.display()),
-                                Err(e) => eprintln!("Save failed: {}", e),
-                            }
-                        }
+                        self.save_active_scene();
                     }
                 }
-                self.core.input_manager.handle_keyboard(keycode, key_event.state);
+                self.core
+                    .input_manager
+                    .handle_keyboard(keycode, key_event.state);
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 self.core.input_manager.handle_mouse_button(*button, *state);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.core.input_manager
+                self.core
+                    .input_manager
                     .handle_mouse_move(position.x as f32, position.y as f32);
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -449,22 +494,29 @@ impl App {
         rust_engine::profile_function!();
 
         // Single-pass authoritative transform propagation for the entire hierarchy.
-        {
-            rust_engine::profile_scope!("transform_propagate");
-            self.core.transform_cache.propagate(self.core.game_world.hecs());
-        }
+        self.core
+            .transform_cache
+            .propagate(self.core.game_world.hecs());
 
         if self.editor.viewport.texture_id.is_none() {
             let texture_id = self
-                .editor.ui.gui
+                .editor
+                .ui
+                .gui
                 .register_native_texture(self.editor.viewport.texture.image_view());
             self.editor.viewport.texture_id = Some(texture_id);
         }
 
         if !self.editor.ui.icons_loaded {
             let engine_path = std::path::Path::new("engine");
-            self.editor.ui.icon_manager.load_toolbar_icons(self.editor.ui.gui.context(), engine_path);
-            self.editor.ui.icon_manager.load_asset_browser_icons(self.editor.ui.gui.context(), engine_path);
+            self.editor
+                .ui
+                .icon_manager
+                .load_toolbar_icons(self.editor.ui.gui.context(), engine_path);
+            self.editor
+                .ui
+                .icon_manager
+                .load_asset_browser_icons(self.editor.ui.gui.context(), engine_path);
             self.editor.ui.icons_loaded = true;
         }
 
@@ -485,7 +537,8 @@ impl App {
             &mut self.core.mesh_data_buffer,
             &self.core.transform_cache,
         );
-        let light_data = render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);
+        let light_data =
+            render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);
 
         if let Some(mut prev_future) = self.core.previous_frame_end.take() {
             prev_future.cleanup_finished();
@@ -496,16 +549,25 @@ impl App {
             if vp_width > 0 && vp_height > 0 {
                 if let Ok(true) = self.editor.viewport.texture.resize(vp_width, vp_height) {
                     if let Some(texture_id) = self.editor.viewport.texture_id {
-                        self.editor.ui.gui
-                            .update_native_texture(texture_id, self.editor.viewport.texture.image_view());
+                        self.editor.ui.gui.update_native_texture(
+                            texture_id,
+                            self.editor.viewport.texture.image_view(),
+                        );
                     }
-                    self.editor.viewport.camera.set_viewport_size(vp_width as f32, vp_height as f32);
-                    self.core.renderer
+                    self.editor
+                        .viewport
+                        .camera
+                        .set_viewport_size(vp_width as f32, vp_height as f32);
+                    self.core
+                        .renderer
                         .camera_3d
                         .set_viewport_size(vp_width as f32, vp_height as f32);
                 }
                 if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
-                    eprintln!("Failed to sync deferred renderer after swapchain recreation: {}", e);
+                    eprintln!(
+                        "Failed to sync deferred renderer after swapchain recreation: {}",
+                        e
+                    );
                 }
             }
             self.editor.viewport.pending_sync = false;
@@ -517,7 +579,8 @@ impl App {
                 &mut self.core.deferred_renderer,
             ) {
                 Ok(false) => {
-                    self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
+                    self.core.previous_frame_end =
+                        Some(render_loop::create_now_future(&self.core.renderer));
                     return Ok(());
                 }
                 Ok(true) => {
@@ -525,7 +588,8 @@ impl App {
                     self.editor.ui.gui.clear_framebuffer_cache();
                 }
                 Err(e) => {
-                    self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
+                    self.core.previous_frame_end =
+                        Some(render_loop::create_now_future(&self.core.renderer));
                     return Err(e);
                 }
             }
@@ -535,22 +599,33 @@ impl App {
             match render_loop::acquire_swapchain_image(&mut self.core.renderer) {
                 Ok(result) => result,
                 Err(_) => {
-                    self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
+                    self.core.previous_frame_end =
+                        Some(render_loop::create_now_future(&self.core.renderer));
                     return Ok(());
                 }
             };
 
         let (vp_width, vp_height) = self.editor.viewport.size;
-        if vp_width != self.editor.viewport.texture.width() || vp_height != self.editor.viewport.texture.height() {
+        if vp_width != self.editor.viewport.texture.width()
+            || vp_height != self.editor.viewport.texture.height()
+        {
             if vp_width > 0 && vp_height > 0 {
                 if let Ok(resized) = self.editor.viewport.texture.resize(vp_width, vp_height) {
                     if resized {
                         if let Some(texture_id) = self.editor.viewport.texture_id {
-                            self.editor.ui.gui
-                                .update_native_texture(texture_id, self.editor.viewport.texture.image_view());
+                            self.editor.ui.gui.update_native_texture(
+                                texture_id,
+                                self.editor.viewport.texture.image_view(),
+                            );
                         }
-                        self.editor.viewport.camera.set_viewport_size(vp_width as f32, vp_height as f32);
-                        self.core.renderer.camera_3d.set_viewport_size(vp_width as f32, vp_height as f32);
+                        self.editor
+                            .viewport
+                            .camera
+                            .set_viewport_size(vp_width as f32, vp_height as f32);
+                        self.core
+                            .renderer
+                            .camera_3d
+                            .set_viewport_size(vp_width as f32, vp_height as f32);
                         if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
                             eprintln!("Failed to resize deferred renderer: {}", e);
                         }
@@ -562,7 +637,9 @@ impl App {
         let view_proj = self.editor.viewport.camera.view_projection_matrix();
         let camera_pos = self.editor.viewport.camera.position;
 
-        let render_target = RenderTarget::Texture { image: self.editor.viewport.texture.image() };
+        let render_target = RenderTarget::Texture {
+            image: self.editor.viewport.texture.image(),
+        };
 
         let is_editing = self.play_mode() == PlayMode::Edit;
 
@@ -577,10 +654,20 @@ impl App {
             Ok(cb) => cb,
             Err(e) => {
                 eprintln!("Render error: {}", e);
-                self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
+                self.core.previous_frame_end =
+                    Some(render_loop::create_now_future(&self.core.renderer));
                 return Ok(());
             }
         };
+
+        self.editor.ui.profiler_panel.set_runtime_counters(
+            self.core.deferred_renderer.render_counters().clone(),
+            ResourceCounters::collect(
+                self.core.game_world.hecs(),
+                &self.core.asset_manager,
+                &self.core.physics_world,
+            ),
+        );
 
         let current_play_mode = self.play_mode();
 
@@ -621,51 +708,65 @@ impl App {
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
 
-        let gui_result = match self.editor.ui.gui.render(window, target_image, Some(prev_viewport_rect), |ctx| {
-            menu_action = render_menu_bar(ctx, dock_state, command_history, current_play_mode, build_dialog, console_messages);
+        let gui_result =
+            match self
+                .editor
+                .ui
+                .gui
+                .render(window, target_image, Some(prev_viewport_rect), |ctx| {
+                    menu_action = render_menu_bar(
+                        ctx,
+                        dock_state,
+                        command_history,
+                        current_play_mode,
+                        build_dialog,
+                        console_messages,
+                        self.runtime_flags.benchmark_tools_enabled,
+                    );
 
-            let editor_ctx = EditorContext {
-                world,
-                selection,
-                hierarchy_panel,
-                inspector_panel,
-                command_history,
-                show_profiler,
-                console_messages,
-                log_filter,
-                viewport_texture_id,
-                viewport_size,
-                profiler_panel,
-                console_command_system,
-                console_input,
-                show_stat_fps,
-                fps,
-                delta_ms,
-                editor_camera,
-                gizmo_handler,
-                grid_visible,
-                viewport_hovered,
-                viewport_rect: &mut new_viewport_rect,
-                viewport_settings,
-                icon_manager,
-                asset_browser,
-                play_mode: current_play_mode,
-                toolbar_action: &mut toolbar_action,
+                    let editor_ctx = EditorContext {
+                        world,
+                        selection,
+                        hierarchy_panel,
+                        inspector_panel,
+                        command_history,
+                        show_profiler,
+                        console_messages,
+                        log_filter,
+                        viewport_texture_id,
+                        viewport_size,
+                        profiler_panel,
+                        console_command_system,
+                        console_input,
+                        show_stat_fps,
+                        fps,
+                        delta_ms,
+                        editor_camera,
+                        gizmo_handler,
+                        grid_visible,
+                        viewport_hovered,
+                        viewport_rect: &mut new_viewport_rect,
+                        viewport_settings,
+                        icon_manager,
+                        asset_browser,
+                        play_mode: current_play_mode,
+                        toolbar_action: &mut toolbar_action,
+                    };
+
+                    let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
+
+                    DockArea::new(&mut dock_state.dock_state)
+                        .style(create_editor_dock_style(ctx))
+                        .show(ctx, &mut tab_viewer);
+                }) {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("GUI render error: {}", e);
+                    self.core.previous_frame_end =
+                        Some(render_loop::create_now_future(&self.core.renderer));
+                    return Ok(());
+                }
             };
-
-            let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
-
-            DockArea::new(&mut dock_state.dock_state)
-                .style(create_editor_dock_style(ctx))
-                .show(ctx, &mut tab_viewer);
-        }) {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("GUI render error: {}", e);
-                self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
-                return Ok(());
-            }
-        };
 
         self.editor.viewport.rect = new_viewport_rect;
 
@@ -675,22 +776,7 @@ impl App {
 
         match menu_action {
             MenuAction::None => {}
-            MenuAction::SaveScene => {
-                if self.play_mode() != PlayMode::Edit {
-                    log::warn!("Cannot save scene during play mode");
-                } else {
-                    let scene_path = asset_source::resolve("scenes/main.scene.ron");
-                    match save_scene(
-                        self.core.game_world.hecs(),
-                        &scene_path.to_string_lossy(),
-                        "Main Scene",
-                        self.editor.scene.hierarchy_panel.root_order(),
-                    ) {
-                        Ok(_) => println!("Scene saved to {}", scene_path.display()),
-                        Err(e) => eprintln!("Save failed: {}", e),
-                    }
-                }
-            }
+            MenuAction::SaveScene => self.save_active_scene(),
             MenuAction::Exit => {
                 self.save_layout_on_exit();
                 println!("Closing...");
@@ -698,29 +784,42 @@ impl App {
             }
             MenuAction::Undo => {
                 if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self.editor.scene.command_history.undo(self.core.game_world.hecs_mut()) {
+                    if let Some(desc) = self
+                        .editor
+                        .scene
+                        .command_history
+                        .undo(self.core.game_world.hecs_mut())
+                    {
                         println!("Undo: {}", desc);
                     }
                 }
             }
             MenuAction::Redo => {
                 if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self.editor.scene.command_history.redo(self.core.game_world.hecs_mut()) {
+                    if let Some(desc) = self
+                        .editor
+                        .scene
+                        .command_history
+                        .redo(self.core.game_world.hecs_mut())
+                    {
                         println!("Redo: {}", desc);
                     }
                 }
             }
-            MenuAction::SaveLayout => {
-                match self.editor.ui.dock_state.save_to_default() {
-                    Ok(()) => println!("Layout saved to {}", EditorDockState::default_layout_path().display()),
-                    Err(e) => eprintln!("Failed to save layout: {}", e),
-                }
-            }
+            MenuAction::SaveLayout => match self.editor.ui.dock_state.save_to_default() {
+                Ok(()) => println!(
+                    "Layout saved to {}",
+                    EditorDockState::default_layout_path().display()
+                ),
+                Err(e) => eprintln!("Failed to save layout: {}", e),
+            },
             MenuAction::ResetLayout => {
                 self.editor.ui.dock_state = EditorDockState::new();
                 let _ = self.editor.ui.dock_state.save_to_default();
                 println!("Layout reset to default");
             }
+            MenuAction::LoadBenchmarkScene => self.load_benchmark_scene(),
+            MenuAction::RunBenchmark => self.run_benchmark(),
             MenuAction::Play => self.enter_play_mode(),
             MenuAction::Pause => self.pause_play_mode(),
             MenuAction::Resume => self.resume_play_mode(),
@@ -737,27 +836,49 @@ impl App {
                             AssetType::Scene => {
                                 if self.play_mode() != PlayMode::Edit {
                                     self.editor.console.messages.push(LogMessage::warning(
-                                        "Stop play mode before loading a scene".to_string()
+                                        "Stop play mode before loading a scene".to_string(),
+                                    ));
+                                    continue;
+                                }
+
+                                if metadata.path.as_path()
+                                    == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
+                                    && !self.runtime_flags.benchmark_tools_enabled
+                                {
+                                    self.editor.console.messages.push(LogMessage::warning(
+                                        "Benchmark scene access is locked behind --editor-benchmark-tools"
+                                            .to_string(),
                                     ));
                                     continue;
                                 }
 
                                 let relative = metadata.path.to_string_lossy();
 
-                                self.core.game_world.hecs_mut().clear();
+                                self.core.game_world.reset_transients(false);
                                 self.editor.scene.selection.clear();
+                                self.core.physics_world = PhysicsWorld::new();
 
                                 match load_scene(self.core.game_world.hecs_mut(), &relative) {
                                     Ok((scene_name, root_entities)) => {
-                                        self.editor.scene.hierarchy_panel.set_root_order(root_entities);
+                                        self.editor
+                                            .scene
+                                            .hierarchy_panel
+                                            .set_root_order(root_entities);
+                                        self.editor.scene.current_scene_relative =
+                                            relative.to_string();
+                                        self.editor.scene.current_scene_name = scene_name.clone();
+                                        self.core.transform_cache = TransformCache::new();
+                                        self.core
+                                            .transform_cache
+                                            .propagate(self.core.game_world.hecs());
                                         self.editor.console.messages.push(LogMessage::info(
-                                            format!("Loaded scene: {}", scene_name)
+                                            format!("Loaded scene: {}", scene_name),
                                         ));
                                         println!("Scene loaded: {}", metadata.display_name);
                                     }
                                     Err(e) => {
                                         self.editor.console.messages.push(LogMessage::error(
-                                            format!("Failed to load scene: {}", e)
+                                            format!("Failed to load scene: {}", e),
                                         ));
                                         eprintln!("Failed to load scene: {}", e);
                                     }
@@ -771,7 +892,13 @@ impl App {
                     println!("Asset {} dropped at {:?}", id.0, position);
                 }
                 AssetBrowserEvent::RevealInExplorer { path } => {
-                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
+                    let full_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&path);
                     #[cfg(target_os = "windows")]
                     {
                         let _ = std::process::Command::new("explorer")
@@ -794,60 +921,85 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::AssetDeleted { id, path } => {
-                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
+                    let full_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&path);
                     match std::fs::remove_file(&full_path) {
                         Ok(()) => {
-                            self.editor.console.messages.push(LogMessage::info(
-                                format!("Deleted: {}", path.display())
-                            ));
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::info(format!("Deleted: {}", path.display())));
                             if self.editor.scene.asset_browser.selection.is_selected(id) {
                                 self.editor.scene.asset_browser.selection.remove(id);
                             }
                             self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console.messages.push(LogMessage::error(
-                                format!("Failed to delete {}: {}", path.display(), e)
-                            ));
+                            self.editor.console.messages.push(LogMessage::error(format!(
+                                "Failed to delete {}: {}",
+                                path.display(),
+                                e
+                            )));
                             eprintln!("Failed to delete file: {}", e);
                         }
                     }
                 }
-                AssetBrowserEvent::AssetRenamed { id, old_name, new_name } => {
+                AssetBrowserEvent::AssetRenamed {
+                    id,
+                    old_name,
+                    new_name,
+                } => {
                     if let Some(metadata) = self.editor.scene.asset_browser.registry.get(id) {
-                        let old_path = self.editor.scene.asset_browser.registry.root_path().join(&metadata.path);
-                        let extension = old_path.extension()
+                        let old_path = self
+                            .editor
+                            .scene
+                            .asset_browser
+                            .registry
+                            .root_path()
+                            .join(&metadata.path);
+                        let extension = old_path
+                            .extension()
                             .map(|e| format!(".{}", e.to_string_lossy()))
                             .unwrap_or_default();
                         let new_filename = format!("{}{}", new_name, extension);
-                        let new_path = old_path.parent()
+                        let new_path = old_path
+                            .parent()
                             .map(|p| p.join(&new_filename))
                             .unwrap_or_else(|| std::path::PathBuf::from(&new_filename));
 
                         if new_path.exists() && new_path != old_path {
-                            self.editor.console.messages.push(LogMessage::error(
-                                format!("Cannot rename: '{}' already exists", new_filename)
-                            ));
+                            self.editor.console.messages.push(LogMessage::error(format!(
+                                "Cannot rename: '{}' already exists",
+                                new_filename
+                            )));
                         } else if new_name.is_empty() || new_name.trim().is_empty() {
                             self.editor.console.messages.push(LogMessage::error(
-                                "Cannot rename: name cannot be empty".to_string()
+                                "Cannot rename: name cannot be empty".to_string(),
                             ));
-                        } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+                        } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+                        {
                             self.editor.console.messages.push(LogMessage::error(
-                                "Cannot rename: name contains invalid characters".to_string()
+                                "Cannot rename: name contains invalid characters".to_string(),
                             ));
                         } else {
                             match std::fs::rename(&old_path, &new_path) {
                                 Ok(()) => {
-                                    self.editor.console.messages.push(LogMessage::info(
-                                        format!("Renamed '{}' to '{}'", old_name, new_name)
-                                    ));
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Renamed '{}' to '{}'",
+                                        old_name, new_name
+                                    )));
                                     self.editor.scene.asset_browser.request_rescan();
                                 }
                                 Err(e) => {
-                                    self.editor.console.messages.push(LogMessage::error(
-                                        format!("Failed to rename '{}': {}", old_name, e)
-                                    ));
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to rename '{}': {}",
+                                        old_name, e
+                                    )));
                                     eprintln!("Failed to rename file: {}", e);
                                 }
                             }
@@ -855,7 +1007,13 @@ impl App {
                     }
                 }
                 AssetBrowserEvent::CreateFolder { parent_path } => {
-                    let full_parent = self.editor.scene.asset_browser.registry.root_path().join(&parent_path);
+                    let full_parent = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&parent_path);
                     let base_name = "New Folder";
                     let mut new_name = base_name.to_string();
                     let mut counter = 1;
@@ -866,11 +1024,16 @@ impl App {
                     let new_folder_path = full_parent.join(&new_name);
                     match std::fs::create_dir(&new_folder_path) {
                         Ok(()) => {
-                            self.editor.console.messages.push(LogMessage::info(
-                                format!("Created folder: {}", new_name)
-                            ));
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::info(format!("Created folder: {}", new_name)));
                             if !parent_path.as_os_str().is_empty() {
-                                self.editor.scene.asset_browser.folder_expanded.insert(parent_path.clone());
+                                self.editor
+                                    .scene
+                                    .asset_browser
+                                    .folder_expanded
+                                    .insert(parent_path.clone());
                             }
                             self.editor.scene.asset_browser.request_rescan();
                             let relative_new_folder_path = parent_path.join(&new_name);
@@ -880,42 +1043,65 @@ impl App {
                             });
                         }
                         Err(e) => {
-                            self.editor.console.messages.push(LogMessage::error(
-                                format!("Failed to create folder: {}", e)
-                            ));
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::error(format!("Failed to create folder: {}", e)));
                             eprintln!("Failed to create folder: {}", e);
                         }
                     }
                 }
                 AssetBrowserEvent::FolderDeleted { path } => {
-                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
+                    let full_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&path);
                     let result = std::fs::remove_dir(&full_path)
                         .or_else(|_| std::fs::remove_dir_all(&full_path));
                     match result {
                         Ok(()) => {
-                            self.editor.console.messages.push(LogMessage::info(
-                                format!("Deleted folder: {}", path.display())
-                            ));
-                            if self.editor.scene.asset_browser.current_folder == path ||
-                               self.editor.scene.asset_browser.current_folder.starts_with(&path) {
+                            self.editor.console.messages.push(LogMessage::info(format!(
+                                "Deleted folder: {}",
+                                path.display()
+                            )));
+                            if self.editor.scene.asset_browser.current_folder == path
+                                || self
+                                    .editor
+                                    .scene
+                                    .asset_browser
+                                    .current_folder
+                                    .starts_with(&path)
+                            {
                                 if let Some(parent) = path.parent() {
-                                    self.editor.scene.asset_browser.current_folder = parent.to_path_buf();
+                                    self.editor.scene.asset_browser.current_folder =
+                                        parent.to_path_buf();
                                 } else {
-                                    self.editor.scene.asset_browser.current_folder = std::path::PathBuf::new();
+                                    self.editor.scene.asset_browser.current_folder =
+                                        std::path::PathBuf::new();
                                 }
                             }
                             self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console.messages.push(LogMessage::error(
-                                format!("Failed to delete folder: {}", e)
-                            ));
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::error(format!("Failed to delete folder: {}", e)));
                             eprintln!("Failed to delete folder: {}", e);
                         }
                     }
                 }
                 AssetBrowserEvent::RevealFolderInExplorer { path } => {
-                    let full_path = self.editor.scene.asset_browser.registry.root_path().join(&path);
+                    let full_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&path);
                     #[cfg(target_os = "windows")]
                     {
                         let _ = std::process::Command::new("explorer")
@@ -924,9 +1110,7 @@ impl App {
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        let _ = std::process::Command::new("open")
-                            .arg(&full_path)
-                            .spawn();
+                        let _ = std::process::Command::new("open").arg(&full_path).spawn();
                     }
                     #[cfg(target_os = "linux")]
                     {
@@ -935,52 +1119,85 @@ impl App {
                             .spawn();
                     }
                 }
-                AssetBrowserEvent::AssetMoved { id: _, old_path, new_path } => {
-                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
-                    let full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
+                AssetBrowserEvent::AssetMoved {
+                    id: _,
+                    old_path,
+                    new_path,
+                } => {
+                    let full_old_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&old_path);
+                    let full_new_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&new_path);
 
                     if let Some(parent) = full_new_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
 
                     if full_new_path.exists() {
-                        self.editor.console.messages.push(LogMessage::error(
-                            format!("Cannot move: '{}' already exists in target folder",
-                                new_path.file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| new_path.display().to_string()))
-                        ));
+                        self.editor.console.messages.push(LogMessage::error(format!(
+                            "Cannot move: '{}' already exists in target folder",
+                            new_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| new_path.display().to_string())
+                        )));
                     } else {
                         match std::fs::rename(&full_old_path, &full_new_path) {
                             Ok(()) => {
-                                self.editor.console.messages.push(LogMessage::info(
-                                    format!("Moved '{}' to '{}'",
-                                        old_path.file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| old_path.display().to_string()),
-                                        new_path.parent()
-                                            .map(|p| p.display().to_string())
-                                            .unwrap_or_else(|| "root".to_string()))
-                                ));
+                                self.editor.console.messages.push(LogMessage::info(format!(
+                                    "Moved '{}' to '{}'",
+                                    old_path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| old_path.display().to_string()),
+                                    new_path
+                                        .parent()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|| "root".to_string())
+                                )));
                                 self.editor.scene.asset_browser.request_rescan();
                             }
                             Err(e) => {
-                                self.editor.console.messages.push(LogMessage::error(
-                                    format!("Failed to move file: {}", e)
-                                ));
+                                self.editor
+                                    .console
+                                    .messages
+                                    .push(LogMessage::error(format!("Failed to move file: {}", e)));
                                 eprintln!("Failed to move file: {}", e);
                             }
                         }
                     }
                 }
                 AssetBrowserEvent::FolderMoved { old_path, new_path } => {
-                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
-                    let mut full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
+                    let full_old_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&old_path);
+                    let mut full_new_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&new_path);
                     let mut final_new_path = new_path.clone();
                     let mut was_renamed = false;
 
                     if full_new_path.exists() {
-                        let base_name = new_path.file_name()
+                        let base_name = new_path
+                            .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         let parent = new_path.parent().unwrap_or(std::path::Path::new(""));
@@ -989,7 +1206,13 @@ impl App {
                         loop {
                             let new_name = format!("{} ({})", base_name, counter);
                             let candidate = parent.join(&new_name);
-                            let full_candidate = self.editor.scene.asset_browser.registry.root_path().join(&candidate);
+                            let full_candidate = self
+                                .editor
+                                .scene
+                                .asset_browser
+                                .registry
+                                .root_path()
+                                .join(&candidate);
                             if !full_candidate.exists() {
                                 final_new_path = candidate;
                                 full_new_path = full_candidate;
@@ -998,9 +1221,10 @@ impl App {
                             }
                             counter += 1;
                             if counter > 100 {
-                                self.editor.console.messages.push(LogMessage::error(
-                                    format!("Cannot move: too many folders named '{}' in target location", base_name)
-                                ));
+                                self.editor.console.messages.push(LogMessage::error(format!(
+                                    "Cannot move: too many folders named '{}' in target location",
+                                    base_name
+                                )));
                                 continue;
                             }
                         }
@@ -1008,87 +1232,137 @@ impl App {
 
                     match std::fs::rename(&full_old_path, &full_new_path) {
                         Ok(()) => {
-                            let original_name = old_path.file_name()
+                            let original_name = old_path
+                                .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| old_path.display().to_string());
-                            let target_dir = final_new_path.parent()
+                            let target_dir = final_new_path
+                                .parent()
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_else(|| "root".to_string());
 
                             if was_renamed {
-                                let new_name = final_new_path.file_name()
+                                let new_name = final_new_path
+                                    .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                self.editor.console.messages.push(LogMessage::info(
-                                    format!("Moved folder '{}' to '{}' (renamed to '{}')",
-                                        original_name, target_dir, new_name)
-                                ));
+                                self.editor.console.messages.push(LogMessage::info(format!(
+                                    "Moved folder '{}' to '{}' (renamed to '{}')",
+                                    original_name, target_dir, new_name
+                                )));
                             } else {
-                                self.editor.console.messages.push(LogMessage::info(
-                                    format!("Moved folder '{}' to '{}'", original_name, target_dir)
-                                ));
+                                self.editor.console.messages.push(LogMessage::info(format!(
+                                    "Moved folder '{}' to '{}'",
+                                    original_name, target_dir
+                                )));
                             }
 
-                            if self.editor.scene.asset_browser.current_folder.starts_with(&old_path) {
-                                if let Ok(relative) = self.editor.scene.asset_browser.current_folder.strip_prefix(&old_path) {
-                                    self.editor.scene.asset_browser.current_folder = final_new_path.join(relative);
+                            if self
+                                .editor
+                                .scene
+                                .asset_browser
+                                .current_folder
+                                .starts_with(&old_path)
+                            {
+                                if let Ok(relative) = self
+                                    .editor
+                                    .scene
+                                    .asset_browser
+                                    .current_folder
+                                    .strip_prefix(&old_path)
+                                {
+                                    self.editor.scene.asset_browser.current_folder =
+                                        final_new_path.join(relative);
                                 } else {
-                                    self.editor.scene.asset_browser.current_folder = final_new_path.clone();
+                                    self.editor.scene.asset_browser.current_folder =
+                                        final_new_path.clone();
                                 }
                             }
                             self.editor.scene.asset_browser.request_rescan();
                         }
                         Err(e) => {
-                            self.editor.console.messages.push(LogMessage::error(
-                                format!("Failed to move folder: {}", e)
-                            ));
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::error(format!("Failed to move folder: {}", e)));
                             eprintln!("Failed to move folder: {}", e);
                         }
                     }
                 }
                 AssetBrowserEvent::FolderRenamed { old_path, new_path } => {
-                    let full_old_path = self.editor.scene.asset_browser.registry.root_path().join(&old_path);
-                    let full_new_path = self.editor.scene.asset_browser.registry.root_path().join(&new_path);
+                    let full_old_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&old_path);
+                    let full_new_path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&new_path);
 
-                    let new_name = new_path.file_name()
+                    let new_name = new_path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
 
                     if new_name.is_empty() || new_name.trim().is_empty() {
                         self.editor.console.messages.push(LogMessage::error(
-                            "Cannot rename: folder name cannot be empty".to_string()
+                            "Cannot rename: folder name cannot be empty".to_string(),
                         ));
                     } else if new_name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
                         self.editor.console.messages.push(LogMessage::error(
-                            "Cannot rename: folder name contains invalid characters".to_string()
+                            "Cannot rename: folder name contains invalid characters".to_string(),
                         ));
                     } else if full_new_path.exists() && full_new_path != full_old_path {
-                        self.editor.console.messages.push(LogMessage::error(
-                            format!("Cannot rename: folder '{}' already exists", new_name)
-                        ));
+                        self.editor.console.messages.push(LogMessage::error(format!(
+                            "Cannot rename: folder '{}' already exists",
+                            new_name
+                        )));
                     } else {
                         match std::fs::rename(&full_old_path, &full_new_path) {
                             Ok(()) => {
-                                let old_name = old_path.file_name()
+                                let old_name = old_path
+                                    .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| old_path.display().to_string());
-                                self.editor.console.messages.push(LogMessage::info(
-                                    format!("Renamed folder '{}' to '{}'", old_name, new_name)
-                                ));
-                                if self.editor.scene.asset_browser.current_folder == old_path ||
-                                   self.editor.scene.asset_browser.current_folder.starts_with(&old_path) {
-                                    if let Ok(relative) = self.editor.scene.asset_browser.current_folder.strip_prefix(&old_path) {
-                                        self.editor.scene.asset_browser.current_folder = new_path.join(relative);
+                                self.editor.console.messages.push(LogMessage::info(format!(
+                                    "Renamed folder '{}' to '{}'",
+                                    old_name, new_name
+                                )));
+                                if self.editor.scene.asset_browser.current_folder == old_path
+                                    || self
+                                        .editor
+                                        .scene
+                                        .asset_browser
+                                        .current_folder
+                                        .starts_with(&old_path)
+                                {
+                                    if let Ok(relative) = self
+                                        .editor
+                                        .scene
+                                        .asset_browser
+                                        .current_folder
+                                        .strip_prefix(&old_path)
+                                    {
+                                        self.editor.scene.asset_browser.current_folder =
+                                            new_path.join(relative);
                                     } else {
-                                        self.editor.scene.asset_browser.current_folder = new_path.clone();
+                                        self.editor.scene.asset_browser.current_folder =
+                                            new_path.clone();
                                     }
                                 }
                                 self.editor.scene.asset_browser.request_rescan();
                             }
                             Err(e) => {
-                                self.editor.console.messages.push(LogMessage::error(
-                                    format!("Failed to rename folder: {}", e)
-                                ));
+                                self.editor.console.messages.push(LogMessage::error(format!(
+                                    "Failed to rename folder: {}",
+                                    e
+                                )));
                                 eprintln!("Failed to rename folder: {}", e);
                             }
                         }
@@ -1101,7 +1375,7 @@ impl App {
         self.handle_frame_input(&gui_result);
 
         {
-            rust_engine::profile_scope!("gpu_submit");
+            rust_engine::profile_scope!("swapchain_present");
             let future = acquire_future
                 .then_execute(self.core.renderer.queue.clone(), deferred_cb)
                 .unwrap()
@@ -1121,7 +1395,8 @@ impl App {
                     self.core.previous_frame_end = Some(future.boxed());
                 }
                 Err(_) => {
-                    self.core.previous_frame_end = Some(render_loop::create_now_future(&self.core.renderer));
+                    self.core.previous_frame_end =
+                        Some(render_loop::create_now_future(&self.core.renderer));
                 }
             }
         }
@@ -1129,14 +1404,129 @@ impl App {
         Ok(())
     }
 
+    fn save_active_scene(&mut self) {
+        if self.play_mode() != PlayMode::Edit {
+            log::warn!("Cannot save scene during play mode");
+            return;
+        }
+
+        let scene_relative = self.editor.scene.current_scene_relative.clone();
+        let scene_name = self.editor.scene.current_scene_name.clone();
+        let scene_path = asset_source::resolve(&scene_relative);
+
+        match save_scene(
+            self.core.game_world.hecs(),
+            &scene_path.to_string_lossy(),
+            &scene_name,
+            self.editor.scene.hierarchy_panel.root_order(),
+        ) {
+            Ok(_) => {
+                println!("Scene saved to {}", scene_path.display());
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "Saved scene: {}",
+                    scene_relative
+                )));
+            }
+            Err(error) => {
+                eprintln!("Save failed: {}", error);
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to save scene '{}': {}",
+                    scene_relative, error
+                )));
+            }
+        }
+    }
+
+    fn load_benchmark_scene(&mut self) {
+        if !self.runtime_flags.benchmark_tools_enabled {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Benchmark tools are disabled. Launch the editor with --editor-benchmark-tools"
+                    .to_string(),
+            ));
+            return;
+        }
+
+        if self.play_mode() != PlayMode::Edit {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Stop play mode before loading the benchmark scene".to_string(),
+            ));
+            return;
+        }
+
+        self.core.game_world.reset_transients(false);
+        self.editor.scene.selection.clear();
+        let roots = match load_or_create_benchmark_scene(
+            self.core.game_world.hecs_mut(),
+            &mut self.core.physics_world,
+            &BenchmarkConfig::default(),
+            self.core.cube_mesh_index,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to load benchmark scene: {}",
+                    error
+                )));
+                return;
+            }
+        };
+        self.editor.scene.hierarchy_panel.set_root_order(roots);
+        self.editor.scene.current_scene_relative = BENCHMARK_SCENE_RELATIVE.to_string();
+        self.editor.scene.current_scene_name = "Benchmark Scene".to_string();
+        self.core.transform_cache = TransformCache::new();
+        self.core
+            .transform_cache
+            .propagate(self.core.game_world.hecs());
+
+        self.editor.console.messages.push(LogMessage::info(
+            "Loaded benchmark scene".to_string(),
+        ));
+    }
+
+    fn run_benchmark(&mut self) {
+        if !self.runtime_flags.benchmark_tools_enabled {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Benchmark tools are disabled. Launch the editor with --editor-benchmark-tools"
+                    .to_string(),
+            ));
+            return;
+        }
+
+        match std::env::current_exe() {
+            Ok(exe_path) => {
+                let result = std::process::Command::new(&exe_path)
+                    .args(["--benchmark", "--uncapped"])
+                    .spawn();
+                match result {
+                    Ok(_) => self.editor.console.messages.push(LogMessage::info(format!(
+                        "Launched uncapped benchmark runner: {}",
+                        exe_path.display()
+                    ))),
+                    Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to launch benchmark runner: {error}"
+                    ))),
+                }
+            }
+            Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
+                "Failed to resolve current executable: {error}"
+            ))),
+        }
+    }
+
     // === Play Mode Management ===
 
     pub fn enter_play_mode(&mut self) {
-        let current_mode = self.core.game_world.resource::<EditorState>()
+        let current_mode = self
+            .core
+            .game_world
+            .resource::<EditorState>()
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit);
         if current_mode != PlayMode::Edit {
-            log::warn!("enter_play_mode called but not in Edit mode (current: {:?})", current_mode);
+            log::warn!(
+                "enter_play_mode called but not in Edit mode (current: {:?})",
+                current_mode
+            );
             return;
         }
 
@@ -1160,7 +1550,10 @@ impl App {
             state.play_mode = PlayMode::Playing;
         }
 
-        play_mode::rebuild_physics(&mut self.core.physics_world, self.core.game_world.hecs_mut());
+        play_mode::rebuild_physics(
+            &mut self.core.physics_world,
+            self.core.game_world.hecs_mut(),
+        );
 
         if let Some(time) = self.core.game_world.resource_mut::<Time>() {
             time.paused = false;
@@ -1189,7 +1582,10 @@ impl App {
     }
 
     pub fn stop_play_mode(&mut self) {
-        let previous_mode = self.core.game_world.resource::<EditorState>()
+        let previous_mode = self
+            .core
+            .game_world
+            .resource::<EditorState>()
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit);
         if previous_mode == PlayMode::Edit {
@@ -1219,7 +1615,10 @@ impl App {
                     self.editor.play.snapshot = None;
                 }
                 Err(e) => {
-                    log::error!("Failed to restore play mode snapshot (snapshot preserved): {}", e);
+                    log::error!(
+                        "Failed to restore play mode snapshot (snapshot preserved): {}",
+                        e
+                    );
                 }
             }
         } else {
@@ -1245,11 +1644,17 @@ impl App {
     }
 
     pub fn pause_play_mode(&mut self) {
-        let current_mode = self.core.game_world.resource::<EditorState>()
+        let current_mode = self
+            .core
+            .game_world
+            .resource::<EditorState>()
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit);
         if current_mode != PlayMode::Playing {
-            log::warn!("pause_play_mode called but not Playing (current: {:?})", current_mode);
+            log::warn!(
+                "pause_play_mode called but not Playing (current: {:?})",
+                current_mode
+            );
             return;
         }
 
@@ -1269,11 +1674,17 @@ impl App {
     }
 
     pub fn resume_play_mode(&mut self) {
-        let current_mode = self.core.game_world.resource::<EditorState>()
+        let current_mode = self
+            .core
+            .game_world
+            .resource::<EditorState>()
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit);
         if current_mode != PlayMode::Paused {
-            log::warn!("resume_play_mode called but not Paused (current: {:?})", current_mode);
+            log::warn!(
+                "resume_play_mode called but not Paused (current: {:?})",
+                current_mode
+            );
             return;
         }
 
@@ -1293,7 +1704,9 @@ impl App {
     }
 
     pub fn play_mode(&self) -> PlayMode {
-        self.core.game_world.resource::<EditorState>()
+        self.core
+            .game_world
+            .resource::<EditorState>()
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit)
     }
@@ -1312,27 +1725,46 @@ impl App {
             let render_mat = cache.get_render(entity);
 
             let pos = glam::Vec3::new(render_mat[(0, 3)], render_mat[(1, 3)], render_mat[(2, 3)]);
-            let forward = glam::Vec3::new(-render_mat[(0, 2)], -render_mat[(1, 2)], -render_mat[(2, 2)]);
+            let forward = glam::Vec3::new(
+                -render_mat[(0, 2)],
+                -render_mat[(1, 2)],
+                -render_mat[(2, 2)],
+            );
 
             self.editor.viewport.camera.position = pos;
             self.editor.viewport.camera.target = pos + forward;
             self.editor.viewport.camera.fov = camera.fov.to_radians();
             self.editor.viewport.camera.near = camera.near;
             self.editor.viewport.camera.far = camera.far;
-            self.editor.viewport.camera.set_viewport_size(vp_w as f32, vp_h as f32);
+            self.editor
+                .viewport
+                .camera
+                .set_viewport_size(vp_w as f32, vp_h as f32);
             return;
         }
     }
 
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
-        if self.play_mode() == PlayMode::Edit && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft) {
+        if self.play_mode() == PlayMode::Edit
+            && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft)
+        {
             if self.core.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
-                if let Some(desc) = self.editor.scene.command_history.undo(self.core.game_world.hecs_mut()) {
+                if let Some(desc) = self
+                    .editor
+                    .scene
+                    .command_history
+                    .undo(self.core.game_world.hecs_mut())
+                {
                     println!("Undo: {}", desc);
                 }
             }
             if self.core.input_manager.is_key_just_pressed(KeyCode::KeyY) {
-                if let Some(desc) = self.editor.scene.command_history.redo(self.core.game_world.hecs_mut()) {
+                if let Some(desc) = self
+                    .editor
+                    .scene
+                    .command_history
+                    .redo(self.core.game_world.hecs_mut())
+                {
                     println!("Redo: {}", desc);
                 }
             }
@@ -1343,10 +1775,12 @@ impl App {
 
         let is_playing = self.play_mode() != PlayMode::Edit;
 
-        self.editor.viewport.camera.mouse_sensitivity = self.editor.viewport.settings.mouse_sensitivity;
+        self.editor.viewport.camera.mouse_sensitivity =
+            self.editor.viewport.settings.mouse_sensitivity;
 
         let (vp_w, vp_h) = self.editor.viewport.size;
-        let viewport_usable = vp_w >= MIN_VIEWPORT_SIZE_FOR_CAMERA && vp_h >= MIN_VIEWPORT_SIZE_FOR_CAMERA;
+        let viewport_usable =
+            vp_w >= MIN_VIEWPORT_SIZE_FOR_CAMERA && vp_h >= MIN_VIEWPORT_SIZE_FOR_CAMERA;
 
         if is_playing {
             self.editor.viewport.camera.reset_active_drag();
@@ -1355,7 +1789,8 @@ impl App {
         }
 
         if !is_playing {
-            let viewport_available = (self.editor.viewport.hovered || self.editor.viewport.camera.is_active_drag())
+            let viewport_available = (self.editor.viewport.hovered
+                || self.editor.viewport.camera.is_active_drag())
                 && !gui_result.is_using_pointer
                 && viewport_usable;
 
@@ -1368,7 +1803,8 @@ impl App {
             );
 
             if (self.editor.viewport.camera.fly_speed_multiplier - 1.0).abs() > 0.001 {
-                let new_speed = (self.editor.viewport.settings.camera_speed * self.editor.viewport.camera.fly_speed_multiplier)
+                let new_speed = (self.editor.viewport.settings.camera_speed
+                    * self.editor.viewport.camera.fly_speed_multiplier)
                     .clamp(0.03, 8.0);
                 self.editor.viewport.settings.camera_speed = new_speed;
                 self.editor.viewport.camera.fly_speed_multiplier = 1.0;
@@ -1378,8 +1814,14 @@ impl App {
         let camera_dragging = !is_playing && self.editor.viewport.camera.is_active_drag();
 
         if camera_dragging && !self.editor.viewport.cursor_locked {
-            self.editor.viewport.drag_start_cursor_pos = Some(self.core.input_manager.mouse_position());
-            if self.core.window.set_cursor_grab(CursorGrabMode::Confined).is_err() {
+            self.editor.viewport.drag_start_cursor_pos =
+                Some(self.core.input_manager.mouse_position());
+            if self
+                .core
+                .window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .is_err()
+            {
                 let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
             }
             self.core.window.set_cursor_visible(false);

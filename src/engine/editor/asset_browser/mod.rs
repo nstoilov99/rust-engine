@@ -127,6 +127,8 @@ pub struct AssetBrowserPanel {
     pub folder_panel_width: f32,
     /// Needs rescan flag
     needs_rescan: bool,
+    /// Asset paths hidden from the browser.
+    hidden_paths: HashSet<PathBuf>,
 }
 
 impl AssetBrowserPanel {
@@ -158,7 +160,16 @@ impl AssetBrowserPanel {
             show_folders: true,
             folder_panel_width: 180.0,
             needs_rescan: false,
+            hidden_paths: HashSet::new(),
         }
+    }
+
+    /// Hide specific asset paths from the browser UI.
+    pub fn set_hidden_paths<I>(&mut self, hidden_paths: I)
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        self.hidden_paths = hidden_paths.into_iter().collect();
     }
 
     /// Request a rescan of the assets directory
@@ -761,6 +772,7 @@ impl AssetBrowserPanel {
             include_subfolders: true,
             sort_by: SortCriteria::Name,
             sort_ascending: true,
+            excluded_paths: self.hidden_paths.iter().cloned().collect(),
         }
     }
 

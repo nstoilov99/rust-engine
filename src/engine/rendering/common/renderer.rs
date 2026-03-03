@@ -1,6 +1,9 @@
 use crate::engine::assets::texture::load_texture;
 use crate::engine::camera::{Camera2D, Camera3D};
-use crate::engine::core::swapchain::{create_swapchain, recreate_swapchain};
+use crate::engine::core::swapchain::{
+    create_swapchain, create_swapchain_with_present_mode, recreate_swapchain,
+    SwapchainPresentModePreference,
+};
 use crate::engine::core::{create_logical_device, select_physical_device, VulkanContext};
 use crate::engine::ecs::components::{Camera, MeshRenderer, Transform};
 use crate::engine::rendering::rendering_2d::SpriteBatch;
@@ -84,13 +87,31 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_present_mode(window, SwapchainPresentModePreference::Default)
+    }
+
+    pub fn new_with_present_mode(
+        window: Arc<Window>,
+        present_mode_preference: SwapchainPresentModePreference,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let vulkan_context = VulkanContext::new("Rust Engine")?;
 
         let surface = Surface::from_window(vulkan_context.instance.clone(), window.clone())?;
 
         let physical_device = select_physical_device(vulkan_context.instance.clone())?;
         let device_context = create_logical_device(physical_device, surface.clone())?;
-        let (swapchain, images) = create_swapchain(device_context.device.clone(), surface.clone())?;
+        let (swapchain, images) = if matches!(
+            present_mode_preference,
+            SwapchainPresentModePreference::Default
+        ) {
+            create_swapchain(device_context.device.clone(), surface.clone())?
+        } else {
+            create_swapchain_with_present_mode(
+                device_context.device.clone(),
+                surface.clone(),
+                present_mode_preference,
+            )?
+        };
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device_context.device.clone(),

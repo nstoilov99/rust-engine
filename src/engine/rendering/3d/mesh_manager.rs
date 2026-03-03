@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use glam::Vec3;
+use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 
 /// Stores vertex and index buffers for a mesh on GPU
 pub struct GpuMesh {
@@ -71,9 +71,7 @@ pub struct MeshManager {
 
 impl MeshManager {
     pub fn new() -> Self {
-        Self {
-            meshes: Vec::new(),
-        }
+        Self { meshes: Vec::new() }
     }
 
     /// Uploads a model to GPU
@@ -106,6 +104,10 @@ impl MeshManager {
     /// Gets a mesh by index
     pub fn get(&self, index: usize) -> Option<&GpuMesh> {
         self.meshes.get(index)
+    }
+
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
     }
 }
 

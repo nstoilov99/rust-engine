@@ -9,17 +9,16 @@ use super::components::{
 };
 use crate::engine::adapters::physics_adapter::{
     cuboid_half_extents_to_physics, position_from_physics, position_to_physics,
-    velocity_from_physics,
+    rotation_from_physics, rotation_to_physics, velocity_from_physics,
 };
 use crate::engine::ecs::components::Transform;
 use hecs::World;
 use nalgebra_glm as glm;
-use rapier3d::na::{Isometry3, Point3, Quaternion, UnitQuaternion, Vector3};
+use rapier3d::na::{Isometry3, Point3, Vector3};
 use rapier3d::prelude::{
     CCDSolver, ColliderBuilder, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
     IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
-    QueryFilter, QueryPipeline, Ray, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-    SharedShape,
+    QueryFilter, QueryPipeline, Ray, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SharedShape,
 };
 
 /// Manages Rapier physics simulation
@@ -87,9 +86,9 @@ impl PhysicsWorld {
         }
     }
 
-    /// Set gravity vector (in Y-up coordinates)
+    /// Set gravity vector (in ECS Z-up coordinates)
     pub fn set_gravity(&mut self, gravity: nalgebra_glm::Vec3) {
-        self.gravity = Vector3::new(gravity.x, gravity.y, gravity.z);
+        self.gravity = crate::engine::adapters::physics_adapter::gravity_to_physics(&gravity);
     }
 
     /// Set fixed timestep for physics simulation (default: 1/60)
@@ -101,6 +100,10 @@ impl PhysicsWorld {
     /// Call after rebuilding physics to prevent stale time from triggering steps.
     pub fn reset_accumulator(&mut self) {
         self.accumulator = 0.0;
+    }
+
+    pub fn rigid_body_count(&self) -> u32 {
+        self.rigid_body_set.len().min(u32::MAX as usize) as u32
     }
 
     /// Step physics with fixed timestep accumulator
@@ -176,13 +179,7 @@ impl PhysicsWorld {
         // Convert Z-up ECS position to Y-up for Rapier via adapter
         let translation = position_to_physics(&transform.position);
 
-        // Use rotation directly (don't convert - causes sideways view)
-        let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
-            transform.rotation.coords.w,
-            transform.rotation.coords.x,
-            transform.rotation.coords.y,
-            transform.rotation.coords.z,
-        ));
+        let rotation = rotation_to_physics(&transform.rotation);
 
         let rb = rb_builder
             .translation(translation)
@@ -243,9 +240,15 @@ impl PhysicsWorld {
         direction: nalgebra_glm::Vec3,
         max_distance: f32,
     ) -> Option<(RigidBodyHandle, f32, nalgebra_glm::Vec3)> {
+        let physics_origin = position_to_physics(&origin);
+        let physics_direction = position_to_physics(&direction);
         let ray = Ray::new(
-            Point3::new(origin.x, origin.y, origin.z),
-            Vector3::new(direction.x, direction.y, direction.z),
+            Point3::new(physics_origin.x, physics_origin.y, physics_origin.z),
+            Vector3::new(
+                physics_direction.x,
+                physics_direction.y,
+                physics_direction.z,
+            ),
         );
 
         self.query_pipeline
@@ -263,7 +266,7 @@ impl PhysicsWorld {
                 (
                     rb_handle,
                     toi,
-                    nalgebra_glm::vec3(hit_point.x, hit_point.y, hit_point.z),
+                    position_from_physics(&Vector3::new(hit_point.x, hit_point.y, hit_point.z)),
                 )
             })
     }
@@ -272,9 +275,7 @@ impl PhysicsWorld {
     ///
     /// Uses physics_adapter for Z-up → Y-up conversion.
     fn sync_ecs_to_physics(&mut self, ecs_world: &World) {
-        for (_, (transform, rigidbody)) in
-            ecs_world.query::<(&Transform, &EcsRigidBody)>().iter()
-        {
+        for (_, (transform, rigidbody)) in ecs_world.query::<(&Transform, &EcsRigidBody)>().iter() {
             // Only update kinematic bodies
             if rigidbody.body_type != EcsRigidBodyType::Kinematic {
                 continue;
@@ -285,12 +286,7 @@ impl PhysicsWorld {
                     // Convert via physics_adapter
                     let translation = position_to_physics(&transform.position);
 
-                    let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
-                        transform.rotation.coords.w,
-                        transform.rotation.coords.x,
-                        transform.rotation.coords.y,
-                        transform.rotation.coords.z,
-                    ));
+                    let rotation = rotation_to_physics(&transform.rotation);
 
                     rb.set_next_kinematic_position(Isometry3::from_parts(
                         translation.into(),
@@ -320,10 +316,7 @@ impl PhysicsWorld {
                     let pos_zup = position_from_physics(rb.translation());
                     transform.position = pos_zup;
 
-                    // Copy rotation directly (don't convert)
-                    // glm::quat takes parameters in order (x, y, z, w), NOT (w, x, y, z)!
-                    let rot = rb.rotation();
-                    transform.rotation = glm::quat(rot.coords.x, rot.coords.y, rot.coords.z, rot.w);
+                    transform.rotation = rotation_from_physics(rb.rotation());
 
                     // Update velocity if component exists (convert via adapter)
                     if let Some(vel) = velocity {

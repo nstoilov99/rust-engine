@@ -103,9 +103,7 @@ impl RunCriteria for RunIfEditing {
 pub struct RunIfNotPaused;
 impl RunCriteria for RunIfNotPaused {
     fn should_run(&self, resources: &Resources) -> bool {
-        resources
-            .get::<Time>()
-            .map_or(true, |time| !time.paused)
+        resources.get::<Time>().map_or(true, |time| !time.paused)
     }
 }
 
@@ -152,11 +150,7 @@ impl Schedule {
     }
 
     /// Add a system to the schedule at the given stage.
-    pub fn add_system<S: System + 'static>(
-        &mut self,
-        system: S,
-        stage: Stage,
-    ) -> &mut Self {
+    pub fn add_system<S: System + 'static>(&mut self, system: S, stage: Stage) -> &mut Self {
         self.systems.push(RegisteredSystem {
             system: Box::new(system),
             stage,
@@ -193,12 +187,7 @@ impl Schedule {
     }
 
     /// Add a function system (convenience).
-    pub fn add_fn_system<F>(
-        &mut self,
-        name: &'static str,
-        stage: Stage,
-        func: F,
-    ) -> &mut Self
+    pub fn add_fn_system<F>(&mut self, name: &'static str, stage: Stage, func: F) -> &mut Self
     where
         F: FnMut(&mut hecs::World, &mut Resources) + Send + Sync + 'static,
     {
@@ -228,6 +217,8 @@ impl Schedule {
         resources: &mut Resources,
         command_buffer: &mut super::commands::CommandBuffer,
     ) {
+        crate::profile_scope!("ecs_systems");
+
         self.ensure_sorted();
 
         let mut current_stage: Option<Stage> = None;

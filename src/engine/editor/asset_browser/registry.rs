@@ -38,6 +38,8 @@ pub struct AssetFilter {
     pub sort_by: SortCriteria,
     /// Sort direction
     pub sort_ascending: bool,
+    /// Paths hidden from queries.
+    pub excluded_paths: Vec<PathBuf>,
 }
 
 /// Sorting options for asset lists
@@ -337,6 +339,14 @@ impl AssetRegistry {
     }
 
     fn matches_filter(&self, metadata: &AssetMetadata, filter: &AssetFilter) -> bool {
+        if filter
+            .excluded_paths
+            .iter()
+            .any(|path| path == &metadata.path)
+        {
+            return false;
+        }
+
         // Check folder filter
         if let Some(folder) = &filter.folder {
             if let Some(parent) = metadata.path.parent() {

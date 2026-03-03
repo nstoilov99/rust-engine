@@ -8,6 +8,8 @@ use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
 use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
+use crate::engine::rendering::counters::RenderCounters;
+use crate::engine::rendering::render_target::RenderTarget;
 use glam::{Mat4, Vec3};
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -21,12 +23,11 @@ use vulkano::command_buffer::{
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::{Device, Queue};
+use vulkano::image::view::ImageView;
+use vulkano::image::Image;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::PipelineBindPoint;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
-use vulkano::image::Image;
-use vulkano::image::view::ImageView;
-use crate::engine::rendering::render_target::RenderTarget;
 
 pub struct DeferredRenderer {
     gbuffer: GBuffer,
@@ -39,6 +40,7 @@ pub struct DeferredRenderer {
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     debug_view: DebugView,
+    render_counters: RenderCounters,
     // Cached resources for performance
     gbuffer_descriptor_set: Arc<DescriptorSet>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
@@ -136,6 +138,7 @@ impl DeferredRenderer {
             command_buffer_allocator,
             descriptor_set_allocator,
             debug_view: DebugView::None,
+            render_counters: RenderCounters::default(),
             gbuffer_descriptor_set,
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
@@ -165,7 +168,8 @@ impl DeferredRenderer {
             },
         )?;
 
-        self.framebuffer_cache.insert(cache_key, framebuffer.clone());
+        self.framebuffer_cache
+            .insert(cache_key, framebuffer.clone());
         Ok(framebuffer)
     }
 
@@ -191,7 +195,8 @@ impl DeferredRenderer {
             },
         )?;
 
-        self.grid_framebuffer_cache.insert(cache_key, framebuffer.clone());
+        self.grid_framebuffer_cache
+            .insert(cache_key, framebuffer.clone());
         Ok(framebuffer)
     }
 
@@ -215,12 +220,7 @@ impl DeferredRenderer {
         }
 
         // Recreate G-Buffer with new dimensions
-        self.gbuffer = GBuffer::new(
-            self.device.clone(),
-            self.allocator.clone(),
-            width,
-            height,
-        )?;
+        self.gbuffer = GBuffer::new(self.device.clone(), self.allocator.clone(), width, height)?;
 
         // Recreate the G-Buffer descriptor set for lighting pass
         self.gbuffer_descriptor_set = self.lighting_pass.create_descriptor_set(
@@ -254,19 +254,24 @@ impl DeferredRenderer {
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
-        let target_image = target.image().clone();
+        self.render_counters.reset();
 
-        let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
-        let grid_framebuffer = if grid_visible {
-            Some(self.get_or_create_grid_framebuffer(target_image)?)
-        } else {
-            None
+        let (target_framebuffer, grid_framebuffer, mut builder) = {
+            crate::profile_scope!("command_buffer_setup");
+            let target_image = target.image().clone();
+            let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
+            let grid_framebuffer = if grid_visible {
+                Some(self.get_or_create_grid_framebuffer(target_image)?)
+            } else {
+                None
+            };
+            let builder = AutoCommandBufferBuilder::primary(
+                self.command_buffer_allocator.clone(),
+                self.queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )?;
+            (target_framebuffer, grid_framebuffer, builder)
         };
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )?;
 
         // ========== PASS 1: Geometry Pass (Render to G-Buffer) ==========
         {
@@ -308,7 +313,16 @@ impl DeferredRenderer {
             // Render all meshes to G-Buffer
             {
                 crate::profile_scope!("mesh_loop");
+                let mut last_material = None;
                 for mesh in mesh_data {
+                    self.render_counters.visible_entities += 1;
+                    self.render_counters.draw_calls += 1;
+                    self.render_counters.triangles += mesh.index_count / 3;
+                    if last_material != Some(mesh.material_index) {
+                        self.render_counters.material_changes += 1;
+                        last_material = Some(mesh.material_index);
+                    }
+
                     builder
                         .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
                         .bind_index_buffer(mesh.index_buffer.clone())?
@@ -317,7 +331,9 @@ impl DeferredRenderer {
                             0,
                             mesh.push_constants, // Model + view-projection matrices
                         )?;
-                    unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
+                    unsafe {
+                        builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                    }
                 }
             }
 
@@ -363,13 +379,11 @@ impl DeferredRenderer {
                     0,
                     gbuffer_descriptor_set,
                 )?
-                .push_constants(
-                    self.lighting_pass.layout(),
-                    0,
-                    *light_data,
-                )?;
+                .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
             // Draw fullscreen triangle (no vertex buffer - generated in shader)
-            unsafe { builder.draw(3, 1, 0, 0)?; }
+            unsafe {
+                builder.draw(3, 1, 0, 0)?;
+            }
             builder.end_render_pass(SubpassEndInfo::default())?;
         }
 
@@ -395,7 +409,7 @@ impl DeferredRenderer {
                 view_proj,
                 camera_pos,
                 grid_extent_size,
-                100.0,  // fade_distance: 100 units
+                100.0, // fade_distance: 100 units
             );
 
             builder
@@ -416,18 +430,27 @@ impl DeferredRenderer {
                 .push_constants(self.grid_pass.layout(), 0, grid_push)?;
 
             // Draw ground plane quad (4 vertices as triangle strip)
-            unsafe { builder.draw(4, 1, 0, 0)?; }
+            unsafe {
+                builder.draw(4, 1, 0, 0)?;
+            }
             builder.end_render_pass(SubpassEndInfo::default())?;
         }
 
         // Build command buffer
-        let command_buffer = builder.build()?;
+        let command_buffer = {
+            crate::profile_scope!("command_buffer_build");
+            builder.build()?
+        };
 
         Ok(command_buffer)
     }
 
     pub fn set_debug_view(&mut self, view: DebugView) {
         self.debug_view = view;
+    }
+
+    pub fn render_counters(&self) -> &RenderCounters {
+        &self.render_counters
     }
 }
 
@@ -436,6 +459,8 @@ pub struct MeshRenderData {
     pub vertex_buffer: Subbuffer<[crate::engine::rendering::rendering_3d::Vertex3D]>,
     pub index_buffer: Subbuffer<[u32]>,
     pub index_count: u32,
+    pub mesh_index: usize,
+    pub material_index: usize,
     pub push_constants: PushConstantData,
 }
 

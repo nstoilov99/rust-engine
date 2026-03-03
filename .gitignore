@@ -22,6 +22,7 @@ Thumbs.db
 *.profraw
 *.profdata
 perf.data*
+/benchmarks/
 
 # Documentation build
 /target/doc/

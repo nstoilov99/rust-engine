@@ -28,6 +28,10 @@ pub enum MenuAction {
     SaveLayout,
     /// Reset dock layout to default
     ResetLayout,
+    /// Replace the current world with the deterministic benchmark scene.
+    LoadBenchmarkScene,
+    /// Launch the standalone benchmark runner.
+    RunBenchmark,
     /// Enter play mode (Edit -> Playing)
     Play,
     /// Pause play mode (Playing -> Paused)
@@ -100,8 +104,15 @@ pub(super) fn play_icon_button(
         }
 
         if in_rect {
-            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
-                .show(|ui| { ui.label(tooltip); });
+            egui::containers::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new(tooltip),
+                egui::containers::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(tooltip);
+            });
         }
     }
 
@@ -118,61 +129,97 @@ pub(super) fn render_play_controls(
     match play_mode {
         PlayMode::Edit => {
             if play_icon_button(
-                ui, ToolbarIcon::Play, "▶",
-                play_colors::PLAY, play_colors::PLAY_HOVER,
-                "Play (F5)", icon_manager,
+                ui,
+                ToolbarIcon::Play,
+                "▶",
+                play_colors::PLAY,
+                play_colors::PLAY_HOVER,
+                "Play (F5)",
+                icon_manager,
             ) {
                 *action = MenuAction::Play;
             }
             play_icon_button(
-                ui, ToolbarIcon::Pause, "⏸",
-                play_colors::DISABLED, play_colors::DISABLED,
-                "Pause (F6) - not playing", icon_manager,
+                ui,
+                ToolbarIcon::Pause,
+                "⏸",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Pause (F6) - not playing",
+                icon_manager,
             );
             play_icon_button(
-                ui, ToolbarIcon::Stop, "⏹",
-                play_colors::DISABLED, play_colors::DISABLED,
-                "Stop (F5) - not playing", icon_manager,
+                ui,
+                ToolbarIcon::Stop,
+                "⏹",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Stop (F5) - not playing",
+                icon_manager,
             );
         }
         PlayMode::Playing => {
             play_icon_button(
-                ui, ToolbarIcon::Play, "▶",
-                play_colors::DISABLED, play_colors::DISABLED,
-                "Already playing", icon_manager,
+                ui,
+                ToolbarIcon::Play,
+                "▶",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Already playing",
+                icon_manager,
             );
             if play_icon_button(
-                ui, ToolbarIcon::Pause, "⏸",
-                play_colors::PAUSE, play_colors::PAUSE_HOVER,
-                "Pause (F6)", icon_manager,
+                ui,
+                ToolbarIcon::Pause,
+                "⏸",
+                play_colors::PAUSE,
+                play_colors::PAUSE_HOVER,
+                "Pause (F6)",
+                icon_manager,
             ) {
                 *action = MenuAction::Pause;
             }
             if play_icon_button(
-                ui, ToolbarIcon::Stop, "⏹",
-                play_colors::STOP, play_colors::STOP_HOVER,
-                "Stop (F5)", icon_manager,
+                ui,
+                ToolbarIcon::Stop,
+                "⏹",
+                play_colors::STOP,
+                play_colors::STOP_HOVER,
+                "Stop (F5)",
+                icon_manager,
             ) {
                 *action = MenuAction::Stop;
             }
         }
         PlayMode::Paused => {
             if play_icon_button(
-                ui, ToolbarIcon::SkipForward, "⏭",
-                play_colors::RESUME, play_colors::RESUME_HOVER,
-                "Resume (F6)", icon_manager,
+                ui,
+                ToolbarIcon::SkipForward,
+                "⏭",
+                play_colors::RESUME,
+                play_colors::RESUME_HOVER,
+                "Resume (F6)",
+                icon_manager,
             ) {
                 *action = MenuAction::Resume;
             }
             play_icon_button(
-                ui, ToolbarIcon::Pause, "⏸",
-                play_colors::DISABLED, play_colors::DISABLED,
-                "Already paused", icon_manager,
+                ui,
+                ToolbarIcon::Pause,
+                "⏸",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Already paused",
+                icon_manager,
             );
             if play_icon_button(
-                ui, ToolbarIcon::Stop, "⏹",
-                play_colors::STOP, play_colors::STOP_HOVER,
-                "Stop (F5)", icon_manager,
+                ui,
+                ToolbarIcon::Stop,
+                "⏹",
+                play_colors::STOP,
+                play_colors::STOP_HOVER,
+                "Stop (F5)",
+                icon_manager,
             ) {
                 *action = MenuAction::Stop;
             }
@@ -190,6 +237,7 @@ pub fn render_menu_bar(
     play_mode: PlayMode,
     build_dialog: &mut BuildDialog,
     console_messages: &mut ConsoleLog,
+    show_benchmark_tools: bool,
 ) -> MenuAction {
     let mut action = MenuAction::None;
 
@@ -213,6 +261,21 @@ pub fn render_menu_bar(
                         action = MenuAction::SaveScene;
                         ui.close();
                     }
+                    if show_benchmark_tools {
+                        ui.separator();
+
+                        ui.menu_button("Benchmark", |ui| {
+                            if ui.button("Load Benchmark Scene").clicked() {
+                                action = MenuAction::LoadBenchmarkScene;
+                                ui.close();
+                            }
+                            if ui.button("Run CPU Benchmark").clicked() {
+                                action = MenuAction::RunBenchmark;
+                                ui.close();
+                            }
+                        });
+                    }
+
                     ui.separator();
 
                     ui.menu_button("Build Game", |ui| {
@@ -264,7 +327,8 @@ pub fn render_menu_bar(
                             BuildState::Building | BuildState::CopyingContent => {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    let label = if build_dialog.state == BuildState::CopyingContent {
+                                    let label = if build_dialog.state == BuildState::CopyingContent
+                                    {
                                         "Packing assets..."
                                     } else {
                                         "Building..."
@@ -300,7 +364,6 @@ pub fn render_menu_bar(
                                 }
                             }
                         }
-
                     });
 
                     ui.separator();
@@ -320,7 +383,10 @@ pub fn render_menu_bar(
                     };
 
                     if ui
-                        .add_enabled(is_edit_mode && command_history.can_undo(), egui::Button::new(undo_text))
+                        .add_enabled(
+                            is_edit_mode && command_history.can_undo(),
+                            egui::Button::new(undo_text),
+                        )
                         .clicked()
                     {
                         action = MenuAction::Undo;
@@ -334,7 +400,10 @@ pub fn render_menu_bar(
                     };
 
                     if ui
-                        .add_enabled(is_edit_mode && command_history.can_redo(), egui::Button::new(redo_text))
+                        .add_enabled(
+                            is_edit_mode && command_history.can_redo(),
+                            egui::Button::new(redo_text),
+                        )
                         .clicked()
                     {
                         action = MenuAction::Redo;
@@ -394,7 +463,11 @@ pub fn render_menu_bar(
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Rust Game Engine").weak());
-                    ui.label(egui::RichText::new("Tutorial 21: Inspector Panel").weak().small());
+                    ui.label(
+                        egui::RichText::new("Tutorial 21: Inspector Panel")
+                            .weak()
+                            .small(),
+                    );
                 });
             });
         });

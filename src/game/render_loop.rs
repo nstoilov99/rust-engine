@@ -6,6 +6,7 @@ use glam::Vec3;
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
+use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
 use rust_engine::engine::ecs::hierarchy::TransformCache;
@@ -32,7 +33,7 @@ pub fn prepare_mesh_data(
     mesh_data_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
 ) {
-    rust_engine::profile_function!();
+    rust_engine::profile_scope!("prepare_mesh_data");
 
     mesh_data_buffer.clear();
 
@@ -46,8 +47,7 @@ pub fn prepare_mesh_data(
 
     let vp_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(view_projection) };
 
-    for (entity, (_transform, mesh_renderer)) in
-        world.query::<(&Transform, &MeshRenderer)>().iter()
+    for (entity, (_transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter()
     {
         if !mesh_renderer.visible {
             continue;
@@ -92,6 +92,8 @@ pub fn prepare_mesh_data(
                 vertex_buffer: gpu_mesh.vertex_buffer.clone(),
                 index_buffer: gpu_mesh.index_buffer.clone(),
                 index_count: gpu_mesh.index_count,
+                mesh_index: mesh_renderer.mesh_index,
+                material_index: mesh_renderer.material_index,
                 push_constants: PushConstantData {
                     model: model_array,
                     view_projection: vp_array,
@@ -99,11 +101,13 @@ pub fn prepare_mesh_data(
             });
         }
     }
+
+    mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
 }
 
 /// Prepare light uniform data from ECS world
 pub fn prepare_light_data(world: &World, renderer: &Renderer) -> LightUniformData {
-    rust_engine::profile_function!();
+    rust_engine::profile_scope!("prepare_light_data");
 
     let camera_pos = renderer.camera_3d.position;
     let mut light_data = LightUniformData {
@@ -119,11 +123,8 @@ pub fn prepare_light_data(world: &World, renderer: &Renderer) -> LightUniformDat
 
     // Query ECS for directional light (use first one found)
     if let Some((_entity, dir_light)) = world.query::<&EcsDirectionalLight>().iter().next() {
-        light_data.directional_light_dir = [
-            dir_light.direction.x,
-            dir_light.direction.y,
-            dir_light.direction.z,
-        ];
+        let direction = glm::normalize(&render_adapter::direction_to_render(&dir_light.direction));
+        light_data.directional_light_dir = [direction.x, direction.y, direction.z];
         light_data.directional_light_color =
             [dir_light.color.x, dir_light.color.y, dir_light.color.z];
         light_data.directional_light_intensity = dir_light.intensity;
@@ -178,15 +179,8 @@ pub fn handle_swapchain_recreation(
 /// Acquire next swapchain image
 pub fn acquire_swapchain_image(
     renderer: &mut Renderer,
-) -> Result<
-    (
-        u32,
-        Arc<Image>,
-        Box<dyn GpuFuture>,
-    ),
-    SwapchainError,
-> {
-    rust_engine::profile_function!();
+) -> Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError> {
+    rust_engine::profile_scope!("acquire_swapchain_image");
 
     match acquire_next_image(renderer.swapchain.clone(), None) {
         Ok((image_index, suboptimal, acquire_future)) => {

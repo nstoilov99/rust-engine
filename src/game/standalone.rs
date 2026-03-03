@@ -4,14 +4,14 @@
 
 use super::{game_setup, input_handler, render_loop};
 use rust_engine::assets::AssetManager;
+use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::ecs::resources::{PlayMode, EditorState, Time};
+use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::ecs::resources::{EditorState, PlayMode, Time};
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
 use rust_engine::engine::rendering::RenderTarget;
-use rust_engine::engine::ecs::components::{Camera, Transform};
-use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
@@ -68,7 +68,11 @@ impl StandaloneApp {
             game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0])?;
 
         if !scene_loaded {
-            game_setup::spawn_physics_test_objects(game_world.hecs_mut(), plane_mesh_index, cube_mesh_index);
+            game_setup::spawn_physics_test_objects(
+                game_world.hecs_mut(),
+                plane_mesh_index,
+                cube_mesh_index,
+            );
         }
 
         let mut physics_world = PhysicsWorld::new();
@@ -94,7 +98,13 @@ impl StandaloneApp {
         transform_cache.propagate(game_world.hecs());
 
         // Set camera from first Camera entity, or use default
-        Self::sync_camera_from_ecs(&mut renderer, game_world.hecs(), &transform_cache, width as f32, height as f32);
+        Self::sync_camera_from_ecs(
+            &mut renderer,
+            game_world.hecs(),
+            &transform_cache,
+            width as f32,
+            height as f32,
+        );
 
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
@@ -118,7 +128,13 @@ impl StandaloneApp {
         })
     }
 
-    fn sync_camera_from_ecs(renderer: &mut Renderer, world: &hecs::World, cache: &TransformCache, width: f32, height: f32) {
+    fn sync_camera_from_ecs(
+        renderer: &mut Renderer,
+        world: &hecs::World,
+        cache: &TransformCache,
+        width: f32,
+        height: f32,
+    ) {
         for (entity, (_transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
             if !camera.active {
                 continue;
@@ -126,7 +142,11 @@ impl StandaloneApp {
             let render_mat = cache.get_render(entity);
 
             let pos = glam::Vec3::new(render_mat[(0, 3)], render_mat[(1, 3)], render_mat[(2, 3)]);
-            let forward = glam::Vec3::new(-render_mat[(0, 2)], -render_mat[(1, 2)], -render_mat[(2, 2)]);
+            let forward = glam::Vec3::new(
+                -render_mat[(0, 2)],
+                -render_mat[(1, 2)],
+                -render_mat[(2, 2)],
+            );
 
             renderer.camera_3d.position = pos;
             renderer.camera_3d.target = pos + forward;
@@ -153,7 +173,8 @@ impl StandaloneApp {
             time.advance(delta_time);
         }
 
-        self.physics_world.step(delta_time, self.game_world.hecs_mut());
+        self.physics_world
+            .step(delta_time, self.game_world.hecs_mut());
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
@@ -161,7 +182,9 @@ impl StandaloneApp {
             WindowEvent::Resized(_new_size) => {
                 self.renderer.recreate_swapchain = true;
             }
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 let keycode = match key_event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
@@ -223,13 +246,15 @@ impl StandaloneApp {
                 Ok(true) => {
                     let new_size = self.window.inner_size();
                     if new_size.width > 0 && new_size.height > 0 {
-                        if let Err(e) = self.deferred_renderer.resize(new_size.width, new_size.height) {
+                        if let Err(e) = self
+                            .deferred_renderer
+                            .resize(new_size.width, new_size.height)
+                        {
                             log::error!("Failed to resize deferred renderer: {}", e);
                         }
-                        self.renderer.camera_3d.set_viewport_size(
-                            new_size.width as f32,
-                            new_size.height as f32,
-                        );
+                        self.renderer
+                            .camera_3d
+                            .set_viewport_size(new_size.width as f32, new_size.height as f32);
                     }
                 }
                 Err(e) => {
@@ -251,7 +276,9 @@ impl StandaloneApp {
         let view_proj = self.renderer.camera_3d.view_projection_matrix();
         let camera_pos = self.renderer.camera_3d.position;
 
-        let render_target = RenderTarget::Swapchain { image: target_image.clone() };
+        let render_target = RenderTarget::Swapchain {
+            image: target_image.clone(),
+        };
 
         let deferred_cb = match self.deferred_renderer.render(
             &self.mesh_data_buffer,
@@ -275,17 +302,20 @@ impl StandaloneApp {
             &mut self.current_debug_view,
         );
 
-        let future = acquire_future
-            .then_execute(self.renderer.queue.clone(), deferred_cb)
-            .map_err(|e| format!("Execute error: {:?}", e))?
-            .then_swapchain_present(
-                self.renderer.queue.clone(),
-                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.renderer.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush();
+        let future = {
+            rust_engine::profile_scope!("swapchain_present");
+            acquire_future
+                .then_execute(self.renderer.queue.clone(), deferred_cb)
+                .map_err(|e| format!("Execute error: {:?}", e))?
+                .then_swapchain_present(
+                    self.renderer.queue.clone(),
+                    vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
+                        self.renderer.swapchain.clone(),
+                        image_index,
+                    ),
+                )
+                .then_signal_fence_and_flush()
+        };
 
         match future {
             Ok(future) => {

@@ -11,10 +11,13 @@
 //!
 //! Conversion: `(x, y, z)_zup` → `(y, z, -x)_yup`
 
-use crate::engine::utils::coords::{convert_position_yup_to_zup, convert_position_zup_to_yup};
+use crate::engine::utils::coords::{
+    convert_position_yup_to_zup, convert_position_zup_to_yup, convert_rotation_yup_to_zup,
+    convert_rotation_zup_to_yup,
+};
 use glam::Vec3;
 use nalgebra_glm as glm;
-use rapier3d::na::Vector3;
+use rapier3d::na::{Quaternion, UnitQuaternion, Vector3};
 
 /// Convert ECS position (Z-up) to Rapier position (Y-up)
 ///
@@ -46,6 +49,25 @@ pub fn velocity_from_physics(vel: &Vector3<f32>) -> glm::Vec3 {
 /// Use when applying velocity to physics bodies.
 pub fn velocity_to_physics(vel: &glm::Vec3) -> Vector3<f32> {
     position_to_physics(vel) // Same conversion for vectors
+}
+
+/// Convert ECS rotation (Z-up) to Rapier rotation (Y-up).
+pub fn rotation_to_physics(rot: &glm::Quat) -> UnitQuaternion<f32> {
+    let rot_yup = convert_rotation_zup_to_yup(glam::Quat::from_xyzw(
+        rot.coords.x,
+        rot.coords.y,
+        rot.coords.z,
+        rot.coords.w,
+    ));
+
+    UnitQuaternion::from_quaternion(Quaternion::new(rot_yup.w, rot_yup.x, rot_yup.y, rot_yup.z))
+}
+
+/// Convert Rapier rotation (Y-up) back to ECS rotation (Z-up).
+pub fn rotation_from_physics(rot: &UnitQuaternion<f32>) -> glm::Quat {
+    let rot_yup = glam::Quat::from_xyzw(rot.coords.x, rot.coords.y, rot.coords.z, rot.w);
+    let rot_zup = convert_rotation_yup_to_zup(rot_yup);
+    glm::quat(rot_zup.x, rot_zup.y, rot_zup.z, rot_zup.w)
 }
 
 /// Convert collider cuboid half-extents from Z-up to Rapier Y-up
@@ -119,5 +141,19 @@ mod tests {
         assert!((hx - 3.0).abs() < 0.001);
         assert!((hy - 4.0).abs() < 0.001);
         assert!((hz - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_rotation_roundtrip() {
+        let rotation_zup = glm::quat(0.25, -0.5, 0.1, 0.82);
+        let rotation_zup = glm::quat_normalize(&rotation_zup);
+
+        let physics_rotation = rotation_to_physics(&rotation_zup);
+        let back_to_zup = rotation_from_physics(&physics_rotation);
+
+        assert!((back_to_zup.coords.x - rotation_zup.coords.x).abs() < 0.001);
+        assert!((back_to_zup.coords.y - rotation_zup.coords.y).abs() < 0.001);
+        assert!((back_to_zup.coords.z - rotation_zup.coords.z).abs() < 0.001);
+        assert!((back_to_zup.coords.w - rotation_zup.coords.w).abs() < 0.001);
     }
 }

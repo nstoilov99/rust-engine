@@ -7,6 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use super::tracy::TracyState;
+use crate::engine::rendering::{RenderCounters, ResourceCounters};
 
 /// A single profiling scope within a frame
 #[derive(Clone, Debug)]
@@ -45,7 +46,11 @@ impl ProfileScope {
 
     /// Count total scopes including children recursively
     pub fn total_scope_count(&self) -> usize {
-        1 + self.children.iter().map(|c| c.total_scope_count()).sum::<usize>()
+        1 + self
+            .children
+            .iter()
+            .map(|c| c.total_scope_count())
+            .sum::<usize>()
     }
 
     /// Check if this scope matches a filter string (case-insensitive)
@@ -164,13 +169,14 @@ pub enum ProfilerView {
     #[default]
     Flamegraph,
     Table,
+    Budget,
 }
 
 /// Frame history display mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FrameHistoryMode {
     #[default]
-    Live,    // Chronological order, newest on right
+    Live, // Chronological order, newest on right
     Slowest, // Sorted by duration, slowest first
 }
 
@@ -179,7 +185,7 @@ pub enum FrameHistoryMode {
 pub enum FrameBarScale {
     #[default]
     Fixed, // Fixed 50ms scale (good for comparing across time)
-    Auto,  // Auto-scale to max visible frame (good for seeing detail)
+    Auto, // Auto-scale to max visible frame (good for seeing detail)
 }
 
 /// Profiler settings
@@ -352,6 +358,10 @@ pub struct ProfilerState {
     pub tracy_state: TracyState,
     /// Show Tracy popup window
     pub show_tracy_popup: bool,
+    /// Latest frame-level render counters supplied by the runtime.
+    pub latest_render_counters: RenderCounters,
+    /// Latest scene-level resource counters supplied by the runtime.
+    pub latest_resource_counters: ResourceCounters,
 }
 
 impl Default for ProfilerState {
@@ -385,6 +395,8 @@ impl Default for ProfilerState {
             frame_history_mode: FrameHistoryMode::default(),
             tracy_state: TracyState::new(),
             show_tracy_popup: false,
+            latest_render_counters: RenderCounters::default(),
+            latest_resource_counters: ResourceCounters::default(),
         }
     }
 }
@@ -490,8 +502,10 @@ impl ProfilerState {
             let target_ratio = 0.6;
             let new_visible_range = item.duration_ms / target_ratio;
             // Max zoom allows viewing sub-microsecond scopes (10M px/ms)
-            self.flamegraph_zoom = (content_width as f64 / new_visible_range).clamp(1.0, 10_000_000.0);
-            self.flamegraph_pan_ms = item.start_ms + item.duration_ms / 2.0 - new_visible_range / 2.0;
+            self.flamegraph_zoom =
+                (content_width as f64 / new_visible_range).clamp(1.0, 10_000_000.0);
+            self.flamegraph_pan_ms =
+                item.start_ms + item.duration_ms / 2.0 - new_visible_range / 2.0;
             self.user_zoomed = true;
             // Truncate to keep only items up to and including this one
             self.breadcrumb_path.truncate(index + 1);
@@ -602,5 +616,14 @@ impl ProfilerState {
     /// Invalidate the cached stats (call when sort/filter changes)
     pub fn invalidate_stats_cache(&mut self) {
         self.cached_stats = None;
+    }
+
+    pub fn set_runtime_counters(
+        &mut self,
+        render_counters: RenderCounters,
+        resource_counters: ResourceCounters,
+    ) {
+        self.latest_render_counters = render_counters;
+        self.latest_resource_counters = resource_counters;
     }
 }

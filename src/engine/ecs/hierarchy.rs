@@ -164,7 +164,7 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
     if let Ok(parent) = world.get::<&Parent>(entity) {
         let parent_entity = parent.0;
         drop(parent); // Release borrow before mutable borrow
-        // Remove from parent's children list
+                      // Remove from parent's children list
         if let Ok(mut children) = world.get::<&mut Children>(parent_entity) {
             children.remove(entity);
         }
@@ -176,11 +176,8 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
 /// Get all root entities (entities without Parent component)
 pub fn get_root_entities(world: &World) -> Vec<Entity> {
     let mut roots = Vec::new();
-    let entities_with_parents: std::collections::HashSet<Entity> = world
-        .query::<&Parent>()
-        .iter()
-        .map(|(e, _)| e)
-        .collect();
+    let entities_with_parents: std::collections::HashSet<Entity> =
+        world.query::<&Parent>().iter().map(|(e, _)| e).collect();
 
     // All entities that don't have a Parent component are roots
     for (entity, _) in world.query::<()>().iter() {
@@ -265,6 +262,8 @@ impl TransformCache {
     /// Must be called once per frame before any consumer reads transforms.
     /// Uses an iterative BFS from root entities so there is no recursion.
     pub fn propagate(&mut self, world: &World) {
+        crate::profile_scope!("transform_propagation");
+
         self.world_cache.clear();
         self.render_cache.clear();
 
@@ -272,11 +271,8 @@ impl TransformCache {
         let mut queue: Vec<(Entity, glm::Mat4)> = Vec::new();
 
         // Collect entities with parents for the root-detection pass.
-        let entities_with_parents: std::collections::HashSet<Entity> = world
-            .query::<&Parent>()
-            .iter()
-            .map(|(e, _)| e)
-            .collect();
+        let entities_with_parents: std::collections::HashSet<Entity> =
+            world.query::<&Parent>().iter().map(|(e, _)| e).collect();
 
         for (entity, _) in world.query::<()>().iter() {
             if !entities_with_parents.contains(&entity) {
@@ -285,7 +281,8 @@ impl TransformCache {
                     .map(|t| t.local_matrix_zup())
                     .unwrap_or_else(|_| glm::identity());
                 self.world_cache.insert(entity, local);
-                let render = crate::engine::adapters::render_adapter::world_matrix_to_render(&local);
+                let render =
+                    crate::engine::adapters::render_adapter::world_matrix_to_render(&local);
                 self.render_cache.insert(entity, render);
                 queue.push((entity, local));
             }
@@ -309,7 +306,8 @@ impl TransformCache {
                     .unwrap_or_else(|_| glm::identity());
                 let child_world = parent_world * local;
                 self.world_cache.insert(child, child_world);
-                let render = crate::engine::adapters::render_adapter::world_matrix_to_render(&child_world);
+                let render =
+                    crate::engine::adapters::render_adapter::world_matrix_to_render(&child_world);
                 self.render_cache.insert(child, render);
                 queue.push((child, child_world));
             }
@@ -320,14 +318,20 @@ impl TransformCache {
     ///
     /// Returns identity if the entity was not seen during [`propagate`].
     pub fn get_world(&self, entity: Entity) -> glm::Mat4 {
-        self.world_cache.get(&entity).copied().unwrap_or_else(glm::identity)
+        self.world_cache
+            .get(&entity)
+            .copied()
+            .unwrap_or_else(glm::identity)
     }
 
     /// Get cached render transform in Y-up space.
     ///
     /// Returns identity if the entity was not seen during [`propagate`].
     pub fn get_render(&self, entity: Entity) -> glm::Mat4 {
-        self.render_cache.get(&entity).copied().unwrap_or_else(glm::identity)
+        self.render_cache
+            .get(&entity)
+            .copied()
+            .unwrap_or_else(glm::identity)
     }
 }
 

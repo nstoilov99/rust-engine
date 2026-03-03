@@ -139,11 +139,62 @@ pub fn rebuild_physics(physics_world: &mut PhysicsWorld, world: &mut hecs::World
     physics_world.query_pipeline = rapier3d::prelude::QueryPipeline::new();
     physics_world.reset_accumulator();
 
+    for (_, rigidbody) in world.query::<&mut PhysRigidBody>().iter() {
+        rigidbody.handle = None;
+    }
+
+    for (_, collider) in world.query::<&mut PhysCollider>().iter() {
+        collider.handle = None;
+    }
+
     // Re-register all physics entities from ECS
     for (_, (transform, rigidbody, collider)) in world
         .query::<(&Transform, &mut PhysRigidBody, &mut PhysCollider)>()
         .iter()
     {
         physics_world.register_entity(transform, rigidbody, collider);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rebuild_physics;
+    use crate::engine::ecs::components::Transform;
+    use crate::engine::physics::{Collider, PhysicsWorld, RigidBody};
+    use hecs::World;
+    use nalgebra_glm as glm;
+
+    #[test]
+    fn rebuild_physics_re_registers_bodies_with_stale_handles() {
+        let mut world = World::new();
+        let entity = world.spawn((
+            Transform::new(glm::vec3(0.0, 0.0, 5.0)),
+            RigidBody::dynamic(),
+            Collider::cuboid(0.5, 0.5, 0.5),
+        ));
+
+        let mut physics_world = PhysicsWorld::new();
+        {
+            let mut query = world.query::<(&Transform, &mut RigidBody, &mut Collider)>();
+            let (_, (transform, rigidbody, collider)) = query
+                .iter()
+                .next()
+                .expect("spawned entity should have physics components");
+            physics_world.register_entity(transform, rigidbody, collider);
+            assert!(rigidbody.handle.is_some());
+            assert!(collider.handle.is_some());
+        }
+
+        rebuild_physics(&mut physics_world, &mut world);
+
+        assert_eq!(physics_world.rigid_body_set.len(), 1);
+        assert_eq!(physics_world.collider_set.len(), 1);
+
+        physics_world.step(0.5, &mut world);
+
+        let transform = world
+            .get::<&Transform>(entity)
+            .expect("entity should still have a transform");
+        assert!(transform.position.z < 5.0);
     }
 }

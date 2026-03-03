@@ -5,12 +5,13 @@
 
 #[cfg(feature = "editor")]
 mod app;
+mod benchmark_runner;
 mod game_setup;
 mod input_handler;
 mod render_loop;
 
 #[cfg(feature = "editor")]
-use app::App;
+use app::{App, EditorRuntimeFlags};
 use rust_engine::engine::utils::WindowConfig;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -30,17 +31,19 @@ struct GameApp {
     window: Option<Arc<Window>>,
     app: Option<App>,
     window_config: WindowConfig,
+    runtime_flags: EditorRuntimeFlags,
     should_exit: bool,
     is_minimized: bool,
 }
 
 #[cfg(feature = "editor")]
 impl GameApp {
-    fn new(window_config: WindowConfig) -> Self {
+    fn new(window_config: WindowConfig, runtime_flags: EditorRuntimeFlags) -> Self {
         Self {
             window: None,
             app: None,
             window_config,
+            runtime_flags,
             should_exit: false,
             is_minimized: false,
         }
@@ -81,7 +84,7 @@ impl ApplicationHandler for GameApp {
             }
         };
 
-        match App::new(window.clone()) {
+        match App::new(window.clone(), self.runtime_flags) {
             Ok(app) => {
                 app.print_controls();
                 println!("Engine ready!\n");
@@ -145,7 +148,9 @@ impl ApplicationHandler for GameApp {
         let Some(app) = &mut self.app else { return };
 
         if let DeviceEvent::MouseMotion { delta } = event {
-            app.core.input_manager.handle_raw_mouse_motion(delta.0, delta.1);
+            app.core
+                .input_manager
+                .handle_raw_mouse_motion(delta.0, delta.1);
         }
     }
 
@@ -280,7 +285,8 @@ impl ApplicationHandler for GameApp {
         _event_loop: &ActiveEventLoop,
         _device_id: DeviceId,
         _event: DeviceEvent,
-    ) {}
+    ) {
+    }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if self.is_minimized {
@@ -313,12 +319,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the asset source before anything else.
     init_asset_source();
 
+    let args: Vec<String> = std::env::args().collect();
     let event_loop = EventLoop::new()?;
+
+    if let Some(config) = benchmark_runner::parse_benchmark_config(&args) {
+        let mut benchmark_app = benchmark_runner::BenchmarkApp::new(config);
+        event_loop.run_app(&mut benchmark_app)?;
+        return Ok(());
+    }
 
     #[cfg(feature = "editor")]
     let mut game_app = {
         let window_config = WindowConfig::load_or_default();
-        GameApp::new(window_config)
+        let runtime_flags = EditorRuntimeFlags::from_args(&args);
+        GameApp::new(window_config, runtime_flags)
     };
 
     #[cfg(not(feature = "editor"))]
