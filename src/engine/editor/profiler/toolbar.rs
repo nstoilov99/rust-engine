@@ -93,7 +93,9 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
                     .fill(Color32::from_gray(35))
                     .corner_radius(3.0),
             )
-            .on_disabled_hover_text("Tracy not available.\nBuild with: cargo build --features tracy");
+            .on_disabled_hover_text(
+                "Tracy not available.\nBuild with: cargo build --features tracy",
+            );
         }
 
         ui.add_space(4.0);
@@ -162,9 +164,7 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
 
             // Data size
             let size_kb = frame.data_size_bytes as f64 / 1024.0;
-            ui.label(
-                RichText::new(format!("{:.1} KB", size_kb)).color(Color32::from_gray(160)),
-            );
+            ui.label(RichText::new(format!("{:.1} KB", size_kb)).color(Color32::from_gray(160)));
         } else {
             ui.label(RichText::new("No frame selected").weak());
         }
@@ -325,10 +325,8 @@ pub fn render_settings_popup(ui: &mut Ui, state: &mut ProfilerState) {
                     // Custom thresholds with color indicators
                     ui.horizontal(|ui| {
                         // Green color indicator
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::Vec2::new(12.0, 12.0),
-                            egui::Sense::hover(),
-                        );
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::Vec2::new(12.0, 12.0), egui::Sense::hover());
                         ui.painter()
                             .rect_filled(rect, 2.0, Color32::from_rgb(80, 200, 80));
 
@@ -343,10 +341,8 @@ pub fn render_settings_popup(ui: &mut Ui, state: &mut ProfilerState) {
 
                     ui.horizontal(|ui| {
                         // Yellow color indicator
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::Vec2::new(12.0, 12.0),
-                            egui::Sense::hover(),
-                        );
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::Vec2::new(12.0, 12.0), egui::Sense::hover());
                         ui.painter()
                             .rect_filled(rect, 2.0, Color32::from_rgb(220, 180, 60));
 
@@ -364,10 +360,8 @@ pub fn render_settings_popup(ui: &mut Ui, state: &mut ProfilerState) {
 
                     ui.horizontal(|ui| {
                         // Red color indicator
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::Vec2::new(12.0, 12.0),
-                            egui::Sense::hover(),
-                        );
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::Vec2::new(12.0, 12.0), egui::Sense::hover());
                         ui.painter()
                             .rect_filled(rect, 2.0, Color32::from_rgb(220, 80, 80));
 
@@ -435,11 +429,19 @@ pub fn render_settings_popup(ui: &mut Ui, state: &mut ProfilerState) {
                                 state.settings.sub_grid_divisions.to_string()
                             })
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut state.settings.sub_grid_divisions, 0, "None");
+                                ui.selectable_value(
+                                    &mut state.settings.sub_grid_divisions,
+                                    0,
+                                    "None",
+                                );
                                 ui.selectable_value(&mut state.settings.sub_grid_divisions, 2, "2");
                                 ui.selectable_value(&mut state.settings.sub_grid_divisions, 4, "4");
                                 ui.selectable_value(&mut state.settings.sub_grid_divisions, 5, "5");
-                                ui.selectable_value(&mut state.settings.sub_grid_divisions, 10, "10");
+                                ui.selectable_value(
+                                    &mut state.settings.sub_grid_divisions,
+                                    10,
+                                    "10",
+                                );
                             });
                     });
                 });
@@ -542,8 +544,7 @@ pub fn render_tracy_popup(ui: &mut Ui, state: &mut ProfilerState) {
                     #[cfg(not(feature = "tracy"))]
                     {
                         ui.label(
-                            RichText::new("Tracy not compiled in")
-                                .color(Color32::from_gray(140)),
+                            RichText::new("Tracy not compiled in").color(Color32::from_gray(140)),
                         );
                         ui.label(
                             RichText::new("Build with: cargo build --features tracy")
@@ -569,12 +570,28 @@ pub fn render_tracy_popup(ui: &mut Ui, state: &mut ProfilerState) {
                     ui.label("  • Lock contention analysis");
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Puffin:").strong().color(Color32::from_gray(180)));
-                        ui.label(RichText::new("Quick in-app overview").small().color(Color32::from_gray(140)));
+                        ui.label(
+                            RichText::new("Puffin:")
+                                .strong()
+                                .color(Color32::from_gray(180)),
+                        );
+                        ui.label(
+                            RichText::new("Quick in-app overview")
+                                .small()
+                                .color(Color32::from_gray(140)),
+                        );
                     });
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Tracy:").strong().color(Color32::from_gray(180)));
-                        ui.label(RichText::new("Deep investigation tool").small().color(Color32::from_gray(140)));
+                        ui.label(
+                            RichText::new("Tracy:")
+                                .strong()
+                                .color(Color32::from_gray(180)),
+                        );
+                        ui.label(
+                            RichText::new("Deep investigation tool")
+                                .small()
+                                .color(Color32::from_gray(140)),
+                        );
                     });
                 });
 

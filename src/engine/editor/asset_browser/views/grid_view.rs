@@ -104,7 +104,7 @@ impl GridView {
         let available_width = ui.available_width();
         let card_width = self.card_width() + self.spacing;
         let columns = ((available_width / card_width).floor() as usize).max(1);
-        let rows = (assets.len() + columns - 1) / columns;
+        let rows = assets.len().div_ceil(columns);
 
         let card_height = self.card_height() + self.spacing;
         let total_height = rows as f32 * card_height;
@@ -114,10 +114,8 @@ impl GridView {
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
                 // Reserve space for all items
-                let (_, painter_rect) = ui.allocate_space(Vec2::new(
-                    columns as f32 * card_width,
-                    total_height,
-                ));
+                let (_, painter_rect) =
+                    ui.allocate_space(Vec2::new(columns as f32 * card_width, total_height));
 
                 // Calculate visible row range
                 let start_row = (viewport.top() / card_height).floor() as usize;
@@ -141,7 +139,8 @@ impl GridView {
                         );
 
                         // Check if this asset is being renamed
-                        let is_renaming = renaming_asset.as_ref()
+                        let is_renaming = renaming_asset
+                            .as_ref()
                             .map(|(id, _)| *id == asset.id)
                             .unwrap_or(false);
 
@@ -191,6 +190,7 @@ impl GridView {
         response
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_asset_card(
         &self,
         ui: &mut Ui,
@@ -295,9 +295,16 @@ impl GridView {
 
         // Asset type badge (small icon in corner)
         let badge_size = 18.0;
-        let badge_pos = Pos2::new(thumb_rect.max.x - badge_size - 2.0, thumb_rect.max.y - badge_size - 2.0);
+        let badge_pos = Pos2::new(
+            thumb_rect.max.x - badge_size - 2.0,
+            thumb_rect.max.y - badge_size - 2.0,
+        );
         let badge_rect = Rect::from_min_size(badge_pos, Vec2::new(badge_size, badge_size));
-        painter.rect_filled(badge_rect, 2.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+        painter.rect_filled(
+            badge_rect,
+            2.0,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+        );
 
         // Try to render PNG icon for badge, fall back to text
         let badge_icon_rendered = if let Some(manager) = icon_manager {
@@ -333,7 +340,10 @@ impl GridView {
 
         // Label area
         let label_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x + self.padding, rect.min.y + self.padding + self.item_size + 2.0),
+            Pos2::new(
+                rect.min.x + self.padding,
+                rect.min.y + self.padding + self.item_size + 2.0,
+            ),
             Vec2::new(self.item_size, self.label_height),
         );
 
@@ -353,7 +363,7 @@ impl GridView {
                             .id(text_edit_id)
                             .desired_width(self.item_size - 4.0)
                             .font(egui::FontId::proportional(11.0))
-                            .horizontal_align(egui::Align::Center)
+                            .horizontal_align(egui::Align::Center),
                     );
 
                     // Request focus on first render
@@ -424,7 +434,10 @@ impl GridView {
 
             ui.separator();
 
-            if ui.button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80))).clicked() {
+            if ui
+                .button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80)))
+                .clicked()
+            {
                 context_action = Some(ContextAction::Delete);
                 ui.close();
             }
@@ -458,13 +471,18 @@ impl GridView {
 
         // Tooltip on hover (context_menu auto-closes tooltip)
         if ui_response.hovered() {
-            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("asset_tooltip"), egui::containers::PopupAnchor::Pointer)
-                .show(|ui| {
-                    ui.label(&asset.display_name);
-                    ui.label(RichText::new(asset.asset_type.display_name()).weak());
-                    ui.label(RichText::new(format!("Size: {}", asset.formatted_size())).weak());
-                    ui.label(RichText::new(format!("Path: {}", asset.path.display())).weak());
-                });
+            egui::containers::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new("asset_tooltip"),
+                egui::containers::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(&asset.display_name);
+                ui.label(RichText::new(asset.asset_type.display_name()).weak());
+                ui.label(RichText::new(format!("Size: {}", asset.formatted_size())).weak());
+                ui.label(RichText::new(format!("Path: {}", asset.path.display())).weak());
+            });
         }
 
         Some(response)
@@ -502,13 +520,13 @@ fn get_type_icon_small(asset_type: AssetType) -> &'static str {
 /// Get color for asset type
 fn get_type_color(asset_type: AssetType) -> Color32 {
     match asset_type {
-        AssetType::Texture => Color32::from_rgb(100, 180, 100),  // Green
-        AssetType::Model => Color32::from_rgb(100, 150, 220),    // Blue
-        AssetType::Scene => Color32::from_rgb(220, 180, 100),    // Gold
+        AssetType::Texture => Color32::from_rgb(100, 180, 100), // Green
+        AssetType::Model => Color32::from_rgb(100, 150, 220),   // Blue
+        AssetType::Scene => Color32::from_rgb(220, 180, 100),   // Gold
         AssetType::Material => Color32::from_rgb(200, 100, 180), // Purple
-        AssetType::Audio => Color32::from_rgb(220, 120, 100),    // Orange-red
-        AssetType::Shader => Color32::from_rgb(150, 220, 220),   // Cyan
-        AssetType::Prefab => Color32::from_rgb(180, 180, 100),   // Olive
+        AssetType::Audio => Color32::from_rgb(220, 120, 100),   // Orange-red
+        AssetType::Shader => Color32::from_rgb(150, 220, 220),  // Cyan
+        AssetType::Prefab => Color32::from_rgb(180, 180, 100),  // Olive
         AssetType::Unknown => Color32::from_gray(150),
     }
 }

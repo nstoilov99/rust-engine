@@ -6,9 +6,7 @@ use vulkano::device::{DeviceExtensions, QueueFlags};
 use vulkano::instance::Instance;
 
 /// Selects best GPU: must have graphics queue + swapchain, prefers discrete GPU
-pub fn select_physical_device(
-    instance: Arc<Instance>,
-) -> Result<Arc<PhysicalDevice>, String> {
+pub fn select_physical_device(instance: Arc<Instance>) -> Result<Arc<PhysicalDevice>, String> {
     let devices: Vec<_> = instance
         .enumerate_physical_devices()
         .map_err(|e| format!("Failed to enumerate devices: {}", e))?
@@ -30,11 +28,10 @@ pub fn select_physical_device(
         })
         .filter(|d| {
             // Must support swapchain extension
-            d.supported_extensions()
-                .contains(&DeviceExtensions {
-                    khr_swapchain: true,
-                    ..DeviceExtensions::empty()
-                })
+            d.supported_extensions().contains(&DeviceExtensions {
+                khr_swapchain: true,
+                ..DeviceExtensions::empty()
+            })
         })
         .min_by_key(|d| {
             // Prefer discrete GPU over integrated

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 use super::handle::AssetId;
 
@@ -29,22 +29,19 @@ impl AssetDependencies {
         // Add to dependents map (texture -> materials)
         {
             let mut dependents = self.dependents.write();
-            dependents
-                .entry(dependency)
-                .or_insert_with(Vec::new)
-                .push(asset);
+            dependents.entry(dependency).or_default().push(asset);
         }
 
         // Add to dependencies map (material -> textures)
         {
             let mut dependencies = self.dependencies.write();
-            dependencies
-                .entry(asset)
-                .or_insert_with(Vec::new)
-                .push(dependency);
+            dependencies.entry(asset).or_default().push(dependency);
         }
 
-        println!("📎 Dependency added: {:?} depends on {:?}", asset, dependency);
+        println!(
+            "📎 Dependency added: {:?} depends on {:?}",
+            asset, dependency
+        );
     }
 
     /// Remove a dependency relationship
@@ -70,20 +67,14 @@ impl AssetDependencies {
     /// Example: get_dependents(texture_id) returns all materials using that texture
     pub fn get_dependents(&self, asset: AssetId) -> Vec<AssetId> {
         let dependents = self.dependents.read();
-        dependents
-            .get(&asset)
-            .map(|deps| deps.clone())
-            .unwrap_or_default()
+        dependents.get(&asset).cloned().unwrap_or_default()
     }
 
     /// Get all assets this asset depends on
     /// Example: get_dependencies(material_id) returns all textures it uses
     pub fn get_dependencies(&self, asset: AssetId) -> Vec<AssetId> {
         let dependencies = self.dependencies.read();
-        dependencies
-            .get(&asset)
-            .map(|deps| deps.clone())
-            .unwrap_or_default()
+        dependencies.get(&asset).cloned().unwrap_or_default()
     }
 
     /// Get all dependents recursively (full dependency tree)
@@ -171,9 +162,7 @@ impl std::fmt::Display for DependencyStats {
         write!(
             f,
             "Dependencies: {} relationships, {} assets depend on {} assets",
-            self.total_relationships,
-            self.assets_with_dependencies,
-            self.assets_being_depended_on
+            self.total_relationships, self.assets_with_dependencies, self.assets_being_depended_on
         )
     }
 }

@@ -80,11 +80,7 @@ pub fn pack_directory(content_dir: &Path, output_path: &Path) -> io::Result<u64>
     Ok(total_size)
 }
 
-fn collect_files(
-    base: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, PathBuf)>,
-) -> io::Result<()> {
+fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -92,9 +88,7 @@ fn collect_files(
             collect_files(base, &path, out)?;
         } else {
             let rel = path.strip_prefix(base).unwrap();
-            let normalized = rel
-                .to_string_lossy()
-                .replace('\\', "/");
+            let normalized = rel.to_string_lossy().replace('\\', "/");
             out.push((normalized, path));
         }
     }
@@ -116,7 +110,10 @@ impl PakReader {
 
     fn from_bytes(data: Vec<u8>) -> io::Result<Self> {
         if data.len() < HEADER_SIZE as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "pak file too small"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pak file too small",
+            ));
         }
 
         let mut cursor = io::Cursor::new(&data);
@@ -124,7 +121,10 @@ impl PakReader {
         let mut magic = [0u8; 4];
         cursor.read_exact(&mut magic)?;
         if &magic != PAK_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid pak magic"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid pak magic",
+            ));
         }
 
         let mut buf4 = [0u8; 4];

@@ -59,7 +59,9 @@ impl ViewportTexture {
                 image_type: ImageType::Dim2d,
                 format,
                 extent: [width, height, 1],
-                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+                usage: ImageUsage::COLOR_ATTACHMENT
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo::default(),
@@ -72,7 +74,11 @@ impl ViewportTexture {
 
     /// Resize the viewport texture if dimensions have changed
     /// Returns true if the texture was recreated
-    pub fn resize(&mut self, new_width: u32, new_height: u32) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn resize(
+        &mut self,
+        new_width: u32,
+        new_height: u32,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         // Don't resize if dimensions are the same or invalid
         if new_width == self.width && new_height == self.height {
             return Ok(false);
@@ -82,7 +88,8 @@ impl ViewportTexture {
             return Ok(false);
         }
 
-        let (image, image_view) = Self::create_image(&self.allocator, new_width, new_height, self.format)?;
+        let (image, image_view) =
+            Self::create_image(&self.allocator, new_width, new_height, self.format)?;
 
         self.image = image;
         self.image_view = image_view;

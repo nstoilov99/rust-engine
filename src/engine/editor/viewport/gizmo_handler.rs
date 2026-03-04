@@ -8,8 +8,7 @@ use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use transform_gizmo_egui::{
     mint::{Quaternion, RowMatrix4, Vector3, Vector4},
-    Gizmo, GizmoConfig, GizmoExt, GizmoMode as TGMode, GizmoOrientation as TGOrientation,
-    EnumSet,
+    EnumSet, Gizmo, GizmoConfig, GizmoExt, GizmoMode as TGMode, GizmoOrientation as TGOrientation,
 };
 
 use crate::engine::ecs::components::Transform;
@@ -112,7 +111,7 @@ impl GizmoHandler {
         };
 
         // Clone the transform to avoid borrow issues
-        let transform: Transform = (*transform_ref).clone();
+        let transform: Transform = *transform_ref;
         drop(transform_ref);
 
         // Adapt Y-up view matrix to work with Z-up world coordinates (for MVP projection)
@@ -122,8 +121,16 @@ impl GizmoHandler {
 
         // Extract camera orientation vectors from Y-up view matrix and convert to Z-up world space
         // View matrix rows (from look_at_rh): row0=right, row1=up, row2=back
-        let up_yup = Vec3::new(view_matrix.x_axis.y, view_matrix.y_axis.y, view_matrix.z_axis.y);
-        let back_yup = Vec3::new(view_matrix.x_axis.z, view_matrix.y_axis.z, view_matrix.z_axis.z);
+        let up_yup = Vec3::new(
+            view_matrix.x_axis.y,
+            view_matrix.y_axis.y,
+            view_matrix.z_axis.y,
+        );
+        let back_yup = Vec3::new(
+            view_matrix.x_axis.z,
+            view_matrix.y_axis.z,
+            view_matrix.z_axis.z,
+        );
 
         // Convert Y-up direction vectors to Z-up: (x, y, z) → (-z, x, y)
         // This maps: Y-up X(right)→Z-up Y(right), Y-up Y(up)→Z-up Z(up), Y-up Z(back)→Z-up -X(back)
@@ -181,7 +188,7 @@ impl GizmoHandler {
             if !self.is_dragging {
                 // Drag just started
                 self.is_dragging = true;
-                self.drag_start_transform = Some(transform.clone());
+                self.drag_start_transform = Some(transform);
                 self.drag_entity = Some(entity);
             }
 
@@ -205,7 +212,7 @@ impl GizmoHandler {
                         return GizmoInteractionResult::DragEnded {
                             entity: drag_entity,
                             start_transform: start,
-                            end_transform: transform.clone(),
+                            end_transform: transform,
                         };
                     }
                 }
@@ -230,12 +237,18 @@ impl GizmoHandler {
                 EnumSet::empty()
             }
             ToolMode::Translate => {
-                TGMode::TranslateX | TGMode::TranslateY | TGMode::TranslateZ
-                    | TGMode::TranslateXY | TGMode::TranslateXZ | TGMode::TranslateYZ
+                TGMode::TranslateX
+                    | TGMode::TranslateY
+                    | TGMode::TranslateZ
+                    | TGMode::TranslateXY
+                    | TGMode::TranslateXZ
+                    | TGMode::TranslateYZ
                     | TGMode::TranslateView
             }
             ToolMode::Rotate => {
-                TGMode::RotateX | TGMode::RotateY | TGMode::RotateZ
+                TGMode::RotateX
+                    | TGMode::RotateY
+                    | TGMode::RotateZ
                     | TGMode::RotateView
                     | TGMode::Arcball
             }
@@ -260,10 +273,7 @@ impl GizmoHandler {
 
     /// Convert ECS Transform (Z-up) to gizmo transform
     /// Direct pass-through since the forked gizmo uses Z-up natively
-    fn ecs_to_gizmo_transform(
-        &self,
-        t: &Transform,
-    ) -> transform_gizmo_egui::math::Transform {
+    fn ecs_to_gizmo_transform(&self, t: &Transform) -> transform_gizmo_egui::math::Transform {
         transform_gizmo_egui::math::Transform {
             translation: Vector3 {
                 x: t.position.x as f64,
@@ -297,7 +307,7 @@ impl GizmoHandler {
         match self.mode {
             ToolMode::Select => {
                 // Select mode doesn't modify transforms
-                original.clone()
+                *original
             }
             ToolMode::Translate => {
                 // Only update position, keep original rotation and scale
@@ -368,9 +378,9 @@ fn adapt_view_matrix_for_zup(view_yup: Mat4) -> Mat4 {
     // Each column says where each Z-up axis goes in Y-up space
     // Column-major format: each Vec4 is a column
     let zup_to_yup = Mat4::from_cols(
-        Vec4::new(0.0, 0.0, -1.0, 0.0),  // Z-up X (forward) → Y-up -Z (back)
-        Vec4::new(1.0, 0.0, 0.0, 0.0),   // Z-up Y (right)   → Y-up X (right)
-        Vec4::new(0.0, 1.0, 0.0, 0.0),   // Z-up Z (up)      → Y-up Y (up)
+        Vec4::new(0.0, 0.0, -1.0, 0.0), // Z-up X (forward) → Y-up -Z (back)
+        Vec4::new(1.0, 0.0, 0.0, 0.0),  // Z-up Y (right)   → Y-up X (right)
+        Vec4::new(0.0, 1.0, 0.0, 0.0),  // Z-up Z (up)      → Y-up Y (up)
         Vec4::new(0.0, 0.0, 0.0, 1.0),
     );
 

@@ -4,7 +4,7 @@ pub struct Animation {
     pub name: String,
     pub start_frame: u32,
     pub end_frame: u32,
-    pub frame_duration: f32,  // Seconds per frame
+    pub frame_duration: f32, // Seconds per frame
     pub looping: bool,
 }
 
@@ -38,6 +38,12 @@ pub struct AnimationController {
     pub time_accumulator: f32,
     pub playing: bool,
     animations: Vec<Animation>,
+}
+
+impl Default for AnimationController {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnimationController {
@@ -80,7 +86,11 @@ impl AnimationController {
             return;
         }
 
-        let Some(anim) = self.animations.iter().find(|a| a.name == self.current_animation) else {
+        let Some(anim) = self
+            .animations
+            .iter()
+            .find(|a| a.name == self.current_animation)
+        else {
             return;
         };
 

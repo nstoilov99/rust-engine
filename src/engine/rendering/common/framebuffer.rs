@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use vulkano::image::Image;
 use vulkano::image::view::ImageView;
+use vulkano::image::Image;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 /// Creates one framebuffer per swapchain image
@@ -42,7 +42,7 @@ pub fn create_framebuffers_3d(
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![view, depth_view.clone()],  // Color + Depth
+                    attachments: vec![view, depth_view.clone()], // Color + Depth
                     ..Default::default()
                 },
             )

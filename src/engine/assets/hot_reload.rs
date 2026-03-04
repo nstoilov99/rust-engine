@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::path::Path;
-use notify::{Watcher, RecursiveMode, Event, EventKind, RecommendedWatcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use super::asset_manager::AssetManager;
 
@@ -12,9 +12,18 @@ use super::model_loader::Model;
 /// Hot-reload event messages
 #[derive(Debug, Clone)]
 pub enum ReloadEvent {
-    ModelChanged { path: String, mesh_indices: Vec<usize>, model: std::sync::Arc<Model> },
-    TextureChanged { path: String },
-    ReloadFailed { path: String, error: String },
+    ModelChanged {
+        path: String,
+        mesh_indices: Vec<usize>,
+        model: std::sync::Arc<Model>,
+    },
+    TextureChanged {
+        path: String,
+    },
+    ReloadFailed {
+        path: String,
+        error: String,
+    },
 }
 
 /// Watches asset files and triggers hot-reload
@@ -44,7 +53,10 @@ impl HotReloadWatcher {
         let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
                 match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any => {
+                    EventKind::Modify(_)
+                    | EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Any => {
                         for path in event.paths {
                             if let Some(path_str) = path.to_str() {
                                 // Normalize path separators to forward slashes
@@ -59,45 +71,53 @@ impl HotReloadWatcher {
 
                                 if is_tracked {
                                     // Find the matching tracked path
-                                    let tracked_path = watched.iter()
+                                    let tracked_path = watched
+                                        .iter()
                                         .find(|tracked| normalized_path.ends_with(*tracked))
                                         .unwrap()
                                         .clone();
 
                                     // Determine asset type and reload (use tracked_path for consistency)
-                                    if tracked_path.ends_with(".png") ||
-                                       tracked_path.ends_with(".jpg") ||
-                                       tracked_path.ends_with(".jpeg") {
+                                    if tracked_path.ends_with(".png")
+                                        || tracked_path.ends_with(".jpg")
+                                        || tracked_path.ends_with(".jpeg")
+                                    {
                                         match assets.textures.reload(&tracked_path) {
                                             Ok(_) => {
-                                                let _ = reload_sender.send(ReloadEvent::TextureChanged {
-                                                    path: tracked_path.clone(),
-                                                });
+                                                let _ = reload_sender.send(
+                                                    ReloadEvent::TextureChanged {
+                                                        path: tracked_path.clone(),
+                                                    },
+                                                );
                                             }
                                             Err(e) => {
                                                 eprintln!("Failed to reload texture: {}", e);
-                                                let _ = reload_sender.send(ReloadEvent::ReloadFailed {
-                                                    path: tracked_path.clone(),
-                                                    error: e.to_string(),
-                                                });
+                                                let _ =
+                                                    reload_sender.send(ReloadEvent::ReloadFailed {
+                                                        path: tracked_path.clone(),
+                                                        error: e.to_string(),
+                                                    });
                                             }
                                         }
-                                    } else if tracked_path.ends_with(".gltf") ||
-                                              tracked_path.ends_with(".glb") {
+                                    } else if tracked_path.ends_with(".gltf")
+                                        || tracked_path.ends_with(".glb")
+                                    {
                                         match assets.reload_model_gpu(&tracked_path) {
                                             Ok((new_indices, model_handle)) => {
-                                                let _ = reload_sender.send(ReloadEvent::ModelChanged {
-                                                    path: tracked_path.clone(),
-                                                    mesh_indices: new_indices,
-                                                    model: model_handle.get_arc(),
-                                                });
+                                                let _ =
+                                                    reload_sender.send(ReloadEvent::ModelChanged {
+                                                        path: tracked_path.clone(),
+                                                        mesh_indices: new_indices,
+                                                        model: model_handle.get_arc(),
+                                                    });
                                             }
                                             Err(e) => {
                                                 eprintln!("Failed to reload model: {}", e);
-                                                let _ = reload_sender.send(ReloadEvent::ReloadFailed {
-                                                    path: tracked_path.clone(),
-                                                    error: e.to_string(),
-                                                });
+                                                let _ =
+                                                    reload_sender.send(ReloadEvent::ReloadFailed {
+                                                        path: tracked_path.clone(),
+                                                        error: e.to_string(),
+                                                    });
                                             }
                                         }
                                     }

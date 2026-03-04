@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::device::{Device, Queue};
+use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::format::Format;
 
-use super::handle::{Handle, AssetId};
+use super::handle::{AssetId, Handle};
 
 /// Manages texture loading and caching
 pub struct TextureManager {
@@ -89,13 +89,19 @@ impl TextureManager {
     }
 
     /// Internal: Load texture via asset source (content-relative path).
-    fn load_texture_from_disk(&self, relative: &str) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    fn load_texture_from_disk(
+        &self,
+        relative: &str,
+    ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
         use super::asset_source;
+        use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+        use vulkano::command_buffer::{
+            AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
+            PrimaryCommandBufferAbstract,
+        };
         use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
         use vulkano::memory::allocator::AllocationCreateInfo;
-        use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
         use vulkano::memory::allocator::MemoryTypeFilter;
-        use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryCommandBufferAbstract};
         use vulkano::sync::GpuFuture;
 
         let img = if asset_source::is_pak() {
@@ -141,13 +147,11 @@ impl TextureManager {
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
-        builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            buffer,
-            image.clone(),
-        ))?;
+        builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
 
         let command_buffer = builder.build()?;
-        command_buffer.execute(self.queue.clone())?
+        command_buffer
+            .execute(self.queue.clone())?
             .then_signal_fence_and_flush()?
             .wait(None)?;
 

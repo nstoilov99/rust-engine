@@ -71,7 +71,7 @@ impl BenchmarkProfileCollector {
         };
 
         let mut frame_totals = HashMap::<&'static str, f64>::new();
-        for (_, stream_info) in &unpacked.thread_streams {
+        for stream_info in unpacked.thread_streams.values() {
             let top_scopes = match puffin::Reader::from_start(&stream_info.stream).read_top_scopes()
             {
                 Ok(scopes) => scopes,

@@ -10,9 +10,9 @@ use crate::engine::physics::{
     Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
 };
 use hecs::{Entity, World};
+use log;
 use nalgebra_glm as glm;
 use std::fs;
-use log;
 
 /// Serialize a single entity to EntityData
 fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
@@ -33,7 +33,11 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
     // Try to get each component type
     if let Ok(transform) = world.get::<&Transform>(entity) {
         components.push(ComponentData::Transform {
-            position: [transform.position.x, transform.position.y, transform.position.z],
+            position: [
+                transform.position.x,
+                transform.position.y,
+                transform.position.z,
+            ],
             rotation: [
                 transform.rotation.coords.x,
                 transform.rotation.coords.y,
@@ -270,7 +274,11 @@ pub fn load_scene_from_string(
 
         let mut has_parent = false;
         for component in &entity_data.components {
-            if let ComponentData::Parent { parent_name, parent_guid } = component {
+            if let ComponentData::Parent {
+                parent_name,
+                parent_guid,
+            } = component
+            {
                 parent_relationships.push((entity, parent_name.clone(), parent_guid.clone()));
                 has_parent = true;
             }
@@ -288,7 +296,8 @@ pub fn load_scene_from_string(
         } else {
             log::warn!(
                 "Parent '{}' not found for entity {:?}, entity becomes root",
-                parent_name, child_entity
+                parent_name,
+                child_entity
             );
         }
     }
@@ -316,10 +325,7 @@ pub fn load_scene(
 
     let result = load_scene_from_string(world, &ron_string)?;
 
-    println!(
-        "Scene loaded: {} ({} roots)",
-        result.0, result.1.len()
-    );
+    println!("Scene loaded: {} ({} roots)", result.0, result.1.len());
 
     Ok(result)
 }
@@ -497,7 +503,7 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
         .guid
         .as_ref()
         .and_then(|s| EntityGuid::from_string(s))
-        .unwrap_or_else(EntityGuid::new);
+        .unwrap_or_default();
     builder.add(entity_guid);
 
     // Spawn the entity

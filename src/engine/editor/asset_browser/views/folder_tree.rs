@@ -95,7 +95,15 @@ impl FolderTreeView {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Render root node
-                let node_response = self.render_folder_node(ui, root, current_folder, expanded, 0, renaming_folder, icon_manager);
+                let node_response = self.render_folder_node(
+                    ui,
+                    root,
+                    current_folder,
+                    expanded,
+                    0,
+                    renaming_folder,
+                    icon_manager,
+                );
                 if node_response.clicked.is_some() {
                     response.clicked = node_response.clicked;
                 }
@@ -110,7 +118,8 @@ impl FolderTreeView {
                 }
                 if node_response.folder_rename_cancelled {
                     response.folder_rename_cancelled = true;
-                    response.folder_rename_cancelled_path = node_response.folder_rename_cancelled_path;
+                    response.folder_rename_cancelled_path =
+                        node_response.folder_rename_cancelled_path;
                 }
                 if node_response.asset_dropped.is_some() {
                     response.asset_dropped = node_response.asset_dropped;
@@ -159,11 +168,8 @@ impl FolderTreeView {
                     egui::epaint::StrokeKind::Inside,
                 );
                 // Draw text
-                ui.painter().galley(
-                    label_rect.min + padding,
-                    galley,
-                    Color32::WHITE,
-                );
+                ui.painter()
+                    .galley(label_rect.min + padding, galley, Color32::WHITE);
             }
         }
 
@@ -178,6 +184,7 @@ impl FolderTreeView {
         response
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_folder_node(
         &mut self,
         ui: &mut Ui,
@@ -191,12 +198,13 @@ impl FolderTreeView {
         let mut tree_response = FolderTreeResponse::default();
         let has_children = !node.children.is_empty();
         let is_expanded = expanded.contains(&node.path);
-        let is_selected = current_folder == &node.path ||
-            (node.path.as_os_str().is_empty() && current_folder.as_os_str().is_empty());
+        let is_selected = current_folder == &node.path
+            || (node.path.as_os_str().is_empty() && current_folder.as_os_str().is_empty());
         let is_root = node.path.as_os_str().is_empty();
 
         // Check if this folder is being renamed
-        let is_renaming = renaming_folder.as_ref()
+        let is_renaming = renaming_folder
+            .as_ref()
             .map(|(path, _)| path == &node.path)
             .unwrap_or(false);
 
@@ -210,8 +218,8 @@ impl FolderTreeView {
         let mut is_drop_target = false;
 
         // Icon sizes for folder tree
-        let arrow_size = egui::vec2(10.0, 10.0);  // Arrow icons
-        let folder_icon_size = egui::vec2(16.0, 16.0);  // Folder icons
+        let arrow_size = egui::vec2(10.0, 10.0); // Arrow icons
+        let folder_icon_size = egui::vec2(16.0, 16.0); // Folder icons
 
         // Render the row content inside horizontal layout
         // Return arrow_clicked from closure to avoid mutable capture issues
@@ -230,12 +238,18 @@ impl FolderTreeView {
             // Render folder name (normal label or rename TextEdit)
             if is_renaming {
                 // Show folder icon first
-                render_folder_icon(ui, is_expanded && has_children, icon_manager, folder_icon_size);
+                render_folder_icon(
+                    ui,
+                    is_expanded && has_children,
+                    icon_manager,
+                    folder_icon_size,
+                );
 
                 // Show TextEdit for renaming
                 if let Some((rename_path, ref mut rename_text)) = renaming_folder {
                     if rename_path == &node.path {
-                        let text_edit_id = ui.make_persistent_id(("folder_rename", node.path.as_os_str()));
+                        let text_edit_id =
+                            ui.make_persistent_id(("folder_rename", node.path.as_os_str()));
                         let text_response = ui.add(
                             egui::TextEdit::singleline(rename_text)
                                 .id(text_edit_id)
@@ -249,8 +263,11 @@ impl FolderTreeView {
                         }
 
                         // Handle Enter to confirm WHILE focused (before focus is lost)
-                        if text_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            tree_response.folder_rename_confirmed = Some((node.path.clone(), rename_text.clone()));
+                        if text_response.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            tree_response.folder_rename_confirmed =
+                                Some((node.path.clone(), rename_text.clone()));
                         } else if text_response.lost_focus() {
                             // Lost focus without Enter = cancel
                             tree_response.folder_rename_cancelled = true;
@@ -260,8 +277,17 @@ impl FolderTreeView {
                 }
             } else {
                 // Normal folder label - render icon and text
-                render_folder_icon(ui, is_expanded && has_children, icon_manager, folder_icon_size);
-                let text_color = if is_selected { Color32::WHITE } else { ui.style().visuals.text_color() };
+                render_folder_icon(
+                    ui,
+                    is_expanded && has_children,
+                    icon_manager,
+                    folder_icon_size,
+                );
+                let text_color = if is_selected {
+                    Color32::WHITE
+                } else {
+                    ui.style().visuals.text_color()
+                };
                 ui.label(RichText::new(&node.name).color(text_color));
             }
 
@@ -348,7 +374,10 @@ impl FolderTreeView {
                     ui.separator();
 
                     // Delete button - styled in red
-                    if ui.button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80))).clicked() {
+                    if ui
+                        .button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80)))
+                        .clicked()
+                    {
                         context_action = Some(FolderContextAction::Delete);
                         ui.close();
                     }
@@ -391,7 +420,7 @@ impl FolderTreeView {
             // Check for DnD hover - folder being dragged over this folder
             if let Some(dragged_folder) = response.dnd_hover_payload::<PathBuf>() {
                 // Don't allow dropping folder onto itself or into its own children
-                let dragged_path: &PathBuf = &*dragged_folder;
+                let dragged_path: &PathBuf = &dragged_folder;
                 if dragged_path != &node.path && !node.path.starts_with(dragged_path) {
                     is_drop_target = true;
                 }
@@ -406,7 +435,7 @@ impl FolderTreeView {
             // First try the standard dnd_release_payload
             if let Some(dropped_folder) = response.dnd_release_payload::<PathBuf>() {
                 // Validate: can't drop into self or children
-                let dropped_path: &PathBuf = &*dropped_folder;
+                let dropped_path: &PathBuf = &dropped_folder;
                 if dropped_path != &node.path && !node.path.starts_with(dropped_path) {
                     tree_response.folder_dropped = Some((node.path.clone(), dropped_path.clone()));
                 }
@@ -425,8 +454,11 @@ impl FolderTreeView {
                             // Use stored dragged_folder instead of egui payload (which is cleared on release)
                             if let Some(ref dropped_path) = self.dragged_folder {
                                 // Validate: can't drop into self or children
-                                if dropped_path != &node.path && !node.path.starts_with(dropped_path) {
-                                    tree_response.folder_dropped = Some((node.path.clone(), dropped_path.clone()));
+                                if dropped_path != &node.path
+                                    && !node.path.starts_with(dropped_path)
+                                {
+                                    tree_response.folder_dropped =
+                                        Some((node.path.clone(), dropped_path.clone()));
                                 }
                             }
                         }
@@ -446,11 +478,8 @@ impl FolderTreeView {
 
         // Dim the folder if it's being dragged
         if is_being_dragged {
-            ui.painter().rect_filled(
-                rect,
-                2.0,
-                Color32::from_rgba_unmultiplied(80, 80, 80, 150),
-            );
+            ui.painter()
+                .rect_filled(rect, 2.0, Color32::from_rgba_unmultiplied(80, 80, 80, 150));
         }
 
         // Highlight drop target with filled background and border
@@ -473,11 +502,8 @@ impl FolderTreeView {
 
         // Handle deferred context action
         if let Some(action) = context_action {
-            match &action {
-                FolderContextAction::Rename => {
-                    tree_response.rename_requested = Some((node.path.clone(), node.name.clone()));
-                }
-                _ => {}
+            if let FolderContextAction::Rename = &action {
+                tree_response.rename_requested = Some((node.path.clone(), node.name.clone()));
             }
             tree_response.context_action = Some((node.path.clone(), action));
         }
@@ -485,7 +511,15 @@ impl FolderTreeView {
         // Render children if expanded
         if is_expanded {
             for child in &node.children {
-                let child_response = self.render_folder_node(ui, child, current_folder, expanded, depth + 1, renaming_folder, icon_manager);
+                let child_response = self.render_folder_node(
+                    ui,
+                    child,
+                    current_folder,
+                    expanded,
+                    depth + 1,
+                    renaming_folder,
+                    icon_manager,
+                );
                 if child_response.clicked.is_some() {
                     tree_response.clicked = child_response.clicked;
                 }
@@ -500,7 +534,8 @@ impl FolderTreeView {
                 }
                 if child_response.folder_rename_cancelled {
                     tree_response.folder_rename_cancelled = true;
-                    tree_response.folder_rename_cancelled_path = child_response.folder_rename_cancelled_path;
+                    tree_response.folder_rename_cancelled_path =
+                        child_response.folder_rename_cancelled_path;
                 }
                 if child_response.asset_dropped.is_some() {
                     tree_response.asset_dropped = child_response.asset_dropped;
@@ -519,7 +554,12 @@ impl FolderTreeView {
 }
 
 /// Render a folder icon (PNG or Unicode fallback)
-fn render_folder_icon(ui: &mut Ui, is_open: bool, icon_manager: Option<&IconManager>, size: egui::Vec2) {
+fn render_folder_icon(
+    ui: &mut Ui,
+    is_open: bool,
+    icon_manager: Option<&IconManager>,
+    size: egui::Vec2,
+) {
     let icon_type = if is_open {
         AssetBrowserIcon::FolderOpen
     } else {
@@ -540,7 +580,12 @@ fn render_folder_icon(ui: &mut Ui, is_open: bool, icon_manager: Option<&IconMana
 
 /// Render an expand/collapse arrow icon (PNG or Unicode fallback)
 /// Returns true if clicked
-fn render_arrow_icon(ui: &mut Ui, is_expanded: bool, icon_manager: Option<&IconManager>, size: egui::Vec2) -> bool {
+fn render_arrow_icon(
+    ui: &mut Ui,
+    is_expanded: bool,
+    icon_manager: Option<&IconManager>,
+    size: egui::Vec2,
+) -> bool {
     let icon_type = if is_expanded {
         AssetBrowserIcon::ArrowDown
     } else {

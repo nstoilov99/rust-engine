@@ -216,7 +216,8 @@ impl BenchmarkRunner {
             renderer.memory_allocator.clone(),
             renderer.command_buffer_allocator.clone(),
         ));
-        let (_mesh_indices, _plane_mesh_index, cube_mesh_index) = game_setup::load_assets(&asset_manager)?;
+        let (_mesh_indices, _plane_mesh_index, cube_mesh_index) =
+            game_setup::load_assets(&asset_manager)?;
 
         let mut game_world = GameWorld::new();
         let mut physics_world = PhysicsWorld::new();

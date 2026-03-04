@@ -19,7 +19,7 @@ pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, spe
     let forward = (renderer.camera_3d.target - renderer.camera_3d.position).normalize();
     // Y-up: standard cross product forward × up = right
     let right = forward.cross(Vec3::Y).normalize();
-    let up = Vec3::Y;  // Y is up in render space
+    let up = Vec3::Y; // Y is up in render space
 
     // Table-driven: (key, direction multiplier)
     let movements: &[(KeyCode, Vec3)] = &[
@@ -27,8 +27,8 @@ pub fn handle_camera_movement(renderer: &mut Renderer, input: &InputManager, spe
         (KeyCode::KeyS, -forward),
         (KeyCode::KeyA, -right),
         (KeyCode::KeyD, right),
-        (KeyCode::Space, up),        // +Y (up in Y-up)
-        (KeyCode::ShiftLeft, -up),   // -Y (down in Y-up)
+        (KeyCode::Space, up),      // +Y (up in Y-up)
+        (KeyCode::ShiftLeft, -up), // -Y (down in Y-up)
     ];
 
     for (key, direction) in movements {
@@ -73,8 +73,7 @@ pub fn handle_camera_rotation(renderer: &mut Renderer, input: &InputManager, loo
         // Y-up: Apply pitch (vertical rotation adjusts Y, clamped to avoid gimbal lock)
         let new_y = (direction.y + pitch_delta).clamp(-1.5, 1.5);
 
-        renderer.camera_3d.target =
-            renderer.camera_3d.position + Vec3::new(new_x, new_y, new_z);
+        renderer.camera_3d.target = renderer.camera_3d.position + Vec3::new(new_x, new_y, new_z);
     }
 }
 
@@ -106,11 +105,7 @@ pub fn handle_debug_views(
 }
 
 #[cfg(feature = "editor")]
-pub fn handle_zoom(
-    renderer: &mut Renderer,
-    input: &InputManager,
-    camera_distance: &mut f32,
-) {
+pub fn handle_zoom(renderer: &mut Renderer, input: &InputManager, camera_distance: &mut f32) {
     let scroll = input.scroll_delta();
     if scroll != 0.0 {
         *camera_distance = (*camera_distance - scroll).clamp(2.0, 200.0);

@@ -97,9 +97,21 @@ impl Frustum {
             // p-vertex: choose the component from min or max that is most
             // aligned with the plane normal.
             let p = Vec3::new(
-                if plane.normal.x >= 0.0 { aabb_max.x } else { aabb_min.x },
-                if plane.normal.y >= 0.0 { aabb_max.y } else { aabb_min.y },
-                if plane.normal.z >= 0.0 { aabb_max.z } else { aabb_min.z },
+                if plane.normal.x >= 0.0 {
+                    aabb_max.x
+                } else {
+                    aabb_min.x
+                },
+                if plane.normal.y >= 0.0 {
+                    aabb_max.y
+                } else {
+                    aabb_min.y
+                },
+                if plane.normal.z >= 0.0 {
+                    aabb_max.z
+                } else {
+                    aabb_min.z
+                },
             );
             if plane.distance_to_point(p) < 0.0 {
                 return false;

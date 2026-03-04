@@ -133,3 +133,131 @@ impl Default for CommandBuffer {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hecs::World;
+
+    #[test]
+    fn spawn_via_command_buffer() {
+        let mut world = World::new();
+        let mut buf = CommandBuffer::new();
+
+        buf.spawn(|w: &mut World| w.spawn((42_i32,)));
+        assert_eq!(buf.len(), 1);
+
+        buf.apply(&mut world);
+        assert_eq!(world.len(), 1);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn despawn_via_command_buffer() {
+        let mut world = World::new();
+        let entity = world.spawn((100_i32,));
+        assert_eq!(world.len(), 1);
+
+        let mut buf = CommandBuffer::new();
+        buf.despawn(entity);
+        buf.apply(&mut world);
+
+        assert_eq!(world.len(), 0);
+    }
+
+    #[test]
+    fn insert_component_via_command_buffer() {
+        let mut world = World::new();
+        let entity = world.spawn((42_i32,));
+
+        let mut buf = CommandBuffer::new();
+        buf.insert(entity, 2.72_f32);
+        buf.apply(&mut world);
+
+        let val = world
+            .get::<&f32>(entity)
+            .expect("f32 component should exist");
+        assert!((*val - 2.72).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn remove_component_via_command_buffer() {
+        let mut world = World::new();
+        let entity = world.spawn((42_i32, 2.72_f32));
+
+        let mut buf = CommandBuffer::new();
+        buf.remove::<f32>(entity);
+        buf.apply(&mut world);
+
+        assert!(world.get::<&f32>(entity).is_err());
+        assert!(world.get::<&i32>(entity).is_ok());
+    }
+
+    #[test]
+    fn custom_command() {
+        let mut world = World::new();
+        let entity = world.spawn((0_i32,));
+
+        let mut buf = CommandBuffer::new();
+        buf.custom(move |w: &mut World| {
+            if let Ok(mut val) = w.get::<&mut i32>(entity) {
+                *val = 999;
+            }
+        });
+        buf.apply(&mut world);
+
+        let val = world.get::<&i32>(entity).expect("i32 should exist");
+        assert_eq!(*val, 999);
+    }
+
+    #[test]
+    fn commands_applied_in_order() {
+        let mut world = World::new();
+        let entity = world.spawn((0_i32,));
+
+        let mut buf = CommandBuffer::new();
+        // First set to 10
+        buf.custom(move |w: &mut World| {
+            if let Ok(mut val) = w.get::<&mut i32>(entity) {
+                *val = 10;
+            }
+        });
+        // Then multiply by 2
+        buf.custom(move |w: &mut World| {
+            if let Ok(mut val) = w.get::<&mut i32>(entity) {
+                *val *= 2;
+            }
+        });
+        buf.apply(&mut world);
+
+        let val = world.get::<&i32>(entity).expect("i32 should exist");
+        assert_eq!(*val, 20);
+    }
+
+    #[test]
+    fn empty_buffer_apply_is_noop() {
+        let mut world = World::new();
+        let _entity = world.spawn((42_i32,));
+
+        let mut buf = CommandBuffer::new();
+        assert!(buf.is_empty());
+        buf.apply(&mut world);
+
+        assert_eq!(world.len(), 1);
+    }
+
+    #[test]
+    fn clear_discards_commands() {
+        let mut buf = CommandBuffer::new();
+        buf.spawn(|w: &mut World| w.spawn((1_i32,)));
+        buf.spawn(|w: &mut World| w.spawn((2_i32,)));
+        assert_eq!(buf.len(), 2);
+
+        buf.clear();
+        assert!(buf.is_empty());
+
+        let mut world = World::new();
+        buf.apply(&mut world);
+        assert_eq!(world.len(), 0);
+    }
+}

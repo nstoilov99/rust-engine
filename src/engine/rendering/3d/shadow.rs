@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::format::Format;
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+use vulkano::image::sampler::{
+    BorderColor, Filter, Sampler, SamplerAddressMode, SamplerCreateInfo,
+};
 use vulkano::image::view::ImageView;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
-use vulkano::render_pass::RenderPass;
-use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode, BorderColor};
 use vulkano::pipeline::graphics::depth_stencil::CompareOp;
+use vulkano::render_pass::RenderPass;
 
 /// Creates a depth-only render pass for shadow mapping
 pub fn create_shadow_render_pass(
@@ -65,5 +67,6 @@ pub fn create_shadow_sampler(
             compare: Some(CompareOp::LessOrEqual), // Enable shadow comparison
             ..Default::default()
         },
-    ).map_err(|e| e.into())
+    )
+    .map_err(|e| e.into())
 }

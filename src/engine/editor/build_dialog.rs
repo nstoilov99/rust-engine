@@ -92,6 +92,12 @@ pub struct BuildDialog {
     copy_thread: Option<std::thread::JoinHandle<Result<u64, String>>>,
 }
 
+impl Default for BuildDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BuildDialog {
     pub fn new() -> Self {
         Self {
@@ -121,7 +127,9 @@ impl BuildDialog {
                 let handle = self.build_thread.take().expect("checked is_finished");
                 match handle.join() {
                     Ok(Ok(_binary_size)) => {
-                        messages.push(LogMessage::info("[build] Build succeeded. Copying files..."));
+                        messages.push(LogMessage::info(
+                            "[build] Build succeeded. Copying files...",
+                        ));
                         self.state = BuildState::CopyingContent;
                         self.start_copy_thread();
                     }
@@ -202,7 +210,6 @@ impl BuildDialog {
             copy_build_output(profile, platform, &output_dir, build_log)
         }));
     }
-
 }
 
 fn run_cargo_build(
@@ -225,11 +232,9 @@ fn run_cargo_build(
         if let Some(stdout) = stdout {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    if let Ok(mut log) = log_stdout.lock() {
-                        log.push(line);
-                    }
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut log) = log_stdout.lock() {
+                    log.push(line);
                 }
             }
         }
@@ -242,11 +247,9 @@ fn run_cargo_build(
         if let Some(stderr) = stderr {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    if let Ok(mut log) = log_stderr.lock() {
-                        log.push(line);
-                    }
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut log) = log_stderr.lock() {
+                    log.push(line);
                 }
             }
         }
@@ -263,11 +266,8 @@ fn run_cargo_build(
         return Err(format!("cargo exited with code {:?}", status.code()));
     }
 
-    let exe_path = PathBuf::from(profile.output_dir())
-        .join(format!("{}.exe", BIN_NAME));
-    let binary_size = std::fs::metadata(&exe_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let exe_path = PathBuf::from(profile.output_dir()).join(format!("{}.exe", BIN_NAME));
+    let binary_size = std::fs::metadata(&exe_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(binary_size)
 }
@@ -292,12 +292,9 @@ fn copy_build_output(
         return Err(format!("Binary not found: {}", src_exe.display()));
     }
 
-    std::fs::copy(&src_exe, &dst_exe)
-        .map_err(|e| format!("Failed to copy binary: {}", e))?;
+    std::fs::copy(&src_exe, &dst_exe).map_err(|e| format!("Failed to copy binary: {}", e))?;
 
-    let binary_size = std::fs::metadata(&dst_exe)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let binary_size = std::fs::metadata(&dst_exe).map(|m| m.len()).unwrap_or(0);
 
     if let Ok(mut log) = build_log.lock() {
         log.push(format!(
@@ -318,7 +315,10 @@ fn copy_build_output(
                         log.push(format!("Warning: failed to copy {}: {}", path.display(), e));
                     }
                 } else if let Ok(mut log) = build_log.lock() {
-                    log.push(format!("Copied {}", path.file_name().expect("has filename").to_string_lossy()));
+                    log.push(format!(
+                        "Copied {}",
+                        path.file_name().expect("has filename").to_string_lossy()
+                    ));
                 }
             }
         }

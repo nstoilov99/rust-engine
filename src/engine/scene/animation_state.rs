@@ -10,15 +10,15 @@ pub struct AnimationTransition {
 
 #[derive(Debug, Clone)]
 pub enum TransitionCondition {
-    Immediate,                    // Transition immediately
-    OnComplete,                   // When current animation finishes
-    OnInput(String),              // When specific input is pressed
-    OnParameter(String, f32),     // When parameter reaches value
+    Immediate,                // Transition immediately
+    OnComplete,               // When current animation finishes
+    OnInput(String),          // When specific input is pressed
+    OnParameter(String, f32), // When parameter reaches value
 }
 
 /// Animation state machine
 pub struct AnimationStateMachine {
-    states: HashMap<String, String>,  // state_name -> animation_name
+    states: HashMap<String, String>, // state_name -> animation_name
     transitions: Vec<AnimationTransition>,
     current_state: String,
     parameters: HashMap<String, f32>,
@@ -36,7 +36,8 @@ impl AnimationStateMachine {
 
     /// Add a state (maps state name to animation name)
     pub fn add_state(&mut self, state_name: &str, animation_name: &str) {
-        self.states.insert(state_name.to_string(), animation_name.to_string());
+        self.states
+            .insert(state_name.to_string(), animation_name.to_string());
     }
 
     /// Add a transition between states
@@ -64,9 +65,11 @@ impl AnimationStateMachine {
             let should_transition = match &transition.condition {
                 TransitionCondition::Immediate => true,
                 TransitionCondition::OnComplete => animation_finished,
-                TransitionCondition::OnParameter(param, target) => {
-                    self.parameters.get(param).map(|v| v >= target).unwrap_or(false)
-                }
+                TransitionCondition::OnParameter(param, target) => self
+                    .parameters
+                    .get(param)
+                    .map(|v| v >= target)
+                    .unwrap_or(false),
                 _ => false,
             };
 

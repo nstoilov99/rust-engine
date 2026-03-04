@@ -1,32 +1,37 @@
 // Graphics pipeline - combines shaders, vertex format, and rendering settings
+use smallvec::smallvec;
 use std::mem::size_of;
-use vulkano::descriptor_set::layout::DescriptorSetLayout;
 use std::sync::Arc;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::layout::DescriptorSetLayout;
+use vulkano::descriptor_set::{
+    layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType},
+    DescriptorSet, WriteDescriptorSet,
+};
 use vulkano::device::Device;
+use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
+use vulkano::pipeline::graphics::rasterization::DepthBiasState;
 use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState, AttachmentBlend},
+    color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
+    depth_stencil::CompareOp,
+    depth_stencil::DepthState,
+    depth_stencil::DepthStencilState,
     input_assembly::InputAssemblyState,
     multisample::MultisampleState,
     rasterization::RasterizationState,
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
-    viewport::{ViewportState},
+    viewport::ViewportState,
     GraphicsPipelineCreateInfo,
-    depth_stencil::DepthStencilState,
-    depth_stencil::DepthState,
-    depth_stencil::CompareOp,
 };
-use vulkano::shader::ShaderStages;
+use vulkano::pipeline::layout::{
+    PipelineDescriptorSetLayoutCreateInfo, PipelineLayout, PipelineLayoutCreateInfo,
+    PushConstantRange,
+};
 use vulkano::pipeline::{DynamicState, Pipeline};
-use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout, PipelineLayoutCreateInfo, PushConstantRange};
 use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
-use vulkano::descriptor_set::{layout::{DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo, DescriptorType}, DescriptorSet, WriteDescriptorSet};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::image::sampler::Sampler;
-use vulkano::image::view::ImageView;
-use vulkano::pipeline::graphics::rasterization::DepthBiasState;
-use smallvec::smallvec;
-
+use vulkano::shader::ShaderStages;
 
 // 3D mesh shaders
 pub mod mesh_vs {
@@ -88,17 +93,24 @@ pub mod pbr_fs {
 }
 
 /// Vertex format for 3D meshes with lighting support
-#[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    vulkano::buffer::BufferContents,
+    vulkano::pipeline::graphics::vertex_input::Vertex,
+)]
 #[repr(C)]
 pub struct Vertex3D {
     #[format(R32G32B32_SFLOAT)]
-    pub position: [f32; 3],  // X, Y, Z position
+    pub position: [f32; 3], // X, Y, Z position
     #[format(R32G32B32_SFLOAT)]
-    pub normal: [f32; 3],    // Surface normal for lighting
+    pub normal: [f32; 3], // Surface normal for lighting
     #[format(R32G32_SFLOAT)]
-    pub uv: [f32; 2],        // Texture coordinates
+    pub uv: [f32; 2], // Texture coordinates
 
-    #[format(R32G32B32A32_SFLOAT)]  // W component = bitangent handedness
+    #[format(R32G32B32A32_SFLOAT)] // W component = bitangent handedness
     pub tangent: [f32; 4],
 }
 
@@ -164,8 +176,7 @@ pub fn create_mesh_pipeline(
     let fs = mesh_fs::load(device.clone())?.entry_point("main").unwrap();
 
     // Vertex input: Vertex3D format (must be done before stages consumes vs)
-    let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs)?;
+    let vertex_input_state = Vertex3D::per_vertex().definition(&vs)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs),
@@ -193,8 +204,8 @@ pub fn create_mesh_pipeline(
             // NEW: Enable depth testing!
             depth_stencil_state: Some(DepthStencilState {
                 depth: Some(DepthState {
-                    compare_op: CompareOp::Less,  // Closer pixels win
-                    write_enable: true,            // Update depth buffer
+                    compare_op: CompareOp::Less, // Closer pixels win
+                    write_enable: true,          // Update depth buffer
                 }),
                 ..Default::default()
             }),
@@ -230,8 +241,7 @@ pub fn create_lit_mesh_pipeline(
     let vs_entry_point = vs.entry_point("main").unwrap();
     let fs_entry_point = fs.entry_point("main").unwrap();
 
-    let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry_point)?;
+    let vertex_input_state = Vertex3D::per_vertex().definition(&vs_entry_point)?;
 
     // Create pipeline layout with two descriptor sets:
     // - Set 0: Texture (albedo)
@@ -272,7 +282,7 @@ pub fn create_lit_mesh_pipeline(
                                     DescriptorSetLayoutBinding {
                                         stages: ShaderStages::FRAGMENT,
                                         ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
+                                            DescriptorType::CombinedImageSampler,
                                         )
                                     },
                                 )]
@@ -289,7 +299,7 @@ pub fn create_lit_mesh_pipeline(
                                     DescriptorSetLayoutBinding {
                                         stages: ShaderStages::FRAGMENT,
                                         ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::UniformBuffer
+                                            DescriptorType::UniformBuffer,
                                         )
                                     },
                                 )]
@@ -320,11 +330,14 @@ pub fn create_pbr_pipeline(
     let vs = pbr_vs::load(device.clone())?;
     let fs = pbr_fs::load(device.clone())?;
 
-    let vs_entry = vs.entry_point("main").ok_or("Vertex shader missing 'main' entry point")?;
-    let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
+    let vs_entry = vs
+        .entry_point("main")
+        .ok_or("Vertex shader missing 'main' entry point")?;
+    let fs_entry = fs
+        .entry_point("main")
+        .ok_or("Fragment shader missing 'main' entry point")?;
 
-    let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry)?;
+    let vertex_input_state = Vertex3D::per_vertex().definition(&vs_entry)?;
 
     let pipeline = GraphicsPipeline::new(
         device.clone(),
@@ -358,31 +371,44 @@ pub fn create_pbr_pipeline(
                             device.clone(),
                             DescriptorSetLayoutCreateInfo {
                                 bindings: [
-                                    (0, DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::FRAGMENT,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
-                                        )
-                                    }),
-                                    (1, DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::FRAGMENT,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
-                                        )
-                                    }),
-                                    (2, DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::FRAGMENT,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
-                                        )
-                                    }),
-                                    (3, DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::FRAGMENT,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
-                                        )
-                                    }),
-                                ].into(),
+                                    (
+                                        0,
+                                        DescriptorSetLayoutBinding {
+                                            stages: ShaderStages::FRAGMENT,
+                                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                                DescriptorType::CombinedImageSampler,
+                                            )
+                                        },
+                                    ),
+                                    (
+                                        1,
+                                        DescriptorSetLayoutBinding {
+                                            stages: ShaderStages::FRAGMENT,
+                                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                                DescriptorType::CombinedImageSampler,
+                                            )
+                                        },
+                                    ),
+                                    (
+                                        2,
+                                        DescriptorSetLayoutBinding {
+                                            stages: ShaderStages::FRAGMENT,
+                                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                                DescriptorType::CombinedImageSampler,
+                                            )
+                                        },
+                                    ),
+                                    (
+                                        3,
+                                        DescriptorSetLayoutBinding {
+                                            stages: ShaderStages::FRAGMENT,
+                                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                                DescriptorType::CombinedImageSampler,
+                                            )
+                                        },
+                                    ),
+                                ]
+                                .into(),
                                 ..Default::default()
                             },
                         )?,
@@ -395,10 +421,11 @@ pub fn create_pbr_pipeline(
                                     DescriptorSetLayoutBinding {
                                         stages: ShaderStages::FRAGMENT,
                                         ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::UniformBuffer
+                                            DescriptorType::UniformBuffer,
                                         )
                                     },
-                                )].into(),
+                                )]
+                                .into(),
                                 ..Default::default()
                             },
                         )?,
@@ -411,10 +438,11 @@ pub fn create_pbr_pipeline(
                                     DescriptorSetLayoutBinding {
                                         stages: ShaderStages::FRAGMENT,
                                         ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::CombinedImageSampler
+                                            DescriptorType::CombinedImageSampler,
                                         )
                                     },
-                                )].into(),
+                                )]
+                                .into(),
                                 ..Default::default()
                             },
                         )?,
@@ -441,11 +469,14 @@ pub fn create_shadow_pipeline(
     let vs = shadow_vs::load(device.clone())?;
     let fs = shadow_fs::load(device.clone())?;
 
-    let vs_entry = vs.entry_point("main").ok_or("Vertex shader missing 'main' entry point")?;
-    let fs_entry = fs.entry_point("main").ok_or("Fragment shader missing 'main' entry point")?;
+    let vs_entry = vs
+        .entry_point("main")
+        .ok_or("Vertex shader missing 'main' entry point")?;
+    let fs_entry = fs
+        .entry_point("main")
+        .ok_or("Fragment shader missing 'main' entry point")?;
 
-    let vertex_input_state = Vertex3D::per_vertex()
-        .definition(&vs_entry)?;
+    let vertex_input_state = Vertex3D::per_vertex().definition(&vs_entry)?;
 
     let pipeline = GraphicsPipeline::new(
         device.clone(),
@@ -460,7 +491,7 @@ pub fn create_shadow_pipeline(
             viewport_state: Some(ViewportState::default()),
             rasterization_state: Some(RasterizationState {
                 depth_bias: Some(DepthBiasState {
-                    constant_factor: 1.25,  // Prevents shadow acne
+                    constant_factor: 1.25, // Prevents shadow acne
                     clamp: 0.0,
                     slope_factor: 1.75,
                 }),
@@ -480,9 +511,7 @@ pub fn create_shadow_pipeline(
             ..GraphicsPipelineCreateInfo::layout(PipelineLayout::new(
                 device.clone(),
                 PipelineLayoutCreateInfo {
-                    set_layouts: vec![
-                        
-                    ],
+                    set_layouts: vec![],
                     push_constant_ranges: vec![PushConstantRange {
                         stages: ShaderStages::VERTEX,
                         offset: 0,

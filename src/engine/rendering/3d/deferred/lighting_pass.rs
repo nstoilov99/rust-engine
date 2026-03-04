@@ -1,9 +1,9 @@
 //! Lighting pass - reads G-Buffer and calculates lighting
 
-use std::sync::Arc;
 use smallvec::smallvec;
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
+use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
@@ -16,8 +16,8 @@ use vulkano::pipeline::graphics::{
     viewport::ViewportState,
     GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo, PipelineLayout};
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
 
 // Lighting shaders
@@ -49,8 +49,12 @@ impl LightingPass {
         render_pass: Arc<RenderPass>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Load shaders
-        let vs = lighting_vs::load(device.clone())?.entry_point("main").unwrap();
-        let fs = lighting_fs::load(device.clone())?.entry_point("main").unwrap();
+        let vs = lighting_vs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
+        let fs = lighting_fs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
@@ -96,13 +100,20 @@ impl LightingPass {
                 dynamic_state: [
                     vulkano::pipeline::DynamicState::Viewport,
                     vulkano::pipeline::DynamicState::Scissor,
-                ].into_iter().collect(),
+                ]
+                .into_iter()
+                .collect(),
                 subpass: Some(subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout.clone())
             },
         )?;
 
-        Ok(Self { pipeline, sampler, layout, render_pass })
+        Ok(Self {
+            pipeline,
+            sampler,
+            layout,
+            render_pass,
+        })
     }
 
     /// Create descriptor set for G-Buffer sampling
@@ -114,7 +125,7 @@ impl LightingPass {
         albedo: Arc<ImageView>,
         material: Arc<ImageView>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let layout = self.layout.set_layouts().get(0).unwrap();
+        let layout = self.layout.set_layouts().first().unwrap();
 
         let set = DescriptorSet::new(
             descriptor_set_allocator,

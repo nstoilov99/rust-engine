@@ -35,4 +35,3 @@ pub fn content_root() -> PathBuf {
     // 3. Relative fallback
     PathBuf::from("content")
 }
-

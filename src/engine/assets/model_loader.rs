@@ -1,16 +1,26 @@
-use std::path::Path;
-use std::sync::Arc;
-use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
-use vulkano::image::sampler::Sampler;
-use vulkano::device::Device;
-use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::pipeline::GraphicsPipeline;
-use vulkano::image::view::ImageView;
-use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
 use crate::engine::rendering::rendering_3d::material::*;
+use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use glam::Vec3;
 use gltf;
+use std::path::Path;
+use std::sync::Arc;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::device::Device;
+use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
+use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::pipeline::GraphicsPipeline;
+
+/// Result type for GLTF loading operations.
+type GltfResult = Result<
+    (
+        gltf::Document,
+        Vec<gltf::buffer::Data>,
+        Vec<gltf::image::Data>,
+    ),
+    Box<dyn std::error::Error>,
+>;
 
 /// Represents a loaded mesh with vertex and index data
 #[derive(Debug)]
@@ -71,13 +81,13 @@ impl Model {
 }
 
 /// Loads a GLTF/GLB file and returns the parsed document
-pub fn load_gltf(path: &str) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
+pub fn load_gltf(path: &str) -> GltfResult {
     let (document, buffers, images) = gltf::import(path)?;
     Ok((document, buffers, images))
 }
 
 /// Loads a GLTF/GLB from in-memory bytes (for pak file loading).
-pub fn load_gltf_from_bytes(data: &[u8]) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), Box<dyn std::error::Error>> {
+pub fn load_gltf_from_bytes(data: &[u8]) -> GltfResult {
     let (document, buffers, images) = gltf::import_slice(data)?;
     Ok((document, buffers, images))
 }
@@ -165,14 +175,13 @@ fn build_model(
     buffers: Vec<gltf::buffer::Data>,
     images: Vec<gltf::image::Data>,
 ) -> Result<Model, Box<dyn std::error::Error>> {
-
     let mut model = Model::new(name.clone());
 
     // Extract all meshes
     {
         crate::profile_scope!("vertex_processing");
-        for (_mesh_index, mesh) in document.meshes().enumerate() {
-            for (_prim_index, primitive) in mesh.primitives().enumerate() {
+        for mesh in document.meshes() {
+            for primitive in mesh.primitives() {
                 // Only handle triangle meshes
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
                     continue;
@@ -193,16 +202,15 @@ fn build_model(
 
     // Extract textures from images
     crate::profile_scope!("texture_extraction");
-    for (_i, image_data) in images.iter().enumerate() {
+    for image_data in images.iter() {
         // Convert to RgbaImage
         let rgba_image = match image_data.format {
-            gltf::image::Format::R8G8B8A8 => {
-                image::RgbaImage::from_raw(
-                    image_data.width,
-                    image_data.height,
-                    image_data.pixels.clone(),
-                ).ok_or("Failed to create RGBA image")?
-            }
+            gltf::image::Format::R8G8B8A8 => image::RgbaImage::from_raw(
+                image_data.width,
+                image_data.height,
+                image_data.pixels.clone(),
+            )
+            .ok_or("Failed to create RGBA image")?,
             gltf::image::Format::R8G8B8 => {
                 // Convert RGB to RGBA
                 let mut rgba_pixels = Vec::with_capacity(image_data.pixels.len() * 4 / 3);
@@ -210,13 +218,10 @@ fn build_model(
                     rgba_pixels.push(chunk[0]); // R
                     rgba_pixels.push(chunk[1]); // G
                     rgba_pixels.push(chunk[2]); // B
-                    rgba_pixels.push(255);      // A
+                    rgba_pixels.push(255); // A
                 }
-                image::RgbaImage::from_raw(
-                    image_data.width,
-                    image_data.height,
-                    rgba_pixels,
-                ).ok_or("Failed to create RGBA image from RGB")?
+                image::RgbaImage::from_raw(image_data.width, image_data.height, rgba_pixels)
+                    .ok_or("Failed to create RGBA image from RGB")?
             }
             _ => {
                 // Unsupported format, use default white texture
@@ -227,7 +232,12 @@ fn build_model(
         model.textures.push(rgba_image);
     }
 
-    println!("✓ Model loaded: {} (meshes: {}, textures: {})", name, model.meshes.len(), model.textures.len());
+    println!(
+        "✓ Model loaded: {} (meshes: {}, textures: {})",
+        name,
+        model.meshes.len(),
+        model.textures.len()
+    );
 
     Ok(model)
 }
@@ -422,7 +432,9 @@ pub fn extract_texture_from_gltf(
     buffers: &[gltf::buffer::Data],
     texture_index: usize,
 ) -> Result<image::RgbaImage, Box<dyn std::error::Error>> {
-    let texture = document.textures().nth(texture_index)
+    let texture = document
+        .textures()
+        .nth(texture_index)
         .ok_or("Texture index out of bounds")?;
 
     let image_data = texture.source();
@@ -431,7 +443,7 @@ pub fn extract_texture_from_gltf(
     match image_source {
         gltf::image::Source::Uri { uri, .. } => {
             // External file reference
-            return Err(format!("External texture files not supported yet: {}", uri).into());
+            Err(format!("External texture files not supported yet: {}", uri).into())
         }
         gltf::image::Source::View { view, .. } => {
             // Embedded in buffer
@@ -448,6 +460,7 @@ pub fn extract_texture_from_gltf(
 }
 
 /// Extracts PBR material from GLTF
+#[allow(clippy::too_many_arguments)]
 pub fn extract_material_from_gltf(
     document: &gltf::Document,
     _buffers: &[gltf::buffer::Data],
@@ -459,7 +472,9 @@ pub fn extract_material_from_gltf(
     pipeline: Arc<GraphicsPipeline>,
     sampler: Arc<Sampler>,
 ) -> Result<PbrMaterial, Box<dyn std::error::Error>> {
-    let material = document.materials().nth(material_index)
+    let material = document
+        .materials()
+        .nth(material_index)
         .ok_or("Material not found")?;
 
     let pbr = material.pbr_metallic_roughness();
@@ -471,11 +486,7 @@ pub fn extract_material_from_gltf(
         load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
     } else {
         // Default white texture
-        create_default_texture(
-            device.clone(),
-            allocator.clone(),
-            [255, 255, 255, 255],
-        )?
+        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
     };
 
     // Extract normal map
@@ -485,11 +496,7 @@ pub fn extract_material_from_gltf(
         load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
     } else {
         // Default normal map (pointing up: 128, 128, 255)
-        create_default_texture(
-            device.clone(),
-            allocator.clone(),
-            [128, 128, 255, 255],
-        )?
+        create_default_texture(device.clone(), allocator.clone(), [128, 128, 255, 255])?
     };
 
     // Extract metallic-roughness map
@@ -499,11 +506,7 @@ pub fn extract_material_from_gltf(
         load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
     } else {
         // Default: non-metallic (B=0), half-rough (G=128)
-        create_default_texture(
-            device.clone(),
-            allocator.clone(),
-            [0, 128, 0, 255],
-        )?
+        create_default_texture(device.clone(), allocator.clone(), [0, 128, 0, 255])?
     };
 
     // Extract ambient occlusion map
@@ -513,11 +516,7 @@ pub fn extract_material_from_gltf(
         load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
     } else {
         // Default: no occlusion (white = 255)
-        create_default_texture(
-            device.clone(),
-            allocator.clone(),
-            [255, 255, 255, 255],
-        )?
+        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
     };
 
     // Create descriptor set
@@ -552,6 +551,6 @@ fn load_gltf_image(
     create_default_texture(
         device,
         allocator,
-        [255, 0, 255, 255],  // Magenta = "texture not loaded"
+        [255, 0, 255, 255], // Magenta = "texture not loaded"
     )
 }

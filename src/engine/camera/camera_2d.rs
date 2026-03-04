@@ -1,13 +1,13 @@
-use glam::{Vec2, Mat4};
+use glam::{Mat4, Vec2};
 
 /// Push constants with camera support
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct CameraPushConstants {
-    pub view_projection: [[f32; 4]; 4],  // Camera matrix (4x4)
-    pub position: [f32; 2],              // Sprite position
-    pub rotation: f32,                   // Sprite rotation
-    pub scale: [f32; 2],                 // Sprite scale
+    pub view_projection: [[f32; 4]; 4], // Camera matrix (4x4)
+    pub position: [f32; 2],             // Sprite position
+    pub rotation: f32,                  // Sprite rotation
+    pub scale: [f32; 2],                // Sprite scale
 }
 
 impl CameraPushConstants {
@@ -24,8 +24,8 @@ impl CameraPushConstants {
 /// 2D Camera for viewing the game world
 #[derive(Debug, Clone)]
 pub struct Camera2D {
-    pub position: Vec2,     // Camera position in world space
-    pub zoom: f32,          // Zoom level (1.0 = normal, 2.0 = 2x zoom)
+    pub position: Vec2,      // Camera position in world space
+    pub zoom: f32,           // Zoom level (1.0 = normal, 2.0 = 2x zoom)
     pub viewport_size: Vec2, // Window size in pixels
 }
 
@@ -43,7 +43,10 @@ impl Camera2D {
     pub fn set_viewport_size(&mut self, width: f32, height: f32) {
         self.viewport_size = Vec2::new(width, height);
         let aspect = width / height;
-        println!("📐 Camera viewport updated: {}×{} (aspect: {:.2})", width, height, aspect);
+        println!(
+            "📐 Camera viewport updated: {}×{} (aspect: {:.2})",
+            width, height, aspect
+        );
     }
 
     /// Moves the camera by an offset
@@ -77,7 +80,14 @@ impl Camera2D {
     pub fn projection_matrix(&self) -> Mat4 {
         let half_width = (self.viewport_size.x / 2.0) / self.zoom;
         let half_height = (self.viewport_size.y / 2.0) / self.zoom;
-        Mat4::orthographic_rh(-half_width, half_width, -half_height, half_height, -1.0, 1.0)
+        Mat4::orthographic_rh(
+            -half_width,
+            half_width,
+            -half_height,
+            half_height,
+            -1.0,
+            1.0,
+        )
     }
 
     /// Combined view-projection matrix

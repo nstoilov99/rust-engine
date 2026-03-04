@@ -1,23 +1,22 @@
-
 use std::sync::Arc;
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
+use vulkano::image::sampler::Sampler;
+use vulkano::image::view::ImageView;
 use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState, AttachmentBlend},
+    color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
     input_assembly::InputAssemblyState,
     multisample::MultisampleState,
     rasterization::RasterizationState,
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
     viewport::{Viewport, ViewportState},
-    GraphicsPipelineCreateInfo
+    GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::DynamicState;
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
-use vulkano::pipeline::{Pipeline, GraphicsPipeline, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::DynamicState;
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::image::sampler::Sampler;
-use vulkano::image::view::ImageView;
 
 // Basic colored vertex shader
 mod vs {
@@ -76,9 +75,15 @@ mod camera_fs {
     }
 }
 
-
 /// Vertex structure matching shader inputs
-#[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    vulkano::buffer::BufferContents,
+    vulkano::pipeline::graphics::vertex_input::Vertex,
+)]
 #[repr(C)]
 pub struct Vertex {
     #[format(R32G32_SFLOAT)]
@@ -87,13 +92,20 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
-#[derive(Clone, Copy, Debug, Default, vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    vulkano::buffer::BufferContents,
+    vulkano::pipeline::graphics::vertex_input::Vertex,
+)]
 #[repr(C)]
 pub struct TexturedVertex {
     #[format(R32G32_SFLOAT)]
-    pub position: [f32; 2],  // Screen position
+    pub position: [f32; 2], // Screen position
     #[format(R32G32_SFLOAT)]
-    pub uv: [f32; 2],        // Texture coordinate
+    pub uv: [f32; 2], // Texture coordinate
 }
 
 /// Creates graphics pipeline with shaders and rendering settings
@@ -109,8 +121,7 @@ pub fn create_pipeline(
     let vs_entry_point = vs.entry_point("main").unwrap();
     let fs_entry_point = fs.entry_point("main").unwrap();
 
-    let vertex_input_state = Vertex::per_vertex()
-        .definition(&vs_entry_point)?;
+    let vertex_input_state = Vertex::per_vertex().definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -163,8 +174,7 @@ pub fn create_textured_pipeline(
     let vs_entry_point = vs.entry_point("main").unwrap();
     let fs_entry_point = fs.entry_point("main").unwrap();
 
-    let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point)?;
+    let vertex_input_state = TexturedVertex::per_vertex().definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -217,8 +227,7 @@ pub fn create_transform_pipeline(
     let vs_entry_point = vs.entry_point("main").unwrap();
     let fs_entry_point = fs.entry_point("main").unwrap();
 
-    let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point)?;
+    let vertex_input_state = TexturedVertex::per_vertex().definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -271,8 +280,7 @@ pub fn create_camera_pipeline(
     let vs_entry_point = vs.entry_point("main").unwrap();
     let fs_entry_point = fs.entry_point("main").unwrap();
 
-    let vertex_input_state = TexturedVertex::per_vertex()
-        .definition(&vs_entry_point)?;
+    let vertex_input_state = TexturedVertex::per_vertex().definition(&vs_entry_point)?;
 
     let stages = [
         PipelineShaderStageCreateInfo::new(vs_entry_point),
@@ -292,17 +300,17 @@ pub fn create_camera_pipeline(
             stages: stages.into_iter().collect(),
             vertex_input_state: Some(vertex_input_state),
             input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState::default()),  // Dynamic viewport - will be set per-frame
+            viewport_state: Some(ViewportState::default()), // Dynamic viewport - will be set per-frame
             rasterization_state: Some(RasterizationState::default()),
             multisample_state: Some(MultisampleState::default()),
             color_blend_state: Some(ColorBlendState::with_attachment_states(
                 1,
                 ColorBlendAttachmentState {
-                    blend: Some(AttachmentBlend::alpha()),  // Enable alpha blending for transparency
+                    blend: Some(AttachmentBlend::alpha()), // Enable alpha blending for transparency
                     ..Default::default()
                 },
             )),
-            dynamic_state: [DynamicState::Viewport].into_iter().collect(),  // Enable dynamic viewport
+            dynamic_state: [DynamicState::Viewport].into_iter().collect(), // Enable dynamic viewport
             subpass: Some(render_pass.clone().first_subpass().into()),
             ..GraphicsPipelineCreateInfo::layout(layout)
         },
@@ -320,12 +328,16 @@ pub fn create_texture_descriptor_set(
     texture_view: Arc<ImageView>,
     sampler: Arc<Sampler>,
 ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-    let layout = pipeline.layout().set_layouts().get(0).unwrap();
+    let layout = pipeline.layout().set_layouts().first().unwrap();
 
     let descriptor_set = DescriptorSet::new(
         descriptor_set_allocator,
         layout.clone(),
-        [WriteDescriptorSet::image_view_sampler(0, texture_view, sampler)],
+        [WriteDescriptorSet::image_view_sampler(
+            0,
+            texture_view,
+            sampler,
+        )],
         [],
     )?;
 
@@ -337,17 +349,29 @@ pub fn create_texture_descriptor_set(
 /// Creates vertices for a textured quad (sprite)
 pub fn create_quad_vertices() -> [TexturedVertex; 4] {
     [
-        TexturedVertex { position: [-0.5, -0.5], uv: [0.0, 0.0] },  // Top-left
-        TexturedVertex { position: [ 0.5, -0.5], uv: [1.0, 0.0] },  // Top-right
-        TexturedVertex { position: [-0.5,  0.5], uv: [0.0, 1.0] },  // Bottom-left
-        TexturedVertex { position: [ 0.5,  0.5], uv: [1.0, 1.0] },  // Bottom-right
+        TexturedVertex {
+            position: [-0.5, -0.5],
+            uv: [0.0, 0.0],
+        }, // Top-left
+        TexturedVertex {
+            position: [0.5, -0.5],
+            uv: [1.0, 0.0],
+        }, // Top-right
+        TexturedVertex {
+            position: [-0.5, 0.5],
+            uv: [0.0, 1.0],
+        }, // Bottom-left
+        TexturedVertex {
+            position: [0.5, 0.5],
+            uv: [1.0, 1.0],
+        }, // Bottom-right
     ]
 }
 
 /// Creates indices for a quad (2 triangles)
 pub fn create_quad_indices() -> [u32; 6] {
     [
-        0, 1, 2,  // First triangle: top-left, top-right, bottom-left
-        1, 3, 2,  // Second triangle: top-right, bottom-right, bottom-left
+        0, 1, 2, // First triangle: top-left, top-right, bottom-left
+        1, 3, 2, // Second triangle: top-right, bottom-right, bottom-left
     ]
 }

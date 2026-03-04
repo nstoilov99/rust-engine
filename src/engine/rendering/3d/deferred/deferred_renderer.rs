@@ -308,7 +308,7 @@ impl DeferredRenderer {
                 )?
                 .bind_pipeline_graphics(self.geometry_pass.pipeline())?
                 .set_viewport(0, smallvec![viewport.clone()])?
-                .set_scissor(0, smallvec![scissor.clone()])?;
+                .set_scissor(0, smallvec![scissor])?;
 
             // Render all meshes to G-Buffer
             {
@@ -372,7 +372,7 @@ impl DeferredRenderer {
                 )?
                 .bind_pipeline_graphics(self.lighting_pass.pipeline())?
                 .set_viewport(0, smallvec![target_viewport.clone()])?
-                .set_scissor(0, smallvec![target_scissor.clone()])?
+                .set_scissor(0, smallvec![target_scissor])?
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.lighting_pass.layout(),

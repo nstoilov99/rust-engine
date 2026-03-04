@@ -93,11 +93,8 @@ impl ThumbnailCache {
         if self.error_placeholder.is_none() {
             // Create error placeholder (red-ish)
             let error_image = create_placeholder_image(THUMBNAIL_SIZE, [80, 40, 40, 255]);
-            self.error_placeholder = Some(ctx.load_texture(
-                "thumb_error",
-                error_image,
-                TextureOptions::default(),
-            ));
+            self.error_placeholder =
+                Some(ctx.load_texture("thumb_error", error_image, TextureOptions::default()));
         }
     }
 
@@ -293,7 +290,8 @@ fn generate_model_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
 
                             let rgba = thumb.to_rgba8();
                             let size = [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize];
-                            let image_data = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                            let image_data =
+                                ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
 
                             return ThumbnailResult {
                                 id,
@@ -315,7 +313,8 @@ fn generate_model_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
 
                                 let rgba = thumb.to_rgba8();
                                 let size = [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize];
-                                let image_data = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                                let image_data =
+                                    ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
 
                                 return ThumbnailResult {
                                     id,

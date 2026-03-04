@@ -1,17 +1,17 @@
 use std::sync::Arc;
-use vulkano::device::{Device, Queue};
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::image::view::ImageView;
-use vulkano::format::Format;
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
     PrimaryCommandBufferAbstract,
 };
-use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::sync::{GpuFuture};
-use vulkano::image::sampler::{Sampler, SamplerCreateInfo, Filter, SamplerAddressMode};
+use vulkano::device::{Device, Queue};
+use vulkano::format::Format;
+use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
+use vulkano::image::view::ImageView;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::sync::GpuFuture;
 
 /// Loads image by content-relative path (e.g. `"textures/idle_animation.png"`),
 /// uploads to GPU, and returns ImageView + Sampler.
@@ -40,9 +40,9 @@ pub fn load_texture(
         memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
-            format: Format::R8G8B8A8_SRGB,  // RGBA, 8 bits per channel
+            format: Format::R8G8B8A8_SRGB, // RGBA, 8 bits per channel
             extent: [width, height, 1],
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,  // Can upload data + sample in shader
+            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED, // Can upload data + sample in shader
             ..Default::default()
         },
         AllocationCreateInfo {
@@ -81,7 +81,7 @@ pub fn upload_texture_data(
     let staging_buffer = Buffer::from_iter(
         memory_allocator,
         BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,  // Source for transfer
+            usage: BufferUsage::TRANSFER_SRC, // Source for transfer
             ..Default::default()
         },
         AllocationCreateInfo {
@@ -99,10 +99,7 @@ pub fn upload_texture_data(
         CommandBufferUsage::OneTimeSubmit,
     )?;
 
-    builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-        staging_buffer,
-        image,
-    ))?;
+    builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(staging_buffer, image))?;
 
     let command_buffer = builder.build()?;
 

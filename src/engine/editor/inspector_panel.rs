@@ -3,21 +3,21 @@
 //! Displays and allows editing of component properties for the selected entity.
 
 use super::Selection;
+use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
     Transform,
 };
-use crate::engine::ecs::resources::PlayMode;
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
-use egui::{Color32, CollapsingHeader, DragValue, RichText, ScrollArea, Stroke, Ui};
+use egui::{CollapsingHeader, Color32, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::collections::{HashMap, HashSet};
 
 /// Axis colors (industry standard: X=red, Y=green, Z=blue)
-const AXIS_COLOR_X: Color32 = Color32::from_rgb(220, 80, 80);   // Red
-const AXIS_COLOR_Y: Color32 = Color32::from_rgb(80, 180, 80);   // Green
-const AXIS_COLOR_Z: Color32 = Color32::from_rgb(80, 120, 220);  // Blue
+const AXIS_COLOR_X: Color32 = Color32::from_rgb(220, 80, 80); // Red
+const AXIS_COLOR_Y: Color32 = Color32::from_rgb(80, 180, 80); // Green
+const AXIS_COLOR_Z: Color32 = Color32::from_rgb(80, 120, 220); // Blue
 
 /// Component categories for visual grouping
 #[derive(Clone, Copy)]
@@ -46,29 +46,47 @@ struct ComponentPresence {
 }
 
 impl ComponentPresence {
-    const NAME:              u16 = 1 << 0;
-    const TRANSFORM:         u16 = 1 << 1;
-    const CAMERA:            u16 = 1 << 2;
-    const MESH_RENDERER:     u16 = 1 << 3;
-    const DIR_LIGHT:         u16 = 1 << 4;
-    const POINT_LIGHT:       u16 = 1 << 5;
-    const RIGID_BODY:        u16 = 1 << 6;
-    const COLLIDER:          u16 = 1 << 7;
+    const NAME: u16 = 1 << 0;
+    const TRANSFORM: u16 = 1 << 1;
+    const CAMERA: u16 = 1 << 2;
+    const MESH_RENDERER: u16 = 1 << 3;
+    const DIR_LIGHT: u16 = 1 << 4;
+    const POINT_LIGHT: u16 = 1 << 5;
+    const RIGID_BODY: u16 = 1 << 6;
+    const COLLIDER: u16 = 1 << 7;
 
     fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
-        if world.get::<&Name>(entity).is_ok()             { bits |= Self::NAME; }
-        if world.get::<&Transform>(entity).is_ok()         { bits |= Self::TRANSFORM; }
-        if world.get::<&Camera>(entity).is_ok()            { bits |= Self::CAMERA; }
-        if world.get::<&MeshRenderer>(entity).is_ok()      { bits |= Self::MESH_RENDERER; }
-        if world.get::<&DirectionalLight>(entity).is_ok()  { bits |= Self::DIR_LIGHT; }
-        if world.get::<&PointLight>(entity).is_ok()        { bits |= Self::POINT_LIGHT; }
-        if world.get::<&RigidBody>(entity).is_ok()         { bits |= Self::RIGID_BODY; }
-        if world.get::<&Collider>(entity).is_ok()          { bits |= Self::COLLIDER; }
+        if world.get::<&Name>(entity).is_ok() {
+            bits |= Self::NAME;
+        }
+        if world.get::<&Transform>(entity).is_ok() {
+            bits |= Self::TRANSFORM;
+        }
+        if world.get::<&Camera>(entity).is_ok() {
+            bits |= Self::CAMERA;
+        }
+        if world.get::<&MeshRenderer>(entity).is_ok() {
+            bits |= Self::MESH_RENDERER;
+        }
+        if world.get::<&DirectionalLight>(entity).is_ok() {
+            bits |= Self::DIR_LIGHT;
+        }
+        if world.get::<&PointLight>(entity).is_ok() {
+            bits |= Self::POINT_LIGHT;
+        }
+        if world.get::<&RigidBody>(entity).is_ok() {
+            bits |= Self::RIGID_BODY;
+        }
+        if world.get::<&Collider>(entity).is_ok() {
+            bits |= Self::COLLIDER;
+        }
         Self { bits }
     }
 
-    fn has(self, flag: u16) -> bool { self.bits & flag != 0 }
+    fn has(self, flag: u16) -> bool {
+        self.bits & flag != 0
+    }
 }
 
 /// Inspector Panel state
@@ -113,7 +131,13 @@ impl InspectorPanel {
     }
 
     /// Render the inspector panel as a side panel
-    pub fn show(&mut self, ctx: &egui::Context, world: &mut World, selection: &Selection, play_mode: PlayMode) {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        world: &mut World,
+        selection: &Selection,
+        play_mode: PlayMode,
+    ) {
         egui::SidePanel::right("inspector_panel")
             .resizable(true)
             .default_width(300.0)
@@ -124,7 +148,13 @@ impl InspectorPanel {
     }
 
     /// Render just the contents (for use inside dock tabs)
-    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &Selection, play_mode: PlayMode) {
+    pub fn show_contents(
+        &mut self,
+        ui: &mut Ui,
+        world: &mut World,
+        selection: &Selection,
+        play_mode: PlayMode,
+    ) {
         let read_only = play_mode != PlayMode::Edit;
 
         self.render_header(ui, selection, read_only);
@@ -209,11 +239,7 @@ impl InspectorPanel {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&name).strong().size(16.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("ID: {}", entity.id()))
-                        .weak()
-                        .small(),
-                );
+                ui.label(RichText::new(format!("ID: {}", entity.id())).weak().small());
             });
         });
     }
@@ -221,9 +247,9 @@ impl InspectorPanel {
     /// Component category colors
     fn category_color(category: ComponentCategory) -> Color32 {
         match category {
-            ComponentCategory::Core => Color32::from_rgb(100, 160, 220),      // Blue
-            ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80),  // Yellow/Gold
-            ComponentCategory::Physics => Color32::from_rgb(100, 180, 120),   // Green
+            ComponentCategory::Core => Color32::from_rgb(100, 160, 220), // Blue
+            ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80), // Yellow/Gold
+            ComponentCategory::Physics => Color32::from_rgb(100, 180, 120), // Green
         }
     }
 
@@ -232,11 +258,8 @@ impl InspectorPanel {
         ui.add_space(10.0);
         let rect = ui.available_rect_before_wrap();
         let y = rect.top();
-        ui.painter().hline(
-            rect.x_range(),
-            y,
-            Stroke::new(1.0, Color32::from_gray(70)),
-        );
+        ui.painter()
+            .hline(rect.x_range(), y, Stroke::new(1.0, Color32::from_gray(70)));
         ui.add_space(8.0);
     }
 
@@ -248,15 +271,21 @@ impl InspectorPanel {
 
         // === CORE COMPONENTS ===
         if self.matches_filter("name") && p.has(ComponentPresence::NAME) {
-            if component_count > 0 { Self::draw_component_divider(ui); }
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
             self.edit_name(ui, world, entity, ComponentCategory::Core);
             component_count += 1;
         }
-        if (self.matches_filter("transform") || self.matches_filter("position")
-            || self.matches_filter("rotation") || self.matches_filter("scale"))
+        if (self.matches_filter("transform")
+            || self.matches_filter("position")
+            || self.matches_filter("rotation")
+            || self.matches_filter("scale"))
             && p.has(ComponentPresence::TRANSFORM)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
             self.edit_transform(ui, world, entity, ComponentCategory::Core);
             component_count += 1;
         }
@@ -265,26 +294,41 @@ impl InspectorPanel {
         if (self.matches_filter("camera") || self.matches_filter("fov"))
             && p.has(ComponentPresence::CAMERA)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_camera(ui, world, entity, ComponentCategory::Rendering) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) = self.edit_camera(ui, world, entity, ComponentCategory::Rendering)
+            {
                 pending_action = action;
             }
             component_count += 1;
         }
-        if (self.matches_filter("mesh") || self.matches_filter("renderer") || self.matches_filter("material"))
+        if (self.matches_filter("mesh")
+            || self.matches_filter("renderer")
+            || self.matches_filter("material"))
             && p.has(ComponentPresence::MESH_RENDERER)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering)
+            {
                 pending_action = action;
             }
             component_count += 1;
         }
-        if (self.matches_filter("directional") || self.matches_filter("light") || self.matches_filter("sun"))
+        if (self.matches_filter("directional")
+            || self.matches_filter("light")
+            || self.matches_filter("sun"))
             && p.has(ComponentPresence::DIR_LIGHT)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_directional_light(ui, world, entity, ComponentCategory::Rendering) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_directional_light(ui, world, entity, ComponentCategory::Rendering)
+            {
                 pending_action = action;
             }
             component_count += 1;
@@ -292,28 +336,42 @@ impl InspectorPanel {
         if (self.matches_filter("point") || self.matches_filter("light"))
             && p.has(ComponentPresence::POINT_LIGHT)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_point_light(ui, world, entity, ComponentCategory::Rendering) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_point_light(ui, world, entity, ComponentCategory::Rendering)
+            {
                 pending_action = action;
             }
             component_count += 1;
         }
 
         // === PHYSICS COMPONENTS ===
-        if (self.matches_filter("rigid") || self.matches_filter("body") || self.matches_filter("physics"))
+        if (self.matches_filter("rigid")
+            || self.matches_filter("body")
+            || self.matches_filter("physics"))
             && p.has(ComponentPresence::RIGID_BODY)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_rigidbody(ui, world, entity, ComponentCategory::Physics) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) = self.edit_rigidbody(ui, world, entity, ComponentCategory::Physics)
+            {
                 pending_action = action;
             }
             component_count += 1;
         }
-        if (self.matches_filter("collider") || self.matches_filter("physics") || self.matches_filter("collision"))
+        if (self.matches_filter("collider")
+            || self.matches_filter("physics")
+            || self.matches_filter("collision"))
             && p.has(ComponentPresence::COLLIDER)
         {
-            if component_count > 0 { Self::draw_component_divider(ui); }
-            if let Some(action) = self.edit_collider(ui, world, entity, ComponentCategory::Physics) {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) = self.edit_collider(ui, world, entity, ComponentCategory::Physics)
+            {
                 pending_action = action;
             }
         }
@@ -322,12 +380,24 @@ impl InspectorPanel {
         let mutated = !matches!(pending_action, ComponentAction::None);
         match pending_action {
             ComponentAction::None => {}
-            ComponentAction::RemoveCamera => { let _ = world.remove_one::<Camera>(entity); }
-            ComponentAction::RemoveMeshRenderer => { let _ = world.remove_one::<MeshRenderer>(entity); }
-            ComponentAction::RemoveDirectionalLight => { let _ = world.remove_one::<DirectionalLight>(entity); }
-            ComponentAction::RemovePointLight => { let _ = world.remove_one::<PointLight>(entity); }
-            ComponentAction::RemoveRigidBody => { let _ = world.remove_one::<RigidBody>(entity); }
-            ComponentAction::RemoveCollider => { let _ = world.remove_one::<Collider>(entity); }
+            ComponentAction::RemoveCamera => {
+                let _ = world.remove_one::<Camera>(entity);
+            }
+            ComponentAction::RemoveMeshRenderer => {
+                let _ = world.remove_one::<MeshRenderer>(entity);
+            }
+            ComponentAction::RemoveDirectionalLight => {
+                let _ = world.remove_one::<DirectionalLight>(entity);
+            }
+            ComponentAction::RemovePointLight => {
+                let _ = world.remove_one::<PointLight>(entity);
+            }
+            ComponentAction::RemoveRigidBody => {
+                let _ = world.remove_one::<RigidBody>(entity);
+            }
+            ComponentAction::RemoveCollider => {
+                let _ = world.remove_one::<Collider>(entity);
+            }
         }
         if mutated {
             self.cached_presence = ComponentPresence::probe(world, entity);
@@ -335,7 +405,13 @@ impl InspectorPanel {
     }
 
     /// Edit Name component
-    fn edit_name(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) {
+    fn edit_name(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) {
         if let Ok(mut name) = world.get::<&mut Name>(entity) {
             let color = Self::category_color(category);
             let start_y = ui.cursor().top();
@@ -363,7 +439,13 @@ impl InspectorPanel {
     }
 
     /// Edit Transform component
-    fn edit_transform(&mut self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) {
+    fn edit_transform(
+        &mut self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) {
         // Snapshot before editing so we can detect changes and mark dirty.
         let snapshot = world.get::<&Transform>(entity).ok().map(|t| *t);
 
@@ -382,9 +464,15 @@ impl InspectorPanel {
                         }
                     });
                     // Sanitize position values to prevent NaN/Infinity issues
-                    if !transform.position.x.is_finite() { transform.position.x = 0.0; }
-                    if !transform.position.y.is_finite() { transform.position.y = 0.0; }
-                    if !transform.position.z.is_finite() { transform.position.z = 0.0; }
+                    if !transform.position.x.is_finite() {
+                        transform.position.x = 0.0;
+                    }
+                    if !transform.position.y.is_finite() {
+                        transform.position.y = 0.0;
+                    }
+                    if !transform.position.z.is_finite() {
+                        transform.position.z = 0.0;
+                    }
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
                         ui.add(DragValue::new(&mut transform.position.x).speed(0.1));
@@ -399,7 +487,10 @@ impl InspectorPanel {
                         ui.label("Rotation");
                         if ui.small_button("R").on_hover_text("Reset").clicked() {
                             transform.rotation = glm::quat_identity();
-                            self.euler_cache.insert(entity.id() as u64, (glm::quat_identity(), [0.0, 0.0, 0.0]));
+                            self.euler_cache.insert(
+                                entity.id() as u64,
+                                (glm::quat_identity(), [0.0, 0.0, 0.0]),
+                            );
                         }
                     });
 
@@ -408,39 +499,58 @@ impl InspectorPanel {
                     // the quaternion has been modified externally (e.g., by the gizmo).
                     let entity_id = entity.id() as u64;
                     let needs_recompute = match self.euler_cache.get(&entity_id) {
-                        Some((cached_quat, _)) => !quaternions_approximately_equal(cached_quat, &transform.rotation),
+                        Some((cached_quat, _)) => {
+                            !quaternions_approximately_equal(cached_quat, &transform.rotation)
+                        }
                         None => true,
                     };
                     if needs_recompute {
                         let new_euler = quaternion_to_euler_degrees(&transform.rotation);
-                        self.euler_cache.insert(entity_id, (transform.rotation.clone(), new_euler));
+                        self.euler_cache
+                            .insert(entity_id, (transform.rotation, new_euler));
                     }
 
                     // Get a copy of euler to work with (avoids borrow issues with closure)
                     let mut euler = self.euler_cache.get(&entity_id).unwrap().1;
 
                     // Sanitize cached euler values to prevent DragValue crash
-                    for i in 0..3 {
-                        if !euler[i].is_finite() {
-                            euler[i] = 0.0;
+                    for item in &mut euler {
+                        if !item.is_finite() {
+                            *item = 0.0;
                         }
                     }
 
                     let mut euler_changed = false;
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        let response_x = ui.add(DragValue::new(&mut euler[0]).speed(1.0).suffix("°").range(-180.0..=180.0));
+                        let response_x = ui.add(
+                            DragValue::new(&mut euler[0])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
                         ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        let response_y = ui.add(DragValue::new(&mut euler[1]).speed(1.0).suffix("°").range(-180.0..=180.0));
+                        let response_y = ui.add(
+                            DragValue::new(&mut euler[1])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
                         ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        let response_z = ui.add(DragValue::new(&mut euler[2]).speed(1.0).suffix("°").range(-180.0..=180.0));
+                        let response_z = ui.add(
+                            DragValue::new(&mut euler[2])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
 
-                        euler_changed = response_x.changed() || response_y.changed() || response_z.changed();
+                        euler_changed =
+                            response_x.changed() || response_y.changed() || response_z.changed();
                     });
 
                     if euler_changed {
                         let new_quat = euler_degrees_to_quaternion(&euler);
-                        transform.rotation = new_quat.clone();
+                        transform.rotation = new_quat;
                         // Update cache with new quaternion so we don't recompute euler next frame
                         self.euler_cache.insert(entity_id, (new_quat, euler));
                     }
@@ -453,16 +563,34 @@ impl InspectorPanel {
                         }
                     });
                     // Sanitize scale values to prevent DragValue crash
-                    if !transform.scale.x.is_finite() { transform.scale.x = 1.0; }
-                    if !transform.scale.y.is_finite() { transform.scale.y = 1.0; }
-                    if !transform.scale.z.is_finite() { transform.scale.z = 1.0; }
+                    if !transform.scale.x.is_finite() {
+                        transform.scale.x = 1.0;
+                    }
+                    if !transform.scale.y.is_finite() {
+                        transform.scale.y = 1.0;
+                    }
+                    if !transform.scale.z.is_finite() {
+                        transform.scale.z = 1.0;
+                    }
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        ui.add(DragValue::new(&mut transform.scale.x).speed(0.01).range(0.001..=1000.0));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.x)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
                         ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        ui.add(DragValue::new(&mut transform.scale.y).speed(0.01).range(0.001..=1000.0));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.y)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
                         ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        ui.add(DragValue::new(&mut transform.scale.z).speed(0.01).range(0.001..=1000.0));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.z)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
                     });
                 });
 
@@ -478,7 +606,7 @@ impl InspectorPanel {
         // After the mutable borrow is released, check if transform changed
         // and mark dirty for incremental propagation.
         if let Some(before) = snapshot {
-            let changed = world.get::<&Transform>(entity).ok().map_or(false, |current| {
+            let changed = world.get::<&Transform>(entity).ok().is_some_and(|current| {
                 current.position != before.position
                     || current.rotation != before.rotation
                     || current.scale != before.scale
@@ -490,7 +618,13 @@ impl InspectorPanel {
     }
 
     /// Edit Camera component
-    fn edit_camera(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_camera(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut camera) = world.get::<&mut Camera>(entity) {
             let color = Self::category_color(category);
@@ -512,21 +646,32 @@ impl InspectorPanel {
                         egui::ComboBox::from_id_salt("cam_projection")
                             .selected_text(current_label)
                             .show_ui(ui, |ui| {
-                                let is_perspective = matches!(camera.projection, CameraProjection::Perspective);
+                                let is_perspective =
+                                    matches!(camera.projection, CameraProjection::Perspective);
                                 if ui.selectable_label(is_perspective, "Perspective").clicked() {
                                     camera.projection = CameraProjection::Perspective;
                                 }
-                                let is_ortho = matches!(camera.projection, CameraProjection::Orthographic { .. });
+                                let is_ortho = matches!(
+                                    camera.projection,
+                                    CameraProjection::Orthographic { .. }
+                                );
                                 if ui.selectable_label(is_ortho, "Orthographic").clicked() {
-                                    camera.projection = CameraProjection::Orthographic { size: 10.0 };
+                                    camera.projection =
+                                        CameraProjection::Orthographic { size: 10.0 };
                                 }
                             });
                     });
 
                     // Sanitize camera values to prevent DragValue crash
-                    if !camera.fov.is_finite() { camera.fov = 60.0; }
-                    if !camera.near.is_finite() || camera.near <= 0.0 { camera.near = 0.1; }
-                    if !camera.far.is_finite() || camera.far <= camera.near { camera.far = 1000.0; }
+                    if !camera.fov.is_finite() {
+                        camera.fov = 60.0;
+                    }
+                    if !camera.near.is_finite() || camera.near <= 0.0 {
+                        camera.near = 0.1;
+                    }
+                    if !camera.far.is_finite() || camera.far <= camera.near {
+                        camera.far = 1000.0;
+                    }
 
                     // FOV or Ortho Size depending on projection
                     match &mut camera.projection {
@@ -542,15 +687,13 @@ impl InspectorPanel {
                             });
                         }
                         CameraProjection::Orthographic { size } => {
-                            if !size.is_finite() { *size = 10.0; }
+                            if !size.is_finite() {
+                                *size = 10.0;
+                            }
                             ui.horizontal(|ui| {
                                 ui.label("Ortho Size:");
-                                ui.add(
-                                    DragValue::new(size)
-                                        .speed(0.1)
-                                        .range(0.1..=1000.0),
-                                )
-                                .on_hover_text("Orthographic camera view size");
+                                ui.add(DragValue::new(size).speed(0.1).range(0.1..=1000.0))
+                                    .on_hover_text("Orthographic camera view size");
                             });
                         }
                     }
@@ -566,7 +709,9 @@ impl InspectorPanel {
                                 .speed(0.01)
                                 .range(0.001..=near_max),
                         )
-                        .on_hover_text("Near clipping plane. Objects closer than this won't render");
+                        .on_hover_text(
+                            "Near clipping plane. Objects closer than this won't render",
+                        );
                     });
                     ui.horizontal(|ui| {
                         ui.label("Far:");
@@ -575,7 +720,9 @@ impl InspectorPanel {
                                 .speed(1.0)
                                 .range(far_min..=100000.0),
                         )
-                        .on_hover_text("Far clipping plane. Objects farther than this won't render");
+                        .on_hover_text(
+                            "Far clipping plane. Objects farther than this won't render",
+                        );
                     });
 
                     // Clear color
@@ -617,7 +764,13 @@ impl InspectorPanel {
     }
 
     /// Edit MeshRenderer component
-    fn edit_mesh_renderer(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_mesh_renderer(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) {
             let color = Self::category_color(category);
@@ -670,7 +823,13 @@ impl InspectorPanel {
     }
 
     /// Edit DirectionalLight component
-    fn edit_directional_light(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_directional_light(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut light) = world.get::<&mut DirectionalLight>(entity) {
             let color = Self::category_color(category);
@@ -680,28 +839,51 @@ impl InspectorPanel {
                 .default_open(true)
                 .show(ui, |ui| {
                     // Direction
-                    ui.label("Direction:").on_hover_text("Direction the light is pointing (normalized)");
+                    ui.label("Direction:")
+                        .on_hover_text("Direction the light is pointing (normalized)");
                     // Sanitize direction to prevent DragValue crash
-                    if !light.direction.x.is_finite() { light.direction.x = 0.0; }
-                    if !light.direction.y.is_finite() { light.direction.y = -1.0; }
-                    if !light.direction.z.is_finite() { light.direction.z = 0.0; }
+                    if !light.direction.x.is_finite() {
+                        light.direction.x = 0.0;
+                    }
+                    if !light.direction.y.is_finite() {
+                        light.direction.y = -1.0;
+                    }
+                    if !light.direction.z.is_finite() {
+                        light.direction.z = 0.0;
+                    }
                     ui.horizontal(|ui| {
-                        ui.add(DragValue::new(&mut light.direction.x).prefix("X: ").speed(0.01).range(-1.0..=1.0));
-                        ui.add(DragValue::new(&mut light.direction.y).prefix("Y: ").speed(0.01).range(-1.0..=1.0));
-                        ui.add(DragValue::new(&mut light.direction.z).prefix("Z: ").speed(0.01).range(-1.0..=1.0));
+                        ui.add(
+                            DragValue::new(&mut light.direction.x)
+                                .prefix("X: ")
+                                .speed(0.01)
+                                .range(-1.0..=1.0),
+                        );
+                        ui.add(
+                            DragValue::new(&mut light.direction.y)
+                                .prefix("Y: ")
+                                .speed(0.01)
+                                .range(-1.0..=1.0),
+                        );
+                        ui.add(
+                            DragValue::new(&mut light.direction.z)
+                                .prefix("Z: ")
+                                .speed(0.01)
+                                .range(-1.0..=1.0),
+                        );
                     });
 
                     // Normalize direction (safe - values are now bounded)
                     let len = glm::length(&light.direction);
                     if len > 0.001 {
-                        light.direction = light.direction / len;
+                        light.direction /= len;
                     }
 
                     // Color (RGB)
                     ui.horizontal(|ui| {
                         ui.label("Color:");
                         let mut color = [light.color.x, light.color.y, light.color.z];
-                        if ui.color_edit_button_rgb(&mut color)
+                        if ui
+                            .color_edit_button_rgb(&mut color)
                             .on_hover_text("Light color")
                             .changed()
                         {
@@ -723,7 +905,9 @@ impl InspectorPanel {
                     ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
                         .on_hover_text("Enable shadow casting from this light");
                     if light.shadow_enabled {
-                        if !light.shadow_bias.is_finite() { light.shadow_bias = 0.005; }
+                        if !light.shadow_bias.is_finite() {
+                            light.shadow_bias = 0.005;
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Shadow Bias:");
                             ui.add(
@@ -756,7 +940,13 @@ impl InspectorPanel {
     }
 
     /// Edit PointLight component
-    fn edit_point_light(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_point_light(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut light) = world.get::<&mut PointLight>(entity) {
             let color = Self::category_color(category);
@@ -766,14 +956,19 @@ impl InspectorPanel {
                 .default_open(true)
                 .show(ui, |ui| {
                     // Sanitize light values to prevent DragValue crash
-                    if !light.intensity.is_finite() { light.intensity = 1.0; }
-                    if !light.radius.is_finite() { light.radius = 10.0; }
+                    if !light.intensity.is_finite() {
+                        light.intensity = 1.0;
+                    }
+                    if !light.radius.is_finite() {
+                        light.radius = 10.0;
+                    }
 
                     // Color
                     ui.horizontal(|ui| {
                         ui.label("Color:");
                         let mut color = [light.color.x, light.color.y, light.color.z];
-                        if ui.color_edit_button_rgb(&mut color)
+                        if ui
+                            .color_edit_button_rgb(&mut color)
                             .on_hover_text("Light color")
                             .changed()
                         {
@@ -808,12 +1003,24 @@ impl InspectorPanel {
                         egui::ComboBox::from_id_salt("pl_falloff")
                             .selected_text(format!("{:?}", light.falloff))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut light.falloff, LightFalloff::Linear, "Linear")
-                                    .on_hover_text("Light decreases linearly with distance");
-                                ui.selectable_value(&mut light.falloff, LightFalloff::Quadratic, "Quadratic")
-                                    .on_hover_text("Realistic falloff (default)");
-                                ui.selectable_value(&mut light.falloff, LightFalloff::InverseSquare, "Inverse Square")
-                                    .on_hover_text("Physically accurate inverse-square law");
+                                ui.selectable_value(
+                                    &mut light.falloff,
+                                    LightFalloff::Linear,
+                                    "Linear",
+                                )
+                                .on_hover_text("Light decreases linearly with distance");
+                                ui.selectable_value(
+                                    &mut light.falloff,
+                                    LightFalloff::Quadratic,
+                                    "Quadratic",
+                                )
+                                .on_hover_text("Realistic falloff (default)");
+                                ui.selectable_value(
+                                    &mut light.falloff,
+                                    LightFalloff::InverseSquare,
+                                    "Inverse Square",
+                                )
+                                .on_hover_text("Physically accurate inverse-square law");
                             });
                     });
 
@@ -842,7 +1049,13 @@ impl InspectorPanel {
     }
 
     /// Edit RigidBody component
-    fn edit_rigidbody(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_rigidbody(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut rb) = world.get::<&mut RigidBody>(entity) {
             let color = Self::category_color(category);
@@ -964,7 +1177,13 @@ impl InspectorPanel {
     }
 
     /// Edit Collider component
-    fn edit_collider(&self, ui: &mut Ui, world: &mut World, entity: Entity, category: ComponentCategory) -> Option<ComponentAction> {
+    fn edit_collider(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut collider) = world.get::<&mut Collider>(entity) {
             let color = Self::category_color(category);
@@ -984,20 +1203,40 @@ impl InspectorPanel {
                         egui::ComboBox::from_id_salt("collider_shape")
                             .selected_text(current_shape_name)
                             .show_ui(ui, |ui| {
-                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Cuboid { .. }), "Cuboid").clicked() {
-                                    if !matches!(&collider.shape, ColliderShape::Cuboid { .. }) {
-                                        collider.shape = ColliderShape::Cuboid { half_extents: glm::vec3(0.5, 0.5, 0.5) };
-                                    }
+                                if ui
+                                    .selectable_label(
+                                        matches!(&collider.shape, ColliderShape::Cuboid { .. }),
+                                        "Cuboid",
+                                    )
+                                    .clicked()
+                                    && !matches!(&collider.shape, ColliderShape::Cuboid { .. })
+                                {
+                                    collider.shape = ColliderShape::Cuboid {
+                                        half_extents: glm::vec3(0.5, 0.5, 0.5),
+                                    };
                                 }
-                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Ball { .. }), "Ball").clicked() {
-                                    if !matches!(&collider.shape, ColliderShape::Ball { .. }) {
-                                        collider.shape = ColliderShape::Ball { radius: 0.5 };
-                                    }
+                                if ui
+                                    .selectable_label(
+                                        matches!(&collider.shape, ColliderShape::Ball { .. }),
+                                        "Ball",
+                                    )
+                                    .clicked()
+                                    && !matches!(&collider.shape, ColliderShape::Ball { .. })
+                                {
+                                    collider.shape = ColliderShape::Ball { radius: 0.5 };
                                 }
-                                if ui.selectable_label(matches!(&collider.shape, ColliderShape::Capsule { .. }), "Capsule").clicked() {
-                                    if !matches!(&collider.shape, ColliderShape::Capsule { .. }) {
-                                        collider.shape = ColliderShape::Capsule { half_height: 0.5, radius: 0.25 };
-                                    }
+                                if ui
+                                    .selectable_label(
+                                        matches!(&collider.shape, ColliderShape::Capsule { .. }),
+                                        "Capsule",
+                                    )
+                                    .clicked()
+                                    && !matches!(&collider.shape, ColliderShape::Capsule { .. })
+                                {
+                                    collider.shape = ColliderShape::Capsule {
+                                        half_height: 0.5,
+                                        radius: 0.25,
+                                    };
                                 }
                             });
                     });
@@ -1005,32 +1244,63 @@ impl InspectorPanel {
                     // Shape-specific parameters
                     match &mut collider.shape {
                         ColliderShape::Cuboid { half_extents } => {
-                            if !half_extents.x.is_finite() { half_extents.x = 0.5; }
-                            if !half_extents.y.is_finite() { half_extents.y = 0.5; }
-                            if !half_extents.z.is_finite() { half_extents.z = 0.5; }
+                            if !half_extents.x.is_finite() {
+                                half_extents.x = 0.5;
+                            }
+                            if !half_extents.y.is_finite() {
+                                half_extents.y = 0.5;
+                            }
+                            if !half_extents.z.is_finite() {
+                                half_extents.z = 0.5;
+                            }
                             ui.label("Half Extents:");
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                                ui.add(DragValue::new(&mut half_extents.x).speed(0.01).range(0.001..=1000.0));
+                                ui.add(
+                                    DragValue::new(&mut half_extents.x)
+                                        .speed(0.01)
+                                        .range(0.001..=1000.0),
+                                );
                                 ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                                ui.add(DragValue::new(&mut half_extents.y).speed(0.01).range(0.001..=1000.0));
+                                ui.add(
+                                    DragValue::new(&mut half_extents.y)
+                                        .speed(0.01)
+                                        .range(0.001..=1000.0),
+                                );
                                 ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                                ui.add(DragValue::new(&mut half_extents.z).speed(0.01).range(0.001..=1000.0));
+                                ui.add(
+                                    DragValue::new(&mut half_extents.z)
+                                        .speed(0.01)
+                                        .range(0.001..=1000.0),
+                                );
                             });
                         }
                         ColliderShape::Ball { radius } => {
-                            if !radius.is_finite() { *radius = 0.5; }
+                            if !radius.is_finite() {
+                                *radius = 0.5;
+                            }
                             ui.horizontal(|ui| {
                                 ui.label("Radius:");
                                 ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0));
                             });
                         }
-                        ColliderShape::Capsule { half_height, radius } => {
-                            if !half_height.is_finite() { *half_height = 0.5; }
-                            if !radius.is_finite() { *radius = 0.25; }
+                        ColliderShape::Capsule {
+                            half_height,
+                            radius,
+                        } => {
+                            if !half_height.is_finite() {
+                                *half_height = 0.5;
+                            }
+                            if !radius.is_finite() {
+                                *radius = 0.25;
+                            }
                             ui.horizontal(|ui| {
                                 ui.label("Half Height:");
-                                ui.add(DragValue::new(half_height).speed(0.01).range(0.001..=1000.0));
+                                ui.add(
+                                    DragValue::new(half_height)
+                                        .speed(0.01)
+                                        .range(0.001..=1000.0),
+                                );
                             });
                             ui.horizontal(|ui| {
                                 ui.label("Radius:");
@@ -1087,18 +1357,24 @@ impl InspectorPanel {
     fn render_add_component(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
         let p = self.cached_presence;
         let has_rigidbody = p.has(ComponentPresence::RIGID_BODY);
-        let has_collider  = p.has(ComponentPresence::COLLIDER);
-        let has_camera    = p.has(ComponentPresence::CAMERA);
+        let has_collider = p.has(ComponentPresence::COLLIDER);
+        let has_camera = p.has(ComponentPresence::CAMERA);
         let has_dir_light = p.has(ComponentPresence::DIR_LIGHT);
         let has_point_light = p.has(ComponentPresence::POINT_LIGHT);
 
         if has_rigidbody && !has_collider {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Warning: RigidBody without Collider").color(Color32::from_rgb(220, 180, 50)));
+                ui.label(
+                    RichText::new("Warning: RigidBody without Collider")
+                        .color(Color32::from_rgb(220, 180, 50)),
+                );
             });
         } else if !has_rigidbody && has_collider {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Warning: Collider without RigidBody").color(Color32::from_rgb(220, 180, 50)));
+                ui.label(
+                    RichText::new("Warning: Collider without RigidBody")
+                        .color(Color32::from_rgb(220, 180, 50)),
+                );
             });
         }
 
@@ -1123,7 +1399,9 @@ impl InspectorPanel {
                     let conflicts = has_camera || has_point_light;
                     if conflicts {
                         ui.add_enabled(false, egui::Button::selectable(false, "Directional Light"))
-                            .on_disabled_hover_text("Conflicts with existing Camera or Point Light");
+                            .on_disabled_hover_text(
+                                "Conflicts with existing Camera or Point Light",
+                            );
                     } else if ui.selectable_label(false, "Directional Light").clicked() {
                         let _ = world.insert_one(entity, DirectionalLight::default());
                         added = true;
@@ -1134,32 +1412,30 @@ impl InspectorPanel {
                     let conflicts = has_camera || has_dir_light;
                     if conflicts {
                         ui.add_enabled(false, egui::Button::selectable(false, "Point Light"))
-                            .on_disabled_hover_text("Conflicts with existing Camera or Directional Light");
+                            .on_disabled_hover_text(
+                                "Conflicts with existing Camera or Directional Light",
+                            );
                     } else if ui.selectable_label(false, "Point Light").clicked() {
                         let _ = world.insert_one(entity, PointLight::default());
                         added = true;
                     }
                 }
 
-                if !p.has(ComponentPresence::MESH_RENDERER) {
-                    if ui.selectable_label(false, "Mesh Renderer").clicked() {
-                        let _ = world.insert_one(entity, MeshRenderer::default());
-                        added = true;
-                    }
+                if !p.has(ComponentPresence::MESH_RENDERER)
+                    && ui.selectable_label(false, "Mesh Renderer").clicked()
+                {
+                    let _ = world.insert_one(entity, MeshRenderer::default());
+                    added = true;
                 }
 
-                if !has_rigidbody {
-                    if ui.selectable_label(false, "Rigid Body").clicked() {
-                        let _ = world.insert_one(entity, RigidBody::default());
-                        added = true;
-                    }
+                if !has_rigidbody && ui.selectable_label(false, "Rigid Body").clicked() {
+                    let _ = world.insert_one(entity, RigidBody::default());
+                    added = true;
                 }
 
-                if !has_collider {
-                    if ui.selectable_label(false, "Collider").clicked() {
-                        let _ = world.insert_one(entity, Collider::default());
-                        added = true;
-                    }
+                if !has_collider && ui.selectable_label(false, "Collider").clicked() {
+                    let _ = world.insert_one(entity, Collider::default());
+                    added = true;
                 }
             });
 
@@ -1179,9 +1455,21 @@ fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
     let q_norm = glm::quat_normalize(q);
     let euler = glm::quat_euler_angles(&q_norm);
     [
-        if euler.x.is_finite() { euler.x.to_degrees() } else { 0.0 },
-        if euler.y.is_finite() { euler.y.to_degrees() } else { 0.0 },
-        if euler.z.is_finite() { euler.z.to_degrees() } else { 0.0 },
+        if euler.x.is_finite() {
+            euler.x.to_degrees()
+        } else {
+            0.0
+        },
+        if euler.y.is_finite() {
+            euler.y.to_degrees()
+        } else {
+            0.0
+        },
+        if euler.z.is_finite() {
+            euler.z.to_degrees()
+        } else {
+            0.0
+        },
     ]
 }
 

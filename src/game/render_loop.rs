@@ -20,6 +20,9 @@ use vulkano::swapchain::acquire_next_image;
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError};
 
+/// Result type for swapchain image acquisition.
+type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError>;
+
 /// Prepare mesh render data from ECS world into a reusable buffer.
 ///
 /// Reads pre-computed transforms from `transform_cache` (populated by
@@ -151,15 +154,13 @@ pub fn handle_swapchain_recreation(
         }
         Err(e) => {
             eprintln!("Failed to recreate swapchain: {}", e);
-            Err(e.into())
+            Err(e)
         }
     }
 }
 
 /// Acquire next swapchain image
-pub fn acquire_swapchain_image(
-    renderer: &mut Renderer,
-) -> Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError> {
+pub fn acquire_swapchain_image(renderer: &mut Renderer) -> AcquireResult {
     rust_engine::profile_scope!("acquire_swapchain_image");
 
     match acquire_next_image(renderer.swapchain.clone(), None) {

@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 use vulkano::device::physical::PhysicalDevice;
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags};
+use vulkano::device::{
+    Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+};
 use vulkano::swapchain::Surface;
 
 pub struct LogicalDeviceContext {
-    pub device: Arc<Device>,  // For creating resources
-    pub queue: Arc<Queue>,    // For submitting commands
+    pub device: Arc<Device>, // For creating resources
+    pub queue: Arc<Queue>,   // For submitting commands
 }
 
 /// Creates logical device with queue that supports graphics + present
@@ -37,7 +39,7 @@ pub fn create_logical_device(
                 ..Default::default()
             }],
             enabled_extensions: DeviceExtensions {
-                khr_swapchain: true,  // Required for presenting to screen
+                khr_swapchain: true, // Required for presenting to screen
                 ..DeviceExtensions::empty()
             },
             ..Default::default()

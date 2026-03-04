@@ -1,7 +1,7 @@
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use parking_lot::Mutex;
 
 use super::asset_manager::AssetManager;
 use super::handle::AssetId;
@@ -14,8 +14,16 @@ pub enum LoadRequest {
 
 /// Asset loading result
 pub enum LoadResult {
-    TextureLoaded { id: AssetId, success: bool, error: Option<String> },
-    ModelLoaded { id: AssetId, success: bool, error: Option<String> },
+    TextureLoaded {
+        id: AssetId,
+        success: bool,
+        error: Option<String>,
+    },
+    ModelLoaded {
+        id: AssetId,
+        success: bool,
+        error: Option<String>,
+    },
 }
 
 /// Async asset loader for background loading
@@ -34,7 +42,7 @@ impl AsyncAssetLoader {
                 .thread_name("async-asset-loader")
                 .enable_all()
                 .build()
-                .expect("Failed to create async runtime")
+                .expect("Failed to create async runtime"),
         );
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<LoadRequest>();
@@ -50,52 +58,50 @@ impl AsyncAssetLoader {
                 let result_tx = result_tx.clone();
 
                 // Spawn blocking task for CPU-intensive loading
-                runtime_clone.spawn_blocking(move || {
-                    match request {
-                        LoadRequest::Texture { path } => {
-                            let id = AssetId::from_path(&path);
-                            println!("⏳ Loading texture async: {}", path);
+                runtime_clone.spawn_blocking(move || match request {
+                    LoadRequest::Texture { path } => {
+                        let id = AssetId::from_path(&path);
+                        println!("⏳ Loading texture async: {}", path);
 
-                            match assets.textures.load(&path) {
-                                Ok(_) => {
-                                    println!("✅ Texture loaded: {}", path);
-                                    let _ = result_tx.send(LoadResult::TextureLoaded {
-                                        id,
-                                        success: true,
-                                        error: None,
-                                    });
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Failed to load texture: {}", e);
-                                    let _ = result_tx.send(LoadResult::TextureLoaded {
-                                        id,
-                                        success: false,
-                                        error: Some(e.to_string()),
-                                    });
-                                }
+                        match assets.textures.load(&path) {
+                            Ok(_) => {
+                                println!("✅ Texture loaded: {}", path);
+                                let _ = result_tx.send(LoadResult::TextureLoaded {
+                                    id,
+                                    success: true,
+                                    error: None,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to load texture: {}", e);
+                                let _ = result_tx.send(LoadResult::TextureLoaded {
+                                    id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                });
                             }
                         }
-                        LoadRequest::Model { path } => {
-                            let id = AssetId::from_path(&path);
-                            println!("⏳ Loading model async: {}", path);
+                    }
+                    LoadRequest::Model { path } => {
+                        let id = AssetId::from_path(&path);
+                        println!("⏳ Loading model async: {}", path);
 
-                            match assets.models.load(&path) {
-                                Ok(_) => {
-                                    println!("✅ Model loaded: {}", path);
-                                    let _ = result_tx.send(LoadResult::ModelLoaded {
-                                        id,
-                                        success: true,
-                                        error: None,
-                                    });
-                                }
-                                Err(e) => {
-                                    eprintln!("❌ Failed to load model: {}", e);
-                                    let _ = result_tx.send(LoadResult::ModelLoaded {
-                                        id,
-                                        success: false,
-                                        error: Some(e.to_string()),
-                                    });
-                                }
+                        match assets.models.load(&path) {
+                            Ok(_) => {
+                                println!("✅ Model loaded: {}", path);
+                                let _ = result_tx.send(LoadResult::ModelLoaded {
+                                    id,
+                                    success: true,
+                                    error: None,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to load model: {}", e);
+                                let _ = result_tx.send(LoadResult::ModelLoaded {
+                                    id,
+                                    success: false,
+                                    error: Some(e.to_string()),
+                                });
                             }
                         }
                     }
@@ -113,16 +119,16 @@ impl AsyncAssetLoader {
 
     /// Request to load a texture asynchronously
     pub fn load_texture_async(&self, path: impl Into<String>) {
-        let _ = self.request_sender.send(LoadRequest::Texture {
-            path: path.into(),
-        });
+        let _ = self
+            .request_sender
+            .send(LoadRequest::Texture { path: path.into() });
     }
 
     /// Request to load a model asynchronously
     pub fn load_model_async(&self, path: impl Into<String>) {
-        let _ = self.request_sender.send(LoadRequest::Model {
-            path: path.into(),
-        });
+        let _ = self
+            .request_sender
+            .send(LoadRequest::Model { path: path.into() });
     }
 
     /// Poll for completed load results (call this each frame)
@@ -155,8 +161,6 @@ impl AsyncAssetLoader {
 /// Example usage pattern
 #[cfg(test)]
 mod example {
-    use super::*;
-
     #[test]
     fn example_async_loading() {
         // This is just an example - won't actually run without proper setup

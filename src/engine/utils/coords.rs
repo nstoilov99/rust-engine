@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3, Quat};
+use glam::{Mat4, Quat, Vec3};
 
 /// Coordinate system convention
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,14 +12,18 @@ pub enum CoordinateSystem {
 /// Transform in gameplay space (Z-up coordinate system)
 #[derive(Debug, Clone, Copy)]
 pub struct GameplayTransform {
-    pub position: Vec3,     // X=forward, Y=right, Z=up
-    pub rotation: Quat,     // Rotation in Z-up space
+    pub position: Vec3, // X=forward, Y=right, Z=up
+    pub rotation: Quat, // Rotation in Z-up space
     pub scale: Vec3,
 }
 
 impl GameplayTransform {
     pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        Self { position, rotation, scale }
+        Self {
+            position,
+            rotation,
+            scale,
+        }
     }
 
     pub fn identity() -> Self {
@@ -66,18 +70,18 @@ impl GameplayTransform {
 /// Y-up: (X=right, Y=up, Z=-forward)
 pub fn convert_position_zup_to_yup(pos: Vec3) -> Vec3 {
     Vec3::new(
-        pos.y,   // Z-up Y (right) → Y-up X (right)
-        pos.z,   // Z-up Z (up)    → Y-up Y (up)
-        -pos.x,  // Z-up X (forward) → Y-up -Z (forward into screen)
+        pos.y,  // Z-up Y (right) → Y-up X (right)
+        pos.z,  // Z-up Z (up)    → Y-up Y (up)
+        -pos.x, // Z-up X (forward) → Y-up -Z (forward into screen)
     )
 }
 
 /// Converts Y-up position to Z-up position
 pub fn convert_position_yup_to_zup(pos: Vec3) -> Vec3 {
     Vec3::new(
-        -pos.z,  // Y-up Z (forward) → Z-up X (forward)
-        pos.x,   // Y-up X (right)   → Z-up Y (right)
-        pos.y,   // Y-up Y (up)      → Z-up Z (up)
+        -pos.z, // Y-up Z (forward) → Z-up X (forward)
+        pos.x,  // Y-up X (right)   → Z-up Y (right)
+        pos.y,  // Y-up Y (up)      → Z-up Z (up)
     )
 }
 
@@ -91,18 +95,18 @@ pub fn convert_position_yup_to_zup(pos: Vec3) -> Vec3 {
 /// Note: Unlike position, scale is always positive along axes (no sign flip for Z).
 pub fn convert_scale_zup_to_yup(scale: Vec3) -> Vec3 {
     Vec3::new(
-        scale.y,  // Z-up Y (right) → Y-up X (right)
-        scale.z,  // Z-up Z (up)    → Y-up Y (up)
-        scale.x,  // Z-up X (forward) → Y-up Z (forward) - no sign flip for scale
+        scale.y, // Z-up Y (right) → Y-up X (right)
+        scale.z, // Z-up Z (up)    → Y-up Y (up)
+        scale.x, // Z-up X (forward) → Y-up Z (forward) - no sign flip for scale
     )
 }
 
 /// Converts Y-up scale to Z-up scale
 pub fn convert_scale_yup_to_zup(scale: Vec3) -> Vec3 {
     Vec3::new(
-        scale.z,  // Y-up Z (forward) → Z-up X (forward)
-        scale.x,  // Y-up X (right)   → Z-up Y (right)
-        scale.y,  // Y-up Y (up)      → Z-up Z (up)
+        scale.z, // Y-up Z (forward) → Z-up X (forward)
+        scale.x, // Y-up X (right)   → Z-up Y (right)
+        scale.y, // Y-up Y (up)      → Z-up Z (up)
     )
 }
 
@@ -170,9 +174,9 @@ pub fn convert_transform_zup_to_yup(position: Vec3, rotation: Quat, scale: Vec3)
 pub mod zup {
     use glam::Vec3;
 
-    pub const FORWARD: Vec3 = Vec3::X;   // X is forward in Z-up
-    pub const RIGHT: Vec3 = Vec3::Y;     // Y is right in Z-up
-    pub const UP: Vec3 = Vec3::Z;        // Z is up in Z-up
+    pub const FORWARD: Vec3 = Vec3::X; // X is forward in Z-up
+    pub const RIGHT: Vec3 = Vec3::Y; // Y is right in Z-up
+    pub const UP: Vec3 = Vec3::Z; // Z is up in Z-up
     pub const BACK: Vec3 = Vec3::NEG_X;
     pub const LEFT: Vec3 = Vec3::NEG_Y;
     pub const DOWN: Vec3 = Vec3::NEG_Z;
@@ -182,9 +186,9 @@ pub mod zup {
 pub mod yup {
     use glam::Vec3;
 
-    pub const RIGHT: Vec3 = Vec3::X;     // X is right in Y-up
-    pub const UP: Vec3 = Vec3::Y;        // Y is up in Y-up
-    pub const FORWARD: Vec3 = Vec3::Z;   // Z is forward in Y-up
+    pub const RIGHT: Vec3 = Vec3::X; // X is right in Y-up
+    pub const UP: Vec3 = Vec3::Y; // Y is up in Y-up
+    pub const FORWARD: Vec3 = Vec3::Z; // Z is forward in Y-up
     pub const LEFT: Vec3 = Vec3::NEG_X;
     pub const DOWN: Vec3 = Vec3::NEG_Y;
     pub const BACK: Vec3 = Vec3::NEG_Z;
@@ -257,9 +261,21 @@ mod tests {
         let scale_z = Vec3::new(matrix.z_axis.x, matrix.z_axis.y, matrix.z_axis.z).length();
 
         // The scale values should be remapped: (2,3,4) -> (3,4,2)
-        assert!((scale_x - 3.0).abs() < 0.001, "X scale should be 3.0, got {}", scale_x);
-        assert!((scale_y - 4.0).abs() < 0.001, "Y scale should be 4.0, got {}", scale_y);
-        assert!((scale_z - 2.0).abs() < 0.001, "Z scale should be 2.0, got {}", scale_z);
+        assert!(
+            (scale_x - 3.0).abs() < 0.001,
+            "X scale should be 3.0, got {}",
+            scale_x
+        );
+        assert!(
+            (scale_y - 4.0).abs() < 0.001,
+            "Y scale should be 4.0, got {}",
+            scale_y
+        );
+        assert!(
+            (scale_z - 2.0).abs() < 0.001,
+            "Z scale should be 2.0, got {}",
+            scale_z
+        );
     }
 
     #[test]
@@ -277,7 +293,7 @@ mod tests {
 
         // Scale magnitude should be preserved (product of scales)
         let expected_det = 2.0 * 1.0 * 1.0; // Product of scales
-        // Note: Rotation doesn't change determinant, coordinate conversion preserves it
+                                            // Note: Rotation doesn't change determinant, coordinate conversion preserves it
         assert!((det.abs() - expected_det).abs() < 0.001);
     }
 
@@ -337,7 +353,12 @@ mod tests {
 
             // Quaternions can be negated and still represent same rotation
             let diff = (back - rot).length().min((back + rot).length());
-            assert!(diff < 0.001, "Round-trip failed for {:?}, got {:?}", rot, back);
+            assert!(
+                diff < 0.001,
+                "Round-trip failed for {:?}, got {:?}",
+                rot,
+                back
+            );
         }
     }
 
@@ -355,22 +376,37 @@ mod tests {
         let rot_around_zup_z = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
         let converted = convert_rotation_zup_to_yup(rot_around_zup_z);
         let expected = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_4);
-        let diff = (converted - expected).length().min((converted + expected).length());
-        assert!(diff < 0.001, "Z-up Z rotation should map to Y-up -Y rotation");
+        let diff = (converted - expected)
+            .length()
+            .min((converted + expected).length());
+        assert!(
+            diff < 0.001,
+            "Z-up Z rotation should map to Y-up -Y rotation"
+        );
 
         // Z-up X rotation → Y-up Z rotation (axis flipped, angle negated → positive Z)
         let rot_around_zup_x = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
         let converted_x = convert_rotation_zup_to_yup(rot_around_zup_x);
         let expected_x = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
-        let diff_x = (converted_x - expected_x).length().min((converted_x + expected_x).length());
-        assert!(diff_x < 0.001, "Z-up X rotation should map to Y-up Z rotation");
+        let diff_x = (converted_x - expected_x)
+            .length()
+            .min((converted_x + expected_x).length());
+        assert!(
+            diff_x < 0.001,
+            "Z-up X rotation should map to Y-up Z rotation"
+        );
 
         // Z-up Y rotation → Y-up -X rotation (angle negated)
         let rot_around_zup_y = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
         let converted_y = convert_rotation_zup_to_yup(rot_around_zup_y);
         let expected_y = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4);
-        let diff_y = (converted_y - expected_y).length().min((converted_y + expected_y).length());
-        assert!(diff_y < 0.001, "Z-up Y rotation should map to Y-up -X rotation");
+        let diff_y = (converted_y - expected_y)
+            .length()
+            .min((converted_y + expected_y).length());
+        assert!(
+            diff_y < 0.001,
+            "Z-up Y rotation should map to Y-up -X rotation"
+        );
     }
 
     #[test]
@@ -389,13 +425,23 @@ mod tests {
         let (actual_axis, actual_angle) = rot_yup.to_axis_angle();
 
         // Axis should match (accounting for sign flip of axis with angle negation)
-        let axis_diff = (actual_axis - expected_axis_yup).length()
+        let axis_diff = (actual_axis - expected_axis_yup)
+            .length()
             .min((actual_axis + expected_axis_yup).length());
-        assert!(axis_diff < 0.01, "Axis mismatch: expected {:?}, got {:?}", expected_axis_yup, actual_axis);
+        assert!(
+            axis_diff < 0.01,
+            "Axis mismatch: expected {:?}, got {:?}",
+            expected_axis_yup,
+            actual_axis
+        );
 
         // Angle should be preserved (possibly negated with axis flip)
-        assert!((actual_angle.abs() - angle).abs() < 0.01,
-            "Angle mismatch: expected {}, got {}", angle, actual_angle.abs());
+        assert!(
+            (actual_angle.abs() - angle).abs() < 0.01,
+            "Angle mismatch: expected {}, got {}",
+            angle,
+            actual_angle.abs()
+        );
     }
 
     #[test]
@@ -410,12 +456,7 @@ mod tests {
             Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.8),
         ];
 
-        let test_vectors = [
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-            Vec3::new(1.0, 2.0, 3.0),
-        ];
+        let test_vectors = [Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(1.0, 2.0, 3.0)];
 
         for rot_zup in test_rotations {
             for vec_zup in test_vectors {
@@ -430,10 +471,80 @@ mod tests {
 
                 // Both methods should produce the same result
                 let diff = (result1 - result2).length();
-                assert!(diff < 0.001,
+                assert!(
+                    diff < 0.001,
                     "Vector transformation inconsistent for rot {:?}, vec {:?}: {:?} vs {:?}",
-                    rot_zup, vec_zup, result1, result2);
+                    rot_zup,
+                    vec_zup,
+                    result1,
+                    result2
+                );
             }
+        }
+    }
+
+    #[test]
+    fn position_roundtrip_arbitrary() {
+        let positions = [
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(-5.0, 0.0, 10.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(-1.0, -2.0, -3.0),
+        ];
+
+        for pos in positions {
+            let yup = convert_position_zup_to_yup(pos);
+            let back = convert_position_yup_to_zup(yup);
+            assert!(
+                (back - pos).length() < 0.001,
+                "position roundtrip failed for {:?}: got {:?}",
+                pos,
+                back
+            );
+        }
+    }
+
+    #[test]
+    fn scale_roundtrip_arbitrary() {
+        let scales = [
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(10.0, 1.0, 0.1),
+        ];
+
+        for scale in scales {
+            let yup = convert_scale_zup_to_yup(scale);
+            let back = convert_scale_yup_to_zup(yup);
+            assert!(
+                (back - scale).length() < 0.001,
+                "scale roundtrip failed for {:?}: got {:?}",
+                scale,
+                back
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_roundtrip_multiple() {
+        let rotations = [
+            Quat::IDENTITY,
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+            Quat::from_rotation_z(std::f32::consts::PI),
+            Quat::from_axis_angle(Vec3::new(1.0, 1.0, 1.0).normalize(), 1.5),
+        ];
+
+        for rot in rotations {
+            let yup = convert_rotation_zup_to_yup(rot);
+            let back = convert_rotation_yup_to_zup(yup);
+
+            let diff = (back - rot).length().min((back + rot).length());
+            assert!(
+                diff < 0.001,
+                "rotation roundtrip failed for {:?}: got {:?}",
+                rot,
+                back
+            );
         }
     }
 }

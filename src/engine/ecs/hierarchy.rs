@@ -503,10 +503,8 @@ impl Default for TransformCache {
 /// Convenience: mark a single entity as dirty so incremental propagation
 /// picks it up next frame. Silently ignores dead entities.
 pub fn mark_transform_dirty(world: &mut World, entity: Entity) {
-    if world.contains(entity) {
-        if world.get::<&TransformDirty>(entity).is_err() {
-            let _ = world.insert_one(entity, TransformDirty);
-        }
+    if world.contains(entity) && world.get::<&TransformDirty>(entity).is_err() {
+        let _ = world.insert_one(entity, TransformDirty);
     }
 }
 
@@ -518,15 +516,19 @@ mod tests {
 
     /// Spawn a root entity with a transform at the given position.
     fn spawn_root(world: &mut World, x: f32, y: f32, z: f32) -> Entity {
-        let mut t = Transform::default();
-        t.position = glm::vec3(x, y, z);
+        let t = Transform {
+            position: glm::vec3(x, y, z),
+            ..Default::default()
+        };
         world.spawn((t,))
     }
 
     /// Spawn a child entity parented to `parent` with a local offset.
     fn spawn_child(world: &mut World, parent: Entity, x: f32, y: f32, z: f32) -> Entity {
-        let mut t = Transform::default();
-        t.position = glm::vec3(x, y, z);
+        let t = Transform {
+            position: glm::vec3(x, y, z),
+            ..Default::default()
+        };
         let child = world.spawn((t,));
         set_parent(world, child, parent);
         child

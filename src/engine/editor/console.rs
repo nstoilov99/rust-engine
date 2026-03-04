@@ -64,8 +64,7 @@ impl LogMessage {
 
     /// Format the message with level prefix and color
     pub fn rich_text(&self) -> RichText {
-        RichText::new(format!("{} {}", self.level.prefix(), self.text))
-            .color(self.level.color())
+        RichText::new(format!("{} {}", self.level.prefix(), self.text)).color(self.level.color())
     }
 }
 

@@ -148,13 +148,16 @@ impl GameWorld {
     pub fn spawn(&mut self, bundle: impl hecs::DynamicBundle) -> Entity {
         let entity = self.hecs_world.spawn(bundle);
         // Auto-assign GUID if the bundle didn't include one
-        if self.hecs_world.get::<&super::components::EntityGuid>(entity).is_err() {
-            let _ = self.hecs_world.insert_one(entity, super::components::EntityGuid::new());
+        if self
+            .hecs_world
+            .get::<&super::components::EntityGuid>(entity)
+            .is_err()
+        {
+            let _ = self
+                .hecs_world
+                .insert_one(entity, super::components::EntityGuid::new());
         }
-        self.events.send(EntitySpawned {
-            entity,
-            name: None,
-        });
+        self.events.send(EntitySpawned { entity, name: None });
         self.hierarchy_changed = true;
         entity
     }
@@ -168,8 +171,14 @@ impl GameWorld {
     ) -> Entity {
         let entity = self.hecs_world.spawn(bundle);
         // Auto-assign GUID if the bundle didn't include one
-        if self.hecs_world.get::<&super::components::EntityGuid>(entity).is_err() {
-            let _ = self.hecs_world.insert_one(entity, super::components::EntityGuid::new());
+        if self
+            .hecs_world
+            .get::<&super::components::EntityGuid>(entity)
+            .is_err()
+        {
+            let _ = self
+                .hecs_world
+                .insert_one(entity, super::components::EntityGuid::new());
         }
         self.events.send(EntitySpawned {
             entity,
@@ -202,7 +211,10 @@ impl GameWorld {
     }
 
     /// Remove a component from an entity.
-    pub fn remove<T: hecs::Component>(&mut self, entity: Entity) -> Result<T, hecs::ComponentError> {
+    pub fn remove<T: hecs::Component>(
+        &mut self,
+        entity: Entity,
+    ) -> Result<T, hecs::ComponentError> {
         self.hecs_world.remove_one::<T>(entity)
     }
 

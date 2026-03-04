@@ -276,7 +276,11 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
                 Pos2::new(text_x - text_width / 2.0 - 3.0, time_axis_rect.top() + 3.0),
                 Vec2::new(text_width + 6.0, text_galley.size().y + 2.0),
             );
-            painter.rect_filled(bg_rect, 3.0, Color32::from_rgba_unmultiplied(30, 30, 30, 230));
+            painter.rect_filled(
+                bg_rect,
+                3.0,
+                Color32::from_rgba_unmultiplied(30, 30, 30, 230),
+            );
 
             // Draw text centered
             painter.text(
@@ -405,7 +409,10 @@ fn draw_time_axis(
 
     // Draw separator line at bottom of time axis
     painter.line_segment(
-        [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
+        [
+            Pos2::new(rect.left(), rect.bottom()),
+            Pos2::new(rect.right(), rect.bottom()),
+        ],
         egui::Stroke::new(1.0, Color32::from_gray(50)),
     );
 
@@ -416,7 +423,10 @@ fn draw_time_axis(
         let x = rect.left() + ((-visible_start_ms) / visible_range_ms * rect.width() as f64) as f32;
         if x >= rect.left() && x <= rect.right() - 30.0 {
             painter.line_segment(
-                [Pos2::new(x, rect.bottom() - 6.0), Pos2::new(x, rect.bottom())],
+                [
+                    Pos2::new(x, rect.bottom() - 6.0),
+                    Pos2::new(x, rect.bottom()),
+                ],
                 egui::Stroke::new(1.0, Color32::from_gray(100)),
             );
             painter.text(
@@ -441,7 +451,10 @@ fn draw_time_axis(
 
         // Draw tick mark
         painter.line_segment(
-            [Pos2::new(x, rect.bottom() - 6.0), Pos2::new(x, rect.bottom())],
+            [
+                Pos2::new(x, rect.bottom() - 6.0),
+                Pos2::new(x, rect.bottom()),
+            ],
             egui::Stroke::new(1.0, Color32::from_gray(100)),
         );
 
@@ -537,8 +550,7 @@ fn draw_breadcrumb_bar(ui: &mut Ui, state: &mut ProfilerState) {
 
         // Style the bar with a subtle background
         let rect = ui.available_rect_before_wrap();
-        ui.painter()
-            .rect_filled(rect, 0.0, Color32::from_gray(35));
+        ui.painter().rect_filled(rect, 0.0, Color32::from_gray(35));
 
         ui.add_space(LEFT_MARGIN);
 
@@ -574,11 +586,9 @@ fn draw_breadcrumb_bar(ui: &mut Ui, state: &mut ProfilerState) {
 
             if ui
                 .add(
-                    egui::Button::new(
-                        RichText::new(&display_name).color(Color32::from_gray(200)),
-                    )
-                    .fill(Color32::from_gray(45))
-                    .corner_radius(2.0),
+                    egui::Button::new(RichText::new(&display_name).color(Color32::from_gray(200)))
+                        .fill(Color32::from_gray(45))
+                        .corner_radius(2.0),
                 )
                 .on_hover_text(hover_text)
                 .clicked()
@@ -614,7 +624,12 @@ fn draw_thread_header(
 
     // Draw collapse arrow (using simple ASCII that renders reliably)
     let arrow = if is_collapsed { ">" } else { "v" };
-    let text = format!("{} {} ({} scopes)", arrow, thread.name, thread.scope_count());
+    let text = format!(
+        "{} {} ({} scopes)",
+        arrow,
+        thread.name,
+        thread.scope_count()
+    );
 
     painter.text(
         Pos2::new(header_rect.left() + LEFT_MARGIN, header_rect.center().y),
@@ -628,6 +643,7 @@ fn draw_thread_header(
 }
 
 /// Draw all scopes for a thread
+#[allow(clippy::too_many_arguments)]
 fn draw_thread_scopes<'a>(
     painter: &egui::Painter,
     ui: &Ui,
@@ -674,24 +690,34 @@ fn draw_thread_scopes<'a>(
 
     // Show tooltip for hovered scope
     if let Some(scope) = result.hovered {
-        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("scope_tooltip"), egui::containers::PopupAnchor::Pointer)
-            .show(|ui| {
-                ui.label(RichText::new(scope.name.as_ref()).strong());
-                ui.label(RichText::new(scope.location.as_ref()).weak().small());
-                ui.separator();
-                ui.label(format!("Duration: {:.3} ms", scope.duration_ms()));
-                if !scope.children.is_empty() {
-                    ui.label(format!("Children: {}", scope.children.len()));
-                }
-                ui.add_space(4.0);
-                ui.label(RichText::new("Click to zoom | R: reset | +/-: zoom | Arrows: pan").weak().small());
-            });
+        egui::containers::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new("scope_tooltip"),
+            egui::containers::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label(RichText::new(scope.name.as_ref()).strong());
+            ui.label(RichText::new(scope.location.as_ref()).weak().small());
+            ui.separator();
+            ui.label(format!("Duration: {:.3} ms", scope.duration_ms()));
+            if !scope.children.is_empty() {
+                ui.label(format!("Children: {}", scope.children.len()));
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Click to zoom | R: reset | +/-: zoom | Arrows: pan")
+                    .weak()
+                    .small(),
+            );
+        });
     }
 
     result
 }
 
 /// Draw a single scope and its children
+#[allow(clippy::too_many_arguments)]
 fn draw_scope<'a>(
     painter: &egui::Painter,
     clip_rect: Rect,
@@ -772,10 +798,10 @@ fn draw_scope<'a>(
     }
 
     // Check if hovered
-    let is_hovered = hover_pos.map_or(false, |pos| scope_rect.contains(pos));
+    let is_hovered = hover_pos.is_some_and(|pos| scope_rect.contains(pos));
 
     // Check if clicked
-    let is_clicked = click_pos.map_or(false, |pos| scope_rect.contains(pos));
+    let is_clicked = click_pos.is_some_and(|pos| scope_rect.contains(pos));
 
     // Get color based on duration
     let mut color = scope_color(duration_ms, &state.settings);
@@ -821,7 +847,8 @@ fn draw_scope<'a>(
 
         // Use dark text on light backgrounds (calculate perceived brightness)
         // Using relative luminance formula: 0.299*R + 0.587*G + 0.114*B
-        let brightness = 0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
+        let brightness =
+            0.299 * color.r() as f32 + 0.587 * color.g() as f32 + 0.114 * color.b() as f32;
         let text_color = if brightness > 140.0 {
             Color32::from_gray(30)
         } else {

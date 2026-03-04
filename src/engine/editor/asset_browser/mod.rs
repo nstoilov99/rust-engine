@@ -38,30 +38,18 @@ pub enum ViewMode {
 #[derive(Debug, Clone)]
 pub enum RenameTarget {
     /// Renaming an asset file
-    Asset {
-        id: AssetId,
-        current_name: String,
-    },
+    Asset { id: AssetId, current_name: String },
     /// Renaming a folder
-    Folder {
-        path: PathBuf,
-        current_name: String,
-    },
+    Folder { path: PathBuf, current_name: String },
 }
 
 /// Target for delete operation
 #[derive(Debug, Clone)]
 pub enum DeleteTarget {
     /// Deleting an asset file
-    Asset {
-        id: AssetId,
-        path: PathBuf,
-    },
+    Asset { id: AssetId, path: PathBuf },
     /// Deleting a folder
-    Folder {
-        path: PathBuf,
-        is_empty: bool,
-    },
+    Folder { path: PathBuf, is_empty: bool },
 }
 
 /// State for delete confirmation dialog
@@ -79,10 +67,7 @@ pub enum DragPayload {
     /// Dragging an asset
     Asset(AssetDragPayload),
     /// Dragging a folder
-    Folder {
-        path: PathBuf,
-        name: String,
-    },
+    Folder { path: PathBuf, name: String },
 }
 
 /// Main asset browser panel
@@ -237,31 +222,39 @@ impl AssetBrowserPanel {
 
         if let Some(ref confirmation) = self.delete_confirmation {
             let (title, message) = match &confirmation.target {
-                DeleteTarget::Asset { path, .. } => {
-                    ("Delete Asset".to_string(), format!(
+                DeleteTarget::Asset { path, .. } => (
+                    "Delete Asset".to_string(),
+                    format!(
                         "Are you sure you want to delete '{}'?\n\nThis action cannot be undone.",
                         path.file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| path.display().to_string())
-                    ))
-                }
+                    ),
+                ),
                 DeleteTarget::Folder { path, is_empty } => {
-                    let folder_name = path.file_name()
+                    let folder_name = path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| path.display().to_string());
 
                     if *is_empty {
-                        ("Delete Folder".to_string(), format!(
-                            "Are you sure you want to delete the folder '{}'?",
-                            folder_name
-                        ))
+                        (
+                            "Delete Folder".to_string(),
+                            format!(
+                                "Are you sure you want to delete the folder '{}'?",
+                                folder_name
+                            ),
+                        )
                     } else {
-                        ("Delete Non-Empty Folder".to_string(), format!(
-                            "The folder '{}' contains {} items.\n\n\
+                        (
+                            "Delete Non-Empty Folder".to_string(),
+                            format!(
+                                "The folder '{}' contains {} items.\n\n\
                             Are you sure you want to delete this folder and ALL its contents?\n\n\
                             This action cannot be undone!",
-                            folder_name, confirmation.file_count
-                        ))
+                                folder_name, confirmation.file_count
+                            ),
+                        )
                     }
                 }
             };
@@ -289,23 +282,29 @@ impl AssetBrowserPanel {
                             }
 
                             // Cancel button
-                            if ui.add(
-                                egui::Button::new("Cancel")
-                                    .min_size(egui::vec2(button_width, 28.0))
-                            ).clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Cancel")
+                                        .min_size(egui::vec2(button_width, 28.0)),
+                                )
+                                .clicked()
+                            {
                                 close_dialog = true;
                             }
 
                             ui.add_space(spacing);
 
                             // Red delete button
-                            if ui.add(
-                                egui::Button::new(
-                                    RichText::new("Delete").color(egui::Color32::WHITE)
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Delete").color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(180, 60, 60))
+                                    .min_size(egui::vec2(button_width, 28.0)),
                                 )
-                                .fill(egui::Color32::from_rgb(180, 60, 60))
-                                .min_size(egui::vec2(button_width, 28.0))
-                            ).clicked() {
+                                .clicked()
+                            {
                                 confirm_delete = true;
                             }
                         });
@@ -318,7 +317,8 @@ impl AssetBrowserPanel {
             if let Some(confirmation) = self.delete_confirmation.take() {
                 match confirmation.target {
                     DeleteTarget::Asset { id, path } => {
-                        self.events.push(AssetBrowserEvent::AssetDeleted { id, path });
+                        self.events
+                            .push(AssetBrowserEvent::AssetDeleted { id, path });
                     }
                     DeleteTarget::Folder { path, .. } => {
                         // For non-empty folders, we need to use FolderDeleted with force flag
@@ -335,7 +335,11 @@ impl AssetBrowserPanel {
     fn render_toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             // Folder toggle
-            if ui.selectable_label(self.show_folders, "\u{1F4C1}").on_hover_text("Toggle folders").clicked() {
+            if ui
+                .selectable_label(self.show_folders, "\u{1F4C1}")
+                .on_hover_text("Toggle folders")
+                .clicked()
+            {
                 self.show_folders = !self.show_folders;
             }
 
@@ -353,10 +357,13 @@ impl AssetBrowserPanel {
             }
 
             // Clear search button
-            if !self.search_text.is_empty() {
-                if ui.small_button("\u{2715}").on_hover_text("Clear search").clicked() {
-                    self.search_text.clear();
-                }
+            if !self.search_text.is_empty()
+                && ui
+                    .small_button("\u{2715}")
+                    .on_hover_text("Clear search")
+                    .clicked()
+            {
+                self.search_text.clear();
             }
 
             ui.separator();
@@ -368,23 +375,31 @@ impl AssetBrowserPanel {
                     None => "All Types",
                 })
                 .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.type_filter, None, "All Types").clicked() {}
+                    ui.selectable_value(&mut self.type_filter, None, "All Types")
+                        .clicked();
                     ui.separator();
                     for asset_type in AssetType::all() {
-                        if ui.selectable_value(&mut self.type_filter, Some(*asset_type), asset_type.display_name()).clicked() {}
+                        ui.selectable_value(
+                            &mut self.type_filter,
+                            Some(*asset_type),
+                            asset_type.display_name(),
+                        )
+                        .clicked();
                     }
                 });
 
             ui.separator();
 
             // View mode toggle
-            if ui.selectable_label(self.view_mode == ViewMode::Grid, "\u{25A6}") // Grid icon
+            if ui
+                .selectable_label(self.view_mode == ViewMode::Grid, "\u{25A6}") // Grid icon
                 .on_hover_text("Grid view")
                 .clicked()
             {
                 self.view_mode = ViewMode::Grid;
             }
-            if ui.selectable_label(self.view_mode == ViewMode::List, "\u{2630}") // List icon
+            if ui
+                .selectable_label(self.view_mode == ViewMode::List, "\u{2630}") // List icon
                 .on_hover_text("List view")
                 .clicked()
             {
@@ -396,8 +411,8 @@ impl AssetBrowserPanel {
             // Zoom slider (grid view only)
             if self.view_mode == ViewMode::Grid {
                 ui.label("Size:");
-                let slider = egui::Slider::new(&mut self.grid_item_size, 48.0..=192.0)
-                    .show_value(false);
+                let slider =
+                    egui::Slider::new(&mut self.grid_item_size, 48.0..=192.0).show_value(false);
                 if ui.add(slider).changed() {
                     self.grid_view.item_size = self.grid_item_size;
                 }
@@ -405,7 +420,11 @@ impl AssetBrowserPanel {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Rescan button
-                if ui.button("\u{27F3}").on_hover_text("Rescan assets").clicked() {
+                if ui
+                    .button("\u{27F3}")
+                    .on_hover_text("Rescan assets")
+                    .clicked()
+                {
                     self.request_rescan();
                 }
 
@@ -423,7 +442,9 @@ impl AssetBrowserPanel {
 
         // Extract folder renaming state
         let mut renaming_folder = match &self.renaming {
-            Some(RenameTarget::Folder { path, current_name }) => Some((path.clone(), current_name.clone())),
+            Some(RenameTarget::Folder { path, current_name }) => {
+                Some((path.clone(), current_name.clone()))
+            }
             _ => None,
         };
 
@@ -439,7 +460,11 @@ impl AssetBrowserPanel {
 
         // Sync folder renaming text back (if modified)
         if let Some((path, text)) = renaming_folder {
-            if let Some(RenameTarget::Folder { path: rename_path, current_name }) = &mut self.renaming {
+            if let Some(RenameTarget::Folder {
+                path: rename_path,
+                current_name,
+            }) = &mut self.renaming
+            {
                 if *rename_path == path {
                     *current_name = text;
                 }
@@ -455,17 +480,18 @@ impl AssetBrowserPanel {
                 // Folder is at root level
                 PathBuf::from(&new_name)
             };
-            self.events.push(AssetBrowserEvent::FolderRenamed {
-                old_path,
-                new_path,
-            });
+            self.events
+                .push(AssetBrowserEvent::FolderRenamed { old_path, new_path });
             self.renaming = None;
         }
 
         // Handle folder rename cancelled - only if the cancelled folder matches current renaming folder
         // This prevents cancelling a new rename when the old TextEdit loses focus
         if response.folder_rename_cancelled {
-            if let Some(RenameTarget::Folder { path: current_path, .. }) = &self.renaming {
+            if let Some(RenameTarget::Folder {
+                path: current_path, ..
+            }) = &self.renaming
+            {
                 if response.folder_rename_cancelled_path.as_ref() == Some(current_path) {
                     self.renaming = None;
                 }
@@ -483,9 +509,7 @@ impl AssetBrowserPanel {
                 self.events.push(AssetBrowserEvent::AssetMoved {
                     id: asset_id,
                     old_path: metadata.path.clone(),
-                    new_path: target_folder.join(
-                        metadata.path.file_name().unwrap_or_default()
-                    ),
+                    new_path: target_folder.join(metadata.path.file_name().unwrap_or_default()),
                 });
             }
             // Clear drag state after drop
@@ -507,7 +531,8 @@ impl AssetBrowserPanel {
         // Handle folder navigation
         if let Some(clicked) = response.clicked {
             self.current_folder = clicked.clone();
-            self.events.push(AssetBrowserEvent::FolderChanged { path: clicked });
+            self.events
+                .push(AssetBrowserEvent::FolderChanged { path: clicked });
         }
 
         // Handle folder context menu actions
@@ -515,7 +540,8 @@ impl AssetBrowserPanel {
             use views::FolderContextAction;
             match action {
                 FolderContextAction::NewFolder => {
-                    self.events.push(AssetBrowserEvent::CreateFolder { parent_path: path });
+                    self.events
+                        .push(AssetBrowserEvent::CreateFolder { parent_path: path });
                 }
                 FolderContextAction::Rename => {
                     // Start folder rename
@@ -540,7 +566,8 @@ impl AssetBrowserPanel {
                     });
                 }
                 FolderContextAction::RevealInExplorer => {
-                    self.events.push(AssetBrowserEvent::RevealFolderInExplorer { path });
+                    self.events
+                        .push(AssetBrowserEvent::RevealFolderInExplorer { path });
                 }
             }
         }
@@ -573,8 +600,20 @@ impl AssetBrowserPanel {
 
         match self.view_mode {
             ViewMode::Grid => {
-                let response = self.grid_view.show(ui, &assets, &mut self.thumbnails, &mut self.selection, &mut renaming_asset, icon_manager);
-                self.handle_view_response(response.clicked, response.double_clicked, response.context_menu, ui);
+                let response = self.grid_view.show(
+                    ui,
+                    &assets,
+                    &mut self.thumbnails,
+                    &mut self.selection,
+                    &mut renaming_asset,
+                    icon_manager,
+                );
+                self.handle_view_response(
+                    response.clicked,
+                    response.double_clicked,
+                    response.context_menu,
+                    ui,
+                );
 
                 // Handle rename request from context menu
                 if let Some(id) = response.rename_requested {
@@ -635,8 +674,19 @@ impl AssetBrowserPanel {
                 }
             }
             ViewMode::List => {
-                let response = self.list_view.show(ui, &assets, &mut self.selection, &mut renaming_asset, icon_manager);
-                self.handle_view_response(response.clicked, response.double_clicked, response.context_menu, ui);
+                let response = self.list_view.show(
+                    ui,
+                    &assets,
+                    &mut self.selection,
+                    &mut renaming_asset,
+                    icon_manager,
+                );
+                self.handle_view_response(
+                    response.clicked,
+                    response.double_clicked,
+                    response.context_menu,
+                    ui,
+                );
 
                 // Handle rename request from context menu
                 if let Some(id) = response.rename_requested {
@@ -708,7 +758,11 @@ impl AssetBrowserPanel {
 
         // Sync renaming_asset changes back (if text was modified)
         if let Some((id, text)) = renaming_asset {
-            if let Some(RenameTarget::Asset { id: rename_id, current_name }) = &mut self.renaming {
+            if let Some(RenameTarget::Asset {
+                id: rename_id,
+                current_name,
+            }) = &mut self.renaming
+            {
                 if *rename_id == id {
                     *current_name = text;
                 }
@@ -887,7 +941,8 @@ impl AssetBrowserPanel {
                 }
             } else if !self.current_folder.as_os_str().is_empty() {
                 // Second priority: rename current folder (if not at root)
-                let folder_name = self.current_folder
+                let folder_name = self
+                    .current_folder
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
@@ -915,13 +970,14 @@ impl AssetBrowserPanel {
         }
 
         // Backspace - navigate up one folder level
-        if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
-            if !self.current_folder.as_os_str().is_empty() {
-                if let Some(parent) = self.current_folder.parent() {
-                    let parent_path = parent.to_path_buf();
-                    self.current_folder = parent_path.clone();
-                    self.events.push(AssetBrowserEvent::FolderChanged { path: parent_path });
-                }
+        if ui.input(|i| i.key_pressed(egui::Key::Backspace))
+            && !self.current_folder.as_os_str().is_empty()
+        {
+            if let Some(parent) = self.current_folder.parent() {
+                let parent_path = parent.to_path_buf();
+                self.current_folder = parent_path.clone();
+                self.events
+                    .push(AssetBrowserEvent::FolderChanged { path: parent_path });
             }
         }
 
@@ -932,10 +988,8 @@ impl AssetBrowserPanel {
 
         // Arrow navigation and Ctrl+A require visible assets list
         let filter = self.build_filter();
-        let visible_assets: Vec<AssetId> = self.registry.query(&filter)
-            .iter()
-            .map(|m| m.id)
-            .collect();
+        let visible_assets: Vec<AssetId> =
+            self.registry.query(&filter).iter().map(|m| m.id).collect();
 
         if visible_assets.is_empty() {
             return;
@@ -962,7 +1016,8 @@ impl AssetBrowserPanel {
                     }
                 }
             } else {
-                self.selection.select(visible_assets[visible_assets.len() - 1]);
+                self.selection
+                    .select(visible_assets[visible_assets.len() - 1]);
             }
         }
 

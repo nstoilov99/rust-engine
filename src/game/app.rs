@@ -612,29 +612,29 @@ impl App {
             };
 
         let (vp_width, vp_height) = self.editor.viewport.size;
-        if vp_width != self.editor.viewport.texture.width()
-            || vp_height != self.editor.viewport.texture.height()
+        if (vp_width != self.editor.viewport.texture.width()
+            || vp_height != self.editor.viewport.texture.height())
+            && vp_width > 0
+            && vp_height > 0
         {
-            if vp_width > 0 && vp_height > 0 {
-                if let Ok(resized) = self.editor.viewport.texture.resize(vp_width, vp_height) {
-                    if resized {
-                        if let Some(texture_id) = self.editor.viewport.texture_id {
-                            self.editor.ui.gui.update_native_texture(
-                                texture_id,
-                                self.editor.viewport.texture.image_view(),
-                            );
-                        }
-                        self.editor
-                            .viewport
-                            .camera
-                            .set_viewport_size(vp_width as f32, vp_height as f32);
-                        self.core
-                            .renderer
-                            .camera_3d
-                            .set_viewport_size(vp_width as f32, vp_height as f32);
-                        if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
-                            eprintln!("Failed to resize deferred renderer: {}", e);
-                        }
+            if let Ok(resized) = self.editor.viewport.texture.resize(vp_width, vp_height) {
+                if resized {
+                    if let Some(texture_id) = self.editor.viewport.texture_id {
+                        self.editor.ui.gui.update_native_texture(
+                            texture_id,
+                            self.editor.viewport.texture.image_view(),
+                        );
+                    }
+                    self.editor
+                        .viewport
+                        .camera
+                        .set_viewport_size(vp_width as f32, vp_height as f32);
+                    self.core
+                        .renderer
+                        .camera_3d
+                        .set_viewport_size(vp_width as f32, vp_height as f32);
+                    if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
+                        eprintln!("Failed to resize deferred renderer: {}", e);
                     }
                 }
             }
@@ -838,59 +838,57 @@ impl App {
             match event {
                 AssetBrowserEvent::AssetOpened { id } => {
                     if let Some(metadata) = self.editor.scene.asset_browser.registry.get(id) {
-                        match metadata.asset_type {
-                            AssetType::Scene => {
-                                if self.play_mode() != PlayMode::Edit {
-                                    self.editor.console.messages.push(LogMessage::warning(
-                                        "Stop play mode before loading a scene".to_string(),
-                                    ));
-                                    continue;
+                        if metadata.asset_type == AssetType::Scene {
+                            if self.play_mode() != PlayMode::Edit {
+                                self.editor.console.messages.push(LogMessage::warning(
+                                    "Stop play mode before loading a scene".to_string(),
+                                ));
+                                continue;
+                            }
+
+                            if metadata.path.as_path()
+                                == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
+                                && !self.runtime_flags.benchmark_tools_enabled
+                            {
+                                self.editor.console.messages.push(LogMessage::warning(
+                                    "Benchmark scene access is locked behind --editor-benchmark-tools"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+
+                            let relative = metadata.path.to_string_lossy();
+
+                            self.core.game_world.reset_transients(false);
+                            self.editor.scene.selection.clear();
+                            self.core.physics_world = PhysicsWorld::new();
+
+                            match load_scene(self.core.game_world.hecs_mut(), &relative) {
+                                Ok((scene_name, root_entities)) => {
+                                    self.editor
+                                        .scene
+                                        .hierarchy_panel
+                                        .set_root_order(root_entities);
+                                    self.editor.scene.current_scene_relative = relative.to_string();
+                                    self.editor.scene.current_scene_name = scene_name.clone();
+                                    self.core.transform_cache = TransformCache::new();
+                                    self.core
+                                        .transform_cache
+                                        .propagate(self.core.game_world.hecs_mut());
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Loaded scene: {}",
+                                        scene_name
+                                    )));
+                                    println!("Scene loaded: {}", metadata.display_name);
                                 }
-
-                                if metadata.path.as_path()
-                                    == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
-                                    && !self.runtime_flags.benchmark_tools_enabled
-                                {
-                                    self.editor.console.messages.push(LogMessage::warning(
-                                        "Benchmark scene access is locked behind --editor-benchmark-tools"
-                                            .to_string(),
-                                    ));
-                                    continue;
-                                }
-
-                                let relative = metadata.path.to_string_lossy();
-
-                                self.core.game_world.reset_transients(false);
-                                self.editor.scene.selection.clear();
-                                self.core.physics_world = PhysicsWorld::new();
-
-                                match load_scene(self.core.game_world.hecs_mut(), &relative) {
-                                    Ok((scene_name, root_entities)) => {
-                                        self.editor
-                                            .scene
-                                            .hierarchy_panel
-                                            .set_root_order(root_entities);
-                                        self.editor.scene.current_scene_relative =
-                                            relative.to_string();
-                                        self.editor.scene.current_scene_name = scene_name.clone();
-                                        self.core.transform_cache = TransformCache::new();
-                                        self.core
-                                            .transform_cache
-                                            .propagate(self.core.game_world.hecs_mut());
-                                        self.editor.console.messages.push(LogMessage::info(
-                                            format!("Loaded scene: {}", scene_name),
-                                        ));
-                                        println!("Scene loaded: {}", metadata.display_name);
-                                    }
-                                    Err(e) => {
-                                        self.editor.console.messages.push(LogMessage::error(
-                                            format!("Failed to load scene: {}", e),
-                                        ));
-                                        eprintln!("Failed to load scene: {}", e);
-                                    }
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to load scene: {}",
+                                        e
+                                    )));
+                                    eprintln!("Failed to load scene: {}", e);
                                 }
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -1428,10 +1426,10 @@ impl App {
         ) {
             Ok(_) => {
                 println!("Scene saved to {}", scene_path.display());
-                self.editor.console.messages.push(LogMessage::info(format!(
-                    "Saved scene: {}",
-                    scene_relative
-                )));
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("Saved scene: {}", scene_relative)));
             }
             Err(error) => {
                 eprintln!("Save failed: {}", error);
@@ -1484,9 +1482,10 @@ impl App {
             .transform_cache
             .propagate(self.core.game_world.hecs_mut());
 
-        self.editor.console.messages.push(LogMessage::info(
-            "Loaded benchmark scene".to_string(),
-        ));
+        self.editor
+            .console
+            .messages
+            .push(LogMessage::info("Loaded benchmark scene".to_string()));
     }
 
     fn run_benchmark(&mut self) {
@@ -1788,9 +1787,7 @@ impl App {
         let viewport_usable =
             vp_w >= MIN_VIEWPORT_SIZE_FOR_CAMERA && vp_h >= MIN_VIEWPORT_SIZE_FOR_CAMERA;
 
-        if is_playing {
-            self.editor.viewport.camera.reset_active_drag();
-        } else if !viewport_usable && self.editor.viewport.camera.is_active_drag() {
+        if is_playing || (!viewport_usable && self.editor.viewport.camera.is_active_drag()) {
             self.editor.viewport.camera.reset_active_drag();
         }
 

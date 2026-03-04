@@ -32,12 +32,9 @@ pub fn build_guid_map(world: &hecs::World) -> HashMap<Uuid, Entity> {
 
 /// Get the GUID of the primary selected entity, if it has one.
 pub fn selection_guid(world: &hecs::World, selection: &Selection) -> Option<Uuid> {
-    selection.primary().and_then(|entity| {
-        world
-            .get::<&EntityGuid>(entity)
-            .ok()
-            .map(|g| g.0)
-    })
+    selection
+        .primary()
+        .and_then(|entity| world.get::<&EntityGuid>(entity).ok().map(|g| g.0))
 }
 
 /// Create a snapshot of the current scene state.
@@ -49,18 +46,13 @@ pub fn create_snapshot(
 ) -> Result<PlayModeSnapshot, Box<dyn std::error::Error>> {
     hierarchy_panel.sync_root_order(world);
 
-    let scene_data = serialize_scene_to_string(
-        world,
-        "PlayModeSnapshot",
-        hierarchy_panel.root_order(),
-    )?;
+    let scene_data =
+        serialize_scene_to_string(world, "PlayModeSnapshot", hierarchy_panel.root_order())?;
 
     let root_order_guids: Vec<Uuid> = hierarchy_panel
         .root_order()
         .iter()
-        .filter_map(|&entity| {
-            world.get::<&EntityGuid>(entity).ok().map(|g| g.0)
-        })
+        .filter_map(|&entity| world.get::<&EntityGuid>(entity).ok().map(|g| g.0))
         .collect();
 
     let selected_guid = selection_guid(world, selection);
@@ -83,10 +75,8 @@ pub fn restore_snapshot(
     command_history: &mut CommandHistory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load scene from snapshot RON string (clears world internally)
-    let (_name, root_entities) = load_scene_from_string(
-        game_world.hecs_mut(),
-        &snapshot.scene_data,
-    )?;
+    let (_name, root_entities) =
+        load_scene_from_string(game_world.hecs_mut(), &snapshot.scene_data)?;
 
     // Build GUID -> Entity map for the restored world
     let guid_map = build_guid_map(game_world.hecs());

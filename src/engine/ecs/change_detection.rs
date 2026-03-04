@@ -59,7 +59,7 @@ impl ChangeTicks {
         let key = (entity, TypeId::of::<T>());
         self.added
             .get(&key)
-            .map_or(false, |&frame| self.current_frame.saturating_sub(frame) <= max_age)
+            .is_some_and(|&frame| self.current_frame.saturating_sub(frame) <= max_age)
     }
 
     /// Check if a component was changed within `max_age` frames.
@@ -67,7 +67,7 @@ impl ChangeTicks {
         let key = (entity, TypeId::of::<T>());
         self.changed
             .get(&key)
-            .map_or(false, |&frame| self.current_frame.saturating_sub(frame) <= max_age)
+            .is_some_and(|&frame| self.current_frame.saturating_sub(frame) <= max_age)
     }
 
     /// Remove all tracking data for an entity (call on despawn).

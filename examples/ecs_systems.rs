@@ -1,7 +1,7 @@
 use hecs::World;
 use rust_engine::engine::ecs::{
     components::*,
-    systems::{System, SystemScheduler, MovementSystem, RotationSystem},
+    systems::{MovementSystem, RotationSystem, System, SystemScheduler},
 };
 
 fn main() {
@@ -17,7 +17,9 @@ fn main() {
 
     // Add systems
     scheduler.add_system(Box::new(MovementSystem { speed: 2.0 }));
-    scheduler.add_system(Box::new(RotationSystem { rotation_speed: 1.0 }));
+    scheduler.add_system(Box::new(RotationSystem {
+        rotation_speed: 1.0,
+    }));
 
     // Simulate 5 frames
     let delta_time = 1.0 / 60.0; // 60 FPS

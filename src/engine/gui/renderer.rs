@@ -10,9 +10,9 @@ use vulkano::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
         RenderPassBeginInfo, SubpassBeginInfo, SubpassEndInfo,
     },
+    command_buffer::{CopyBufferToImageInfo, PrimaryCommandBufferAbstract},
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, DescriptorSet,
-        WriteDescriptorSet,
+        allocator::StandardDescriptorSetAllocator, DescriptorSet, WriteDescriptorSet,
     },
     device::{Device, Queue},
     format::Format,
@@ -35,9 +35,8 @@ use vulkano::{
         layout::PipelineDescriptorSetLayoutCreateInfo,
         DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
     },
+    pipeline::{Pipeline, PipelineBindPoint},
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    pipeline::{PipelineBindPoint, Pipeline},
-    command_buffer::{CopyBufferToImageInfo, PrimaryCommandBufferAbstract},
     sync::GpuFuture,
 };
 
@@ -157,8 +156,14 @@ impl EguiRenderer {
         )?;
         let placeholder_buf = Buffer::from_iter(
             memory_allocator.clone(),
-            BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-            AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
             [255u8, 255, 255, 255],
         )?;
         let mut ph_builder = AutoCommandBufferBuilder::primary(
@@ -166,9 +171,15 @@ impl EguiRenderer {
             queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
-        ph_builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(placeholder_buf, placeholder_image.clone()))?;
+        ph_builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            placeholder_buf,
+            placeholder_image.clone(),
+        ))?;
         let ph_cb = ph_builder.build()?;
-        ph_cb.execute(queue.clone())?.then_signal_fence_and_flush()?.wait(None)?;
+        ph_cb
+            .execute(queue.clone())?
+            .then_signal_fence_and_flush()?
+            .wait(None)?;
         let placeholder_view = ImageView::new_default(placeholder_image)?;
 
         Ok(Self {
@@ -204,8 +215,7 @@ impl EguiRenderer {
         let fs = fs::load(device.clone())?;
 
         let vs_entry = vs.entry_point("main").unwrap();
-        let vertex_input_state = EguiVertex::per_vertex()
-            .definition(&vs_entry)?;
+        let vertex_input_state = EguiVertex::per_vertex().definition(&vs_entry)?;
 
         let fs_entry = fs.entry_point("main").unwrap();
         let stages = [
@@ -235,11 +245,15 @@ impl EguiRenderer {
                 color_blend_state: Some(ColorBlendState::with_attachment_states(
                     subpass.num_color_attachments(),
                     ColorBlendAttachmentState {
-                        blend: Some(vulkano::pipeline::graphics::color_blend::AttachmentBlend::alpha()),
+                        blend: Some(
+                            vulkano::pipeline::graphics::color_blend::AttachmentBlend::alpha(),
+                        ),
                         ..Default::default()
                     },
                 )),
-                dynamic_state: [DynamicState::Viewport, DynamicState::Scissor].into_iter().collect(),
+                dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
+                    .into_iter()
+                    .collect(),
                 subpass: Some(subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
@@ -258,7 +272,10 @@ impl EguiRenderer {
         let mut still_pending = Vec::new();
         for mut upload in self.pending_uploads.drain(..) {
             // Use a very short wait — if the GPU hasn't finished, keep it pending.
-            match upload.fence.wait(Some(std::time::Duration::from_micros(100))) {
+            match upload
+                .fence
+                .wait(Some(std::time::Duration::from_micros(100)))
+            {
                 Ok(()) => {
                     upload.fence.cleanup_finished();
                     if let Some(view) = upload.new_view {
@@ -280,15 +297,19 @@ impl EguiRenderer {
     /// New textures become visible through the placeholder until the fence
     /// signals. Partial updates are written in-place to the existing image;
     /// the old content remains visible until the upload completes.
-    fn upload_texture(&mut self, texture_id: egui::TextureId, image_delta: &egui::epaint::ImageDelta) -> Result<(), Box<dyn std::error::Error>> {
+    fn upload_texture(
+        &mut self,
+        texture_id: egui::TextureId,
+        image_delta: &egui::epaint::ImageDelta,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let delta_size = image_delta.image.size();
 
         let pixels: Vec<u8> = match &image_delta.image {
-            egui::ImageData::Color(img) => {
-                img.pixels.iter()
-                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
-                    .collect()
-            }
+            egui::ImageData::Color(img) => img
+                .pixels
+                .iter()
+                .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+                .collect(),
         };
 
         if let Some(pos) = image_delta.pos {
@@ -298,8 +319,14 @@ impl EguiRenderer {
 
                 let buffer = Buffer::from_iter(
                     self.memory_allocator.clone(),
-                    BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-                    AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+                    BufferCreateInfo {
+                        usage: BufferUsage::TRANSFER_SRC,
+                        ..Default::default()
+                    },
+                    AllocationCreateInfo {
+                        memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
                     pixels,
                 )?;
 
@@ -320,11 +347,16 @@ impl EguiRenderer {
                         image_offset: [pos[0] as u32, pos[1] as u32, 0],
                         image_extent: [delta_size[0] as u32, delta_size[1] as u32, 1],
                         ..Default::default()
-                    }].into(),
+                    }]
+                    .into(),
                     ..CopyBufferToImageInfo::buffer_image(buffer, existing_image.clone())
                 })?;
 
-                let fence = builder.build()?.execute(self.queue.clone()).map(|f| f.boxed())?.then_signal_fence_and_flush()?;
+                let fence = builder
+                    .build()?
+                    .execute(self.queue.clone())
+                    .map(|f| f.boxed())?
+                    .then_signal_fence_and_flush()?;
                 self.pending_uploads.push(PendingUpload {
                     texture_id,
                     fence,
@@ -347,8 +379,14 @@ impl EguiRenderer {
 
             let buffer = Buffer::from_iter(
                 self.memory_allocator.clone(),
-                BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-                AllocationCreateInfo { memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE, ..Default::default() },
+                BufferCreateInfo {
+                    usage: BufferUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
                 pixels,
             )?;
 
@@ -357,14 +395,20 @@ impl EguiRenderer {
                 self.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )?;
-            builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
+            builder
+                .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
 
-            let fence = builder.build()?.execute(self.queue.clone()).map(|f| f.boxed())?.then_signal_fence_and_flush()?;
+            let fence = builder
+                .build()?
+                .execute(self.queue.clone())
+                .map(|f| f.boxed())?
+                .then_signal_fence_and_flush()?;
             let view = ImageView::new_default(image)?;
 
             // Install placeholder so the texture id is drawable immediately.
             if !self.texture_cache.contains_key(&texture_id) {
-                self.texture_cache.insert(texture_id, self.placeholder_view.clone());
+                self.texture_cache
+                    .insert(texture_id, self.placeholder_view.clone());
                 self.descriptor_set_cache.remove(&texture_id);
             }
 
@@ -392,7 +436,11 @@ impl EguiRenderer {
     /// Update an existing native texture with a new image view
     ///
     /// Used when the viewport is resized and the texture needs to be recreated.
-    pub fn update_native_texture(&mut self, texture_id: egui::TextureId, image_view: Arc<ImageView>) {
+    pub fn update_native_texture(
+        &mut self,
+        texture_id: egui::TextureId,
+        image_view: Arc<ImageView>,
+    ) {
         self.texture_cache.insert(texture_id, image_view);
         // Invalidate cached descriptor set since texture changed
         self.descriptor_set_cache.remove(&texture_id);
@@ -410,7 +458,8 @@ impl EguiRenderer {
         clipped_primitives: Vec<ClippedPrimitive>,
         textures_delta: TexturesDelta,
         screen_rect: Rect,
-    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
+    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>>
+    {
         crate::profile_function!();
 
         // Submit texture uploads (non-blocking: each gets its own command
@@ -540,7 +589,8 @@ impl EguiRenderer {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             self.batched_vertices.iter().copied(),
@@ -553,7 +603,8 @@ impl EguiRenderer {
                 ..Default::default()
             },
             AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             self.batched_indices.iter().copied(),
@@ -593,37 +644,43 @@ impl EguiRenderer {
 
         // Push constants (same for all draws)
         let push_constants = PushConstants { screen_size };
-        builder.push_constants(
-            self.pipeline.layout().clone(),
-            0,
-            push_constants,
-        )?;
+        builder.push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
 
         // Issue draw commands
         crate::profile_scope!("draw_commands");
         for cmd in &draw_commands {
             // Get or create cached descriptor set for this texture
-            let descriptor_set = if let Some(cached) = self.descriptor_set_cache.get(&cmd.texture_id) {
-                cached.clone()
-            } else {
-                let texture_view = self.texture_cache.get(&cmd.texture_id)
-                    .ok_or("Texture not found")?;
+            let descriptor_set =
+                if let Some(cached) = self.descriptor_set_cache.get(&cmd.texture_id) {
+                    cached.clone()
+                } else {
+                    let texture_view = self
+                        .texture_cache
+                        .get(&cmd.texture_id)
+                        .ok_or("Texture not found")?;
 
-                let layout = self.pipeline.layout().set_layouts().get(0)
-                    .ok_or("No descriptor set layout")?;
+                    let layout = self
+                        .pipeline
+                        .layout()
+                        .set_layouts()
+                        .first()
+                        .ok_or("No descriptor set layout")?;
 
-                let new_set = DescriptorSet::new(
-                    self.descriptor_set_allocator.clone(),
-                    layout.clone(),
-                    [
-                        WriteDescriptorSet::image_view_sampler(0, texture_view.clone(), self.sampler.clone()),
-                    ],
-                    [],
-                )?;
+                    let new_set = DescriptorSet::new(
+                        self.descriptor_set_allocator.clone(),
+                        layout.clone(),
+                        [WriteDescriptorSet::image_view_sampler(
+                            0,
+                            texture_view.clone(),
+                            self.sampler.clone(),
+                        )],
+                        [],
+                    )?;
 
-                self.descriptor_set_cache.insert(cmd.texture_id, new_set.clone());
-                new_set
-            };
+                    self.descriptor_set_cache
+                        .insert(cmd.texture_id, new_set.clone());
+                    new_set
+                };
 
             // Set scissor rectangle for clipping
             let scissor = vulkano::pipeline::graphics::viewport::Scissor {

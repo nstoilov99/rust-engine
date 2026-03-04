@@ -1,7 +1,7 @@
 use hecs::World;
-use rust_engine::engine::ecs::components::*;
-use rust_engine::engine::scene::{save_scene, load_scene};
 use nalgebra_glm as glm;
+use rust_engine::engine::ecs::components::*;
+use rust_engine::engine::scene::{load_scene, save_scene};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Scene Serialization Demo ===\n");
@@ -16,8 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     world.spawn((
-        Transform::new(glm::vec3(0.0, 0.0, 0.0))
-            .with_scale(glm::vec3(0.01, 0.01, 0.01)),
+        Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_scale(glm::vec3(0.01, 0.01, 0.01)),
         MeshRenderer {
             mesh_index: 0,
             material_index: 0,
@@ -45,7 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load scene
     let scene_name = load_scene(&mut world, "assets/scenes/demo.scene.ron")?;
-    println!("\nLoaded scene '{}' with {} entities\n", scene_name, world.len());
+    println!(
+        "\nLoaded scene '{}' with {} entities\n",
+        scene_name,
+        world.len()
+    );
 
     // Verify loaded entities
     println!("=== Loaded Entities ===");

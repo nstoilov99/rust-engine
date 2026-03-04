@@ -1,4 +1,4 @@
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 
 /// 3D perspective camera
 ///
@@ -6,13 +6,13 @@ use glam::{Vec3, Mat4};
 /// No conversion needed - camera works in Vulkan-native coordinates.
 /// GUI displays Z-up equivalent for user convenience.
 pub struct Camera3D {
-    pub position: Vec3,       // Camera position (Y-up render space)
-    pub target: Vec3,         // What the camera looks at (Y-up render space)
-    pub up: Vec3,             // Up direction (Vec3::Y in Y-up space)
-    pub fov: f32,             // Field of view in radians
-    pub aspect_ratio: f32,    // Width / height
-    pub near: f32,            // Near clip plane
-    pub far: f32,             // Far clip plane
+    pub position: Vec3,    // Camera position (Y-up render space)
+    pub target: Vec3,      // What the camera looks at (Y-up render space)
+    pub up: Vec3,          // Up direction (Vec3::Y in Y-up space)
+    pub fov: f32,          // Field of view in radians
+    pub aspect_ratio: f32, // Width / height
+    pub near: f32,         // Near clip plane
+    pub far: f32,          // Far clip plane
 }
 
 impl Camera3D {
@@ -24,7 +24,7 @@ impl Camera3D {
             // Y-up: elevated 5 units in +Y, back 10 units in +Z
             position: Vec3::new(0.0, 5.0, 10.0),
             target: Vec3::ZERO,
-            up: Vec3::Y,  // Y is up in render space
+            up: Vec3::Y, // Y is up in render space
             fov: 45.0_f32.to_radians(),
             aspect_ratio: viewport_width / viewport_height,
             near: 0.1,

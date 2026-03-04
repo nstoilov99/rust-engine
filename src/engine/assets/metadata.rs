@@ -81,12 +81,7 @@ impl AssetMetadata {
     }
 
     /// Create metadata with explicit values (for testing or manual creation)
-    pub fn new(
-        path: PathBuf,
-        asset_type: AssetType,
-        display_name: String,
-        file_size: u64,
-    ) -> Self {
+    pub fn new(path: PathBuf, asset_type: AssetType, display_name: String, file_size: u64) -> Self {
         let id = AssetId::from_path(path.to_str().unwrap_or(""));
         Self {
             id,
@@ -104,10 +99,7 @@ impl AssetMetadata {
 
     /// Get the filename without directory path
     pub fn filename(&self) -> &str {
-        self.path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
+        self.path.file_name().and_then(|s| s.to_str()).unwrap_or("")
     }
 
     /// Get the parent folder path

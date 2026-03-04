@@ -1,6 +1,6 @@
 use super::BenchmarkResults;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,7 +21,7 @@ pub fn write_report(results: &BenchmarkResults) -> Result<PathBuf, Box<dyn std::
     Ok(path)
 }
 
-pub fn print_summary(path: &PathBuf, results: &BenchmarkResults) {
+pub fn print_summary(path: &Path, results: &BenchmarkResults) {
     println!("Benchmark complete");
     println!("Report: {}", path.display());
     println!("Present mode: {}", results.metadata.present_mode);

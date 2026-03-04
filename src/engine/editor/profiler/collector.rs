@@ -43,7 +43,7 @@ impl ProfilerCollector {
         // Prevent unbounded memory growth: clear caches periodically
         // The scope_collection is just a lookup cache that gets rebuilt from scope_delta
         // Typical apps have <500 unique scopes, so 1000 is a generous limit
-        if self.frame_count % 1000 == 0 {
+        if self.frame_count.is_multiple_of(1000) {
             let scope_count = self.scope_collection.scopes_by_id().len();
             if scope_count > 1000 {
                 self.scope_collection = ScopeCollection::default();
@@ -57,14 +57,16 @@ impl ProfilerCollector {
         }
 
         #[allow(irrefutable_let_patterns)]
-        let Ok(unpacked) = frame_data.unpacked() else { return; };
+        let Ok(unpacked) = frame_data.unpacked() else {
+            return;
+        };
 
         let mut threads = Vec::new();
         let mut total_scopes = 0;
 
         for (thread_info, stream_info) in &unpacked.thread_streams {
             let scopes = self.parse_scopes(&stream_info.stream);
-            let scope_count: usize = scopes.iter().map(|s| count_scopes(s)).sum();
+            let scope_count: usize = scopes.iter().map(count_scopes).sum();
             total_scopes += scope_count;
 
             let max_depth = calculate_max_depth(&scopes);
@@ -155,22 +157,24 @@ impl ProfilerCollector {
         }
 
         // Compute strings (slow path - only happens once per unique scope)
-        let (name, location): (Arc<str>, Arc<str>) = if let Some(details) = self.scope_collection.fetch_by_id(scope_id) {
-            let name_str = details
-                .scope_name
-                .as_ref()
-                .map(|s| s.as_ref())
-                .unwrap_or_else(|| details.function_name.as_ref());
-            let location = format!("{}:{}", details.file_path, details.line_nr);
-            (Arc::from(name_str), Arc::from(location.as_str()))
-        } else {
-            // Fallback if details not found
-            let name = format!("scope_{}", scope_id.0);
-            (Arc::from(name.as_str()), Arc::from(""))
-        };
+        let (name, location): (Arc<str>, Arc<str>) =
+            if let Some(details) = self.scope_collection.fetch_by_id(scope_id) {
+                let name_str = details
+                    .scope_name
+                    .as_ref()
+                    .map(|s| s.as_ref())
+                    .unwrap_or_else(|| details.function_name.as_ref());
+                let location = format!("{}:{}", details.file_path, details.line_nr);
+                (Arc::from(name_str), Arc::from(location.as_str()))
+            } else {
+                // Fallback if details not found
+                let name = format!("scope_{}", scope_id.0);
+                (Arc::from(name.as_str()), Arc::from(""))
+            };
 
         // Cache for future use
-        self.string_cache.insert(*scope_id, (name.clone(), location.clone()));
+        self.string_cache
+            .insert(*scope_id, (name.clone(), location.clone()));
         (name, location)
     }
 }
@@ -192,7 +196,7 @@ pub fn create_profiler_channel() -> (Receiver<Arc<ProfileFrame>>, puffin::FrameS
 
 /// Count total scopes recursively
 fn count_scopes(scope: &ProfileScope) -> usize {
-    1 + scope.children.iter().map(|c| count_scopes(c)).sum::<usize>()
+    1 + scope.children.iter().map(count_scopes).sum::<usize>()
 }
 
 /// Calculate maximum depth in scope tree
@@ -204,11 +208,11 @@ fn calculate_max_depth(scopes: &[ProfileScope]) -> usize {
             scope
                 .children
                 .iter()
-                .map(|c| depth_recursive(c))
+                .map(depth_recursive)
                 .max()
                 .unwrap_or(scope.depth)
         }
     }
 
-    scopes.iter().map(|s| depth_recursive(s)).max().unwrap_or(0)
+    scopes.iter().map(depth_recursive).max().unwrap_or(0)
 }

@@ -121,7 +121,7 @@ impl EditorDockState {
 
     /// Load layout from the default file path, or create a new default layout
     pub fn load_or_default() -> Self {
-        Self::load(&Self::default_layout_path()).unwrap_or_else(Self::new)
+        Self::load(&Self::default_layout_path()).unwrap_or_default()
     }
 }
 
@@ -142,19 +142,24 @@ pub fn create_default_dock_state() -> DockState<EditorTab> {
     let mut dock_state = DockState::new(vec![EditorTab::Viewport]);
 
     // Split: Add hierarchy on the left (20% width)
-    let [_hierarchy_node, center_node] = dock_state
-        .main_surface_mut()
-        .split_left(NodeIndex::root(), 0.20, vec![EditorTab::Hierarchy]);
+    let [_hierarchy_node, center_node] = dock_state.main_surface_mut().split_left(
+        NodeIndex::root(),
+        0.20,
+        vec![EditorTab::Hierarchy],
+    );
 
     // Split: Add inspector on the right (25% of remaining = ~20% total)
-    let [viewport_node, _inspector_node] = dock_state
-        .main_surface_mut()
-        .split_right(center_node, 0.75, vec![EditorTab::Inspector]);
+    let [viewport_node, _inspector_node] =
+        dock_state
+            .main_surface_mut()
+            .split_right(center_node, 0.75, vec![EditorTab::Inspector]);
 
     // Split: Add bottom panel with console and profiler as tabs below viewport (25% height)
-    let [_viewport_final, _bottom_node] = dock_state
-        .main_surface_mut()
-        .split_below(viewport_node, 0.75, vec![EditorTab::Console, EditorTab::Profiler]);
+    let [_viewport_final, _bottom_node] = dock_state.main_surface_mut().split_below(
+        viewport_node,
+        0.75,
+        vec![EditorTab::Console, EditorTab::Profiler],
+    );
 
     dock_state
 }

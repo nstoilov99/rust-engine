@@ -1,12 +1,12 @@
 //! Scene Hierarchy Panel - tree view of all entities
 
 use super::Selection;
+use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     hierarchy::{can_set_parent, despawn_recursive, get_root_entities, remove_parent, set_parent},
     Camera, Children, DirectionalLight, EntityGuid, MeshRenderer, Name, Parent, PointLight,
     Transform,
 };
-use crate::engine::ecs::resources::PlayMode;
 use egui::{pos2, Color32, Context, RichText, ScrollArea, SidePanel, Stroke, TextEdit, Ui};
 use hecs::{Entity, World};
 use std::collections::HashSet;
@@ -94,7 +94,13 @@ impl HierarchyPanel {
     }
 
     /// Render the hierarchy panel as a side panel
-    pub fn show(&mut self, ctx: &Context, world: &mut World, selection: &mut Selection, play_mode: PlayMode) {
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        world: &mut World,
+        selection: &mut Selection,
+        play_mode: PlayMode,
+    ) {
         SidePanel::left("hierarchy_panel")
             .resizable(true)
             .default_width(250.0)
@@ -105,7 +111,13 @@ impl HierarchyPanel {
     }
 
     /// Render just the contents (for use inside dock tabs)
-    pub fn show_contents(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, play_mode: PlayMode) {
+    pub fn show_contents(
+        &mut self,
+        ui: &mut Ui,
+        world: &mut World,
+        selection: &mut Selection,
+        play_mode: PlayMode,
+    ) {
         let read_only = play_mode != PlayMode::Edit;
 
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -227,7 +239,13 @@ impl HierarchyPanel {
 
     // ─── render tree with virtualization ────────────────────────────────
 
-    fn render_tree(&mut self, ui: &mut Ui, world: &mut World, selection: &mut Selection, read_only: bool) {
+    fn render_tree(
+        &mut self,
+        ui: &mut Ui,
+        world: &mut World,
+        selection: &mut Selection,
+        read_only: bool,
+    ) {
         self.sync_root_order(world);
 
         if read_only {
@@ -267,8 +285,17 @@ impl HierarchyPanel {
                     let name = self.flat_rows[idx].name.clone();
 
                     self.render_row(
-                        ui, world, selection, entity, depth, &name,
-                        has_children, is_expanded, icon, icon_color, read_only,
+                        ui,
+                        world,
+                        selection,
+                        entity,
+                        depth,
+                        &name,
+                        has_children,
+                        is_expanded,
+                        icon,
+                        icon_color,
+                        read_only,
                     );
                 }
             });
@@ -287,6 +314,7 @@ impl HierarchyPanel {
     }
 
     /// Render a single flattened row.
+    #[allow(clippy::too_many_arguments)]
     fn render_row(
         &mut self,
         ui: &mut Ui,
@@ -305,9 +333,9 @@ impl HierarchyPanel {
         let is_renaming = self.renaming_entity == Some(entity);
         let entity_id = entity.id() as u64;
 
-        let is_valid_drop_target = self.drag_source.map_or(false, |source| {
-            source != entity && can_set_parent(world, source, entity)
-        });
+        let is_valid_drop_target = self
+            .drag_source
+            .is_some_and(|source| source != entity && can_set_parent(world, source, entity));
 
         let row_response = ui.horizontal(|ui| {
             Self::draw_tree_guides(ui, depth);
@@ -358,7 +386,8 @@ impl HierarchyPanel {
             ui.label(RichText::new(icon).color(icon_color));
 
             if is_renaming {
-                let response = ui.add(TextEdit::singleline(&mut self.rename_buffer).desired_width(100.0));
+                let response =
+                    ui.add(TextEdit::singleline(&mut self.rename_buffer).desired_width(100.0));
                 response.request_focus();
 
                 if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -429,7 +458,12 @@ impl HierarchyPanel {
             );
         }
 
-        if self.drag_source.is_some() && is_hovered && has_children && !is_expanded && is_valid_drop_target {
+        if self.drag_source.is_some()
+            && is_hovered
+            && has_children
+            && !is_expanded
+            && is_valid_drop_target
+        {
             if self.drag_hover_entity != Some(entity) {
                 self.drag_hover_entity = Some(entity);
                 self.drag_hover_start = Some(Instant::now());
@@ -573,7 +607,10 @@ impl HierarchyPanel {
             .get::<&Name>(entity)
             .map(|n| format!("{} (Copy)", n.0))
             .unwrap_or_else(|_| "Entity (Copy)".to_string());
-        let transform = world.get::<&Transform>(entity).map(|t| *t).unwrap_or_default();
+        let transform = world
+            .get::<&Transform>(entity)
+            .map(|t| *t)
+            .unwrap_or_default();
         world.spawn((transform, Name::new(name), EntityGuid::new()));
     }
 
@@ -629,7 +666,9 @@ impl HierarchyPanel {
             }
 
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-            let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
+            let is_hovered = pointer_pos
+                .map(|p| response.rect.contains(p))
+                .unwrap_or(false);
 
             if is_hovered {
                 let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
@@ -656,7 +695,8 @@ impl HierarchyPanel {
                                 Stroke::new(2.0, Color32::from_rgb(100, 200, 100)),
                                 egui::epaint::StrokeKind::Outside,
                             );
-                            let icon_pos = pos2(response.rect.right() - 16.0, response.rect.center().y);
+                            let icon_pos =
+                                pos2(response.rect.right() - 16.0, response.rect.center().y);
                             ui.painter().text(
                                 icon_pos,
                                 egui::Align2::CENTER_CENTER,
@@ -684,7 +724,9 @@ impl HierarchyPanel {
                 }
 
                 let pointer_pos = ui.input(|i| i.pointer.interact_pos());
-                let is_hovered = pointer_pos.map(|p| response.rect.contains(p)).unwrap_or(false);
+                let is_hovered = pointer_pos
+                    .map(|p| response.rect.contains(p))
+                    .unwrap_or(false);
 
                 if is_hovered {
                     let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
@@ -700,11 +742,8 @@ impl HierarchyPanel {
     }
 
     fn draw_insertion_line(&self, ui: &mut Ui, line_y: f32, rect: &egui::Rect) {
-        ui.painter().hline(
-            rect.x_range(),
-            line_y,
-            Stroke::new(2.0, Color32::YELLOW),
-        );
+        ui.painter()
+            .hline(rect.x_range(), line_y, Stroke::new(2.0, Color32::YELLOW));
         let arrow_left = rect.left() - 8.0;
         let arrow_size = 5.0;
         let arrow_points = vec![
@@ -753,7 +792,11 @@ impl HierarchyPanel {
                 if let Ok(mut children) = world.get::<&mut Children>(parent) {
                     if let Some(target_idx) = children.index_of(target) {
                         let source_idx = children.index_of(source);
-                        let mut insert_idx = if drop_above { target_idx } else { target_idx + 1 };
+                        let mut insert_idx = if drop_above {
+                            target_idx
+                        } else {
+                            target_idx + 1
+                        };
                         if let Some(src_idx) = source_idx {
                             if src_idx < target_idx {
                                 insert_idx = insert_idx.saturating_sub(1);
@@ -762,36 +805,44 @@ impl HierarchyPanel {
                         children.move_to_index(source, insert_idx);
                     }
                 }
-            } else {
-                if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
-                    let source_idx = self.root_order.iter().position(|&e| e == source);
-                    let mut insert_idx = if drop_above { target_idx } else { target_idx + 1 };
-                    if let Some(src_idx) = source_idx {
-                        if src_idx < target_idx {
-                            insert_idx = insert_idx.saturating_sub(1);
-                        }
+            } else if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
+                let source_idx = self.root_order.iter().position(|&e| e == source);
+                let mut insert_idx = if drop_above {
+                    target_idx
+                } else {
+                    target_idx + 1
+                };
+                if let Some(src_idx) = source_idx {
+                    if src_idx < target_idx {
+                        insert_idx = insert_idx.saturating_sub(1);
                     }
-                    self.move_root(source, insert_idx);
+                }
+                self.move_root(source, insert_idx);
+            }
+        } else if let Some(parent) = target_parent {
+            set_parent(world, source, parent);
+            if let Ok(mut children) = world.get::<&mut Children>(parent) {
+                if let Some(target_idx) = children.index_of(target) {
+                    let insert_idx = if drop_above {
+                        target_idx
+                    } else {
+                        target_idx + 1
+                    };
+                    children.move_to_index(source, insert_idx);
                 }
             }
         } else {
-            if let Some(parent) = target_parent {
-                set_parent(world, source, parent);
-                if let Ok(mut children) = world.get::<&mut Children>(parent) {
-                    if let Some(target_idx) = children.index_of(target) {
-                        let insert_idx = if drop_above { target_idx } else { target_idx + 1 };
-                        children.move_to_index(source, insert_idx);
-                    }
-                }
-            } else {
-                remove_parent(world, source);
-                if !self.root_order.contains(&source) {
-                    self.root_order.push(source);
-                }
-                if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
-                    let insert_idx = if drop_above { target_idx } else { target_idx + 1 };
-                    self.move_root(source, insert_idx);
-                }
+            remove_parent(world, source);
+            if !self.root_order.contains(&source) {
+                self.root_order.push(source);
+            }
+            if let Some(target_idx) = self.root_order.iter().position(|&e| e == target) {
+                let insert_idx = if drop_above {
+                    target_idx
+                } else {
+                    target_idx + 1
+                };
+                self.move_root(source, insert_idx);
             }
         }
     }

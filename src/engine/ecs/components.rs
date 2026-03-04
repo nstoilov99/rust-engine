@@ -338,3 +338,147 @@ mod quat_serde {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform_default_is_identity() {
+        let t = Transform::default();
+        assert_eq!(t.position, glm::vec3(0.0, 0.0, 0.0));
+        assert!((t.rotation.coords.w - 1.0).abs() < 1e-6);
+        assert!(t.rotation.coords.x.abs() < 1e-6);
+        assert!(t.rotation.coords.y.abs() < 1e-6);
+        assert!(t.rotation.coords.z.abs() < 1e-6);
+        assert_eq!(t.scale, glm::vec3(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn transform_new_sets_position() {
+        let t = Transform::new(glm::vec3(1.0, 2.0, 3.0));
+        assert_eq!(t.position, glm::vec3(1.0, 2.0, 3.0));
+        // Default rotation and scale
+        assert!((t.rotation.coords.w - 1.0).abs() < 1e-6);
+        assert_eq!(t.scale, glm::vec3(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn transform_builder_with_scale() {
+        let t = Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_scale(glm::vec3(2.0, 3.0, 4.0));
+        assert_eq!(t.scale, glm::vec3(2.0, 3.0, 4.0));
+    }
+
+    #[test]
+    fn transform_builder_with_rotation() {
+        let rot = glm::quat_angle_axis(std::f32::consts::FRAC_PI_2, &glm::vec3(0.0, 0.0, 1.0));
+        let t = Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_rotation(rot);
+
+        let diff = (t.rotation.coords - rot.coords).norm();
+        assert!(diff < 1e-6, "rotation should match");
+    }
+
+    #[test]
+    fn transform_local_matrix_identity() {
+        let t = Transform::default();
+        let mat = t.local_matrix_zup();
+        let expected = glm::identity::<f32, 4>();
+
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (mat[(i, j)] - expected[(i, j)]).abs() < 1e-5,
+                    "matrix[{},{}] should be identity",
+                    i,
+                    j
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transform_local_matrix_translation() {
+        let t = Transform::new(glm::vec3(5.0, 10.0, 15.0));
+        let mat = t.local_matrix_zup();
+
+        // Translation is in the last column
+        assert!((mat[(0, 3)] - 5.0).abs() < 1e-5);
+        assert!((mat[(1, 3)] - 10.0).abs() < 1e-5);
+        assert!((mat[(2, 3)] - 15.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn transform_local_matrix_scale() {
+        let t = Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_scale(glm::vec3(2.0, 3.0, 4.0));
+        let mat = t.local_matrix_zup();
+        let det = glm::determinant(&mat);
+
+        assert!(
+            (det - 24.0).abs() < 1e-3,
+            "det should be 2*3*4=24, got {}",
+            det
+        );
+    }
+
+    #[test]
+    fn transform_rotation_preserves_orthogonality() {
+        let rot = glm::quat_angle_axis(0.7, &glm::vec3(1.0, 1.0, 0.0));
+        let rot = glm::quat_normalize(&rot);
+        let t = Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_rotation(rot);
+        let mat = t.local_matrix_zup();
+
+        // Extract 3x3 rotation part and check orthogonality
+        let col0 = glm::vec3(mat[(0, 0)], mat[(1, 0)], mat[(2, 0)]);
+        let col1 = glm::vec3(mat[(0, 1)], mat[(1, 1)], mat[(2, 1)]);
+        let col2 = glm::vec3(mat[(0, 2)], mat[(1, 2)], mat[(2, 2)]);
+
+        assert!(
+            glm::dot(&col0, &col1).abs() < 1e-5,
+            "columns should be orthogonal"
+        );
+        assert!(
+            glm::dot(&col0, &col2).abs() < 1e-5,
+            "columns should be orthogonal"
+        );
+        assert!(
+            glm::dot(&col1, &col2).abs() < 1e-5,
+            "columns should be orthogonal"
+        );
+    }
+
+    #[test]
+    fn entity_guid_uniqueness() {
+        let a = EntityGuid::new();
+        let b = EntityGuid::new();
+        assert_ne!(a, b, "two new GUIDs should be different");
+    }
+
+    #[test]
+    fn entity_guid_from_string_roundtrip() {
+        let original = EntityGuid::new();
+        let string = original.0.to_string();
+        let parsed = EntityGuid::from_string(&string).expect("should parse");
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn entity_guid_invalid_string() {
+        assert!(EntityGuid::from_string("not-a-uuid").is_none());
+    }
+
+    #[test]
+    fn transform_serde_roundtrip() {
+        let t = Transform::new(glm::vec3(1.0, 2.0, 3.0))
+            .with_scale(glm::vec3(0.5, 1.5, 2.5))
+            .with_rotation(glm::quat_angle_axis(1.0, &glm::vec3(0.0, 0.0, 1.0)));
+
+        let serialized = ron::to_string(&t).expect("serialize");
+        let deserialized: Transform = ron::from_str(&serialized).expect("deserialize");
+
+        assert!((deserialized.position.x - t.position.x).abs() < 1e-5);
+        assert!((deserialized.position.y - t.position.y).abs() < 1e-5);
+        assert!((deserialized.position.z - t.position.z).abs() < 1e-5);
+        assert!((deserialized.scale.x - t.scale.x).abs() < 1e-5);
+        assert!((deserialized.rotation.coords.w - t.rotation.coords.w).abs() < 1e-5);
+    }
+}

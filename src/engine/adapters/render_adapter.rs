@@ -45,10 +45,10 @@ use nalgebra_glm as glm;
 fn get_basis_change_matrix() -> glm::Mat4 {
     // Column-major: each column is specified
     glm::mat4(
-        0.0, 1.0, 0.0, 0.0,  // column 0: Y-up X basis = Z-up Y
-        0.0, 0.0, 1.0, 0.0,  // column 1: Y-up Y basis = Z-up Z
+        0.0, 1.0, 0.0, 0.0, // column 0: Y-up X basis = Z-up Y
+        0.0, 0.0, 1.0, 0.0, // column 1: Y-up Y basis = Z-up Z
         -1.0, 0.0, 0.0, 0.0, // column 2: Y-up Z basis = -Z-up X
-        0.0, 0.0, 0.0, 1.0,  // column 3: translation (identity)
+        0.0, 0.0, 0.0, 1.0, // column 3: translation (identity)
     )
 }
 
@@ -154,7 +154,11 @@ mod tests {
         // The conversion matrix applied to identity gives the basis change
         // but determinant should still be 1 (valid orthogonal transform)
         let det = glm::determinant(&converted);
-        assert!((det - 1.0).abs() < 0.001, "Determinant should be 1.0, got {}", det);
+        assert!(
+            (det - 1.0).abs() < 0.001,
+            "Determinant should be 1.0, got {}",
+            det
+        );
     }
 
     #[test]
@@ -181,17 +185,38 @@ mod tests {
         let converted = world_matrix_to_render(&scale_zup);
 
         // Extract scale magnitudes from columns
-        let scale_x = glm::length(&glm::vec3(converted[(0, 0)], converted[(1, 0)], converted[(2, 0)]));
-        let scale_y = glm::length(&glm::vec3(converted[(0, 1)], converted[(1, 1)], converted[(2, 1)]));
-        let scale_z = glm::length(&glm::vec3(converted[(0, 2)], converted[(1, 2)], converted[(2, 2)]));
+        let scale_x = glm::length(&glm::vec3(
+            converted[(0, 0)],
+            converted[(1, 0)],
+            converted[(2, 0)],
+        ));
+        let scale_y = glm::length(&glm::vec3(
+            converted[(0, 1)],
+            converted[(1, 1)],
+            converted[(2, 1)],
+        ));
+        let scale_z = glm::length(&glm::vec3(
+            converted[(0, 2)],
+            converted[(1, 2)],
+            converted[(2, 2)],
+        ));
 
         // All three scale values should appear (remapped to different axes)
-        let mut scales = vec![scale_x, scale_y, scale_z];
+        let mut scales = [scale_x, scale_y, scale_z];
         scales.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        assert!((scales[0] - 2.0).abs() < 0.001, "Smallest scale should be 2.0");
-        assert!((scales[1] - 3.0).abs() < 0.001, "Middle scale should be 3.0");
-        assert!((scales[2] - 4.0).abs() < 0.001, "Largest scale should be 4.0");
+        assert!(
+            (scales[0] - 2.0).abs() < 0.001,
+            "Smallest scale should be 2.0"
+        );
+        assert!(
+            (scales[1] - 3.0).abs() < 0.001,
+            "Middle scale should be 3.0"
+        );
+        assert!(
+            (scales[2] - 4.0).abs() < 0.001,
+            "Largest scale should be 4.0"
+        );
     }
 
     #[test]
@@ -211,7 +236,7 @@ mod tests {
         let scale_z = glm::length(&glm::vec3(model[(0, 2)], model[(1, 2)], model[(2, 2)]));
 
         // Scale values should be preserved (remapped)
-        let mut scales = vec![scale_x, scale_y, scale_z];
+        let mut scales = [scale_x, scale_y, scale_z];
         scales.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         assert!((scales[0] - 2.0).abs() < 0.001);
@@ -238,7 +263,11 @@ mod tests {
         assert!(det.abs() > 0.001, "Matrix should have non-zero determinant");
 
         // Determinant should equal product of scales (2 * 1 * 1 = 2)
-        assert!((det.abs() - 2.0).abs() < 0.001, "Determinant should be 2.0, got {}", det);
+        assert!(
+            (det.abs() - 2.0).abs() < 0.001,
+            "Determinant should be 2.0, got {}",
+            det
+        );
     }
 
     #[test]
@@ -255,7 +284,82 @@ mod tests {
                 assert!(
                     (product[(i, j)] - expected).abs() < 0.001,
                     "C * C^T [{},{}] should be {}, got {}",
-                    i, j, expected, product[(i, j)]
+                    i,
+                    j,
+                    expected,
+                    product[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn position_zup_to_yup_roundtrip_via_matrix() {
+        // Convert Z-up position through matrix pipeline and verify
+        let pos_zup = glm::vec3(3.0, 7.0, 11.0);
+        let t = Transform::new(pos_zup);
+        let render_mat = transform_to_model_matrix(&t);
+
+        // Extract position from render matrix (column 3)
+        let render_pos = glm::vec3(render_mat[(0, 3)], render_mat[(1, 3)], render_mat[(2, 3)]);
+
+        // The simple position conversion should match
+        let expected = position_to_render(&pos_zup);
+        assert!((render_pos.x - expected.x).abs() < 0.001);
+        assert!((render_pos.y - expected.y).abs() < 0.001);
+        assert!((render_pos.z - expected.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn rotation_roundtrip_zup_yup_zup() {
+        // Rotate 45 degrees around Z-up's Z axis
+        let rot_zup = glm::quat_angle_axis(std::f32::consts::FRAC_PI_4, &glm::vec3(0.0, 0.0, 1.0));
+        let t_original = Transform::new(glm::vec3(0.0, 0.0, 0.0)).with_rotation(rot_zup);
+        let mat_zup = t_original.local_matrix_zup();
+
+        // Convert to render (Y-up) and back
+        let mat_yup = world_matrix_to_render(&mat_zup);
+        let c = get_basis_change_matrix();
+        let c_inv = glm::transpose(&c);
+        let mat_back = c_inv * mat_yup * c;
+
+        // Should recover the original matrix
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (mat_back[(i, j)] - mat_zup[(i, j)]).abs() < 0.001,
+                    "roundtrip failed at [{},{}]: {} vs {}",
+                    i,
+                    j,
+                    mat_back[(i, j)],
+                    mat_zup[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_uniform_scale_roundtrip() {
+        let t = Transform {
+            position: glm::vec3(1.0, 2.0, 3.0),
+            rotation: glm::quat_identity(),
+            scale: glm::vec3(2.0, 3.0, 4.0),
+        };
+        let mat_zup = t.local_matrix_zup();
+        let mat_yup = world_matrix_to_render(&mat_zup);
+
+        // Roundtrip back
+        let c = get_basis_change_matrix();
+        let c_inv = glm::transpose(&c);
+        let mat_back = c_inv * mat_yup * c;
+
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (mat_back[(i, j)] - mat_zup[(i, j)]).abs() < 0.001,
+                    "non-uniform scale roundtrip failed at [{},{}]",
+                    i,
+                    j
                 );
             }
         }

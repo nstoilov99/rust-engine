@@ -23,6 +23,7 @@ pub use asset_browser::{
     AssetRegistry, AssetSelection, FolderNode, GridView, ListView, RenameTarget, ScanResult,
     SortCriteria, ThumbnailCache, ViewMode,
 };
+pub use build_dialog::BuildDialog;
 pub use commands::*;
 pub use console::{ConsoleLog, LogFilter, LogLevel, LogMessage};
 pub use console_cmd::ConsoleCommandSystem;
@@ -37,4 +38,3 @@ pub use tab_viewer::*;
 pub use viewport::*;
 pub use viewport_texture::*;
 pub use window_config::*;
-pub use build_dialog::BuildDialog;

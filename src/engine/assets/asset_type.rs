@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Classification of asset types supported by the engine
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetType {
     /// Image textures (PNG, JPG, JPEG, TGA, BMP)
     Texture,
@@ -24,6 +24,7 @@ pub enum AssetType {
     /// Prefab entity templates (*.prefab.ron)
     Prefab,
     /// Unknown or unsupported file type
+    #[default]
     Unknown,
 }
 
@@ -47,10 +48,7 @@ impl AssetType {
 
     /// Determine asset type from full path, including filename patterns
     pub fn from_path(path: &Path) -> Self {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Check for RON file patterns first
         if filename.ends_with(".scene.ron") {
@@ -119,12 +117,6 @@ impl AssetType {
     /// Check if this asset type has a thumbnail preview
     pub fn has_thumbnail(&self) -> bool {
         matches!(self, AssetType::Texture | AssetType::Model)
-    }
-}
-
-impl Default for AssetType {
-    fn default() -> Self {
-        AssetType::Unknown
     }
 }
 

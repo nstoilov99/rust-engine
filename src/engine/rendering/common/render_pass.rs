@@ -1,8 +1,8 @@
 // Render pass creation - defines rendering structure (attachments, subpasses, operations)
 
 use std::sync::Arc;
-use vulkano::format::Format;
 use vulkano::device::Device;
+use vulkano::format::Format;
 use vulkano::render_pass::RenderPass;
 use vulkano::swapchain::Swapchain;
 

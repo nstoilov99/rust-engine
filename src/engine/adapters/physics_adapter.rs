@@ -156,4 +156,52 @@ mod tests {
         assert!((back_to_zup.coords.z - rotation_zup.coords.z).abs() < 0.001);
         assert!((back_to_zup.coords.w - rotation_zup.coords.w).abs() < 0.001);
     }
+
+    #[test]
+    fn velocity_roundtrip() {
+        let vel_zup = glm::vec3(5.0, -3.0, 8.0);
+        let vel_yup = velocity_to_physics(&vel_zup);
+        let back = velocity_from_physics(&vel_yup);
+
+        assert!((back.x - vel_zup.x).abs() < 0.001);
+        assert!((back.y - vel_zup.y).abs() < 0.001);
+        assert!((back.z - vel_zup.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn rotation_90deg_roundtrip() {
+        // 90 degrees around Z-up's Z axis (up axis)
+        let rot = glm::quat_angle_axis(std::f32::consts::FRAC_PI_2, &glm::vec3(0.0, 0.0, 1.0));
+        let rot = glm::quat_normalize(&rot);
+
+        let physics_rot = rotation_to_physics(&rot);
+        let back = rotation_from_physics(&physics_rot);
+
+        assert!((back.coords.x - rot.coords.x).abs() < 0.001);
+        assert!((back.coords.y - rot.coords.y).abs() < 0.001);
+        assert!((back.coords.z - rot.coords.z).abs() < 0.001);
+        assert!((back.coords.w - rot.coords.w).abs() < 0.001);
+    }
+
+    #[test]
+    fn gravity_roundtrip() {
+        let gravity_zup = glm::vec3(0.0, 0.0, -9.81);
+        let gravity_yup = gravity_to_physics(&gravity_zup);
+        let back = position_from_physics(&gravity_yup);
+
+        assert!((back.x - gravity_zup.x).abs() < 0.001);
+        assert!((back.y - gravity_zup.y).abs() < 0.001);
+        assert!((back.z - gravity_zup.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn position_zero_roundtrip() {
+        let pos = glm::vec3(0.0, 0.0, 0.0);
+        let physics = position_to_physics(&pos);
+        let back = position_from_physics(&physics);
+
+        assert!((back.x).abs() < 0.001);
+        assert!((back.y).abs() < 0.001);
+        assert!((back.z).abs() < 0.001);
+    }
 }

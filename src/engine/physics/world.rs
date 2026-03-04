@@ -340,3 +340,233 @@ impl Default for PhysicsWorld {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::ecs::components::Transform;
+    use hecs::World;
+    use nalgebra_glm as glm;
+
+    /// Helper: spawn a physics entity and register it.
+    fn spawn_and_register(
+        world: &mut World,
+        physics: &mut PhysicsWorld,
+        pos: glm::Vec3,
+        rb: EcsRigidBody,
+        col: EcsCollider,
+    ) -> Entity {
+        let entity = world.spawn((Transform::new(pos), rb, col));
+        {
+            let mut query = world.query::<(&Transform, &mut EcsRigidBody, &mut EcsCollider)>();
+            let (_, (transform, rigidbody, collider)) = query
+                .iter()
+                .find(|(e, _)| *e == entity)
+                .expect("spawned entity should exist");
+            physics.register_entity(transform, rigidbody, collider);
+        }
+        entity
+    }
+
+    #[test]
+    fn register_dynamic_body() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 5.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::cuboid(0.5, 0.5, 0.5),
+        );
+
+        assert_eq!(physics.rigid_body_set.len(), 1);
+        assert_eq!(physics.collider_set.len(), 1);
+
+        let rb = world.get::<&EcsRigidBody>(entity).expect("rb should exist");
+        assert!(
+            rb.handle.is_some(),
+            "handle should be assigned after registration"
+        );
+    }
+
+    #[test]
+    fn register_static_body() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 0.0),
+            EcsRigidBody::fixed(),
+            EcsCollider::cuboid(10.0, 10.0, 0.1),
+        );
+
+        assert_eq!(physics.rigid_body_set.len(), 1);
+        assert_eq!(physics.collider_set.len(), 1);
+    }
+
+    #[test]
+    fn register_kinematic_body() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(1.0, 2.0, 3.0),
+            EcsRigidBody::kinematic(),
+            EcsCollider::ball(1.0),
+        );
+
+        assert_eq!(physics.rigid_body_set.len(), 1);
+        assert_eq!(physics.collider_set.len(), 1);
+    }
+
+    #[test]
+    fn skip_already_registered() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 0.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::cuboid(1.0, 1.0, 1.0),
+        );
+
+        // Try to register again
+        {
+            let mut query = world.query::<(&Transform, &mut EcsRigidBody, &mut EcsCollider)>();
+            let (_, (transform, rigidbody, collider)) = query
+                .iter()
+                .find(|(e, _)| *e == entity)
+                .expect("entity should exist");
+            physics.register_entity(transform, rigidbody, collider);
+        }
+
+        // Should still have only one body
+        assert_eq!(physics.rigid_body_set.len(), 1);
+    }
+
+    #[test]
+    fn dynamic_body_falls_under_gravity() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 10.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::ball(0.5),
+        );
+
+        // Step physics for several frames
+        for _ in 0..10 {
+            physics.step(1.0 / 60.0, &mut world);
+        }
+
+        let transform = world
+            .get::<&Transform>(entity)
+            .expect("transform should exist");
+        assert!(
+            transform.position.z < 10.0,
+            "dynamic body should have fallen: z = {}",
+            transform.position.z
+        );
+    }
+
+    #[test]
+    fn static_body_does_not_move() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 0.0),
+            EcsRigidBody::fixed(),
+            EcsCollider::cuboid(10.0, 10.0, 0.1),
+        );
+
+        for _ in 0..10 {
+            physics.step(1.0 / 60.0, &mut world);
+        }
+
+        let transform = world
+            .get::<&Transform>(entity)
+            .expect("transform should exist");
+        assert!(
+            (transform.position.z).abs() < 0.001,
+            "static body should not move: z = {}",
+            transform.position.z
+        );
+    }
+
+    #[test]
+    fn collider_ball_shape() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 0.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::ball(2.5),
+        );
+
+        assert_eq!(physics.collider_set.len(), 1);
+        // Verify the collider was created (we can't easily inspect shape type
+        // without Rapier internals, but creation success is the key test)
+    }
+
+    #[test]
+    fn collider_capsule_shape() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 0.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::capsule(1.0, 0.5),
+        );
+
+        assert_eq!(physics.collider_set.len(), 1);
+    }
+
+    #[test]
+    fn gravity_direction_is_correct() {
+        let physics = PhysicsWorld::new();
+        // Default gravity in Z-up is (0, 0, -9.81)
+        // After conversion to Y-up: (0, -9.81, 0)
+        assert!((physics.gravity.x).abs() < 0.001);
+        assert!((physics.gravity.y - (-9.81)).abs() < 0.01);
+        assert!((physics.gravity.z).abs() < 0.001);
+    }
+
+    #[test]
+    fn multiple_bodies_registered() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+
+        for i in 0..5 {
+            spawn_and_register(
+                &mut world,
+                &mut physics,
+                glm::vec3(i as f32 * 2.0, 0.0, 5.0),
+                EcsRigidBody::dynamic(),
+                EcsCollider::cuboid(0.5, 0.5, 0.5),
+            );
+        }
+
+        assert_eq!(physics.rigid_body_set.len(), 5);
+        assert_eq!(physics.collider_set.len(), 5);
+    }
+}

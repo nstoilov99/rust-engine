@@ -95,9 +95,8 @@ impl ConsoleCommandSystem {
                 if msg == "__CLEAR__" {
                     // Return empty - caller checks for this
                     return vec![LogMessage::info("__CLEAR__")];
-                } else if msg.starts_with("__HELP__:") {
+                } else if let Some(cmd_name) = msg.strip_prefix("__HELP__:") {
                     // Detailed help for a specific command
-                    let cmd_name = &msg[9..];
                     if let Some(cmd) = self.registry.get(cmd_name) {
                         let meta = cmd.meta();
                         output.push(LogMessage::info(format!("Command: {}", meta.name)));
@@ -111,7 +110,10 @@ impl ConsoleCommandSystem {
                         output.push(LogMessage::info(""));
                         output.push(LogMessage::info(meta.help));
                     } else {
-                        output.push(LogMessage::error(format!("Unknown command: '{}'", cmd_name)));
+                        output.push(LogMessage::error(format!(
+                            "Unknown command: '{}'",
+                            cmd_name
+                        )));
                     }
                 } else if !msg.is_empty() {
                     output.push(LogMessage::info(msg));

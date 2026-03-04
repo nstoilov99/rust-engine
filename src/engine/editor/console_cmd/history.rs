@@ -58,7 +58,7 @@ impl InputHistory {
 
     /// Navigate to next entry (down arrow)
     /// Returns the entry to display, or None if back at current input
-    pub fn next(&mut self) -> Option<&str> {
+    pub fn navigate_next(&mut self) -> Option<&str> {
         if self.position == -1 {
             return None;
         }
@@ -110,9 +110,9 @@ mod tests {
         assert_eq!(history.previous("current"), Some("first")); // stays at oldest
 
         // Navigate back down
-        assert_eq!(history.next(), Some("second"));
-        assert_eq!(history.next(), Some("third"));
-        assert_eq!(history.next(), Some("current")); // back to current
+        assert_eq!(history.navigate_next(), Some("second"));
+        assert_eq!(history.navigate_next(), Some("third"));
+        assert_eq!(history.navigate_next(), Some("current")); // back to current
     }
 
     #[test]

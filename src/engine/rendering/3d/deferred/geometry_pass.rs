@@ -1,7 +1,7 @@
 //! Geometry pass - renders scene to G-Buffer
 
-use std::sync::Arc;
 use smallvec::smallvec;
+use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::pipeline::graphics::{
     color_blend::{ColorBlendAttachmentState, ColorBlendState},
@@ -13,8 +13,8 @@ use vulkano::pipeline::graphics::{
     viewport::ViewportState,
     GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
+use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::RenderPass;
 
 use crate::engine::rendering::rendering_3d::Vertex3D;
@@ -46,12 +46,15 @@ impl GeometryPass {
         render_pass: Arc<RenderPass>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Load shaders
-        let vs = gbuffer_vs::load(device.clone())?.entry_point("main").unwrap();
-        let fs = gbuffer_fs::load(device.clone())?.entry_point("main").unwrap();
+        let vs = gbuffer_vs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
+        let fs = gbuffer_fs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
 
         // Vertex input: Vertex3D format (must be done before stages consumes vs)
-        let vertex_input_state = Vertex3D::per_vertex()
-            .definition(&vs)?;
+        let vertex_input_state = Vertex3D::per_vertex().definition(&vs)?;
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
@@ -89,7 +92,9 @@ impl GeometryPass {
                 dynamic_state: [
                     vulkano::pipeline::DynamicState::Viewport,
                     vulkano::pipeline::DynamicState::Scissor,
-                ].into_iter().collect(),
+                ]
+                .into_iter()
+                .collect(),
                 subpass: Some(subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout.clone())
             },

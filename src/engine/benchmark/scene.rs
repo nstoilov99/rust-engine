@@ -51,64 +51,64 @@ pub fn spawn_benchmark_scene(
     spawn_with_guid(
         world,
         (
-        Transform::new(glm::vec3(-90.0, 0.0, 35.0)).with_rotation(camera_rotation),
-        Camera {
-            far: 500.0,
-            ..Default::default()
-        },
-        Name::new("BenchmarkCamera"),
-    ),
+            Transform::new(glm::vec3(-90.0, 0.0, 35.0)).with_rotation(camera_rotation),
+            Camera {
+                far: 500.0,
+                ..Default::default()
+            },
+            Name::new("BenchmarkCamera"),
+        ),
     );
 
     spawn_with_guid(
         world,
         (
-        DirectionalLight {
-            direction: glm::normalize(&glm::vec3(1.0, -0.35, -1.0)),
-            intensity: 1.3,
-            ..Default::default()
-        },
-        Name::new("BenchmarkSun"),
-    ),
+            DirectionalLight {
+                direction: glm::normalize(&glm::vec3(1.0, -0.35, -1.0)),
+                intensity: 1.3,
+                ..Default::default()
+            },
+            Name::new("BenchmarkSun"),
+        ),
     );
 
     for index in 0..point_light_count {
         spawn_with_guid(
             world,
             (
-            Transform::new(glm::vec3(
-                rng.range_f32(-40.0, 40.0),
-                rng.range_f32(-40.0, 40.0),
-                rng.range_f32(8.0, 20.0),
-            )),
-            PointLight {
-                color: glm::vec3(
-                    rng.range_f32(0.4, 1.0),
-                    rng.range_f32(0.4, 1.0),
-                    rng.range_f32(0.4, 1.0),
-                ),
-                intensity: rng.range_f32(3.0, 8.0),
-                radius: rng.range_f32(8.0, 16.0),
-                ..Default::default()
-            },
-            Name::new(format!("BenchmarkLight{index}")),
-        ),
+                Transform::new(glm::vec3(
+                    rng.range_f32(-40.0, 40.0),
+                    rng.range_f32(-40.0, 40.0),
+                    rng.range_f32(8.0, 20.0),
+                )),
+                PointLight {
+                    color: glm::vec3(
+                        rng.range_f32(0.4, 1.0),
+                        rng.range_f32(0.4, 1.0),
+                        rng.range_f32(0.4, 1.0),
+                    ),
+                    intensity: rng.range_f32(3.0, 8.0),
+                    radius: rng.range_f32(8.0, 16.0),
+                    ..Default::default()
+                },
+                Name::new(format!("BenchmarkLight{index}")),
+            ),
         );
     }
 
     spawn_with_guid(
         world,
         (
-        Transform::new(glm::vec3(0.0, 0.0, -0.5)).with_scale(glm::vec3(120.0, 120.0, 1.0)),
-        MeshRenderer {
-            mesh_index: cube_mesh_index,
-            material_index: 0,
-            ..Default::default()
-        },
-        RigidBody::fixed(),
-        Collider::cuboid(60.0, 60.0, 0.5),
-        Name::new("BenchmarkGround"),
-    ),
+            Transform::new(glm::vec3(0.0, 0.0, -0.5)).with_scale(glm::vec3(120.0, 120.0, 1.0)),
+            MeshRenderer {
+                mesh_index: cube_mesh_index,
+                material_index: 0,
+                ..Default::default()
+            },
+            RigidBody::fixed(),
+            Collider::cuboid(60.0, 60.0, 0.5),
+            Name::new("BenchmarkGround"),
+        ),
     );
 
     for index in 0..mesh_count {
@@ -121,20 +121,20 @@ pub fn spawn_benchmark_scene(
         spawn_with_guid(
             world,
             (
-            Transform::new(glm::vec3(
-                rng.range_f32(-55.0, 55.0),
-                rng.range_f32(-55.0, 55.0),
-                rng.range_f32(0.0, 12.0),
-            ))
-            .with_rotation(yaw * pitch)
-            .with_scale(glm::vec3(scale, scale, scale)),
-            MeshRenderer {
-                mesh_index: cube_mesh_index,
-                material_index: (index % 8) as usize,
-                ..Default::default()
-            },
-            Name::new(format!("BenchmarkMesh{index}")),
-        ),
+                Transform::new(glm::vec3(
+                    rng.range_f32(-55.0, 55.0),
+                    rng.range_f32(-55.0, 55.0),
+                    rng.range_f32(0.0, 12.0),
+                ))
+                .with_rotation(yaw * pitch)
+                .with_scale(glm::vec3(scale, scale, scale)),
+                MeshRenderer {
+                    mesh_index: cube_mesh_index,
+                    material_index: (index % 8) as usize,
+                    ..Default::default()
+                },
+                Name::new(format!("BenchmarkMesh{index}")),
+            ),
         );
     }
 
@@ -142,18 +142,18 @@ pub fn spawn_benchmark_scene(
         let root = spawn_with_guid(
             world,
             (
-            Transform::new(glm::vec3(
-                -35.0 + chain_index as f32 * 2.8,
-                rng.range_f32(-20.0, 20.0),
-                1.5,
-            )),
-            MeshRenderer {
-                mesh_index: cube_mesh_index,
-                material_index: (chain_index % 8) as usize,
-                ..Default::default()
-            },
-            Name::new(format!("BenchmarkChain{chain_index}_0")),
-        ),
+                Transform::new(glm::vec3(
+                    -35.0 + chain_index as f32 * 2.8,
+                    rng.range_f32(-20.0, 20.0),
+                    1.5,
+                )),
+                MeshRenderer {
+                    mesh_index: cube_mesh_index,
+                    material_index: (chain_index % 8) as usize,
+                    ..Default::default()
+                },
+                Name::new(format!("BenchmarkChain{chain_index}_0")),
+            ),
         );
 
         let mut parent = root;
@@ -161,23 +161,23 @@ pub fn spawn_benchmark_scene(
             let child = spawn_with_guid(
                 world,
                 (
-                Transform::new(glm::vec3(
-                    1.4 + rng.range_f32(-0.2, 0.2),
-                    rng.range_f32(-0.3, 0.3),
-                    0.9 + rng.range_f32(-0.2, 0.2),
-                ))
-                .with_rotation(glm::quat_angle_axis(
-                    rng.range_f32(-0.35, 0.35),
-                    &glm::vec3(0.0, 1.0, 0.0),
-                ))
-                .with_scale(glm::vec3(0.75, 0.75, 0.75)),
-                MeshRenderer {
-                    mesh_index: cube_mesh_index,
-                    material_index: ((chain_index + depth) % 8) as usize,
-                    ..Default::default()
-                },
-                Name::new(format!("BenchmarkChain{chain_index}_{depth}")),
-            ),
+                    Transform::new(glm::vec3(
+                        1.4 + rng.range_f32(-0.2, 0.2),
+                        rng.range_f32(-0.3, 0.3),
+                        0.9 + rng.range_f32(-0.2, 0.2),
+                    ))
+                    .with_rotation(glm::quat_angle_axis(
+                        rng.range_f32(-0.35, 0.35),
+                        &glm::vec3(0.0, 1.0, 0.0),
+                    ))
+                    .with_scale(glm::vec3(0.75, 0.75, 0.75)),
+                    MeshRenderer {
+                        mesh_index: cube_mesh_index,
+                        material_index: ((chain_index + depth) % 8) as usize,
+                        ..Default::default()
+                    },
+                    Name::new(format!("BenchmarkChain{chain_index}_{depth}")),
+                ),
             );
             set_parent(world, child, parent);
             parent = child;
@@ -189,23 +189,23 @@ pub fn spawn_benchmark_scene(
         spawn_with_guid(
             world,
             (
-            Transform::new(glm::vec3(
-                -8.0 + (index % 5) as f32 * 1.8,
-                -6.0 + ((index / 5) % 5) as f32 * 1.8,
-                height,
-            ))
-            .with_scale(glm::vec3(0.75, 0.75, 0.75)),
-            MeshRenderer {
-                mesh_index: cube_mesh_index,
-                material_index: (index % 8) as usize,
-                ..Default::default()
-            },
-            RigidBody::dynamic()
-                .with_mass(rng.range_f32(0.5, 3.0))
-                .with_linear_damping(0.1),
-            Collider::cuboid(0.375, 0.375, 0.375).with_restitution(rng.range_f32(0.1, 0.6)),
-            Name::new(format!("BenchmarkBody{index}")),
-        ),
+                Transform::new(glm::vec3(
+                    -8.0 + (index % 5) as f32 * 1.8,
+                    -6.0 + ((index / 5) % 5) as f32 * 1.8,
+                    height,
+                ))
+                .with_scale(glm::vec3(0.75, 0.75, 0.75)),
+                MeshRenderer {
+                    mesh_index: cube_mesh_index,
+                    material_index: (index % 8) as usize,
+                    ..Default::default()
+                },
+                RigidBody::dynamic()
+                    .with_mass(rng.range_f32(0.5, 3.0))
+                    .with_linear_damping(0.1),
+                Collider::cuboid(0.375, 0.375, 0.375).with_restitution(rng.range_f32(0.1, 0.6)),
+                Name::new(format!("BenchmarkBody{index}")),
+            ),
         );
     }
 

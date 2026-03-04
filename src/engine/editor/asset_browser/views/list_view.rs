@@ -118,11 +118,19 @@ impl ListView {
                     let asset = assets[row];
 
                     // Check if this asset is being renamed
-                    let is_renaming = renaming_asset.as_ref()
+                    let is_renaming = renaming_asset
+                        .as_ref()
                         .map(|(id, _)| *id == asset.id)
                         .unwrap_or(false);
 
-                    if let Some(r) = self.render_row(ui, asset, selection, is_renaming, renaming_asset, icon_manager) {
+                    if let Some(r) = self.render_row(
+                        ui,
+                        asset,
+                        selection,
+                        is_renaming,
+                        renaming_asset,
+                        icon_manager,
+                    ) {
                         if r.clicked.is_some() {
                             response.clicked = r.clicked;
                         }
@@ -242,7 +250,9 @@ impl ListView {
                         }
 
                         // Handle Enter to confirm WHILE focused (before focus is lost)
-                        if text_edit_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if text_edit_response.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
                             response.rename_confirmed = Some((asset.id, rename_text.clone()));
                         } else if text_edit_response.lost_focus() {
                             // Lost focus without Enter = cancel
@@ -254,14 +264,12 @@ impl ListView {
                 // Normal label rendering with icon
                 render_file_type_icon(ui, asset.asset_type, icon_manager);
                 ui.add_sized(
-                    egui::vec2(184.0, self.row_height),  // Slightly smaller to account for icon
-                    egui::Label::new(
-                        RichText::new(&asset.display_name).color(if is_selected {
-                            Color32::WHITE
-                        } else {
-                            Color32::from_gray(220)
-                        }),
-                    )
+                    egui::vec2(184.0, self.row_height), // Slightly smaller to account for icon
+                    egui::Label::new(RichText::new(&asset.display_name).color(if is_selected {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(220)
+                    }))
                     .truncate(),
                 );
             }
@@ -336,7 +344,10 @@ impl ListView {
 
             ui.separator();
 
-            if ui.button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80))).clicked() {
+            if ui
+                .button(RichText::new("Delete").color(Color32::from_rgb(220, 80, 80)))
+                .clicked()
+            {
                 context_action = Some(ContextAction::Delete);
                 ui.close();
             }

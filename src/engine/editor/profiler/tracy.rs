@@ -12,13 +12,15 @@ mod enabled {
     /// The Tracy client is started immediately on creation so that
     /// profile spans work from the very start of the application.
     pub struct TracyState {
-        _client: Client,  // Always running - required for span!() to work
+        _client: Client, // Always running - required for span!() to work
     }
 
     impl TracyState {
         pub fn new() -> Self {
             // Start Tracy client immediately so spans work from the start
-            Self { _client: Client::start() }
+            Self {
+                _client: Client::start(),
+            }
         }
 
         /// Enable Tracy profiling - no-op since client is always running

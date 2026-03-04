@@ -1,15 +1,15 @@
-use std::sync::Arc;
 use glam::Vec3;
-use vulkano::device::{Device, Queue};
+use std::sync::Arc;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::device::{Device, Queue};
 use vulkano::memory::allocator::StandardMemoryAllocator;
 
-use super::texture_manager::TextureManager;
 use super::model_manager::ModelManager;
-use crate::MeshManager;
+use super::texture_manager::TextureManager;
 use crate::engine::math::Aabb;
 use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
+use crate::MeshManager;
 
 /// Master asset manager - provides access to all asset types
 pub struct AssetManager {
@@ -40,7 +40,16 @@ impl AssetManager {
     }
 
     /// Load a model and upload it to GPU, returns (mesh indices, model handle)
-    pub fn load_model_gpu(&self, path: &str) -> Result<(Vec<usize>, super::handle::Handle<super::model_loader::Model>), Box<dyn std::error::Error>> {
+    pub fn load_model_gpu(
+        &self,
+        path: &str,
+    ) -> Result<
+        (
+            Vec<usize>,
+            super::handle::Handle<super::model_loader::Model>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         crate::profile_function!();
 
         // Load model from cache
@@ -51,7 +60,7 @@ impl AssetManager {
         let mut meshes = self.meshes.write();
         let indices = {
             crate::profile_scope!("gpu_mesh_upload");
-            meshes.upload_model(&model, self.allocator.clone())?
+            meshes.upload_model(model, self.allocator.clone())?
         };
 
         Ok((indices, model_handle))
@@ -59,7 +68,16 @@ impl AssetManager {
 
     /// Reload model from filesystem and re-upload to GPU.
     /// `fs_path` is the absolute filesystem path (from hot-reload watcher).
-    pub fn reload_model_gpu(&self, fs_path: &str) -> Result<(Vec<usize>, super::handle::Handle<super::model_loader::Model>), Box<dyn std::error::Error>> {
+    pub fn reload_model_gpu(
+        &self,
+        fs_path: &str,
+    ) -> Result<
+        (
+            Vec<usize>,
+            super::handle::Handle<super::model_loader::Model>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         self.models.reload(fs_path)?;
 
         {
@@ -84,11 +102,21 @@ impl AssetManager {
 
         // Compute AABB for frustum culling
         let aabb = Aabb::from_points(
-            vertices.iter().map(|v| Vec3::new(v.position[0], v.position[1], v.position[2])),
+            vertices
+                .iter()
+                .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2])),
         );
 
         let mut meshes = self.meshes.write();
-        let gpu_mesh = GpuMesh::new(self.allocator.clone(), vertices, indices, center, radius, aabb.min, aabb.max)?;
+        let gpu_mesh = GpuMesh::new(
+            self.allocator.clone(),
+            vertices,
+            indices,
+            center,
+            radius,
+            aabb.min,
+            aabb.max,
+        )?;
         let index = meshes.meshes.len();
         meshes.meshes.push(gpu_mesh);
         Ok(index)

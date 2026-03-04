@@ -29,8 +29,8 @@
 //! └──────────────────┘         └──────────────────┘
 //! ```
 
-pub mod render_adapter;
 pub mod physics_adapter;
+pub mod render_adapter;
 
-pub use render_adapter::*;
 pub use physics_adapter::*;
+pub use render_adapter::*;

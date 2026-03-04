@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Primary: Windows (matches dev environment)
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (default features)
+        run: cargo build
+
+      - name: Build (editor feature)
+        run: cargo build --features editor
+
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Test (editor feature)
+        run: cargo test --features editor
+
+      - name: Clippy (default features)
+        run: cargo clippy --lib --bins --tests -- -D warnings
+
+      - name: Clippy (editor feature)
+        run: cargo clippy --lib --bins --tests --features editor -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  # Optional: Linux for cross-platform validation
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (default features)
+        run: cargo build
+
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Clippy (default features)
+        run: cargo clippy --lib --bins --tests -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --all -- --check

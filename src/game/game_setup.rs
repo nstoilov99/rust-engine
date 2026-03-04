@@ -2,6 +2,7 @@
 //!
 //! Extracts setup code from main.rs for better organization.
 
+use hecs::Entity;
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
@@ -11,7 +12,6 @@ use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLigh
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
 use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
 use rust_engine::engine::rendering::rendering_3d::mesh::{create_cube, create_plane};
-use hecs::Entity;
 use rust_engine::engine::scene::load_scene;
 use rust_engine::Renderer;
 #[cfg(feature = "editor")]
@@ -30,9 +30,9 @@ use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::sync::GpuFuture;
 
-
 /// Setup asset manager and hot-reload system (editor only)
 #[cfg(feature = "editor")]
+#[allow(clippy::type_complexity)]
 pub fn setup_asset_system(
     renderer: &Renderer,
 ) -> Result<(Arc<AssetManager>, HotReloadWatcher, Receiver<ReloadEvent>), Box<dyn std::error::Error>>
@@ -74,7 +74,6 @@ pub fn load_assets(
 
 /// Create default scene with camera, duck, and light
 pub fn create_default_scene(world: &mut World, mesh_index: usize) {
-
     // Spawn Camera entity
     world.spawn((
         Transform::new(glm::vec3(0.0, 5.0, 10.0)),
@@ -106,7 +105,6 @@ pub fn create_default_scene(world: &mut World, mesh_index: usize) {
         },
         Name::new("Sun"),
     ));
-
 }
 
 /// Load scene from file or create default
@@ -147,7 +145,11 @@ fn spawn_physics_object(world: &mut World, config: PhysicsObjectConfig) {
     };
 
     world.spawn((
-        Transform::new(config.position).with_scale(glm::vec3(config.scale, config.scale, config.scale)),
+        Transform::new(config.position).with_scale(glm::vec3(
+            config.scale,
+            config.scale,
+            config.scale,
+        )),
         MeshRenderer {
             mesh_index: config.mesh_index,
             material_index: 0,
@@ -163,7 +165,6 @@ fn spawn_physics_object(world: &mut World, config: PhysicsObjectConfig) {
 ///
 /// Now uses Z-up coordinates: objects spawn at Z heights and fall in -Z direction.
 pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mesh: usize) {
-
     // Ground plane (static - never moves)
     // In Z-up: ground is at Z = -0.5
     world.spawn((
@@ -182,7 +183,7 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
     // In Z-up: objects spawn at Z heights (3.0, 5.0, 7.0) and fall in -Z direction
     let cubes = [
         PhysicsObjectConfig {
-            position: glm::vec3(0.0, 0.0, 3.0),  // Z-up: height is Z
+            position: glm::vec3(0.0, 0.0, 3.0), // Z-up: height is Z
             scale: 0.5,
             mass: 1.0,
             restitution: 0.7,
@@ -191,7 +192,7 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
             name: "FallingCube1",
         },
         PhysicsObjectConfig {
-            position: glm::vec3(1.0, 0.5, 5.0),  // Z-up: height is Z
+            position: glm::vec3(1.0, 0.5, 5.0), // Z-up: height is Z
             scale: 0.4,
             mass: 0.5,
             restitution: 0.5,
@@ -200,7 +201,7 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
             name: "FallingCube2",
         },
         PhysicsObjectConfig {
-            position: glm::vec3(-1.0, 0.0, 7.0),  // Z-up: height is Z
+            position: glm::vec3(-1.0, 0.0, 7.0), // Z-up: height is Z
             scale: 0.6,
             mass: 2.0,
             restitution: 0.9,

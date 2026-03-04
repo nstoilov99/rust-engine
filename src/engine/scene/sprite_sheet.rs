@@ -3,10 +3,10 @@ use glam::Vec2;
 /// Defines a sprite sheet with frame layout
 #[derive(Debug, Clone)]
 pub struct SpriteSheet {
-    pub texture_size: Vec2,        // Full texture size (e.g., 512x512)
-    pub frame_size: Vec2,           // Size of one frame (e.g., 64x64)
-    pub frames_per_row: u32,        // Frames in each row
-    pub total_frames: u32,          // Total number of frames
+    pub texture_size: Vec2,  // Full texture size (e.g., 512x512)
+    pub frame_size: Vec2,    // Size of one frame (e.g., 64x64)
+    pub frames_per_row: u32, // Frames in each row
+    pub total_frames: u32,   // Total number of frames
 }
 
 impl SpriteSheet {
@@ -18,16 +18,28 @@ impl SpriteSheet {
         frame_height: f32,
     ) -> Self {
         // Validate dimensions
-        assert!(texture_width > 0.0, "SpriteSheet: texture_width must be > 0");
-        assert!(texture_height > 0.0, "SpriteSheet: texture_height must be > 0");
+        assert!(
+            texture_width > 0.0,
+            "SpriteSheet: texture_width must be > 0"
+        );
+        assert!(
+            texture_height > 0.0,
+            "SpriteSheet: texture_height must be > 0"
+        );
         assert!(frame_width > 0.0, "SpriteSheet: frame_width must be > 0");
         assert!(frame_height > 0.0, "SpriteSheet: frame_height must be > 0");
-        assert!(frame_width <= texture_width,
+        assert!(
+            frame_width <= texture_width,
             "SpriteSheet: frame_width ({}) cannot be larger than texture_width ({})",
-            frame_width, texture_width);
-        assert!(frame_height <= texture_height,
+            frame_width,
+            texture_width
+        );
+        assert!(
+            frame_height <= texture_height,
             "SpriteSheet: frame_height ({}) cannot be larger than texture_height ({})",
-            frame_height, texture_height);
+            frame_height,
+            texture_height
+        );
 
         let frames_per_row = (texture_width / frame_width) as u32;
         let frames_per_col = (texture_height / frame_height) as u32;
@@ -38,7 +50,10 @@ impl SpriteSheet {
             eprintln!("Warning: SpriteSheet has 0 frames! Check your dimensions:");
             eprintln!("    Texture: {}x{}", texture_width, texture_height);
             eprintln!("    Frame: {}x{}", frame_width, frame_height);
-            eprintln!("    Frames: {} per row, {} per col", frames_per_row, frames_per_col);
+            eprintln!(
+                "    Frames: {} per row, {} per col",
+                frames_per_row, frames_per_col
+            );
         }
 
         Self {

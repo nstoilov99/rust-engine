@@ -13,7 +13,7 @@ impl VulkanContext {
         let library = VulkanLibrary::new()?;
 
         // Enable all supported extensions (surface, win32_surface, etc.)
-        let required_extensions = library.supported_extensions().clone();
+        let required_extensions = *library.supported_extensions();
 
         let instance = Instance::new(
             library,

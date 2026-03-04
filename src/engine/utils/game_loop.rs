@@ -1,4 +1,4 @@
-use std::time::{Instant};
+use std::time::Instant;
 
 /// Manages frame timing and delta time calculation
 pub struct GameLoop {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::hash::{Hash, Hasher};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Type-safe handle to an asset
 /// Generic over asset type (Texture, Model, etc.)

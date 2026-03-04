@@ -3,18 +3,18 @@
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::format::Format;
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::image::view::ImageView;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
-use vulkano::render_pass::{RenderPass, Framebuffer, FramebufferCreateInfo};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 /// G-Buffer attachments
 pub struct GBuffer {
-    pub position: Arc<ImageView>,    // RT0: RGB16F (world position)
-    pub normal: Arc<ImageView>,      // RT1: RGB16F (world normal)
-    pub albedo: Arc<ImageView>,      // RT2: RGBA8 (albedo + roughness)
-    pub material: Arc<ImageView>,    // RT3: RGBA8 (metallic, AO, etc.)
-    pub depth: Arc<ImageView>,       // Depth buffer
+    pub position: Arc<ImageView>, // RT0: RGB16F (world position)
+    pub normal: Arc<ImageView>,   // RT1: RGB16F (world normal)
+    pub albedo: Arc<ImageView>,   // RT2: RGBA8 (albedo + roughness)
+    pub material: Arc<ImageView>, // RT3: RGBA8 (metallic, AO, etc.)
+    pub depth: Arc<ImageView>,    // Depth buffer
     pub framebuffer: Arc<Framebuffer>,
     pub render_pass: Arc<RenderPass>,
 }
@@ -130,12 +130,11 @@ impl GBuffer {
 fn create_gbuffer_render_pass(
     device: Arc<Device>,
 ) -> Result<Arc<RenderPass>, Box<dyn std::error::Error>> {
+    use vulkano::image::SampleCount;
     use vulkano::render_pass::{
-        AttachmentDescription, AttachmentReference,
-        SubpassDescription, RenderPassCreateInfo,
+        AttachmentDescription, AttachmentReference, RenderPassCreateInfo, SubpassDescription,
     };
     use vulkano::render_pass::{AttachmentLoadOp, AttachmentStoreOp};
-    use vulkano::image::SampleCount;
 
     let attachments = vec![
         // Attachment 0: Position (RGB16F)

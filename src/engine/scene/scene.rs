@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use crate::engine::scene::Transform2D;
 use crate::engine::rendering::rendering_2d::SpriteBatch;
-use crate::engine::scene::{SpriteSheet, AnimationController};
+use crate::engine::scene::Transform2D;
+use crate::engine::scene::{AnimationController, SpriteSheet};
+use std::collections::HashMap;
 
 /// Entity ID (unique per entity)
 pub type EntityId = usize;
@@ -9,8 +9,8 @@ pub type EntityId = usize;
 /// Sprite component (references a texture)
 #[derive(Clone, Copy, Debug)]
 pub struct SpriteComponent {
-    pub texture_id: usize,  // Which texture to use
-    pub layer: i32,         // Drawing order (higher = drawn on top)
+    pub texture_id: usize, // Which texture to use
+    pub layer: i32,        // Drawing order (higher = drawn on top)
 }
 
 /// Entity with components
@@ -20,7 +20,7 @@ pub struct Entity {
     pub transform: Transform2D,
     pub sprite: Option<SpriteComponent>,
     pub animation: Option<AnimationController>,
-    pub sprite_sheet: Option<SpriteSheet>,  
+    pub sprite_sheet: Option<SpriteSheet>,
     pub active: bool,
 }
 
@@ -44,19 +44,22 @@ impl Scene {
         transform: Transform2D,
         sprite: Option<SpriteComponent>,
         animation: Option<AnimationController>,
-        sprite_sheet: Option<SpriteSheet>,  
+        sprite_sheet: Option<SpriteSheet>,
     ) -> EntityId {
         let id = self.next_id;
         self.next_id += 1;
 
-        self.entities.insert(id, Entity {
+        self.entities.insert(
             id,
-            transform,
-            sprite,
-            animation,
-            sprite_sheet, 
-            active: true,
-        });
+            Entity {
+                id,
+                transform,
+                sprite,
+                animation,
+                sprite_sheet,
+                active: true,
+            },
+        );
 
         id
     }
@@ -87,9 +90,15 @@ impl Scene {
     }
 
     /// Submit all sprites to a batch for rendering (sorted by layer)
-    pub fn submit_to_batch(&self, batch: &mut SpriteBatch, get_uv_rect: impl Fn(&Entity) -> [f32; 4]) {
+    pub fn submit_to_batch(
+        &self,
+        batch: &mut SpriteBatch,
+        get_uv_rect: impl Fn(&Entity) -> [f32; 4],
+    ) {
         // Collect sprites with layers
-        let mut sprites: Vec<_> = self.entities.values()
+        let mut sprites: Vec<_> = self
+            .entities
+            .values()
             .filter(|e| e.active && e.sprite.is_some())
             .collect();
 

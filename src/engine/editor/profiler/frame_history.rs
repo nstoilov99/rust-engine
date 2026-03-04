@@ -26,7 +26,10 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     let frame_count = state.frame_history.len();
 
     if frame_count == 0 {
-        ui.allocate_space(Vec2::new(available_width, FRAME_HISTORY_HEIGHT + CONTROL_BAR_HEIGHT));
+        ui.allocate_space(Vec2::new(
+            available_width,
+            FRAME_HISTORY_HEIGHT + CONTROL_BAR_HEIGHT,
+        ));
         ui.centered_and_justified(|ui| {
             ui.label(egui::RichText::new("No frames captured").weak());
         });
@@ -100,7 +103,10 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     if fps_60_y > rect.top() {
         let line_color = Color32::from_rgba_unmultiplied(100, 200, 100, 100);
         painter.line_segment(
-            [Pos2::new(rect.left(), fps_60_y), Pos2::new(rect.right() - 20.0, fps_60_y)],
+            [
+                Pos2::new(rect.left(), fps_60_y),
+                Pos2::new(rect.right() - 20.0, fps_60_y),
+            ],
             egui::Stroke::new(1.0, line_color),
         );
         // Draw "60" label on right side
@@ -118,7 +124,10 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     if fps_30_y > rect.top() {
         let line_color = Color32::from_rgba_unmultiplied(220, 180, 60, 100);
         painter.line_segment(
-            [Pos2::new(rect.left(), fps_30_y), Pos2::new(rect.right() - 20.0, fps_30_y)],
+            [
+                Pos2::new(rect.left(), fps_30_y),
+                Pos2::new(rect.right() - 20.0, fps_30_y),
+            ],
             egui::Stroke::new(1.0, line_color),
         );
         // Draw "30" label on right side
@@ -150,15 +159,13 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
         );
 
         // Check if hovered
-        let is_hovered = pointer_pos.map_or(false, |pos| bar_rect.contains(pos));
+        let is_hovered = pointer_pos.is_some_and(|pos| bar_rect.contains(pos));
         if is_hovered {
             hovered_index = Some(*original_index);
         }
 
         // Check if this is the selected frame
-        let is_selected = state
-            .selected_frame_index
-            .map_or(false, |idx| idx == *original_index);
+        let is_selected = state.selected_frame_index == Some(*original_index);
 
         // Get bar color based on FPS
         let mut color = frame_bar_color_fps(duration_ms);
@@ -203,14 +210,31 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     // Show tooltip for hovered frame
     if let Some(idx) = hovered_index {
         if let Some(frame) = state.frame_history.get(idx) {
-            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("frame_tooltip"), egui::containers::PopupAnchor::Pointer)
-                .show(|ui| {
-                    ui.label(format!("Frame #{}", frame.frame_number));
-                    ui.label(format!("{:.2} ms ({:.0} FPS)", frame.duration_ms(), 1000.0 / frame.duration_ms()));
-                    ui.label(format!("{} threads, {} scopes", frame.thread_count(), frame.total_scopes));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Click to select and pause").weak().small());
-                });
+            egui::containers::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new("frame_tooltip"),
+                egui::containers::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(format!("Frame #{}", frame.frame_number));
+                ui.label(format!(
+                    "{:.2} ms ({:.0} FPS)",
+                    frame.duration_ms(),
+                    1000.0 / frame.duration_ms()
+                ));
+                ui.label(format!(
+                    "{} threads, {} scopes",
+                    frame.thread_count(),
+                    frame.total_scopes
+                ));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Click to select and pause")
+                        .weak()
+                        .small(),
+                );
+            });
         }
     }
 
@@ -227,7 +251,15 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
     }
 
     // Render bottom control bar (mode buttons + scrollbar/info)
-    render_control_bar(ui, state, available_width, frame_count, max_bars, scroll_range, show_scrollbar);
+    render_control_bar(
+        ui,
+        state,
+        available_width,
+        frame_count,
+        max_bars,
+        scroll_range,
+        show_scrollbar,
+    );
 }
 
 /// Render the bottom control bar with mode toggle and scrollbar
@@ -250,18 +282,14 @@ fn render_control_bar(
         let live_selected = state.frame_history_mode == FrameHistoryMode::Live;
 
         // Live button
-        let live_response = ui.add(
-            egui::Button::new("Live").selected(live_selected)
-        );
+        let live_response = ui.add(egui::Button::new("Live").selected(live_selected));
         if live_response.clicked() && !live_selected {
             state.frame_history_mode = FrameHistoryMode::Live;
         }
         live_response.on_hover_text("Show frames chronologically (newest on right)");
 
         // Slowest button
-        let slowest_response = ui.add(
-            egui::Button::new("Slowest").selected(!live_selected)
-        );
+        let slowest_response = ui.add(egui::Button::new("Slowest").selected(!live_selected));
         if slowest_response.clicked() && live_selected {
             state.frame_history_mode = FrameHistoryMode::Slowest;
             // Auto-pause when switching to Slowest mode
@@ -278,9 +306,12 @@ fn render_control_bar(
             // In Slowest mode, show info about displayed frames
             let displayed = max_bars.min(frame_count);
             ui.label(
-                egui::RichText::new(format!("Showing {} slowest of {} frames", displayed, frame_count))
-                    .color(Color32::from_gray(160))
-                    .small()
+                egui::RichText::new(format!(
+                    "Showing {} slowest of {} frames",
+                    displayed, frame_count
+                ))
+                .color(Color32::from_gray(160))
+                .small(),
             );
         } else if show_scrollbar {
             // In Live mode with overflow, show inline scrollbar
@@ -290,7 +321,7 @@ fn render_control_bar(
             ui.label(
                 egui::RichText::new(format!("{} frames", frame_count))
                     .color(Color32::from_gray(160))
-                    .small()
+                    .small(),
             );
         }
     });
@@ -361,7 +392,8 @@ fn render_inline_scrollbar(
         if let Some(pos) = scroll_response.interact_pointer_pos() {
             if scroll_area > 0.0 {
                 // Normalize: 0 = left (oldest), 1 = right (newest)
-                let click_normalized = (scroll_rect.right() - thumb_width / 2.0 - pos.x) / scroll_area;
+                let click_normalized =
+                    (scroll_rect.right() - thumb_width / 2.0 - pos.x) / scroll_area;
                 let click_normalized = click_normalized.clamp(0.0, 1.0);
                 state.frame_history_scroll = (click_normalized * scroll_range as f32) as usize;
             }
@@ -372,8 +404,13 @@ fn render_inline_scrollbar(
     let visible_start = scroll_range.saturating_sub(state.frame_history_scroll);
     let visible_end = visible_start + max_bars;
     ui.label(
-        egui::RichText::new(format!("{}-{} of {}", visible_start + 1, visible_end, frame_count))
-            .color(Color32::from_gray(160))
-            .small()
+        egui::RichText::new(format!(
+            "{}-{} of {}",
+            visible_start + 1,
+            visible_end,
+            frame_count
+        ))
+        .color(Color32::from_gray(160))
+        .small(),
     );
 }

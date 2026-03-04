@@ -1,13 +1,13 @@
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::collections::HashMap;
-use parking_lot::RwLock;
 use vulkano::device::Device;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 
 use super::asset_source;
-use super::handle::{Handle, AssetId};
-use super::model_loader::{Model, load_model, load_model_from_bytes};
+use super::handle::{AssetId, Handle};
+use super::model_loader::{load_model, load_model_from_bytes, Model};
 
 /// Manages 3D model loading and caching
 pub struct ModelManager {

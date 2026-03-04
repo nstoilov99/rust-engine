@@ -235,3 +235,150 @@ pub struct PlayModeChanged {
     pub current: PlayMode,
 }
 impl Event for PlayModeChanged {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Simple test event type
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestEvent(i32);
+    impl Event for TestEvent {}
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct OtherEvent(String);
+    impl Event for OtherEvent {}
+
+    #[test]
+    fn events_not_readable_same_frame() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(1));
+        // Before update(), events go to `current` — iter reads from `previous`
+        assert!(events.is_empty());
+        assert_eq!(events.len(), 0);
+    }
+
+    #[test]
+    fn events_readable_after_update() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(42));
+        events.update(); // swap: current → previous
+
+        assert!(!events.is_empty());
+        assert_eq!(events.len(), 1);
+        let collected: Vec<_> = events.iter().collect();
+        assert_eq!(collected[0], &TestEvent(42));
+    }
+
+    #[test]
+    fn events_cleared_after_two_updates() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(1));
+        events.update(); // frame N events now readable
+        assert_eq!(events.len(), 1);
+
+        events.update(); // frame N events cleared, nothing new
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn multiple_events_in_one_frame() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(1));
+        events.send(TestEvent(2));
+        events.send(TestEvent(3));
+        events.update();
+
+        assert_eq!(events.len(), 3);
+        let values: Vec<i32> = events.iter().map(|e| e.0).collect();
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn clear_removes_all_events() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(1));
+        events.update();
+        events.send(TestEvent(2));
+
+        events.clear();
+        assert!(events.is_empty());
+        events.update();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn event_writer_sends_batch() {
+        let mut events = Events::<TestEvent>::new();
+        {
+            let mut writer = EventWriter::new(&mut events);
+            writer.send_batch(vec![TestEvent(10), TestEvent(20)]);
+        }
+        events.update();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn event_reader_iterates() {
+        let mut events = Events::<TestEvent>::new();
+        events.send(TestEvent(5));
+        events.update();
+
+        let reader = EventReader::new(&events);
+        assert!(!reader.is_empty());
+        assert_eq!(reader.len(), 1);
+        let collected: Vec<_> = reader.iter().collect();
+        assert_eq!(collected[0], &TestEvent(5));
+    }
+
+    #[test]
+    fn event_storage_register_and_send() {
+        let mut storage = EventStorage::new();
+        storage.register::<TestEvent>();
+
+        storage.send(TestEvent(99));
+        storage.update_all();
+
+        let events = storage
+            .get::<TestEvent>()
+            .expect("TestEvent should be registered");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.iter().next(), Some(&TestEvent(99)));
+    }
+
+    #[test]
+    fn event_storage_auto_registers_on_send() {
+        let mut storage = EventStorage::new();
+        // Don't call register — send should auto-register
+        storage.send(TestEvent(7));
+        storage.update_all();
+
+        let events = storage.get::<TestEvent>().expect("auto-registered");
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn event_storage_multiple_types() {
+        let mut storage = EventStorage::new();
+        storage.send(TestEvent(1));
+        storage.send(OtherEvent("hello".into()));
+        storage.update_all();
+
+        assert_eq!(storage.get::<TestEvent>().expect("registered").len(), 1);
+        assert_eq!(storage.get::<OtherEvent>().expect("registered").len(), 1);
+    }
+
+    #[test]
+    fn event_storage_clear_all() {
+        let mut storage = EventStorage::new();
+        storage.send(TestEvent(1));
+        storage.update_all();
+        assert_eq!(storage.get::<TestEvent>().expect("registered").len(), 1);
+
+        storage.clear_all();
+        assert_eq!(
+            storage.get::<TestEvent>().expect("still registered").len(),
+            0
+        );
+    }
+}

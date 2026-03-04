@@ -57,10 +57,10 @@ impl GridPushConstants {
             view_proj: view_proj.to_cols_array_2d(),
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, grid_extent],
             grid_params: [
-                1.0,                    // grid_size1: fine grid (1 unit)
-                10.0,                   // grid_size2: coarse grid (10 units)
-                fade_distance * 0.5,    // fade_start
-                fade_distance,          // fade_end
+                1.0,                 // grid_size1: fine grid (1 unit)
+                10.0,                // grid_size2: coarse grid (10 units)
+                fade_distance * 0.5, // fade_start
+                fade_distance,       // fade_end
             ],
         }
     }

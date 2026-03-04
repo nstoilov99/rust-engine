@@ -10,7 +10,7 @@ pub use renderer::EguiRenderer;
 use egui::Context;
 use std::sync::Arc;
 use winit::event::WindowEvent;
-use winit::keyboard::{Key, NamedKey, PhysicalKey, KeyCode};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::Window;
 
 /// Result from GUI rendering including input consumption flags
@@ -137,22 +137,28 @@ impl Gui {
         // Solution: Check if pointer is over a popup/tooltip layer (above Background order).
         // Popups render on Foreground or higher layers. The viewport is on Background.
         // This way, we only block viewport input when interacting with popups/menus.
-        let pointer_over_popup = self.egui_ctx.input(|i| i.pointer.hover_pos()).map_or(false, |pos| {
-            self.egui_ctx.layer_id_at(pos).map_or(false, |layer| {
-                // Block if layer order is above Background (popups, tooltips, etc.)
-                layer.order > egui::Order::Background
-            })
-        });
+        let pointer_over_popup =
+            self.egui_ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| {
+                    self.egui_ctx.layer_id_at(pos).is_some_and(|layer| {
+                        // Block if layer order is above Background (popups, tooltips, etc.)
+                        layer.order > egui::Order::Background
+                    })
+                });
 
         // Also check if egui is actively dragging AND the pointer started on a popup layer.
         // This handles the case where user starts dragging a slider in a popup and moves
         // the mouse outside the popup - we still want to block viewport input.
-        let dragging_from_popup = self.egui_ctx.is_using_pointer() &&
-            self.egui_ctx.input(|i| i.pointer.press_origin()).map_or(false, |origin_pos| {
-                self.egui_ctx.layer_id_at(origin_pos).map_or(false, |layer| {
-                    layer.order > egui::Order::Background
-                })
-            });
+        let dragging_from_popup = self.egui_ctx.is_using_pointer()
+            && self
+                .egui_ctx
+                .input(|i| i.pointer.press_origin())
+                .is_some_and(|origin_pos| {
+                    self.egui_ctx
+                        .layer_id_at(origin_pos)
+                        .is_some_and(|layer| layer.order > egui::Order::Background)
+                });
 
         // Block viewport input when dragging from OUTSIDE the viewport rect.
         // This catches egui_dock separator drags (which are on Background layer, not popup).
@@ -177,14 +183,13 @@ impl Gui {
             None
         };
 
-        let dragging_from_outside_viewport = is_dragging &&
-            effective_viewport_rect.map_or(false, |vp_rect| {
-                press_origin.map_or(false, |origin_pos| {
-                    !vp_rect.contains(origin_pos)
-                })
+        let dragging_from_outside_viewport = is_dragging
+            && effective_viewport_rect.is_some_and(|vp_rect| {
+                press_origin.is_some_and(|origin_pos| !vp_rect.contains(origin_pos))
             });
 
-        let is_using_pointer = pointer_over_popup || dragging_from_popup || dragging_from_outside_viewport;
+        let is_using_pointer =
+            pointer_over_popup || dragging_from_popup || dragging_from_outside_viewport;
 
         // Handle clipboard copy via commands (egui 0.33 API)
         for command in &full_output.platform_output.commands {
@@ -289,9 +294,11 @@ impl Gui {
                     winit::event::Ime::Preedit(text, _cursor) => {
                         if text.is_empty() {
                             // Preedit cleared
-                            self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(String::new())));
+                            self.events
+                                .push(egui::Event::Ime(egui::ImeEvent::Preedit(String::new())));
                         } else {
-                            self.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
+                            self.events
+                                .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
                         }
                         true
                     }
@@ -322,7 +329,9 @@ impl Gui {
                 true
             }
 
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 let pressed = key_event.state.is_pressed();
 
                 // Update modifiers based on physical key

@@ -30,8 +30,8 @@ impl DirectionalLight {
     /// Standard sunlight (from above, slightly angled)
     pub fn sun() -> Self {
         Self::new(
-            Vec3::new(0.3, -1.0, 0.2),  // Coming from upper-right
-            Vec3::new(1.0, 0.95, 0.8),  // Warm white
+            Vec3::new(0.3, -1.0, 0.2), // Coming from upper-right
+            Vec3::new(1.0, 0.95, 0.8), // Warm white
             1.0,
         )
     }
@@ -40,7 +40,7 @@ impl DirectionalLight {
     pub fn moon() -> Self {
         Self::new(
             Vec3::new(-0.2, -1.0, -0.3),
-            Vec3::new(0.7, 0.8, 1.0),  // Cool blue
+            Vec3::new(0.7, 0.8, 1.0), // Cool blue
             0.3,
         )
     }
@@ -105,9 +105,11 @@ impl AmbientLight {
     pub fn new(color: Vec3, intensity: f32) -> Self {
         Self { color, intensity }
     }
+}
 
+impl Default for AmbientLight {
     /// Neutral white ambient
-    pub fn default() -> Self {
+    fn default() -> Self {
         Self::new(Vec3::ONE, 0.2)
     }
 }

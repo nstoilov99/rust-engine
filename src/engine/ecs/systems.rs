@@ -96,10 +96,8 @@ impl LegacySystem for RotationSystem {
 
         let mut rotated = Vec::new();
         for (id, transform) in world.query_mut::<&mut Transform>() {
-            let rotation = glm::quat_angle_axis(
-                self.rotation_speed * delta_time,
-                &glm::vec3(0.0, 1.0, 0.0),
-            );
+            let rotation =
+                glm::quat_angle_axis(self.rotation_speed * delta_time, &glm::vec3(0.0, 1.0, 0.0));
             transform.rotation = rotation * transform.rotation;
             rotated.push(id);
         }

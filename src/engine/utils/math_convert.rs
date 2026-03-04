@@ -30,10 +30,9 @@ pub fn vec3_from_glm(v: &glm::Vec3) -> g::Vec3 {
 pub fn mat4_to_glm(m: g::Mat4) -> glm::Mat4 {
     let cols = m.to_cols_array_2d();
     glm::mat4(
-        cols[0][0], cols[0][1], cols[0][2], cols[0][3],
-        cols[1][0], cols[1][1], cols[1][2], cols[1][3],
-        cols[2][0], cols[2][1], cols[2][2], cols[2][3],
-        cols[3][0], cols[3][1], cols[3][2], cols[3][3],
+        cols[0][0], cols[0][1], cols[0][2], cols[0][3], cols[1][0], cols[1][1], cols[1][2],
+        cols[1][3], cols[2][0], cols[2][1], cols[2][2], cols[2][3], cols[3][0], cols[3][1],
+        cols[3][2], cols[3][3],
     )
 }
 

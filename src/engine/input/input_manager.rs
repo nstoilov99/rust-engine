@@ -1,6 +1,6 @@
+use std::collections::HashSet;
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::KeyCode;
-use std::collections::HashSet;
 
 /// Tracks input state (keyboard and mouse)
 /// Updated for winit 0.30 - uses KeyCode instead of VirtualKeyCode
@@ -18,6 +18,12 @@ pub struct InputManager {
     raw_mouse_delta: (f32, f32),
     /// Whether to use raw mouse input (when cursor is locked)
     use_raw_mouse: bool,
+}
+
+impl Default for InputManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InputManager {

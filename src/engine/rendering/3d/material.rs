@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use vulkano::image::view::ImageView;
 use vulkano::descriptor_set::DescriptorSet;
+use vulkano::image::view::ImageView;
 
 /// PBR material with all texture maps
 pub struct PbrMaterial {
@@ -35,8 +35,8 @@ pub fn create_default_texture(
     allocator: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
     _color: [u8; 4],
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
-    use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::format::Format;
+    use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::memory::allocator::AllocationCreateInfo;
 
     // Create 1x1 texture with solid color

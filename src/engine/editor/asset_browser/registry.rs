@@ -156,8 +156,12 @@ impl AssetRegistry {
         let mut found_paths: HashSet<PathBuf> = HashSet::new();
 
         // Walk the directory tree
-        if let Err(e) = self.scan_directory_recursive(&self.root_path.clone(), &mut found_paths, &mut result) {
-            result.errors.push(format!("Failed to scan directory: {}", e));
+        if let Err(e) =
+            self.scan_directory_recursive(&self.root_path.clone(), &mut found_paths, &mut result)
+        {
+            result
+                .errors
+                .push(format!("Failed to scan directory: {}", e));
         }
 
         // Remove assets whose files no longer exist
@@ -220,7 +224,8 @@ impl AssetRegistry {
                     }
                 } else {
                     // New asset
-                    if let Some(metadata) = AssetMetadata::from_path(relative_path, &self.root_path) {
+                    if let Some(metadata) = AssetMetadata::from_path(relative_path, &self.root_path)
+                    {
                         self.register(metadata);
                         result.added += 1;
                     }
@@ -399,6 +404,7 @@ impl AssetRegistry {
     }
 
     /// Recursively collect all folders from the filesystem
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_folders_recursive(
         &self,
         base_path: &Path,
@@ -479,6 +485,7 @@ impl AssetRegistry {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn calculate_total_counts(&self, node: &mut FolderNode) {
         let mut total = node.asset_count;
         for child in &mut node.children {

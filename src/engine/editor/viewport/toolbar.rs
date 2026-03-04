@@ -7,8 +7,8 @@ use egui::{Color32, Ui, Vec2};
 
 use super::camera_controller::CameraControlMode;
 use super::settings::{
-    GizmoOrientation, ToolMode, ViewportSettings,
-    GRID_SNAP_VALUES, ROTATION_SNAP_VALUES, SCALE_SNAP_VALUES,
+    GizmoOrientation, ToolMode, ViewportSettings, GRID_SNAP_VALUES, ROTATION_SNAP_VALUES,
+    SCALE_SNAP_VALUES,
 };
 use crate::engine::editor::icons::{IconManager, ToolbarIcon};
 
@@ -101,8 +101,15 @@ fn icon_tool_button(
                 egui::StrokeKind::Outside,
             );
             // Tooltip
-            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
-                .show(|ui| { ui.label(tooltip); });
+            egui::containers::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new(tooltip),
+                egui::containers::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(tooltip);
+            });
         }
     }
 
@@ -110,12 +117,7 @@ fn icon_tool_button(
 }
 
 #[allow(dead_code)]
-fn tool_button(
-    ui: &mut Ui,
-    label: &str,
-    selected: bool,
-    tooltip: &str,
-) -> bool {
+fn tool_button(ui: &mut Ui, label: &str, selected: bool, tooltip: &str) -> bool {
     let fill = if selected {
         colors::BUTTON_ACTIVE
     } else {
@@ -157,8 +159,15 @@ fn tool_button(
                 egui::StrokeKind::Outside,
             );
             // Tooltip
-            egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
-                .show(|ui| { ui.label(tooltip); });
+            egui::containers::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::new(tooltip),
+                egui::containers::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.label(tooltip);
+            });
         }
     }
 
@@ -167,6 +176,7 @@ fn tool_button(
 
 /// Pill-shaped snap button with toggle on left and dropdown menu on right
 /// Returns true if toggle was clicked (to toggle snap on/off)
+#[allow(clippy::too_many_arguments)]
 fn snap_button_with_menu(
     ui: &mut Ui,
     icon: ToolbarIcon,
@@ -186,7 +196,8 @@ fn snap_button_with_menu(
     let corner_radius = height / 2.0;
 
     // Allocate space for the entire button group
-    let (total_rect, _) = ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
+    let (total_rect, _) =
+        ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
 
     let icon_rect = egui::Rect::from_min_size(total_rect.min, Vec2::new(icon_width, height));
     let dropdown_rect = egui::Rect::from_min_size(
@@ -203,7 +214,12 @@ fn snap_button_with_menu(
     if enabled {
         painter.rect_filled(
             icon_rect.shrink(1.0),
-            egui::CornerRadius { nw: 11, sw: 11, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 11,
+                sw: 11,
+                ne: 0,
+                se: 0,
+            },
             colors::BUTTON_ACTIVE,
         );
     }
@@ -262,8 +278,14 @@ fn snap_button_with_menu(
     let caret_size = 3.0;
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(caret_center.x - caret_size, caret_center.y - caret_size / 2.0),
-            egui::pos2(caret_center.x + caret_size, caret_center.y - caret_size / 2.0),
+            egui::pos2(
+                caret_center.x - caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
+            egui::pos2(
+                caret_center.x + caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
             egui::pos2(caret_center.x, caret_center.y + caret_size / 2.0),
         ],
         Color32::from_gray(180),
@@ -273,7 +295,9 @@ fn snap_button_with_menu(
     // Check for clicks using raw input
     let pointer_pos = ui.input(|i| i.pointer.latest_pos());
     let in_icon = pointer_pos.map(|p| icon_rect.contains(p)).unwrap_or(false);
-    let in_dropdown = pointer_pos.map(|p| dropdown_rect.contains(p)).unwrap_or(false);
+    let in_dropdown = pointer_pos
+        .map(|p| dropdown_rect.contains(p))
+        .unwrap_or(false);
     let primary_released = ui.input(|i| i.pointer.primary_released());
 
     let icon_clicked = primary_released && in_icon;
@@ -282,17 +306,34 @@ fn snap_button_with_menu(
     if in_icon {
         painter.rect_stroke(
             icon_rect,
-            egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 12,
+                sw: 12,
+                ne: 0,
+                se: 0,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(icon_tooltip), egui::containers::PopupAnchor::Pointer)
-            .show(|ui| { ui.label(icon_tooltip); });
+        egui::containers::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new(icon_tooltip),
+            egui::containers::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label(icon_tooltip);
+        });
     }
     if in_dropdown {
         painter.rect_stroke(
             dropdown_rect,
-            egui::CornerRadius { nw: 0, sw: 0, ne: 12, se: 12 },
+            egui::CornerRadius {
+                nw: 0,
+                sw: 0,
+                ne: 12,
+                se: 12,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
@@ -317,7 +358,10 @@ fn snap_button_with_menu(
             for &value in values {
                 let label = format_snap_value(value);
                 let selected = (*current_value - value).abs() < 0.0001;
-                if ui.selectable_label(selected, egui::RichText::new(&label).size(13.0)).clicked() {
+                if ui
+                    .selectable_label(selected, egui::RichText::new(&label).size(13.0))
+                    .clicked()
+                {
                     *current_value = value;
                     egui::Popup::close_id(ui.ctx(), popup_id);
                 }
@@ -332,7 +376,10 @@ fn format_snap_value(value: f32) -> String {
     if value >= 1.0 && value == value.floor() {
         format!("{}", value as i32)
     } else if value >= 0.1 {
-        format!("{:.2}", value).trim_end_matches('0').trim_end_matches('.').to_string()
+        format!("{:.2}", value)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     } else {
         format!("{}", value)
     }
@@ -353,7 +400,8 @@ fn camera_speed_button_with_menu(
     let corner_radius = height / 2.0;
 
     // Allocate space
-    let (total_rect, _) = ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
+    let (total_rect, _) =
+        ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
 
     let icon_rect = egui::Rect::from_min_size(total_rect.min, Vec2::new(icon_width, height));
     let dropdown_rect = egui::Rect::from_min_size(
@@ -415,8 +463,14 @@ fn camera_speed_button_with_menu(
     let caret_size = 3.0;
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(caret_center.x - caret_size, caret_center.y - caret_size / 2.0),
-            egui::pos2(caret_center.x + caret_size, caret_center.y - caret_size / 2.0),
+            egui::pos2(
+                caret_center.x - caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
+            egui::pos2(
+                caret_center.x + caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
             egui::pos2(caret_center.x, caret_center.y + caret_size / 2.0),
         ],
         Color32::from_gray(180),
@@ -425,7 +479,9 @@ fn camera_speed_button_with_menu(
 
     // Check for clicks
     let pointer_pos = ui.input(|i| i.pointer.latest_pos());
-    let in_dropdown = pointer_pos.map(|p| dropdown_rect.contains(p)).unwrap_or(false);
+    let in_dropdown = pointer_pos
+        .map(|p| dropdown_rect.contains(p))
+        .unwrap_or(false);
     let in_icon = pointer_pos.map(|p| icon_rect.contains(p)).unwrap_or(false);
     let primary_released = ui.input(|i| i.pointer.primary_released());
 
@@ -433,17 +489,34 @@ fn camera_speed_button_with_menu(
     if in_icon {
         painter.rect_stroke(
             icon_rect,
-            egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 12,
+                sw: 12,
+                ne: 0,
+                se: 0,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("camera_speed_tooltip"), egui::containers::PopupAnchor::Pointer)
-            .show(|ui| { ui.label("Camera speed"); });
+        egui::containers::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new("camera_speed_tooltip"),
+            egui::containers::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label("Camera speed");
+        });
     }
     if in_dropdown {
         painter.rect_stroke(
             dropdown_rect,
-            egui::CornerRadius { nw: 0, sw: 0, ne: 12, se: 12 },
+            egui::CornerRadius {
+                nw: 0,
+                sw: 0,
+                ne: 12,
+                se: 12,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
@@ -460,93 +533,105 @@ fn camera_speed_button_with_menu(
         .open_memory(None)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-        ui.set_min_width(180.0);
-        ui.style_mut().spacing.item_spacing.y = 6.0;
+            ui.set_min_width(180.0);
+            ui.style_mut().spacing.item_spacing.y = 6.0;
 
-        // Header
-        ui.label(egui::RichText::new("CAMERA SPEED").size(10.0).color(Color32::GRAY));
-        ui.separator();
-
-        // Camera Speed slider row with label
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Camera Speed").size(12.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::DragValue::new(camera_speed)
-                    .range(0.03..=8.0)
-                    .speed(0.01)
-                    .fixed_decimals(2));
-            });
-        });
-
-        // Custom slider with logarithmic feel
-        let slider_height = 16.0;
-        let (slider_rect, slider_response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), slider_height),
-            egui::Sense::click_and_drag()
-        );
-
-        if ui.is_rect_visible(slider_rect) {
-            let painter = ui.painter();
-
-            // Draw track background
-            let track_rect = egui::Rect::from_center_size(
-                slider_rect.center(),
-                egui::vec2(slider_rect.width() - 8.0, 4.0)
+            // Header
+            ui.label(
+                egui::RichText::new("CAMERA SPEED")
+                    .size(10.0)
+                    .color(Color32::GRAY),
             );
-            painter.rect_filled(track_rect, 2.0, Color32::from_gray(60));
+            ui.separator();
 
-            // Calculate handle position from value using logarithmic mapping
-            let min_val = 0.03_f32;
-            let max_val = 8.0_f32;
-            let log_min = min_val.ln();
-            let log_max = max_val.ln();
-            let t = ((camera_speed.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
-            let handle_x = track_rect.left() + t * track_rect.width();
+            // Camera Speed slider row with label
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Camera Speed").size(12.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::DragValue::new(camera_speed)
+                            .range(0.03..=8.0)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    );
+                });
+            });
 
-            // Draw handle
-            let handle_radius = 6.0;
-            let handle_color = if slider_response.dragged() {
-                Color32::from_rgb(100, 150, 255)
-            } else if slider_response.hovered() {
-                Color32::from_rgb(180, 180, 180)
-            } else {
-                Color32::from_rgb(150, 150, 150)
-            };
-            painter.circle_filled(egui::pos2(handle_x, slider_rect.center().y), handle_radius, handle_color);
-        }
+            // Custom slider with logarithmic feel
+            let slider_height = 16.0;
+            let (slider_rect, slider_response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), slider_height),
+                egui::Sense::click_and_drag(),
+            );
 
-        // Handle dragging with logarithmic mapping
-        if slider_response.dragged() || slider_response.clicked() {
-            if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
-                let track_left = slider_rect.left() + 4.0;
-                let track_right = slider_rect.right() - 4.0;
-                let track_width = track_right - track_left;
+            if ui.is_rect_visible(slider_rect) {
+                let painter = ui.painter();
 
-                // Calculate t from mouse x position, clamped to [0, 1]
-                let t = ((pointer_pos.x - track_left) / track_width).clamp(0.0, 1.0);
+                // Draw track background
+                let track_rect = egui::Rect::from_center_size(
+                    slider_rect.center(),
+                    egui::vec2(slider_rect.width() - 8.0, 4.0),
+                );
+                painter.rect_filled(track_rect, 2.0, Color32::from_gray(60));
 
-                // Convert t to value using logarithmic mapping
+                // Calculate handle position from value using logarithmic mapping
                 let min_val = 0.03_f32;
                 let max_val = 8.0_f32;
                 let log_min = min_val.ln();
                 let log_max = max_val.ln();
-                *camera_speed = (log_min + t * (log_max - log_min)).exp();
+                let t = ((camera_speed.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
+                let handle_x = track_rect.left() + t * track_rect.width();
+
+                // Draw handle
+                let handle_radius = 6.0;
+                let handle_color = if slider_response.dragged() {
+                    Color32::from_rgb(100, 150, 255)
+                } else if slider_response.hovered() {
+                    Color32::from_rgb(180, 180, 180)
+                } else {
+                    Color32::from_rgb(150, 150, 150)
+                };
+                painter.circle_filled(
+                    egui::pos2(handle_x, slider_rect.center().y),
+                    handle_radius,
+                    handle_color,
+                );
             }
-        }
 
-        ui.add_space(4.0);
+            // Handle dragging with logarithmic mapping
+            if slider_response.dragged() || slider_response.clicked() {
+                if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
+                    let track_left = slider_rect.left() + 4.0;
+                    let track_right = slider_rect.right() - 4.0;
+                    let track_width = track_right - track_left;
 
-        // Speed Scalar row
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Speed Scalar").size(12.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::DragValue::new(camera_speed_scalar)
-                    .range(0.1..=10.0)
-                    .speed(0.1)
-                    .fixed_decimals(1));
+                    // Calculate t from mouse x position, clamped to [0, 1]
+                    let t = ((pointer_pos.x - track_left) / track_width).clamp(0.0, 1.0);
+
+                    // Convert t to value using logarithmic mapping
+                    let min_val = 0.03_f32;
+                    let max_val = 8.0_f32;
+                    let log_min = min_val.ln();
+                    let log_max = max_val.ln();
+                    *camera_speed = (log_min + t * (log_max - log_min)).exp();
+                }
+            }
+
+            ui.add_space(4.0);
+
+            // Speed Scalar row
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Speed Scalar").size(12.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::DragValue::new(camera_speed_scalar)
+                            .range(0.1..=10.0)
+                            .speed(0.1)
+                            .fixed_decimals(1),
+                    );
+                });
             });
         });
-    });
 }
 
 /// Rotation snap button with single-column dropdown
@@ -564,7 +649,8 @@ fn rotation_snap_button_with_menu(
     let corner_radius = height / 2.0;
 
     // Allocate space
-    let (total_rect, _) = ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
+    let (total_rect, _) =
+        ui.allocate_exact_size(Vec2::new(total_width, height), egui::Sense::hover());
 
     let icon_rect = egui::Rect::from_min_size(total_rect.min, Vec2::new(icon_width, height));
     let dropdown_rect = egui::Rect::from_min_size(
@@ -581,7 +667,12 @@ fn rotation_snap_button_with_menu(
     if enabled {
         painter.rect_filled(
             icon_rect.shrink(1.0),
-            egui::CornerRadius { nw: 11, sw: 11, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 11,
+                sw: 11,
+                ne: 0,
+                se: 0,
+            },
             colors::BUTTON_ACTIVE,
         );
     }
@@ -640,8 +731,14 @@ fn rotation_snap_button_with_menu(
     let caret_size = 3.0;
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(caret_center.x - caret_size, caret_center.y - caret_size / 2.0),
-            egui::pos2(caret_center.x + caret_size, caret_center.y - caret_size / 2.0),
+            egui::pos2(
+                caret_center.x - caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
+            egui::pos2(
+                caret_center.x + caret_size,
+                caret_center.y - caret_size / 2.0,
+            ),
             egui::pos2(caret_center.x, caret_center.y + caret_size / 2.0),
         ],
         Color32::from_gray(180),
@@ -651,7 +748,9 @@ fn rotation_snap_button_with_menu(
     // Check for clicks
     let pointer_pos = ui.input(|i| i.pointer.latest_pos());
     let in_icon = pointer_pos.map(|p| icon_rect.contains(p)).unwrap_or(false);
-    let in_dropdown = pointer_pos.map(|p| dropdown_rect.contains(p)).unwrap_or(false);
+    let in_dropdown = pointer_pos
+        .map(|p| dropdown_rect.contains(p))
+        .unwrap_or(false);
     let primary_released = ui.input(|i| i.pointer.primary_released());
 
     let icon_clicked = primary_released && in_icon;
@@ -660,17 +759,34 @@ fn rotation_snap_button_with_menu(
     if in_icon {
         painter.rect_stroke(
             icon_rect,
-            egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 },
+            egui::CornerRadius {
+                nw: 12,
+                sw: 12,
+                ne: 0,
+                se: 0,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
-        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("rotation_snap_tooltip"), egui::containers::PopupAnchor::Pointer)
-            .show(|ui| { ui.label("Rotation snapping"); });
+        egui::containers::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new("rotation_snap_tooltip"),
+            egui::containers::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label("Rotation snapping");
+        });
     }
     if in_dropdown {
         painter.rect_stroke(
             dropdown_rect,
-            egui::CornerRadius { nw: 0, sw: 0, ne: 12, se: 12 },
+            egui::CornerRadius {
+                nw: 0,
+                sw: 0,
+                ne: 12,
+                se: 12,
+            },
             egui::Stroke::new(1.0, Color32::from_gray(100)),
             egui::StrokeKind::Outside,
         );
@@ -687,18 +803,21 @@ fn rotation_snap_button_with_menu(
         .open_memory(None)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-        ui.set_min_width(80.0);
-        ui.style_mut().spacing.item_spacing.y = 1.0;
+            ui.set_min_width(80.0);
+            ui.style_mut().spacing.item_spacing.y = 1.0;
 
-        for &value in ROTATION_SNAP_VALUES {
-            let label = format!("{}°", value as i32);
-            let selected = (*current_value - value).abs() < 0.0001;
-            if ui.selectable_label(selected, egui::RichText::new(&label).size(13.0)).clicked() {
-                *current_value = value;
-                egui::Popup::close_id(ui.ctx(), popup_id);
+            for &value in ROTATION_SNAP_VALUES {
+                let label = format!("{}°", value as i32);
+                let selected = (*current_value - value).abs() < 0.0001;
+                if ui
+                    .selectable_label(selected, egui::RichText::new(&label).size(13.0))
+                    .clicked()
+                {
+                    *current_value = value;
+                    egui::Popup::close_id(ui.ctx(), popup_id);
+                }
             }
-        }
-    });
+        });
 
     icon_clicked
 }
@@ -709,7 +828,10 @@ fn toolbar_separator(ui: &mut Ui) {
     let painter = ui.painter();
     let x = rect.left() + 4.0;
     painter.line_segment(
-        [egui::pos2(x, rect.top() + 4.0), egui::pos2(x, rect.bottom() - 4.0)],
+        [
+            egui::pos2(x, rect.top() + 4.0),
+            egui::pos2(x, rect.bottom() - 4.0),
+        ],
         egui::Stroke::new(1.0, colors::SEPARATOR),
     );
     ui.add_space(9.0);
@@ -745,14 +867,20 @@ pub fn render_viewport_toolbar_overlay(
 
                         let tools = [
                             (ToolMode::Select, ToolbarIcon::Select, "Q", "Select (Q)"),
-                            (ToolMode::Translate, ToolbarIcon::Translate, "W", "Translate (W)"),
+                            (
+                                ToolMode::Translate,
+                                ToolbarIcon::Translate,
+                                "W",
+                                "Translate (W)",
+                            ),
                             (ToolMode::Rotate, ToolbarIcon::Rotate, "E", "Rotate (E)"),
                             (ToolMode::Scale, ToolbarIcon::Scale, "R", "Scale (R)"),
                         ];
 
                         for (mode, icon, fallback, tooltip) in tools {
                             let selected = settings.tool_mode == mode;
-                            if icon_tool_button(ui, icon, fallback, selected, tooltip, icon_manager) {
+                            if icon_tool_button(ui, icon, fallback, selected, tooltip, icon_manager)
+                            {
                                 settings.tool_mode = mode;
                             }
                         }
@@ -765,7 +893,14 @@ pub fn render_viewport_toolbar_overlay(
                         } else {
                             (ToolbarIcon::Local, "L", "Local space (click for World)")
                         };
-                        if icon_tool_button(ui, icon, space_label, false, space_tooltip, icon_manager) {
+                        if icon_tool_button(
+                            ui,
+                            icon,
+                            space_label,
+                            false,
+                            space_tooltip,
+                            icon_manager,
+                        ) {
                             settings.gizmo_orientation = if is_world {
                                 GizmoOrientation::Local
                             } else {
@@ -776,29 +911,41 @@ pub fn render_viewport_toolbar_overlay(
                         toolbar_separator(ui);
 
                         if snap_button_with_menu(
-                            ui, ToolbarIcon::GridSnap, "▦",
+                            ui,
+                            ToolbarIcon::GridSnap,
+                            "▦",
                             settings.grid_snap_enabled,
                             format!("{}", settings.snap_translate),
-                            "Grid snapping", "grid_snap_menu",
-                            GRID_SNAP_VALUES, &mut settings.snap_translate, icon_manager,
+                            "Grid snapping",
+                            "grid_snap_menu",
+                            GRID_SNAP_VALUES,
+                            &mut settings.snap_translate,
+                            icon_manager,
                         ) {
                             settings.grid_snap_enabled = !settings.grid_snap_enabled;
                         }
 
                         if rotation_snap_button_with_menu(
-                            ui, settings.rotation_snap_enabled,
+                            ui,
+                            settings.rotation_snap_enabled,
                             format!("{}°", settings.snap_rotate as i32),
-                            &mut settings.snap_rotate, icon_manager,
+                            &mut settings.snap_rotate,
+                            icon_manager,
                         ) {
                             settings.rotation_snap_enabled = !settings.rotation_snap_enabled;
                         }
 
                         if snap_button_with_menu(
-                            ui, ToolbarIcon::ScaleSnap, "⊞",
+                            ui,
+                            ToolbarIcon::ScaleSnap,
+                            "⊞",
                             settings.scale_snap_enabled,
                             format!("{}", settings.snap_scale),
-                            "Scale snapping", "scale_snap_menu",
-                            SCALE_SNAP_VALUES, &mut settings.snap_scale, icon_manager,
+                            "Scale snapping",
+                            "scale_snap_menu",
+                            SCALE_SNAP_VALUES,
+                            &mut settings.snap_scale,
+                            icon_manager,
                         ) {
                             settings.scale_snap_enabled = !settings.scale_snap_enabled;
                         }
@@ -806,18 +953,28 @@ pub fn render_viewport_toolbar_overlay(
                         toolbar_separator(ui);
 
                         camera_speed_button_with_menu(
-                            ui, format!("{:.2}", settings.camera_speed),
-                            &mut settings.camera_speed, &mut settings.camera_speed_scalar, icon_manager,
+                            ui,
+                            format!("{:.2}", settings.camera_speed),
+                            &mut settings.camera_speed,
+                            &mut settings.camera_speed_scalar,
+                            icon_manager,
                         );
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (text, color) = match camera_mode {
-                                CameraControlMode::Fly => {
-                                    (format!("Fly {:.1}x", settings.camera_speed), Color32::from_rgb(100, 200, 100))
+                                CameraControlMode::Fly => (
+                                    format!("Fly {:.1}x", settings.camera_speed),
+                                    Color32::from_rgb(100, 200, 100),
+                                ),
+                                CameraControlMode::Orbit => {
+                                    ("Orbit".to_string(), Color32::from_rgb(100, 150, 200))
                                 }
-                                CameraControlMode::Orbit => ("Orbit".to_string(), Color32::from_rgb(100, 150, 200)),
-                                CameraControlMode::Pan => ("Pan".to_string(), Color32::from_rgb(200, 150, 100)),
-                                CameraControlMode::LookDrag => ("Look".to_string(), Color32::from_rgb(150, 100, 200)),
+                                CameraControlMode::Pan => {
+                                    ("Pan".to_string(), Color32::from_rgb(200, 150, 100))
+                                }
+                                CameraControlMode::LookDrag => {
+                                    ("Look".to_string(), Color32::from_rgb(150, 100, 200))
+                                }
                                 CameraControlMode::None => return,
                             };
                             ui.label(egui::RichText::new(text).color(color).small());
@@ -828,7 +985,13 @@ pub fn render_viewport_toolbar_overlay(
 }
 
 /// Render a small orientation indicator cube in a corner
-pub fn render_orientation_indicator(ui: &mut Ui, rect: egui::Rect, forward: [f32; 3], right: [f32; 3], up: [f32; 3]) {
+pub fn render_orientation_indicator(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    forward: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+) {
     let painter = ui.painter();
     let size = 40.0;
     let padding = 8.0;
@@ -840,14 +1003,17 @@ pub fn render_orientation_indicator(ui: &mut Ui, rect: egui::Rect, forward: [f32
     );
 
     // Background circle
-    painter.circle_filled(center, size / 2.0 + 2.0, Color32::from_rgba_unmultiplied(0, 0, 0, 150));
+    painter.circle_filled(
+        center,
+        size / 2.0 + 2.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
 
     // Draw axes (simplified 2D projection)
     let axis_length = size / 2.0 - 4.0;
 
-    let project = |dir: [f32; 3]| -> egui::Vec2 {
-        egui::vec2(dir[0] * axis_length, -dir[1] * axis_length)
-    };
+    let project =
+        |dir: [f32; 3]| -> egui::Vec2 { egui::vec2(dir[0] * axis_length, -dir[1] * axis_length) };
 
     // X axis (Red)
     let x_end = center + project([forward[0], forward[1], forward[2]]);

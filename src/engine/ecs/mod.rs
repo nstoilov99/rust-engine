@@ -9,6 +9,10 @@ pub mod schedule;
 pub mod systems;
 pub mod world;
 
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod test_helpers;
+
 pub use change_detection::ChangeTicks;
 pub use commands::CommandBuffer;
 pub use components::*;
@@ -18,8 +22,8 @@ pub use hecs::{Entity, World};
 pub use hierarchy::*;
 pub use resources::*;
 pub use schedule::{
-    Always, FunctionSystem, RunCriteria, RunIfEditing, RunIfNotPaused, RunIfPlaying,
-    Schedule, Stage, System,
+    Always, FunctionSystem, RunCriteria, RunIfEditing, RunIfNotPaused, RunIfPlaying, Schedule,
+    Stage, System,
 };
 pub use systems::*;
 pub use world::*;

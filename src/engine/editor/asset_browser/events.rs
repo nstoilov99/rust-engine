@@ -12,9 +12,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub enum AssetBrowserEvent {
     /// An asset was selected in the browser
-    AssetSelected {
-        id: AssetId,
-    },
+    AssetSelected { id: AssetId },
 
     /// Asset selection was cleared
     SelectionCleared,
@@ -29,16 +27,10 @@ pub enum AssetBrowserEvent {
     },
 
     /// An asset was imported or reimported
-    AssetImported {
-        id: AssetId,
-        path: PathBuf,
-    },
+    AssetImported { id: AssetId, path: PathBuf },
 
     /// An asset was deleted
-    AssetDeleted {
-        id: AssetId,
-        path: PathBuf,
-    },
+    AssetDeleted { id: AssetId, path: PathBuf },
 
     /// An asset was renamed
     AssetRenamed {
@@ -57,33 +49,21 @@ pub enum AssetBrowserEvent {
     /// Request to focus/reveal an asset in the browser
     ///
     /// Other panels can emit this to navigate to a specific asset.
-    FocusAsset {
-        id: AssetId,
-    },
+    FocusAsset { id: AssetId },
 
     /// Request to reveal an asset in the system file explorer
-    RevealInExplorer {
-        path: PathBuf,
-    },
+    RevealInExplorer { path: PathBuf },
 
     /// Asset was double-clicked (open for editing)
-    AssetOpened {
-        id: AssetId,
-    },
+    AssetOpened { id: AssetId },
 
     /// Asset tags were modified
-    TagsModified {
-        id: AssetId,
-        tags: Vec<String>,
-    },
+    TagsModified { id: AssetId, tags: Vec<String> },
 
     /// Asset browser folder changed
-    FolderChanged {
-        path: PathBuf,
-    },
+    FolderChanged { path: PathBuf },
 
     // === Folder Operations ===
-
     /// A folder was renamed
     FolderRenamed {
         old_path: PathBuf,
@@ -97,19 +77,13 @@ pub enum AssetBrowserEvent {
     },
 
     /// A folder was deleted
-    FolderDeleted {
-        path: PathBuf,
-    },
+    FolderDeleted { path: PathBuf },
 
     /// Request to create a new folder
-    CreateFolder {
-        parent_path: PathBuf,
-    },
+    CreateFolder { parent_path: PathBuf },
 
     /// Request to reveal a folder in the system file explorer
-    RevealFolderInExplorer {
-        path: PathBuf,
-    },
+    RevealFolderInExplorer { path: PathBuf },
 }
 
 impl AssetBrowserEvent {

@@ -14,7 +14,7 @@ mod toolbar;
 pub use camera_controller::{CameraControlMode, EditorCamera};
 pub use gizmo_handler::{GizmoHandler, GizmoInteractionResult};
 pub use settings::{
-    GizmoMode, GizmoOrientation, ToolMode, ViewportSettings,
-    CAMERA_SPEED_VALUES, GRID_SNAP_VALUES, ROTATION_SNAP_VALUES, SCALE_SNAP_VALUES,
+    GizmoMode, GizmoOrientation, ToolMode, ViewportSettings, CAMERA_SPEED_VALUES, GRID_SNAP_VALUES,
+    ROTATION_SNAP_VALUES, SCALE_SNAP_VALUES,
 };
 pub use toolbar::{render_orientation_indicator, render_viewport_toolbar_overlay};

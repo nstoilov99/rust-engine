@@ -138,8 +138,7 @@ impl<'a> EditorTabViewer<'a> {
                 let (pill_rect, _) =
                     ui.allocate_exact_size(egui::vec2(pill_w, pill_h), egui::Sense::hover());
 
-                ui.painter()
-                    .rect_filled(pill_rect, pill_h / 2.0, pill_bg);
+                ui.painter().rect_filled(pill_rect, pill_h / 2.0, pill_bg);
 
                 let icons_rect = pill_rect.shrink2(egui::vec2(pill_pad_x, pill_pad_y));
                 let mut child_ui = ui.new_child(
@@ -210,7 +209,8 @@ impl<'a> EditorTabViewer<'a> {
 
             // Handle keyboard shortcuts when viewport is hovered
             // Block gizmo mode shortcuts during camera drag (but WASD still works for camera movement)
-            let camera_dragging = self.editor.editor_camera.current_mode() != CameraControlMode::None;
+            let camera_dragging =
+                self.editor.editor_camera.current_mode() != CameraControlMode::None;
 
             if viewport_hovered && !camera_dragging {
                 let input = ui.input(|i| i.clone());
@@ -229,7 +229,8 @@ impl<'a> EditorTabViewer<'a> {
                     self.editor.viewport_settings.tool_mode = ToolMode::Scale;
                 }
                 if input.key_pressed(egui::Key::G) {
-                    self.editor.viewport_settings.grid_visible = !self.editor.viewport_settings.grid_visible;
+                    self.editor.viewport_settings.grid_visible =
+                        !self.editor.viewport_settings.grid_visible;
                 }
 
                 // Snapping while Ctrl held - enable appropriate snap for current mode
@@ -254,7 +255,8 @@ impl<'a> EditorTabViewer<'a> {
             self.editor.gizmo_handler.snap_translate = self.editor.viewport_settings.snap_translate;
             self.editor.gizmo_handler.snap_rotate = self.editor.viewport_settings.snap_rotate;
             self.editor.gizmo_handler.snap_scale = self.editor.viewport_settings.snap_scale;
-            self.editor.gizmo_handler.snapping_enabled = self.editor.viewport_settings.current_snap_enabled();
+            self.editor.gizmo_handler.snapping_enabled =
+                self.editor.viewport_settings.current_snap_enabled();
             *self.editor.grid_visible = self.editor.viewport_settings.grid_visible;
 
             // Process gizmo only in Edit mode
@@ -295,8 +297,11 @@ impl<'a> EditorTabViewer<'a> {
                         } => {
                             // Create undo command
                             use super::TransformChangeCommand;
-                            let cmd =
-                                TransformChangeCommand::new(entity, &start_transform, &end_transform);
+                            let cmd = TransformChangeCommand::new(
+                                entity,
+                                &start_transform,
+                                &end_transform,
+                            );
                             self.editor
                                 .command_history
                                 .execute(Box::new(cmd), self.editor.world);
@@ -350,8 +355,10 @@ impl<'a> EditorTabViewer<'a> {
             let line_height = 18.0;
 
             // Position in top-left corner of viewport (below toolbar overlay ~36px)
-            let overlay_pos =
-                egui::pos2(viewport_rect.left() + padding, viewport_rect.top() + padding + 36.0);
+            let overlay_pos = egui::pos2(
+                viewport_rect.left() + padding,
+                viewport_rect.top() + padding + 36.0,
+            );
 
             // Format stats
             let fps_text = format!("FPS: {:.1}", self.editor.fps);
@@ -393,16 +400,22 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Render the hierarchy panel
     fn render_hierarchy(&mut self, ui: &mut Ui) {
-        self.editor
-            .hierarchy_panel
-            .show_contents(ui, self.editor.world, self.editor.selection, self.editor.play_mode);
+        self.editor.hierarchy_panel.show_contents(
+            ui,
+            self.editor.world,
+            self.editor.selection,
+            self.editor.play_mode,
+        );
     }
 
     /// Render the inspector panel
     fn render_inspector(&mut self, ui: &mut Ui) {
-        self.editor
-            .inspector_panel
-            .show_contents(ui, self.editor.world, self.editor.selection, self.editor.play_mode);
+        self.editor.inspector_panel.show_contents(
+            ui,
+            self.editor.world,
+            self.editor.selection,
+            self.editor.play_mode,
+        );
     }
 
     /// Render the asset browser panel
@@ -412,8 +425,7 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Render the console panel
     fn render_console(&mut self, ui: &mut Ui) {
-        let (info_count, warn_count, error_count) =
-            self.editor.console_messages.counts();
+        let (info_count, warn_count, error_count) = self.editor.console_messages.counts();
 
         // Header with filter toggles (custom styled buttons instead of selectable_label)
         ui.horizontal(|ui| {
@@ -426,14 +438,19 @@ impl<'a> EditorTabViewer<'a> {
             } else {
                 Color32::from_gray(45)
             };
-            let error_text = RichText::new(format!("Errors ({})", error_count))
-                .color(if self.editor.log_filter.show_error {
+            let error_text = RichText::new(format!("Errors ({})", error_count)).color(
+                if self.editor.log_filter.show_error {
                     LogLevel::Error.color()
                 } else {
                     Color32::GRAY
-                });
+                },
+            );
             if ui
-                .add(egui::Button::new(error_text).fill(error_fill).corner_radius(3.0))
+                .add(
+                    egui::Button::new(error_text)
+                        .fill(error_fill)
+                        .corner_radius(3.0),
+                )
                 .clicked()
             {
                 self.editor.log_filter.show_error = !self.editor.log_filter.show_error;
@@ -445,14 +462,19 @@ impl<'a> EditorTabViewer<'a> {
             } else {
                 Color32::from_gray(45)
             };
-            let warn_text = RichText::new(format!("Warnings ({})", warn_count))
-                .color(if self.editor.log_filter.show_warning {
+            let warn_text = RichText::new(format!("Warnings ({})", warn_count)).color(
+                if self.editor.log_filter.show_warning {
                     LogLevel::Warning.color()
                 } else {
                     Color32::GRAY
-                });
+                },
+            );
             if ui
-                .add(egui::Button::new(warn_text).fill(warn_fill).corner_radius(3.0))
+                .add(
+                    egui::Button::new(warn_text)
+                        .fill(warn_fill)
+                        .corner_radius(3.0),
+                )
                 .clicked()
             {
                 self.editor.log_filter.show_warning = !self.editor.log_filter.show_warning;
@@ -464,14 +486,19 @@ impl<'a> EditorTabViewer<'a> {
             } else {
                 Color32::from_gray(45)
             };
-            let info_text = RichText::new(format!("Info ({})", info_count))
-                .color(if self.editor.log_filter.show_info {
+            let info_text = RichText::new(format!("Info ({})", info_count)).color(
+                if self.editor.log_filter.show_info {
                     LogLevel::Info.color()
                 } else {
                     Color32::GRAY
-                });
+                },
+            );
             if ui
-                .add(egui::Button::new(info_text).fill(info_fill).corner_radius(3.0))
+                .add(
+                    egui::Button::new(info_text)
+                        .fill(info_fill)
+                        .corner_radius(3.0),
+                )
                 .clicked()
             {
                 self.editor.log_filter.show_info = !self.editor.log_filter.show_info;
@@ -553,7 +580,7 @@ impl<'a> EditorTabViewer<'a> {
                 }
             }
             if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                if let Some(next) = self.editor.console_command_system.history.next() {
+                if let Some(next) = self.editor.console_command_system.history.navigate_next() {
                     *self.editor.console_input = next.to_string();
                 }
             }

@@ -190,7 +190,10 @@ impl IconManager {
             if let Some(texture) = self.load_png_icon(ctx, &path, icon.filename()) {
                 self.asset_icons.insert(*icon, texture);
             } else {
-                eprintln!("Warning: Failed to load asset browser icon: {}", path.display());
+                eprintln!(
+                    "Warning: Failed to load asset browser icon: {}",
+                    path.display()
+                );
             }
         }
     }
@@ -219,10 +222,8 @@ impl IconManager {
             })
             .collect();
 
-        let color_image = ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            &tinted,
-        );
+        let color_image =
+            ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &tinted);
 
         // Create texture
         let texture = ctx.load_texture(name, color_image, TextureOptions::LINEAR);
@@ -335,8 +336,15 @@ pub fn icon_button(
 
     // Show tooltip on hover
     if response.hovered() {
-        egui::containers::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tooltip), egui::containers::PopupAnchor::Pointer)
-            .show(|ui| { ui.label(tooltip); });
+        egui::containers::Tooltip::always_open(
+            ui.ctx().clone(),
+            ui.layer_id(),
+            egui::Id::new(tooltip),
+            egui::containers::PopupAnchor::Pointer,
+        )
+        .show(|ui| {
+            ui.label(tooltip);
+        });
     }
 
     response

@@ -64,7 +64,10 @@ impl<'de> Deserialize<'de> for CameraProjectionData {
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
                 match v {
                     "Perspective" => Ok(CameraProjectionData::Perspective),
-                    other => Err(de::Error::unknown_variant(other, &["Perspective", "Orthographic"])),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["Perspective", "Orthographic"],
+                    )),
                 }
             }
 
@@ -77,7 +80,9 @@ impl<'de> Deserialize<'de> for CameraProjectionData {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "size" => size = Some(map.next_value()?),
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
                     }
                 }
                 let size = size.ok_or_else(|| de::Error::missing_field("size"))?;
@@ -122,7 +127,10 @@ impl<'de> Deserialize<'de> for LightFalloffData {
                     "Linear" => Ok(LightFalloffData::Linear),
                     "Quadratic" => Ok(LightFalloffData::Quadratic),
                     "InverseSquare" => Ok(LightFalloffData::InverseSquare),
-                    other => Err(E::unknown_variant(other, &["Linear", "Quadratic", "InverseSquare"])),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["Linear", "Quadratic", "InverseSquare"],
+                    )),
                 }
             }
             fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
@@ -166,7 +174,10 @@ impl<'de> Deserialize<'de> for RigidBodyTypeData {
                     "Dynamic" => Ok(RigidBodyTypeData::Dynamic),
                     "Kinematic" => Ok(RigidBodyTypeData::Kinematic),
                     "Static" => Ok(RigidBodyTypeData::Static),
-                    other => Err(E::unknown_variant(other, &["Dynamic", "Kinematic", "Static"])),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["Dynamic", "Kinematic", "Static"],
+                    )),
                 }
             }
             fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {

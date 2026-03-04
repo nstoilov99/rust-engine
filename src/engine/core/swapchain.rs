@@ -6,6 +6,9 @@ use vulkano::image::{Image, ImageUsage};
 use vulkano::swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo};
 use winit::window::Window;
 
+/// Result type for swapchain creation operations.
+type SwapchainResult = Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapchainPresentModePreference {
     Default,
@@ -13,15 +16,8 @@ pub enum SwapchainPresentModePreference {
 }
 
 /// Creates swapchain with at least 2 images for smooth rendering
-pub fn create_swapchain(
-    device: Arc<Device>,
-    surface: Arc<Surface>,
-) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>> {
-    create_swapchain_with_present_mode(
-        device,
-        surface,
-        SwapchainPresentModePreference::Default,
-    )
+pub fn create_swapchain(device: Arc<Device>, surface: Arc<Surface>) -> SwapchainResult {
+    create_swapchain_with_present_mode(device, surface, SwapchainPresentModePreference::Default)
 }
 
 /// Creates a swapchain with an explicit present-mode preference.
@@ -29,7 +25,7 @@ pub fn create_swapchain_with_present_mode(
     device: Arc<Device>,
     surface: Arc<Surface>,
     present_mode_preference: SwapchainPresentModePreference,
-) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>> {
+) -> SwapchainResult {
     // Get window dimensions first for validation
     let window = surface.object().unwrap().downcast_ref::<Window>().unwrap();
     let window_size = window.inner_size();
@@ -126,7 +122,7 @@ pub fn recreate_swapchain(
     device: Arc<Device>,
     surface: Arc<Surface>,
     old_swapchain: Arc<Swapchain>,
-) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::error::Error>> {
+) -> SwapchainResult {
     let _surface_capabilities = device
         .physical_device()
         .surface_capabilities(&surface, Default::default())?;

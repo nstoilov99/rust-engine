@@ -59,15 +59,12 @@ pub fn read_bytes(relative: &str) -> Result<Vec<u8>, std::io::Error> {
             let path = content_root.join(relative);
             std::fs::read(&path)
         }
-        AssetSource::Pak(reader) => reader
-            .read(relative)
-            .map(|b| b.to_vec())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("not found in pak: {}", relative),
-                )
-            }),
+        AssetSource::Pak(reader) => reader.read(relative).map(|b| b.to_vec()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("not found in pak: {}", relative),
+            )
+        }),
     }
 }
 

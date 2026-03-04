@@ -158,7 +158,6 @@ impl Renderer {
                 render_pass_3d.clone(),
             )?;
 
-
         // Create lit mesh pipeline
         let pipeline_lit =
             create_lit_mesh_pipeline(device_context.device.clone(), render_pass_3d.clone())?;
@@ -251,7 +250,6 @@ impl Renderer {
         let pipeline =
             create_camera_pipeline(device_context.device.clone(), render_pass.clone(), viewport)?;
 
-
         // Load texture (for both 2D and 3D)
         let (texture_view, sampler) = load_texture(
             device_context.device.clone(),
@@ -314,7 +312,8 @@ impl Renderer {
     /// (minimized window or out-of-date swapchain queued for recreation).
     fn begin_render_frame(
         &mut self,
-    ) -> Result<Option<(u32, vk_swapchain::SwapchainAcquireFuture)>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<(u32, vk_swapchain::SwapchainAcquireFuture)>, Box<dyn std::error::Error>>
+    {
         if let Some(mut previous) = self.previous_frame_end.take() {
             previous.cleanup_finished();
         }
@@ -332,10 +331,8 @@ impl Renderer {
             self.was_minimized = false;
         }
 
-        if self.recreate_swapchain {
-            if !self.recreate_swapchain_resources()? {
-                return Ok(None);
-            }
+        if self.recreate_swapchain && !self.recreate_swapchain_resources()? {
+            return Ok(None);
         }
 
         let (image_index, suboptimal, acquire_future) =
@@ -472,7 +469,9 @@ impl Renderer {
             // Bind vertex buffer
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
             .bind_index_buffer(self.index_buffer.clone())?;
-        unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+        unsafe {
+            builder.draw_indexed(6, 1, 0, 0, 0)?;
+        }
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;
 
@@ -525,7 +524,9 @@ impl Renderer {
             .push_constants(self.pipeline.layout().clone(), 0, push_constants)?
             .bind_vertex_buffers(0, self.vertex_buffer.clone())?
             .bind_index_buffer(self.index_buffer.clone())?;
-        unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+        unsafe {
+            builder.draw_indexed(6, 1, 0, 0, 0)?;
+        }
         builder.end_render_pass(SubpassEndInfo::default())?;
 
         // 5. Build and submit
@@ -609,7 +610,9 @@ impl Renderer {
                     texture_descriptor.clone(),
                 )?
                 .push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
-            unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+            unsafe {
+                builder.draw_indexed(6, 1, 0, 0, 0)?;
+            }
         }
 
         // End render pass
@@ -678,14 +681,16 @@ impl Renderer {
             for transform in transforms {
                 let push_constants = camera_vs::PushConstants {
                     view_projection: camera_vp.to_cols_array_2d(),
-                    pos: transform.position.into(),
+                    pos: transform.position,
                     rotation: transform.rotation.into(),
                     scale: transform.scale.into(),
-                    uv_rect: [0.0, 0.0, 0.0, 0.0].into(),
+                    uv_rect: [0.0, 0.0, 0.0, 0.0],
                 };
 
                 builder.push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
-                unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+                unsafe {
+                    builder.draw_indexed(6, 1, 0, 0, 0)?;
+                }
             }
         }
 
@@ -708,7 +713,9 @@ impl Renderer {
                 };
 
                 builder.push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
-                unsafe { builder.draw_indexed(6, 1, 0, 0, 0)?; }
+                unsafe {
+                    builder.draw_indexed(6, 1, 0, 0, 0)?;
+                }
             }
         }
 
@@ -783,7 +790,9 @@ impl Renderer {
 
         // Draw
         builder.push_constants(self.pipeline_3d.layout().clone(), 0, push_constants)?;
-        unsafe { builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?; }
+        unsafe {
+            builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+        }
 
         // End render pass
         builder.end_render_pass(SubpassEndInfo::default())?;
