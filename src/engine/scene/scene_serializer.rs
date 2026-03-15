@@ -482,6 +482,7 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     friction: *friction,
                     restitution: *restitution,
                     is_sensor: *is_sensor,
+                    debug_draw_visible: false,
                     handle: None,
                 });
             }

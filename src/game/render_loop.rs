@@ -191,3 +191,80 @@ pub enum SwapchainError {
 pub fn create_now_future(renderer: &Renderer) -> Box<dyn GpuFuture> {
     sync::now(renderer.device.clone()).boxed()
 }
+
+/// Prepare debug draw GPU data from the debug draw buffer.
+///
+/// Drains lines from the buffer, converts Z-up positions to Y-up render space,
+/// and uploads to GPU vertex buffers.
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub fn prepare_debug_draw_data(
+    debug_draw_buffer: &mut rust_engine::engine::debug_draw::DebugDrawBuffer,
+    renderer: &Renderer,
+) -> rust_engine::engine::debug_draw::DebugDrawData {
+    use rust_engine::engine::debug_draw::{DebugDrawData, DebugLineVertex};
+    use rust_engine::engine::utils::coords::convert_position_zup_to_yup;
+    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+
+    rust_engine::profile_scope!("prepare_debug_draw_data");
+
+    let (depth_lines, overlay_lines) = debug_draw_buffer.drain();
+
+    let convert_lines = |lines: &[rust_engine::engine::debug_draw::DebugLineData]| -> Option<(vulkano::buffer::Subbuffer<[DebugLineVertex]>, u32)> {
+        if lines.is_empty() {
+            return None;
+        }
+
+        let mut vertices = Vec::with_capacity(lines.len() * 2);
+        for line in lines {
+            let start_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.start));
+            let end_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.end));
+            vertices.push(DebugLineVertex {
+                position: start_yup.into(),
+                color: line.color,
+            });
+            vertices.push(DebugLineVertex {
+                position: end_yup.into(),
+                color: line.color,
+            });
+        }
+
+        let vertex_count = vertices.len() as u32;
+        let buffer = Buffer::from_iter(
+            renderer.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices,
+        );
+
+        match buffer {
+            Ok(buf) => Some((buf, vertex_count)),
+            Err(e) => {
+                log::warn!("Failed to create debug draw vertex buffer: {}", e);
+                None
+            }
+        }
+    };
+
+    let (depth_buffer, depth_vertex_count) = convert_lines(&depth_lines)
+        .map(|(b, c)| (Some(b), c))
+        .unwrap_or((None, 0));
+    let (overlay_buffer, overlay_vertex_count) = convert_lines(&overlay_lines)
+        .map(|(b, c)| (Some(b), c))
+        .unwrap_or((None, 0));
+
+    DebugDrawData {
+        depth_buffer,
+        depth_vertex_count,
+        overlay_buffer,
+        overlay_vertex_count,
+    }
+}

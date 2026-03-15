@@ -26,6 +26,9 @@ pub mod ecs;
 #[cfg(feature = "editor")]
 pub mod gui;
 
+// Debug draw system (wireframe line rendering)
+pub mod debug_draw;
+
 // Physics system (Rapier 3D integration)
 pub mod benchmark;
 pub mod physics;

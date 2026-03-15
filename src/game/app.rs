@@ -92,6 +92,8 @@ pub struct CoreApp {
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
     pub transform_cache: TransformCache,
+    #[cfg(debug_assertions)]
+    pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
 
 /// Viewport rendering, camera, gizmo, and interaction state.
@@ -252,6 +254,8 @@ impl App {
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
             transform_cache: TransformCache::new(),
+            #[cfg(debug_assertions)]
+            debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
 
         let mut asset_browser = AssetBrowserPanel::new(std::path::PathBuf::from("content"));
@@ -372,6 +376,10 @@ impl App {
                 .physics_world
                 .step(delta_time, self.core.game_world.hecs_mut());
         }
+
+        // Update debug draw persistent line lifetimes
+        #[cfg(debug_assertions)]
+        self.core.debug_draw_buffer.update(delta_time);
     }
 
     fn process_hot_reload(&mut self) {
@@ -649,6 +657,21 @@ impl App {
 
         let is_editing = self.play_mode() == PlayMode::Edit;
 
+        // Submit collider debug wireframes for entities with debug_draw_visible
+        #[cfg(debug_assertions)]
+        rust_engine::engine::physics::submit_collider_debug_draws(
+            self.core.game_world.hecs(),
+            &mut self.core.debug_draw_buffer,
+        );
+
+        #[cfg(debug_assertions)]
+        let debug_draw_data = render_loop::prepare_debug_draw_data(
+            &mut self.core.debug_draw_buffer,
+            &self.core.renderer,
+        );
+        #[cfg(not(debug_assertions))]
+        let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
+
         let deferred_cb = match self.core.deferred_renderer.render(
             &self.core.mesh_data_buffer,
             &light_data,
@@ -656,6 +679,7 @@ impl App {
             self.editor.viewport.grid_visible && is_editing,
             view_proj,
             camera_pos,
+            &debug_draw_data,
         ) {
             Ok(cb) => cb,
             Err(e) => {

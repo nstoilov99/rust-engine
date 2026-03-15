@@ -341,6 +341,7 @@ impl BenchmarkRunner {
                 }
             };
 
+        let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
         let deferred_cb = self.deferred_renderer.render(
             &self.mesh_data_buffer,
             &light_data,
@@ -350,6 +351,7 @@ impl BenchmarkRunner {
             false,
             self.renderer.camera_3d.view_projection_matrix(),
             self.renderer.camera_3d.position,
+            &debug_draw_data,
         )?;
 
         let future = {

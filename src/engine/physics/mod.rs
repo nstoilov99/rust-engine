@@ -26,9 +26,11 @@
 //! ```
 
 mod components;
+pub mod debug_render;
 mod world;
 
 pub use components::*;
+pub use debug_render::submit_collider_debug_draws;
 pub use world::PhysicsWorld;
 
 // Re-export useful Rapier types

@@ -128,6 +128,9 @@ pub struct Collider {
     pub friction: f32,
     pub restitution: f32,
     pub is_sensor: bool,
+    /// Show debug wireframe for this collider
+    #[serde(default)]
+    pub debug_draw_visible: bool,
 
     #[serde(skip)]
     pub(crate) handle: Option<ColliderHandle>,
@@ -142,6 +145,7 @@ impl Default for Collider {
             friction: 0.5,
             restitution: 0.3,
             is_sensor: false,
+            debug_draw_visible: false,
             handle: None,
         }
     }

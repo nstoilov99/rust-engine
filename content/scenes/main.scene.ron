@@ -40,6 +40,27 @@
                     cast_shadows: true,
                     receive_shadows: true,
                 ),
+                (
+                    type: "RigidBody",
+                    body_type: "Dynamic",
+                    mass: 1.0,
+                    linear_damping: 0.05,
+                    angular_damping: 0.05,
+                    can_sleep: true,
+                    gravity_scale: 1.0,
+                    lock_rotation: (false, false, false),
+                    continuous_collision: false,
+                ),
+                (
+                    type: "Collider",
+                    shape: {
+                        "type": "Cuboid",
+                        "half_extents": (0.5, 0.2, 0.5),
+                    },
+                    friction: 0.5,
+                    restitution: 0.28,
+                    is_sensor: true,
+                ),
             ],
         ),
         (

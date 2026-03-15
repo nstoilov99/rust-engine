@@ -1331,6 +1331,9 @@ impl InspectorPanel {
 
                     ui.checkbox(&mut collider.is_sensor, "Is Sensor (Trigger)")
                         .on_hover_text("Detects overlaps without physical collision");
+
+                    ui.checkbox(&mut collider.debug_draw_visible, "Debug Draw")
+                        .on_hover_text("Show collider wireframe in viewport");
                 });
 
             // Context menu for component removal

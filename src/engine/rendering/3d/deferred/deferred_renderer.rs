@@ -8,6 +8,7 @@ use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
 use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
+use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::render_target::RenderTarget;
 use glam::{Mat4, Vec3};
@@ -34,6 +35,7 @@ pub struct DeferredRenderer {
     geometry_pass: GeometryPass,
     lighting_pass: LightingPass,
     grid_pass: GridPass,
+    debug_draw_pass: DebugDrawPass,
     device: Arc<Device>,
     queue: Arc<Queue>,
     allocator: Arc<StandardMemoryAllocator>,
@@ -118,6 +120,10 @@ impl DeferredRenderer {
 
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
 
+        // Debug draw pass reuses the same render pass format as the grid
+        // (Load color + Load depth, alpha blend, depth test)
+        let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
+
         // Cache G-Buffer descriptor set (created once, reused every frame)
         let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
             descriptor_set_allocator.clone(),
@@ -132,6 +138,7 @@ impl DeferredRenderer {
             geometry_pass,
             lighting_pass,
             grid_pass,
+            debug_draw_pass,
             device,
             queue,
             allocator,
@@ -243,6 +250,7 @@ impl DeferredRenderer {
     /// Accepts a `RenderTarget` that can be either a swapchain image (standalone)
     /// or a texture (editor viewport). Shadow, G-buffer, and lighting passes
     /// remain identical; only the compose output differs.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         mesh_data: &[MeshRenderData],
@@ -251,16 +259,20 @@ impl DeferredRenderer {
         grid_visible: bool,
         view_proj: Mat4,
         camera_pos: Vec3,
+        debug_draw: &DebugDrawData,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
         self.render_counters.reset();
 
-        let (target_framebuffer, grid_framebuffer, mut builder) = {
+        // Debug draw needs a framebuffer with color + depth (same format as grid)
+        let needs_depth_framebuffer = grid_visible || !debug_draw.is_empty();
+
+        let (target_framebuffer, depth_framebuffer, mut builder) = {
             crate::profile_scope!("command_buffer_setup");
             let target_image = target.image().clone();
             let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
-            let grid_framebuffer = if grid_visible {
+            let depth_framebuffer = if needs_depth_framebuffer {
                 Some(self.get_or_create_grid_framebuffer(target_image)?)
             } else {
                 None
@@ -270,7 +282,7 @@ impl DeferredRenderer {
                 self.queue.queue_family_index(),
                 CommandBufferUsage::OneTimeSubmit,
             )?;
-            (target_framebuffer, grid_framebuffer, builder)
+            (target_framebuffer, depth_framebuffer, builder)
         };
 
         // ========== PASS 1: Geometry Pass (Render to G-Buffer) ==========
@@ -389,51 +401,115 @@ impl DeferredRenderer {
 
         // ========== PASS 3: Grid Pass (Optional, Hardware Depth Testing) ==========
         // Uses Unreal-style ground plane quad with hardware depth occlusion
-        if let Some(grid_fb) = grid_framebuffer {
-            crate::profile_scope!("grid_pass");
+        if grid_visible {
+            if let Some(ref grid_fb) = depth_framebuffer {
+                crate::profile_scope!("grid_pass");
 
-            let grid_extent = grid_fb.extent();
-            let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                offset: [0.0, 0.0],
-                extent: [grid_extent[0] as f32, grid_extent[1] as f32],
-                depth_range: 0.0..=1.0,
-            };
-            let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                offset: [0, 0],
-                extent: [grid_extent[0], grid_extent[1]],
-            };
+                let grid_extent = grid_fb.extent();
+                let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                    offset: [0.0, 0.0],
+                    extent: [grid_extent[0] as f32, grid_extent[1] as f32],
+                    depth_range: 0.0..=1.0,
+                };
+                let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                    offset: [0, 0],
+                    extent: [grid_extent[0], grid_extent[1]],
+                };
 
-            // Grid push constants (simplified - no depth texture needed)
-            let grid_extent_size = 500.0; // Large ground plane extent
-            let grid_push = GridPushConstants::new(
-                view_proj,
-                camera_pos,
-                grid_extent_size,
-                100.0, // fade_distance: 100 units
-            );
+                // Grid push constants (simplified - no depth texture needed)
+                let grid_extent_size = 500.0; // Large ground plane extent
+                let grid_push = GridPushConstants::new(
+                    view_proj,
+                    camera_pos,
+                    grid_extent_size,
+                    100.0, // fade_distance: 100 units
+                );
 
-            builder
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        // Load existing color content, depth is also loaded (for testing)
-                        clear_values: vec![None, None],
-                        ..RenderPassBeginInfo::framebuffer(grid_fb)
-                    },
-                    SubpassBeginInfo {
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    },
-                )?
-                .bind_pipeline_graphics(self.grid_pass.pipeline())?
-                .set_viewport(0, smallvec![grid_viewport])?
-                .set_scissor(0, smallvec![grid_scissor])?
-                .push_constants(self.grid_pass.layout(), 0, grid_push)?;
+                builder
+                    .begin_render_pass(
+                        RenderPassBeginInfo {
+                            // Load existing color content, depth is also loaded (for testing)
+                            clear_values: vec![None, None],
+                            ..RenderPassBeginInfo::framebuffer(grid_fb.clone())
+                        },
+                        SubpassBeginInfo {
+                            contents: SubpassContents::Inline,
+                            ..Default::default()
+                        },
+                    )?
+                    .bind_pipeline_graphics(self.grid_pass.pipeline())?
+                    .set_viewport(0, smallvec![grid_viewport])?
+                    .set_scissor(0, smallvec![grid_scissor])?
+                    .push_constants(self.grid_pass.layout(), 0, grid_push)?;
 
-            // Draw ground plane quad (4 vertices as triangle strip)
-            unsafe {
-                builder.draw(4, 1, 0, 0)?;
+                // Draw ground plane quad (4 vertices as triangle strip)
+                unsafe {
+                    builder.draw(4, 1, 0, 0)?;
+                }
+                builder.end_render_pass(SubpassEndInfo::default())?;
             }
-            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        // ========== PASS 4: Debug Draw Pass (Optional, Wireframe Lines) ==========
+        if !debug_draw.is_empty() {
+            if let Some(ref debug_fb) = depth_framebuffer {
+                crate::profile_scope!("debug_draw_pass");
+
+                let debug_extent = debug_fb.extent();
+                let debug_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                    offset: [0.0, 0.0],
+                    extent: [debug_extent[0] as f32, debug_extent[1] as f32],
+                    depth_range: 0.0..=1.0,
+                };
+                let debug_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                    offset: [0, 0],
+                    extent: [debug_extent[0], debug_extent[1]],
+                };
+
+                let debug_push = DebugLinePushConstants {
+                    view_proj: view_proj.to_cols_array_2d(),
+                };
+
+                builder
+                    .begin_render_pass(
+                        RenderPassBeginInfo {
+                            clear_values: vec![None, None],
+                            ..RenderPassBeginInfo::framebuffer(debug_fb.clone())
+                        },
+                        SubpassBeginInfo {
+                            contents: SubpassContents::Inline,
+                            ..Default::default()
+                        },
+                    )?;
+
+                // Draw depth-tested lines
+                if let Some(ref depth_buf) = debug_draw.depth_buffer {
+                    builder
+                        .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
+                        .set_viewport(0, smallvec![debug_viewport.clone()])?
+                        .set_scissor(0, smallvec![debug_scissor])?
+                        .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                        .bind_vertex_buffers(0, depth_buf.clone())?;
+                    unsafe {
+                        builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
+                    }
+                }
+
+                // Draw overlay lines (no depth test)
+                if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
+                    builder
+                        .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?
+                        .set_viewport(0, smallvec![debug_viewport])?
+                        .set_scissor(0, smallvec![debug_scissor])?
+                        .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                        .bind_vertex_buffers(0, overlay_buf.clone())?;
+                    unsafe {
+                        builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;
+                    }
+                }
+
+                builder.end_render_pass(SubpassEndInfo::default())?;
+            }
         }
 
         // Build command buffer

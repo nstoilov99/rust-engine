@@ -280,6 +280,7 @@ impl StandaloneApp {
             image: target_image.clone(),
         };
 
+        let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
         let deferred_cb = match self.deferred_renderer.render(
             &self.mesh_data_buffer,
             &light_data,
@@ -287,6 +288,7 @@ impl StandaloneApp {
             false,
             view_proj,
             camera_pos,
+            &debug_draw_data,
         ) {
             Ok(cb) => cb,
             Err(e) => {
