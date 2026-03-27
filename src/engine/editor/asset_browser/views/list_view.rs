@@ -261,11 +261,21 @@ impl ListView {
                     }
                 }
             } else {
-                // Normal label rendering with icon
+                // Normal label rendering with icon — show name with extension
                 render_file_type_icon(ui, asset.asset_type, icon_manager);
+                let ext = asset
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let full_label = if ext.is_empty() {
+                    asset.display_name.clone()
+                } else {
+                    format!("{}.{}", asset.display_name, ext)
+                };
                 ui.add_sized(
                     egui::vec2(184.0, self.row_height), // Slightly smaller to account for icon
-                    egui::Label::new(RichText::new(&asset.display_name).color(if is_selected {
+                    egui::Label::new(RichText::new(&full_label).color(if is_selected {
                         Color32::WHITE
                     } else {
                         Color32::from_gray(220)
@@ -379,6 +389,39 @@ impl ListView {
             sense_response.dnd_set_drag_payload(asset.id);
         }
 
+        // Tooltip on hover
+        if sense_response.hovered() {
+            sense_response.on_hover_ui(|ui| {
+                ui.set_min_width(200.0);
+                let ext = asset
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let full_name = if ext.is_empty() {
+                    asset.display_name.clone()
+                } else {
+                    format!("{}.{}", asset.display_name, ext)
+                };
+                ui.label(RichText::new(&full_name).strong());
+                ui.add_space(2.0);
+                egui::Grid::new("list_tooltip_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Type:").weak());
+                        ui.label(asset.asset_type.display_name());
+                        ui.end_row();
+                        ui.label(RichText::new("Size:").weak());
+                        ui.label(asset.formatted_size());
+                        ui.end_row();
+                        ui.label(RichText::new("Path:").weak());
+                        ui.label(asset.path.display().to_string());
+                        ui.end_row();
+                    });
+            });
+        }
+
         Some(response)
     }
 }
@@ -387,6 +430,8 @@ fn get_type_icon(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Texture => "\u{1F5BC}",
         AssetType::Model => "\u{1F4E6}",
+        AssetType::Mesh => "\u{1F4E6}",
+        AssetType::Animation => "\u{1F3B5}",
         AssetType::Scene => "\u{1F3AC}",
         AssetType::Material => "\u{1F3A8}",
         AssetType::Audio => "\u{1F50A}",
@@ -400,6 +445,8 @@ fn get_type_color(asset_type: AssetType) -> Color32 {
     match asset_type {
         AssetType::Texture => Color32::from_rgb(100, 180, 100),
         AssetType::Model => Color32::from_rgb(100, 150, 220),
+        AssetType::Mesh => Color32::from_rgb(80, 170, 240),
+        AssetType::Animation => Color32::from_rgb(240, 160, 60),
         AssetType::Scene => Color32::from_rgb(220, 180, 100),
         AssetType::Material => Color32::from_rgb(200, 100, 180),
         AssetType::Audio => Color32::from_rgb(220, 120, 100),
@@ -433,6 +480,8 @@ fn get_asset_browser_icon(asset_type: AssetType) -> Option<AssetBrowserIcon> {
     match asset_type {
         AssetType::Texture => Some(AssetBrowserIcon::FileImage),
         AssetType::Model => Some(AssetBrowserIcon::FileMesh),
+        AssetType::Mesh => Some(AssetBrowserIcon::FileMesh),
+        AssetType::Animation => Some(AssetBrowserIcon::FileDocument),
         AssetType::Scene => Some(AssetBrowserIcon::FileDocument),
         AssetType::Material => Some(AssetBrowserIcon::FileDocument),
         AssetType::Audio => Some(AssetBrowserIcon::FileDocument),

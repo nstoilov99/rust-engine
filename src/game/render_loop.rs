@@ -54,7 +54,17 @@ pub fn prepare_mesh_data(
         if !mesh_renderer.visible {
             continue;
         }
-        if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
+
+        // Resolve mesh_path → index if path is set
+        let mesh_idx = if !mesh_renderer.mesh_path.is_empty() {
+            meshes
+                .first_index_for_path(&mesh_renderer.mesh_path)
+                .unwrap_or(mesh_renderer.mesh_index)
+        } else {
+            mesh_renderer.mesh_index
+        };
+
+        if let Some(gpu_mesh) = meshes.get(mesh_idx) {
             let model_matrix = transform_cache.get_render(entity);
 
             // AABB frustum culling — uses the local-space AABB precomputed at
@@ -75,7 +85,7 @@ pub fn prepare_mesh_data(
                 vertex_buffer: gpu_mesh.vertex_buffer.clone(),
                 index_buffer: gpu_mesh.index_buffer.clone(),
                 index_count: gpu_mesh.index_count,
-                mesh_index: mesh_renderer.mesh_index,
+                mesh_index: mesh_idx,
                 material_index: mesh_renderer.material_index,
                 push_constants: PushConstantData {
                     model: model_array,

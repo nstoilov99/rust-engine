@@ -43,6 +43,11 @@ pub struct Gui {
     /// Viewport rect captured when pointer drag started.
     /// Used for consistent "outside viewport" detection during drags.
     drag_start_viewport_rect: Option<egui::Rect>,
+    /// Files dropped onto the window from the OS (e.g. Windows Explorer).
+    /// Drained each frame by the application.
+    dropped_files: Vec<std::path::PathBuf>,
+    /// True while the OS is hovering files over the window (before drop).
+    hovered_file_count: usize,
 }
 
 impl Gui {
@@ -84,6 +89,8 @@ impl Gui {
             clipboard,
             _current_cursor: egui::CursorIcon::Default,
             drag_start_viewport_rect: None,
+            dropped_files: Vec::new(),
+            hovered_file_count: 0,
         })
     }
 
@@ -96,7 +103,31 @@ impl Gui {
         _window: &Window,
         swapchain_image: Arc<vulkano::image::Image>,
         viewport_rect: Option<egui::Rect>,
+        ui_fn: impl FnMut(&egui::Context),
+    ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
+        self.render_inner(_window, swapchain_image, viewport_rect, ui_fn, None)
+    }
+
+    /// Run GUI and render with the swapchain image cleared first.
+    /// Use for secondary windows that have no prior 3D content.
+    pub fn render_with_clear(
+        &mut self,
+        _window: &Window,
+        swapchain_image: Arc<vulkano::image::Image>,
+        viewport_rect: Option<egui::Rect>,
+        ui_fn: impl FnMut(&egui::Context),
+        clear_color: [f32; 4],
+    ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
+        self.render_inner(_window, swapchain_image, viewport_rect, ui_fn, Some(clear_color))
+    }
+
+    fn render_inner(
+        &mut self,
+        _window: &Window,
+        swapchain_image: Arc<vulkano::image::Image>,
+        viewport_rect: Option<egui::Rect>,
         mut ui_fn: impl FnMut(&egui::Context),
+        clear_color: Option<[f32; 4]>,
     ) -> Result<GuiRenderResult, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
@@ -219,12 +250,22 @@ impl Gui {
             egui::vec2(self.screen_size[0], self.screen_size[1]),
         );
 
-        let command_buffer = self.renderer.render(
-            swapchain_image,
-            clipped_primitives,
-            full_output.textures_delta,
-            screen_rect,
-        )?;
+        let command_buffer = if let Some(color) = clear_color {
+            self.renderer.render_with_clear(
+                swapchain_image,
+                clipped_primitives,
+                full_output.textures_delta,
+                screen_rect,
+                color,
+            )?
+        } else {
+            self.renderer.render(
+                swapchain_image,
+                clipped_primitives,
+                full_output.textures_delta,
+                screen_rect,
+            )?
+        };
 
         Ok(GuiRenderResult {
             command_buffer,
@@ -402,8 +443,34 @@ impl Gui {
                 true
             }
 
+            WindowEvent::DroppedFile(path) => {
+                self.dropped_files.push(path.clone());
+                self.hovered_file_count = 0;
+                true
+            }
+
+            WindowEvent::HoveredFile(_path) => {
+                self.hovered_file_count += 1;
+                true
+            }
+
+            WindowEvent::HoveredFileCancelled => {
+                self.hovered_file_count = 0;
+                true
+            }
+
             _ => false,
         }
+    }
+
+    /// Drain files dropped from the OS this frame.
+    pub fn take_dropped_files(&mut self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.dropped_files)
+    }
+
+    /// Returns true if the OS is currently hovering files over the window.
+    pub fn is_hovering_external_files(&self) -> bool {
+        self.hovered_file_count > 0
     }
 
     /// Update screen size (call when window is resized)

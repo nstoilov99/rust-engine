@@ -99,9 +99,14 @@ impl HotReloadWatcher {
                                                     });
                                             }
                                         }
-                                    } else if tracked_path.ends_with(".gltf")
-                                        || tracked_path.ends_with(".glb")
-                                    {
+                                    } else if {
+                                        let ext = Path::new(&tracked_path)
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("")
+                                            .to_lowercase();
+                                        matches!(ext.as_str(), "gltf" | "glb" | "fbx" | "obj")
+                                    } {
                                         match assets.reload_model_gpu(&tracked_path) {
                                             Ok((new_indices, model_handle)) => {
                                                 let _ =

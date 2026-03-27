@@ -84,7 +84,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
             EditorTab::Viewport => "".into(),
-            _ => tab.title().into(),
+            _ => tab.title_string().into(),
         }
     }
 
@@ -415,6 +415,7 @@ impl<'a> EditorTabViewer<'a> {
             self.editor.world,
             self.editor.selection,
             self.editor.play_mode,
+            self.editor.asset_browser,
         );
     }
 
@@ -595,4 +596,5 @@ impl<'a> EditorTabViewer<'a> {
     fn render_profiler(&mut self, ui: &mut Ui) {
         self.editor.profiler_panel.show_contents(ui);
     }
+
 }

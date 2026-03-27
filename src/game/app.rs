@@ -22,9 +22,10 @@ use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
     CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
-    EditorTabViewer, GizmoHandler, HierarchyPanel, IconManager, InspectorPanel, LogFilter,
-    LogMessage, MenuAction, ProfilerPanel, RenameTarget, Selection, ViewportSettings,
-    ViewportTexture, WindowConfig,
+    EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
+    ImportDialogAction, ImportDialogState, ImportPreview, InspectorPanel, LogFilter, LogMessage, MenuAction,
+    PendingWindowRequest, ProfilerPanel, RenameTarget, Selection, ViewportSettings, ViewportTexture,
+    WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
@@ -129,6 +130,10 @@ pub struct SceneEditorState {
     pub asset_browser: AssetBrowserPanel,
     pub current_scene_relative: String,
     pub current_scene_name: String,
+    /// Model import dialog state (shown when model files are dropped).
+    pub import_dialog: Option<ImportDialogState>,
+    /// Open mesh editors keyed by content-relative mesh path.
+    pub mesh_editors: std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -156,6 +161,7 @@ pub struct EditorApp {
     pub scene: SceneEditorState,
     pub ui: EditorUIState,
     pub play: PlayModeState,
+    pub mesh_preview_renderer: Option<rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer>,
 }
 
 /// Main application combining CoreApp and EditorApp.
@@ -163,6 +169,7 @@ pub struct App {
     pub core: CoreApp,
     pub editor: EditorApp,
     runtime_flags: EditorRuntimeFlags,
+    pub pending_window_requests: Vec<PendingWindowRequest>,
 }
 
 impl App {
@@ -258,7 +265,14 @@ impl App {
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
 
-        let mut asset_browser = AssetBrowserPanel::new(std::path::PathBuf::from("content"));
+        let gpu_ctx = GpuThumbnailContext {
+            device: core.renderer.device.clone(),
+            queue: core.renderer.queue.clone(),
+            memory_allocator: core.renderer.memory_allocator.clone(),
+            command_buffer_allocator: core.renderer.command_buffer_allocator.clone(),
+        };
+        let mut asset_browser =
+            AssetBrowserPanel::new(std::path::PathBuf::from("content"), Some(gpu_ctx));
         if !runtime_flags.benchmark_tools_enabled {
             asset_browser.set_hidden_paths([std::path::PathBuf::from(BENCHMARK_SCENE_RELATIVE)]);
         }
@@ -297,6 +311,8 @@ impl App {
                 asset_browser,
                 current_scene_relative: MAIN_SCENE_RELATIVE.to_string(),
                 current_scene_name: "Main Scene".to_string(),
+                import_dialog: None,
+                mesh_editors: std::collections::HashMap::new(),
             },
             ui: EditorUIState {
                 gui,
@@ -312,12 +328,25 @@ impl App {
                 pre_play_camera: None,
                 build_dialog: BuildDialog::new(),
             },
+            mesh_preview_renderer: match rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer::new(
+                core.renderer.device.clone(),
+                core.renderer.queue.clone(),
+                core.renderer.memory_allocator.clone(),
+                core.renderer.command_buffer_allocator.clone(),
+            ) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    log::error!("Failed to create MeshPreviewRenderer: {}", e);
+                    None
+                }
+            },
         };
 
         Ok(Self {
             core,
             editor,
             runtime_flags,
+            pending_window_requests: Vec::new(),
         })
     }
 
@@ -349,6 +378,25 @@ impl App {
         }
     }
 
+    /// Queue a request to open a secondary OS window for a mesh editor.
+    pub fn request_mesh_editor_window(&mut self, mesh_key: String) {
+        let filename = std::path::Path::new(&mesh_key)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| mesh_key.clone());
+        self.pending_window_requests.push(PendingWindowRequest {
+            mesh_key,
+            title: format!("Mesh Editor \u{2014} {}", filename),
+            width: 900,
+            height: 700,
+        });
+    }
+
+    /// Drain all pending window requests (called by GameApp in about_to_wait).
+    pub fn drain_pending_window_requests(&mut self) -> Vec<PendingWindowRequest> {
+        std::mem::take(&mut self.pending_window_requests)
+    }
+
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
@@ -361,6 +409,7 @@ impl App {
         rust_engine::profile_function!();
 
         self.process_hot_reload();
+        self.resolve_mesh_paths();
 
         let delta_time = self.core.game_loop.tick();
 
@@ -380,6 +429,53 @@ impl App {
         // Update debug draw persistent line lifetimes
         #[cfg(debug_assertions)]
         self.core.debug_draw_buffer.update(delta_time);
+    }
+
+    /// Resolve `mesh_path` to `mesh_index` for all MeshRenderer components.
+    ///
+    /// Loads meshes via the AssetManager if they aren't already uploaded.
+    fn resolve_mesh_paths(&mut self) {
+        use rust_engine::engine::ecs::components::MeshRenderer;
+
+        // Collect paths that need resolving
+        let mut paths_to_load: Vec<String> = Vec::new();
+        for (_entity, mr) in self
+            .core
+            .game_world
+            .hecs_mut()
+            .query_mut::<&MeshRenderer>()
+        {
+            if !mr.mesh_path.is_empty() {
+                let meshes = self.core.asset_manager.meshes.read();
+                if meshes.first_index_for_path(&mr.mesh_path).is_none() {
+                    paths_to_load.push(mr.mesh_path.clone());
+                }
+            }
+        }
+
+        // Load unique paths
+        paths_to_load.sort();
+        paths_to_load.dedup();
+        for path in &paths_to_load {
+            if let Err(e) = self.core.asset_manager.load_model_gpu(path) {
+                log::warn!("Failed to load mesh '{}': {}", path, e);
+            }
+        }
+
+        // Resolve indices
+        let meshes = self.core.asset_manager.meshes.read();
+        for (_entity, mr) in self
+            .core
+            .game_world
+            .hecs_mut()
+            .query_mut::<&mut MeshRenderer>()
+        {
+            if !mr.mesh_path.is_empty() {
+                if let Some(idx) = meshes.first_index_for_path(&mr.mesh_path) {
+                    mr.mesh_index = idx;
+                }
+            }
+        }
     }
 
     fn process_hot_reload(&mut self) {
@@ -496,6 +592,128 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Build mesh-preview command buffers for all active mesh editors.
+    ///
+    /// Must be called **before** the secondary-window render loop so each
+    /// CB can be chained with its window's acquire → egui → present chain.
+    /// This keeps the preview render and the egui sample in the **same**
+    /// Vulkan submission, eliminating cross-submission layout/memory issues.
+    pub fn build_mesh_preview_cbs(
+        &mut self,
+    ) -> Vec<(String, std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>)> {
+        // Pre-load meshes that haven't been imported yet.
+        {
+            let paths_to_load: Vec<String> = {
+                let meshes = self.core.asset_manager.meshes.read();
+                self.editor
+                    .scene
+                    .mesh_editors
+                    .values()
+                    .filter(|data| data.preview.is_none())
+                    .filter(|data| meshes.indices_for_path(&data.mesh_path).is_none())
+                    .map(|data| data.mesh_path.clone())
+                    .collect()
+            };
+            for path in paths_to_load {
+                match self.core.asset_manager.load_model_gpu(&path) {
+                    Ok((indices, _)) => {
+                        log::info!(
+                            "Pre-loaded mesh '{}' for preview ({} submeshes)",
+                            path,
+                            indices.len()
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load mesh '{}' for preview: {}", path, e);
+                    }
+                }
+            }
+        }
+
+        let mut result = Vec::new();
+        {
+            let meshes = self.core.asset_manager.meshes.read();
+            for (key, data) in self.editor.scene.mesh_editors.iter_mut() {
+                // Lazy-init preview state
+                if data.preview.is_none() {
+                    if let Some(ref renderer) = self.editor.mesh_preview_renderer {
+                        match rust_engine::engine::editor::mesh_editor::MeshPreviewState::new(
+                            renderer,
+                            &meshes,
+                            &data.mesh_path,
+                        ) {
+                            Ok(state) => data.preview = Some(state),
+                            Err(e) => {
+                                log::error!("Failed to create mesh preview: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ref mut preview) = data.preview {
+                    let (pw, ph) = preview.size;
+                    // Resize if needed
+                    if pw > 0
+                        && ph > 0
+                        && (pw != preview.texture.width() || ph != preview.texture.height())
+                    {
+                        if let Some(ref renderer) = self.editor.mesh_preview_renderer {
+                            if let Ok(true) = preview.resize(renderer, pw, ph) {
+                                data.preview_dirty = true;
+                            }
+                        }
+                    }
+
+                    // Always render the preview when we have mesh data and a
+                    // valid size.  The CB must be in the submission chain every
+                    // frame (matching the main viewport pattern) so vulkano's
+                    // AutoCommandBufferBuilder in the egui CB correctly tracks
+                    // the image layout transition and inserts a proper barrier
+                    // with memory-visibility flags.  Rendering only when dirty
+                    // leaves frames without a preview CB, and the egui builder
+                    // then inserts an Undefined→ShaderReadOnlyOptimal barrier
+                    // that can discard content (white square).
+                    if !preview.mesh_indices.is_empty() && pw > 0 && ph > 0 {
+                        if let Some(ref renderer) = self.editor.mesh_preview_renderer {
+                            let gpu_meshes: Vec<_> = preview
+                                .mesh_indices
+                                .iter()
+                                .filter_map(|&idx| meshes.get(idx))
+                                .map(|gm| {
+                                    (
+                                        gm.vertex_buffer.clone(),
+                                        gm.index_buffer.clone(),
+                                        gm.index_count,
+                                    )
+                                })
+                                .collect();
+                            if !gpu_meshes.is_empty() {
+                                let aspect = pw as f32 / ph.max(1) as f32;
+                                let vp = preview.compute_view_projection(aspect);
+                                match renderer.render(
+                                    &preview.framebuffer,
+                                    pw,
+                                    ph,
+                                    &gpu_meshes,
+                                    vp,
+                                ) {
+                                    Ok(cb) => {
+                                        result.push((key.clone(), cb));
+                                        data.preview_dirty = false;
+                                    }
+                                    Err(e) => {
+                                        log::error!("Mesh preview render error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
@@ -734,9 +952,12 @@ impl App {
 
         let asset_browser = &mut self.editor.scene.asset_browser;
         let build_dialog = &mut self.editor.play.build_dialog;
+        let import_dialog = &mut self.editor.scene.import_dialog;
+        let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
 
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
+        let mut import_action = ImportDialogAction::None;
 
         let gui_result =
             match self
@@ -788,6 +1009,39 @@ impl App {
                     DockArea::new(&mut dock_state.dock_state)
                         .style(create_editor_dock_style(ctx))
                         .show(ctx, &mut tab_viewer);
+
+                    // Show file drop overlay when hovering external files
+                    if is_hovering_files {
+                        #[allow(deprecated)]
+                        let screen = ctx.screen_rect();
+                        let painter = ctx.layer_painter(egui::LayerId::new(
+                            egui::Order::Foreground,
+                            egui::Id::new("file_drop_overlay"),
+                        ));
+                        painter.rect_filled(
+                            screen,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(30, 80, 180, 100),
+                        );
+                        painter.rect_stroke(
+                            screen.shrink(4.0),
+                            8.0,
+                            egui::Stroke::new(3.0, egui::Color32::from_rgb(100, 160, 255)),
+                            egui::StrokeKind::Outside,
+                        );
+                        painter.text(
+                            screen.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Drop files to import into current folder",
+                            egui::FontId::proportional(24.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
+
+                    // Render import dialog if active
+                    if let Some(ref mut dialog_state) = import_dialog {
+                        import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(ctx, dialog_state);
+                    }
                 }) {
                 Ok(result) => result,
                 Err(e) => {
@@ -799,6 +1053,56 @@ impl App {
             };
 
         self.editor.viewport.rect = new_viewport_rect;
+
+        // Handle import dialog result
+        match import_action {
+            ImportDialogAction::Import => {
+                if let Some(dialog) = self.editor.scene.import_dialog.take() {
+                    self.execute_model_import(dialog);
+                }
+            }
+            ImportDialogAction::Cancel => {
+                self.editor.scene.import_dialog = None;
+            }
+            ImportDialogAction::None => {
+                // Try to populate preview if we haven't yet
+                if let Some(ref mut dialog) = self.editor.scene.import_dialog {
+                    if !dialog.preview_attempted {
+                        dialog.preview_attempted = true;
+                        if let Some(source) = dialog.current_file().cloned() {
+                            // Attempt a quick parse to get stats
+                            match rust_engine::assets::load_model(
+                                &source.to_string_lossy(),
+                            ) {
+                                Ok(model) => {
+                                    let total_verts: u32 = model
+                                        .meshes
+                                        .iter()
+                                        .map(|m| m.vertices.len() as u32)
+                                        .sum();
+                                    let total_idx: u32 = model
+                                        .meshes
+                                        .iter()
+                                        .map(|m| m.indices.len() as u32)
+                                        .sum();
+                                    dialog.preview = Some(ImportPreview {
+                                        mesh_count: model.meshes.len(),
+                                        total_vertices: total_verts,
+                                        total_indices: total_idx,
+                                        material_count: model.materials.len(),
+                                        bone_count: model.bones.len(),
+                                        animation_count: model.animations.len(),
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!("Preview parse failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
@@ -856,13 +1160,23 @@ impl App {
             MenuAction::Stop => self.stop_play_mode(),
         }
 
+        // Process OS file drops (files dragged from Windows Explorer / file manager)
+        let dropped_files = self.editor.ui.gui.take_dropped_files();
+        if !dropped_files.is_empty() {
+            self.import_dropped_files(dropped_files);
+        }
+
         // Process asset browser events
         let asset_events: Vec<_> = self.editor.scene.asset_browser.events.drain().collect();
         for event in asset_events {
             match event {
                 AssetBrowserEvent::AssetOpened { id } => {
-                    if let Some(metadata) = self.editor.scene.asset_browser.registry.get(id) {
-                        if metadata.asset_type == AssetType::Scene {
+                    // Extract metadata fields before mutating self
+                    let meta_info = self.editor.scene.asset_browser.registry.get(id).map(|m| {
+                        (m.asset_type, m.path.clone(), m.display_name.clone())
+                    });
+                    if let Some((asset_type, meta_path, display_name)) = meta_info {
+                        if asset_type == AssetType::Scene {
                             if self.play_mode() != PlayMode::Edit {
                                 self.editor.console.messages.push(LogMessage::warning(
                                     "Stop play mode before loading a scene".to_string(),
@@ -870,7 +1184,7 @@ impl App {
                                 continue;
                             }
 
-                            if metadata.path.as_path()
+                            if meta_path.as_path()
                                 == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
                                 && !self.runtime_flags.benchmark_tools_enabled
                             {
@@ -881,7 +1195,7 @@ impl App {
                                 continue;
                             }
 
-                            let relative = metadata.path.to_string_lossy();
+                            let relative = meta_path.to_string_lossy();
 
                             self.core.game_world.reset_transients(false);
                             self.editor.scene.selection.clear();
@@ -899,11 +1213,14 @@ impl App {
                                     self.core
                                         .transform_cache
                                         .propagate(self.core.game_world.hecs_mut());
+                                    // Resolve mesh_path → mesh_index for loaded entities
+                                    self.resolve_mesh_paths();
+
                                     self.editor.console.messages.push(LogMessage::info(format!(
                                         "Loaded scene: {}",
                                         scene_name
                                     )));
-                                    println!("Scene loaded: {}", metadata.display_name);
+                                    println!("Scene loaded: {}", display_name);
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
@@ -912,6 +1229,56 @@ impl App {
                                     )));
                                     eprintln!("Failed to load scene: {}", e);
                                 }
+                            }
+                        } else if asset_type == AssetType::Mesh {
+                            // Open mesh editor tab
+                            let relative = meta_path.to_string_lossy().to_string();
+                            if !self.editor.scene.mesh_editors.contains_key(&relative) {
+                                // Load sidecar metadata
+                                let full_path = std::path::Path::new("content").join(&relative);
+                                let sidecar_path = full_path.with_extension("mesh.ron");
+                                // Handle double extension: "Foo.mesh" → read "Foo.mesh.ron"
+                                let meta = if sidecar_path.exists() {
+                                    match std::fs::read_to_string(&sidecar_path) {
+                                        Ok(text) => ron::from_str(&text).unwrap_or_else(|e| {
+                                            log::warn!("Failed to parse {}: {}", sidecar_path.display(), e);
+                                            rust_engine::engine::assets::mesh_import::MeshImportMeta {
+                                                source: String::new(),
+                                                settings: Default::default(),
+                                                source_hash: 0,
+                                                material_slots: vec![],
+                                            }
+                                        }),
+                                        Err(e) => {
+                                            log::warn!("Failed to read {}: {}", sidecar_path.display(), e);
+                                            rust_engine::engine::assets::mesh_import::MeshImportMeta {
+                                                source: String::new(),
+                                                settings: Default::default(),
+                                                source_hash: 0,
+                                                material_slots: vec![],
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    rust_engine::engine::assets::mesh_import::MeshImportMeta {
+                                        source: String::new(),
+                                        settings: Default::default(),
+                                        source_hash: 0,
+                                        material_slots: vec![],
+                                    }
+                                };
+                                self.editor.scene.mesh_editors.insert(
+                                    relative.clone(),
+                                    rust_engine::engine::editor::mesh_editor::MeshEditorData {
+                                        mesh_path: relative.clone(),
+                                        meta,
+                                        dirty: false,
+                                        preview: None,
+                                        open: true,
+                                        preview_dirty: true,
+                                    },
+                                );
+                                self.request_mesh_editor_window(relative);
                             }
                         }
                     }
@@ -1408,7 +1775,41 @@ impl App {
                 .then_execute(self.core.renderer.queue.clone(), deferred_cb)
                 .unwrap()
                 .then_execute(self.core.renderer.queue.clone(), gui_result.command_buffer)
-                .unwrap()
+                .unwrap();
+
+            // Flush all command buffers BEFORE chaining the present future.
+            // Only the outermost CommandBufferExecFuture gets `submitted=true`
+            // from flush(); inner CBEFs retain `submitted=false`.  If the
+            // chain is later dropped (e.g. present failure), inner CBEF drops
+            // would call flush().unwrap() and re-submit already-submitted
+            // OneTimeSubmit command buffers, triggering VUID-03874.
+            //
+            // Calling signal_finished() after a successful flush marks ALL
+            // futures in the chain as `finished=true`, which makes their
+            // Drop impls skip the re-flush entirely.
+            if let Err(e) = future.flush() {
+                log::error!("Failed to flush command buffers: {:?}", e);
+                // SAFETY: We just attempted to flush — any submitted CBs are
+                // on the GPU.  Marking finished prevents CBEF drops from
+                // trying to re-submit OneTimeSubmit command buffers.
+                unsafe { future.signal_finished() };
+                self.core
+                    .renderer
+                    .queue
+                    .with(|mut q| q.wait_idle())
+                    .ok();
+                self.core.previous_frame_end =
+                    Some(render_loop::create_now_future(&self.core.renderer));
+                return Ok(());
+            }
+            // SAFETY: flush() succeeded — all CBs have been submitted to the
+            // GPU queue.  Marking the entire chain as finished prevents inner
+            // CommandBufferExecFuture drops from re-submitting already-submitted
+            // OneTimeSubmit command buffers (only the outermost CBEF gets
+            // `submitted=true` from flush; inner CBEFs still have `submitted=false`).
+            unsafe { future.signal_finished() };
+
+            let future = future
                 .then_swapchain_present(
                     self.core.renderer.queue.clone(),
                     vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
@@ -1422,7 +1823,13 @@ impl App {
                 Ok(future) => {
                     self.core.previous_frame_end = Some(future.boxed());
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::warn!("Swapchain present/fence failed: {:?}", e);
+                    self.core
+                        .renderer
+                        .queue
+                        .with(|mut q| q.wait_idle())
+                        .ok();
                     self.core.previous_frame_end =
                         Some(render_loop::create_now_future(&self.core.renderer));
                 }
@@ -1462,6 +1869,349 @@ impl App {
                     scene_relative, error
                 )));
             }
+        }
+    }
+
+    /// Import files dropped from the OS file manager into the current asset browser folder.
+    fn import_dropped_files(&mut self, files: Vec<std::path::PathBuf>) {
+        // Split files into model files (go through import dialog) and other files (direct copy)
+        let model_extensions = ["gltf", "glb", "obj", "fbx"];
+        let mut model_files = Vec::new();
+        let mut other_files = Vec::new();
+
+        for file in files {
+            let ext = file
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if model_extensions.contains(&ext.as_str()) && file.is_file() {
+                model_files.push(file);
+            } else {
+                other_files.push(file);
+            }
+        }
+
+        // Model files → open import dialog with settings
+        if !model_files.is_empty() {
+            let target_folder = self.editor.scene.asset_browser.current_folder.clone();
+            self.editor.scene.import_dialog =
+                Some(ImportDialogState::new(model_files, target_folder));
+        }
+
+        // Non-model files → import directly (existing behavior)
+        if other_files.is_empty() {
+            return;
+        }
+
+        let assets_root = self
+            .editor
+            .scene
+            .asset_browser
+            .registry
+            .root_path()
+            .to_path_buf();
+
+        let relative_folder = self.editor.scene.asset_browser.current_folder.clone();
+        let target_dir = assets_root.join(&relative_folder);
+
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            self.editor.console.messages.push(LogMessage::error(format!(
+                "Cannot create target directory: {}",
+                e
+            )));
+            return;
+        }
+
+        let supported_extensions: &[&str] = &[
+            // Textures
+            "png", "jpg", "jpeg", "tga", "bmp", "dds",
+            // Native mesh (already processed)
+            "mesh",
+            // Audio
+            "wav", "ogg", "mp3", "flac",
+            // Shaders
+            "glsl", "vert", "frag", "comp", "spv",
+            // Scene/Material/Prefab definitions
+            "ron",
+        ];
+
+        let files = other_files;
+
+        let mut imported_count = 0;
+        let mut skipped_count = 0;
+
+        for source_path in &files {
+            // Validate that the file exists and is a file (not directory)
+            if !source_path.is_file() {
+                self.editor.console.messages.push(LogMessage::warning(format!(
+                    "Skipped '{}': not a file",
+                    source_path.display()
+                )));
+                skipped_count += 1;
+                continue;
+            }
+
+            // Check file extension against supported types
+            let ext = source_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
+            if !supported_extensions.contains(&ext.as_str()) {
+                self.editor.console.messages.push(LogMessage::warning(format!(
+                    "Skipped '{}': unsupported file type (.{})",
+                    source_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    ext
+                )));
+                skipped_count += 1;
+                continue;
+            }
+
+            let file_name = match source_path.file_name() {
+                Some(name) => name.to_owned(),
+                None => {
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+
+            let mut dest_path = target_dir.join(&file_name);
+
+            // Handle name conflicts by appending a number
+            if dest_path.exists() {
+                let stem = source_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("file");
+                let extension = source_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let mut counter = 1;
+                loop {
+                    let new_name = format!("{} ({}){}", stem, counter,
+                        if extension.is_empty() { String::new() } else { format!(".{}", extension) });
+                    dest_path = target_dir.join(&new_name);
+                    if !dest_path.exists() {
+                        break;
+                    }
+                    counter += 1;
+                    if counter > 100 {
+                        self.editor.console.messages.push(LogMessage::error(format!(
+                            "Cannot import '{}': too many duplicates",
+                            file_name.to_string_lossy()
+                        )));
+                        break;
+                    }
+                }
+                if counter > 100 {
+                    skipped_count += 1;
+                    continue;
+                }
+            }
+
+            // Copy the file
+            match std::fs::copy(source_path, &dest_path) {
+                Ok(bytes) => {
+                    let display_name = dest_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let size_kb = bytes as f64 / 1024.0;
+                    self.editor.console.messages.push(LogMessage::info(format!(
+                        "Imported '{}' ({:.1} KB)",
+                        display_name, size_kb
+                    )));
+                    imported_count += 1;
+
+                    // Also copy companion files for certain formats:
+                    // OBJ → .mtl (material library)
+                    if ext == "obj" {
+                        if let Some(mtl_path) = source_path.parent().map(|p| {
+                            let stem = source_path.file_stem().unwrap_or_default();
+                            p.join(format!("{}.mtl", stem.to_string_lossy()))
+                        }) {
+                            if mtl_path.is_file() {
+                                let mtl_dest = target_dir
+                                    .join(mtl_path.file_name().unwrap_or_default());
+                                if let Err(e) = std::fs::copy(&mtl_path, &mtl_dest) {
+                                    self.editor.console.messages.push(LogMessage::warning(format!(
+                                        "Could not copy companion .mtl file: {}",
+                                        e
+                                    )));
+                                } else {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Imported companion '{}'",
+                                        mtl_path.file_name().unwrap_or_default().to_string_lossy()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to import '{}': {}",
+                        file_name.to_string_lossy(),
+                        e
+                    )));
+                    skipped_count += 1;
+                }
+            }
+        }
+
+        // Trigger rescan so the asset browser picks up new files
+        if imported_count > 0 {
+            self.editor.scene.asset_browser.request_rescan();
+            println!(
+                "Imported {} file(s) into '{}'",
+                imported_count,
+                if relative_folder.as_os_str().is_empty() {
+                    "assets/".to_string()
+                } else {
+                    relative_folder.display().to_string()
+                }
+            );
+        }
+
+        if skipped_count > 0 {
+            println!("Skipped {} file(s) during import", skipped_count);
+        }
+    }
+
+    /// Execute model import: convert source files to .mesh using the dialog's settings.
+    fn execute_model_import(&mut self, dialog: ImportDialogState) {
+        let assets_root = self
+            .editor
+            .scene
+            .asset_browser
+            .registry
+            .root_path()
+            .to_path_buf();
+        let target_dir = assets_root.join(&dialog.target_folder);
+
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            self.editor.console.messages.push(LogMessage::error(format!(
+                "Cannot create target directory: {}",
+                e
+            )));
+            return;
+        }
+
+        let mut imported_count = 0;
+
+        for source_path in &dialog.source_files {
+            let stem = source_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("model");
+
+            // Determine output .mesh path with duplicate handling
+            let mut mesh_path = target_dir.join(format!("{}.mesh", stem));
+            if mesh_path.exists() {
+                let mut counter = 1;
+                loop {
+                    mesh_path = target_dir.join(format!("{} ({}).mesh", stem, counter));
+                    if !mesh_path.exists() || counter > 100 {
+                        break;
+                    }
+                    counter += 1;
+                }
+            }
+
+            // Also copy the source file alongside the .mesh for re-import
+            let source_dest = target_dir.join(
+                source_path
+                    .file_name()
+                    .unwrap_or_default(),
+            );
+            if !source_dest.exists() {
+                if let Err(e) = std::fs::copy(source_path, &source_dest) {
+                    self.editor.console.messages.push(LogMessage::warning(format!(
+                        "Could not copy source file: {}",
+                        e
+                    )));
+                }
+            }
+
+            // Run the import pipeline
+            match rust_engine::assets::mesh_import::import_model_to_mesh(
+                source_path,
+                &mesh_path,
+                &dialog.settings,
+            ) {
+                Ok(result) => {
+                    let mesh_size = std::fs::metadata(&mesh_path)
+                        .map(|m| m.len() as f64 / 1024.0)
+                        .unwrap_or(0.0);
+                    let display_name = mesh_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let source_name = source_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+
+                    let mut msg = format!(
+                        "Imported '{}' -> '{}' ({:.1} KB)",
+                        source_name, display_name, mesh_size
+                    );
+
+                    if result.bone_count > 0 {
+                        msg.push_str(&format!(", {} bones", result.bone_count));
+                    }
+
+                    if result.material_count > 0 {
+                        msg.push_str(&format!(
+                            ", {} material(s)",
+                            result.material_count
+                        ));
+                    }
+
+                    if result.anim_written {
+                        let anim_path = mesh_path.with_extension("anim");
+                        let anim_size = std::fs::metadata(&anim_path)
+                            .map(|m| m.len() as f64 / 1024.0)
+                            .unwrap_or(0.0);
+                        msg.push_str(&format!(
+                            " + {} animation(s) ({:.1} KB)",
+                            result.anim_clip_count, anim_size
+                        ));
+                    }
+
+                    self.editor.console.messages.push(LogMessage::info(msg));
+                    imported_count += 1;
+                }
+                Err(e) => {
+                    self.editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to import '{}': {}",
+                        source_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        e
+                    )));
+                }
+            }
+        }
+
+        if imported_count > 0 {
+            self.editor.scene.asset_browser.request_rescan();
+            println!(
+                "Imported {} model(s) as .mesh into '{}'",
+                imported_count,
+                if dialog.target_folder.as_os_str().is_empty() {
+                    "content/".to_string()
+                } else {
+                    dialog.target_folder.display().to_string()
+                }
+            );
         }
     }
 

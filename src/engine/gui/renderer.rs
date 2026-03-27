@@ -75,6 +75,9 @@ pub struct EguiRenderer {
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pipeline: Arc<GraphicsPipeline>,
     render_pass: Arc<RenderPass>,
+    /// Render pass with `load_op: Clear` for secondary windows that don't
+    /// have a 3D scene underneath. Compatible with the same pipeline.
+    clear_render_pass: Arc<RenderPass>,
     sampler: Arc<Sampler>,
     /// Cached texture image views (uploaded textures)
     texture_cache: HashMap<egui::TextureId, Arc<ImageView>>,
@@ -82,6 +85,8 @@ pub struct EguiRenderer {
     descriptor_set_cache: HashMap<egui::TextureId, Arc<DescriptorSet>>,
     /// Cached framebuffers by target image pointer (avoids per-frame creation)
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
+    /// Framebuffer cache for the clear render pass.
+    clear_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     /// Batched vertex data for entire frame (avoids per-primitive buffer allocation)
     batched_vertices: Vec<EguiVertex>,
     /// Batched index data for entire frame
@@ -111,7 +116,8 @@ impl EguiRenderer {
             Default::default(),
         ));
 
-        // Create render pass
+        // Create render pass (load_op: Load — for main window where 3D scene
+        // renders first and GUI draws on top).
         let render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
@@ -128,7 +134,26 @@ impl EguiRenderer {
             }
         )?;
 
-        // Create pipeline
+        // Compatible render pass with load_op: Clear — for secondary windows
+        // that have no prior content on their swapchain images.
+        let clear_render_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: swapchain_format,
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                }
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )?;
+
+        // Create pipeline (compatible with both render passes — they share
+        // the same attachment format/samples, only load_op differs).
         let pipeline = Self::create_pipeline(device.clone(), render_pass.clone())?;
 
         // Create sampler for textures
@@ -190,10 +215,12 @@ impl EguiRenderer {
             descriptor_set_allocator,
             pipeline,
             render_pass,
+            clear_render_pass,
             sampler,
             texture_cache: HashMap::new(),
             descriptor_set_cache: HashMap::new(),
             framebuffer_cache: HashMap::new(),
+            clear_framebuffer_cache: HashMap::new(),
             batched_vertices: Vec::with_capacity(16384),
             batched_indices: Vec::with_capacity(32768),
             pending_uploads: Vec::new(),
@@ -204,6 +231,7 @@ impl EguiRenderer {
     /// Clear framebuffer cache (call on swapchain recreation)
     pub fn clear_framebuffer_cache(&mut self) {
         self.framebuffer_cache.clear();
+        self.clear_framebuffer_cache.clear();
     }
 
     fn create_pipeline(
@@ -260,36 +288,27 @@ impl EguiRenderer {
         )?)
     }
 
-    /// Non-blocking poll of pending texture uploads.
+    /// Drain all pending texture uploads, blocking until each completes.
     ///
-    /// Checks each fence with a short timeout.  Completed uploads are
-    /// installed into the texture cache; unfinished ones are kept for next
-    /// frame (the placeholder texture remains visible in the meantime).
+    /// Must finish before building the draw command buffer so that image
+    /// resources are no longer write-locked by upload commands.
     ///
-    /// After signalling we call `cleanup_finished()` so Vulkano marks the
-    /// upload command buffer as reclaimable.
+    /// Uses `wait(None)` (infinite) rather than `wait(Some(timeout))`
+    /// to avoid a vulkano 0.35 bug where a timed-out wait drops the
+    /// inner command-buffer future without signalling it finished,
+    /// causing a OneTimeSubmit resubmission panic.
     fn poll_pending_uploads(&mut self) {
-        let mut still_pending = Vec::new();
-        for mut upload in self.pending_uploads.drain(..) {
-            // Use a very short wait — if the GPU hasn't finished, keep it pending.
-            match upload
-                .fence
-                .wait(Some(std::time::Duration::from_micros(100)))
-            {
-                Ok(()) => {
-                    upload.fence.cleanup_finished();
-                    if let Some(view) = upload.new_view {
-                        self.texture_cache.insert(upload.texture_id, view);
-                    }
-                    self.descriptor_set_cache.remove(&upload.texture_id);
-                }
-                Err(_) => {
-                    // Not ready yet — keep for next frame.
-                    still_pending.push(upload);
-                }
+        for upload in self.pending_uploads.drain(..) {
+            // Block until this upload's fence is signalled by the GPU.
+            if let Err(e) = upload.fence.wait(None) {
+                log::warn!("Texture upload fence wait failed: {:?}", e);
+                continue;
             }
+            if let Some(view) = upload.new_view {
+                self.texture_cache.insert(upload.texture_id, view);
+            }
+            self.descriptor_set_cache.remove(&upload.texture_id);
         }
-        self.pending_uploads = still_pending;
     }
 
     /// Submit a non-blocking texture upload / update.
@@ -460,6 +479,32 @@ impl EguiRenderer {
         screen_rect: Rect,
     ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>>
     {
+        self.render_inner(target_image, clipped_primitives, textures_delta, screen_rect, None)
+    }
+
+    /// Render with the swapchain image cleared first. Use for windows that
+    /// have no prior 3D content on their swapchain images.
+    pub fn render_with_clear(
+        &mut self,
+        target_image: Arc<Image>,
+        clipped_primitives: Vec<ClippedPrimitive>,
+        textures_delta: TexturesDelta,
+        screen_rect: Rect,
+        clear_color: [f32; 4],
+    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>>
+    {
+        self.render_inner(target_image, clipped_primitives, textures_delta, screen_rect, Some(clear_color))
+    }
+
+    fn render_inner(
+        &mut self,
+        target_image: Arc<Image>,
+        clipped_primitives: Vec<ClippedPrimitive>,
+        textures_delta: TexturesDelta,
+        screen_rect: Rect,
+        clear_color: Option<[f32; 4]>,
+    ) -> Result<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>>
+    {
         crate::profile_function!();
 
         // Submit texture uploads (non-blocking: each gets its own command
@@ -478,21 +523,34 @@ impl EguiRenderer {
         // stragglers.
         self.poll_pending_uploads();
 
+        // Select render pass and framebuffer cache based on clear mode.
+        let (render_pass, fb_cache) = if clear_color.is_some() {
+            (&self.clear_render_pass, &mut self.clear_framebuffer_cache)
+        } else {
+            (&self.render_pass, &mut self.framebuffer_cache)
+        };
+
         // Get or create cached framebuffer for this target image
         let cache_key = Arc::as_ptr(&target_image) as usize;
-        let framebuffer = if let Some(fb) = self.framebuffer_cache.get(&cache_key) {
+        let framebuffer = if let Some(fb) = fb_cache.get(&cache_key) {
             fb.clone()
         } else {
             let view = ImageView::new_default(target_image.clone())?;
             let fb = Framebuffer::new(
-                self.render_pass.clone(),
+                render_pass.clone(),
                 FramebufferCreateInfo {
                     attachments: vec![view],
                     ..Default::default()
                 },
             )?;
-            self.framebuffer_cache.insert(cache_key, fb.clone());
+            fb_cache.insert(cache_key, fb.clone());
             fb
+        };
+
+        let clear_values = if let Some(color) = clear_color {
+            vec![Some(color.into())]
+        } else {
+            vec![None]
         };
 
         let extent = target_image.extent();
@@ -563,7 +621,7 @@ impl EguiRenderer {
             )?;
             builder.begin_render_pass(
                 RenderPassBeginInfo {
-                    clear_values: vec![None],
+                    clear_values: clear_values.clone(),
                     ..RenderPassBeginInfo::framebuffer(framebuffer)
                 },
                 SubpassBeginInfo {
@@ -619,7 +677,7 @@ impl EguiRenderer {
 
         builder.begin_render_pass(
             RenderPassBeginInfo {
-                clear_values: vec![None],
+                clear_values,
                 ..RenderPassBeginInfo::framebuffer(framebuffer)
             },
             SubpassBeginInfo {

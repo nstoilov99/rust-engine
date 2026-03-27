@@ -425,7 +425,7 @@ pub fn render_menu_bar(
                         (EditorTab::Profiler, "Profiler"),
                     ];
 
-                    for (tab, name) in panels {
+                    for (tab, name) in &panels {
                         let is_open = dock_state.is_tab_open(tab);
                         let label = if is_open {
                             format!("  {} {}", name, "")
@@ -434,10 +434,8 @@ pub fn render_menu_bar(
                         };
 
                         if ui.button(label).clicked() {
-                            if is_open {
-                                // Already open - focus handled by dock
-                            } else {
-                                dock_state.open_tab(tab);
+                            if !is_open {
+                                dock_state.open_tab(tab.clone());
                             }
                             ui.close();
                         }

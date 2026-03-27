@@ -11,8 +11,12 @@ use std::path::Path;
 pub enum AssetType {
     /// Image textures (PNG, JPG, JPEG, TGA, BMP)
     Texture,
-    /// 3D models (GLTF, GLB, OBJ, FBX)
+    /// 3D models — source formats (GLTF, GLB, OBJ, FBX)
     Model,
+    /// Native preprocessed mesh (.mesh)
+    Mesh,
+    /// Animation clips (.anim)
+    Animation,
     /// Scene files (*.scene.ron)
     Scene,
     /// Material definitions (*.material.ron)
@@ -34,8 +38,12 @@ impl AssetType {
         match ext.to_lowercase().as_str() {
             // Textures
             "png" | "jpg" | "jpeg" | "tga" | "bmp" | "dds" => AssetType::Texture,
-            // 3D Models
+            // 3D Models (source)
             "gltf" | "glb" | "obj" | "fbx" => AssetType::Model,
+            // Native mesh (preprocessed)
+            "mesh" => AssetType::Mesh,
+            // Animation clips
+            "anim" => AssetType::Animation,
             // Audio
             "wav" | "ogg" | "mp3" | "flac" => AssetType::Audio,
             // Shaders
@@ -60,6 +68,10 @@ impl AssetType {
         if filename.ends_with(".prefab.ron") {
             return AssetType::Prefab;
         }
+        // Hide .mesh.ron sidecars from the browser (they're metadata, not assets)
+        if filename.ends_with(".mesh.ron") {
+            return AssetType::Unknown;
+        }
 
         // Fall back to extension-based detection
         path.extension()
@@ -73,6 +85,8 @@ impl AssetType {
         match self {
             AssetType::Texture => "Texture",
             AssetType::Model => "Model",
+            AssetType::Mesh => "Mesh",
+            AssetType::Animation => "Animation",
             AssetType::Scene => "Scene",
             AssetType::Material => "Material",
             AssetType::Audio => "Audio",
@@ -87,6 +101,8 @@ impl AssetType {
         match self {
             AssetType::Texture => &["png", "jpg", "jpeg", "tga", "bmp", "dds"],
             AssetType::Model => &["gltf", "glb", "obj", "fbx"],
+            AssetType::Mesh => &["mesh"],
+            AssetType::Animation => &["anim"],
             AssetType::Scene => &["scene.ron"],
             AssetType::Material => &["material.ron"],
             AssetType::Audio => &["wav", "ogg", "mp3", "flac"],
@@ -101,6 +117,8 @@ impl AssetType {
         &[
             AssetType::Texture,
             AssetType::Model,
+            AssetType::Mesh,
+            AssetType::Animation,
             AssetType::Scene,
             AssetType::Material,
             AssetType::Audio,
@@ -111,12 +129,19 @@ impl AssetType {
 
     /// Check if this asset type can be dragged into the viewport
     pub fn is_viewport_droppable(&self) -> bool {
-        matches!(self, AssetType::Model | AssetType::Prefab)
+        matches!(self, AssetType::Model | AssetType::Mesh | AssetType::Prefab)
     }
 
     /// Check if this asset type has a thumbnail preview
     pub fn has_thumbnail(&self) -> bool {
-        matches!(self, AssetType::Texture | AssetType::Model)
+        matches!(
+            self,
+            AssetType::Texture
+                | AssetType::Model
+                | AssetType::Mesh
+                | AssetType::Animation
+                | AssetType::Material
+        )
     }
 }
 
@@ -136,6 +161,7 @@ mod tests {
         assert_eq!(AssetType::from_extension("PNG"), AssetType::Texture);
         assert_eq!(AssetType::from_extension("gltf"), AssetType::Model);
         assert_eq!(AssetType::from_extension("glb"), AssetType::Model);
+        assert_eq!(AssetType::from_extension("mesh"), AssetType::Mesh);
         assert_eq!(AssetType::from_extension("wav"), AssetType::Audio);
         assert_eq!(AssetType::from_extension("xyz"), AssetType::Unknown);
     }

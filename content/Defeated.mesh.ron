@@ -1,0 +1,22 @@
+(
+    source: "C:\\Users\\nstoi\\Downloads\\Defeated.fbx",
+    settings: (
+        scale: 1.0,
+        generate_tangents: true,
+        import_materials: true,
+        flip_uvs: false,
+        up_axis: ZUp,
+        import_animations: true,
+    ),
+    source_hash: 369653710,
+    material_slots: [
+        (
+            name: "Beta_HighLimbsGeoSG3",
+            material_path: "Defeated_Beta_HighLimbsGeoSG3.material.ron",
+        ),
+        (
+            name: "Beta_Joints_MAT1",
+            material_path: "Defeated_Beta_Joints_MAT1.material.ron",
+        ),
+    ],
+)

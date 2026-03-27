@@ -2590,10 +2590,12 @@ dependencies = [
  "ron",
  "serde",
  "smallvec",
+ "tobj",
  "tokio",
  "tracy-client",
  "transform-gizmo-egui",
  "typetag",
+ "ufbx",
  "uuid",
  "vulkano",
  "vulkano-shaders",
@@ -3023,6 +3025,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tobj"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04aca6092e5978e708ee784e8ab9b5cf3cdb598b28f99a2f257446e7081a7025"
+dependencies = [
+ "ahash",
+]
+
+[[package]]
 name = "tokio"
 version = "1.48.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3227,6 +3238,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ufbx"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6d09c5c5a8ce72ad7853b9c92c2b0aae0a4ae0167055f2ddaabecd7e9bec870"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

@@ -381,8 +381,18 @@ impl GridView {
                 }
             }
         } else {
-            // Normal label rendering - truncate if too long
-            let label_text = truncate_label(&asset.display_name, self.item_size, 11.0);
+            // Normal label rendering - show name with extension, truncate if too long
+            let ext = asset
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let full_label = if ext.is_empty() {
+                asset.display_name.clone()
+            } else {
+                format!("{}.{}", asset.display_name, ext)
+            };
+            let label_text = truncate_label(&full_label, self.item_size, 11.0);
             painter.text(
                 Pos2::new(label_rect.center().x, label_rect.min.y + 10.0),
                 egui::Align2::CENTER_CENTER,
@@ -478,10 +488,33 @@ impl GridView {
                 egui::containers::PopupAnchor::Pointer,
             )
             .show(|ui| {
-                ui.label(&asset.display_name);
-                ui.label(RichText::new(asset.asset_type.display_name()).weak());
-                ui.label(RichText::new(format!("Size: {}", asset.formatted_size())).weak());
-                ui.label(RichText::new(format!("Path: {}", asset.path.display())).weak());
+                ui.set_min_width(200.0);
+                let ext = asset
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let full_name = if ext.is_empty() {
+                    asset.display_name.clone()
+                } else {
+                    format!("{}.{}", asset.display_name, ext)
+                };
+                ui.label(RichText::new(&full_name).strong());
+                ui.add_space(2.0);
+                egui::Grid::new("tooltip_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Type:").weak());
+                        ui.label(asset.asset_type.display_name());
+                        ui.end_row();
+                        ui.label(RichText::new("Size:").weak());
+                        ui.label(asset.formatted_size());
+                        ui.end_row();
+                        ui.label(RichText::new("Path:").weak());
+                        ui.label(asset.path.display().to_string());
+                        ui.end_row();
+                    });
             });
         }
 
@@ -494,6 +527,8 @@ fn get_type_icon(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Texture => "\u{1F5BC}",  // 🖼
         AssetType::Model => "\u{1F4E6}",    // 📦
+        AssetType::Mesh => "\u{1F4E6}",      // 📦
+        AssetType::Animation => "\u{1F3B5}", // 🎵
         AssetType::Scene => "\u{1F3AC}",    // 🎬
         AssetType::Material => "\u{1F3A8}", // 🎨
         AssetType::Audio => "\u{1F50A}",    // 🔊
@@ -508,6 +543,8 @@ fn get_type_icon_small(asset_type: AssetType) -> &'static str {
     match asset_type {
         AssetType::Texture => "T",
         AssetType::Model => "M",
+        AssetType::Mesh => "Ms",
+        AssetType::Animation => "An",
         AssetType::Scene => "S",
         AssetType::Material => "Ma",
         AssetType::Audio => "A",
@@ -522,6 +559,8 @@ fn get_type_color(asset_type: AssetType) -> Color32 {
     match asset_type {
         AssetType::Texture => Color32::from_rgb(100, 180, 100), // Green
         AssetType::Model => Color32::from_rgb(100, 150, 220),   // Blue
+        AssetType::Mesh => Color32::from_rgb(80, 170, 240),      // Lighter blue
+        AssetType::Animation => Color32::from_rgb(240, 160, 60), // Orange
         AssetType::Scene => Color32::from_rgb(220, 180, 100),   // Gold
         AssetType::Material => Color32::from_rgb(200, 100, 180), // Purple
         AssetType::Audio => Color32::from_rgb(220, 120, 100),   // Orange-red
@@ -551,6 +590,8 @@ fn get_asset_browser_icon(asset_type: AssetType) -> Option<AssetBrowserIcon> {
     match asset_type {
         AssetType::Texture => Some(AssetBrowserIcon::FileImage),
         AssetType::Model => Some(AssetBrowserIcon::FileMesh),
+        AssetType::Mesh => Some(AssetBrowserIcon::FileMesh),
+        AssetType::Animation => Some(AssetBrowserIcon::FileDocument),
         AssetType::Scene => Some(AssetBrowserIcon::FileDocument),
         AssetType::Material => Some(AssetBrowserIcon::FileDocument),
         AssetType::Audio => Some(AssetBrowserIcon::FileDocument),
