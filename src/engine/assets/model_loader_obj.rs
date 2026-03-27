@@ -149,7 +149,10 @@ fn convert_tobj_mesh(mesh: &tobj::Mesh) -> Result<LoadedMesh, Box<dyn std::error
             normal: normals[i],
             uv: uvs[i],
             tangent: tangents[i],
+<<<<<<< HEAD
             ..Default::default()
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         });
     }
 

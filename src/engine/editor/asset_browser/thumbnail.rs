@@ -310,6 +310,7 @@ fn generate_model_thumbnail(
                 Err(e) => {
                     log::warn!("Thumbnail: failed to initialize GPU renderer: {}", e);
                 }
+<<<<<<< HEAD
             }
         }
     }
@@ -452,10 +453,120 @@ fn generate_model_from_loaded(
                 Err(e) => {
                     log::warn!("Thumbnail: failed to initialize GPU renderer: {}", e);
                 }
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             }
         }
     }
 
+<<<<<<< HEAD
+=======
+    // Try GPU rendering
+    if let Some(r) = renderer {
+        match r.render_model(&model, THUMBNAIL_SIZE) {
+            Ok(image_data) => {
+                return ThumbnailResult {
+                    id,
+                    image_data: Some(image_data),
+                };
+            }
+            Err(e) => {
+                log::warn!("Thumbnail: GPU render failed for {:?}: {}", path, e);
+            }
+        }
+    }
+
+    // Fallback: placeholder icon
+    ThumbnailResult {
+        id,
+        image_data: Some(create_model_icon_image()),
+    }
+}
+
+/// Generate thumbnail for an animation asset.
+///
+/// Finds the sibling `.mesh` file (same stem), loads it, applies the first
+/// frame of the animation as a skeletal pose, and renders a 3D thumbnail.
+fn generate_anim_thumbnail(
+    id: AssetId,
+    anim_path: &Path,
+    gpu_ctx: &Option<super::thumbnail_renderer::GpuThumbnailContext>,
+    renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
+) -> ThumbnailResult {
+    use crate::engine::assets::mesh_import::load_anim_binary;
+    use crate::engine::assets::model_loader::load_model;
+
+    // Find sibling .mesh file (same stem, different extension)
+    let mesh_path = anim_path.with_extension("mesh");
+    if !mesh_path.exists() {
+        log::warn!(
+            "Thumbnail: no sibling .mesh for animation {:?}",
+            anim_path
+        );
+        return ThumbnailResult {
+            id,
+            image_data: Some(create_model_icon_image()),
+        };
+    }
+
+    // Load the mesh model (geometry + bones + skinning)
+    let mesh_str = mesh_path.to_string_lossy();
+    let mut model = match load_model(&mesh_str) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("Thumbnail: failed to load mesh for anim {:?}: {}", mesh_path, e);
+            return ThumbnailResult {
+                id,
+                image_data: Some(create_model_icon_image()),
+            };
+        }
+    };
+
+    // Load the animation data
+    let (_bone_names, clips) = match load_anim_binary(anim_path) {
+        Ok(data) => data,
+        Err(e) => {
+            log::warn!("Thumbnail: failed to load anim {:?}: {}", anim_path, e);
+            // Fall back to rendering the mesh in bind pose
+            return generate_model_from_loaded(id, model, gpu_ctx, renderer);
+        }
+    };
+
+    // Apply the first frame of the first clip if we have bones and skinning
+    if let Some(clip) = clips.first() {
+        if !model.bones.is_empty() {
+            apply_first_frame_pose(&mut model, clip);
+        }
+    }
+
+    generate_model_from_loaded(id, model, gpu_ctx, renderer)
+}
+
+/// Render thumbnail from an already-loaded model.
+fn generate_model_from_loaded(
+    id: AssetId,
+    model: crate::engine::assets::model_loader::Model,
+    gpu_ctx: &Option<super::thumbnail_renderer::GpuThumbnailContext>,
+    renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
+) -> ThumbnailResult {
+    use super::thumbnail_renderer::ThumbnailRenderer;
+
+    // Lazily initialize the GPU renderer
+    if renderer.is_none() {
+        if let Some(ctx) = gpu_ctx {
+            match ThumbnailRenderer::new(ctx.clone_context()) {
+                Ok(r) => {
+                    log::info!("Thumbnail renderer initialized");
+                    *renderer = Some(r);
+                }
+                Err(e) => {
+                    log::warn!("Thumbnail: failed to initialize GPU renderer: {}", e);
+                }
+            }
+        }
+    }
+
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     if let Some(r) = renderer {
         match r.render_model(&model, THUMBNAIL_SIZE) {
             Ok(image_data) => {
@@ -488,6 +599,7 @@ fn apply_first_frame_pose(
         return;
     }
 
+<<<<<<< HEAD
     // Derive rest-pose local transforms from inverse bind matrices.
     // Bones without animation channels keep their rest pose instead of
     // collapsing to identity (which would scatter the mesh).
@@ -503,6 +615,10 @@ fn apply_first_frame_pose(
         .collect();
 
     // Override with the first keyframe for bones that have animation channels
+=======
+    // Build local transform for each bone from the first keyframe
+    let mut local_transforms = vec![Mat4::IDENTITY; bone_count];
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     for channel in &clip.channels {
         if channel.bone_index >= bone_count {
             continue;

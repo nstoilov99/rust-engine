@@ -5,6 +5,7 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in vec4 tangent;
+<<<<<<< HEAD
 layout(location = 4) in uvec4 joint_indices;
 layout(location = 5) in vec4 joint_weights;
 
@@ -13,6 +14,8 @@ layout(set = 0, binding = 0) uniform BonePalette {
     mat4 bones[256];
     uint bone_count;
 } palette;
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
 // Push constants (model + view-projection matrices)
 layout(push_constant) uniform PushConstants {
@@ -24,6 +27,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec3 frag_normal;
 
 void main() {
+<<<<<<< HEAD
     // Skinning: compute blended bone matrix
     mat4 skin_matrix =
         joint_weights.x * palette.bones[joint_indices.x] +
@@ -36,5 +40,9 @@ void main() {
 
     vec4 world_pos = pc.model * skinned_pos;
     frag_normal = normalize(mat3(pc.model) * skinned_normal);
+=======
+    vec4 world_pos = pc.model * vec4(position, 1.0);
+    frag_normal = normalize(mat3(pc.model) * normal);
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     gl_Position = pc.view_projection * world_pos;
 }

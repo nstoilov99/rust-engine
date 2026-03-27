@@ -58,6 +58,21 @@ pub fn prepare_mesh_data(
         if !mesh_renderer.visible {
             continue;
         }
+<<<<<<< HEAD
+=======
+
+        // Resolve mesh_path → index if path is set
+        let mesh_idx = if !mesh_renderer.mesh_path.is_empty() {
+            meshes
+                .first_index_for_path(&mesh_renderer.mesh_path)
+                .unwrap_or(mesh_renderer.mesh_index)
+        } else {
+            mesh_renderer.mesh_index
+        };
+
+        if let Some(gpu_mesh) = meshes.get(mesh_idx) {
+            let model_matrix = transform_cache.get_render(entity);
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
         // Resolve mesh_path → submesh indices (multi-submesh support)
         let submesh_indices: &[usize] = if !mesh_renderer.mesh_path.is_empty() {
@@ -76,6 +91,7 @@ pub fn prepare_mesh_data(
         });
         let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
+<<<<<<< HEAD
         // GPU bone palette: use skeleton's palette if present, else identity
         let palette_set = if let Some(skel) = skeleton {
             if !skel.palette.is_empty() {
@@ -112,6 +128,19 @@ pub fn prepare_mesh_data(
                     bone_palette_set: palette_set.clone(),
                 });
             }
+=======
+            mesh_data_buffer.push(MeshRenderData {
+                vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+                index_buffer: gpu_mesh.index_buffer.clone(),
+                index_count: gpu_mesh.index_count,
+                mesh_index: mesh_idx,
+                material_index: mesh_renderer.material_index,
+                push_constants: PushConstantData {
+                    model: model_array,
+                    view_projection: vp_array,
+                },
+            });
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         }
     }
 

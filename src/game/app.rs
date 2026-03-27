@@ -275,7 +275,10 @@ impl App {
             queue: core.renderer.queue.clone(),
             memory_allocator: core.renderer.memory_allocator.clone(),
             command_buffer_allocator: core.renderer.command_buffer_allocator.clone(),
+<<<<<<< HEAD
             descriptor_set_allocator: core.renderer.descriptor_set_allocator.clone(),
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         };
         let mut asset_browser =
             AssetBrowserPanel::new(std::path::PathBuf::from("content"), Some(gpu_ctx));
@@ -339,7 +342,10 @@ impl App {
                 core.renderer.queue.clone(),
                 core.renderer.memory_allocator.clone(),
                 core.renderer.command_buffer_allocator.clone(),
+<<<<<<< HEAD
                 core.renderer.descriptor_set_allocator.clone(),
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             ) {
                 Ok(r) => Some(r),
                 Err(e) => {

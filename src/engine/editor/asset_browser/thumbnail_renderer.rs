@@ -34,6 +34,7 @@ use vulkano::pipeline::{
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::sync::GpuFuture;
 
+<<<<<<< HEAD
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::DescriptorSet;
 use vulkano::pipeline::PipelineBindPoint;
@@ -41,6 +42,10 @@ use vulkano::pipeline::PipelineBindPoint;
 use crate::engine::assets::model_loader::{LoadedMesh, Model};
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use crate::engine::rendering::rendering_3d::SkinningBackend;
+=======
+use crate::engine::assets::model_loader::{LoadedMesh, Model};
+use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
 mod thumbnail_vs {
     vulkano_shaders::shader! {
@@ -64,7 +69,10 @@ pub struct GpuThumbnailContext {
     pub queue: Arc<Queue>,
     pub memory_allocator: Arc<StandardMemoryAllocator>,
     pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+<<<<<<< HEAD
     pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 }
 
 impl GpuThumbnailContext {
@@ -75,7 +83,10 @@ impl GpuThumbnailContext {
             queue: self.queue.clone(),
             memory_allocator: self.memory_allocator.clone(),
             command_buffer_allocator: self.command_buffer_allocator.clone(),
+<<<<<<< HEAD
             descriptor_set_allocator: self.descriptor_set_allocator.clone(),
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         }
     }
 }
@@ -88,7 +99,10 @@ pub struct ThumbnailRenderer {
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     _render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
+<<<<<<< HEAD
     identity_palette_set: Arc<DescriptorSet>,
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     color_image: Arc<Image>,
     _color_view: Arc<ImageView>,
     _depth_view: Arc<ImageView>,
@@ -167,6 +181,7 @@ impl ThumbnailRenderer {
             },
         )?;
 
+<<<<<<< HEAD
         // Identity bone palette for static meshes
         let identity_palette_set = SkinningBackend::create_identity_set_for_layout(
             &ctx.memory_allocator,
@@ -175,6 +190,8 @@ impl ThumbnailRenderer {
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         // Offscreen attachments
         let color_image = Image::new(
             ctx.memory_allocator.clone(),
@@ -232,7 +249,10 @@ impl ThumbnailRenderer {
             command_buffer_allocator: ctx.command_buffer_allocator,
             _render_pass: render_pass,
             pipeline,
+<<<<<<< HEAD
             identity_palette_set,
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             color_image,
             _color_view: color_view,
             _depth_view: depth_view,
@@ -336,6 +356,7 @@ impl ThumbnailRenderer {
 
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
+<<<<<<< HEAD
         // Bind identity bone palette (set 0) — all thumbnails render static meshes
         builder.bind_descriptor_sets(
             PipelineBindPoint::Graphics,
@@ -344,6 +365,8 @@ impl ThumbnailRenderer {
             self.identity_palette_set.clone(),
         )?;
 
+=======
+>>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         // Push constants: model (identity) + view_projection
         let model_matrix = Mat4::IDENTITY;
         let push_data = thumbnail_vs::PushConstants {
