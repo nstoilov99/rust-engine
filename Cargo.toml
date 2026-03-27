@@ -43,6 +43,8 @@ image = "0.25"
 bytemuck = "1.24.0"
 
 gltf = "1.4"
+tobj = "4.0"
+ufbx = "0.10"
 
 # Small vector optimization
 smallvec = "1.13"

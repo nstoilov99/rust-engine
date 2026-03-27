@@ -11,24 +11,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         // Back face (Z-) - tangent points left (X-)
         Vertex3D {
@@ -36,24 +40,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 1.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, -0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 1.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [1.0, 0.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 0.0, -1.0],
             uv: [0.0, 0.0],
             tangent: [-1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         // Right face (X+) - tangent points back (Z-)
         Vertex3D {
@@ -61,24 +69,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, -0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, -0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, 0.5],
             normal: [1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [0.0, 0.0, -1.0, 1.0],
+            ..Default::default()
         },
         // Left face (X-) - tangent points forward (Z+)
         Vertex3D {
@@ -86,24 +98,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, -0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, 0.5, 0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, 0.5, -0.5],
             normal: [-1.0, 0.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [0.0, 0.0, 1.0, 1.0],
+            ..Default::default()
         },
         // Top face (Y+) - tangent points right (X+)
         Vertex3D {
@@ -111,24 +127,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, 0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, 0.5, -0.5],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         // Bottom face (Y-) - tangent points right (X+)
         Vertex3D {
@@ -136,24 +156,28 @@ pub fn create_cube() -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, -0.5, -0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-0.5, -0.5, 0.5],
             normal: [0.0, -1.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
     ];
 
@@ -182,24 +206,28 @@ pub fn create_plane(size: f32) -> (Vec<Vertex3D>, Vec<u32>) {
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [half, 0.0, -half],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [half, 0.0, half],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
         Vertex3D {
             position: [-half, 0.0, half],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 1.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            ..Default::default()
         },
     ];
 

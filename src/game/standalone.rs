@@ -7,7 +7,9 @@ use rust_engine::assets::AssetManager;
 use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::game_world::GameWorld;
 use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::animation::AnimationUpdateSystem;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode, Time};
+use rust_engine::engine::ecs::schedule::{Schedule, Stage};
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
@@ -36,6 +38,7 @@ pub struct StandaloneApp {
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
     transform_cache: TransformCache,
+    schedule: Schedule,
 }
 
 impl StandaloneApp {
@@ -125,6 +128,11 @@ impl StandaloneApp {
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
             transform_cache,
+            schedule: {
+                let mut s = Schedule::new();
+                s.add_system(AnimationUpdateSystem, Stage::PreUpdate);
+                s
+            },
         })
     }
 
@@ -172,6 +180,8 @@ impl StandaloneApp {
         if let Some(time) = self.game_world.resource_mut::<Time>() {
             time.advance(delta_time);
         }
+
+        self.game_world.run_schedule(&mut self.schedule);
 
         self.physics_world
             .step(delta_time, self.game_world.hecs_mut());
@@ -227,6 +237,7 @@ impl StandaloneApp {
             &self.renderer,
             &mut self.mesh_data_buffer,
             &self.transform_cache,
+            self.deferred_renderer.skinning(),
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 

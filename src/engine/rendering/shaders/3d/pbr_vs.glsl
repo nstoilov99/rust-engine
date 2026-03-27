@@ -4,7 +4,9 @@
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
-layout(location = 3) in vec4 tangent;  // NEW: xyz=tangent, w=handedness
+layout(location = 3) in vec4 tangent;  // xyz=tangent, w=handedness
+layout(location = 4) in uvec4 joint_indices;
+layout(location = 5) in vec4 joint_weights;
 
 // Output to fragment shader
 layout(location = 0) out vec3 frag_position;
@@ -37,7 +39,7 @@ void main() {
     // Calculate bitangent
     vec3 B = cross(N, T) * tangent.w;
 
-    // Build TBN matrix (tangent space → world space)
+    // Build TBN matrix (tangent space -> world space)
     frag_TBN = mat3(T, B, N);
 
     // Pass through

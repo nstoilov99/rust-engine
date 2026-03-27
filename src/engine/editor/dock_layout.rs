@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 const LAYOUT_FILE: &str = "editor_layout.ron";
 
 /// All available editor panels/tabs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EditorTab {
     /// 3D viewport - renders the scene
     Viewport,
@@ -29,15 +29,15 @@ pub enum EditorTab {
 }
 
 impl EditorTab {
-    /// Display name for the tab
-    pub fn title(&self) -> &'static str {
+    /// Display name for the tab.
+    pub fn title_string(&self) -> String {
         match self {
-            EditorTab::Viewport => "Viewport",
-            EditorTab::Hierarchy => "Hierarchy",
-            EditorTab::Inspector => "Inspector",
-            EditorTab::AssetBrowser => "Assets",
-            EditorTab::Console => "Console",
-            EditorTab::Profiler => "Profiler",
+            EditorTab::Viewport => "Viewport".to_string(),
+            EditorTab::Hierarchy => "Hierarchy".to_string(),
+            EditorTab::Inspector => "Inspector".to_string(),
+            EditorTab::AssetBrowser => "Assets".to_string(),
+            EditorTab::Console => "Console".to_string(),
+            EditorTab::Profiler => "Profiler".to_string(),
         }
     }
 
@@ -72,11 +72,10 @@ impl EditorDockState {
     }
 
     /// Check if a tab is currently open in the dock
-    pub fn is_tab_open(&self, tab: EditorTab) -> bool {
-        // Iterate through all tabs in the dock state
+    pub fn is_tab_open(&self, tab: &EditorTab) -> bool {
         for (_surface_index, node) in self.dock_state.iter_all_nodes() {
             if let egui_dock::Node::Leaf(leaf_data) = node {
-                if leaf_data.tabs.contains(&tab) {
+                if leaf_data.tabs.contains(tab) {
                     return true;
                 }
             }
@@ -84,14 +83,14 @@ impl EditorDockState {
         false
     }
 
-    /// Open a tab (add it to the dock if not already present)
+    /// Open a tab, or focus it if already present
     pub fn open_tab(&mut self, tab: EditorTab) {
-        // First check if already open
-        if self.is_tab_open(tab) {
+        if let Some(location) = self.dock_state.find_tab(&tab) {
+            self.dock_state.set_active_tab(location);
+            self.dock_state
+                .set_focused_node_and_surface((location.0, location.1));
             return;
         }
-
-        // Add to the focused leaf (or first available leaf)
         self.dock_state.push_to_focused_leaf(tab);
     }
 

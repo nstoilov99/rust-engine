@@ -50,6 +50,9 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
 
     if let Ok(mesh_renderer) = world.get::<&MeshRenderer>(entity) {
         components.push(ComponentData::MeshRenderer {
+            mesh_path: mesh_renderer.mesh_path.clone(),
+            material_paths: mesh_renderer.material_paths.clone(),
+            material_path: String::new(),
             mesh_index: mesh_renderer.mesh_index,
             material_index: mesh_renderer.material_index,
             visible: mesh_renderer.visible,
@@ -355,19 +358,27 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                 builder.add(transform);
             }
             ComponentData::MeshRenderer {
+                mesh_path,
+                material_paths,
+                material_path,
                 mesh_index,
                 material_index,
                 visible,
                 cast_shadows,
                 receive_shadows,
             } => {
-                builder.add(MeshRenderer {
+                let mut mr = MeshRenderer {
+                    mesh_path: mesh_path.clone(),
+                    material_paths: material_paths.clone(),
+                    material_path: material_path.clone(),
                     mesh_index: *mesh_index,
                     material_index: *material_index,
                     visible: *visible,
                     cast_shadows: *cast_shadows,
                     receive_shadows: *receive_shadows,
-                });
+                };
+                mr.migrate_legacy_material_path();
+                builder.add(mr);
             }
             ComponentData::Camera {
                 fov,

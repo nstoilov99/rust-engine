@@ -13,6 +13,11 @@ if echo "$commit_msg" | grep -qE "^Merge "; then
     exit 0
 fi
 
+# Skip squash merge commits (git merge --squash generates this preamble)
+if echo "$commit_msg" | grep -qE "^Squashed commit of the following:"; then
+    exit 0
+fi
+
 # Strip Co-Authored-By lines (we don't want AI co-author attribution)
 sed -i '/^Co-Authored-By:/d' "$commit_msg_file"
 sed -i '/^co-authored-by:/d' "$commit_msg_file"

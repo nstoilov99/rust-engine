@@ -1,0 +1,10 @@
+(
+    name: "Beta_HighLimbsGeoSG3",
+    base_color_factor: (0.837, 0.30230802, 0.263655, 1.0),
+    metallic_factor: 0.0,
+    roughness_factor: 0.80829155,
+    albedo_texture: "",
+    normal_texture: "",
+    metallic_roughness_texture: "",
+    ao_texture: "",
+)

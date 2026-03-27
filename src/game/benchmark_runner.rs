@@ -305,6 +305,7 @@ impl BenchmarkRunner {
             &self.renderer,
             &mut self.mesh_data_buffer,
             &self.transform_cache,
+            self.deferred_renderer.skinning(),
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 

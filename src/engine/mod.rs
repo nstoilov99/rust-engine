@@ -43,6 +43,9 @@ pub mod editor;
 // Math utilities (frustum culling, etc.)
 pub mod math;
 
+// Skeletal animation system
+pub mod animation;
+
 // Re-export commonly used types
 pub use assets::{load_gltf, load_model, load_texture, LoadedMesh, Model};
 pub use camera::*; // Camera2D, Camera3D, CameraPushConstants

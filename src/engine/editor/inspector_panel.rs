@@ -2,12 +2,16 @@
 //!
 //! Displays and allows editing of component properties for the selected entity.
 
+use super::asset_browser::AssetBrowserPanel;
 use super::Selection;
+use crate::engine::assets::asset_type::AssetType;
+use crate::engine::assets::handle::AssetId;
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
     Transform,
 };
+use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{CollapsingHeader, Color32, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
@@ -25,6 +29,7 @@ enum ComponentCategory {
     Core,      // Transform, Name
     Rendering, // Camera, MeshRenderer, Lights
     Physics,   // RigidBody, Collider
+    Animation, // SkeletonInstance, AnimationPlayer
 }
 
 /// Actions to perform after component editing (deferred to avoid borrow issues)
@@ -54,6 +59,8 @@ impl ComponentPresence {
     const POINT_LIGHT: u16 = 1 << 5;
     const RIGID_BODY: u16 = 1 << 6;
     const COLLIDER: u16 = 1 << 7;
+    const SKELETON: u16 = 1 << 8;
+    const ANIM_PLAYER: u16 = 1 << 9;
 
     fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -80,6 +87,12 @@ impl ComponentPresence {
         }
         if world.get::<&Collider>(entity).is_ok() {
             bits |= Self::COLLIDER;
+        }
+        if world.get::<&SkeletonInstance>(entity).is_ok() {
+            bits |= Self::SKELETON;
+        }
+        if world.get::<&AnimationPlayer>(entity).is_ok() {
+            bits |= Self::ANIM_PLAYER;
         }
         Self { bits }
     }
@@ -137,13 +150,14 @@ impl InspectorPanel {
         world: &mut World,
         selection: &Selection,
         play_mode: PlayMode,
+        asset_browser: &mut AssetBrowserPanel,
     ) {
         egui::SidePanel::right("inspector_panel")
             .resizable(true)
             .default_width(300.0)
             .min_width(200.0)
             .show(ctx, |ui| {
-                self.show_contents(ui, world, selection, play_mode);
+                self.show_contents(ui, world, selection, play_mode, asset_browser);
             });
     }
 
@@ -154,6 +168,7 @@ impl InspectorPanel {
         world: &mut World,
         selection: &Selection,
         play_mode: PlayMode,
+        asset_browser: &mut AssetBrowserPanel,
     ) {
         let read_only = play_mode != PlayMode::Edit;
 
@@ -197,7 +212,7 @@ impl InspectorPanel {
                     self.render_entity_info(ui, world, entity);
                     ui.separator();
                     ui.add_enabled_ui(!read_only, |ui| {
-                        self.render_components(ui, world, entity);
+                        self.render_components(ui, world, entity, asset_browser);
                         ui.separator();
                         self.render_add_component(ui, world, entity);
                     });
@@ -250,6 +265,7 @@ impl InspectorPanel {
             ComponentCategory::Core => Color32::from_rgb(100, 160, 220), // Blue
             ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80), // Yellow/Gold
             ComponentCategory::Physics => Color32::from_rgb(100, 180, 120), // Green
+            ComponentCategory::Animation => Color32::from_rgb(200, 120, 200), // Purple
         }
     }
 
@@ -264,7 +280,13 @@ impl InspectorPanel {
     }
 
     /// Render all component editors using the cached presence snapshot.
-    fn render_components(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
+    fn render_components(
+        &mut self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        asset_browser: &mut AssetBrowserPanel,
+    ) {
         let mut component_count = 0;
         let mut pending_action = ComponentAction::None;
         let p = self.cached_presence;
@@ -312,7 +334,7 @@ impl InspectorPanel {
                 Self::draw_component_divider(ui);
             }
             if let Some(action) =
-                self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering)
+                self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering, asset_browser)
             {
                 pending_action = action;
             }
@@ -374,6 +396,29 @@ impl InspectorPanel {
             {
                 pending_action = action;
             }
+        }
+
+        // === ANIMATION COMPONENTS ===
+        if (self.matches_filter("skeleton")
+            || self.matches_filter("bone")
+            || self.matches_filter("animation"))
+            && p.has(ComponentPresence::SKELETON)
+        {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            self.edit_skeleton(ui, world, entity, ComponentCategory::Animation);
+            component_count += 1;
+        }
+        if (self.matches_filter("animation")
+            || self.matches_filter("playback")
+            || self.matches_filter("clip"))
+            && p.has(ComponentPresence::ANIM_PLAYER)
+        {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            self.edit_animation_player(ui, world, entity, ComponentCategory::Animation);
         }
 
         // Execute pending action and invalidate snapshot
@@ -770,6 +815,7 @@ impl InspectorPanel {
         world: &mut World,
         entity: Entity,
         category: ComponentCategory,
+        asset_browser: &mut AssetBrowserPanel,
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) {
@@ -782,25 +828,49 @@ impl InspectorPanel {
                     ui.checkbox(&mut renderer.visible, "Visible")
                         .on_hover_text("Whether this mesh is rendered");
 
-                    ui.horizontal(|ui| {
-                        ui.label("Mesh Index:");
-                        ui.add(DragValue::new(&mut renderer.mesh_index).range(0..=1000));
-                    });
+                    // Mesh asset slot
+                    let mesh_idx = renderer.mesh_index;
+                    ui.label("Mesh:");
+                    Self::asset_slot(
+                        ui,
+                        "mesh_slot",
+                        &mut renderer.mesh_path,
+                        &[AssetType::Mesh, AssetType::Model],
+                        asset_browser,
+                        mesh_idx,
+                    );
 
-                    ui.horizontal(|ui| {
-                        ui.label("Material Index:");
-                        ui.add(DragValue::new(&mut renderer.material_index).range(0..=1000));
-                    });
+                    ui.add_space(4.0);
+
+                    // Material slots — one slot per submesh material
+                    if renderer.material_paths.is_empty() {
+                        renderer.material_paths.push(String::new());
+                    }
+                    let slot_count = renderer.material_paths.len();
+                    for i in 0..slot_count {
+                        let label = if slot_count == 1 {
+                            "Material:".to_string()
+                        } else {
+                            format!("Material [{}]:", i)
+                        };
+                        ui.label(&label);
+                        Self::asset_slot(
+                            ui,
+                            &format!("material_slot_{}", i),
+                            &mut renderer.material_paths[i],
+                            &[AssetType::Material],
+                            asset_browser,
+                            0,
+                        );
+                        ui.add_space(2.0);
+                    }
+
+                    ui.add_space(4.0);
 
                     ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
                         .on_hover_text("Whether this mesh casts shadows");
                     ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
                         .on_hover_text("Whether this mesh receives shadows from other objects");
-
-                    ui.label(
-                        RichText::new("Tip: Use Asset Browser for mesh/material selection")
-                            .color(Color32::from_gray(160)),
-                    );
                 });
 
             // Context menu for component removal
@@ -820,6 +890,160 @@ impl InspectorPanel {
             ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
+    }
+
+    /// Draw an asset slot widget that accepts drag-and-drop from the asset browser.
+    ///
+    /// Shows a square thumbnail + filename when an asset is assigned, or a drop hint
+    /// when empty. If `legacy_index > 0` and path is empty, shows the legacy index.
+    /// Accepts drops of the specified `allowed_types` from the asset browser.
+    fn asset_slot(
+        ui: &mut Ui,
+        id_salt: &str,
+        path: &mut String,
+        allowed_types: &[AssetType],
+        asset_browser: &mut AssetBrowserPanel,
+        legacy_index: usize,
+    ) {
+        let thumb_size = 64.0;
+        let slot_height = thumb_size + 8.0;
+        let available_width = ui.available_width();
+
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(available_width, slot_height),
+            egui::Sense::hover(),
+        );
+
+        // Check for DnD hover
+        let mut is_valid_hover = false;
+        if let Some(hovered_id) = response.dnd_hover_payload::<AssetId>() {
+            if let Some(meta) = asset_browser.registry.get(*hovered_id) {
+                if allowed_types.contains(&meta.asset_type) {
+                    is_valid_hover = true;
+                }
+            }
+        }
+
+        // Check for DnD drop
+        if let Some(dropped_id) = response.dnd_release_payload::<AssetId>() {
+            if let Some(meta) = asset_browser.registry.get(*dropped_id) {
+                if allowed_types.contains(&meta.asset_type) {
+                    *path = meta.path.to_string_lossy().to_string();
+                }
+            }
+        }
+
+        let painter = ui.painter_at(rect);
+
+        // Background
+        let bg_color = if is_valid_hover {
+            Color32::from_rgba_premultiplied(40, 60, 90, 255)
+        } else {
+            Color32::from_gray(35)
+        };
+        painter.rect_filled(rect, 4.0, bg_color);
+
+        // Border
+        let border_color = if is_valid_hover {
+            Color32::from_rgb(100, 180, 255)
+        } else {
+            Color32::from_gray(60)
+        };
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, border_color),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        if path.is_empty() {
+            // Empty slot
+            if legacy_index > 0 {
+                // Show legacy index info
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Index: {} (legacy, drag to replace)", legacy_index),
+                    egui::FontId::proportional(11.0),
+                    Color32::from_gray(140),
+                );
+            } else {
+                // Show drop hint
+                let type_names: Vec<&str> =
+                    allowed_types.iter().map(|t| t.display_name()).collect();
+                let hint = format!("Drop {} here", type_names.join("/"));
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    hint,
+                    egui::FontId::proportional(12.0),
+                    Color32::from_gray(120),
+                );
+            }
+        } else {
+            // Has asset — show square thumbnail + filename
+            let thumb_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(4.0, 4.0),
+                egui::vec2(thumb_size, thumb_size),
+            );
+
+            // Try to get thumbnail
+            let asset_id = AssetId::from_path(path);
+            if let Some(meta) = asset_browser.registry.get(asset_id) {
+                if let Some(tex_id) = asset_browser.thumbnails.get_texture_id(ui.ctx(), meta) {
+                    painter.image(
+                        tex_id,
+                        thumb_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
+                }
+            } else {
+                painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
+            }
+
+            // Filename text
+            let filename = std::path::Path::new(path.as_str())
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            let text_left = thumb_rect.right() + 8.0;
+            painter.text(
+                egui::pos2(text_left, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &filename,
+                egui::FontId::proportional(12.0),
+                Color32::from_gray(200),
+            );
+
+            // Clear button (x)
+            let clear_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - 22.0, rect.center().y - 8.0),
+                egui::vec2(16.0, 16.0),
+            );
+            let clear_response = ui.interact(
+                clear_rect,
+                ui.id().with(id_salt).with("clear"),
+                egui::Sense::click(),
+            );
+            let clear_color = if clear_response.hovered() {
+                Color32::from_rgb(220, 80, 80)
+            } else {
+                Color32::from_gray(120)
+            };
+            painter.text(
+                clear_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "x",
+                egui::FontId::proportional(12.0),
+                clear_color,
+            );
+            if clear_response.clicked() {
+                *path = String::new();
+            }
+        }
     }
 
     /// Edit DirectionalLight component
@@ -1353,6 +1577,143 @@ impl InspectorPanel {
             ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
+    }
+
+    /// Display skeleton instance info with debug draw toggle
+    fn edit_skeleton(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) {
+        if let Ok(mut skeleton) = world.get::<&mut SkeletonInstance>(entity) {
+            let color = Self::category_color(category);
+            let start_y = ui.cursor().top();
+
+            CollapsingHeader::new(RichText::new("Skeleton").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Bones:");
+                        ui.label(format!("{}", skeleton.bones.len()));
+                    });
+
+                    ui.checkbox(&mut skeleton.debug_draw_visible, "Debug Draw")
+                        .on_hover_text("Show bone hierarchy wireframe in viewport");
+
+                    if !skeleton.bones.is_empty() {
+                        CollapsingHeader::new("Bone List")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (i, bone) in skeleton.bones.iter().enumerate() {
+                                    let parent_str = bone
+                                        .parent_index
+                                        .map(|p| format!(" (parent: {})", p))
+                                        .unwrap_or_default();
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "[{}] {}{}",
+                                            i, bone.name, parent_str
+                                        ))
+                                        .monospace()
+                                        .size(11.0),
+                                    );
+                                }
+                            });
+                    }
+                });
+
+            let end_y = ui.cursor().top();
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), start_y),
+                egui::pos2(ui.min_rect().left() + 4.0, end_y),
+            );
+            ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
+    }
+
+    /// Display and control animation player
+    fn edit_animation_player(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) {
+        if let Ok(mut player) = world.get::<&mut AnimationPlayer>(entity) {
+            let color = Self::category_color(category);
+            let start_y = ui.cursor().top();
+
+            CollapsingHeader::new(RichText::new("Animation Player").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    // Clip info
+                    ui.horizontal(|ui| {
+                        ui.label("Clip:");
+                        ui.label(&player.clip.name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Duration:");
+                        ui.label(format!("{:.2}s", player.clip.duration_seconds));
+                    });
+
+                    // Playback controls
+                    ui.horizontal(|ui| {
+                        let is_playing = player.state == PlaybackState::Playing;
+                        if ui
+                            .button(if is_playing { "Stop" } else { "Play" })
+                            .clicked()
+                        {
+                            if is_playing {
+                                player.stop();
+                            } else {
+                                player.play();
+                            }
+                        }
+                        if ui.button("Reset").clicked() {
+                            player.reset();
+                        }
+                    });
+
+                    // Time scrubber
+                    let duration = player.clip.duration_seconds.max(0.001);
+                    ui.horizontal(|ui| {
+                        ui.label("Time:");
+                        ui.add(
+                            DragValue::new(&mut player.time)
+                                .speed(0.01)
+                                .range(0.0..=duration)
+                                .suffix("s"),
+                        );
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut player.time, 0.0..=duration)
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+
+                    // Speed
+                    ui.horizontal(|ui| {
+                        ui.label("Speed:");
+                        ui.add(
+                            DragValue::new(&mut player.speed)
+                                .speed(0.01)
+                                .range(0.0..=10.0),
+                        );
+                    });
+
+                    // Looping
+                    ui.checkbox(&mut player.looping, "Loop");
+                });
+
+            let end_y = ui.cursor().top();
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), start_y),
+                egui::pos2(ui.min_rect().left() + 4.0, end_y),
+            );
+            ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
     }
 
     /// Render "Add Component" UI with compatibility validation.

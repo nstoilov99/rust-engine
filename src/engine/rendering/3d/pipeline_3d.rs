@@ -92,26 +92,77 @@ pub mod pbr_fs {
     }
 }
 
-/// Vertex format for 3D meshes with lighting support
+/// Vertex format for 3D meshes with lighting and skeletal animation support.
 #[derive(
     Clone,
     Copy,
     Debug,
-    Default,
     vulkano::buffer::BufferContents,
     vulkano::pipeline::graphics::vertex_input::Vertex,
 )]
 #[repr(C)]
 pub struct Vertex3D {
     #[format(R32G32B32_SFLOAT)]
-    pub position: [f32; 3], // X, Y, Z position
+    pub position: [f32; 3], // location 0: X, Y, Z position
     #[format(R32G32B32_SFLOAT)]
-    pub normal: [f32; 3], // Surface normal for lighting
+    pub normal: [f32; 3], // location 1: Surface normal for lighting
     #[format(R32G32_SFLOAT)]
-    pub uv: [f32; 2], // Texture coordinates
-
+    pub uv: [f32; 2], // location 2: Texture coordinates
     #[format(R32G32B32A32_SFLOAT)] // W component = bitangent handedness
-    pub tangent: [f32; 4],
+    pub tangent: [f32; 4], // location 3
+    #[format(R32G32B32A32_UINT)]
+    pub joint_indices: [u32; 4], // location 4: Bone indices for skinning
+    #[format(R32G32B32A32_SFLOAT)]
+    pub joint_weights: [f32; 4], // location 5: Bone weights for skinning
+}
+
+impl Default for Vertex3D {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            normal: [0.0; 3],
+            uv: [0.0; 2],
+            tangent: [0.0; 4],
+            joint_indices: [0; 4],
+            joint_weights: [1.0, 0.0, 0.0, 0.0], // Identity skinning: weight on bone 0
+        }
+    }
+}
+
+/// Maximum bones supported by the FixedUbo skinning backend.
+/// This is a backend limit, not a permanent engine-wide skeleton limit.
+pub const MAX_PALETTE_BONES: usize = 256;
+
+/// GPU bone palette data for the FixedUbo skinning backend.
+///
+/// Uploaded as a uniform buffer and bound at set 0, binding 0 for all
+/// Vertex3D pipelines. Static meshes use the identity palette.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BonePaletteData {
+    pub matrices: [[f32; 16]; MAX_PALETTE_BONES],
+    pub bone_count: u32,
+    pub _pad: [u32; 3],
+}
+
+unsafe impl bytemuck::Pod for BonePaletteData {}
+unsafe impl bytemuck::Zeroable for BonePaletteData {}
+
+impl BonePaletteData {
+    /// Identity palette: every bone slot = identity matrix.
+    /// Used for static (non-skinned) meshes and as a safe fallback
+    /// for skinned meshes rendered without a skeleton (thumbnails, previews).
+    pub fn identity() -> Self {
+        // Mat4::IDENTITY as column-major [f32; 16]
+        let id = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        Self {
+            matrices: [id; MAX_PALETTE_BONES],
+            bone_count: 0,
+            _pad: [0; 3],
+        }
+    }
 }
 
 /// Lighting data for forward rendering pipeline (uniform buffer).

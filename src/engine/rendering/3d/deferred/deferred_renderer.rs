@@ -11,6 +11,7 @@ use super::lighting_pass::LightingPass;
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::render_target::RenderTarget;
+use crate::engine::rendering::rendering_3d::SkinningBackend;
 use glam::{Mat4, Vec3};
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -48,6 +49,7 @@ pub struct DeferredRenderer {
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_render_pass: Arc<RenderPass>,
+    skinning: SkinningBackend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -133,6 +135,13 @@ impl DeferredRenderer {
             gbuffer.material.clone(),
         )?;
 
+        // Skinning backend: manages bone palette UBO and identity descriptor set
+        let skinning = SkinningBackend::new(
+            allocator.clone(),
+            descriptor_set_allocator.clone(),
+            &geometry_pass.pipeline(),
+        )?;
+
         Ok(Self {
             gbuffer,
             geometry_pass,
@@ -150,6 +159,7 @@ impl DeferredRenderer {
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
             grid_render_pass,
+            skinning,
         })
     }
 
@@ -326,6 +336,8 @@ impl DeferredRenderer {
             {
                 crate::profile_scope!("mesh_loop");
                 let mut last_material = None;
+                let mut last_palette: Option<usize> = None;
+                let geom_layout = self.geometry_pass.layout();
                 for mesh in mesh_data {
                     self.render_counters.visible_entities += 1;
                     self.render_counters.draw_calls += 1;
@@ -335,11 +347,23 @@ impl DeferredRenderer {
                         last_material = Some(mesh.material_index);
                     }
 
+                    // Bind bone palette at set 0 (skip if same as last draw)
+                    let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
+                    if last_palette != Some(palette_ptr) {
+                        builder.bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            geom_layout.clone(),
+                            0,
+                            mesh.bone_palette_set.clone(),
+                        )?;
+                        last_palette = Some(palette_ptr);
+                    }
+
                     builder
                         .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
                         .bind_index_buffer(mesh.index_buffer.clone())?
                         .push_constants(
-                            self.geometry_pass.layout(),
+                            geom_layout.clone(),
                             0,
                             mesh.push_constants, // Model + view-projection matrices
                         )?;
@@ -528,6 +552,11 @@ impl DeferredRenderer {
     pub fn render_counters(&self) -> &RenderCounters {
         &self.render_counters
     }
+
+    /// Returns the skinning backend (for accessing identity set in prepare_mesh_data).
+    pub fn skinning(&self) -> &SkinningBackend {
+        &self.skinning
+    }
 }
 
 // Helper structures (define these based on your engine)
@@ -538,6 +567,7 @@ pub struct MeshRenderData {
     pub mesh_index: usize,
     pub material_index: usize,
     pub push_constants: PushConstantData,
+    pub bone_palette_set: Arc<DescriptorSet>,
 }
 
 #[repr(C)]

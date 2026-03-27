@@ -8,8 +8,12 @@ pub mod dependencies;
 pub mod handle;
 #[cfg(feature = "editor")]
 pub mod hot_reload;
+pub mod mesh_import;
 pub mod metadata;
 pub mod model_loader;
+pub mod model_loader_fbx;
+pub mod model_loader_gltf;
+pub mod model_loader_obj;
 pub mod model_manager;
 pub mod pak;
 pub mod texture;
@@ -25,8 +29,10 @@ pub use handle::{AssetId, Handle};
 #[cfg(feature = "editor")]
 pub use hot_reload::{HotReloadWatcher, ReloadEvent};
 pub use metadata::AssetMetadata;
+pub use mesh_import::{MeshImportMeta, MeshImportSettings, UpAxis};
 pub use model_loader::{
-    load_gltf, load_gltf_from_bytes, load_model, load_model_from_bytes, LoadedMesh, Model,
+    load_gltf, load_gltf_from_bytes, load_model, load_model_from_bytes, ImportedMaterial,
+    LoadedMesh, Model, VertexBoneData,
 };
 pub use model_manager::ModelManager;
 pub use texture::load_texture;

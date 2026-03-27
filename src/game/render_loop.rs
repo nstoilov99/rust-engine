@@ -7,11 +7,12 @@ use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
+use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
 use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::engine::math::{Aabb, Frustum};
 use rust_engine::engine::rendering::rendering_3d::{
-    DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData,
+    DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinningBackend,
 };
 use rust_engine::Renderer;
 use std::sync::Arc;
@@ -34,12 +35,14 @@ pub fn prepare_mesh_data(
     renderer: &Renderer,
     mesh_data_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
+    skinning: &SkinningBackend,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
     mesh_data_buffer.clear();
 
     let meshes = asset_manager.meshes.read();
+    let identity_set = skinning.identity_set();
 
     let view_matrix = renderer.camera_3d.view_matrix();
     let projection_matrix = renderer.camera_3d.projection_matrix();
@@ -49,39 +52,66 @@ pub fn prepare_mesh_data(
 
     let vp_array: [[f32; 4]; 4] = view_projection.to_cols_array_2d();
 
-    for (entity, (_transform, mesh_renderer)) in world.query::<(&Transform, &MeshRenderer)>().iter()
+    for (entity, (_transform, mesh_renderer, skeleton)) in
+        world.query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>().iter()
     {
         if !mesh_renderer.visible {
             continue;
         }
-        if let Some(gpu_mesh) = meshes.get(mesh_renderer.mesh_index) {
-            let model_matrix = transform_cache.get_render(entity);
 
-            // AABB frustum culling — uses the local-space AABB precomputed at
-            // asset load time, transformed into world space via the render
-            // matrix. No per-frame scale extraction needed.
-            let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
-            let glam_model = glam::Mat4::from_cols_array_2d(&unsafe {
-                std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(model_matrix)
-            });
-            let world_aabb = local_aabb.transformed(&glam_model);
-            if !frustum.contains_aabb(world_aabb.min, world_aabb.max) {
-                continue;
+        // Resolve mesh_path → submesh indices (multi-submesh support)
+        let submesh_indices: &[usize] = if !mesh_renderer.mesh_path.is_empty() {
+            if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
+                indices
+            } else {
+                std::slice::from_ref(&mesh_renderer.mesh_index)
             }
+        } else {
+            std::slice::from_ref(&mesh_renderer.mesh_index)
+        };
 
-            let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
+        let model_matrix = transform_cache.get_render(entity);
+        let glam_model = glam::Mat4::from_cols_array_2d(&unsafe {
+            std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(model_matrix)
+        });
+        let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
-            mesh_data_buffer.push(MeshRenderData {
-                vertex_buffer: gpu_mesh.vertex_buffer.clone(),
-                index_buffer: gpu_mesh.index_buffer.clone(),
-                index_count: gpu_mesh.index_count,
-                mesh_index: mesh_renderer.mesh_index,
-                material_index: mesh_renderer.material_index,
-                push_constants: PushConstantData {
-                    model: model_array,
-                    view_projection: vp_array,
-                },
-            });
+        // GPU bone palette: use skeleton's palette if present, else identity
+        let palette_set = if let Some(skel) = skeleton {
+            if !skel.palette.is_empty() {
+                match skinning.create_palette_set(&skel.palette) {
+                    Ok(set) => set,
+                    Err(_) => identity_set.clone(),
+                }
+            } else {
+                identity_set.clone()
+            }
+        } else {
+            identity_set.clone()
+        };
+
+        for &mesh_idx in submesh_indices {
+            if let Some(gpu_mesh) = meshes.get(mesh_idx) {
+                // AABB frustum culling per submesh
+                let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
+                let world_aabb = local_aabb.transformed(&glam_model);
+                if !frustum.contains_aabb(world_aabb.min, world_aabb.max) {
+                    continue;
+                }
+
+                mesh_data_buffer.push(MeshRenderData {
+                    vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+                    index_buffer: gpu_mesh.index_buffer.clone(),
+                    index_count: gpu_mesh.index_count,
+                    mesh_index: mesh_idx,
+                    material_index: mesh_renderer.material_index,
+                    push_constants: PushConstantData {
+                        model: model_array,
+                        view_projection: vp_array,
+                    },
+                    bone_palette_set: palette_set.clone(),
+                });
+            }
         }
     }
 

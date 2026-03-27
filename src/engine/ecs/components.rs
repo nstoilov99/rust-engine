@@ -73,7 +73,21 @@ impl Default for Transform {
 /// Mesh renderer component
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshRenderer {
+    /// Content-relative path to a `.mesh` asset (e.g. "Defeated.mesh")
+    #[serde(default)]
+    pub mesh_path: String,
+    /// Per-submesh material paths (content-relative `.material.ron` paths).
+    /// Index 0 = first submesh, etc. Empty vec or missing entries = default material.
+    #[serde(default)]
+    pub material_paths: Vec<String>,
+    /// Backward-compat: old single material_path (migrated to material_paths[0] at load).
+    #[serde(default, skip_serializing)]
+    pub material_path: String,
+    /// Runtime-resolved GPU mesh index (not serialized)
+    #[serde(skip)]
     pub mesh_index: usize,
+    /// Runtime-resolved material sort key (not serialized)
+    #[serde(skip)]
     pub material_index: usize,
     /// Whether this mesh is rendered
     #[serde(default = "default_true")]
@@ -86,9 +100,21 @@ pub struct MeshRenderer {
     pub receive_shadows: bool,
 }
 
+impl MeshRenderer {
+    /// Migrate legacy `material_path` to `material_paths` if needed.
+    pub fn migrate_legacy_material_path(&mut self) {
+        if !self.material_path.is_empty() && self.material_paths.is_empty() {
+            self.material_paths.push(std::mem::take(&mut self.material_path));
+        }
+    }
+}
+
 impl Default for MeshRenderer {
     fn default() -> Self {
         Self {
+            mesh_path: String::new(),
+            material_paths: Vec::new(),
+            material_path: String::new(),
             mesh_index: 0,
             material_index: 0,
             visible: true,

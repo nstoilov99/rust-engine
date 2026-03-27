@@ -1,26 +1,94 @@
-use crate::engine::rendering::rendering_3d::material::*;
-use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
-use glam::Vec3;
-use gltf;
+use glam::{Mat4, Quat, Vec3};
 use std::path::Path;
-use std::sync::Arc;
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::device::Device;
-use vulkano::image::sampler::Sampler;
-use vulkano::image::view::ImageView;
-use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::GraphicsPipeline;
 
-/// Result type for GLTF loading operations.
-type GltfResult = Result<
-    (
-        gltf::Document,
-        Vec<gltf::buffer::Data>,
-        Vec<gltf::image::Data>,
-    ),
-    Box<dyn std::error::Error>,
->;
+// Re-export glTF-specific functions for backward compatibility
+pub use super::model_loader_gltf::{
+    extract_material_from_gltf, extract_texture_from_gltf, load_gltf, load_gltf_from_bytes,
+    print_gltf_info,
+};
+
+// ──────────────────────────────────────────────────────────────
+// Shared data types
+// ──────────────────────────────────────────────────────────────
+
+/// Per-vertex bone weights for skeletal animation.
+#[derive(Debug, Clone)]
+pub struct VertexBoneData {
+    pub joints: [u16; 4],
+    pub weights: [f32; 4],
+}
+
+/// A single bone in a skeleton hierarchy.
+#[derive(Debug, Clone)]
+pub struct BoneData {
+    /// Human-readable bone name (e.g. "mixamorig:Hips").
+    pub name: String,
+    /// Index of the parent bone in `Model::bones`, or `None` for root bones.
+    pub parent_index: Option<usize>,
+    /// Inverse bind matrix — transforms from model space to bone-local space.
+    pub inverse_bind_matrix: Mat4,
+}
+
+/// A single channel of animation targeting one bone.
+#[derive(Debug, Clone)]
+pub struct AnimationChannel {
+    /// Index into `Model::bones`.
+    pub bone_index: usize,
+    /// Position keyframes: (time_seconds, translation).
+    pub position_keys: Vec<(f32, Vec3)>,
+    /// Rotation keyframes: (time_seconds, rotation).
+    pub rotation_keys: Vec<(f32, Quat)>,
+    /// Scale keyframes: (time_seconds, scale).
+    pub scale_keys: Vec<(f32, Vec3)>,
+}
+
+/// A raw animation clip extracted from a source file (one per anim stack).
+#[derive(Debug, Clone)]
+pub struct RawAnimationClip {
+    /// Clip name (e.g. "Take 001", "Idle", "Walk").
+    pub name: String,
+    /// Total duration in seconds.
+    pub duration_seconds: f32,
+    /// Per-bone animation channels.
+    pub channels: Vec<AnimationChannel>,
+}
+
+/// Format-agnostic imported material — source of truth for material data.
+#[derive(Debug, Clone)]
+pub struct ImportedMaterial {
+    /// Human-readable name (from file or generated).
+    pub name: String,
+    /// Base color / albedo texture (RGBA).
+    pub albedo: Option<image::RgbaImage>,
+    /// Normal map texture (RGBA, tangent-space).
+    pub normal: Option<image::RgbaImage>,
+    /// Metallic-roughness packed texture (G=roughness, B=metallic).
+    pub metallic_roughness: Option<image::RgbaImage>,
+    /// Ambient occlusion texture (R channel).
+    pub ao: Option<image::RgbaImage>,
+    /// Base color factor (linear RGBA multiply).
+    pub base_color_factor: [f32; 4],
+    /// Metallic factor [0..1].
+    pub metallic_factor: f32,
+    /// Roughness factor [0..1].
+    pub roughness_factor: f32,
+}
+
+impl Default for ImportedMaterial {
+    fn default() -> Self {
+        Self {
+            name: String::from("Default"),
+            albedo: None,
+            normal: None,
+            metallic_roughness: None,
+            ao: None,
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 0.0,
+            roughness_factor: 0.5,
+        }
+    }
+}
 
 /// Represents a loaded mesh with vertex and index data
 #[derive(Debug)]
@@ -35,10 +103,56 @@ pub struct LoadedMesh {
     /// Local-space axis-aligned bounding box (computed once at load time).
     pub aabb_min: Vec3,
     pub aabb_max: Vec3,
+    /// Per-vertex skinning data (None for static meshes).
+    pub skinning: Option<Vec<VertexBoneData>>,
 }
 
+/// Represents a complete 3D model with all meshes and textures
+#[derive(Debug)]
+pub struct Model {
+    pub meshes: Vec<LoadedMesh>,
+    pub name: String,
+    /// Legacy texture list — kept for backward compat with existing GPU upload path.
+    /// Derived from `materials` via `rebuild_legacy_textures()`.
+    pub textures: Vec<image::RgbaImage>,
+    /// Format-agnostic materials (source of truth).
+    pub materials: Vec<ImportedMaterial>,
+    /// Skeleton bone hierarchy (empty for static meshes).
+    pub bones: Vec<BoneData>,
+    /// Animation clips extracted from the source file (empty for static meshes).
+    pub animations: Vec<RawAnimationClip>,
+}
+
+impl Model {
+    pub fn new(name: String) -> Self {
+        Self {
+            meshes: Vec::new(),
+            name,
+            textures: Vec::new(),
+            materials: Vec::new(),
+            bones: Vec::new(),
+            animations: Vec::new(),
+        }
+    }
+
+    /// Rebuild the legacy `textures` vec from `materials` by collecting albedo
+    /// textures in material order. This keeps the existing GPU upload path
+    /// working while `materials` is the canonical source of truth.
+    pub fn rebuild_legacy_textures(&mut self) {
+        self.textures = self
+            .materials
+            .iter()
+            .filter_map(|m| m.albedo.clone())
+            .collect();
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Shared utilities (used by all format loaders)
+// ──────────────────────────────────────────────────────────────
+
 /// Compute bounding sphere for a set of vertices
-fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
+pub(crate) fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
     if vertices.is_empty() {
         return (Vec3::ZERO, 0.0);
     }
@@ -62,188 +176,9 @@ fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
     (center, radius)
 }
 
-/// Represents a complete 3D model with all meshes and textures
-#[derive(Debug)]
-pub struct Model {
-    pub meshes: Vec<LoadedMesh>,
-    pub name: String,
-    pub textures: Vec<image::RgbaImage>, // Extracted textures from GLTF
-}
-
-impl Model {
-    pub fn new(name: String) -> Self {
-        Self {
-            meshes: Vec::new(),
-            name,
-            textures: Vec::new(),
-        }
-    }
-}
-
-/// Loads a GLTF/GLB file and returns the parsed document
-pub fn load_gltf(path: &str) -> GltfResult {
-    let (document, buffers, images) = gltf::import(path)?;
-    Ok((document, buffers, images))
-}
-
-/// Loads a GLTF/GLB from in-memory bytes (for pak file loading).
-pub fn load_gltf_from_bytes(data: &[u8]) -> GltfResult {
-    let (document, buffers, images) = gltf::import_slice(data)?;
-    Ok((document, buffers, images))
-}
-
-/// Prints detailed information about a GLTF file (for debugging)
-pub fn print_gltf_info(document: &gltf::Document) {
-    println!("\n=== GLTF Model Info ===");
-
-    // Print scenes
-    println!("\n📐 Scenes: {}", document.scenes().count());
-    for (i, scene) in document.scenes().enumerate() {
-        println!("  Scene {}: {:?}", i, scene.name());
-        println!("    Nodes: {}", scene.nodes().count());
-    }
-
-    // Print meshes
-    println!("\n🔷 Meshes: {}", document.meshes().count());
-    for (i, mesh) in document.meshes().enumerate() {
-        println!("  Mesh {}: {:?}", i, mesh.name());
-        println!("    Primitives: {}", mesh.primitives().count());
-
-        for (j, primitive) in mesh.primitives().enumerate() {
-            println!("      Primitive {}: mode={:?}", j, primitive.mode());
-
-            // Print attributes
-            for (semantic, _accessor) in primitive.attributes() {
-                println!("        - {:?}", semantic);
-            }
-
-            if let Some(_indices) = primitive.indices() {
-                println!("        - Indexed (has indices)");
-            }
-        }
-    }
-
-    // Print materials
-    println!("\n🎨 Materials: {}", document.materials().count());
-    for (i, material) in document.materials().enumerate() {
-        println!("  Material {}: {:?}", i, material.name());
-
-        let pbr = material.pbr_metallic_roughness();
-        println!("    Base color: {:?}", pbr.base_color_factor());
-
-        if let Some(_texture) = pbr.base_color_texture() {
-            println!("    Has base color texture");
-        }
-    }
-
-    println!("\n========================\n");
-}
-
-/// Loads a complete model from GLTF file path (filesystem only).
-pub fn load_model(path: &str) -> Result<Model, Box<dyn std::error::Error>> {
-    crate::profile_function!();
-
-    let (document, buffers, images) = {
-        crate::profile_scope!("gltf_parse");
-        load_gltf(path)?
-    };
-
-    let name = Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Unnamed")
-        .to_string();
-
-    build_model(name, document, buffers, images)
-}
-
-/// Loads a complete model from in-memory GLTF/GLB bytes.
-pub fn load_model_from_bytes(data: &[u8], name: &str) -> Result<Model, Box<dyn std::error::Error>> {
-    crate::profile_function!();
-
-    let (document, buffers, images) = {
-        crate::profile_scope!("gltf_parse");
-        load_gltf_from_bytes(data)?
-    };
-
-    build_model(name.to_string(), document, buffers, images)
-}
-
-fn build_model(
-    name: String,
-    document: gltf::Document,
-    buffers: Vec<gltf::buffer::Data>,
-    images: Vec<gltf::image::Data>,
-) -> Result<Model, Box<dyn std::error::Error>> {
-    let mut model = Model::new(name.clone());
-
-    // Extract all meshes
-    {
-        crate::profile_scope!("vertex_processing");
-        for mesh in document.meshes() {
-            for primitive in mesh.primitives() {
-                // Only handle triangle meshes
-                if primitive.mode() != gltf::mesh::Mode::Triangles {
-                    continue;
-                }
-
-                // Extract mesh data
-                match extract_mesh_from_primitive(&primitive, &buffers) {
-                    Ok(loaded_mesh) => {
-                        model.meshes.push(loaded_mesh);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to extract mesh primitive: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract textures from images
-    crate::profile_scope!("texture_extraction");
-    for image_data in images.iter() {
-        // Convert to RgbaImage
-        let rgba_image = match image_data.format {
-            gltf::image::Format::R8G8B8A8 => image::RgbaImage::from_raw(
-                image_data.width,
-                image_data.height,
-                image_data.pixels.clone(),
-            )
-            .ok_or("Failed to create RGBA image")?,
-            gltf::image::Format::R8G8B8 => {
-                // Convert RGB to RGBA
-                let mut rgba_pixels = Vec::with_capacity(image_data.pixels.len() * 4 / 3);
-                for chunk in image_data.pixels.chunks(3) {
-                    rgba_pixels.push(chunk[0]); // R
-                    rgba_pixels.push(chunk[1]); // G
-                    rgba_pixels.push(chunk[2]); // B
-                    rgba_pixels.push(255); // A
-                }
-                image::RgbaImage::from_raw(image_data.width, image_data.height, rgba_pixels)
-                    .ok_or("Failed to create RGBA image from RGB")?
-            }
-            _ => {
-                // Unsupported format, use default white texture
-                image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]))
-            }
-        };
-
-        model.textures.push(rgba_image);
-    }
-
-    println!(
-        "✓ Model loaded: {} (meshes: {}, textures: {})",
-        name,
-        model.meshes.len(),
-        model.textures.len()
-    );
-
-    Ok(model)
-}
-
-/// Calculates tangent vectors for a mesh using vertex positions, normals, UVs, and indices
-fn calculate_tangents(
+/// Calculates tangent vectors for a mesh using vertex positions, normals, UVs, and indices.
+/// Includes zero-determinant guard for degenerate triangles.
+pub(crate) fn calculate_tangents(
     positions: &[[f32; 3]],
     normals: &[[f32; 3]],
     uvs: &[[f32; 2]],
@@ -275,7 +210,11 @@ fn calculate_tangents(
         let delta_uv2 = [uv2[0] - uv0[0], uv2[1] - uv0[1]];
 
         // Calculate tangent and bitangent
-        let f = 1.0 / (delta_uv1[0] * delta_uv2[1] - delta_uv2[0] * delta_uv1[1]);
+        let det = delta_uv1[0] * delta_uv2[1] - delta_uv2[0] * delta_uv1[1];
+        if det.abs() < 1e-8 {
+            continue; // skip degenerate triangle
+        }
+        let f = 1.0 / det;
 
         let tangent = [
             f * (delta_uv2[1] * edge1[0] - delta_uv1[1] * edge2[0]),
@@ -342,215 +281,104 @@ fn calculate_tangents(
     result
 }
 
-/// Extracts mesh data from a GLTF primitive
-fn extract_mesh_from_primitive(
-    primitive: &gltf::Primitive,
-    buffers: &[gltf::buffer::Data],
-) -> Result<LoadedMesh, Box<dyn std::error::Error>> {
-    // Get accessors for vertex attributes
-    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-    // Read positions (required)
-    let positions = reader
-        .read_positions()
-        .ok_or("Missing position attribute")?
-        .collect::<Vec<[f32; 3]>>();
-
-    // Read normals (required for lighting)
-    let normals = reader
-        .read_normals()
-        .ok_or("Missing normal attribute")?
-        .collect::<Vec<[f32; 3]>>();
-
-    // Read UVs (optional, default to [0, 0])
-    let uvs = if let Some(uv_iter) = reader.read_tex_coords(0) {
-        uv_iter.into_f32().collect::<Vec<[f32; 2]>>()
-    } else {
-        vec![[0.0, 0.0]; positions.len()]
-    };
-
-    // Ensure all arrays have same length
-    let vertex_count = positions.len();
-    if normals.len() != vertex_count || uvs.len() != vertex_count {
-        return Err("Vertex attribute count mismatch".into());
+/// Safe tangent calculation that returns fallback [1,0,0,1] tangents when all UVs are [0,0].
+pub(crate) fn calculate_tangents_safe(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+) -> Vec<[f32; 4]> {
+    // If all UVs are zero, tangent calculation is meaningless — return fallback
+    let all_zero = uvs.iter().all(|uv| uv[0] == 0.0 && uv[1] == 0.0);
+    if all_zero {
+        return vec![[1.0, 0.0, 0.0, 1.0]; positions.len()];
     }
-
-    // Read indices first (needed for tangent calculation)
-    let indices = if let Some(indices_reader) = reader.read_indices() {
-        indices_reader.into_u32().collect::<Vec<u32>>()
-    } else {
-        // No indices - generate them (0, 1, 2, 3, ...)
-        (0..vertex_count as u32).collect()
-    };
-
-    // Read tangents (optional, will be calculated if missing)
-    let tangents = if let Some(tangent_iter) = reader.read_tangents() {
-        tangent_iter.collect::<Vec<[f32; 4]>>()
-    } else {
-        // Calculate tangents from geometry
-        calculate_tangents(&positions, &normals, &uvs, &indices)
-    };
-
-    // Combine into Vertex3D format
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for i in 0..vertex_count {
-        vertices.push(Vertex3D {
-            position: positions[i],
-            normal: normals[i],
-            uv: uvs[i],
-            tangent: tangents[i],
-        });
-    }
-
-    // Get material index
-    let material_index = primitive.material().index();
-
-    // Compute bounding sphere for frustum culling
-    let (center, radius) = compute_bounding_sphere(&vertices);
-
-    // Compute local-space AABB (once, at load time — never recomputed at runtime).
-    let aabb = crate::engine::math::Aabb::from_points(
-        vertices
-            .iter()
-            .map(|v| Vec3::new(v.position[0], v.position[1], v.position[2])),
-    );
-
-    Ok(LoadedMesh {
-        vertices,
-        indices,
-        material_index,
-        center,
-        radius,
-        aabb_min: aabb.min,
-        aabb_max: aabb.max,
-    })
+    calculate_tangents(positions, normals, uvs, indices)
 }
 
-/// Extracts texture image data from GLTF
-pub fn extract_texture_from_gltf(
-    document: &gltf::Document,
-    buffers: &[gltf::buffer::Data],
-    texture_index: usize,
-) -> Result<image::RgbaImage, Box<dyn std::error::Error>> {
-    let texture = document
-        .textures()
-        .nth(texture_index)
-        .ok_or("Texture index out of bounds")?;
+/// Generate flat normals from triangle positions and indices.
+/// Each triangle gets a single face normal assigned to all three vertices.
+pub(crate) fn generate_flat_normals(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Vec<[f32; 3]> {
+    let mut normals = vec![[0.0f32; 3]; positions.len()];
 
-    let image_data = texture.source();
-    let image_source = image_data.source();
+    for i in (0..indices.len()).step_by(3) {
+        let i0 = indices[i] as usize;
+        let i1 = indices[i + 1] as usize;
+        let i2 = indices[i + 2] as usize;
 
-    match image_source {
-        gltf::image::Source::Uri { uri, .. } => {
-            // External file reference
-            Err(format!("External texture files not supported yet: {}", uri).into())
-        }
-        gltf::image::Source::View { view, .. } => {
-            // Embedded in buffer
-            let buffer = &buffers[view.buffer().index()];
-            let start = view.offset();
-            let end = start + view.length();
-            let image_bytes = &buffer[start..end];
+        let p0 = Vec3::from(positions[i0]);
+        let p1 = Vec3::from(positions[i1]);
+        let p2 = Vec3::from(positions[i2]);
 
-            // Decode image (PNG, JPEG, etc.)
-            let img = image::load_from_memory(image_bytes)?;
-            Ok(img.to_rgba8())
+        let edge1 = p1 - p0;
+        let edge2 = p2 - p0;
+        let face_normal = edge1.cross(edge2);
+        let n = if face_normal.length_squared() > 1e-12 {
+            face_normal.normalize()
+        } else {
+            Vec3::Y // degenerate triangle fallback
+        };
+
+        for &idx in &[i0, i1, i2] {
+            normals[idx][0] += n.x;
+            normals[idx][1] += n.y;
+            normals[idx][2] += n.z;
         }
     }
+
+    // Normalize accumulated normals
+    for n in &mut normals {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 1e-8 {
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
+        } else {
+            *n = [0.0, 1.0, 0.0];
+        }
+    }
+
+    normals
 }
 
-/// Extracts PBR material from GLTF
-#[allow(clippy::too_many_arguments)]
-pub fn extract_material_from_gltf(
-    document: &gltf::Document,
-    _buffers: &[gltf::buffer::Data],
-    images: &[gltf::image::Data],
-    material_index: usize,
-    device: Arc<Device>,
-    allocator: Arc<StandardMemoryAllocator>,
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    pipeline: Arc<GraphicsPipeline>,
-    sampler: Arc<Sampler>,
-) -> Result<PbrMaterial, Box<dyn std::error::Error>> {
-    let material = document
-        .materials()
-        .nth(material_index)
-        .ok_or("Material not found")?;
+// ──────────────────────────────────────────────────────────────
+// Format dispatch — single source of truth
+// ──────────────────────────────────────────────────────────────
 
-    let pbr = material.pbr_metallic_roughness();
-
-    // Extract base color (albedo) texture
-    let albedo_view = if let Some(info) = pbr.base_color_texture() {
-        let texture = info.texture();
-        let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
-    } else {
-        // Default white texture
-        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
-    };
-
-    // Extract normal map
-    let normal_view = if let Some(normal_texture) = material.normal_texture() {
-        let texture = normal_texture.texture();
-        let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
-    } else {
-        // Default normal map (pointing up: 128, 128, 255)
-        create_default_texture(device.clone(), allocator.clone(), [128, 128, 255, 255])?
-    };
-
-    // Extract metallic-roughness map
-    let metallic_roughness_view = if let Some(info) = pbr.metallic_roughness_texture() {
-        let texture = info.texture();
-        let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
-    } else {
-        // Default: non-metallic (B=0), half-rough (G=128)
-        create_default_texture(device.clone(), allocator.clone(), [0, 128, 0, 255])?
-    };
-
-    // Extract ambient occlusion map
-    let ao_view = if let Some(ao_texture) = material.occlusion_texture() {
-        let texture = ao_texture.texture();
-        let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
-    } else {
-        // Default: no occlusion (white = 255)
-        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
-    };
-
-    // Create descriptor set
-    let descriptor_set = create_pbr_material_descriptor_set(
-        descriptor_set_allocator,
-        pipeline,
-        albedo_view.clone(),
-        normal_view.clone(),
-        metallic_roughness_view.clone(),
-        ao_view.clone(),
-        sampler,
-    )?;
-
-    Ok(PbrMaterial::new(
-        albedo_view,
-        normal_view,
-        metallic_roughness_view,
-        ao_view,
-        descriptor_set,
-    ))
+/// Determine model format from file extension.
+fn model_extension(source_path: &str) -> &str {
+    Path::new(source_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
 }
 
-/// Helper: Load GLTF image data to Vulkan texture
-fn load_gltf_image(
-    _image_data: &gltf::image::Data,
-    device: Arc<Device>,
-    allocator: Arc<StandardMemoryAllocator>,
-) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
-    // Convert GLTF image format to Vulkan format
-    // TODO: Implement texture upload from image_data.pixels
-    // For now, create placeholder
-    create_default_texture(
-        device,
-        allocator,
-        [255, 0, 255, 255], // Magenta = "texture not loaded"
-    )
+/// Load a 3D model from a filesystem path, dispatching by file extension.
+pub fn load_model(source_path: &str) -> Result<Model, Box<dyn std::error::Error>> {
+    match model_extension(source_path).to_ascii_lowercase().as_str() {
+        "gltf" | "glb" => super::model_loader_gltf::load_model_gltf(source_path),
+        "obj" => super::model_loader_obj::load_model_obj(source_path),
+        "fbx" => super::model_loader_fbx::load_model_fbx(source_path),
+        "mesh" => super::mesh_import::load_mesh_binary(Path::new(source_path)),
+        ext => Err(format!("Unsupported model format: .{}", ext).into()),
+    }
+}
+
+/// Load a 3D model from in-memory bytes, dispatching by the extension in `source_path`.
+pub fn load_model_from_bytes(
+    data: &[u8],
+    source_path: &str,
+) -> Result<Model, Box<dyn std::error::Error>> {
+    match model_extension(source_path).to_ascii_lowercase().as_str() {
+        "gltf" | "glb" => {
+            super::model_loader_gltf::load_model_gltf_from_bytes(data, source_path)
+        }
+        "obj" => super::model_loader_obj::load_model_obj_from_bytes(data, source_path),
+        "fbx" => super::model_loader_fbx::load_model_fbx_from_bytes(data, source_path),
+        "mesh" => super::mesh_import::load_mesh_binary_from_bytes(data, source_path),
+        ext => Err(format!("Unsupported model format: .{}", ext).into()),
+    }
 }

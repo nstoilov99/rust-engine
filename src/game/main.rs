@@ -13,6 +13,8 @@ mod render_loop;
 #[cfg(feature = "editor")]
 use app::{App, EditorRuntimeFlags};
 use rust_engine::engine::utils::WindowConfig;
+#[cfg(feature = "editor")]
+use std::collections::HashMap;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 #[cfg(feature = "editor")]
@@ -20,6 +22,8 @@ use winit::dpi::LogicalPosition;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(feature = "editor")]
+use rust_engine::engine::editor::SecondaryWindow;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 // ============================================================================
@@ -34,6 +38,7 @@ struct GameApp {
     runtime_flags: EditorRuntimeFlags,
     should_exit: bool,
     is_minimized: bool,
+    secondary_windows: HashMap<WindowId, SecondaryWindow>,
 }
 
 #[cfg(feature = "editor")]
@@ -46,6 +51,7 @@ impl GameApp {
             runtime_flags,
             should_exit: false,
             is_minimized: false,
+            secondary_windows: HashMap::new(),
         }
     }
 }
@@ -103,9 +109,34 @@ impl ApplicationHandler for GameApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Route secondary window events
+        if self.secondary_windows.contains_key(&window_id) {
+            if matches!(&event, WindowEvent::CloseRequested) {
+                if let Some(sec) = self.secondary_windows.remove(&window_id) {
+                    if let Some(ref mut app) = self.app {
+                        if let Some(data) =
+                            app.editor.scene.mesh_editors.get_mut(&sec.mesh_key)
+                        {
+                            data.open = false;
+                        }
+                    }
+                }
+            } else if let Some(sec) = self.secondary_windows.get_mut(&window_id) {
+                match &event {
+                    WindowEvent::Resized(_) => sec.handle_resize(),
+                    WindowEvent::RedrawRequested => {}
+                    _ => {
+                        sec.gui.handle_event(&event);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Main window events
         let Some(app) = &mut self.app else { return };
         let Some(window) = &self.window else { return };
 
@@ -154,17 +185,133 @@ impl ApplicationHandler for GameApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.is_minimized {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Destructure self to allow split borrows across fields.
+        let Self {
+            app: ref mut app_opt,
+            window: ref window_opt,
+            secondary_windows,
+            is_minimized,
+            ..
+        } = self;
+
+        if *is_minimized {
             return;
         }
 
-        let Some(app) = &mut self.app else { return };
-        let Some(window) = &self.window else { return };
+        let Some(app) = app_opt.as_mut() else { return };
+        let Some(window) = window_opt.as_ref() else { return };
 
         app.begin_frame();
         app.update();
         window.request_redraw();
+
+        // --- Secondary window lifecycle ---
+
+        // 1. Create windows for pending requests (requires ActiveEventLoop).
+        let pending = app.drain_pending_window_requests();
+        if !pending.is_empty() {
+            let device = app.core.renderer.device.clone();
+            let queue = app.core.renderer.queue.clone();
+            for req in pending {
+                let win_attrs = WindowAttributes::default()
+                    .with_title(&req.title)
+                    .with_inner_size(LogicalSize::new(req.width, req.height));
+                match event_loop.create_window(win_attrs) {
+                    Ok(win) => {
+                        let win = Arc::new(win);
+                        let win_id = win.id();
+                        match SecondaryWindow::new(
+                            win,
+                            device.clone(),
+                            queue.clone(),
+                            req.mesh_key,
+                        ) {
+                            Ok(sec) => {
+                                secondary_windows.insert(win_id, sec);
+                            }
+                            Err(e) => log::error!("Failed to create secondary window: {}", e),
+                        }
+                    }
+                    Err(e) => log::error!("Failed to create window: {}", e),
+                }
+            }
+        }
+
+        // Clean up closed mesh editor entries so double-click can reopen them.
+        // Must run BEFORE the is_empty() early-return, otherwise closed entries
+        // persist forever once all secondary windows are gone.
+        app.editor.scene.mesh_editors.retain(|_, data| data.open);
+
+        if secondary_windows.is_empty() {
+            return;
+        }
+
+        // 2. Remove secondary windows for closed/missing mesh editors.
+        secondary_windows.retain(|_, sec| {
+            app.editor
+                .scene
+                .mesh_editors
+                .get(&sec.mesh_key)
+                .is_some_and(|d| d.open)
+        });
+
+        // 3. Build mesh-preview command buffers (lazy-init, resize, render).
+        //    These are chained into each secondary window's own Vulkan
+        //    submission so that the preview texture is rendered and
+        //    transitioned within the same chain as the egui sampling —
+        //    eliminating cross-submission layout/memory visibility issues.
+        let preview_cbs = app.build_mesh_preview_cbs();
+
+        // 4. Render each secondary window with its mesh editor UI.
+        let device = app.core.renderer.device.clone();
+        let queue = app.core.renderer.queue.clone();
+        let mesh_editors = &mut app.editor.scene.mesh_editors;
+        let asset_browser = &mut app.editor.scene.asset_browser;
+
+        for sec in secondary_windows.values_mut() {
+            if let Some(data) = mesh_editors.get_mut(&sec.mesh_key) {
+                // Find a preview CB for this editor (if one was built).
+                let preview_cb = preview_cbs
+                    .iter()
+                    .find(|(k, _)| k == &sec.mesh_key)
+                    .map(|(_, cb)| cb.clone());
+
+                // Register/update preview texture with this window's Gui.
+                if let Some(ref preview) = data.preview {
+                    if !preview.mesh_indices.is_empty() {
+                        let iv = preview.texture.image_view();
+                        let size = (preview.texture.width(), preview.texture.height());
+                        if sec.preview_texture_id.is_none() {
+                            if !data.preview_dirty {
+                                sec.preview_texture_id =
+                                    Some(sec.gui.register_native_texture(iv));
+                                sec.preview_texture_size = size;
+                            }
+                        } else if size != sec.preview_texture_size {
+                            if let Some(tid) = sec.preview_texture_id {
+                                sec.gui.update_native_texture(tid, iv);
+                            }
+                            sec.preview_texture_size = size;
+                        }
+                        data.preview.as_mut().unwrap().texture_id = sec.preview_texture_id;
+                    }
+                }
+
+                // Render the secondary window (preview CB chained first).
+                if let Err(e) = sec.render(device.clone(), queue.clone(), preview_cb, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        rust_engine::engine::editor::mesh_editor::MeshEditorPanel::show(
+                            ui,
+                            data,
+                            asset_browser,
+                        );
+                    });
+                }) {
+                    log::error!("Secondary window render error: {}", e);
+                }
+            }
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {

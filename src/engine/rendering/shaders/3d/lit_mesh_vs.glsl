@@ -4,6 +4,9 @@
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
+layout(location = 3) in vec4 tangent;
+layout(location = 4) in uvec4 joint_indices;
+layout(location = 5) in vec4 joint_weights;
 
 // Output to fragment shader
 layout(location = 0) out vec3 frag_position;  // World position
@@ -22,8 +25,6 @@ void main() {
     frag_position = world_pos.xyz;
 
     // Transform normal to world space
-    // NOTE: Use transpose(inverse(model)) for non-uniform scaling
-    // For uniform scaling, model matrix works fine
     mat3 normal_matrix = mat3(pc.model);
     frag_normal = normalize(normal_matrix * normal);
 

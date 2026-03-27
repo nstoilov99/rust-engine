@@ -380,7 +380,17 @@ pub enum ComponentData {
         scale: [f32; 3],
     },
     MeshRenderer {
+        #[serde(default)]
+        mesh_path: String,
+        #[serde(default)]
+        material_paths: Vec<String>,
+        /// Backward-compat: old single material_path (migrated to material_paths[0] on load)
+        #[serde(default, skip_serializing)]
+        material_path: String,
+        /// Kept for backward compat with old scenes (ignored if mesh_path is set)
+        #[serde(default)]
         mesh_index: usize,
+        #[serde(default)]
         material_index: usize,
         #[serde(default = "default_true")]
         visible: bool,

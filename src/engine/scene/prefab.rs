@@ -103,19 +103,27 @@ impl Prefab {
                     builder.add(transform);
                 }
                 ComponentData::MeshRenderer {
+                    mesh_path,
+                    material_paths,
+                    material_path,
                     mesh_index,
                     material_index,
                     visible,
                     cast_shadows,
                     receive_shadows,
                 } => {
-                    builder.add(MeshRenderer {
+                    let mut mr = MeshRenderer {
+                        mesh_path: mesh_path.clone(),
+                        material_paths: material_paths.clone(),
+                        material_path: material_path.clone(),
                         mesh_index: *mesh_index,
                         material_index: *material_index,
                         visible: *visible,
                         cast_shadows: *cast_shadows,
                         receive_shadows: *receive_shadows,
-                    });
+                    };
+                    mr.migrate_legacy_material_path();
+                    builder.add(mr);
                 }
                 ComponentData::Camera {
                     fov,

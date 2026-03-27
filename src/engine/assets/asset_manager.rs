@@ -56,11 +56,11 @@ impl AssetManager {
         let model_handle = self.models.load(path)?;
         let model = model_handle.get();
 
-        // Upload to GPU mesh manager
+        // Upload to GPU mesh manager (store path mapping for path-based lookup)
         let mut meshes = self.meshes.write();
         let indices = {
             crate::profile_scope!("gpu_mesh_upload");
-            meshes.upload_model(model, self.allocator.clone())?
+            meshes.upload_model_with_path(model, self.allocator.clone(), Some(path))?
         };
 
         Ok((indices, model_handle))

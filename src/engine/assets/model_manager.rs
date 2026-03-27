@@ -1,6 +1,5 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::memory::allocator::StandardMemoryAllocator;
@@ -42,17 +41,23 @@ impl ModelManager {
             return Ok(Handle::new(id, model.clone()));
         }
 
-        println!("Loading model: {}", relative);
-        let name = Path::new(relative)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unnamed");
+        // Prefer native .mesh over source formats for fast loading
+        let mesh_relative = mesh_path_for(relative);
+        let effective_path = if !asset_source::is_pak()
+            && asset_source::resolve(&mesh_relative).exists()
+        {
+            println!("Loading native mesh: {}", mesh_relative);
+            mesh_relative
+        } else {
+            println!("Loading model: {}", relative);
+            relative.to_string()
+        };
 
         let model = if asset_source::is_pak() {
-            let data = asset_source::read_bytes(relative)?;
-            load_model_from_bytes(&data, name)?
+            let data = asset_source::read_bytes(&effective_path)?;
+            load_model_from_bytes(&data, &effective_path)?
         } else {
-            let fs_path = asset_source::resolve(relative);
+            let fs_path = asset_source::resolve(&effective_path);
             load_model(&fs_path.to_string_lossy())?
         };
 
@@ -81,5 +86,17 @@ impl ModelManager {
 
     pub fn cache_size(&self) -> usize {
         self.cache.read().len()
+    }
+}
+
+/// Convert a source model path to its native `.mesh` sibling path.
+/// e.g. `"models/Duck.glb"` → `"models/Duck.mesh"`
+fn mesh_path_for(relative: &str) -> String {
+    let p = std::path::Path::new(relative);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+    if let Some(parent) = p.parent().filter(|p| !p.as_os_str().is_empty()) {
+        format!("{}/{}.mesh", parent.display(), stem)
+    } else {
+        format!("{}.mesh", stem)
     }
 }

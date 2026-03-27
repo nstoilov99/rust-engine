@@ -20,6 +20,7 @@ pub mod rendering_3d {
     pub mod mesh_manager;
     pub mod pipeline_3d;
     pub mod shadow;
+    pub mod skinning;
 
     pub use deferred::*;
     pub use light::{AmbientLight, DirectionalLight, PointLight};
@@ -28,6 +29,7 @@ pub mod rendering_3d {
     pub use mesh_manager::{GpuMesh, MeshManager};
     pub use pipeline_3d::*;
     pub use shadow::*;
+    pub use skinning::SkinningBackend;
 }
 
 pub use common::*;

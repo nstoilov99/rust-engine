@@ -12,12 +12,14 @@ mod events;
 mod registry;
 mod selection;
 mod thumbnail;
+pub mod thumbnail_renderer;
 mod views;
 
 pub use events::{AssetBrowserEvent, AssetEventQueue};
 pub use registry::{AssetFilter, AssetRegistry, FolderNode, ScanResult, SortCriteria};
 pub use selection::AssetSelection;
 pub use thumbnail::{ThumbnailCache, ThumbnailCacheStats, THUMBNAIL_SIZE};
+pub use thumbnail_renderer::GpuThumbnailContext;
 pub use views::{FolderTreeView, GridView, ListView};
 
 use crate::engine::assets::{AssetId, AssetMetadata, AssetType};
@@ -118,7 +120,7 @@ pub struct AssetBrowserPanel {
 
 impl AssetBrowserPanel {
     /// Create a new asset browser panel
-    pub fn new(assets_root: PathBuf) -> Self {
+    pub fn new(assets_root: PathBuf, gpu_ctx: Option<GpuThumbnailContext>) -> Self {
         let mut registry = AssetRegistry::new(assets_root.clone());
 
         // Initial scan
@@ -126,7 +128,7 @@ impl AssetBrowserPanel {
 
         Self {
             registry,
-            thumbnails: ThumbnailCache::new(assets_root),
+            thumbnails: ThumbnailCache::new(assets_root, gpu_ctx),
             selection: AssetSelection::new(),
             view_mode: ViewMode::Grid,
             current_folder: PathBuf::new(),
@@ -1078,7 +1080,7 @@ impl AssetBrowserPanel {
 
 impl Default for AssetBrowserPanel {
     fn default() -> Self {
-        Self::new(PathBuf::from("assets"))
+        Self::new(PathBuf::from("assets"), None)
     }
 }
 

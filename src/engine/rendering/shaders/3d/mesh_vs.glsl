@@ -4,10 +4,13 @@
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
+layout(location = 3) in vec4 tangent;
+layout(location = 4) in uvec4 joint_indices;
+layout(location = 5) in vec4 joint_weights;
 
 // Push constants (per-draw data)
 layout(push_constant) uniform PushConstants {
-    mat4 model;             // Model matrix (local → world)
+    mat4 model;             // Model matrix (local -> world)
     mat4 view_projection;   // Combined view + projection
 } constants;
 
@@ -21,8 +24,7 @@ void main() {
     vec4 worldPos = constants.model * vec4(position, 1.0);
     fragWorldPos = worldPos.xyz;
 
-    // Transform normal to world space (important for lighting!)
-    // Note: Use transpose(inverse(model)) for non-uniform scaling
+    // Transform normal to world space
     fragNormal = mat3(constants.model) * normal;
 
     // Transform to clip space for GPU
