@@ -7,10 +7,7 @@ use super::model_loader::{
     calculate_tangents_safe, compute_bounding_sphere, generate_flat_normals, AnimationChannel,
     BoneData, ImportedMaterial, LoadedMesh, Model, RawAnimationClip, VertexBoneData,
 };
-<<<<<<< HEAD
 use crate::engine::rendering::rendering_3d::pipeline_3d::MAX_PALETTE_BONES;
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
 /// Load FBX model from filesystem path.
 pub fn load_model_fbx(source_path: &str) -> Result<Model, Box<dyn std::error::Error>> {
@@ -115,7 +112,6 @@ fn build_model_from_fbx(
     model.rebuild_legacy_textures();
 
     let bone_count = model.bones.len();
-<<<<<<< HEAD
 
     // Validate bone count against FixedUbo backend cap
     if bone_count > MAX_PALETTE_BONES {
@@ -135,8 +131,6 @@ fn build_model_from_fbx(
         );
     }
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     let anim_count = model.animations.len();
     let skinned_count = model.meshes.iter().filter(|m| m.skinning.is_some()).count();
 
@@ -578,7 +572,6 @@ fn build_loaded_mesh_from_fbx(
     // Calculate tangents
     let tangents = calculate_tangents_safe(&positions, &normals, &uvs, &indices);
 
-<<<<<<< HEAD
     // Extract skin weights
     let skinning = extract_fbx_skin_weights(mesh, tri_indices, bone_node_to_index);
 
@@ -598,30 +591,16 @@ fn build_loaded_mesh_from_fbx(
         } else {
             ([0u32; 4], [1.0, 0.0, 0.0, 0.0])
         };
-=======
-    // Build Vertex3D array
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for i in 0..vertex_count {
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         vertices.push(Vertex3D {
             position: positions[i],
             normal: normals[i],
             uv: uvs[i],
             tangent: tangents[i],
-<<<<<<< HEAD
             joint_indices,
             joint_weights,
         });
     }
 
-=======
-        });
-    }
-
-    // Extract skin weights
-    let skinning = extract_fbx_skin_weights(mesh, tri_indices, bone_node_to_index);
-
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     // Compute bounding sphere
     let (center, radius) = compute_bounding_sphere(&vertices);
 

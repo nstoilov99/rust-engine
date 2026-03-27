@@ -13,11 +13,8 @@ use vulkano::device::{Device, DeviceOwned, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-<<<<<<< HEAD
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::DescriptorSet;
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
 use vulkano::pipeline::graphics::depth_stencil::{DepthState, DepthStencilState};
@@ -40,11 +37,8 @@ use crate::engine::assets::handle::AssetId;
 use crate::engine::assets::mesh_import::{MaterialSlot, MeshImportMeta};
 use crate::engine::rendering::rendering_3d::mesh_manager::MeshManager;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
-<<<<<<< HEAD
 use crate::engine::rendering::rendering_3d::SkinningBackend;
 use vulkano::pipeline::PipelineBindPoint;
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 use egui::{CollapsingHeader, Color32, RichText, ScrollArea, Stroke, Ui};
 
 /// GPU mesh data for preview rendering: (vertex_buffer, index_buffer, index_count).
@@ -78,10 +72,7 @@ pub struct MeshPreviewRenderer {
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
-<<<<<<< HEAD
     identity_palette_set: Arc<DescriptorSet>,
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 }
 
 impl MeshPreviewRenderer {
@@ -90,10 +81,7 @@ impl MeshPreviewRenderer {
         queue: Arc<Queue>,
         memory_allocator: Arc<StandardMemoryAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-<<<<<<< HEAD
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Use the single_pass_renderpass! macro which defaults final_layout
         // to ColorAttachmentOptimal.  The preview CB and egui CB are chained
@@ -168,7 +156,6 @@ impl MeshPreviewRenderer {
             },
         )?;
 
-<<<<<<< HEAD
         // Identity bone palette for static mesh preview
         let identity_palette_set = SkinningBackend::create_identity_set_for_layout(
             &memory_allocator,
@@ -177,18 +164,13 @@ impl MeshPreviewRenderer {
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         Ok(Self {
             queue,
             memory_allocator,
             command_buffer_allocator,
             render_pass,
             pipeline,
-<<<<<<< HEAD
             identity_palette_set,
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         })
     }
 
@@ -243,7 +225,6 @@ impl MeshPreviewRenderer {
 
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
-<<<<<<< HEAD
         // Bind identity bone palette (set 0) — preview renders static meshes
         builder.bind_descriptor_sets(
             PipelineBindPoint::Graphics,
@@ -252,8 +233,6 @@ impl MeshPreviewRenderer {
             self.identity_palette_set.clone(),
         )?;
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         let model_matrix = Mat4::IDENTITY;
         let push_data = preview_vs::PushConstants {
             model: model_matrix.to_cols_array_2d(),

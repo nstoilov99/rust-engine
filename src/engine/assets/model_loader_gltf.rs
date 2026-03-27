@@ -1,14 +1,9 @@
 use crate::engine::rendering::rendering_3d::material::*;
 use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
-<<<<<<< HEAD
 use glam::{Mat4, Quat, Vec3};
 use gltf;
 use std::collections::HashMap;
-=======
-use glam::Vec3;
-use gltf;
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::Device;
@@ -18,12 +13,8 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::GraphicsPipeline;
 
 use super::model_loader::{
-<<<<<<< HEAD
     calculate_tangents_safe, compute_bounding_sphere, AnimationChannel, BoneData, LoadedMesh,
     Model, RawAnimationClip, VertexBoneData,
-=======
-    calculate_tangents_safe, compute_bounding_sphere, LoadedMesh, Model,
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 };
 
 /// Result type for GLTF loading operations.
@@ -197,7 +188,6 @@ fn build_model(
         model.textures.push(rgba_image);
     }
 
-<<<<<<< HEAD
     // Extract skeleton from first skin
     if let Some(skin) = document.skins().next() {
         extract_skeleton(&skin, &buffers, &document, &mut model);
@@ -216,19 +206,11 @@ fn build_model(
         model.textures.len(),
         model.bones.len(),
         model.animations.len(),
-=======
-    println!(
-        "✓ Model loaded: {} (meshes: {}, textures: {})",
-        name,
-        model.meshes.len(),
-        model.textures.len()
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     );
 
     Ok(model)
 }
 
-<<<<<<< HEAD
 /// Extract skeleton bones from a glTF skin.
 fn extract_skeleton(
     skin: &gltf::Skin,
@@ -433,8 +415,6 @@ fn extract_skinning(
     )
 }
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 /// Calculates tangent vectors for a mesh (used internally by glTF loader).
 fn calculate_tangents(
     positions: &[[f32; 3]],
@@ -494,7 +474,6 @@ fn extract_mesh_from_primitive(
         calculate_tangents(&positions, &normals, &uvs, &indices)
     };
 
-<<<<<<< HEAD
     // Extract per-vertex skinning data (joints + weights)
     let skinning_data = extract_skinning(primitive, buffers, vertex_count);
 
@@ -507,21 +486,13 @@ fn extract_mesh_from_primitive(
         } else {
             ([0u32, 0, 0, 0], [1.0f32, 0.0, 0.0, 0.0])
         };
-=======
-    // Combine into Vertex3D format
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for i in 0..vertex_count {
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         vertices.push(Vertex3D {
             position: positions[i],
             normal: normals[i],
             uv: uvs[i],
             tangent: tangents[i],
-<<<<<<< HEAD
             joint_indices,
             joint_weights,
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         });
     }
 
@@ -546,11 +517,7 @@ fn extract_mesh_from_primitive(
         radius,
         aabb_min: aabb.min,
         aabb_max: aabb.max,
-<<<<<<< HEAD
         skinning: skinning_data,
-=======
-        skinning: None,
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     })
 }
 

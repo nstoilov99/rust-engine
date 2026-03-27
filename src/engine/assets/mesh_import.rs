@@ -15,11 +15,7 @@ use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::io;
-<<<<<<< HEAD
 use std::path::{Path, PathBuf};
-=======
-use std::path::Path;
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
 // ──────────────────────────────────────────────────────────────
 // Constants
@@ -155,7 +151,6 @@ pub fn import_model_to_mesh(
     let mut model = super::model_loader::load_model(&source_path.to_string_lossy())?;
 
     // 2. Apply import settings (scale, flip UVs, axis conversion)
-<<<<<<< HEAD
     //    FBX and glTF loaders already convert to Y-up internally, so skip
     //    the user's axis conversion to prevent double-conversion.
     let ext = source_path
@@ -172,9 +167,6 @@ pub fn import_model_to_mesh(
         effective_settings.up_axis = UpAxis::YUp;
     }
     apply_import_settings(&mut model, &effective_settings);
-=======
-    apply_import_settings(&mut model, settings);
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 
     // 3. Strip materials if not requested
     if !settings.import_materials {
@@ -502,7 +494,6 @@ fn write_material(buf: &mut Vec<u8>, mat: &ImportedMaterial) {
 // ──────────────────────────────────────────────────────────────
 
 /// Load a `Model` from a `.mesh` binary file on disk.
-<<<<<<< HEAD
 ///
 /// Automatically detects and undoes double axis conversion caused by
 /// FBX/glTF sources imported with `up_axis: ZUp` (the loader already
@@ -605,11 +596,6 @@ fn undo_double_axis_conversion(model: &mut Model) {
             }
         }
     }
-=======
-pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>> {
-    let data = std::fs::read(path)?;
-    load_mesh_binary_from_bytes(&data, path.to_string_lossy().as_ref())
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
 }
 
 /// Load a `Model` from in-memory `.mesh` binary data.
@@ -763,10 +749,7 @@ pub fn load_mesh_binary_from_bytes(
                     read_f32(data, off + 40),
                     read_f32(data, off + 44),
                 ],
-<<<<<<< HEAD
                 ..Default::default()
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             });
         }
 
@@ -817,7 +800,6 @@ pub fn load_mesh_binary_from_bytes(
             None
         };
 
-<<<<<<< HEAD
         // Merge skinning data into Vertex3D fields
         if let Some(ref skin) = skinning {
             for (vi, vb) in skin.iter().enumerate() {
@@ -831,8 +813,6 @@ pub fn load_mesh_binary_from_bytes(
             }
         }
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
         meshes.push(LoadedMesh {
             vertices,
             indices,
@@ -849,7 +829,6 @@ pub fn load_mesh_binary_from_bytes(
         });
     }
 
-<<<<<<< HEAD
     // Validate bone count against FixedUbo backend cap
     use crate::engine::rendering::rendering_3d::pipeline_3d::MAX_PALETTE_BONES;
     if bones.len() > MAX_PALETTE_BONES {
@@ -871,8 +850,6 @@ pub fn load_mesh_binary_from_bytes(
         );
     }
 
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
     let mut model = Model {
         meshes,
         name: Path::new(name)
@@ -1356,30 +1333,21 @@ mod tests {
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
-<<<<<<< HEAD
                 ..Default::default()
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             },
             Vertex3D {
                 position: [1.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
-<<<<<<< HEAD
                 ..Default::default()
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             },
             Vertex3D {
                 position: [0.0, 1.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
                 uv: [0.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
-<<<<<<< HEAD
                 ..Default::default()
-=======
->>>>>>> dd3005824383ca610931fc7b989ee41794c4d99d
             },
         ];
         let indices = vec![0, 1, 2];
