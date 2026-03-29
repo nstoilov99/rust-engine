@@ -11,15 +11,16 @@ use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
 use rust_engine::engine::benchmark::{
     load_or_create_benchmark_scene, BenchmarkConfig, BENCHMARK_SCENE_RELATIVE,
 };
+use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::events::PlayModeChanged;
 use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::ecs::hierarchy::{HierarchyChanged, TransformCache, TransformPropagationSystem};
 use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::animation::AnimationUpdateSystem;
 use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
-use rust_engine::engine::ecs::schedule::{Schedule, Stage};
+use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
@@ -82,7 +83,6 @@ pub struct CoreApp {
     pub reload_rx: Receiver<ReloadEvent>,
     pub game_world: GameWorld,
     pub schedule: Schedule,
-    pub physics_world: PhysicsWorld,
     pub input_manager: InputManager,
     pub deferred_renderer: DeferredRenderer,
     pub game_loop: GameLoop,
@@ -94,7 +94,6 @@ pub struct CoreApp {
     pub descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
-    pub transform_cache: TransformCache,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
@@ -227,6 +226,8 @@ impl App {
 
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
+        game_world.resources_mut().insert(physics_world);
+        game_world.resources_mut().insert(TransformCache::new());
 
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
@@ -253,6 +254,76 @@ impl App {
         let mut profiler_panel = ProfilerPanel::new();
         profiler_panel.register_sink();
 
+        use rust_engine::engine::animation::{AnimationPlayer, SkeletonInstance};
+        use rust_engine::engine::audio::components::{AudioEmitter, AudioListener};
+        use rust_engine::engine::ecs::components::TransformDirty;
+        use rust_engine::engine::ecs::hierarchy::{Children, Parent};
+        use rust_engine::engine::physics::{
+            Collider as PhysCollider, PhysicsStepSystem,
+            RigidBody as PhysRigidBody, Velocity as PhysVelocity,
+        };
+
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            AnimationUpdateSystem,
+            Stage::PreUpdate,
+            SystemDescriptor::new("AnimationUpdateSystem")
+                .reads_resource::<Time>()
+                .writes::<AnimationPlayer>()
+                .writes::<SkeletonInstance>(),
+        );
+        schedule.add_system_described_with_criteria(
+            PhysicsStepSystem,
+            Stage::PreUpdate,
+            SystemDescriptor::new("PhysicsStepSystem")
+                .reads_resource::<Time>()
+                .writes_resource::<PhysicsWorld>()
+                .writes::<Transform>()
+                .writes::<TransformDirty>()
+                .reads::<PhysRigidBody>()
+                .reads::<PhysCollider>()
+                .reads::<PhysVelocity>()
+                .after("AnimationUpdateSystem"),
+            RunIfPlaying,
+        );
+        schedule.add_system_described(
+            TransformPropagationSystem,
+            Stage::PostUpdate,
+            SystemDescriptor::new("TransformPropagationSystem")
+                .writes_resource::<TransformCache>()
+                .writes_resource::<HierarchyChanged>()
+                .reads::<Transform>()
+                .reads::<Parent>()
+                .reads::<Children>()
+                .writes::<TransformDirty>(),
+        );
+        schedule.add_system_described(
+            AudioSystem::new(),
+            Stage::PostUpdate,
+            SystemDescriptor::new("AudioSystem")
+                .reads_resource::<Time>()
+                .reads_resource::<EditorState>()
+                .writes_resource::<AudioEngine>()
+                .writes_resource::<AudioReloadQueue>()
+                .reads::<Transform>()
+                .reads::<Camera>()
+                .reads::<AudioEmitter>()
+                .reads::<AudioListener>()
+                .after("TransformPropagationSystem"),
+        );
+
+        let validation_errors = schedule.validate();
+        if !validation_errors.is_empty() {
+            for err in &validation_errors {
+                log::error!("Schedule validation error: {err}");
+            }
+            panic!(
+                "Schedule validation failed with {} error(s) — see log above",
+                validation_errors.len()
+            );
+        }
+        schedule.print_access_report();
+
         let core = CoreApp {
             renderer,
             window: window.clone(),
@@ -260,13 +331,7 @@ impl App {
             hot_reload,
             reload_rx,
             game_world,
-            schedule: {
-                let mut s = Schedule::new();
-                s.add_system(AnimationUpdateSystem, Stage::PreUpdate);
-                s.add_system(AudioSystem::new(), Stage::PostUpdate);
-                s
-            },
-            physics_world,
+            schedule,
             input_manager: InputManager::new(),
             deferred_renderer,
             game_loop: GameLoop::new(),
@@ -278,7 +343,6 @@ impl App {
             descriptor_set,
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
-            transform_cache: TransformCache::new(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
@@ -438,13 +502,6 @@ impl App {
         }
 
         self.core.game_world.run_schedule(&mut self.core.schedule);
-
-        if self.play_mode() == PlayMode::Playing {
-            rust_engine::profile_scope!("physics_step");
-            self.core
-                .physics_world
-                .step(delta_time, self.core.game_world.hecs_mut());
-        }
 
         // Update debug draw persistent line lifetimes
         #[cfg(debug_assertions)]
@@ -746,17 +803,6 @@ impl App {
     pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_function!();
 
-        // Forward structural hierarchy changes (spawn/despawn/reparent) to the
-        // transform cache so it performs a full rebuild instead of incremental.
-        if self.core.game_world.take_hierarchy_changed() {
-            self.core.transform_cache.request_full_propagation();
-        }
-
-        // Single-pass authoritative transform propagation for the entire hierarchy.
-        self.core
-            .transform_cache
-            .propagate(self.core.game_world.hecs_mut());
-
         if self.editor.viewport.texture_id.is_none() {
             let texture_id = self
                 .editor
@@ -789,12 +835,17 @@ impl App {
         self.core.renderer.camera_3d.fov = self.editor.viewport.camera.fov;
         self.core.renderer.camera_3d.aspect_ratio = self.editor.viewport.camera.aspect_ratio;
 
+        let transform_cache = self
+            .core
+            .game_world
+            .resource::<TransformCache>()
+            .expect("TransformCache resource missing");
         render_loop::prepare_mesh_data(
             self.core.game_world.hecs(),
             &self.core.asset_manager,
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
-            &self.core.transform_cache,
+            transform_cache,
             self.core.deferred_renderer.skinning(),
         );
         let light_data =
@@ -912,11 +963,18 @@ impl App {
 
         // Submit bone debug wireframes for skeletons with debug_draw_visible
         #[cfg(debug_assertions)]
-        rust_engine::engine::animation::debug_draw::submit_skeleton_debug_draws(
-            self.core.game_world.hecs(),
-            &mut self.core.debug_draw_buffer,
-            &self.core.transform_cache,
-        );
+        {
+            let tc = self
+                .core
+                .game_world
+                .resource::<TransformCache>()
+                .expect("TransformCache resource missing");
+            rust_engine::engine::animation::debug_draw::submit_skeleton_debug_draws(
+                self.core.game_world.hecs(),
+                &mut self.core.debug_draw_buffer,
+                tc,
+            );
+        }
 
         // Submit audio emitter debug wireframes (spatial emitters only)
         #[cfg(debug_assertions)]
@@ -952,12 +1010,17 @@ impl App {
             }
         };
 
+        let physics_ref = self
+            .core
+            .game_world
+            .resource::<PhysicsWorld>()
+            .expect("PhysicsWorld resource missing");
         self.editor.ui.profiler_panel.set_runtime_counters(
             self.core.deferred_renderer.render_counters().clone(),
             ResourceCounters::collect(
                 self.core.game_world.hecs(),
                 &self.core.asset_manager,
-                &self.core.physics_world,
+                physics_ref,
             ),
         );
 
@@ -1243,7 +1306,7 @@ impl App {
 
                             self.core.game_world.reset_transients(false);
                             self.editor.scene.selection.clear();
-                            self.core.physics_world = PhysicsWorld::new();
+                            self.core.game_world.resources_mut().insert(PhysicsWorld::new());
 
                             match load_scene(self.core.game_world.hecs_mut(), &relative) {
                                 Ok((scene_name, root_entities)) => {
@@ -1253,10 +1316,12 @@ impl App {
                                         .set_root_order(root_entities);
                                     self.editor.scene.current_scene_relative = relative.to_string();
                                     self.editor.scene.current_scene_name = scene_name.clone();
-                                    self.core.transform_cache = TransformCache::new();
-                                    self.core
-                                        .transform_cache
-                                        .propagate(self.core.game_world.hecs_mut());
+                                    {
+                                        self.core.game_world.resources_mut().remove::<TransformCache>();
+                                        let mut tc = TransformCache::new();
+                                        tc.propagate(self.core.game_world.hecs_mut());
+                                        self.core.game_world.resources_mut().insert(tc);
+                                    }
                                     // Resolve mesh_path → mesh_index for loaded entities
                                     self.resolve_mesh_paths();
 
@@ -2294,14 +2359,21 @@ impl App {
 
         self.core.game_world.reset_transients(false);
         self.editor.scene.selection.clear();
+        let mut pw = self
+            .core
+            .game_world
+            .resources_mut()
+            .remove::<PhysicsWorld>()
+            .unwrap_or_default();
         let roots = match load_or_create_benchmark_scene(
             self.core.game_world.hecs_mut(),
-            &mut self.core.physics_world,
+            &mut pw,
             &BenchmarkConfig::default(),
             self.core.cube_mesh_index,
         ) {
             Ok(roots) => roots,
             Err(error) => {
+                self.core.game_world.resources_mut().insert(pw);
                 self.editor.console.messages.push(LogMessage::error(format!(
                     "Failed to load benchmark scene: {}",
                     error
@@ -2309,13 +2381,16 @@ impl App {
                 return;
             }
         };
+        self.core.game_world.resources_mut().insert(pw);
         self.editor.scene.hierarchy_panel.set_root_order(roots);
         self.editor.scene.current_scene_relative = BENCHMARK_SCENE_RELATIVE.to_string();
         self.editor.scene.current_scene_name = "Benchmark Scene".to_string();
-        self.core.transform_cache = TransformCache::new();
-        self.core
-            .transform_cache
-            .propagate(self.core.game_world.hecs_mut());
+        {
+            self.core.game_world.resources_mut().remove::<TransformCache>();
+            let mut tc = TransformCache::new();
+            tc.propagate(self.core.game_world.hecs_mut());
+            self.core.game_world.resources_mut().insert(tc);
+        }
 
         self.editor
             .console
@@ -2390,10 +2465,16 @@ impl App {
             state.play_mode = PlayMode::Playing;
         }
 
-        play_mode::rebuild_physics(
-            &mut self.core.physics_world,
-            self.core.game_world.hecs_mut(),
-        );
+        {
+            let mut pw = self
+                .core
+                .game_world
+                .resources_mut()
+                .remove::<PhysicsWorld>()
+                .unwrap_or_default();
+            play_mode::rebuild_physics(&mut pw, self.core.game_world.hecs_mut());
+            self.core.game_world.resources_mut().insert(pw);
+        }
 
         if let Some(time) = self.core.game_world.resource_mut::<Time>() {
             time.paused = false;
@@ -2443,17 +2524,25 @@ impl App {
         self.core.game_world.reset_transients(false);
 
         if let Some(snapshot) = self.editor.play.snapshot.as_ref() {
+            let mut pw = self
+                .core
+                .game_world
+                .resources_mut()
+                .remove::<PhysicsWorld>()
+                .unwrap_or_default();
             match play_mode::restore_snapshot(
                 snapshot,
                 &mut self.core.game_world,
                 &mut self.editor.scene.hierarchy_panel,
                 &mut self.editor.scene.selection,
-                &mut self.core.physics_world,
+                &mut pw,
                 &mut self.editor.scene.command_history,
             ) {
                 Ok(()) => {
                     self.editor.play.snapshot = None;
-                    self.core.transform_cache.request_full_propagation();
+                    if let Some(tc) = self.core.game_world.resource_mut::<TransformCache>() {
+                        tc.request_full_propagation();
+                    }
                 }
                 Err(e) => {
                     log::error!(
@@ -2462,6 +2551,7 @@ impl App {
                     );
                 }
             }
+            self.core.game_world.resources_mut().insert(pw);
         } else {
             log::warn!("stop_play_mode called but no snapshot exists");
         }
@@ -2557,7 +2647,11 @@ impl App {
     fn sync_camera_from_ecs(&mut self) {
         let (vp_w, vp_h) = self.editor.viewport.size;
         let world = self.core.game_world.hecs();
-        let cache = &self.core.transform_cache;
+        let cache = self
+            .core
+            .game_world
+            .resource::<TransformCache>()
+            .expect("TransformCache resource missing");
 
         for (entity, (_transform, camera)) in world.query::<(&Transform, &Camera)>().iter() {
             if !camera.active {

@@ -500,6 +500,42 @@ impl Default for TransformCache {
     }
 }
 
+/// Resource flag set by `GameWorld` when structural hierarchy changes occur
+/// (spawn, despawn, reparent). The `TransformPropagationSystem` reads and
+/// clears this flag to trigger a full cache rebuild.
+#[derive(Debug, Clone, Default)]
+pub struct HierarchyChanged(pub bool);
+
+/// Scheduled system that runs transform propagation from Resources.
+///
+/// Reads `HierarchyChanged` and clears it, then propagates via `TransformCache`.
+pub struct TransformPropagationSystem;
+
+impl super::schedule::System for TransformPropagationSystem {
+    fn run(&mut self, world: &mut World, resources: &mut super::resources::Resources) {
+        // Check if structural hierarchy changes occurred since last frame.
+        let hierarchy_changed = resources
+            .get_mut::<HierarchyChanged>()
+            .map(|h| {
+                let val = h.0;
+                h.0 = false;
+                val
+            })
+            .unwrap_or(false);
+
+        if let Some(cache) = resources.get_mut::<TransformCache>() {
+            if hierarchy_changed {
+                cache.request_full_propagation();
+            }
+            cache.propagate(world);
+        }
+    }
+
+    fn name(&self) -> &str {
+        "TransformPropagationSystem"
+    }
+}
+
 /// Convenience: mark a single entity as dirty so incremental propagation
 /// picks it up next frame. Silently ignores dead entities.
 pub fn mark_transform_dirty(world: &mut World, entity: Entity) {

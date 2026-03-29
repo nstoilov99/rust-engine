@@ -27,10 +27,12 @@
 
 mod components;
 pub mod debug_render;
+pub mod system;
 mod world;
 
 pub use components::*;
 pub use debug_render::submit_collider_debug_draws;
+pub use system::PhysicsStepSystem;
 pub use world::PhysicsWorld;
 
 // Re-export useful Rapier types

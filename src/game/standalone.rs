@@ -4,13 +4,19 @@
 
 use super::{game_setup, input_handler, render_loop};
 use rust_engine::assets::AssetManager;
-use rust_engine::engine::ecs::components::{Camera, Transform};
+use rust_engine::engine::ecs::access::SystemDescriptor;
+use rust_engine::engine::ecs::components::{Camera, Transform, TransformDirty};
 use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::ecs::hierarchy::TransformCache;
-use rust_engine::engine::animation::AnimationUpdateSystem;
+use rust_engine::engine::ecs::hierarchy::{
+    Children, HierarchyChanged, Parent, TransformCache, TransformPropagationSystem,
+};
+use rust_engine::engine::animation::{AnimationPlayer, AnimationUpdateSystem, SkeletonInstance};
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode, Time};
 use rust_engine::engine::ecs::schedule::{Schedule, Stage};
-use rust_engine::engine::physics::PhysicsWorld;
+use rust_engine::engine::physics::{
+    Collider as PhysCollider, PhysicsStepSystem, PhysicsWorld,
+    RigidBody as PhysRigidBody, Velocity as PhysVelocity,
+};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
 use rust_engine::engine::rendering::RenderTarget;
@@ -27,7 +33,6 @@ pub struct StandaloneApp {
     pub renderer: Renderer,
     pub asset_manager: Arc<AssetManager>,
     pub game_world: GameWorld,
-    pub physics_world: PhysicsWorld,
     pub input_manager: InputManager,
     pub deferred_renderer: DeferredRenderer,
     pub game_loop: GameLoop,
@@ -37,7 +42,6 @@ pub struct StandaloneApp {
     pub _descriptor_set: Arc<DescriptorSet>,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
-    transform_cache: TransformCache,
     schedule: Schedule,
 }
 
@@ -80,6 +84,11 @@ impl StandaloneApp {
 
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
+        game_world.resources_mut().insert(physics_world);
+
+        let mut transform_cache = TransformCache::new();
+        transform_cache.propagate(game_world.hecs_mut());
+        game_world.resources_mut().insert(transform_cache);
 
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
@@ -97,27 +106,74 @@ impl StandaloneApp {
             height,
         )?;
 
-        let mut transform_cache = TransformCache::new();
-        transform_cache.propagate(game_world.hecs_mut());
-
         // Set camera from first Camera entity, or use default
-        Self::sync_camera_from_ecs(
-            &mut renderer,
-            game_world.hecs(),
-            &transform_cache,
-            width as f32,
-            height as f32,
-        );
+        {
+            let tc = game_world
+                .resource::<TransformCache>()
+                .expect("TransformCache resource missing");
+            Self::sync_camera_from_ecs(
+                &mut renderer,
+                game_world.hecs(),
+                tc,
+                width as f32,
+                height as f32,
+            );
+        }
 
         let previous_frame_end: Option<Box<dyn GpuFuture>> =
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
+
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            AnimationUpdateSystem,
+            Stage::PreUpdate,
+            SystemDescriptor::new("AnimationUpdateSystem")
+                .reads_resource::<Time>()
+                .writes::<AnimationPlayer>()
+                .writes::<SkeletonInstance>(),
+        );
+        schedule.add_system_described(
+            PhysicsStepSystem,
+            Stage::PreUpdate,
+            SystemDescriptor::new("PhysicsStepSystem")
+                .reads_resource::<Time>()
+                .writes_resource::<PhysicsWorld>()
+                .writes::<Transform>()
+                .writes::<TransformDirty>()
+                .reads::<PhysRigidBody>()
+                .reads::<PhysCollider>()
+                .reads::<PhysVelocity>()
+                .after("AnimationUpdateSystem"),
+        );
+        schedule.add_system_described(
+            TransformPropagationSystem,
+            Stage::PostUpdate,
+            SystemDescriptor::new("TransformPropagationSystem")
+                .writes_resource::<TransformCache>()
+                .writes_resource::<HierarchyChanged>()
+                .reads::<Transform>()
+                .reads::<Parent>()
+                .reads::<Children>()
+                .writes::<TransformDirty>(),
+        );
+
+        let validation_errors = schedule.validate();
+        if !validation_errors.is_empty() {
+            for err in &validation_errors {
+                log::error!("Schedule validation error: {err}");
+            }
+            panic!(
+                "Schedule validation failed with {} error(s) — see log above",
+                validation_errors.len()
+            );
+        }
+        schedule.print_access_report();
 
         Ok(Self {
             renderer,
             window,
             asset_manager,
             game_world,
-            physics_world,
             input_manager: InputManager::new(),
             deferred_renderer,
             game_loop: GameLoop::new(),
@@ -127,12 +183,7 @@ impl StandaloneApp {
             _descriptor_set: descriptor_set,
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
-            transform_cache,
-            schedule: {
-                let mut s = Schedule::new();
-                s.add_system(AnimationUpdateSystem, Stage::PreUpdate);
-                s
-            },
+            schedule,
         })
     }
 
@@ -182,9 +233,6 @@ impl StandaloneApp {
         }
 
         self.game_world.run_schedule(&mut self.schedule);
-
-        self.physics_world
-            .step(delta_time, self.game_world.hecs_mut());
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
@@ -220,23 +268,31 @@ impl StandaloneApp {
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
-        self.transform_cache.propagate(self.game_world.hecs_mut());
-
         let size = self.window.inner_size();
-        Self::sync_camera_from_ecs(
-            &mut self.renderer,
-            self.game_world.hecs(),
-            &self.transform_cache,
-            size.width as f32,
-            size.height as f32,
-        );
+        {
+            let tc = self
+                .game_world
+                .resource::<TransformCache>()
+                .expect("TransformCache resource missing");
+            Self::sync_camera_from_ecs(
+                &mut self.renderer,
+                self.game_world.hecs(),
+                tc,
+                size.width as f32,
+                size.height as f32,
+            );
+        }
 
+        let tc = self
+            .game_world
+            .resource::<TransformCache>()
+            .expect("TransformCache resource missing");
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
-            &self.transform_cache,
+            tc,
             self.deferred_renderer.skinning(),
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);

@@ -101,7 +101,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 log = "0.4"
 
 [profile.dev]
-opt-level = 1
+opt-level = 2
 
 # Compile ALL dependencies at full optimization even in dev builds.
 # vulkano, egui, rapier3d, nalgebra etc. dominate CPU time — this

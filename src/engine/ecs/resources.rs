@@ -23,11 +23,13 @@ impl Resources {
     }
 
     /// Insert a resource. Replaces any existing resource of the same type.
+    #[inline]
     pub fn insert<T: Send + Sync + 'static>(&mut self, resource: T) {
         self.map.insert(TypeId::of::<T>(), Box::new(resource));
     }
 
     /// Get an immutable reference to a resource.
+    #[inline]
     pub fn get<T: 'static>(&self) -> Option<&T> {
         self.map
             .get(&TypeId::of::<T>())
@@ -35,6 +37,7 @@ impl Resources {
     }
 
     /// Get a mutable reference to a resource.
+    #[inline]
     pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.map
             .get_mut(&TypeId::of::<T>())
@@ -42,6 +45,7 @@ impl Resources {
     }
 
     /// Remove a resource, returning it if it existed.
+    #[inline]
     pub fn remove<T: 'static>(&mut self) -> Option<T> {
         self.map
             .remove(&TypeId::of::<T>())
@@ -50,6 +54,7 @@ impl Resources {
     }
 
     /// Check if a resource of this type exists.
+    #[inline]
     pub fn contains<T: 'static>(&self) -> bool {
         self.map.contains_key(&TypeId::of::<T>())
     }

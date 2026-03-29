@@ -1,3 +1,4 @@
+pub mod access;
 pub mod change_detection;
 pub mod commands;
 pub mod components;
@@ -13,6 +14,7 @@ pub mod world;
 #[allow(dead_code)]
 pub(crate) mod test_helpers;
 
+pub use access::{AccessSet, ConflictKind, SystemDescriptor, ValidationError};
 pub use change_detection::ChangeTicks;
 pub use commands::CommandBuffer;
 pub use components::*;
@@ -25,5 +27,4 @@ pub use schedule::{
     Always, FunctionSystem, RunCriteria, RunIfEditing, RunIfNotPaused, RunIfPlaying, Schedule,
     Stage, System,
 };
-pub use systems::*;
 pub use world::*;

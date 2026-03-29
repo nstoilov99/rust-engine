@@ -166,12 +166,10 @@ struct BenchmarkRunner {
     renderer: Renderer,
     asset_manager: Arc<AssetManager>,
     game_world: GameWorld,
-    physics_world: PhysicsWorld,
     deferred_renderer: DeferredRenderer,
     game_loop: GameLoop,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
-    transform_cache: TransformCache,
     config: BenchmarkConfig,
     rendered_frames: u32,
     frame_times_ms: Vec<f64>,
@@ -231,6 +229,8 @@ impl BenchmarkRunner {
         let resource_counters =
             ResourceCounters::collect(game_world.hecs(), &asset_manager, &physics_world);
 
+        game_world.resources_mut().insert(physics_world);
+
         let deferred_renderer = DeferredRenderer::new(
             renderer.device.clone(),
             renderer.queue.clone(),
@@ -250,6 +250,7 @@ impl BenchmarkRunner {
             config.resolution[0] as f32,
             config.resolution[1] as f32,
         );
+        game_world.resources_mut().insert(transform_cache);
 
         let previous_frame_end = Some(vulkano::sync::now(renderer.device.clone()).boxed());
         let (profile_collector, profile_sink_id) = create_profile_sink();
@@ -259,12 +260,10 @@ impl BenchmarkRunner {
             renderer,
             asset_manager,
             game_world,
-            physics_world,
             deferred_renderer,
             game_loop: GameLoop::new(),
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(1024),
-            transform_cache,
             config,
             rendered_frames: 0,
             frame_times_ms: Vec::new(),
@@ -291,20 +290,37 @@ impl BenchmarkRunner {
         }
         {
             rust_engine::profile_scope!("physics_step");
-            self.physics_world
-                .step(delta_time, self.game_world.hecs_mut());
+            let mut pw = self
+                .game_world
+                .resources_mut()
+                .remove::<PhysicsWorld>()
+                .unwrap_or_default();
+            pw.step(delta_time, self.game_world.hecs_mut());
+            self.game_world.resources_mut().insert(pw);
         }
     }
 
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_scope!("frame_render");
-        self.transform_cache.propagate(self.game_world.hecs_mut());
+        {
+            let mut tc = self
+                .game_world
+                .resources_mut()
+                .remove::<TransformCache>()
+                .unwrap_or_default();
+            tc.propagate(self.game_world.hecs_mut());
+            self.game_world.resources_mut().insert(tc);
+        }
+        let tc = self
+            .game_world
+            .resource::<TransformCache>()
+            .expect("TransformCache resource missing");
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
-            &self.transform_cache,
+            tc,
             self.deferred_renderer.skinning(),
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);

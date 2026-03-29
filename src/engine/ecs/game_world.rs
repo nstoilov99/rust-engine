@@ -39,6 +39,7 @@ impl GameWorld {
         let mut resources = Resources::new();
         resources.insert(Time::new());
         resources.insert(EditorState::new());
+        resources.insert(super::hierarchy::HierarchyChanged::default());
 
         Self {
             hecs_world: hecs::World::new(),
@@ -158,7 +159,7 @@ impl GameWorld {
                 .insert_one(entity, super::components::EntityGuid::new());
         }
         self.events.send(EntitySpawned { entity, name: None });
-        self.hierarchy_changed = true;
+        self.mark_hierarchy_changed();
         entity
     }
 
@@ -184,7 +185,7 @@ impl GameWorld {
             entity,
             name: Some(name.into()),
         });
-        self.hierarchy_changed = true;
+        self.mark_hierarchy_changed();
         entity
     }
 
@@ -194,7 +195,7 @@ impl GameWorld {
         self.change_ticks.remove_entity(entity);
         self.events.send(EntityDeleted { entity });
         super::hierarchy::despawn_recursive(&mut self.hecs_world, entity);
-        self.hierarchy_changed = true;
+        self.mark_hierarchy_changed();
     }
 
     /// Insert a component on an entity, marking it as Added in ChangeTicks.
@@ -276,6 +277,10 @@ impl GameWorld {
     /// `TransformCache::request_full_propagation()`.
     pub fn mark_hierarchy_changed(&mut self) {
         self.hierarchy_changed = true;
+        // Also set the resource so scheduled TransformPropagationSystem can see it.
+        if let Some(h) = self.resources.get_mut::<super::hierarchy::HierarchyChanged>() {
+            h.0 = true;
+        }
     }
 
     /// Returns `true` if a structural hierarchy change occurred since the last

@@ -4,7 +4,10 @@
 //! (First → PreUpdate → Update → PostUpdate → Last), with stable
 //! insertion ordering within each stage.
 
+use super::access::{AccessSet, SystemDescriptor, ValidationError};
 use super::resources::{EditorState, PlayMode, Resources, Time};
+use std::any::TypeId;
+use std::collections::HashMap;
 
 /// Execution stage for ordering systems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,6 +22,19 @@ pub enum Stage {
     PostUpdate = 3,
     /// Last stage: render preparation
     Last = 4,
+}
+
+impl Stage {
+    /// Human-readable label for error messages and logging.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Stage::First => "First",
+            Stage::PreUpdate => "PreUpdate",
+            Stage::Update => "Update",
+            Stage::PostUpdate => "PostUpdate",
+            Stage::Last => "Last",
+        }
+    }
 }
 
 /// System trait for game logic. Systems receive the hecs world and resources.
@@ -126,6 +142,8 @@ struct RegisteredSystem {
     run_criteria: Box<dyn RunCriteria>,
     enabled: bool,
     insertion_order: usize,
+    /// Access descriptor. `None` means undeclared (defaults to exclusive, logs warning).
+    descriptor: Option<SystemDescriptor>,
 }
 
 /// Staged system schedule.
@@ -150,6 +168,9 @@ impl Schedule {
     }
 
     /// Add a system to the schedule at the given stage.
+    ///
+    /// Systems added without a descriptor default to exclusive access and
+    /// trigger a warning during validation so migration misses are visible.
     pub fn add_system<S: System + 'static>(&mut self, system: S, stage: Stage) -> &mut Self {
         self.systems.push(RegisteredSystem {
             system: Box::new(system),
@@ -157,6 +178,7 @@ impl Schedule {
             run_criteria: Box::new(Always),
             enabled: true,
             insertion_order: self.next_order,
+            descriptor: None,
         });
         self.next_order += 1;
         self.needs_sort = true;
@@ -180,6 +202,52 @@ impl Schedule {
             run_criteria: Box::new(criteria),
             enabled: true,
             insertion_order: self.next_order,
+            descriptor: None,
+        });
+        self.next_order += 1;
+        self.needs_sort = true;
+        self
+    }
+
+    /// Add a system with an access descriptor for conflict detection.
+    pub fn add_system_described<S: System + 'static>(
+        &mut self,
+        system: S,
+        stage: Stage,
+        descriptor: SystemDescriptor,
+    ) -> &mut Self {
+        self.systems.push(RegisteredSystem {
+            system: Box::new(system),
+            stage,
+            run_criteria: Box::new(Always),
+            enabled: true,
+            insertion_order: self.next_order,
+            descriptor: Some(descriptor),
+        });
+        self.next_order += 1;
+        self.needs_sort = true;
+        self
+    }
+
+    /// Add a system with an access descriptor and custom run criteria.
+    pub fn add_system_described_with_criteria<S, C>(
+        &mut self,
+        system: S,
+        stage: Stage,
+        descriptor: SystemDescriptor,
+        criteria: C,
+    ) -> &mut Self
+    where
+        S: System + 'static,
+        C: RunCriteria + 'static,
+    {
+        self.systems.push(RegisteredSystem {
+            system: Box::new(system),
+            stage,
+            run_criteria: Box::new(criteria),
+            enabled: true,
+            insertion_order: self.next_order,
+            descriptor: Some(descriptor),
         });
         self.next_order += 1;
         self.needs_sort = true;
@@ -259,6 +327,468 @@ impl Schedule {
     /// Get the number of registered systems.
     pub fn system_count(&self) -> usize {
         self.systems.len()
+    }
+
+    /// Validate the schedule for access conflicts, duplicate names, dangling
+    /// references, and circular dependencies.
+    ///
+    /// Returns a list of hard errors. Ordered conflicts (resolved by
+    /// after/before) are info-logged, not returned as errors. Undeclared
+    /// systems (descriptor: None) are warned about.
+    pub fn validate(&mut self) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        // Build merged type-name registry from all descriptors.
+        let mut type_names: HashMap<TypeId, &'static str> = HashMap::new();
+        for reg in &self.systems {
+            if let Some(desc) = &reg.descriptor {
+                type_names.extend(&desc.type_names);
+            }
+        }
+
+        // Collect system names and check for duplicates.
+        let mut name_counts: HashMap<&str, usize> = HashMap::new();
+        for reg in &self.systems {
+            let name = self.system_name(reg);
+            *name_counts.entry(name).or_default() += 1;
+        }
+        for (name, count) in &name_counts {
+            if *count > 1 {
+                errors.push(ValidationError::DuplicateName {
+                    name: name.to_string(),
+                });
+            }
+        }
+        if !errors.is_empty() {
+            return errors; // Duplicate names make further validation ambiguous.
+        }
+
+        // Warn about undeclared systems.
+        for reg in &self.systems {
+            if reg.descriptor.is_none() {
+                log::warn!(
+                    "System \"{}\" registered without access descriptor — \
+                     defaults to exclusive access. Declare access to enable \
+                     conflict validation.",
+                    reg.system.name()
+                );
+            }
+        }
+
+        // Collect all known system names for dangling reference checks.
+        let all_names: std::collections::HashSet<&str> =
+            self.systems.iter().map(|r| self.system_name(r)).collect();
+
+        // Check dangling references.
+        for reg in &self.systems {
+            if let Some(desc) = &reg.descriptor {
+                for after_name in &desc.after {
+                    if !all_names.contains(after_name.as_str()) {
+                        errors.push(ValidationError::DanglingReference {
+                            system: desc.name.clone(),
+                            references: after_name.clone(),
+                            kind: "after",
+                        });
+                    }
+                }
+                for before_name in &desc.before {
+                    if !all_names.contains(before_name.as_str()) {
+                        errors.push(ValidationError::DanglingReference {
+                            system: desc.name.clone(),
+                            references: before_name.clone(),
+                            kind: "before",
+                        });
+                    }
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return errors;
+        }
+
+        // Per-stage validation: conflicts, ordering, circular dependencies.
+        let stages = [
+            Stage::First,
+            Stage::PreUpdate,
+            Stage::Update,
+            Stage::PostUpdate,
+            Stage::Last,
+        ];
+
+        for stage in &stages {
+            let stage_indices: Vec<usize> = self
+                .systems
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.stage == *stage)
+                .map(|(i, _)| i)
+                .collect();
+
+            if stage_indices.len() < 2 {
+                continue;
+            }
+
+            // Build ordering edges from after/before constraints.
+            // Edge: (must_run_first_name, must_run_second_name)
+            let mut ordering_edges: Vec<(&str, &str)> = Vec::new();
+            for &idx in &stage_indices {
+                if let Some(desc) = &self.systems[idx].descriptor {
+                    let name = desc.name.as_str();
+                    for after_name in &desc.after {
+                        // "self.after(X)" means X must run before self
+                        if stage_indices
+                            .iter()
+                            .any(|&j| self.system_name(&self.systems[j]) == after_name.as_str())
+                        {
+                            ordering_edges.push((after_name.as_str(), name));
+                        }
+                    }
+                    for before_name in &desc.before {
+                        // "self.before(X)" means self must run before X
+                        if stage_indices
+                            .iter()
+                            .any(|&j| self.system_name(&self.systems[j]) == before_name.as_str())
+                        {
+                            ordering_edges.push((name, before_name.as_str()));
+                        }
+                    }
+                }
+            }
+
+            // Check for circular dependencies via topological sort.
+            if let Err(cycle) =
+                Self::topological_sort_names(&stage_indices, &self.systems, &ordering_edges)
+            {
+                errors.push(ValidationError::CircularDependency {
+                    stage: stage.label(),
+                    cycle,
+                });
+                continue; // Skip conflict checks for this stage.
+            }
+
+            // Check pairwise conflicts within the stage.
+            for i in 0..stage_indices.len() {
+                for j in (i + 1)..stage_indices.len() {
+                    let idx_a = stage_indices[i];
+                    let idx_b = stage_indices[j];
+
+                    let access_a = self.effective_access(idx_a);
+                    let access_b = self.effective_access(idx_b);
+
+                    if let Some(conflict) = access_a.conflicts_with(&access_b, &type_names) {
+                        let name_a = self.system_name(&self.systems[idx_a]).to_string();
+                        let name_b = self.system_name(&self.systems[idx_b]).to_string();
+
+                        // Check if ordering resolves this conflict.
+                        let ordered = ordering_edges
+                            .iter()
+                            .any(|&(a, b)| {
+                                (a == name_a && b == name_b) || (a == name_b && b == name_a)
+                            });
+
+                        if ordered {
+                            log::info!(
+                                "Conflict in stage {} between \"{}\" and \"{}\" ({}) \
+                                 resolved by ordering constraint",
+                                stage.label(),
+                                name_a,
+                                name_b,
+                                conflict,
+                            );
+                        } else {
+                            errors.push(ValidationError::UnresolvedConflict {
+                                stage: stage.label(),
+                                system_a: name_a,
+                                system_b: name_b,
+                                conflict: conflict.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply topological sort to reorder systems within each stage.
+        if errors.is_empty() {
+            self.apply_topological_order();
+        }
+
+        errors
+    }
+
+    /// Get the effective access set for a system.
+    /// Systems without descriptors default to exclusive access.
+    fn effective_access(&self, idx: usize) -> AccessSet {
+        match &self.systems[idx].descriptor {
+            Some(desc) => desc.access.clone(),
+            None => AccessSet::exclusive(),
+        }
+    }
+
+    /// Get the canonical name for a registered system.
+    fn system_name<'a>(&'a self, reg: &'a RegisteredSystem) -> &'a str {
+        reg.descriptor
+            .as_ref()
+            .map(|d| d.name.as_str())
+            .unwrap_or_else(|| reg.system.name())
+    }
+
+    /// Topological sort of system names within a stage. Returns Err with cycle
+    /// names if a cycle is detected.
+    fn topological_sort_names(
+        stage_indices: &[usize],
+        systems: &[RegisteredSystem],
+        edges: &[(&str, &str)],
+    ) -> Result<Vec<String>, Vec<String>> {
+        // Build name -> index mapping for systems in this stage.
+        let names: Vec<&str> = stage_indices
+            .iter()
+            .map(|&i| {
+                systems[i]
+                    .descriptor
+                    .as_ref()
+                    .map(|d| d.name.as_str())
+                    .unwrap_or_else(|| systems[i].system.name())
+            })
+            .collect();
+
+        let name_to_local: HashMap<&str, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect();
+
+        let n = names.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut in_degree: Vec<usize> = vec![0; n];
+
+        for &(from, to) in edges {
+            if let (Some(&fi), Some(&ti)) = (name_to_local.get(from), name_to_local.get(to)) {
+                adj[fi].push(ti);
+                in_degree[ti] += 1;
+            }
+        }
+
+        // Kahn's algorithm.
+        let mut queue: std::collections::VecDeque<usize> =
+            in_degree.iter().enumerate()
+                .filter(|(_, &d)| d == 0)
+                .map(|(i, _)| i)
+                .collect();
+
+        let mut sorted = Vec::with_capacity(n);
+        while let Some(node) = queue.pop_front() {
+            sorted.push(node);
+            for &neighbor in &adj[node] {
+                in_degree[neighbor] -= 1;
+                if in_degree[neighbor] == 0 {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        if sorted.len() != n {
+            // Find a cycle: nodes not in sorted have non-zero in-degree.
+            let cycle: Vec<String> = (0..n)
+                .filter(|i| !sorted.contains(i))
+                .map(|i| names[i].to_string())
+                .collect();
+            Err(cycle)
+        } else {
+            Ok(sorted.iter().map(|&i| names[i].to_string()).collect())
+        }
+    }
+
+    /// Apply topological ordering within each stage, preserving insertion
+    /// order for systems without ordering constraints.
+    fn apply_topological_order(&mut self) {
+        let stages = [
+            Stage::First,
+            Stage::PreUpdate,
+            Stage::Update,
+            Stage::PostUpdate,
+            Stage::Last,
+        ];
+
+        for stage in &stages {
+            let stage_indices: Vec<usize> = self
+                .systems
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.stage == *stage)
+                .map(|(i, _)| i)
+                .collect();
+
+            if stage_indices.len() < 2 {
+                continue;
+            }
+
+            // Build ordering edges.
+            let mut edges: Vec<(&str, &str)> = Vec::new();
+            for &idx in &stage_indices {
+                if let Some(desc) = &self.systems[idx].descriptor {
+                    let name = desc.name.as_str();
+                    for after_name in &desc.after {
+                        if stage_indices
+                            .iter()
+                            .any(|&j| self.system_name(&self.systems[j]) == after_name.as_str())
+                        {
+                            edges.push((after_name.as_str(), name));
+                        }
+                    }
+                    for before_name in &desc.before {
+                        if stage_indices
+                            .iter()
+                            .any(|&j| self.system_name(&self.systems[j]) == before_name.as_str())
+                        {
+                            edges.push((name, before_name.as_str()));
+                        }
+                    }
+                }
+            }
+
+            if edges.is_empty() {
+                continue; // No ordering constraints, keep insertion order.
+            }
+
+            // Topological sort with insertion-order tie-breaking.
+            let names: Vec<&str> = stage_indices
+                .iter()
+                .map(|&i| self.system_name(&self.systems[i]))
+                .collect();
+
+            let name_to_local: HashMap<&str, usize> = names
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| (n, i))
+                .collect();
+
+            let n = names.len();
+            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+            let mut in_degree: Vec<usize> = vec![0; n];
+
+            for &(from, to) in &edges {
+                if let (Some(&fi), Some(&ti)) = (name_to_local.get(from), name_to_local.get(to)) {
+                    adj[fi].push(ti);
+                    in_degree[ti] += 1;
+                }
+            }
+
+            // Kahn's algorithm with insertion-order tie-breaking.
+            let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize)>> =
+                in_degree
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &d)| d == 0)
+                    .map(|(i, _)| {
+                        std::cmp::Reverse((self.systems[stage_indices[i]].insertion_order, i))
+                    })
+                    .collect();
+
+            let mut sorted_local = Vec::with_capacity(n);
+            while let Some(std::cmp::Reverse((_, node))) = queue.pop() {
+                sorted_local.push(node);
+                for &neighbor in &adj[node] {
+                    in_degree[neighbor] -= 1;
+                    if in_degree[neighbor] == 0 {
+                        queue.push(std::cmp::Reverse((
+                            self.systems[stage_indices[neighbor]].insertion_order,
+                            neighbor,
+                        )));
+                    }
+                }
+            }
+
+            // Remap insertion_order to enforce topological sort.
+            // We assign new insertion orders that preserve the topo order
+            // within the stage while keeping stage-level sorting intact.
+            let base_order = stage_indices
+                .iter()
+                .map(|&i| self.systems[i].insertion_order)
+                .min()
+                .unwrap_or(0);
+
+            for (new_pos, &local_idx) in sorted_local.iter().enumerate() {
+                self.systems[stage_indices[local_idx]].insertion_order = base_order + new_pos;
+            }
+        }
+
+        self.needs_sort = true;
+    }
+
+    /// Log a human-readable report of all systems, their stages, and access patterns.
+    pub fn print_access_report(&self) {
+        let stages = [
+            Stage::First,
+            Stage::PreUpdate,
+            Stage::Update,
+            Stage::PostUpdate,
+            Stage::Last,
+        ];
+
+        log::info!("=== Schedule Access Report ===");
+        for stage in &stages {
+            let stage_systems: Vec<&RegisteredSystem> = self
+                .systems
+                .iter()
+                .filter(|r| r.stage == *stage)
+                .collect();
+
+            if stage_systems.is_empty() {
+                continue;
+            }
+
+            log::info!("Stage: {}", stage.label());
+            for reg in &stage_systems {
+                let name = reg
+                    .descriptor
+                    .as_ref()
+                    .map(|d| d.name.as_str())
+                    .unwrap_or_else(|| reg.system.name());
+
+                match &reg.descriptor {
+                    Some(desc) => {
+                        let reads: Vec<&str> = desc
+                            .type_names
+                            .iter()
+                            .filter(|(tid, _)| {
+                                desc.access.component_reads.contains(tid)
+                                    || desc.access.resource_reads.contains(tid)
+                            })
+                            .map(|(_, name)| *name)
+                            .collect();
+                        let writes: Vec<&str> = desc
+                            .type_names
+                            .iter()
+                            .filter(|(tid, _)| {
+                                desc.access.component_writes.contains(tid)
+                                    || desc.access.resource_writes.contains(tid)
+                            })
+                            .map(|(_, name)| *name)
+                            .collect();
+                        let after = &desc.after;
+                        let before = &desc.before;
+                        log::info!(
+                            "  {} — reads: [{}], writes: [{}], after: {:?}, before: {:?}{}",
+                            name,
+                            reads.join(", "),
+                            writes.join(", "),
+                            after,
+                            before,
+                            if desc.access.exclusive {
+                                " [EXCLUSIVE]"
+                            } else {
+                                ""
+                            },
+                        );
+                    }
+                    None => {
+                        log::info!("  {} — [UNDECLARED, defaults to exclusive]", name);
+                    }
+                }
+            }
+        }
+        log::info!("=== End Access Report ===");
     }
 }
 
@@ -470,5 +1000,228 @@ mod tests {
 
         schedule.add_fn_system("sys2", Stage::Update, |_w, _r| {});
         assert_eq!(schedule.system_count(), 2);
+    }
+
+    // === Access declaration and validation tests ===
+
+    use super::super::access::SystemDescriptor;
+
+    // Dummy marker types for access declaration tests (never constructed).
+    #[allow(dead_code)]
+    struct CompA;
+    #[allow(dead_code)]
+    struct CompB;
+    #[allow(dead_code)]
+    struct ResX;
+
+    #[test]
+    fn validate_no_conflicts() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").reads::<CompA>(),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_b").reads::<CompA>(),
+        );
+        let errors = schedule.validate();
+        assert!(errors.is_empty(), "read-read should have no conflicts: {errors:?}");
+    }
+
+    #[test]
+    fn validate_detects_write_write_conflict() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").writes::<CompA>(),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_b").writes::<CompA>(),
+        );
+        let errors = schedule.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ValidationError::UnresolvedConflict { .. }));
+    }
+
+    #[test]
+    fn validate_conflict_resolved_by_ordering() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").writes::<CompA>(),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_b").writes::<CompA>().after("sys_a"),
+        );
+        let errors = schedule.validate();
+        assert!(errors.is_empty(), "ordering should resolve conflict: {errors:?}");
+    }
+
+    #[test]
+    fn validate_duplicate_name_error() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("dup", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("dup"),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("dup", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("dup"),
+        );
+        let errors = schedule.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ValidationError::DuplicateName { .. }));
+    }
+
+    #[test]
+    fn validate_dangling_reference_error() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").after("nonexistent"),
+        );
+        let errors = schedule.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ValidationError::DanglingReference { .. }));
+    }
+
+    #[test]
+    fn validate_circular_dependency_error() {
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").after("sys_b"),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("sys_b").after("sys_a"),
+        );
+        let errors = schedule.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ValidationError::CircularDependency { .. }));
+    }
+
+    #[test]
+    fn validate_undeclared_system_defaults_exclusive() {
+        // An undeclared system conflicts with everything in the same stage.
+        let mut schedule = Schedule::new();
+        schedule.add_fn_system("undeclared", Stage::Update, |_w, _r| {});
+        schedule.add_system_described(
+            FunctionSystem::new("declared", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::Update,
+            SystemDescriptor::new("declared").reads::<CompA>(),
+        );
+        let errors = schedule.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ValidationError::UnresolvedConflict { .. }));
+    }
+
+    #[test]
+    fn topological_sort_respects_after() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let mut schedule = Schedule::new();
+
+        // Register B first, but A should run first because B.after("sys_a").
+        let o = Arc::clone(&order);
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", move |_w: &mut hecs::World, _r: &mut Resources| {
+                o.lock().expect("lock").push("B");
+            }),
+            Stage::Update,
+            SystemDescriptor::new("sys_b").reads::<CompA>().after("sys_a"),
+        );
+        let o = Arc::clone(&order);
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", move |_w: &mut hecs::World, _r: &mut Resources| {
+                o.lock().expect("lock").push("A");
+            }),
+            Stage::Update,
+            SystemDescriptor::new("sys_a").reads::<CompB>(),
+        );
+
+        let errors = schedule.validate();
+        assert!(errors.is_empty(), "should validate: {errors:?}");
+
+        let mut world = hecs::World::new();
+        let mut resources = Resources::new();
+        resources.insert(Time::new());
+        resources.insert(EditorState::new());
+        let mut cmd = CommandBuffer::new();
+
+        schedule.run_raw(&mut world, &mut resources, &mut cmd);
+
+        let result = order.lock().expect("lock");
+        assert_eq!(*result, vec!["A", "B"], "sys_a should run before sys_b");
+    }
+
+    #[test]
+    fn topological_sort_preserves_insertion_order_without_constraints() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let mut schedule = Schedule::new();
+
+        let o = Arc::clone(&order);
+        schedule.add_system_described(
+            FunctionSystem::new("sys_x", move |_w: &mut hecs::World, _r: &mut Resources| {
+                o.lock().expect("lock").push("X");
+            }),
+            Stage::Update,
+            SystemDescriptor::new("sys_x").reads::<CompA>(),
+        );
+        let o = Arc::clone(&order);
+        schedule.add_system_described(
+            FunctionSystem::new("sys_y", move |_w: &mut hecs::World, _r: &mut Resources| {
+                o.lock().expect("lock").push("Y");
+            }),
+            Stage::Update,
+            SystemDescriptor::new("sys_y").reads::<CompB>(),
+        );
+
+        let errors = schedule.validate();
+        assert!(errors.is_empty());
+
+        let mut world = hecs::World::new();
+        let mut resources = Resources::new();
+        resources.insert(Time::new());
+        resources.insert(EditorState::new());
+        let mut cmd = CommandBuffer::new();
+
+        schedule.run_raw(&mut world, &mut resources, &mut cmd);
+
+        let result = order.lock().expect("lock");
+        assert_eq!(*result, vec!["X", "Y"], "insertion order preserved");
+    }
+
+    #[test]
+    fn different_stages_no_conflict() {
+        // Systems in different stages never conflict.
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            FunctionSystem::new("sys_a", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::PreUpdate,
+            SystemDescriptor::new("sys_a").writes::<CompA>(),
+        );
+        schedule.add_system_described(
+            FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
+            Stage::PostUpdate,
+            SystemDescriptor::new("sys_b").writes::<CompA>(),
+        );
+        let errors = schedule.validate();
+        assert!(errors.is_empty(), "different stages should not conflict: {errors:?}");
     }
 }

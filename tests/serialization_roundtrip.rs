@@ -53,6 +53,9 @@ fn mesh_renderer_roundtrip() {
         EntityGuid::new(),
         Transform::default(),
         MeshRenderer {
+            mesh_path: String::new(),
+            material_paths: vec![],
+            material_path: String::new(),
             mesh_index: 3,
             material_index: 7,
             visible: false,
