@@ -4,6 +4,7 @@ use super::scene_format::{
     CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
     RigidBodyTypeData,
 };
+use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
 use crate::engine::physics::{
     Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
@@ -244,6 +245,37 @@ impl Prefab {
                 }
                 ComponentData::Player => {
                     builder.add(Player);
+                }
+                ComponentData::AudioEmitter {
+                    clip_path,
+                    bus,
+                    volume_db,
+                    pitch,
+                    looping,
+                    auto_play,
+                    spatial,
+                    max_distance,
+                    hide_range_in_game,
+                } => {
+                    let bus_val = match bus.as_str() {
+                        "Music" => AudioBus::Music,
+                        "Ambient" => AudioBus::Ambient,
+                        _ => AudioBus::SFX,
+                    };
+                    builder.add(AudioEmitter {
+                        clip_path: clip_path.clone(),
+                        bus: bus_val,
+                        volume_db: *volume_db,
+                        pitch: *pitch,
+                        looping: *looping,
+                        auto_play: *auto_play,
+                        spatial: *spatial,
+                        max_distance: *max_distance,
+                        hide_range_in_game: *hide_range_in_game,
+                    });
+                }
+                ComponentData::AudioListener { active } => {
+                    builder.add(AudioListener { active: *active });
                 }
                 ComponentData::Parent { .. } => {
                     // Parent relationships are not applicable for prefabs

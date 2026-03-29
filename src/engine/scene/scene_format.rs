@@ -370,6 +370,18 @@ fn default_restitution() -> f32 {
     0.3
 }
 
+fn default_audio_bus() -> String {
+    "SFX".to_string()
+}
+
+fn default_pitch() -> f32 {
+    1.0
+}
+
+fn default_max_distance() -> f32 {
+    50.0
+}
+
 /// Component data enum for all component types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -461,6 +473,30 @@ pub enum ComponentData {
         parent_name: String, // Reference parent entity by name
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_guid: Option<String>, // Reference parent entity by GUID (preferred)
+    },
+    AudioEmitter {
+        #[serde(default)]
+        clip_path: String,
+        #[serde(default = "default_audio_bus")]
+        bus: String,
+        #[serde(default)]
+        volume_db: f32,
+        #[serde(default = "default_pitch")]
+        pitch: f32,
+        #[serde(default)]
+        looping: bool,
+        #[serde(default)]
+        auto_play: bool,
+        #[serde(default)]
+        spatial: bool,
+        #[serde(default = "default_max_distance")]
+        max_distance: f32,
+        #[serde(default = "default_true")]
+        hide_range_in_game: bool,
+    },
+    AudioListener {
+        #[serde(default = "default_true")]
+        active: bool,
     },
 }
 

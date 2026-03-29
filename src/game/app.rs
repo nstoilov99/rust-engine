@@ -18,6 +18,7 @@ use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::animation::AnimationUpdateSystem;
+use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
 use rust_engine::engine::ecs::schedule::{Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
@@ -213,6 +214,17 @@ impl App {
             hierarchy_panel.set_root_order(root_entities);
         }
 
+        // Audio engine — no-audio fallback if initialization fails
+        if let Some(audio_engine) = AudioEngine::new() {
+            game_world.resources_mut().insert(audio_engine);
+        }
+        game_world
+            .resources_mut()
+            .insert(AudioReloadQueue::new());
+        game_world
+            .resources_mut()
+            .insert(asset_manager.clone());
+
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
 
@@ -251,6 +263,7 @@ impl App {
             schedule: {
                 let mut s = Schedule::new();
                 s.add_system(AnimationUpdateSystem, Stage::PreUpdate);
+                s.add_system(AudioSystem::new(), Stage::PostUpdate);
                 s
             },
             physics_world,
@@ -507,6 +520,13 @@ impl App {
                 }
                 ReloadEvent::TextureChanged { path } => {
                     println!("Texture auto-reloaded: {}", path);
+                }
+                ReloadEvent::AudioChanged { path } => {
+                    // Push into AudioReloadQueue — AudioSystem drains it each frame
+                    if let Some(queue) = self.core.game_world.resource_mut::<AudioReloadQueue>() {
+                        queue.0.push(path.clone());
+                    }
+                    println!("Audio auto-reload queued: {}", path);
                 }
                 ReloadEvent::ReloadFailed { path, error } => {
                     eprintln!("Auto-reload failed for {}: {}", path, error);
@@ -898,6 +918,14 @@ impl App {
             &self.core.transform_cache,
         );
 
+        // Submit audio emitter debug wireframes (spatial emitters only)
+        #[cfg(debug_assertions)]
+        rust_engine::engine::audio::debug_draw::submit_audio_debug_draws(
+            self.core.game_world.hecs(),
+            &mut self.core.debug_draw_buffer,
+            !is_editing,
+        );
+
         #[cfg(debug_assertions)]
         let debug_draw_data = render_loop::prepare_debug_draw_data(
             &mut self.core.debug_draw_buffer,
@@ -1244,6 +1272,23 @@ impl App {
                                         e
                                     )));
                                     eprintln!("Failed to load scene: {}", e);
+                                }
+                            }
+                        } else if asset_type == AssetType::Audio {
+                            // Play audio preview on dedicated preview track
+                            let relative = meta_path.to_string_lossy().to_string();
+                            let load_result = self.core.asset_manager.audio.load(&relative);
+                            match load_result {
+                                Ok(handle) => {
+                                    let data = handle.get().clone();
+                                    if let Some(engine) = self.core.game_world.resource_mut::<rust_engine::engine::audio::AudioEngine>() {
+                                        if let Err(e) = engine.play_preview(data) {
+                                            log::warn!("Audio preview failed: {e}");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to load audio for preview: {e}");
                                 }
                             }
                         } else if asset_type == AssetType::Mesh {
@@ -2408,6 +2453,7 @@ impl App {
             ) {
                 Ok(()) => {
                     self.editor.play.snapshot = None;
+                    self.core.transform_cache.request_full_propagation();
                 }
                 Err(e) => {
                     log::error!(

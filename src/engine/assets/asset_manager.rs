@@ -6,6 +6,7 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 
 use super::model_manager::ModelManager;
 use super::texture_manager::TextureManager;
+use crate::engine::audio::AudioAssetManager;
 use crate::engine::math::Aabb;
 use crate::engine::rendering::rendering_3d::mesh_manager::GpuMesh;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
@@ -16,6 +17,7 @@ pub struct AssetManager {
     pub textures: TextureManager,
     pub models: ModelManager,
     pub meshes: Arc<parking_lot::RwLock<MeshManager>>,
+    pub audio: AudioAssetManager,
     allocator: Arc<StandardMemoryAllocator>,
 }
 
@@ -35,6 +37,7 @@ impl AssetManager {
             ),
             models: ModelManager::new(device.clone(), allocator.clone()),
             meshes: Arc::new(parking_lot::RwLock::new(MeshManager::new())),
+            audio: AudioAssetManager::new(),
             allocator,
         }
     }
@@ -126,6 +129,7 @@ impl AssetManager {
     pub fn clear_all_caches(&self) {
         self.textures.clear_cache();
         self.models.clear_cache();
+        self.audio.clear_cache();
     }
 
     /// Get total cache statistics
@@ -133,6 +137,7 @@ impl AssetManager {
         CacheStats {
             textures: self.textures.cache_size(),
             models: self.models.cache_size(),
+            audio: self.audio.cache_size(),
         }
     }
 }
@@ -166,10 +171,15 @@ fn compute_bounding_sphere(vertices: &[Vertex3D]) -> (Vec3, f32) {
 pub struct CacheStats {
     pub textures: usize,
     pub models: usize,
+    pub audio: usize,
 }
 
 impl std::fmt::Display for CacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Textures: {}, Models: {}", self.textures, self.models)
+        write!(
+            f,
+            "Textures: {}, Models: {}, Audio: {}",
+            self.textures, self.models, self.audio
+        )
     }
 }

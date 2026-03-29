@@ -46,6 +46,9 @@ pub mod math;
 // Skeletal animation system
 pub mod animation;
 
+// Audio system (Kira integration)
+pub mod audio;
+
 // Re-export commonly used types
 pub use assets::{load_gltf, load_model, load_texture, LoadedMesh, Model};
 pub use camera::*; // Camera2D, Camera3D, CameraPushConstants

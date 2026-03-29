@@ -8,12 +8,16 @@
             components: [
                 (
                     type: "Transform",
-                    position: (1.5021949, 0.5156814, -0.2912761),
+                    position: (1.5021949, -2.4843187, 1.7087239),
                     rotation: (0.63926286, 0.30222863, 0.30223024, 0.63926345),
                     scale: (0.4, 0.4, 0.4),
                 ),
                 (
                     type: "MeshRenderer",
+                    mesh_path: "",
+                    material_paths: [
+                        "",
+                    ],
                     mesh_index: 2,
                     material_index: 0,
                     visible: true,
@@ -28,12 +32,16 @@
             components: [
                 (
                     type: "Transform",
-                    position: (1.0984617, 1.1080307, 1.0),
+                    position: (1.0984617, -1.8919693, 1.0),
                     rotation: (-0.3362995, -0.29328078, -0.6679992, -0.59553844),
                     scale: (0.6, 0.6, 0.6),
                 ),
                 (
                     type: "MeshRenderer",
+                    mesh_path: "",
+                    material_paths: [
+                        "",
+                    ],
                     mesh_index: 2,
                     material_index: 0,
                     visible: true,
@@ -75,6 +83,10 @@
                 ),
                 (
                     type: "MeshRenderer",
+                    mesh_path: "",
+                    material_paths: [
+                        "",
+                    ],
                     mesh_index: 2,
                     material_index: 0,
                     visible: true,
@@ -109,6 +121,8 @@
                 ),
                 (
                     type: "MeshRenderer",
+                    mesh_path: "",
+                    material_paths: [],
                     mesh_index: 0,
                     material_index: 0,
                     visible: true,
@@ -151,11 +165,26 @@
                 ),
                 (
                     type: "MeshRenderer",
+                    mesh_path: "",
+                    material_paths: [
+                        "",
+                    ],
                     mesh_index: 1,
                     material_index: 0,
                     visible: true,
                     cast_shadows: true,
                     receive_shadows: true,
+                ),
+                (
+                    type: "AudioEmitter",
+                    clip_path: "sounds\\gold.mp3",
+                    bus: "SFX",
+                    volume_db: 12.0,
+                    pitch: 1.0,
+                    looping: false,
+                    auto_play: true,
+                    spatial: true,
+                    max_distance: 15.0,
                 ),
             ],
         ),

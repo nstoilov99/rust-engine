@@ -12,6 +12,7 @@ use crate::engine::ecs::{
     Transform,
 };
 use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
+use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{CollapsingHeader, Color32, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
@@ -30,6 +31,7 @@ enum ComponentCategory {
     Rendering, // Camera, MeshRenderer, Lights
     Physics,   // RigidBody, Collider
     Animation, // SkeletonInstance, AnimationPlayer
+    Audio,     // AudioEmitter, AudioListener
 }
 
 /// Actions to perform after component editing (deferred to avoid borrow issues)
@@ -41,6 +43,8 @@ enum ComponentAction {
     RemovePointLight,
     RemoveRigidBody,
     RemoveCollider,
+    RemoveAudioEmitter,
+    RemoveAudioListener,
 }
 
 /// Bitflags for which inspectable components an entity has.
@@ -61,6 +65,8 @@ impl ComponentPresence {
     const COLLIDER: u16 = 1 << 7;
     const SKELETON: u16 = 1 << 8;
     const ANIM_PLAYER: u16 = 1 << 9;
+    const AUDIO_EMITTER: u16 = 1 << 10;
+    const AUDIO_LISTENER: u16 = 1 << 11;
 
     fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -93,6 +99,12 @@ impl ComponentPresence {
         }
         if world.get::<&AnimationPlayer>(entity).is_ok() {
             bits |= Self::ANIM_PLAYER;
+        }
+        if world.get::<&AudioEmitter>(entity).is_ok() {
+            bits |= Self::AUDIO_EMITTER;
+        }
+        if world.get::<&AudioListener>(entity).is_ok() {
+            bits |= Self::AUDIO_LISTENER;
         }
         Self { bits }
     }
@@ -266,6 +278,7 @@ impl InspectorPanel {
             ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80), // Yellow/Gold
             ComponentCategory::Physics => Color32::from_rgb(100, 180, 120), // Green
             ComponentCategory::Animation => Color32::from_rgb(200, 120, 200), // Purple
+            ComponentCategory::Audio => Color32::from_rgb(220, 140, 80),     // Orange
         }
     }
 
@@ -421,6 +434,36 @@ impl InspectorPanel {
             self.edit_animation_player(ui, world, entity, ComponentCategory::Animation);
         }
 
+        // === AUDIO COMPONENTS ===
+        if (self.matches_filter("audio")
+            || self.matches_filter("emitter")
+            || self.matches_filter("sound")
+            || self.matches_filter("clip"))
+            && p.has(ComponentPresence::AUDIO_EMITTER)
+        {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_audio_emitter(ui, world, entity, ComponentCategory::Audio, asset_browser)
+            {
+                pending_action = action;
+            }
+            component_count += 1;
+        }
+        if (self.matches_filter("audio") || self.matches_filter("listener"))
+            && p.has(ComponentPresence::AUDIO_LISTENER)
+        {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_audio_listener(ui, world, entity, ComponentCategory::Audio)
+            {
+                pending_action = action;
+            }
+        }
+
         // Execute pending action and invalidate snapshot
         let mutated = !matches!(pending_action, ComponentAction::None);
         match pending_action {
@@ -442,6 +485,12 @@ impl InspectorPanel {
             }
             ComponentAction::RemoveCollider => {
                 let _ = world.remove_one::<Collider>(entity);
+            }
+            ComponentAction::RemoveAudioEmitter => {
+                let _ = world.remove_one::<AudioEmitter>(entity);
+            }
+            ComponentAction::RemoveAudioListener => {
+                let _ = world.remove_one::<AudioListener>(entity);
             }
         }
         if mutated {
@@ -905,12 +954,12 @@ impl InspectorPanel {
         asset_browser: &mut AssetBrowserPanel,
         legacy_index: usize,
     ) {
-        let thumb_size = 64.0;
-        let slot_height = thumb_size + 8.0;
-        let available_width = ui.available_width();
+        let slot_size: f32 = 90.0;
+        let thumb_size: f32 = slot_size - 8.0;
+        let slot_width = slot_size.max(ui.available_width().min(slot_size));
 
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(available_width, slot_height),
+            egui::vec2(slot_width, slot_size),
             egui::Sense::hover(),
         );
 
@@ -933,7 +982,10 @@ impl InspectorPanel {
             }
         }
 
-        let painter = ui.painter_at(rect);
+        // Use a child UI constrained to the slot rect for proper clipping and layout
+        let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+
+        let painter = slot_ui.painter();
 
         // Background
         let bg_color = if is_valid_hover {
@@ -957,31 +1009,24 @@ impl InspectorPanel {
         );
 
         if path.is_empty() {
-            // Empty slot
-            if legacy_index > 0 {
-                // Show legacy index info
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Index: {} (legacy, drag to replace)", legacy_index),
-                    egui::FontId::proportional(11.0),
-                    Color32::from_gray(140),
-                );
+            // Empty slot — centered wrapped text
+            let hint = if legacy_index > 0 {
+                format!("Index: {} (legacy, drag to replace)", legacy_index)
             } else {
-                // Show drop hint
                 let type_names: Vec<&str> =
                     allowed_types.iter().map(|t| t.display_name()).collect();
-                let hint = format!("Drop {} here", type_names.join("/"));
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    hint,
-                    egui::FontId::proportional(12.0),
-                    Color32::from_gray(120),
-                );
-            }
+                format!("Drop {} here", type_names.join("/"))
+            };
+            let text_color = Color32::from_gray(if legacy_index > 0 { 140 } else { 120 });
+            let inner = rect.shrink(6.0);
+            slot_ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((inner.height() - 28.0).max(0.0) / 2.0);
+                    ui.label(RichText::new(hint).font(egui::FontId::proportional(11.0)).color(text_color));
+                });
+            });
         } else {
-            // Has asset — show square thumbnail + filename
+            // Has asset — show square thumbnail with filename overlay
             let thumb_rect = egui::Rect::from_min_size(
                 rect.min + egui::vec2(4.0, 4.0),
                 egui::vec2(thumb_size, thumb_size),
@@ -1004,23 +1049,28 @@ impl InspectorPanel {
                 painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
             }
 
-            // Filename text
+            // Filename text at bottom of thumbnail
             let filename = std::path::Path::new(path.as_str())
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.clone());
-            let text_left = thumb_rect.right() + 8.0;
+            // Dark overlay behind text for readability
+            let text_bg = egui::Rect::from_min_max(
+                egui::pos2(thumb_rect.min.x, thumb_rect.max.y - 18.0),
+                thumb_rect.max,
+            );
+            painter.rect_filled(text_bg, 0.0, Color32::from_black_alpha(160));
             painter.text(
-                egui::pos2(text_left, rect.center().y),
-                egui::Align2::LEFT_CENTER,
+                egui::pos2(thumb_rect.center().x, thumb_rect.max.y - 4.0),
+                egui::Align2::CENTER_BOTTOM,
                 &filename,
-                egui::FontId::proportional(12.0),
-                Color32::from_gray(200),
+                egui::FontId::proportional(10.0),
+                Color32::from_gray(220),
             );
 
-            // Clear button (x)
+            // Clear button (x) top-right corner
             let clear_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.max.x - 22.0, rect.center().y - 8.0),
+                egui::pos2(thumb_rect.max.x - 16.0, thumb_rect.min.y),
                 egui::vec2(16.0, 16.0),
             );
             let clear_response = ui.interact(
@@ -1031,13 +1081,14 @@ impl InspectorPanel {
             let clear_color = if clear_response.hovered() {
                 Color32::from_rgb(220, 80, 80)
             } else {
-                Color32::from_gray(120)
+                Color32::from_gray(160)
             };
+            painter.rect_filled(clear_rect, 2.0, Color32::from_black_alpha(120));
             painter.text(
                 clear_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "x",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(11.0),
                 clear_color,
             );
             if clear_response.clicked() {
@@ -1716,6 +1767,144 @@ impl InspectorPanel {
         }
     }
 
+    /// Edit AudioEmitter component
+    fn edit_audio_emitter(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+        asset_browser: &mut AssetBrowserPanel,
+    ) -> Option<ComponentAction> {
+        let mut action = None;
+        if let Ok(mut emitter) = world.get::<&mut AudioEmitter>(entity) {
+            let color = Self::category_color(category);
+            let start_y = ui.cursor().top();
+
+            CollapsingHeader::new(RichText::new("Audio Emitter").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    // Clip path (drag-drop from asset browser)
+                    ui.label("Clip:");
+                    Self::asset_slot(
+                        ui,
+                        "audio_clip_slot",
+                        &mut emitter.clip_path,
+                        &[AssetType::Audio],
+                        asset_browser,
+                        0,
+                    );
+
+                    // Bus dropdown
+                    ui.horizontal(|ui| {
+                        ui.label("Bus:");
+                        egui::ComboBox::from_id_salt("audio_bus")
+                            .selected_text(emitter.bus.display_name())
+                            .show_ui(ui, |ui| {
+                                for &bus in AudioBus::ALL {
+                                    ui.selectable_value(&mut emitter.bus, bus, bus.display_name());
+                                }
+                            });
+                    });
+
+                    // Volume (dB)
+                    ui.horizontal(|ui| {
+                        ui.label("Volume (dB):");
+                        ui.add(
+                            DragValue::new(&mut emitter.volume_db)
+                                .speed(0.1)
+                                .range(-80.0..=12.0)
+                                .suffix(" dB"),
+                        );
+                    });
+
+                    // Pitch
+                    ui.horizontal(|ui| {
+                        ui.label("Pitch:");
+                        ui.add(
+                            DragValue::new(&mut emitter.pitch)
+                                .speed(0.01)
+                                .range(0.1..=4.0),
+                        );
+                    });
+
+                    // Looping & Auto-play
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut emitter.looping, "Loop");
+                        ui.checkbox(&mut emitter.auto_play, "Auto-play");
+                    });
+
+                    // Spatial
+                    ui.checkbox(&mut emitter.spatial, "Spatial (3D)");
+                    if emitter.spatial {
+                        ui.horizontal(|ui| {
+                            ui.label("Max Distance:");
+                            ui.add(
+                                DragValue::new(&mut emitter.max_distance)
+                                    .speed(0.5)
+                                    .range(1.0..=1000.0)
+                                    .suffix(" m"),
+                            );
+                        });
+                        ui.checkbox(&mut emitter.hide_range_in_game, "Hidden in Game");
+                    }
+
+                    ui.add_space(4.0);
+                    if ui
+                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                        .clicked()
+                    {
+                        action = Some(ComponentAction::RemoveAudioEmitter);
+                    }
+                });
+
+            let end_y = ui.cursor().top();
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), start_y),
+                egui::pos2(ui.min_rect().left() + 4.0, end_y),
+            );
+            ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
+        action
+    }
+
+    /// Edit AudioListener component
+    fn edit_audio_listener(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
+        let mut action = None;
+        if let Ok(mut listener) = world.get::<&mut AudioListener>(entity) {
+            let color = Self::category_color(category);
+            let start_y = ui.cursor().top();
+
+            CollapsingHeader::new(RichText::new("Audio Listener").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut listener.active, "Active");
+
+                    ui.add_space(4.0);
+                    if ui
+                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                        .clicked()
+                    {
+                        action = Some(ComponentAction::RemoveAudioListener);
+                    }
+                });
+
+            let end_y = ui.cursor().top();
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), start_y),
+                egui::pos2(ui.min_rect().left() + 4.0, end_y),
+            );
+            ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
+        action
+    }
+
     /// Render "Add Component" UI with compatibility validation.
     /// Uses `self.cached_presence` to avoid per-frame world probing.
     fn render_add_component(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
@@ -1799,6 +1988,20 @@ impl InspectorPanel {
 
                 if !has_collider && ui.selectable_label(false, "Collider").clicked() {
                     let _ = world.insert_one(entity, Collider::default());
+                    added = true;
+                }
+
+                if !p.has(ComponentPresence::AUDIO_EMITTER)
+                    && ui.selectable_label(false, "Audio Emitter").clicked()
+                {
+                    let _ = world.insert_one(entity, AudioEmitter::default());
+                    added = true;
+                }
+
+                if !p.has(ComponentPresence::AUDIO_LISTENER)
+                    && ui.selectable_label(false, "Audio Listener").clicked()
+                {
+                    let _ = world.insert_one(entity, AudioListener::default());
                     added = true;
                 }
             });

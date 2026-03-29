@@ -20,6 +20,9 @@ pub enum ReloadEvent {
     TextureChanged {
         path: String,
     },
+    AudioChanged {
+        path: String,
+    },
     ReloadFailed {
         path: String,
         error: String,
@@ -125,6 +128,18 @@ impl HotReloadWatcher {
                                                     });
                                             }
                                         }
+                                    } else if {
+                                        let ext = Path::new(&tracked_path)
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("")
+                                            .to_lowercase();
+                                        matches!(ext.as_str(), "wav" | "ogg" | "mp3" | "flac")
+                                    } {
+                                        // Audio files are reloaded lazily by AudioSystem
+                                        let _ = reload_sender.send(ReloadEvent::AudioChanged {
+                                            path: tracked_path.clone(),
+                                        });
                                     }
                                 }
                             }

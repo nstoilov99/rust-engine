@@ -4,6 +4,7 @@ use super::scene_format::{
     CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
     RigidBodyTypeData, SceneFile,
 };
+use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
 use crate::engine::ecs::hierarchy::{set_parent, Children, Parent};
 use crate::engine::physics::{
@@ -149,6 +150,26 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
             friction: col.friction,
             restitution: col.restitution,
             is_sensor: col.is_sensor,
+        });
+    }
+
+    if let Ok(emitter) = world.get::<&AudioEmitter>(entity) {
+        components.push(ComponentData::AudioEmitter {
+            clip_path: emitter.clip_path.clone(),
+            bus: emitter.bus.display_name().to_string(),
+            volume_db: emitter.volume_db,
+            pitch: emitter.pitch,
+            looping: emitter.looping,
+            auto_play: emitter.auto_play,
+            spatial: emitter.spatial,
+            max_distance: emitter.max_distance,
+            hide_range_in_game: emitter.hide_range_in_game,
+        });
+    }
+
+    if let Ok(listener) = world.get::<&AudioListener>(entity) {
+        components.push(ComponentData::AudioListener {
+            active: listener.active,
         });
     }
 
@@ -499,6 +520,37 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             }
             ComponentData::Player => {
                 builder.add(Player);
+            }
+            ComponentData::AudioEmitter {
+                clip_path,
+                bus,
+                volume_db,
+                pitch,
+                looping,
+                auto_play,
+                spatial,
+                max_distance,
+                hide_range_in_game,
+            } => {
+                let bus_val = match bus.as_str() {
+                    "Music" => AudioBus::Music,
+                    "Ambient" => AudioBus::Ambient,
+                    _ => AudioBus::SFX,
+                };
+                builder.add(AudioEmitter {
+                    clip_path: clip_path.clone(),
+                    bus: bus_val,
+                    volume_db: *volume_db,
+                    pitch: *pitch,
+                    looping: *looping,
+                    auto_play: *auto_play,
+                    spatial: *spatial,
+                    max_distance: *max_distance,
+                    hide_range_in_game: *hide_range_in_game,
+                });
+            }
+            ComponentData::AudioListener { active } => {
+                builder.add(AudioListener { active: *active });
             }
             ComponentData::Parent { .. } => {
                 // Parent relationships are handled in second pass of load_scene()
