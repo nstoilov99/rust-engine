@@ -8,13 +8,16 @@
 commit_msg_file="$1"
 commit_msg=$(cat "$commit_msg_file")
 
-# Skip merge commits
+# Rewrite merge commits to conventional format
+# "Merge branch 'vibe-kanban'" → "feat: merge vibe-kanban"
 if echo "$commit_msg" | grep -qE "^Merge "; then
-    exit 0
-fi
-
-# Skip squash merge commits (git merge --squash generates this preamble)
-if echo "$commit_msg" | grep -qE "^Squashed commit of the following:"; then
+    branch=$(echo "$commit_msg" | head -1 | sed "s/Merge branch '\\([^']*\\)'.*/\\1/")
+    if [ -n "$branch" ]; then
+        echo "feat: merge $branch" > "$commit_msg_file"
+    else
+        # Fallback for other merge formats (e.g. "Merge remote-tracking ...")
+        echo "feat: merge" > "$commit_msg_file"
+    fi
     exit 0
 fi
 
