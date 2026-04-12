@@ -1,0 +1,7 @@
+(
+    name: "NewInputAction",
+    value_type: Digital,
+    modifiers: [],
+    triggers: [],
+    consumes_input: true,
+)

@@ -8,6 +8,8 @@ use super::{
     console_cmd::{CommandContext, ConsoleCommandSystem},
     dock_layout::EditorTab,
     icons::IconManager,
+    input_action_editor::{InputActionEditor, InputActionEditorState},
+    input_context_editor::{InputContextEditor, InputContextEditorState},
     menu_bar::MenuAction,
     profiler::ProfilerPanel,
     viewport::{
@@ -19,6 +21,7 @@ use super::{
 use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
 use egui::{Color32, RichText, Ui};
+use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::TabViewer;
 use hecs::World;
 
@@ -67,10 +70,26 @@ pub struct EditorContext<'a> {
     pub icon_manager: Option<&'a IconManager>,
     /// Asset browser panel
     pub asset_browser: &'a mut AssetBrowserPanel,
+    /// Input settings panel
+    pub input_settings_panel: &'a mut super::InputSettingsPanel,
+    /// InputActionSet snapshot for input settings display (read-only)
+    pub action_set_snapshot: Option<&'a crate::engine::input::enhanced_action::InputActionSet>,
     /// Current play mode for viewport indicator
     pub play_mode: PlayMode,
     /// Output: play-mode action from viewport tab bar (set during render)
     pub toolbar_action: &'a mut MenuAction,
+    /// Open mesh editors (keyed by content-relative mesh path)
+    pub mesh_editors: &'a mut std::collections::HashMap<String, super::mesh_editor::MeshEditorData>,
+    /// Open input action editor states (split from InputActionEditor to avoid borrow conflicts)
+    pub ia_open_actions: &'a mut std::collections::HashMap<String, InputActionEditorState>,
+    /// Open input context editor states (split from InputContextEditor)
+    pub ic_open_contexts: &'a mut std::collections::HashMap<String, InputContextEditorState>,
+    /// Available action names for mapping context editors
+    pub ic_available_actions: &'a [String],
+    /// Output: tab to undock to OS window (set by context menu or drag-to-undock, processed after DockArea::show)
+    pub undock_request: &'a mut Option<EditorTab>,
+    /// The screen rect of the main dock area, used for drag-to-undock detection.
+    pub dock_area_rect: egui::Rect,
 }
 
 /// Tab viewer that renders each panel type
@@ -88,6 +107,10 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
         }
     }
 
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(tab.id_string())
+    }
+
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             EditorTab::Viewport => self.render_viewport(ui),
@@ -96,11 +119,92 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
             EditorTab::AssetBrowser => self.render_asset_browser(ui),
             EditorTab::Console => self.render_console(ui),
             EditorTab::Profiler => self.render_profiler(ui),
+            EditorTab::InputSettings => self.render_input_settings(ui),
+            EditorTab::MeshEditor(key) => self.render_mesh_editor_tab(ui, key.clone()),
+            EditorTab::InputActionEditor(key) => self.render_input_action_tab(ui, key.clone()),
+            EditorTab::InputContextEditor(key) => self.render_input_context_tab(ui, key.clone()),
+        }
+    }
+
+    fn context_menu(
+        &mut self,
+        ui: &mut Ui,
+        tab: &mut Self::Tab,
+        _surface: egui_dock::SurfaceIndex,
+        _node: egui_dock::NodeIndex,
+    ) {
+        // Viewport cannot be undocked
+        if *tab != EditorTab::Viewport {
+            if ui.button("Open in New Window").clicked() {
+                *self.editor.undock_request = Some(tab.clone());
+                ui.close();
+            }
         }
     }
 
     fn closeable(&mut self, tab: &mut Self::Tab) -> bool {
         tab.closable()
+    }
+
+    fn on_close(&mut self, tab: &mut Self::Tab) -> OnCloseResponse {
+        // Clean up editor state when per-file tabs are closed
+        match tab {
+            EditorTab::MeshEditor(key) => {
+                if let Some(data) = self.editor.mesh_editors.get_mut(key) {
+                    data.open = false;
+                }
+            }
+            EditorTab::InputActionEditor(key) => {
+                if let Some(data) = self.editor.ia_open_actions.get_mut(key) {
+                    data.open = false;
+                }
+            }
+            EditorTab::InputContextEditor(key) => {
+                if let Some(data) = self.editor.ic_open_contexts.get_mut(key) {
+                    data.open = false;
+                }
+            }
+            _ => {}
+        }
+        OnCloseResponse::Close
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
+        if *tab == EditorTab::Viewport {
+            return;
+        }
+
+        // Visual hint while dragging outside dock area
+        if response.dragged() {
+            if let Some(pos) = response.ctx.pointer_interact_pos() {
+                let dock_rect = self.editor.dock_area_rect.shrink(10.0);
+                if !dock_rect.contains(pos) {
+                    let painter = response.ctx.layer_painter(
+                        egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("undock_hint")),
+                    );
+                    painter.text(
+                        pos + egui::vec2(15.0, -10.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("Undock: {}", tab.title_string()),
+                        egui::FontId::proportional(13.0),
+                        Color32::from_rgb(180, 200, 255),
+                    );
+                }
+            }
+        }
+
+        // Trigger undock when drag released outside dock area
+        if response.drag_stopped() {
+            if let Some(pos) = response.ctx.pointer_interact_pos() {
+                if !self.editor.dock_area_rect.shrink(10.0).contains(pos) {
+                    *self.editor.undock_request = Some(tab.clone());
+                }
+            }
+        }
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+        false
     }
 }
 
@@ -597,4 +701,43 @@ impl<'a> EditorTabViewer<'a> {
         self.editor.profiler_panel.show_contents(ui);
     }
 
+    /// Render the input settings panel
+    fn render_input_settings(&mut self, ui: &mut Ui) {
+        self.editor
+            .input_settings_panel
+            .show_contents(ui, self.editor.action_set_snapshot);
+    }
+
+    /// Render a docked mesh editor tab
+    fn render_mesh_editor_tab(&mut self, ui: &mut Ui, key: String) {
+        if let Some(data) = self.editor.mesh_editors.get_mut(&key) {
+            super::mesh_editor::MeshEditorPanel::show(ui, data, self.editor.asset_browser);
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Mesh editor data not found").weak());
+            });
+        }
+    }
+
+    /// Render a docked input action editor tab
+    fn render_input_action_tab(&mut self, ui: &mut Ui, key: String) {
+        if let Some(data) = self.editor.ia_open_actions.get_mut(&key) {
+            InputActionEditor::show_ui(ui, data);
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Input action editor data not found").weak());
+            });
+        }
+    }
+
+    /// Render a docked mapping context editor tab
+    fn render_input_context_tab(&mut self, ui: &mut Ui, key: String) {
+        if let Some(data) = self.editor.ic_open_contexts.get_mut(&key) {
+            InputContextEditor::show_ui(ui, data, self.editor.ic_available_actions);
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Mapping context editor data not found").weak());
+            });
+        }
+    }
 }

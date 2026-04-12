@@ -8,7 +8,7 @@ use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::DeferredRenderer;
 use rust_engine::InputManager;
 use rust_engine::Renderer;
-use winit::keyboard::KeyCode;
+use rust_engine::engine::input::action::KeyCode;
 
 /// Handle camera movement with WASD + Space/Shift
 ///

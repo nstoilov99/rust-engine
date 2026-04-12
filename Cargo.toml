@@ -97,6 +97,9 @@ kira = { version = "0.12", features = ["cpal", "symphonia"] }
 # UUID for entity persistent identity
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Gamepad input
+gilrs = "0.11"
+
 # Logging (required by engine rules - use log::warn!/error! instead of eprintln!)
 log = "0.4"
 

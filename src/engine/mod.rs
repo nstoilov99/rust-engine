@@ -49,13 +49,24 @@ pub mod animation;
 // Audio system (Kira integration)
 pub mod audio;
 
+// Gameplay systems (player controller, etc.)
+pub mod gameplay;
+
 // Re-export commonly used types
 pub use assets::{load_gltf, load_model, load_texture, LoadedMesh, Model};
 pub use camera::*; // Camera2D, Camera3D, CameraPushConstants
 pub use core::{
     create_logical_device, select_physical_device, LogicalDeviceContext, VulkanContext,
 };
-pub use input::InputManager;
+pub use input::{ActionMap, ActionState, InputActionSystem, InputManager};
+pub use input::{
+    ActionPhase, EnhancedInputSystem, InputActionSet, InputEvent, InputModifier, InputSubsystem,
+    InputTrigger, InputValue, InputValueType, MappingContext,
+};
+pub use gameplay::{
+    CharacterMovement, CharacterMovementSystem, LookController, MovementMode, PlayerInput,
+    PlayerInputSystem,
+};
 pub use physics::{Collider, ColliderShape, PhysicsWorld, RigidBody, RigidBodyType, Velocity};
 pub use rendering::common::*; // Renderer, framebuffer functions, etc.
 pub use rendering::rendering_2d::{AnimatedSprite, SpriteBatch};

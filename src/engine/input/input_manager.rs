@@ -1,22 +1,25 @@
+//! Tracks input state (keyboard and mouse).
+//!
+//! Uses engine-owned `KeyCode` and `MouseButton` internally.
+//! Conversion from winit types happens at the event boundary.
+
 use std::collections::HashSet;
-use winit::event::{ElementState, MouseButton};
-use winit::keyboard::KeyCode;
 
-/// Tracks input state (keyboard and mouse)
-/// Updated for winit 0.30 - uses KeyCode instead of VirtualKeyCode
+use super::action;
+use super::key_convert;
+
+/// Tracks input state (keyboard and mouse).
 pub struct InputManager {
-    keys_pressed: HashSet<KeyCode>,
-    keys_just_pressed: HashSet<KeyCode>,
-    keys_just_released: HashSet<KeyCode>,
+    keys_pressed: HashSet<action::KeyCode>,
+    keys_just_pressed: HashSet<action::KeyCode>,
+    keys_just_released: HashSet<action::KeyCode>,
 
-    mouse_buttons_pressed: HashSet<MouseButton>,
+    mouse_buttons_pressed: HashSet<action::MouseButton>,
     mouse_position: (f32, f32),
     mouse_delta: (f32, f32),
     scroll_delta: f32,
 
-    /// Raw mouse delta from DeviceEvent::MouseMotion (for camera when cursor is locked)
     raw_mouse_delta: (f32, f32),
-    /// Whether to use raw mouse input (when cursor is locked)
     use_raw_mouse: bool,
 }
 
@@ -41,7 +44,6 @@ impl InputManager {
         }
     }
 
-    /// Call this at the start of each frame
     pub fn new_frame(&mut self) {
         crate::profile_scope!("input_processing");
         self.keys_just_pressed.clear();
@@ -51,107 +53,119 @@ impl InputManager {
         self.scroll_delta = 0.0;
     }
 
-    /// Handle keyboard input (winit 0.30)
-    pub fn handle_keyboard(&mut self, keycode: Option<KeyCode>, state: ElementState) {
-        if let Some(keycode) = keycode {
-            match state {
-                ElementState::Pressed => {
-                    if !self.keys_pressed.contains(&keycode) {
-                        self.keys_just_pressed.insert(keycode);
-                    }
-                    self.keys_pressed.insert(keycode);
-                }
-                ElementState::Released => {
-                    self.keys_pressed.remove(&keycode);
-                    self.keys_just_released.insert(keycode);
-                }
-            }
-        }
-    }
+    /// Handle keyboard input from winit. Converts to engine KeyCode at the boundary.
+    pub fn handle_keyboard(
+        &mut self,
+        keycode: Option<winit::keyboard::KeyCode>,
+        state: winit::event::ElementState,
+    ) {
+        let Some(winit_key) = keycode else { return };
+        let Some(engine_key) = key_convert::from_winit_keycode(winit_key) else { return };
 
-    /// Handle mouse button input
-    pub fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         match state {
-            ElementState::Pressed => {
-                self.mouse_buttons_pressed.insert(button);
+            winit::event::ElementState::Pressed => {
+                if !self.keys_pressed.contains(&engine_key) {
+                    self.keys_just_pressed.insert(engine_key);
+                }
+                self.keys_pressed.insert(engine_key);
             }
-            ElementState::Released => {
-                self.mouse_buttons_pressed.remove(&button);
+            winit::event::ElementState::Released => {
+                self.keys_pressed.remove(&engine_key);
+                self.keys_just_released.insert(engine_key);
             }
         }
     }
 
-    /// Handle mouse movement
+    /// Handle mouse button input from winit.
+    pub fn handle_mouse_button(
+        &mut self,
+        button: winit::event::MouseButton,
+        state: winit::event::ElementState,
+    ) {
+        let Some(engine_btn) = key_convert::from_winit_mouse_button(button) else { return };
+
+        match state {
+            winit::event::ElementState::Pressed => {
+                self.mouse_buttons_pressed.insert(engine_btn);
+            }
+            winit::event::ElementState::Released => {
+                self.mouse_buttons_pressed.remove(&engine_btn);
+            }
+        }
+    }
+
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) {
         let old_pos = self.mouse_position;
         self.mouse_position = (x, y);
         self.mouse_delta = (x - old_pos.0, y - old_pos.1);
     }
 
-    /// Handle mouse wheel
     pub fn handle_mouse_wheel(&mut self, delta: f32) {
         self.scroll_delta += delta;
     }
 
-    /// Handle raw mouse motion from DeviceEvent::MouseMotion
-    /// This provides delta regardless of cursor position (for camera when cursor is locked)
     pub fn handle_raw_mouse_motion(&mut self, delta_x: f64, delta_y: f64) {
-        // Accumulate raw delta (multiple events can arrive per frame)
         self.raw_mouse_delta.0 += delta_x as f32;
         self.raw_mouse_delta.1 += delta_y as f32;
     }
 
-    /// Set whether to use raw mouse input (call when cursor lock state changes)
     pub fn set_use_raw_mouse(&mut self, use_raw: bool) {
         self.use_raw_mouse = use_raw;
         if use_raw {
-            // Clear cursor-based delta when switching to raw to avoid jump
             self.mouse_delta = (0.0, 0.0);
         } else {
-            // Clear raw delta when switching to cursor-based
             self.raw_mouse_delta = (0.0, 0.0);
         }
     }
 
-    // Query methods
+    // === Engine KeyCode query methods ===
 
-    /// Is key currently held down?
-    pub fn is_key_pressed(&self, keycode: KeyCode) -> bool {
+    pub fn is_key_pressed(&self, keycode: action::KeyCode) -> bool {
         self.keys_pressed.contains(&keycode)
     }
 
-    /// Was key just pressed this frame?
-    pub fn is_key_just_pressed(&self, keycode: KeyCode) -> bool {
+    pub fn is_key_just_pressed(&self, keycode: action::KeyCode) -> bool {
         self.keys_just_pressed.contains(&keycode)
     }
 
-    /// Was key just released this frame?
-    pub fn is_key_just_released(&self, keycode: KeyCode) -> bool {
+    pub fn is_key_just_released(&self, keycode: action::KeyCode) -> bool {
         self.keys_just_released.contains(&keycode)
     }
 
-    /// Is mouse button pressed?
-    pub fn is_mouse_pressed(&self, button: MouseButton) -> bool {
+    /// Is mouse button pressed (engine MouseButton)?
+    pub fn is_mouse_button_pressed(&self, button: action::MouseButton) -> bool {
         self.mouse_buttons_pressed.contains(&button)
     }
 
-    /// Get current mouse position
+    /// Is mouse button pressed (winit compat)?
+    pub fn is_mouse_pressed(&self, button: winit::event::MouseButton) -> bool {
+        key_convert::from_winit_mouse_button(button)
+            .is_some_and(|b| self.mouse_buttons_pressed.contains(&b))
+    }
+
     pub fn mouse_position(&self) -> (f32, f32) {
         self.mouse_position
     }
 
-    /// Get mouse movement delta this frame
-    /// Returns raw delta when cursor is locked, cursor-based delta otherwise
     pub fn mouse_delta(&self) -> (f32, f32) {
-        if self.use_raw_mouse {
-            self.raw_mouse_delta
-        } else {
-            self.mouse_delta
-        }
+        if self.use_raw_mouse { self.raw_mouse_delta } else { self.mouse_delta }
     }
 
-    /// Get mouse wheel scroll delta this frame
     pub fn scroll_delta(&self) -> f32 {
         self.scroll_delta
+    }
+
+    // === Winit-compatible query methods ===
+
+    pub fn is_winit_key_pressed(&self, keycode: winit::keyboard::KeyCode) -> bool {
+        key_convert::from_winit_keycode(keycode).is_some_and(|k| self.keys_pressed.contains(&k))
+    }
+
+    pub fn is_winit_key_just_pressed(&self, keycode: winit::keyboard::KeyCode) -> bool {
+        key_convert::from_winit_keycode(keycode).is_some_and(|k| self.keys_just_pressed.contains(&k))
+    }
+
+    pub fn is_winit_key_just_released(&self, keycode: winit::keyboard::KeyCode) -> bool {
+        key_convert::from_winit_keycode(keycode).is_some_and(|k| self.keys_just_released.contains(&k))
     }
 }

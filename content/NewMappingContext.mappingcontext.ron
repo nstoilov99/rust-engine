@@ -1,0 +1,17 @@
+(
+    name: "NewMappingContext",
+    priority: 0,
+    entries: [
+        (
+            action_name: "Shoot",
+            bindings: [
+                (
+                    source: GamepadButton(Start),
+                    modifiers: [],
+                    triggers: [],
+                    axis_contribution: (0.0, 0.0),
+                ),
+            ],
+        ),
+    ],
+)

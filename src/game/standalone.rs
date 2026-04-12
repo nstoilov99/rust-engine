@@ -21,6 +21,13 @@ use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
 use rust_engine::engine::rendering::RenderTarget;
 use rust_engine::{GameLoop, InputManager, Renderer};
+use rust_engine::engine::input::action_state::ActionState;
+use rust_engine::engine::input::gamepad::GamepadState;
+use rust_engine::engine::input::serialization;
+use rust_engine::engine::input::enhanced_defaults::default_action_set;
+use rust_engine::engine::input::enhanced_serialization;
+use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
+use rust_engine::engine::input::event::InputEvent;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
 use vulkano::sync::GpuFuture;
@@ -33,7 +40,6 @@ pub struct StandaloneApp {
     pub renderer: Renderer,
     pub asset_manager: Arc<AssetManager>,
     pub game_world: GameWorld,
-    pub input_manager: InputManager,
     pub deferred_renderer: DeferredRenderer,
     pub game_loop: GameLoop,
     pub current_debug_view: DebugView,
@@ -89,6 +95,27 @@ impl StandaloneApp {
         let mut transform_cache = TransformCache::new();
         transform_cache.propagate(game_world.hecs_mut());
         game_world.resources_mut().insert(transform_cache);
+        game_world.resources_mut().insert(InputManager::new());
+        // Enhanced input system
+        let action_set = enhanced_serialization::load_action_set(
+            &enhanced_serialization::default_action_set_path(),
+        )
+        .or_else(|| {
+            serialization::load_action_map(&serialization::default_bindings_path())
+                .map(|legacy| enhanced_serialization::migrate_legacy_action_map(&legacy))
+        })
+        .unwrap_or_else(default_action_set);
+        let mut subsystem = InputSubsystem::new(action_set);
+        subsystem.add_context("global");
+        subsystem.add_context("gameplay");
+        game_world.resources_mut().insert(subsystem);
+        game_world.resources_mut().insert(ActionState::new());
+        game_world
+            .resources_mut()
+            .insert(rust_engine::engine::ecs::events::Events::<InputEvent>::new());
+        if let Some(gamepad_state) = GamepadState::try_new() {
+            game_world.resources_mut().insert(gamepad_state);
+        }
 
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
@@ -124,6 +151,11 @@ impl StandaloneApp {
             Some(vulkano::sync::now(renderer.device.clone()).boxed());
 
         let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            EnhancedInputSystem,
+            EnhancedInputSystem::stage(),
+            EnhancedInputSystem::descriptor(),
+        );
         schedule.add_system_described(
             AnimationUpdateSystem,
             Stage::PreUpdate,
@@ -174,7 +206,6 @@ impl StandaloneApp {
             window,
             asset_manager,
             game_world,
-            input_manager: InputManager::new(),
             deferred_renderer,
             game_loop: GameLoop::new(),
             current_debug_view: DebugView::None,
@@ -221,7 +252,12 @@ impl StandaloneApp {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
         tracy_client::Client::running().map(|c| c.frame_mark());
-        self.input_manager.new_frame();
+        if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+            im.new_frame();
+        }
+        if let Some(gp) = self.game_world.resource_mut::<GamepadState>() {
+            gp.update();
+        }
         self.game_world.begin_frame();
     }
 
@@ -247,21 +283,28 @@ impl StandaloneApp {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
-                self.input_manager.handle_keyboard(keycode, key_event.state);
+                if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+                    im.handle_keyboard(keycode, key_event.state);
+                }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                self.input_manager.handle_mouse_button(*button, *state);
+                if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_button(*button, *state);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.input_manager
-                    .handle_mouse_move(position.x as f32, position.y as f32);
+                if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_move(position.x as f32, position.y as f32);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_x, y) => *y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                 };
-                self.input_manager.handle_mouse_wheel(scroll);
+                if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_wheel(scroll);
+                }
             }
             _ => {}
         }
@@ -365,11 +408,13 @@ impl StandaloneApp {
             }
         };
 
-        input_handler::handle_debug_views(
-            &self.input_manager,
-            &mut self.deferred_renderer,
-            &mut self.current_debug_view,
-        );
+        if let Some(im) = self.game_world.resource::<InputManager>() {
+            input_handler::handle_debug_views(
+                im,
+                &mut self.deferred_renderer,
+                &mut self.current_debug_view,
+            );
+        }
 
         let future = {
             rust_engine::profile_scope!("swapchain_present");

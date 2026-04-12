@@ -28,7 +28,7 @@
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.5509301,
+                    fraction: 0.53420085,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -55,7 +55,7 @@
                         ),
                         max: (
                             x: 1435.0,
-                            y: 764.0,
+                            y: 742.0,
                         ),
                     ),
                     viewport: (
@@ -65,7 +65,7 @@
                         ),
                         max: (
                             x: 1435.0,
-                            y: 764.0,
+                            y: 742.0,
                         ),
                     ),
                     tabs: [
@@ -79,7 +79,7 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 766.0,
+                            y: 744.0,
                         ),
                         max: (
                             x: 1435.0,
@@ -89,7 +89,7 @@
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 790.0,
+                            y: 768.0,
                         ),
                         max: (
                             x: 1435.0,
@@ -97,11 +97,11 @@
                         ),
                     ),
                     tabs: [
+                        Profiler,
                         AssetBrowser,
                         Console,
-                        Profiler,
                     ],
-                    active: (2),
+                    active: (1),
                     scroll: 0.0,
                     collapsed: false,
                 )),
@@ -161,16 +161,8 @@
                     scroll: 0.0,
                     collapsed: false,
                 )),
-                Empty,
-                Empty,
-                Empty,
-                Empty,
-                Empty,
-                Empty,
-                Empty,
-                Empty,
             ],
-            focused_node: Some((4)),
+            focused_node: Some((3)),
             collapsed: false,
             collapsed_leaf_count: 0,
         )),

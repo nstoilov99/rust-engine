@@ -25,10 +25,11 @@ use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
     CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
-    EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
-    ImportDialogAction, ImportDialogState, ImportPreview, InspectorPanel, LogFilter, LogMessage, MenuAction,
-    PendingWindowRequest, ProfilerPanel, RenameTarget, Selection, ViewportSettings, ViewportTexture,
-    WindowConfig,
+    EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
+    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
+    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
+    PendingWindowRequest, ProfilerPanel, RenameTarget, SecondaryWindowKind, Selection,
+    ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
@@ -37,6 +38,13 @@ use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderD
 use rust_engine::engine::rendering::{RenderTarget, ResourceCounters};
 use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
+use rust_engine::engine::input::action_state::ActionState;
+use rust_engine::engine::input::gamepad::GamepadState;
+use rust_engine::engine::input::serialization;
+use rust_engine::engine::input::enhanced_defaults::default_action_set;
+use rust_engine::engine::input::enhanced_serialization;
+use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
+use rust_engine::engine::input::event::InputEvent;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
@@ -83,7 +91,6 @@ pub struct CoreApp {
     pub reload_rx: Receiver<ReloadEvent>,
     pub game_world: GameWorld,
     pub schedule: Schedule,
-    pub input_manager: InputManager,
     pub deferred_renderer: DeferredRenderer,
     pub game_loop: GameLoop,
     pub current_debug_view: DebugView,
@@ -135,6 +142,10 @@ pub struct SceneEditorState {
     pub import_dialog: Option<ImportDialogState>,
     /// Open mesh editors keyed by content-relative mesh path.
     pub mesh_editors: std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
+    /// Open input action editors (one per .inputaction.ron file).
+    pub input_action_editor: InputActionEditor,
+    /// Open mapping context editors (one per .mappingcontext.ron file).
+    pub input_context_editor: InputContextEditor,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -146,6 +157,7 @@ pub struct EditorUIState {
     pub icon_manager: IconManager,
     pub icons_loaded: bool,
     pub profiler_panel: ProfilerPanel,
+    pub input_settings_panel: InputSettingsPanel,
 }
 
 /// Play-mode snapshots and build dialog.
@@ -228,6 +240,26 @@ impl App {
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
         game_world.resources_mut().insert(physics_world);
         game_world.resources_mut().insert(TransformCache::new());
+        game_world.resources_mut().insert(InputManager::new());
+        // Enhanced input system: try loading enhanced config, fall back to legacy migration, then defaults
+        let action_set = enhanced_serialization::load_action_set(
+            &enhanced_serialization::default_action_set_path(),
+        )
+        .or_else(|| {
+            serialization::load_action_map(&serialization::default_bindings_path())
+                .map(|legacy| enhanced_serialization::migrate_legacy_action_map(&legacy))
+        })
+        .unwrap_or_else(default_action_set);
+        let mut subsystem = InputSubsystem::new(action_set);
+        subsystem.add_context("global");
+        game_world.resources_mut().insert(subsystem);
+        game_world.resources_mut().insert(ActionState::new());
+        game_world
+            .resources_mut()
+            .insert(rust_engine::engine::ecs::events::Events::<InputEvent>::new());
+        if let Some(gamepad_state) = GamepadState::try_new() {
+            game_world.resources_mut().insert(gamepad_state);
+        }
 
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
@@ -258,12 +290,20 @@ impl App {
         use rust_engine::engine::audio::components::{AudioEmitter, AudioListener};
         use rust_engine::engine::ecs::components::TransformDirty;
         use rust_engine::engine::ecs::hierarchy::{Children, Parent};
+        use rust_engine::engine::gameplay::{
+            CharacterMovementSystem, PlayerInputSystem,
+        };
         use rust_engine::engine::physics::{
             Collider as PhysCollider, PhysicsStepSystem,
             RigidBody as PhysRigidBody, Velocity as PhysVelocity,
         };
 
         let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            EnhancedInputSystem,
+            EnhancedInputSystem::stage(),
+            EnhancedInputSystem::descriptor(),
+        );
         schedule.add_system_described(
             AnimationUpdateSystem,
             Stage::PreUpdate,
@@ -284,6 +324,18 @@ impl App {
                 .reads::<PhysCollider>()
                 .reads::<PhysVelocity>()
                 .after("AnimationUpdateSystem"),
+            RunIfPlaying,
+        );
+        schedule.add_system_described_with_criteria(
+            PlayerInputSystem,
+            Stage::Update,
+            PlayerInputSystem::descriptor(),
+            RunIfPlaying,
+        );
+        schedule.add_system_described_with_criteria(
+            CharacterMovementSystem,
+            Stage::Update,
+            CharacterMovementSystem::descriptor(),
             RunIfPlaying,
         );
         schedule.add_system_described(
@@ -332,7 +384,6 @@ impl App {
             reload_rx,
             game_world,
             schedule,
-            input_manager: InputManager::new(),
             deferred_renderer,
             game_loop: GameLoop::new(),
             current_debug_view: DebugView::None,
@@ -396,6 +447,8 @@ impl App {
                 current_scene_name: "Main Scene".to_string(),
                 import_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
+                input_action_editor: InputActionEditor::new(),
+                input_context_editor: InputContextEditor::new(),
             },
             ui: EditorUIState {
                 gui,
@@ -405,6 +458,7 @@ impl App {
                 icon_manager: IconManager::new(20, egui::Color32::WHITE),
                 icons_loaded: false,
                 profiler_panel,
+                input_settings_panel: InputSettingsPanel::new(),
             },
             play: PlayModeState {
                 snapshot: None,
@@ -462,30 +516,107 @@ impl App {
         }
     }
 
-    /// Queue a request to open a secondary OS window for a mesh editor.
-    pub fn request_mesh_editor_window(&mut self, mesh_key: String) {
-        let filename = std::path::Path::new(&mesh_key)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| mesh_key.clone());
-        self.pending_window_requests.push(PendingWindowRequest {
-            mesh_key,
-            title: format!("Mesh Editor \u{2014} {}", filename),
-            width: 900,
-            height: 700,
-        });
-    }
-
     /// Drain all pending window requests (called by GameApp in about_to_wait).
     pub fn drain_pending_window_requests(&mut self) -> Vec<PendingWindowRequest> {
         std::mem::take(&mut self.pending_window_requests)
+    }
+
+    /// Undock a tab from the dock area to a secondary OS window.
+    pub fn undock_tab(&mut self, tab: EditorTab) {
+        if let Some((kind, editor_key)) = tab.to_window_kind() {
+            // Remove from dock
+            self.editor.ui.dock_state.remove_tab(&tab);
+
+            // Ensure editor state exists for per-file tabs
+            match &tab {
+                EditorTab::MeshEditor(key) => {
+                    if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
+                        data.open = true;
+                    }
+                }
+                EditorTab::InputActionEditor(key) => {
+                    if let Some(data) = self.editor.scene.input_action_editor.open_actions.get_mut(key) {
+                        data.open = true;
+                    }
+                }
+                EditorTab::InputContextEditor(key) => {
+                    if let Some(data) = self.editor.scene.input_context_editor.open_contexts.get_mut(key) {
+                        data.open = true;
+                    }
+                }
+                _ => {}
+            }
+
+            let title = kind.window_title(&editor_key);
+            let (width, height) = kind.default_size();
+            self.pending_window_requests.push(PendingWindowRequest {
+                editor_key,
+                kind,
+                title,
+                width,
+                height,
+            });
+        }
+    }
+
+    /// Dock a secondary OS window back into the dock area as a tab.
+    pub fn dock_tab(&mut self, editor_key: &str, kind: SecondaryWindowKind) {
+        let tab = kind.to_editor_tab(editor_key);
+        self.editor.ui.dock_state.open_tab(tab);
+
+        // Mark the editor state for closure (secondary window will be removed by cleanup)
+        match kind {
+            SecondaryWindowKind::Mesh => {
+                if let Some(data) = self.editor.scene.mesh_editors.get_mut(editor_key) {
+                    data.open = false;
+                }
+            }
+            SecondaryWindowKind::InputAction => {
+                if let Some(data) = self.editor.scene.input_action_editor.open_actions.get_mut(editor_key) {
+                    data.open = false;
+                }
+            }
+            SecondaryWindowKind::InputContext => {
+                if let Some(data) = self.editor.scene.input_context_editor.open_contexts.get_mut(editor_key) {
+                    data.open = false;
+                }
+            }
+            // Built-in panels: just add tab, window will be cleaned up
+            _ => {}
+        }
+    }
+
+    /// Open an input action file as a dock tab (default behavior).
+    pub fn open_input_action_as_tab(&mut self, file_path: std::path::PathBuf) {
+        let key = self.editor.scene.input_action_editor.open(file_path);
+        let tab = EditorTab::InputActionEditor(key);
+        self.editor.ui.dock_state.open_tab(tab);
+    }
+
+    /// Open a mapping context file as a dock tab (default behavior).
+    pub fn open_input_context_as_tab(&mut self, file_path: std::path::PathBuf) {
+        self.editor.scene.input_context_editor.refresh_action_names(std::path::Path::new("content"));
+        let key = self.editor.scene.input_context_editor.open(file_path);
+        let tab = EditorTab::InputContextEditor(key);
+        self.editor.ui.dock_state.open_tab(tab);
+    }
+
+    /// Open a mesh file as a dock tab (default behavior).
+    pub fn open_mesh_as_tab(&mut self, mesh_key: String) {
+        let tab = EditorTab::MeshEditor(mesh_key);
+        self.editor.ui.dock_state.open_tab(tab);
     }
 
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
         tracy_client::Client::running().map(|c| c.frame_mark());
-        self.core.input_manager.new_frame();
+        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+            im.new_frame();
+        }
+        if let Some(gp) = self.core.game_world.resource_mut::<GamepadState>() {
+            gp.update();
+        }
         self.core.game_world.begin_frame();
     }
 
@@ -640,29 +771,33 @@ impl App {
                     }
 
                     if keycode == Some(KeyCode::KeyS)
-                        && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft)
+                        && self.core.game_world.resource::<InputManager>().is_some_and(|im| im.is_winit_key_pressed(KeyCode::ControlLeft))
                     {
                         self.save_active_scene();
                     }
                 }
-                self.core
-                    .input_manager
-                    .handle_keyboard(keycode, key_event.state);
+                if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+                    im.handle_keyboard(keycode, key_event.state);
+                }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                self.core.input_manager.handle_mouse_button(*button, *state);
+                if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_button(*button, *state);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.core
-                    .input_manager
-                    .handle_mouse_move(position.x as f32, position.y as f32);
+                if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_move(position.x as f32, position.y as f32);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_x, y) => *y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
                 };
-                self.core.input_manager.handle_mouse_wheel(scroll);
+                if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+                    im.handle_mouse_wheel(scroll);
+                }
             }
             WindowEvent::Focused(false) => {
                 self.editor.viewport.camera.reset_active_drag();
@@ -670,7 +805,9 @@ impl App {
                     let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
                     self.core.window.set_cursor_visible(true);
                     self.editor.viewport.cursor_locked = false;
-                    self.core.input_manager.set_use_raw_mouse(false);
+                    if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+                        im.set_use_raw_mouse(false);
+                    }
                     self.editor.viewport.drag_start_cursor_pos = None;
                 }
             }
@@ -810,6 +947,21 @@ impl App {
                 .gui
                 .register_native_texture(self.editor.viewport.texture.image_view());
             self.editor.viewport.texture_id = Some(texture_id);
+        }
+
+        // Register/update mesh preview textures for docked mesh editors
+        for (key, data) in self.editor.scene.mesh_editors.iter_mut() {
+            if self.editor.ui.dock_state.is_tab_open(&EditorTab::MeshEditor(key.clone())) {
+                if let Some(ref preview) = data.preview {
+                    if !preview.mesh_indices.is_empty() && !data.preview_dirty {
+                        let iv = preview.texture.image_view();
+                        if preview.texture_id.is_none() {
+                            let tid = self.editor.ui.gui.register_native_texture(iv);
+                            data.preview.as_mut().unwrap().texture_id = Some(tid);
+                        }
+                    }
+                }
+            }
         }
 
         if !self.editor.ui.icons_loaded {
@@ -1026,10 +1178,18 @@ impl App {
 
         let current_play_mode = self.play_mode();
 
+        // Snapshot InputActionSet for the input settings panel (before mutable world borrow)
+        let action_set_snapshot = self
+            .core
+            .game_world
+            .resource::<InputSubsystem>()
+            .map(|s| s.action_set.clone());
+
         let show_profiler = &mut self.editor.ui.show_profiler;
         let hierarchy_panel = &mut self.editor.scene.hierarchy_panel;
         let inspector_panel = &mut self.editor.scene.inspector_panel;
         let profiler_panel = &mut self.editor.ui.profiler_panel;
+        let input_settings_panel = &mut self.editor.ui.input_settings_panel;
         let world = self.core.game_world.hecs_mut();
         let selection = &mut self.editor.scene.selection;
         let command_history = &mut self.editor.scene.command_history;
@@ -1058,6 +1218,10 @@ impl App {
         };
 
         let asset_browser = &mut self.editor.scene.asset_browser;
+        let mesh_editors = &mut self.editor.scene.mesh_editors;
+        let ia_open_actions = &mut self.editor.scene.input_action_editor.open_actions;
+        let ic_open_contexts = &mut self.editor.scene.input_context_editor.open_contexts;
+        let ic_available_actions = self.editor.scene.input_context_editor.available_actions.as_slice();
         let build_dialog = &mut self.editor.play.build_dialog;
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
@@ -1065,6 +1229,7 @@ impl App {
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
         let mut import_action = ImportDialogAction::None;
+        let mut undock_request: Option<EditorTab> = None;
 
         let gui_result =
             match self
@@ -1107,8 +1272,16 @@ impl App {
                         viewport_settings,
                         icon_manager,
                         asset_browser,
+                        input_settings_panel,
+                        action_set_snapshot: action_set_snapshot.as_ref(),
                         play_mode: current_play_mode,
                         toolbar_action: &mut toolbar_action,
+                        mesh_editors,
+                        ia_open_actions,
+                        ic_open_contexts,
+                        ic_available_actions,
+                        undock_request: &mut undock_request,
+                        dock_area_rect: ctx.available_rect(),
                     };
 
                     let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -1209,6 +1382,18 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Apply edited input bindings back to the InputSubsystem
+        if let Some(new_set) = self.editor.ui.input_settings_panel.take_pending_apply() {
+            if let Some(subsystem) = self.core.game_world.resource_mut::<InputSubsystem>() {
+                subsystem.set_action_set(new_set);
+            }
+        }
+
+        // Process undock request from tab context menu
+        if let Some(tab) = undock_request {
+            self.undock_tab(tab);
         }
 
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
@@ -1404,8 +1589,14 @@ impl App {
                                         preview_dirty: true,
                                     },
                                 );
-                                self.request_mesh_editor_window(relative);
+                                self.open_mesh_as_tab(relative);
                             }
+                        } else if asset_type == AssetType::InputAction {
+                            let full_path = std::path::Path::new("content").join(&meta_path);
+                            self.open_input_action_as_tab(full_path);
+                        } else if asset_type == AssetType::InputMappingContext {
+                            let full_path = std::path::Path::new("content").join(&meta_path);
+                            self.open_input_context_as_tab(full_path);
                         }
                     }
                 }
@@ -1887,6 +2078,74 @@ impl App {
                                 eprintln!("Failed to rename folder: {}", e);
                             }
                         }
+                    }
+                }
+                AssetBrowserEvent::CreateAsset { asset_type, parent_path } => {
+                    let full_parent = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&parent_path);
+
+                    match asset_type {
+                        AssetType::InputAction => {
+                            let base_name = "NewInputAction";
+                            let mut new_name = format!("{}.inputaction.ron", base_name);
+                            let mut counter = 1;
+                            while full_parent.join(&new_name).exists() {
+                                new_name = format!("{}_{}.inputaction.ron", base_name, counter);
+                                counter += 1;
+                            }
+                            let action_name = new_name.trim_end_matches(".inputaction.ron").to_string();
+                            let action = rust_engine::engine::input::enhanced_action::InputActionDefinition::new(
+                                &action_name,
+                                rust_engine::engine::input::value::InputValueType::Digital,
+                            );
+                            let file_path = full_parent.join(&new_name);
+                            match enhanced_serialization::save_input_action(&action, &file_path) {
+                                Ok(()) => {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Created input action: {}", action_name
+                                    )));
+                                    self.editor.scene.asset_browser.request_rescan();
+                                }
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to create input action: {}", e
+                                    )));
+                                }
+                            }
+                        }
+                        AssetType::InputMappingContext => {
+                            let base_name = "NewMappingContext";
+                            let mut new_name = format!("{}.mappingcontext.ron", base_name);
+                            let mut counter = 1;
+                            while full_parent.join(&new_name).exists() {
+                                new_name = format!("{}_{}.mappingcontext.ron", base_name, counter);
+                                counter += 1;
+                            }
+                            let ctx_name = new_name.trim_end_matches(".mappingcontext.ron").to_string();
+                            let mapping_ctx = rust_engine::engine::input::enhanced_action::MappingContext::new(
+                                &ctx_name, 0,
+                            );
+                            let file_path = full_parent.join(&new_name);
+                            match enhanced_serialization::save_mapping_context(&mapping_ctx, &file_path) {
+                                Ok(()) => {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Created mapping context: {}", ctx_name
+                                    )));
+                                    self.editor.scene.asset_browser.request_rescan();
+                                }
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to create mapping context: {}", e
+                                    )));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -2494,6 +2753,23 @@ impl App {
 
         self.sync_camera_from_ecs();
 
+        // Mapping context activation is handled by PlayerInputSystem
+        // (reads from the PlayerInput component's mapping_context field)
+
+        // Capture cursor for mouse look during gameplay
+        if self
+            .core
+            .window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .is_err()
+        {
+            let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
+        }
+        self.core.window.set_cursor_visible(false);
+        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+            im.set_use_raw_mouse(true);
+        }
+
         self.core.game_world.send_event(PlayModeChanged {
             previous: PlayMode::Edit,
             current: PlayMode::Playing,
@@ -2519,6 +2795,26 @@ impl App {
         }
         if let Some(time) = self.core.game_world.resource_mut::<Time>() {
             time.paused = false;
+        }
+
+        // Remove all gameplay mapping contexts (pushed by PlayerInputSystem)
+        if let Some(subsystem) = self.core.game_world.resource_mut::<InputSubsystem>() {
+            let to_remove: Vec<String> = subsystem
+                .active_contexts()
+                .iter()
+                .filter(|c| c.as_str() != "global")
+                .cloned()
+                .collect();
+            for ctx in to_remove {
+                subsystem.remove_context(&ctx);
+            }
+        }
+
+        // Release cursor capture
+        let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
+        self.core.window.set_cursor_visible(true);
+        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+            im.set_use_raw_mouse(false);
         }
 
         self.core.game_world.reset_transients(false);
@@ -2680,10 +2976,15 @@ impl App {
     }
 
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
+        // Temporarily remove InputManager to avoid borrow conflicts with game_world
+        let Some(mut input_manager) = self.core.game_world.resources_mut().remove::<InputManager>() else {
+            return;
+        };
+
         if self.play_mode() == PlayMode::Edit
-            && self.core.input_manager.is_key_pressed(KeyCode::ControlLeft)
+            && input_manager.is_winit_key_pressed(KeyCode::ControlLeft)
         {
-            if self.core.input_manager.is_key_just_pressed(KeyCode::KeyZ) {
+            if input_manager.is_winit_key_just_pressed(KeyCode::KeyZ) {
                 if let Some(desc) = self
                     .editor
                     .scene
@@ -2693,7 +2994,7 @@ impl App {
                     println!("Undo: {}", desc);
                 }
             }
-            if self.core.input_manager.is_key_just_pressed(KeyCode::KeyY) {
+            if input_manager.is_winit_key_just_pressed(KeyCode::KeyY) {
                 if let Some(desc) = self
                     .editor
                     .scene
@@ -2728,7 +3029,7 @@ impl App {
                 && viewport_usable;
 
             self.editor.viewport.camera.update(
-                &self.core.input_manager,
+                &input_manager,
                 delta_time,
                 viewport_available,
                 gizmo_active,
@@ -2748,7 +3049,7 @@ impl App {
 
         if camera_dragging && !self.editor.viewport.cursor_locked {
             self.editor.viewport.drag_start_cursor_pos =
-                Some(self.core.input_manager.mouse_position());
+                Some(input_manager.mouse_position());
             if self
                 .core
                 .window
@@ -2759,7 +3060,7 @@ impl App {
             }
             self.core.window.set_cursor_visible(false);
             self.editor.viewport.cursor_locked = true;
-            self.core.input_manager.set_use_raw_mouse(true);
+            input_manager.set_use_raw_mouse(true);
         } else if !camera_dragging && self.editor.viewport.cursor_locked {
             let _ = self.core.window.set_cursor_grab(CursorGrabMode::None);
             if let Some((x, y)) = self.editor.viewport.drag_start_cursor_pos.take() {
@@ -2768,12 +3069,12 @@ impl App {
             }
             self.core.window.set_cursor_visible(true);
             self.editor.viewport.cursor_locked = false;
-            self.core.input_manager.set_use_raw_mouse(false);
+            input_manager.set_use_raw_mouse(false);
         }
 
         if !gui_result.wants_keyboard && self.play_mode() == PlayMode::Edit {
             input_handler::handle_debug_views(
-                &self.core.input_manager,
+                &input_manager,
                 &mut self.core.deferred_renderer,
                 &mut self.core.current_debug_view,
             );
@@ -2782,9 +3083,12 @@ impl App {
         if !gui_result.wants_pointer && !self.editor.viewport.hovered {
             input_handler::handle_zoom(
                 &mut self.core.renderer,
-                &self.core.input_manager,
+                &input_manager,
                 &mut self.core.camera_distance,
             );
         }
+
+        // Re-insert InputManager into resources
+        self.core.game_world.resources_mut().insert(input_manager);
     }
 }

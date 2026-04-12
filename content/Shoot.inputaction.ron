@@ -1,0 +1,9 @@
+(
+    name: "Shoot",
+    value_type: Digital,
+    modifiers: [],
+    triggers: [
+        Down,
+    ],
+    consumes_input: true,
+)

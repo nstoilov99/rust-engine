@@ -8,8 +8,8 @@
 
 use glam::{Mat4, Quat, Vec3};
 use winit::event::MouseButton;
-use winit::keyboard::KeyCode;
 
+use crate::engine::input::action::KeyCode;
 use crate::engine::input::InputManager;
 
 /// Camera control mode based on input combination
