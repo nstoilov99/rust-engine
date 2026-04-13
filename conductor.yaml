@@ -1,0 +1,60 @@
+workspace: /mnt/e/projects/rust/rust-engine
+server:
+  host: 127.0.0.1
+  port: 4748
+  cors_origins: []
+port: 4748
+dashboardUrl: http://localhost:4747
+defaults: {}
+projects:
+  rust-engine:
+    name: rust-engine
+    repo: nstoilov99/rust-engine
+    path: /mnt/e/projects/rust/rust-engine
+    defaultBranch: main
+    sessionPrefix: re
+    runtime: direct
+    agent: claude-code
+    workspace: worktree
+    scm: github
+    agentConfig:
+      permissions: skip
+      model: claude-opus-4-6
+      reasoningEffort: medium
+    setupScript: []
+    runSetupInParallel: false
+    devServerScript: []
+    cleanupScript: []
+    archiveScript: []
+    copyFiles: []
+preferences:
+  onboardingAcknowledged: true
+  codingAgent: claude-code
+  ide: vscode
+  markdownEditor: vscode
+  markdownEditorPath: ''
+  modelAccess:
+    claudeCode: api
+    codex: chatgpt
+    gemini: oauth
+    qwenCode: oauth
+  notifications:
+    soundEnabled: true
+    soundFile: abstract-sound-1
+access:
+  requireAuth: false
+  defaultRole: operator
+  trustedHeaders:
+    enabled: false
+    provider: cloudflare-access
+    emailHeader: Cf-Access-Authenticated-User-Email
+    jwtHeader: Cf-Access-Jwt-Assertion
+    teamDomain: ''
+    audience: ''
+  roles:
+    viewers: []
+    operators: []
+    admins: []
+    viewerDomains: []
+    operatorDomains: []
+    adminDomains: []
