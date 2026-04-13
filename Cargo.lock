@@ -1038,6 +1038,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_client"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_dock",
+ "game_shared",
+ "glam 0.29.3",
+ "hecs",
+ "log",
+ "nalgebra-glm",
+ "parking_lot",
+ "puffin",
+ "ron",
+ "rust_engine",
+ "serde",
+ "tracy-client",
+ "vulkano",
+ "winit",
+]
+
+[[package]]
+name = "game_shared"
+version = "0.1.0"
+dependencies = [
+ "glam 0.29.3",
+ "ron",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2360,6 +2391,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pak_tool"
+version = "0.1.0"
+dependencies = [
+ "rust_engine",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2848,13 +2886,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7204ed6420f698836b76d4d5c2ec5dec7585fd5c3a788fd1cde855d1de598239"
 
 [[package]]
-name = "rust-engine"
+name = "rust_engine"
 version = "0.1.0"
 dependencies = [
  "arboard",
  "bytemuck",
  "egui",
  "egui_dock",
+ "game_shared",
  "gilrs",
  "glam 0.29.3",
  "gltf",

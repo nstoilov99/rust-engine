@@ -1,115 +1,22 @@
-[package]
-name = "rust-engine"
-version = "0.1.0"
-edition = "2021"
-default-run = "game"
+[workspace]
+members = [
+    "engine",
+    "game_shared",
+    "game_client",
+    "tools/pak_tool",
+]
+resolver = "2"
 
-[features]
-default = []
-editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio"]
-tracy = ["tracy-client"]
-
-# Define both library and binary
-[lib]
-name = "rust_engine"
-path = "src/lib.rs"
-
-[[bin]]
-name = "game"
-path = "src/game/main.rs"
-
-[[bin]]
-name = "pak_tool"
-path = "src/tools/pak_tool.rs"
-
-
-[dependencies]
-# Window and event handling
-winit = "0.30"
-
-# Vulkano - Safe Vulkan wrapper
-vulkano = "0.35"
-
-# Shader compilation at build time
-vulkano-shaders = "0.35"
-
-# vulkano-win removed - deprecated, Surface::from_window now works with winit 0.30
-
-# Math library
+[workspace.dependencies]
 glam = { version = "0.29", features = ["serde"] }
-
-# Image loading (for textures later)
-image = "0.25"
-bytemuck = "1.24.0"
-
-gltf = "1.4"
-tobj = "4.0"
-ufbx = "0.10"
-
-# Small vector optimization
-smallvec = "1.13"
-
-# ECS
-hecs = "0.10"
-
-# File watching for hot-reload (editor only)
-notify = { version = "6.1", optional = true }
-
-# Thread-safe locking primitives
-parking_lot = "0.12"
-
-# Math library (nalgebra for glm-style functions)
-nalgebra-glm = "0.18"
-
-# Async runtime for background loading (editor only)
-tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"], optional = true }
-
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
-ron = "0.8"                                        # Rusty Object Notation
-typetag = "0.2"                                    # Polymorphic serialization
-
-# Immediate Mode GUI (editor only)
-egui = { version = "0.33.3", optional = true }
-
-# Physics Engine (Rapier 3D)
-rapier3d = "0.25"
-
-# Profiling (Puffin core - custom egui integration will be implemented)
-puffin = "0.19"
-
-# Tracy profiler integration (optional - build with --features tracy)
-tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }
-
-# Docking layout system for egui (editor only)
-egui_dock = { version = "0.18", features = ["serde"], optional = true }
-
-# Transform gizmo for viewport manipulation (editor only)
-transform-gizmo-egui = { version = "0.8", optional = true }
-mint = "0.5"
-
-# Clipboard support (editor only)
-arboard = { version = "3.4", optional = true }
-
-# Audio engine
-kira = { version = "0.12", features = ["cpal", "symphonia"] }
-
-# UUID for entity persistent identity
 uuid = { version = "1", features = ["v4", "serde"] }
-
-# Gamepad input
-gilrs = "0.11"
-
-# Logging (required by engine rules - use log::warn!/error! instead of eprintln!)
+nalgebra-glm = "0.18"
 log = "0.4"
 
 [profile.dev]
 opt-level = 2
 
-# Compile ALL dependencies at full optimization even in dev builds.
-# vulkano, egui, rapier3d, nalgebra etc. dominate CPU time — this
-# typically gives a 3-10x speedup with minimal impact on compile time
-# (deps are only recompiled when their version changes).
 [profile.dev.package."*"]
 opt-level = 3
 
@@ -123,9 +30,6 @@ strip = true
 codegen-units = 1
 panic = "abort"
 
-# Patch emath to fix smart_aim bug that causes crash when dragging DragValue
-# See: https://github.com/emilk/egui/issues/7747
-# Also patch transform-gizmo to use Z-up coordinate system natively
 [patch.crates-io]
 emath = { path = "crates/emath-patched" }
 transform-gizmo = { path = "crates/transform-gizmo-fork/crates/transform-gizmo" }

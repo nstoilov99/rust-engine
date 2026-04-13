@@ -34,22 +34,22 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build (default features)
-        run: cargo build
+        run: cargo build --workspace
 
       - name: Build (editor feature)
-        run: cargo build --features editor
+        run: cargo build -p game_client --features editor
 
       - name: Test (default features)
-        run: cargo test
+        run: cargo test --workspace --lib --tests
 
       - name: Test (editor feature)
-        run: cargo test --features editor
+        run: cargo test --workspace --lib --tests --features editor
 
       - name: Clippy (default features)
-        run: cargo clippy --lib --bins --tests -- -D warnings
+        run: cargo clippy --workspace --lib --bins --tests -- -D warnings
 
       - name: Clippy (editor feature)
-        run: cargo clippy --lib --bins --tests --features editor -- -D warnings
+        run: cargo clippy --workspace --lib --bins --tests --features editor -- -D warnings
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -78,13 +78,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build (default features)
-        run: cargo build
+        run: cargo build --workspace
 
       - name: Test (default features)
-        run: cargo test
+        run: cargo test --workspace --lib --tests
 
       - name: Clippy (default features)
-        run: cargo clippy --lib --bins --tests -- -D warnings
+        run: cargo clippy --workspace --lib --bins --tests -- -D warnings
 
       - name: Format check
         run: cargo fmt --all -- --check

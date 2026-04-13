@@ -1,0 +1,11 @@
+[package]
+name = "pak_tool"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pak_tool"
+path = "src/main.rs"
+
+[dependencies]
+rust_engine = { path = "../../engine" }

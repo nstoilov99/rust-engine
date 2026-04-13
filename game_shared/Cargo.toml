@@ -1,0 +1,12 @@
+[package]
+name = "game_shared"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+ron = "0.8"

@@ -1,0 +1,50 @@
+[package]
+name = "game_client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "game"
+path = "src/main.rs"
+
+[features]
+default = []
+editor = ["rust_engine/editor", "dep:egui_dock", "dep:egui"]
+tracy = ["rust_engine/tracy"]
+
+[dependencies]
+rust_engine = { path = "../engine" }
+game_shared = { path = "../game_shared" }
+
+# Workspace shared deps
+glam = { workspace = true }
+serde = { workspace = true }
+nalgebra-glm = { workspace = true }
+log = { workspace = true }
+
+# Window and event handling
+winit = "0.30"
+
+# Vulkano (needed for descriptor sets, sync, buffers in game code)
+vulkano = "0.35"
+
+# ECS (needed for hecs::Entity, hecs::World in game code)
+hecs = "0.10"
+
+# Docking layout system (editor only, used in app.rs)
+egui_dock = { version = "0.18", features = ["serde"], optional = true }
+
+# Immediate Mode GUI (editor only, used in app.rs)
+egui = { version = "0.33.3", optional = true }
+
+# Serialization (used in app.rs)
+ron = "0.8"
+
+# Thread-safe locking primitives
+parking_lot = "0.12"
+
+# Profiling
+puffin = "0.19"
+
+# Tracy profiler integration
+tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }

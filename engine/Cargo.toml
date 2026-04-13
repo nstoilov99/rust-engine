@@ -1,0 +1,88 @@
+[package]
+name = "rust_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_engine"
+path = "src/lib.rs"
+
+[features]
+default = []
+editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio"]
+tracy = ["tracy-client"]
+
+[dependencies]
+# Workspace shared deps
+glam = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+nalgebra-glm = { workspace = true }
+log = { workspace = true }
+
+# Window and event handling
+winit = "0.30"
+
+# Vulkano - Safe Vulkan wrapper
+vulkano = "0.35"
+
+# Shader compilation at build time
+vulkano-shaders = "0.35"
+
+# Image loading (for textures later)
+image = "0.25"
+bytemuck = "1.24.0"
+
+gltf = "1.4"
+tobj = "4.0"
+ufbx = "0.10"
+
+# Small vector optimization
+smallvec = "1.13"
+
+# ECS
+hecs = "0.10"
+
+# File watching for hot-reload (editor only)
+notify = { version = "6.1", optional = true }
+
+# Thread-safe locking primitives
+parking_lot = "0.12"
+
+# Async runtime for background loading (editor only)
+tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"], optional = true }
+
+# Serialization
+ron = "0.8"
+typetag = "0.2"
+
+# Immediate Mode GUI (editor only)
+egui = { version = "0.33.3", optional = true }
+
+# Physics Engine (Rapier 3D)
+rapier3d = "0.25"
+
+# Profiling (Puffin core - custom egui integration will be implemented)
+puffin = "0.19"
+
+# Tracy profiler integration (optional - build with --features tracy)
+tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }
+
+# Docking layout system for egui (editor only)
+egui_dock = { version = "0.18", features = ["serde"], optional = true }
+
+# Transform gizmo for viewport manipulation (editor only)
+transform-gizmo-egui = { version = "0.8", optional = true }
+mint = "0.5"
+
+# Clipboard support (editor only)
+arboard = { version = "3.4", optional = true }
+
+# Audio engine
+kira = { version = "0.12", features = ["cpal", "symphonia"] }
+
+# Gamepad input
+gilrs = "0.11"
+
+# Shared gameplay types
+game_shared = { path = "../game_shared" }
