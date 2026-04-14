@@ -10,6 +10,7 @@ use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
+use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::render_target::RenderTarget;
 use crate::engine::rendering::rendering_3d::SkinningBackend;
 use glam::{Mat4, Vec3};
@@ -258,8 +259,8 @@ impl DeferredRenderer {
     /// Render scene using deferred pipeline
     ///
     /// Accepts a `RenderTarget` that can be either a swapchain image (standalone)
-    /// or a texture (editor viewport). Shadow, G-buffer, and lighting passes
-    /// remain identical; only the compose output differs.
+    /// or a texture (editor viewport). Uses a render graph to determine pass
+    /// execution order based on declared resource dependencies.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -275,7 +276,6 @@ impl DeferredRenderer {
 
         self.render_counters.reset();
 
-        // Debug draw needs a framebuffer with color + depth (same format as grid)
         let needs_depth_framebuffer = grid_visible || !debug_draw.is_empty();
 
         let (target_framebuffer, depth_framebuffer, mut builder) = {
@@ -295,248 +295,297 @@ impl DeferredRenderer {
             (target_framebuffer, depth_framebuffer, builder)
         };
 
-        // ========== PASS 1: Geometry Pass (Render to G-Buffer) ==========
-        {
-            crate::profile_scope!("geometry_pass");
+        // Build the render graph for this frame
+        let graph = {
+            crate::profile_scope!("graph_setup");
 
-            // Get G-Buffer dimensions for viewport
-            let gbuffer_extent = self.gbuffer.framebuffer.extent();
-            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                offset: [0.0, 0.0],
-                extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
-                depth_range: 0.0..=1.0,
-            };
-            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                offset: [0, 0],
-                extent: [gbuffer_extent[0], gbuffer_extent[1]],
-            };
+            let mut graph = RenderGraph::new();
 
-            builder
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        clear_values: vec![
-                            Some([0.0, 0.0, 0.0, 1.0].into()), // Position
-                            Some([0.0, 0.0, 0.0, 1.0].into()), // Normal
-                            Some([0.0, 0.0, 0.0, 1.0].into()), // Albedo
-                            Some([0.0, 0.0, 0.0, 1.0].into()), // Material
-                            Some(1.0.into()),                  // Depth
-                        ],
-                        ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
-                    },
-                    SubpassBeginInfo {
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    },
-                )?
-                .bind_pipeline_graphics(self.geometry_pass.pipeline())?
-                .set_viewport(0, smallvec![viewport.clone()])?
-                .set_scissor(0, smallvec![scissor])?;
+            let gbuffer_position = graph.declare_virtual("gbuffer_position");
+            let gbuffer_normal = graph.declare_virtual("gbuffer_normal");
+            let gbuffer_albedo = graph.declare_virtual("gbuffer_albedo");
+            let gbuffer_material = graph.declare_virtual("gbuffer_material");
+            let gbuffer_depth = graph.declare_virtual("gbuffer_depth");
+            let target_res = graph.declare_virtual("target");
 
-            // Render all meshes to G-Buffer
-            {
-                crate::profile_scope!("mesh_loop");
-                let mut last_material = None;
-                let mut last_palette: Option<usize> = None;
-                let geom_layout = self.geometry_pass.layout();
-                for mesh in mesh_data {
-                    self.render_counters.visible_entities += 1;
-                    self.render_counters.draw_calls += 1;
-                    self.render_counters.triangles += mesh.index_count / 3;
-                    if last_material != Some(mesh.material_index) {
-                        self.render_counters.material_changes += 1;
-                        last_material = Some(mesh.material_index);
+            graph.add_pass("geometry", |b| {
+                b.write(gbuffer_position);
+                b.write(gbuffer_normal);
+                b.write(gbuffer_albedo);
+                b.write(gbuffer_material);
+                b.write(gbuffer_depth);
+            });
+
+            graph.add_pass("lighting", |b| {
+                b.read(gbuffer_position);
+                b.read(gbuffer_normal);
+                b.read(gbuffer_albedo);
+                b.read(gbuffer_material);
+                b.write(target_res);
+            });
+
+            if grid_visible {
+                graph.add_pass("grid", |b| {
+                    b.read(gbuffer_depth);
+                    b.modify(target_res);
+                });
+            }
+
+            if !debug_draw.is_empty() {
+                graph.add_pass("debug_draw", |b| {
+                    b.read(gbuffer_depth);
+                    b.modify(target_res);
+                });
+            }
+
+            graph.mark_output(target_res);
+            graph.enable_culling();
+            graph.compile()?;
+            graph
+        };
+
+        // Execute passes in graph-determined order
+        for &pass_idx in graph.compiled_order() {
+            let pass_name = graph.pass_name(pass_idx);
+            match pass_name {
+                "geometry" => {
+                    crate::profile_scope!("geometry_pass");
+
+                    let gbuffer_extent = self.gbuffer.framebuffer.extent();
+                    let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                        offset: [0.0, 0.0],
+                        extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
+                        depth_range: 0.0..=1.0,
+                    };
+                    let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                        offset: [0, 0],
+                        extent: [gbuffer_extent[0], gbuffer_extent[1]],
+                    };
+
+                    builder
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                clear_values: vec![
+                                    Some([0.0, 0.0, 0.0, 1.0].into()),
+                                    Some([0.0, 0.0, 0.0, 1.0].into()),
+                                    Some([0.0, 0.0, 0.0, 1.0].into()),
+                                    Some([0.0, 0.0, 0.0, 1.0].into()),
+                                    Some(1.0.into()),
+                                ],
+                                ..RenderPassBeginInfo::framebuffer(
+                                    self.gbuffer.framebuffer.clone(),
+                                )
+                            },
+                            SubpassBeginInfo {
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
+                        )?
+                        .bind_pipeline_graphics(self.geometry_pass.pipeline())?
+                        .set_viewport(0, smallvec![viewport.clone()])?
+                        .set_scissor(0, smallvec![scissor])?;
+
+                    {
+                        crate::profile_scope!("mesh_loop");
+                        let mut last_material = None;
+                        let mut last_palette: Option<usize> = None;
+                        let geom_layout = self.geometry_pass.layout();
+                        for mesh in mesh_data {
+                            self.render_counters.visible_entities += 1;
+                            self.render_counters.draw_calls += 1;
+                            self.render_counters.triangles += mesh.index_count / 3;
+                            if last_material != Some(mesh.material_index) {
+                                self.render_counters.material_changes += 1;
+                                last_material = Some(mesh.material_index);
+                            }
+
+                            let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
+                            if last_palette != Some(palette_ptr) {
+                                builder.bind_descriptor_sets(
+                                    PipelineBindPoint::Graphics,
+                                    geom_layout.clone(),
+                                    0,
+                                    mesh.bone_palette_set.clone(),
+                                )?;
+                                last_palette = Some(palette_ptr);
+                            }
+
+                            builder
+                                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
+                                .bind_index_buffer(mesh.index_buffer.clone())?
+                                .push_constants(
+                                    geom_layout.clone(),
+                                    0,
+                                    mesh.push_constants,
+                                )?;
+                            unsafe {
+                                builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                            }
+                        }
                     }
 
-                    // Bind bone palette at set 0 (skip if same as last draw)
-                    let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
-                    if last_palette != Some(palette_ptr) {
-                        builder.bind_descriptor_sets(
+                    builder.end_render_pass(SubpassEndInfo::default())?;
+                }
+                "lighting" => {
+                    crate::profile_scope!("lighting_pass");
+
+                    let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
+
+                    let target_extent = target_framebuffer.extent();
+                    let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                        offset: [0.0, 0.0],
+                        extent: [target_extent[0] as f32, target_extent[1] as f32],
+                        depth_range: 0.0..=1.0,
+                    };
+                    let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                        offset: [0, 0],
+                        extent: [target_extent[0], target_extent[1]],
+                    };
+
+                    builder
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                                ..RenderPassBeginInfo::framebuffer(target_framebuffer.clone())
+                            },
+                            SubpassBeginInfo {
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
+                        )?
+                        .bind_pipeline_graphics(self.lighting_pass.pipeline())?
+                        .set_viewport(0, smallvec![target_viewport.clone()])?
+                        .set_scissor(0, smallvec![target_scissor])?
+                        .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
-                            geom_layout.clone(),
+                            self.lighting_pass.layout(),
                             0,
-                            mesh.bone_palette_set.clone(),
+                            gbuffer_descriptor_set,
+                        )?
+                        .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
+                    unsafe {
+                        builder.draw(3, 1, 0, 0)?;
+                    }
+                    builder.end_render_pass(SubpassEndInfo::default())?;
+                }
+                "grid" => {
+                    if let Some(ref grid_fb) = depth_framebuffer {
+                        crate::profile_scope!("grid_pass");
+
+                        let grid_extent = grid_fb.extent();
+                        let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                            offset: [0.0, 0.0],
+                            extent: [grid_extent[0] as f32, grid_extent[1] as f32],
+                            depth_range: 0.0..=1.0,
+                        };
+                        let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                            offset: [0, 0],
+                            extent: [grid_extent[0], grid_extent[1]],
+                        };
+
+                        let grid_extent_size = 500.0;
+                        let grid_push = GridPushConstants::new(
+                            view_proj,
+                            camera_pos,
+                            grid_extent_size,
+                            100.0,
+                        );
+
+                        builder
+                            .begin_render_pass(
+                                RenderPassBeginInfo {
+                                    clear_values: vec![None, None],
+                                    ..RenderPassBeginInfo::framebuffer(grid_fb.clone())
+                                },
+                                SubpassBeginInfo {
+                                    contents: SubpassContents::Inline,
+                                    ..Default::default()
+                                },
+                            )?
+                            .bind_pipeline_graphics(self.grid_pass.pipeline())?
+                            .set_viewport(0, smallvec![grid_viewport])?
+                            .set_scissor(0, smallvec![grid_scissor])?
+                            .push_constants(self.grid_pass.layout(), 0, grid_push)?;
+
+                        unsafe {
+                            builder.draw(4, 1, 0, 0)?;
+                        }
+                        builder.end_render_pass(SubpassEndInfo::default())?;
+                    }
+                }
+                "debug_draw" => {
+                    if let Some(ref debug_fb) = depth_framebuffer {
+                        crate::profile_scope!("debug_draw_pass");
+
+                        let debug_extent = debug_fb.extent();
+                        let debug_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                            offset: [0.0, 0.0],
+                            extent: [debug_extent[0] as f32, debug_extent[1] as f32],
+                            depth_range: 0.0..=1.0,
+                        };
+                        let debug_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                            offset: [0, 0],
+                            extent: [debug_extent[0], debug_extent[1]],
+                        };
+
+                        let debug_push = DebugLinePushConstants {
+                            view_proj: view_proj.to_cols_array_2d(),
+                        };
+
+                        builder.begin_render_pass(
+                            RenderPassBeginInfo {
+                                clear_values: vec![None, None],
+                                ..RenderPassBeginInfo::framebuffer(debug_fb.clone())
+                            },
+                            SubpassBeginInfo {
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
                         )?;
-                        last_palette = Some(palette_ptr);
-                    }
 
-                    builder
-                        .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
-                        .bind_index_buffer(mesh.index_buffer.clone())?
-                        .push_constants(
-                            geom_layout.clone(),
-                            0,
-                            mesh.push_constants, // Model + view-projection matrices
-                        )?;
-                    unsafe {
-                        builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                        if let Some(ref depth_buf) = debug_draw.depth_buffer {
+                            builder
+                                .bind_pipeline_graphics(
+                                    self.debug_draw_pass.depth_pipeline(),
+                                )?
+                                .set_viewport(0, smallvec![debug_viewport.clone()])?
+                                .set_scissor(0, smallvec![debug_scissor])?
+                                .push_constants(
+                                    self.debug_draw_pass.layout(),
+                                    0,
+                                    debug_push,
+                                )?
+                                .bind_vertex_buffers(0, depth_buf.clone())?;
+                            unsafe {
+                                builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
+                            }
+                        }
+
+                        if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
+                            builder
+                                .bind_pipeline_graphics(
+                                    self.debug_draw_pass.overlay_pipeline(),
+                                )?
+                                .set_viewport(0, smallvec![debug_viewport])?
+                                .set_scissor(0, smallvec![debug_scissor])?
+                                .push_constants(
+                                    self.debug_draw_pass.layout(),
+                                    0,
+                                    debug_push,
+                                )?
+                                .bind_vertex_buffers(0, overlay_buf.clone())?;
+                            unsafe {
+                                builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;
+                            }
+                        }
+
+                        builder.end_render_pass(SubpassEndInfo::default())?;
                     }
                 }
-            }
-
-            builder.end_render_pass(SubpassEndInfo::default())?;
-        }
-
-        // ========== PASS 2: Lighting Pass (Read G-Buffer, Output to Screen) ==========
-        {
-            crate::profile_scope!("lighting_pass");
-
-            // Use cached G-Buffer descriptor set (no per-frame allocation)
-            let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
-
-            // Get target framebuffer dimensions for lighting pass viewport
-            let target_extent = target_framebuffer.extent();
-            let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                offset: [0.0, 0.0],
-                extent: [target_extent[0] as f32, target_extent[1] as f32],
-                depth_range: 0.0..=1.0,
-            };
-            let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                offset: [0, 0],
-                extent: [target_extent[0], target_extent[1]],
-            };
-
-            builder
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                        ..RenderPassBeginInfo::framebuffer(target_framebuffer)
-                    },
-                    SubpassBeginInfo {
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    },
-                )?
-                .bind_pipeline_graphics(self.lighting_pass.pipeline())?
-                .set_viewport(0, smallvec![target_viewport.clone()])?
-                .set_scissor(0, smallvec![target_scissor])?
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    self.lighting_pass.layout(),
-                    0,
-                    gbuffer_descriptor_set,
-                )?
-                .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
-            // Draw fullscreen triangle (no vertex buffer - generated in shader)
-            unsafe {
-                builder.draw(3, 1, 0, 0)?;
-            }
-            builder.end_render_pass(SubpassEndInfo::default())?;
-        }
-
-        // ========== PASS 3: Grid Pass (Optional, Hardware Depth Testing) ==========
-        // Uses Unreal-style ground plane quad with hardware depth occlusion
-        if grid_visible {
-            if let Some(ref grid_fb) = depth_framebuffer {
-                crate::profile_scope!("grid_pass");
-
-                let grid_extent = grid_fb.extent();
-                let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                    offset: [0.0, 0.0],
-                    extent: [grid_extent[0] as f32, grid_extent[1] as f32],
-                    depth_range: 0.0..=1.0,
-                };
-                let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                    offset: [0, 0],
-                    extent: [grid_extent[0], grid_extent[1]],
-                };
-
-                // Grid push constants (simplified - no depth texture needed)
-                let grid_extent_size = 500.0; // Large ground plane extent
-                let grid_push = GridPushConstants::new(
-                    view_proj,
-                    camera_pos,
-                    grid_extent_size,
-                    100.0, // fade_distance: 100 units
-                );
-
-                builder
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            // Load existing color content, depth is also loaded (for testing)
-                            clear_values: vec![None, None],
-                            ..RenderPassBeginInfo::framebuffer(grid_fb.clone())
-                        },
-                        SubpassBeginInfo {
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )?
-                    .bind_pipeline_graphics(self.grid_pass.pipeline())?
-                    .set_viewport(0, smallvec![grid_viewport])?
-                    .set_scissor(0, smallvec![grid_scissor])?
-                    .push_constants(self.grid_pass.layout(), 0, grid_push)?;
-
-                // Draw ground plane quad (4 vertices as triangle strip)
-                unsafe {
-                    builder.draw(4, 1, 0, 0)?;
-                }
-                builder.end_render_pass(SubpassEndInfo::default())?;
+                _ => {}
             }
         }
 
-        // ========== PASS 4: Debug Draw Pass (Optional, Wireframe Lines) ==========
-        if !debug_draw.is_empty() {
-            if let Some(ref debug_fb) = depth_framebuffer {
-                crate::profile_scope!("debug_draw_pass");
-
-                let debug_extent = debug_fb.extent();
-                let debug_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                    offset: [0.0, 0.0],
-                    extent: [debug_extent[0] as f32, debug_extent[1] as f32],
-                    depth_range: 0.0..=1.0,
-                };
-                let debug_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                    offset: [0, 0],
-                    extent: [debug_extent[0], debug_extent[1]],
-                };
-
-                let debug_push = DebugLinePushConstants {
-                    view_proj: view_proj.to_cols_array_2d(),
-                };
-
-                builder
-                    .begin_render_pass(
-                        RenderPassBeginInfo {
-                            clear_values: vec![None, None],
-                            ..RenderPassBeginInfo::framebuffer(debug_fb.clone())
-                        },
-                        SubpassBeginInfo {
-                            contents: SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )?;
-
-                // Draw depth-tested lines
-                if let Some(ref depth_buf) = debug_draw.depth_buffer {
-                    builder
-                        .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
-                        .set_viewport(0, smallvec![debug_viewport.clone()])?
-                        .set_scissor(0, smallvec![debug_scissor])?
-                        .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
-                        .bind_vertex_buffers(0, depth_buf.clone())?;
-                    unsafe {
-                        builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
-                    }
-                }
-
-                // Draw overlay lines (no depth test)
-                if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
-                    builder
-                        .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?
-                        .set_viewport(0, smallvec![debug_viewport])?
-                        .set_scissor(0, smallvec![debug_scissor])?
-                        .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
-                        .bind_vertex_buffers(0, overlay_buf.clone())?;
-                    unsafe {
-                        builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;
-                    }
-                }
-
-                builder.end_render_pass(SubpassEndInfo::default())?;
-            }
-        }
-
-        // Build command buffer
         let command_buffer = {
             crate::profile_scope!("command_buffer_build");
             builder.build()?

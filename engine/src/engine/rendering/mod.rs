@@ -1,5 +1,6 @@
 pub mod common;
 pub mod counters;
+pub mod graph;
 pub mod render_target;
 
 #[path = "2d"]

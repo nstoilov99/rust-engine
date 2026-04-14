@@ -48,6 +48,11 @@ src/engine/
 │
 ├── rendering/      # All rendering pipelines
 │   ├── common.rs       # Shared rendering utilities, Renderer trait
+│   ├── graph/          # Render graph (frame graph) system
+│   │   ├── render_graph.rs   # RenderGraph: topological sort, culling, execution
+│   │   ├── pass_node.rs      # PassNode, PassBuilder, PassContext
+│   │   ├── resource.rs       # ResourceId, ResourceDesc, ResourceTable
+│   │   └── resource_pool.rs  # TransientResourcePool (texture reuse across frames)
 │   ├── 2d/             # 2D sprite rendering
 │   │   ├── pipeline_2d.rs
 │   │   └── sprite_batch.rs
@@ -126,40 +131,42 @@ The engine uses a deferred rendering pipeline for efficient multi-light scenes:
 
 ### Render Frame Flow
 
+The deferred renderer uses a **render graph** (`engine/src/engine/rendering/graph/`) to determine pass execution order. Each frame, a local `RenderGraph` is built:
+
+1. Passes declare resource dependencies (read/write/modify)
+2. The graph topologically sorts passes based on these dependencies
+3. Dead passes (writing resources nobody reads, not marked as output) are culled
+4. `compiled_order()` drives command recording in the correct order
+
 ```
 1. Begin Frame
    └── Acquire swapchain image
 
-2. Shadow Pass (per shadow-casting light)
-   └── Render depth-only to shadow map
+2. Build Render Graph
+   ├── Declare virtual resources (gbuffer textures, target)
+   ├── Register passes with dependencies:
+   │   ├── geometry: writes gbuffer (position, normal, albedo, material, depth)
+   │   ├── lighting: reads gbuffer, writes target
+   │   ├── grid (optional): reads depth, modifies target
+   │   └── debug_draw (optional): reads depth, modifies target
+   ├── Mark target as output
+   └── Compile (topological sort + culling)
 
-3. G-Buffer Pass
-   ├── Bind G-buffer framebuffer
-   ├── For each entity with MeshRenderer:
-   │   ├── Get world transform (hierarchy-aware)
-   │   ├── Convert to render space (Z-up → Y-up)
-   │   └── Draw to G-buffer
-   └── Output: albedo, normal, position, material textures
+3. Execute Passes (in graph-determined order)
+   ├── Geometry Pass → G-Buffer
+   ├── Lighting Pass → Target image
+   ├── Grid Pass (if visible) → Overlay on target
+   └── Debug Draw Pass (if lines exist) → Overlay on target
 
-4. Lighting Pass
-   ├── Read G-buffer textures
-   ├── Apply directional lights with shadows
-   ├── Apply point lights
-   ├── Apply ambient light
-   └── Output: HDR color buffer
-
-5. Compose Pass
-   ├── Tone mapping (Reinhard)
-   ├── Gamma correction
-   └── Output to swapchain
-
-6. GUI Pass
+4. GUI Pass (outside graph)
    ├── egui rendering
    └── Overlay on top of scene
 
-7. End Frame
+5. End Frame
    └── Present swapchain image
 ```
+
+The graph supports transient resources (pooled textures reused across frames) for future passes that need temporary render targets.
 
 ## ECS Architecture
 
