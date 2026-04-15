@@ -23,11 +23,23 @@ pub struct GuiRenderResult {
     pub cursor_icon: egui::CursorIcon,
 }
 
+/// Result from GUI layout pass (no GPU commands).
+pub struct GuiLayoutResult {
+    pub clipped_primitives: Vec<egui::ClippedPrimitive>,
+    pub textures_delta: egui::TexturesDelta,
+    pub screen_rect: egui::Rect,
+    pub wants_keyboard: bool,
+    pub wants_pointer: bool,
+    pub is_using_pointer: bool,
+    pub cursor_icon: egui::CursorIcon,
+    pub texture_binds: Vec<crate::engine::rendering::frame_packet::TextureBindCommand>,
+}
+
 /// Main GUI integration struct
 pub struct Gui {
     /// egui context (persistent across frames)
     egui_ctx: Context,
-    /// Vulkan renderer for egui
+    /// Vulkan renderer for egui (kept for secondary windows that still render synchronously)
     renderer: EguiRenderer,
     /// Screen size for calculating input coordinates
     screen_size: [f32; 2],
@@ -48,6 +60,10 @@ pub struct Gui {
     dropped_files: Vec<std::path::PathBuf>,
     /// True while the OS is hovering files over the window (before drop).
     hovered_file_count: usize,
+    /// Queued texture bind commands for the render thread (egui texture slot protocol).
+    pending_texture_binds: Vec<crate::engine::rendering::frame_packet::TextureBindCommand>,
+    /// Next user texture ID counter for layout-only texture registration.
+    next_texture_id: std::sync::atomic::AtomicU64,
 }
 
 impl Gui {
@@ -91,7 +107,131 @@ impl Gui {
             drag_start_viewport_rect: None,
             dropped_files: Vec::new(),
             hovered_file_count: 0,
+            pending_texture_binds: Vec::new(),
+            next_texture_id: std::sync::atomic::AtomicU64::new(1000),
         })
+    }
+
+    /// Layout-only pass: runs egui, tessellates, and returns primitives + deltas.
+    /// No GPU commands are recorded. Call this when rendering is handled by the render thread.
+    pub fn layout(
+        &mut self,
+        viewport_rect: Option<egui::Rect>,
+        ui_fn: impl FnMut(&egui::Context),
+    ) -> GuiLayoutResult {
+        let (clipped_primitives, textures_delta, screen_rect, wants_keyboard, wants_pointer, is_using_pointer, cursor_icon) =
+            self.layout_inner(viewport_rect, ui_fn);
+
+        let texture_binds = std::mem::take(&mut self.pending_texture_binds);
+
+        GuiLayoutResult {
+            clipped_primitives,
+            textures_delta,
+            screen_rect,
+            wants_keyboard,
+            wants_pointer,
+            is_using_pointer,
+            cursor_icon,
+            texture_binds,
+        }
+    }
+
+    fn layout_inner(
+        &mut self,
+        viewport_rect: Option<egui::Rect>,
+        mut ui_fn: impl FnMut(&egui::Context),
+    ) -> (Vec<egui::ClippedPrimitive>, egui::TexturesDelta, egui::Rect, bool, bool, bool, egui::CursorIcon) {
+        crate::profile_function!();
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(self.screen_size[0], self.screen_size[1]),
+            )),
+            time: Some(current_time),
+            predicted_dt: 1.0 / 60.0,
+            modifiers: self.modifiers,
+            events: std::mem::take(&mut self.events),
+            ..Default::default()
+        };
+
+        let full_output = {
+            crate::profile_scope!("egui_run");
+            self.egui_ctx.run(raw_input, &mut ui_fn)
+        };
+
+        let wants_keyboard =
+            full_output.platform_output.ime.is_some() || self.egui_ctx.wants_keyboard_input();
+        let wants_pointer = self.egui_ctx.wants_pointer_input();
+
+        let pointer_over_popup =
+            self.egui_ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| {
+                    self.egui_ctx.layer_id_at(pos).is_some_and(|layer| {
+                        layer.order > egui::Order::Background
+                    })
+                });
+
+        let dragging_from_popup = self.egui_ctx.is_using_pointer()
+            && self
+                .egui_ctx
+                .input(|i| i.pointer.press_origin())
+                .is_some_and(|origin_pos| {
+                    self.egui_ctx
+                        .layer_id_at(origin_pos)
+                        .is_some_and(|layer| layer.order > egui::Order::Background)
+                });
+
+        let is_dragging = self.egui_ctx.is_using_pointer();
+        let press_origin = self.egui_ctx.input(|i| i.pointer.press_origin());
+
+        let effective_viewport_rect = if is_dragging {
+            if self.drag_start_viewport_rect.is_none() {
+                self.drag_start_viewport_rect = viewport_rect.map(|r| r.shrink(3.0));
+            }
+            self.drag_start_viewport_rect
+        } else {
+            self.drag_start_viewport_rect = None;
+            None
+        };
+
+        let dragging_from_outside_viewport = is_dragging
+            && effective_viewport_rect.is_some_and(|vp_rect| {
+                press_origin.is_some_and(|origin_pos| !vp_rect.contains(origin_pos))
+            });
+
+        let is_using_pointer =
+            pointer_over_popup || dragging_from_popup || dragging_from_outside_viewport;
+
+        for command in &full_output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                if let Some(clipboard) = &mut self.clipboard {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+        }
+
+        let cursor_icon = full_output.platform_output.cursor_icon;
+        self.pixels_per_point = full_output.pixels_per_point;
+
+        let clipped_primitives = {
+            crate::profile_scope!("egui_tessellate");
+            self.egui_ctx
+                .tessellate(full_output.shapes, full_output.pixels_per_point)
+        };
+
+        let screen_rect = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(self.screen_size[0], self.screen_size[1]),
+        );
+
+        (clipped_primitives, full_output.textures_delta, screen_rect, wants_keyboard, wants_pointer, is_using_pointer, cursor_icon)
     }
 
     /// Run GUI and render - call this once per frame
@@ -486,25 +626,36 @@ impl Gui {
         &self.egui_ctx
     }
 
-    /// Register an external Vulkan image view as an egui texture
-    ///
-    /// Used for render-to-texture scenarios like the viewport.
+    /// Register an external Vulkan image view as an egui texture.
+    /// Queues a TextureBindCommand for the render thread.
     pub fn register_native_texture(
         &mut self,
         image_view: std::sync::Arc<vulkano::image::view::ImageView>,
     ) -> egui::TextureId {
-        self.renderer.register_native_texture(image_view)
+        let id = self.next_texture_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let texture_id = egui::TextureId::User(id);
+        self.pending_texture_binds.push(
+            crate::engine::rendering::frame_packet::TextureBindCommand {
+                texture_id,
+                image_view,
+            },
+        );
+        texture_id
     }
 
-    /// Update an existing native texture with a new image view
-    ///
-    /// Used when the viewport is resized and the texture needs to be recreated.
+    /// Update an existing native texture with a new image view.
+    /// Queues a TextureBindCommand for the render thread.
     pub fn update_native_texture(
         &mut self,
         texture_id: egui::TextureId,
         image_view: std::sync::Arc<vulkano::image::view::ImageView>,
     ) {
-        self.renderer.update_native_texture(texture_id, image_view);
+        self.pending_texture_binds.push(
+            crate::engine::rendering::frame_packet::TextureBindCommand {
+                texture_id,
+                image_view,
+            },
+        );
     }
 
     /// Clear framebuffer cache (call on swapchain recreation)

@@ -2,7 +2,7 @@
 //!
 //! Runs the game with direct swapchain rendering, no egui, no editor panels.
 
-use super::{game_setup, input_handler, render_loop};
+use super::{game_setup, render_loop};
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform, TransformDirty};
@@ -17,9 +17,10 @@ use rust_engine::engine::physics::{
     Collider as PhysCollider, PhysicsStepSystem, PhysicsWorld,
     RigidBody as PhysRigidBody, Velocity as PhysVelocity,
 };
+use rust_engine::engine::rendering::frame_packet::FramePacket;
+use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
-use rust_engine::engine::rendering::RenderTarget;
+use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData, SkinningBackend};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use rust_engine::engine::input::action_state::ActionState;
 use rust_engine::engine::input::gamepad::GamepadState;
@@ -30,7 +31,6 @@ use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem}
 use rust_engine::engine::input::event::InputEvent;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
-use vulkano::sync::GpuFuture;
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::window::Window;
@@ -40,15 +40,16 @@ pub struct StandaloneApp {
     pub renderer: Renderer,
     pub asset_manager: Arc<AssetManager>,
     pub game_world: GameWorld,
-    pub deferred_renderer: DeferredRenderer,
+    pub skinning: SkinningBackend,
     pub game_loop: GameLoop,
     pub current_debug_view: DebugView,
     pub _camera_distance: f32,
     pub _mesh_indices: Vec<usize>,
     pub _descriptor_set: Arc<DescriptorSet>,
-    pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
     schedule: Schedule,
+    frame_number: u64,
+    render_thread: Option<RenderThread>,
 }
 
 impl StandaloneApp {
@@ -58,10 +59,10 @@ impl StandaloneApp {
         let mut renderer = Renderer::new(window.clone())?;
         let (asset_manager, _hot_reload_stub, _reload_rx_stub) = {
             let asset_manager = Arc::new(AssetManager::new(
-                renderer.device.clone(),
-                renderer.queue.clone(),
-                renderer.memory_allocator.clone(),
-                renderer.command_buffer_allocator.clone(),
+                renderer.gpu.device.clone(),
+                renderer.gpu.queue.clone(),
+                renderer.gpu.memory_allocator.clone(),
+                renderer.gpu.command_buffer_allocator.clone(),
             ));
             let (tx, rx) = std::sync::mpsc::channel::<()>();
             (asset_manager, tx, rx)
@@ -123,14 +124,25 @@ impl StandaloneApp {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        let deferred_renderer = DeferredRenderer::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
-            renderer.memory_allocator.clone(),
-            renderer.command_buffer_allocator.clone(),
-            renderer.descriptor_set_allocator.clone(),
-            width,
-            height,
+        // Create a temporary DeferredRenderer to extract the geometry pipeline for SkinningBackend.
+        // The render thread creates its own DeferredRenderer for actual rendering.
+        let geometry_pipeline = {
+            let tmp = DeferredRenderer::new(
+                renderer.gpu.device.clone(),
+                renderer.gpu.queue.clone(),
+                renderer.gpu.memory_allocator.clone(),
+                renderer.gpu.command_buffer_allocator.clone(),
+                renderer.gpu.descriptor_set_allocator.clone(),
+                width,
+                height,
+            )?;
+            tmp.geometry_pipeline()
+        };
+
+        let skinning = SkinningBackend::new(
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.descriptor_set_allocator.clone(),
+            &geometry_pipeline,
         )?;
 
         // Set camera from first Camera entity, or use default
@@ -146,9 +158,6 @@ impl StandaloneApp {
                 height as f32,
             );
         }
-
-        let previous_frame_end: Option<Box<dyn GpuFuture>> =
-            Some(vulkano::sync::now(renderer.device.clone()).boxed());
 
         let mut schedule = Schedule::new();
         schedule.add_system_described(
@@ -202,20 +211,49 @@ impl StandaloneApp {
         }
         schedule.print_access_report();
 
+        let render_thread = RenderThread::spawn(RenderThreadConfig {
+            gpu_context: renderer.gpu.clone(),
+            render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Standalone,
+            initial_dimensions: [width, height],
+            swapchain_transfer: Some(rust_engine::engine::rendering::render_thread::SwapchainTransfer {
+                surface: renderer.swapchain_state.surface.clone(),
+                swapchain: renderer.swapchain_state.swapchain.clone(),
+                images: renderer.swapchain_state.images.clone(),
+            }),
+            #[cfg(feature = "editor")]
+            viewport_dimensions: None,
+        });
+
+        match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady { .. }) => {
+                log::info!("standalone: render thread ready");
+            }
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message }) => {
+                return Err(format!("render thread init failed: {}", message).into());
+            }
+            Ok(_) => {
+                log::warn!("standalone: unexpected event while waiting for render thread ready");
+            }
+            Err(e) => {
+                return Err(format!("render thread did not become ready: {}", e).into());
+            }
+        }
+
         Ok(Self {
             renderer,
             window,
             asset_manager,
             game_world,
-            deferred_renderer,
+            skinning,
             game_loop: GameLoop::new(),
             current_debug_view: DebugView::None,
             _camera_distance: 5.0,
             _mesh_indices: mesh_indices,
             _descriptor_set: descriptor_set,
-            previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
             schedule,
+            frame_number: 0,
+            render_thread: Some(render_thread),
         })
     }
 
@@ -275,7 +313,7 @@ impl StandaloneApp {
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::Resized(_new_size) => {
-                self.renderer.recreate_swapchain = true;
+                self.renderer.swapchain_state.recreate_swapchain = true;
             }
             WindowEvent::KeyboardInput {
                 event: key_event, ..
@@ -312,7 +350,29 @@ impl StandaloneApp {
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
+        // Poll render thread events
+        if let Some(ref rt) = self.render_thread {
+            for event in rt.poll_events() {
+                match &event {
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::SwapchainRecreated { dimensions } => {
+                        self.renderer.camera_3d.set_viewport_size(
+                            dimensions[0] as f32,
+                            dimensions[1] as f32,
+                        );
+                    }
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
+                        log::error!("standalone: render thread error: {}", message);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let size = self.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+
         {
             let tc = self
                 .game_world
@@ -337,107 +397,30 @@ impl StandaloneApp {
             &self.renderer,
             &mut self.mesh_data_buffer,
             tc,
-            self.deferred_renderer.skinning(),
+            &self.skinning,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
-
-        if let Some(mut prev_future) = self.previous_frame_end.take() {
-            prev_future.cleanup_finished();
-        }
-
-        if self.renderer.recreate_swapchain {
-            match render_loop::handle_swapchain_recreation(
-                &mut self.renderer,
-                &mut self.deferred_renderer,
-            ) {
-                Ok(false) => {
-                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
-                    return Ok(());
-                }
-                Ok(true) => {
-                    let new_size = self.window.inner_size();
-                    if new_size.width > 0 && new_size.height > 0 {
-                        if let Err(e) = self
-                            .deferred_renderer
-                            .resize(new_size.width, new_size.height)
-                        {
-                            log::error!("Failed to resize deferred renderer: {}", e);
-                        }
-                        self.renderer
-                            .camera_3d
-                            .set_viewport_size(new_size.width as f32, new_size.height as f32);
-                    }
-                }
-                Err(e) => {
-                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
-                    return Err(e);
-                }
-            }
-        }
-
-        let (image_index, target_image, acquire_future) =
-            match render_loop::acquire_swapchain_image(&mut self.renderer) {
-                Ok(result) => result,
-                Err(_) => {
-                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
-                    return Ok(());
-                }
-            };
 
         let view_proj = self.renderer.camera_3d.view_projection_matrix();
         let camera_pos = self.renderer.camera_3d.position;
 
-        let render_target = RenderTarget::Swapchain {
-            image: target_image.clone(),
-        };
-
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
-        let deferred_cb = match self.deferred_renderer.render(
-            &self.mesh_data_buffer,
-            &light_data,
-            render_target,
-            false,
+
+        let packet = FramePacket::build_standalone(
+            std::mem::take(&mut self.mesh_data_buffer),
+            light_data,
             view_proj,
             camera_pos,
-            &debug_draw_data,
-        ) {
-            Ok(cb) => cb,
-            Err(e) => {
-                log::error!("Render error: {}", e);
-                self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
-                return Ok(());
-            }
-        };
+            false,
+            debug_draw_data,
+            [size.width, size.height],
+            self.frame_number,
+        );
+        self.frame_number += 1;
 
-        if let Some(im) = self.game_world.resource::<InputManager>() {
-            input_handler::handle_debug_views(
-                im,
-                &mut self.deferred_renderer,
-                &mut self.current_debug_view,
-            );
-        }
-
-        let future = {
-            rust_engine::profile_scope!("swapchain_present");
-            acquire_future
-                .then_execute(self.renderer.queue.clone(), deferred_cb)
-                .map_err(|e| format!("Execute error: {:?}", e))?
-                .then_swapchain_present(
-                    self.renderer.queue.clone(),
-                    vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                        self.renderer.swapchain.clone(),
-                        image_index,
-                    ),
-                )
-                .then_signal_fence_and_flush()
-        };
-
-        match future {
-            Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
-            }
-            Err(_) => {
-                self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+        if let Some(ref rt) = self.render_thread {
+            if let Err(e) = rt.send(packet) {
+                log::error!("standalone: failed to send frame packet: {}", e);
             }
         }
 

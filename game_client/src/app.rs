@@ -33,9 +33,11 @@ use rust_engine::engine::editor::{
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
+use rust_engine::engine::rendering::frame_packet::FramePacket;
+use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData};
-use rust_engine::engine::rendering::{RenderTarget, ResourceCounters};
+use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData, SkinningBackend};
+use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use rust_engine::engine::input::action_state::ActionState;
@@ -48,7 +50,6 @@ use rust_engine::engine::input::event::InputEvent;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
-use vulkano::sync::GpuFuture;
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -92,6 +93,7 @@ pub struct CoreApp {
     pub game_world: GameWorld,
     pub schedule: Schedule,
     pub deferred_renderer: DeferredRenderer,
+    pub skinning: SkinningBackend,
     pub game_loop: GameLoop,
     pub current_debug_view: DebugView,
     pub camera_distance: f32,
@@ -99,8 +101,9 @@ pub struct CoreApp {
     pub plane_mesh_index: usize,
     pub cube_mesh_index: usize,
     pub descriptor_set: Arc<DescriptorSet>,
-    pub previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    frame_number: u64,
+    pub render_thread: Option<RenderThread>,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
@@ -197,10 +200,10 @@ impl App {
 
         let renderer = Renderer::new(window.clone())?;
 
-        let swapchain_format = renderer.images[0].format();
+        let swapchain_format = renderer.swapchain_state.images[0].format();
         let gui = Gui::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
+            renderer.gpu.device.clone(),
+            renderer.gpu.queue.clone(),
             swapchain_format,
             &window,
         )?;
@@ -267,24 +270,27 @@ impl App {
         let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
         let deferred_renderer = DeferredRenderer::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
-            renderer.memory_allocator.clone(),
-            renderer.command_buffer_allocator.clone(),
-            renderer.descriptor_set_allocator.clone(),
+            renderer.gpu.device.clone(),
+            renderer.gpu.queue.clone(),
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.command_buffer_allocator.clone(),
+            renderer.gpu.descriptor_set_allocator.clone(),
             800,
             600,
+        )?;
+
+        let skinning = SkinningBackend::new(
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.descriptor_set_allocator.clone(),
+            &deferred_renderer.geometry_pipeline(),
         )?;
 
         let viewport_texture = ViewportTexture::new(
-            renderer.device.clone(),
-            renderer.memory_allocator.clone(),
+            renderer.gpu.device.clone(),
+            renderer.gpu.memory_allocator.clone(),
             800,
             600,
         )?;
-
-        let previous_frame_end: Option<Box<dyn GpuFuture>> =
-            Some(vulkano::sync::now(renderer.device.clone()).boxed());
 
         let mut profiler_panel = ProfilerPanel::new();
         profiler_panel.register_sink();
@@ -365,6 +371,33 @@ impl App {
         }
         schedule.print_access_report();
 
+        let render_thread = RenderThread::spawn(RenderThreadConfig {
+            gpu_context: renderer.gpu.clone(),
+            render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Editor,
+            initial_dimensions: [800, 600],
+            swapchain_transfer: Some(rust_engine::engine::rendering::render_thread::SwapchainTransfer {
+                surface: renderer.swapchain_state.surface.clone(),
+                swapchain: renderer.swapchain_state.swapchain.clone(),
+                images: renderer.swapchain_state.images.clone(),
+            }),
+            viewport_dimensions: Some([800, 600]),
+        });
+
+        match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady { .. }) => {
+                log::info!("editor: render thread ready");
+            }
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message }) => {
+                return Err(format!("render thread init failed: {}", message).into());
+            }
+            Ok(_) => {
+                log::warn!("editor: unexpected event while waiting for render thread ready");
+            }
+            Err(e) => {
+                return Err(format!("render thread did not become ready: {}", e).into());
+            }
+        }
+
         let core = CoreApp {
             renderer,
             window: window.clone(),
@@ -374,6 +407,7 @@ impl App {
             game_world,
             schedule,
             deferred_renderer,
+            skinning,
             game_loop: GameLoop::new(),
             current_debug_view: DebugView::None,
             camera_distance: 5.0,
@@ -381,18 +415,19 @@ impl App {
             plane_mesh_index,
             cube_mesh_index,
             descriptor_set,
-            previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(64),
+            frame_number: 0,
+            render_thread: Some(render_thread),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
 
         let gpu_ctx = GpuThumbnailContext {
-            device: core.renderer.device.clone(),
-            queue: core.renderer.queue.clone(),
-            memory_allocator: core.renderer.memory_allocator.clone(),
-            command_buffer_allocator: core.renderer.command_buffer_allocator.clone(),
-            descriptor_set_allocator: core.renderer.descriptor_set_allocator.clone(),
+            device: core.renderer.gpu.device.clone(),
+            queue: core.renderer.gpu.queue.clone(),
+            memory_allocator: core.renderer.gpu.memory_allocator.clone(),
+            command_buffer_allocator: core.renderer.gpu.command_buffer_allocator.clone(),
+            descriptor_set_allocator: core.renderer.gpu.descriptor_set_allocator.clone(),
         };
         let mut asset_browser =
             AssetBrowserPanel::new(std::path::PathBuf::from("content"), Some(gpu_ctx));
@@ -456,11 +491,11 @@ impl App {
                 cursor_released: false,
             },
             mesh_preview_renderer: match rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer::new(
-                core.renderer.device.clone(),
-                core.renderer.queue.clone(),
-                core.renderer.memory_allocator.clone(),
-                core.renderer.command_buffer_allocator.clone(),
-                core.renderer.descriptor_set_allocator.clone(),
+                core.renderer.gpu.device.clone(),
+                core.renderer.gpu.queue.clone(),
+                core.renderer.gpu.memory_allocator.clone(),
+                core.renderer.gpu.command_buffer_allocator.clone(),
+                core.renderer.gpu.descriptor_set_allocator.clone(),
             ) {
                 Ok(r) => Some(r),
                 Err(e) => {
@@ -718,7 +753,7 @@ impl App {
 
         match event {
             WindowEvent::Resized(new_size) => {
-                self.core.renderer.recreate_swapchain = true;
+                self.core.renderer.swapchain_state.recreate_swapchain = true;
                 self.editor
                     .ui
                     .gui
@@ -966,8 +1001,28 @@ impl App {
         result
     }
 
-    pub fn render(&mut self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::profile_function!();
+
+        // Poll render thread events
+        if let Some(ref rt) = self.core.render_thread {
+            for event in rt.poll_events() {
+                match event {
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::SwapchainRecreated { dimensions } => {
+                        log::info!("editor: swapchain recreated to {}x{}", dimensions[0], dimensions[1]);
+                        self.editor.viewport.pending_sync = true;
+                    }
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::ViewportTextureChanged { texture_id, image_view } => {
+                        log::info!("editor: viewport texture changed");
+                        self.editor.ui.gui.update_native_texture(texture_id, image_view);
+                    }
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
+                        log::error!("editor: render thread error: {}", message);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         if self.editor.viewport.texture_id.is_none() {
             let texture_id = self
@@ -1027,111 +1082,47 @@ impl App {
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
             transform_cache,
-            self.core.deferred_renderer.skinning(),
+            &self.core.skinning,
         );
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);
 
-        if let Some(mut prev_future) = self.core.previous_frame_end.take() {
-            prev_future.cleanup_finished();
-        }
-
         if self.editor.viewport.pending_sync {
             let (vp_width, vp_height) = self.editor.viewport.size;
             if vp_width > 0 && vp_height > 0 {
-                if let Ok(true) = self.editor.viewport.texture.resize(vp_width, vp_height) {
-                    if let Some(texture_id) = self.editor.viewport.texture_id {
-                        self.editor.ui.gui.update_native_texture(
-                            texture_id,
-                            self.editor.viewport.texture.image_view(),
-                        );
-                    }
-                    self.editor
-                        .viewport
-                        .camera
-                        .set_viewport_size(vp_width as f32, vp_height as f32);
-                    self.core
-                        .renderer
-                        .camera_3d
-                        .set_viewport_size(vp_width as f32, vp_height as f32);
-                }
-                if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
-                    eprintln!(
-                        "Failed to sync deferred renderer after swapchain recreation: {}",
-                        e
+                if let Some(texture_id) = self.editor.viewport.texture_id {
+                    self.editor.ui.gui.update_native_texture(
+                        texture_id,
+                        self.editor.viewport.texture.image_view(),
                     );
                 }
+                self.editor
+                    .viewport
+                    .camera
+                    .set_viewport_size(vp_width as f32, vp_height as f32);
+                self.core
+                    .renderer
+                    .camera_3d
+                    .set_viewport_size(vp_width as f32, vp_height as f32);
             }
             self.editor.viewport.pending_sync = false;
         }
 
-        if self.core.renderer.recreate_swapchain {
-            match render_loop::handle_swapchain_recreation(
-                &mut self.core.renderer,
-                &mut self.core.deferred_renderer,
-            ) {
-                Ok(false) => {
-                    self.core.previous_frame_end =
-                        Some(render_loop::create_now_future(&self.core.renderer));
-                    return Ok(());
-                }
-                Ok(true) => {
-                    self.editor.viewport.pending_sync = true;
-                    self.editor.ui.gui.clear_framebuffer_cache();
-                }
-                Err(e) => {
-                    self.core.previous_frame_end =
-                        Some(render_loop::create_now_future(&self.core.renderer));
-                    return Err(e);
-                }
-            }
-        }
-
-        let (image_index, target_image, acquire_future) =
-            match render_loop::acquire_swapchain_image(&mut self.core.renderer) {
-                Ok(result) => result,
-                Err(_) => {
-                    self.core.previous_frame_end =
-                        Some(render_loop::create_now_future(&self.core.renderer));
-                    return Ok(());
-                }
-            };
-
+        // Update camera for current viewport size (render thread handles the actual texture resize)
         let (vp_width, vp_height) = self.editor.viewport.size;
-        if (vp_width != self.editor.viewport.texture.width()
-            || vp_height != self.editor.viewport.texture.height())
-            && vp_width > 0
-            && vp_height > 0
-        {
-            if let Ok(resized) = self.editor.viewport.texture.resize(vp_width, vp_height) {
-                if resized {
-                    if let Some(texture_id) = self.editor.viewport.texture_id {
-                        self.editor.ui.gui.update_native_texture(
-                            texture_id,
-                            self.editor.viewport.texture.image_view(),
-                        );
-                    }
-                    self.editor
-                        .viewport
-                        .camera
-                        .set_viewport_size(vp_width as f32, vp_height as f32);
-                    self.core
-                        .renderer
-                        .camera_3d
-                        .set_viewport_size(vp_width as f32, vp_height as f32);
-                    if let Err(e) = self.core.deferred_renderer.resize(vp_width, vp_height) {
-                        eprintln!("Failed to resize deferred renderer: {}", e);
-                    }
-                }
-            }
+        if vp_width > 0 && vp_height > 0 {
+            self.editor
+                .viewport
+                .camera
+                .set_viewport_size(vp_width as f32, vp_height as f32);
+            self.core
+                .renderer
+                .camera_3d
+                .set_viewport_size(vp_width as f32, vp_height as f32);
         }
 
         let view_proj = self.editor.viewport.camera.view_projection_matrix();
         let camera_pos = self.editor.viewport.camera.position;
-
-        let render_target = RenderTarget::Texture {
-            image: self.editor.viewport.texture.image(),
-        };
 
         let is_editing = self.play_mode() == PlayMode::Edit;
 
@@ -1173,23 +1164,20 @@ impl App {
         #[cfg(not(debug_assertions))]
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
 
-        let deferred_cb = match self.core.deferred_renderer.render(
-            &self.core.mesh_data_buffer,
-            &light_data,
-            render_target,
-            self.editor.viewport.grid_visible && is_editing,
+        let window_size = self.core.window.inner_size();
+        let (vp_w, vp_h) = self.editor.viewport.size;
+        let packet = FramePacket::build_editor(
+            std::mem::take(&mut self.core.mesh_data_buffer),
+            light_data,
             view_proj,
             camera_pos,
-            &debug_draw_data,
-        ) {
-            Ok(cb) => cb,
-            Err(e) => {
-                eprintln!("Render error: {}", e);
-                self.core.previous_frame_end =
-                    Some(render_loop::create_now_future(&self.core.renderer));
-                return Ok(());
-            }
-        };
+            self.editor.viewport.grid_visible && is_editing,
+            debug_draw_data,
+            [window_size.width, window_size.height],
+            Some([vp_w, vp_h]),
+            self.core.frame_number,
+        );
+        self.core.frame_number += 1;
 
         let physics_ref = self
             .core
@@ -1197,7 +1185,7 @@ impl App {
             .resource::<PhysicsWorld>()
             .expect("PhysicsWorld resource missing");
         self.editor.ui.profiler_panel.set_runtime_counters(
-            self.core.deferred_renderer.render_counters().clone(),
+            Default::default(),
             ResourceCounters::collect(
                 self.core.game_world.hecs(),
                 &self.core.asset_manager,
@@ -1261,11 +1249,11 @@ impl App {
         let mut undock_request: Option<EditorTab> = None;
 
         let gui_result =
-            match self
+            self
                 .editor
                 .ui
                 .gui
-                .render(window, target_image, Some(prev_viewport_rect), |ctx| {
+                .layout(Some(prev_viewport_rect), |ctx| {
                     menu_action = render_menu_bar(
                         ctx,
                         dock_state,
@@ -1351,15 +1339,7 @@ impl App {
                     if let Some(ref mut dialog_state) = import_dialog {
                         import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(ctx, dialog_state);
                     }
-                }) {
-                Ok(result) => result,
-                Err(e) => {
-                    eprintln!("GUI render error: {}", e);
-                    self.core.previous_frame_end =
-                        Some(render_loop::create_now_future(&self.core.renderer));
-                    return Ok(());
-                }
-            };
+                });
 
         self.editor.viewport.rect = new_viewport_rect;
 
@@ -2183,70 +2163,16 @@ impl App {
 
         self.handle_frame_input(&gui_result);
 
-        {
-            rust_engine::profile_scope!("swapchain_present");
-            let future = acquire_future
-                .then_execute(self.core.renderer.queue.clone(), deferred_cb)
-                .unwrap()
-                .then_execute(self.core.renderer.queue.clone(), gui_result.command_buffer)
-                .unwrap();
+        // Attach egui layout data to frame packet and send to render thread
+        let mut packet = packet;
+        packet.egui_primitives = Some(gui_result.clipped_primitives);
+        packet.egui_texture_deltas = Some(gui_result.textures_delta);
+        packet.texture_binds = gui_result.texture_binds;
+        packet.viewport_texture_id = self.editor.viewport.texture_id;
 
-            // Flush all command buffers BEFORE chaining the present future.
-            // Only the outermost CommandBufferExecFuture gets `submitted=true`
-            // from flush(); inner CBEFs retain `submitted=false`.  If the
-            // chain is later dropped (e.g. present failure), inner CBEF drops
-            // would call flush().unwrap() and re-submit already-submitted
-            // OneTimeSubmit command buffers, triggering VUID-03874.
-            //
-            // Calling signal_finished() after a successful flush marks ALL
-            // futures in the chain as `finished=true`, which makes their
-            // Drop impls skip the re-flush entirely.
-            if let Err(e) = future.flush() {
-                log::error!("Failed to flush command buffers: {:?}", e);
-                // SAFETY: We just attempted to flush — any submitted CBs are
-                // on the GPU.  Marking finished prevents CBEF drops from
-                // trying to re-submit OneTimeSubmit command buffers.
-                unsafe { future.signal_finished() };
-                self.core
-                    .renderer
-                    .queue
-                    .with(|mut q| q.wait_idle())
-                    .ok();
-                self.core.previous_frame_end =
-                    Some(render_loop::create_now_future(&self.core.renderer));
-                return Ok(());
-            }
-            // SAFETY: flush() succeeded — all CBs have been submitted to the
-            // GPU queue.  Marking the entire chain as finished prevents inner
-            // CommandBufferExecFuture drops from re-submitting already-submitted
-            // OneTimeSubmit command buffers (only the outermost CBEF gets
-            // `submitted=true` from flush; inner CBEFs still have `submitted=false`).
-            unsafe { future.signal_finished() };
-
-            let future = future
-                .then_swapchain_present(
-                    self.core.renderer.queue.clone(),
-                    vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                        self.core.renderer.swapchain.clone(),
-                        image_index,
-                    ),
-                )
-                .then_signal_fence_and_flush();
-
-            match future {
-                Ok(future) => {
-                    self.core.previous_frame_end = Some(future.boxed());
-                }
-                Err(e) => {
-                    log::warn!("Swapchain present/fence failed: {:?}", e);
-                    self.core
-                        .renderer
-                        .queue
-                        .with(|mut q| q.wait_idle())
-                        .ok();
-                    self.core.previous_frame_end =
-                        Some(render_loop::create_now_future(&self.core.renderer));
-                }
+        if let Some(ref rt) = self.core.render_thread {
+            if let Err(e) = rt.send(packet) {
+                log::error!("editor: failed to send frame packet: {}", e);
             }
         }
 
@@ -3005,7 +2931,7 @@ impl App {
         }
     }
 
-    fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiRenderResult) {
+    fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiLayoutResult) {
         // Temporarily remove InputManager to avoid borrow conflicts with game_world
         let Some(mut input_manager) = self.core.game_world.resources_mut().remove::<InputManager>() else {
             return;

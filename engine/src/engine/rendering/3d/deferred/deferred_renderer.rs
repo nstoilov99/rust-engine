@@ -12,7 +12,6 @@ use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConst
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::render_target::RenderTarget;
-use crate::engine::rendering::rendering_3d::SkinningBackend;
 use glam::{Mat4, Vec3};
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -50,7 +49,6 @@ pub struct DeferredRenderer {
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_render_pass: Arc<RenderPass>,
-    skinning: SkinningBackend,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,13 +134,6 @@ impl DeferredRenderer {
             gbuffer.material.clone(),
         )?;
 
-        // Skinning backend: manages bone palette UBO and identity descriptor set
-        let skinning = SkinningBackend::new(
-            allocator.clone(),
-            descriptor_set_allocator.clone(),
-            &geometry_pass.pipeline(),
-        )?;
-
         Ok(Self {
             gbuffer,
             geometry_pass,
@@ -160,7 +151,6 @@ impl DeferredRenderer {
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
             grid_render_pass,
-            skinning,
         })
     }
 
@@ -602,9 +592,9 @@ impl DeferredRenderer {
         &self.render_counters
     }
 
-    /// Returns the skinning backend (for accessing identity set in prepare_mesh_data).
-    pub fn skinning(&self) -> &SkinningBackend {
-        &self.skinning
+    /// Returns the geometry pass pipeline (for creating SkinningBackend externally).
+    pub fn geometry_pipeline(&self) -> Arc<vulkano::pipeline::GraphicsPipeline> {
+        self.geometry_pass.pipeline()
     }
 }
 
