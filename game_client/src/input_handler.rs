@@ -80,6 +80,7 @@ pub fn handle_camera_rotation(renderer: &mut Renderer, input: &InputManager, loo
 /// Handle debug view toggles (keys 0-5)
 ///
 /// Uses lookup table instead of 6 repetitive if-blocks.
+#[allow(dead_code)]
 pub fn handle_debug_views(
     input: &InputManager,
     deferred_renderer: &mut DeferredRenderer,

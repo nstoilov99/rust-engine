@@ -118,29 +118,51 @@ pub fn prepare_mesh_data(
     mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
 }
 
+fn compute_light_vp(light_dir_render: glm::Vec3) -> glam::Mat4 {
+    let dir =
+        glam::Vec3::new(light_dir_render.x, light_dir_render.y, light_dir_render.z).normalize();
+    let distance = 100.0;
+    let half_size = 50.0;
+    let light_pos = glam::Vec3::ZERO - dir * distance;
+
+    let up = if dir.y.abs() > 0.99 {
+        glam::Vec3::X
+    } else {
+        glam::Vec3::Y
+    };
+
+    let view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, up);
+    let proj = glam::Mat4::orthographic_rh(-half_size, half_size, -half_size, half_size, 0.1, 200.0);
+    proj * view
+}
+
 /// Prepare light uniform data from ECS world
 pub fn prepare_light_data(world: &World, renderer: &Renderer) -> LightUniformData {
     rust_engine::profile_scope!("prepare_light_data");
 
+    let identity: [[f32; 4]; 4] = glam::Mat4::IDENTITY.to_cols_array_2d();
     let camera_pos = renderer.camera_3d.position;
     let mut light_data = LightUniformData {
         camera_position: [camera_pos.x, camera_pos.y, camera_pos.z],
-        _pad0: 0.0,
+        shadow_bias: 0.005,
         directional_light_dir: [0.0, -1.0, -1.0],
-        _pad1: 0.0,
+        shadow_enabled: 0.0,
         directional_light_color: [1.0, 1.0, 1.0],
         directional_light_intensity: 1.0,
         ambient_color: [0.1, 0.1, 0.15],
         ambient_intensity: 0.3,
+        light_vp: identity,
     };
 
-    // Query ECS for directional light (use first one found)
     if let Some((_entity, dir_light)) = world.query::<&EcsDirectionalLight>().iter().next() {
         let direction = glm::normalize(&render_adapter::direction_to_render(&dir_light.direction));
         light_data.directional_light_dir = [direction.x, direction.y, direction.z];
         light_data.directional_light_color =
             [dir_light.color.x, dir_light.color.y, dir_light.color.z];
         light_data.directional_light_intensity = dir_light.intensity;
+        light_data.shadow_bias = dir_light.shadow_bias;
+        light_data.shadow_enabled = if dir_light.shadow_enabled { 1.0 } else { 0.0 };
+        light_data.light_vp = compute_light_vp(direction).to_cols_array_2d();
     }
 
     light_data
