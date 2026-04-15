@@ -7,7 +7,6 @@
 # Cargo.lock  # <-- DON'T uncomment this for applications
 
 # IDE files
-.claude
 .vscode/
 .idea/
 *.swp

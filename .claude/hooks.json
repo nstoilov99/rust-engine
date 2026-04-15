@@ -1,0 +1,5 @@
+{
+    "pre-prompt": {
+        "command": "cat docs/KNOWLEDGE.md"
+    }
+}

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo tree:*)",
+      "mcp__filesystem__list_directory",
+      "Bash(dir:*)",
+      "Bash(find src/engine src/game -name \"*.rs\" -type f -exec sh -c 'lines=$\\(wc -l < \"\"$1\"\"\\); if [ \"\"$lines\"\" -gt 200 ]; then echo \"\"$lines $1\"\"; fi' _ {} ;)",
+      "Bash(git config:*)",
+      "Bash(git update-index:*)",
+      "Read(//tmp/vibe-kanban/worktrees/e913-task-26-performa/rust-engine/**)",
+      "mcp__filesystem__read_text_file",
+      "Bash(grep:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -o .githooks/prepare-commit-msg -m \"$\\(cat <<''EOF''\nchore: allow vibe-kanban commit messages in git hook\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "WebFetch(domain:vibekanban.com)",
+      "mcp__filesystem__directory_tree",
+      "Bash(find:*)",
+      "mcp__filesystem__read_multiple_files",
+      "mcp__context7__resolve-library-id",
+      "WebFetch(domain:docs.rs)",
+      "mcp__context7__query-docs",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo test:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
