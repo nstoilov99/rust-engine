@@ -119,7 +119,7 @@ impl ApplicationHandler for BenchmarkApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
-                runner.renderer.recreate_swapchain = true;
+                runner.renderer.swapchain_state.recreate_swapchain = true;
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = runner.render() {
@@ -167,6 +167,7 @@ struct BenchmarkRunner {
     asset_manager: Arc<AssetManager>,
     game_world: GameWorld,
     deferred_renderer: DeferredRenderer,
+    skinning: rust_engine::engine::rendering::rendering_3d::SkinningBackend,
     game_loop: GameLoop,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
@@ -199,7 +200,7 @@ impl BenchmarkRunner {
             window.clone(),
             benchmark_present_mode_preference(&config),
         )?;
-        let actual_present_mode = renderer.swapchain.create_info().present_mode;
+        let actual_present_mode = renderer.swapchain_state.swapchain.create_info().present_mode;
         if config.uncapped && actual_present_mode != PresentMode::Immediate {
             println!(
                 "Benchmark uncapped mode requested, but {:?} was selected instead",
@@ -209,10 +210,10 @@ impl BenchmarkRunner {
             println!("Benchmark present mode: {:?}", actual_present_mode);
         }
         let asset_manager = Arc::new(AssetManager::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
-            renderer.memory_allocator.clone(),
-            renderer.command_buffer_allocator.clone(),
+            renderer.gpu.device.clone(),
+            renderer.gpu.queue.clone(),
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.command_buffer_allocator.clone(),
         ));
         let (_mesh_indices, _plane_mesh_index, cube_mesh_index) =
             game_setup::load_assets(&asset_manager)?;
@@ -232,13 +233,19 @@ impl BenchmarkRunner {
         game_world.resources_mut().insert(physics_world);
 
         let deferred_renderer = DeferredRenderer::new(
-            renderer.device.clone(),
-            renderer.queue.clone(),
-            renderer.memory_allocator.clone(),
-            renderer.command_buffer_allocator.clone(),
-            renderer.descriptor_set_allocator.clone(),
+            renderer.gpu.device.clone(),
+            renderer.gpu.queue.clone(),
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.command_buffer_allocator.clone(),
+            renderer.gpu.descriptor_set_allocator.clone(),
             config.resolution[0],
             config.resolution[1],
+        )?;
+
+        let skinning = rust_engine::engine::rendering::rendering_3d::SkinningBackend::new(
+            renderer.gpu.memory_allocator.clone(),
+            renderer.gpu.descriptor_set_allocator.clone(),
+            &deferred_renderer.geometry_pipeline(),
         )?;
 
         let mut transform_cache = TransformCache::new();
@@ -252,7 +259,7 @@ impl BenchmarkRunner {
         );
         game_world.resources_mut().insert(transform_cache);
 
-        let previous_frame_end = Some(vulkano::sync::now(renderer.device.clone()).boxed());
+        let previous_frame_end = Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed());
         let (profile_collector, profile_sink_id) = create_profile_sink();
 
         Ok(Self {
@@ -261,6 +268,7 @@ impl BenchmarkRunner {
             asset_manager,
             game_world,
             deferred_renderer,
+            skinning,
             game_loop: GameLoop::new(),
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(1024),
@@ -321,7 +329,7 @@ impl BenchmarkRunner {
             &self.renderer,
             &mut self.mesh_data_buffer,
             tc,
-            self.deferred_renderer.skinning(),
+            &self.skinning,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
@@ -329,7 +337,7 @@ impl BenchmarkRunner {
             prev_future.cleanup_finished();
         }
 
-        if self.renderer.recreate_swapchain {
+        if self.renderer.swapchain_state.recreate_swapchain {
             match render_loop::handle_swapchain_recreation(
                 &mut self.renderer,
                 &mut self.deferred_renderer,
@@ -374,12 +382,12 @@ impl BenchmarkRunner {
         let future = {
             rust_engine::profile_scope!("swapchain_present");
             acquire_future
-                .then_execute(self.renderer.queue.clone(), deferred_cb)
+                .then_execute(self.renderer.gpu.queue.clone(), deferred_cb)
                 .map_err(|error| format!("Execute error: {error:?}"))?
                 .then_swapchain_present(
-                    self.renderer.queue.clone(),
+                    self.renderer.gpu.queue.clone(),
                     vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                        self.renderer.swapchain.clone(),
+                        self.renderer.swapchain_state.swapchain.clone(),
                         image_index,
                     ),
                 )
@@ -428,12 +436,13 @@ impl BenchmarkRunner {
             cpu_name: detect_cpu_name(),
             gpu_name: self
                 .renderer
+                .gpu
                 .device
                 .physical_device()
                 .properties()
                 .device_name
                 .clone(),
-            present_mode: format!("{:?}", self.renderer.swapchain.create_info().present_mode),
+            present_mode: format!("{:?}", self.renderer.swapchain_state.swapchain.create_info().present_mode),
             resolution: self.config.resolution,
             seed: self.config.seed,
         };

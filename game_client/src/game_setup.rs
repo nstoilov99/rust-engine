@@ -38,10 +38,10 @@ pub fn setup_asset_system(
 ) -> Result<(Arc<AssetManager>, HotReloadWatcher, Receiver<ReloadEvent>), Box<dyn std::error::Error>>
 {
     let asset_manager = Arc::new(AssetManager::new(
-        renderer.device.clone(),
-        renderer.queue.clone(),
-        renderer.memory_allocator.clone(),
-        renderer.command_buffer_allocator.clone(),
+        renderer.gpu.device.clone(),
+        renderer.gpu.queue.clone(),
+        renderer.gpu.memory_allocator.clone(),
+        renderer.gpu.command_buffer_allocator.clone(),
     ));
 
     // Setup hot-reload channel
@@ -246,7 +246,7 @@ pub fn upload_model_texture(
     };
 
     let image = Image::new(
-        renderer.memory_allocator.clone(),
+        renderer.gpu.memory_allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
             format: Format::R8G8B8A8_SRGB,
@@ -258,7 +258,7 @@ pub fn upload_model_texture(
     )?;
 
     let buffer = Buffer::from_iter(
-        renderer.memory_allocator.clone(),
+        renderer.gpu.memory_allocator.clone(),
         BufferCreateInfo {
             usage: BufferUsage::TRANSFER_SRC,
             ..Default::default()
@@ -271,8 +271,8 @@ pub fn upload_model_texture(
     )?;
 
     let mut builder = AutoCommandBufferBuilder::primary(
-        renderer.command_buffer_allocator.clone(),
-        renderer.queue.queue_family_index(),
+        renderer.gpu.command_buffer_allocator.clone(),
+        renderer.gpu.queue.queue_family_index(),
         CommandBufferUsage::OneTimeSubmit,
     )?;
 
@@ -280,13 +280,13 @@ pub fn upload_model_texture(
 
     let command_buffer = builder.build()?;
     command_buffer
-        .execute(renderer.queue.clone())?
+        .execute(renderer.gpu.queue.clone())?
         .then_signal_fence_and_flush()?
         .wait(None)?;
 
     let texture_view = ImageView::new_default(image)?;
     let sampler = Sampler::new(
-        renderer.device.clone(),
+        renderer.gpu.device.clone(),
         SamplerCreateInfo {
             mag_filter: Filter::Linear,
             min_filter: Filter::Linear,
@@ -298,7 +298,7 @@ pub fn upload_model_texture(
     // Create descriptor set for texture
     use rust_engine::rendering::rendering_2d::pipeline_2d::create_texture_descriptor_set;
     let descriptor_set = create_texture_descriptor_set(
-        renderer.descriptor_set_allocator.clone(),
+        renderer.gpu.descriptor_set_allocator.clone(),
         renderer.pipeline_3d.clone(),
         texture_view,
         sampler,

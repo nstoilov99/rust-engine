@@ -46,27 +46,28 @@ use vulkano::sync::GpuFuture;
 use vulkano::{Validated, VulkanError};
 use winit::window::Window;
 
+/// Swapchain and associated resources that move to the render thread in Step 5.
+pub struct SwapchainState {
+    pub swapchain: Arc<Swapchain>,
+    pub images: Vec<Arc<Image>>,
+    pub surface: Arc<Surface>,
+    pub recreate_swapchain: bool,
+}
+
 pub struct Renderer {
     #[allow(dead_code)] // Kept alive for Vulkan instance lifetime
     instance: Arc<Instance>,
-    pub device: Arc<Device>,
-    pub queue: Arc<Queue>,
-    pub surface: Arc<Surface>,
-    pub swapchain: Arc<Swapchain>,
-    pub images: Vec<Arc<Image>>,
-    pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    pub memory_allocator: Arc<StandardMemoryAllocator>,
+    pub gpu: Arc<super::gpu_context::GpuContext>,
+    pub swapchain_state: SwapchainState,
     pub vertex_buffer: Subbuffer<[TexturedVertex]>,
     pub index_buffer: Subbuffer<[u32]>,
     pub render_pass: Arc<vulkano::render_pass::RenderPass>,
     pub framebuffers: Vec<Arc<Framebuffer>>,
     pub pipeline: Arc<GraphicsPipeline>,
-    pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pub descriptor_set: Arc<DescriptorSet>,
     _frames_in_flight: usize,
     _current_frame: usize,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
-    pub recreate_swapchain: bool,
     /// Tracks if we've already logged the minimized state (prevents log spam)
     was_minimized: bool,
     pub camera: Camera2D,
@@ -75,14 +76,21 @@ pub struct Renderer {
     pub framebuffers_3d: Vec<Arc<Framebuffer>>,
     pub pipeline_3d: Arc<GraphicsPipeline>,
     pub depth_buffer: Arc<ImageView>,
-    // Lit mesh pipeline (uses lighting uniform data)
     pub lit_mesh_pipeline: Arc<GraphicsPipeline>,
     pub ambient_light: AmbientLight,
     pub directional_light: Option<DirectionalLight>,
     pub point_lights: Vec<PointLight>,
     pub lighting_buffer: Subbuffer<LightingUniformData>,
     pub lighting_descriptor_set: Arc<DescriptorSet>,
-    // pub gui: Gui, // No compatible version for Vulkano 0.34
+}
+
+// Convenience accessors — keeps call sites shorter during migration
+impl Renderer {
+    pub fn device(&self) -> &Arc<Device> { &self.gpu.device }
+    pub fn queue(&self) -> &Arc<Queue> { &self.gpu.queue }
+    pub fn memory_allocator(&self) -> &Arc<StandardMemoryAllocator> { &self.gpu.memory_allocator }
+    pub fn command_buffer_allocator(&self) -> &Arc<StandardCommandBufferAllocator> { &self.gpu.command_buffer_allocator }
+    pub fn descriptor_set_allocator(&self) -> &Arc<StandardDescriptorSetAllocator> { &self.gpu.descriptor_set_allocator }
 }
 
 impl Renderer {
@@ -267,26 +275,34 @@ impl Renderer {
             sampler,
         )?;
 
-        Ok(Self {
-            instance: vulkan_context.instance,
+        let gpu = Arc::new(super::gpu_context::GpuContext {
             device: device_context.device,
             queue: device_context.queue,
-            surface,
+            memory_allocator,
+            command_buffer_allocator,
+            descriptor_set_allocator,
+        });
+
+        let swapchain_state = SwapchainState {
             swapchain,
             images,
-            command_buffer_allocator,
-            memory_allocator,
+            surface,
+            recreate_swapchain: false,
+        };
+
+        Ok(Self {
+            instance: vulkan_context.instance,
+            gpu,
+            swapchain_state,
             vertex_buffer,
             index_buffer,
             render_pass,
             framebuffers,
             pipeline,
-            descriptor_set_allocator,
             descriptor_set,
             _frames_in_flight: 2,
             _current_frame: 0,
             previous_frame_end: None,
-            recreate_swapchain: false,
             was_minimized: false,
             camera,
             camera_3d,
@@ -300,7 +316,6 @@ impl Renderer {
             point_lights,
             lighting_buffer,
             lighting_descriptor_set,
-            // gui, // No compatible version for Vulkano 0.34
         })
     }
 
@@ -318,35 +333,35 @@ impl Renderer {
             previous.cleanup_finished();
         }
 
-        let extent = self.swapchain.image_extent();
+        let extent = self.swapchain_state.swapchain.image_extent();
         if extent[0] == 0 || extent[1] == 0 {
             if !self.was_minimized {
                 println!("Window minimized, pausing render");
                 self.was_minimized = true;
             }
-            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            self.previous_frame_end = Some(vulkano::sync::now(self.gpu.device.clone()).boxed());
             return Ok(None);
         } else if self.was_minimized {
             println!("Window restored, resuming render");
             self.was_minimized = false;
         }
 
-        if self.recreate_swapchain && !self.recreate_swapchain_resources()? {
+        if self.swapchain_state.recreate_swapchain && !self.recreate_swapchain_resources()? {
             return Ok(None);
         }
 
         let (image_index, suboptimal, acquire_future) =
-            match vk_swapchain::acquire_next_image(self.swapchain.clone(), None) {
+            match vk_swapchain::acquire_next_image(self.swapchain_state.swapchain.clone(), None) {
                 Ok(r) => r,
                 Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
+                    self.swapchain_state.recreate_swapchain = true;
                     return Ok(None);
                 }
                 Err(e) => return Err(e.into()),
             };
 
         if suboptimal {
-            self.recreate_swapchain = true;
+            self.swapchain_state.recreate_swapchain = true;
         }
 
         Ok(Some((image_index, acquire_future)))
@@ -357,42 +372,42 @@ impl Renderer {
     /// (zero-sized images) and rendering should be skipped.
     fn recreate_swapchain_resources(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         let (new_swapchain, new_images) = recreate_swapchain(
-            self.device.clone(),
-            self.surface.clone(),
-            self.swapchain.clone(),
+            self.gpu.device.clone(),
+            self.swapchain_state.surface.clone(),
+            self.swapchain_state.swapchain.clone(),
         )?;
 
         if new_images.is_empty() {
-            self.recreate_swapchain = false;
-            self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+            self.swapchain_state.recreate_swapchain = false;
+            self.previous_frame_end = Some(vulkano::sync::now(self.gpu.device.clone()).boxed());
             return Ok(false);
         }
 
-        self.swapchain = new_swapchain;
+        self.swapchain_state.swapchain = new_swapchain;
 
         self.depth_buffer = crate::engine::depth_buffer::create_depth_buffer(
-            self.device.clone(),
-            self.memory_allocator.clone(),
+            self.gpu.device.clone(),
+            self.gpu.memory_allocator.clone(),
             new_images[0].extent()[0],
             new_images[0].extent()[1],
         )?;
 
-        self.images = new_images;
+        self.swapchain_state.images = new_images;
 
-        self.framebuffers = create_framebuffers(&self.images, self.render_pass.clone())?;
+        self.framebuffers = create_framebuffers(&self.swapchain_state.images, self.render_pass.clone())?;
         self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
-            &self.images,
+            &self.swapchain_state.images,
             self.render_pass_3d.clone(),
             self.depth_buffer.clone(),
         )?;
 
-        let extent = self.images[0].extent();
+        let extent = self.swapchain_state.images[0].extent();
         self.camera
             .set_viewport_size(extent[0] as f32, extent[1] as f32);
         self.camera_3d
             .set_viewport_size(extent[0] as f32, extent[1] as f32);
 
-        self.recreate_swapchain = false;
+        self.swapchain_state.recreate_swapchain = false;
         Ok(true)
     }
 
@@ -405,11 +420,11 @@ impl Renderer {
         image_index: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
+            .then_execute(self.gpu.queue.clone(), command_buffer)?
             .then_swapchain_present(
-                self.queue.clone(),
+                self.gpu.queue.clone(),
                 vk_swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
+                    self.swapchain_state.swapchain.clone(),
                     image_index,
                 ),
             )
@@ -423,12 +438,12 @@ impl Renderer {
                 return Err("GPU device lost".into());
             }
             Err(Validated::Error(VulkanError::OutOfDate)) => {
-                self.recreate_swapchain = true;
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                self.swapchain_state.recreate_swapchain = true;
+                self.previous_frame_end = Some(vulkano::sync::now(self.gpu.device.clone()).boxed());
             }
             Err(e) => {
                 eprintln!("Failed to flush future: {:?}", e);
-                self.previous_frame_end = Some(vulkano::sync::now(self.device.clone()).boxed());
+                self.previous_frame_end = Some(vulkano::sync::now(self.gpu.device.clone()).boxed());
             }
         }
 
@@ -442,8 +457,8 @@ impl Renderer {
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -487,12 +502,12 @@ impl Renderer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // 1. Acquire image
         let (image_index, _, acquire_future) =
-            vulkano::swapchain::acquire_next_image(self.swapchain.clone(), None)?;
+            vulkano::swapchain::acquire_next_image(self.swapchain_state.swapchain.clone(), None)?;
 
         // 2. Build command buffer
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -533,11 +548,11 @@ impl Renderer {
         let command_buffer = builder.build()?;
 
         let future = acquire_future
-            .then_execute(self.queue.clone(), command_buffer)?
+            .then_execute(self.gpu.queue.clone(), command_buffer)?
             .then_swapchain_present(
-                self.queue.clone(),
+                self.gpu.queue.clone(),
                 vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
+                    self.swapchain_state.swapchain.clone(),
                     image_index,
                 ),
             )
@@ -559,8 +574,8 @@ impl Renderer {
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -576,7 +591,7 @@ impl Renderer {
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
         // Set dynamic viewport (updates with window resize)
-        let extent = self.swapchain.image_extent();
+        let extent = self.swapchain_state.swapchain.image_extent();
         builder.set_viewport(
             0,
             smallvec![Viewport {
@@ -633,8 +648,8 @@ impl Renderer {
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -651,7 +666,7 @@ impl Renderer {
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
         // Set dynamic viewport (updates with window resize)
-        let extent = self.swapchain.image_extent();
+        let extent = self.swapchain_state.swapchain.image_extent();
         builder.set_viewport(
             0,
             smallvec![Viewport {
@@ -739,8 +754,8 @@ impl Renderer {
         };
 
         let mut builder = AutoCommandBufferBuilder::primary(
-            self.command_buffer_allocator.clone(),
-            self.queue.queue_family_index(),
+            self.gpu.command_buffer_allocator.clone(),
+            self.gpu.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -758,7 +773,7 @@ impl Renderer {
         builder.bind_pipeline_graphics(self.pipeline_3d.clone())?;
 
         // Set viewport
-        let extent = self.swapchain.image_extent();
+        let extent = self.swapchain_state.swapchain.image_extent();
         builder.set_viewport(
             0,
             smallvec![Viewport {

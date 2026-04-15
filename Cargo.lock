@@ -2891,6 +2891,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "bytemuck",
+ "crossbeam-channel",
  "egui",
  "egui_dock",
  "game_shared",

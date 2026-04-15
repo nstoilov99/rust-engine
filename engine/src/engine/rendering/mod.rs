@@ -1,7 +1,9 @@
 pub mod common;
 pub mod counters;
+pub mod frame_packet;
 pub mod graph;
 pub mod render_target;
+pub mod render_thread;
 
 #[path = "2d"]
 pub mod rendering_2d {

@@ -231,8 +231,8 @@ impl ApplicationHandler for GameApp {
         // 1. Create windows for pending requests (requires ActiveEventLoop).
         let pending = app.drain_pending_window_requests();
         if !pending.is_empty() {
-            let device = app.core.renderer.device.clone();
-            let queue = app.core.renderer.queue.clone();
+            let device = app.core.renderer.gpu.device.clone();
+            let queue = app.core.renderer.gpu.queue.clone();
             for req in pending {
                 // Skip if a window for this key+kind already exists
                 let already_exists = secondary_windows.values().any(|s| s.editor_key == req.editor_key && s.kind == req.kind);
@@ -363,8 +363,8 @@ impl ApplicationHandler for GameApp {
             .copied()
             .unwrap_or(rust_engine::engine::ecs::resources::PlayMode::Edit);
 
-        let device = app.core.renderer.device.clone();
-        let queue = app.core.renderer.queue.clone();
+        let device = app.core.renderer.gpu.device.clone();
+        let queue = app.core.renderer.gpu.queue.clone();
 
         // Collect dock requests from secondary windows
         let dock_requests: Vec<(String, SecondaryWindowKind)> = {

@@ -154,19 +154,19 @@ pub fn handle_swapchain_recreation(
     use rust_engine::engine::core::swapchain::recreate_swapchain;
 
     match recreate_swapchain(
-        renderer.device.clone(),
-        renderer.surface.clone(),
-        renderer.swapchain.clone(),
+        renderer.gpu.device.clone(),
+        renderer.swapchain_state.surface.clone(),
+        renderer.swapchain_state.swapchain.clone(),
     ) {
         Ok((new_swapchain, new_images)) => {
             // Check if window is minimized
             if new_images.is_empty() {
-                renderer.recreate_swapchain = false;
+                renderer.swapchain_state.recreate_swapchain = false;
                 return Ok(false);
             }
 
-            renderer.swapchain = new_swapchain;
-            renderer.images = new_images.clone();
+            renderer.swapchain_state.swapchain = new_swapchain;
+            renderer.swapchain_state.images = new_images.clone();
 
             // NOTE: Do NOT update camera aspect ratio here!
             // The camera should use VIEWPORT PANEL dimensions, not window dimensions.
@@ -179,7 +179,7 @@ pub fn handle_swapchain_recreation(
             // - Recreating at window size caused stretching after minimize/restore
             deferred_renderer.clear_framebuffer_cache();
 
-            renderer.recreate_swapchain = false;
+            renderer.swapchain_state.recreate_swapchain = false;
             Ok(true)
         }
         Err(e) => {
@@ -193,17 +193,17 @@ pub fn handle_swapchain_recreation(
 pub fn acquire_swapchain_image(renderer: &mut Renderer) -> AcquireResult {
     rust_engine::profile_scope!("acquire_swapchain_image");
 
-    match acquire_next_image(renderer.swapchain.clone(), None) {
+    match acquire_next_image(renderer.swapchain_state.swapchain.clone(), None) {
         Ok((image_index, suboptimal, acquire_future)) => {
             if suboptimal {
-                renderer.recreate_swapchain = true;
+                renderer.swapchain_state.recreate_swapchain = true;
             }
-            let target_image = renderer.images[image_index as usize].clone();
+            let target_image = renderer.swapchain_state.images[image_index as usize].clone();
             Ok((image_index, target_image, acquire_future.boxed()))
         }
         Err(e) => match e {
             Validated::Error(VulkanError::OutOfDate) => {
-                renderer.recreate_swapchain = true;
+                renderer.swapchain_state.recreate_swapchain = true;
                 Err(SwapchainError::OutOfDate)
             }
             _ => Err(SwapchainError::AcquireFailed(format!("{:?}", e))),
@@ -219,7 +219,7 @@ pub enum SwapchainError {
 
 /// Create a "now" future for synchronization after errors
 pub fn create_now_future(renderer: &Renderer) -> Box<dyn GpuFuture> {
-    sync::now(renderer.device.clone()).boxed()
+    sync::now(renderer.gpu.device.clone()).boxed()
 }
 
 /// Prepare debug draw GPU data from the debug draw buffer.
@@ -262,7 +262,7 @@ pub fn prepare_debug_draw_data(
 
         let vertex_count = vertices.len() as u32;
         let buffer = Buffer::from_iter(
-            renderer.memory_allocator.clone(),
+            renderer.gpu.memory_allocator.clone(),
             BufferCreateInfo {
                 usage: BufferUsage::VERTEX_BUFFER,
                 ..Default::default()

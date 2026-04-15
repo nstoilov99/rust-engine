@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create G-Buffer
     println!("📦 Creating G-Buffer (800x600)...");
     let gbuffer = GBuffer::new(
-        renderer.device.clone(),
-        renderer.memory_allocator.clone(),
+        renderer.gpu.device.clone(),
+        renderer.gpu.memory_allocator.clone(),
         800,
         600,
     )?;
