@@ -35,6 +35,7 @@ use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::window::Window;
 
+#[allow(dead_code)]
 pub struct StandaloneApp {
     pub window: Arc<Window>,
     pub renderer: Renderer,

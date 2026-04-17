@@ -315,6 +315,7 @@ impl RenderThread {
                             packet.view_proj,
                             packet.camera_pos,
                             &packet.debug_draw,
+                            &packet.post_processing,
                         ) {
                             Ok(cb) => Some(cb),
                             Err(e) => {
@@ -456,6 +457,7 @@ impl RenderThread {
                         packet.view_proj,
                         packet.camera_pos,
                         &packet.debug_draw,
+                        &packet.post_processing,
                     ) {
                         Ok(cb) => cb,
                         Err(e) => {
@@ -524,6 +526,7 @@ impl RenderThread {
     }
 
     /// Send a frame packet to the render thread.
+    #[allow(clippy::result_large_err)]
     pub fn send(&self, packet: FramePacket) -> Result<(), crossbeam_channel::SendError<FramePacket>> {
         self.sender.send(packet)
     }

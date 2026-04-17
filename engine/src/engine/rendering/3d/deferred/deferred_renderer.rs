@@ -1,13 +1,12 @@
-//! Deferred rendering orchestration
-//!
-//! Performance optimizations:
-//! - Cached G-Buffer descriptor set (created once on init/resize)
-//! - Cached swapchain framebuffers (one per swapchain image)
-
+use super::bloom_pass::{BloomPass, BloomSamplePush, BloomThresholdPush};
+use super::composite_pass::{CompositePass, CompositePushConstants};
 use super::gbuffer::GBuffer;
 use super::geometry_pass::GeometryPass;
 use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
+use super::luminance_pass::{LuminancePass, LuminancePush};
+use super::shadow_pass::ShadowPass;
+use super::ssao_pass::{SsaoPass, SsaoPushConstants};
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::graph::RenderGraph;
@@ -25,9 +24,11 @@ use vulkano::command_buffer::{
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::{Device, Queue};
+use vulkano::format::Format;
+use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
-use vulkano::image::Image;
-use vulkano::memory::allocator::StandardMemoryAllocator;
+use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::PipelineBindPoint;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
@@ -35,6 +36,11 @@ pub struct DeferredRenderer {
     gbuffer: GBuffer,
     geometry_pass: GeometryPass,
     lighting_pass: LightingPass,
+    shadow_pass: ShadowPass,
+    ssao_pass: SsaoPass,
+    bloom_pass: BloomPass,
+    luminance_pass: LuminancePass,
+    composite_pass: CompositePass,
     grid_pass: GridPass,
     debug_draw_pass: DebugDrawPass,
     device: Arc<Device>,
@@ -44,8 +50,17 @@ pub struct DeferredRenderer {
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     debug_view: DebugView,
     render_counters: RenderCounters,
-    // Cached resources for performance
     gbuffer_descriptor_set: Arc<DescriptorSet>,
+    shadow_descriptor_set: Arc<DescriptorSet>,
+    ssao_descriptor_set: Arc<DescriptorSet>,
+    ssao_fallback_descriptor_set: Arc<DescriptorSet>,
+    ssao_sampler: Arc<Sampler>,
+    #[allow(dead_code)]
+    ssao_fallback: Arc<ImageView>,
+    hdr_target: Arc<ImageView>,
+    hdr_framebuffer: Arc<Framebuffer>,
+    composite_descriptor_set: Arc<DescriptorSet>,
+    composite_render_pass: Arc<RenderPass>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_render_pass: Arc<RenderPass>,
@@ -53,12 +68,51 @@ pub struct DeferredRenderer {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DebugView {
-    None,     // Normal rendering
-    Position, // Show world positions (colorful = far from origin)
-    Normal,   // Show normals (RGB = XYZ)
-    Albedo,   // Show base color
-    Material, // Show roughness/metallic
-    Depth,    // Show depth (white = near, black = far)
+    None,
+    Position,
+    Normal,
+    Albedo,
+    Material,
+    Depth,
+}
+
+fn create_hdr_target(
+    allocator: Arc<StandardMemoryAllocator>,
+    width: u32,
+    height: u32,
+) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    let image = Image::new(
+        allocator,
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R16G16B16A16_SFLOAT,
+            extent: [width, height, 1],
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
+    )?;
+    ImageView::new_default(image).map_err(|e| e.into())
+}
+
+fn create_ssao_fallback(
+    allocator: Arc<StandardMemoryAllocator>,
+) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    let image = Image::new(
+        allocator,
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8_UNORM,
+            extent: [1, 1, 1],
+            usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    )?;
+    ImageView::new_default(image).map_err(|e| e.into())
 }
 
 impl DeferredRenderer {
@@ -74,10 +128,31 @@ impl DeferredRenderer {
         let gbuffer = GBuffer::new(device.clone(), allocator.clone(), width, height)?;
         let geometry_pass = GeometryPass::new(device.clone(), gbuffer.render_pass.clone())?;
 
-        // Create a separate render pass for lighting (outputs to swapchain, no depth)
-        use vulkano::format::Format;
+        let hdr_render_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: Format::R16G16B16A16_SFLOAT,
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                }
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )?;
 
-        let lighting_render_pass = vulkano::single_pass_renderpass!(
+        let lighting_pass = LightingPass::new(device.clone(), hdr_render_pass)?;
+
+        let shadow_pass = ShadowPass::new(
+            device.clone(),
+            allocator.clone(),
+            descriptor_set_allocator.clone(),
+        )?;
+
+        let composite_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
                 color: {
@@ -93,24 +168,36 @@ impl DeferredRenderer {
             }
         )?;
 
-        let lighting_pass = LightingPass::new(device.clone(), lighting_render_pass)?;
+        let composite_pass = CompositePass::new(device.clone(), composite_render_pass.clone())?;
 
-        // Create render pass for grid (loads existing color + depth, alpha blends on top)
-        // Hardware depth testing for proper occlusion (Unreal-style approach)
+        let bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
+
+        let luminance_pass = LuminancePass::new(device.clone(), allocator.clone())?;
+
+        let hdr_target = create_hdr_target(allocator.clone(), width, height)?;
+
+        let hdr_framebuffer = Framebuffer::new(
+            lighting_pass.render_pass(),
+            FramebufferCreateInfo {
+                attachments: vec![hdr_target.clone()],
+                ..Default::default()
+            },
+        )?;
+
         let grid_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
                 color: {
                     format: Format::B8G8R8A8_SRGB,
                     samples: 1,
-                    load_op: Load,  // Load existing content from lighting pass
+                    load_op: Load,
                     store_op: Store,
                 },
                 depth: {
                     format: Format::D32_SFLOAT,
                     samples: 1,
-                    load_op: Load,      // Load existing depth from geometry pass
-                    store_op: DontCare, // Grid doesn't write depth
+                    load_op: Load,
+                    store_op: DontCare,
                 }
             },
             pass: {
@@ -120,12 +207,8 @@ impl DeferredRenderer {
         )?;
 
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
-
-        // Debug draw pass reuses the same render pass format as the grid
-        // (Load color + Load depth, alpha blend, depth test)
         let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
 
-        // Cache G-Buffer descriptor set (created once, reused every frame)
         let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
             descriptor_set_allocator.clone(),
             gbuffer.position.clone(),
@@ -134,10 +217,60 @@ impl DeferredRenderer {
             gbuffer.material.clone(),
         )?;
 
+        let shadow_descriptor_set = lighting_pass.create_shadow_descriptor_set(
+            descriptor_set_allocator.clone(),
+            shadow_pass.shadow_map(),
+            shadow_pass.shadow_sampler(),
+        )?;
+
+        let ssao_pass = SsaoPass::new(
+            device.clone(),
+            allocator.clone(),
+            descriptor_set_allocator.clone(),
+            width,
+            height,
+        )?;
+
+        let ssao_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                ..Default::default()
+            },
+        )?;
+
+        let ssao_fallback = create_ssao_fallback(allocator.clone())?;
+
+        let ssao_descriptor_set = lighting_pass.create_ssao_descriptor_set(
+            descriptor_set_allocator.clone(),
+            ssao_pass.ssao_blurred(),
+            ssao_sampler.clone(),
+        )?;
+
+        let ssao_fallback_descriptor_set = lighting_pass.create_ssao_descriptor_set(
+            descriptor_set_allocator.clone(),
+            ssao_fallback.clone(),
+            ssao_sampler.clone(),
+        )?;
+
+        let composite_descriptor_set = composite_pass.create_descriptor_set(
+            descriptor_set_allocator.clone(),
+            hdr_target.clone(),
+            bloom_pass.bloom_result(),
+            luminance_pass.persistent_1x1(),
+        )?;
+
         Ok(Self {
             gbuffer,
             geometry_pass,
             lighting_pass,
+            shadow_pass,
+            ssao_pass,
+            bloom_pass,
+            luminance_pass,
+            composite_pass,
             grid_pass,
             debug_draw_pass,
             device,
@@ -148,28 +281,34 @@ impl DeferredRenderer {
             debug_view: DebugView::None,
             render_counters: RenderCounters::default(),
             gbuffer_descriptor_set,
+            shadow_descriptor_set,
+            ssao_descriptor_set,
+            ssao_fallback_descriptor_set,
+            ssao_sampler,
+            ssao_fallback,
+            hdr_target,
+            hdr_framebuffer,
+            composite_descriptor_set,
+            composite_render_pass,
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
             grid_render_pass,
         })
     }
 
-    /// Get or create a cached framebuffer for the given swapchain image
     fn get_or_create_framebuffer(
         &mut self,
         target_image: Arc<Image>,
     ) -> Result<Arc<Framebuffer>, Box<dyn std::error::Error>> {
-        // Use image pointer as cache key
         let cache_key = Arc::as_ptr(&target_image) as usize;
 
         if let Some(fb) = self.framebuffer_cache.get(&cache_key) {
             return Ok(fb.clone());
         }
 
-        // Create new framebuffer and cache it
         let target_view = ImageView::new_default(target_image)?;
         let framebuffer = Framebuffer::new(
-            self.lighting_pass.render_pass(),
+            self.composite_render_pass.clone(),
             FramebufferCreateInfo {
                 attachments: vec![target_view],
                 ..Default::default()
@@ -181,8 +320,6 @@ impl DeferredRenderer {
         Ok(framebuffer)
     }
 
-    /// Get or create a cached grid framebuffer for the given swapchain image
-    /// Includes both color (swapchain) and depth (from G-Buffer) attachments
     fn get_or_create_grid_framebuffer(
         &mut self,
         target_image: Arc<Image>,
@@ -194,7 +331,6 @@ impl DeferredRenderer {
         }
 
         let target_view = ImageView::new_default(target_image)?;
-        // Use G-Buffer depth for hardware depth testing (grid occlusion)
         let framebuffer = Framebuffer::new(
             self.grid_render_pass.clone(),
             FramebufferCreateInfo {
@@ -208,29 +344,23 @@ impl DeferredRenderer {
         Ok(framebuffer)
     }
 
-    /// Clear the framebuffer cache (call on swapchain recreation)
     pub fn clear_framebuffer_cache(&mut self) {
         self.framebuffer_cache.clear();
         self.grid_framebuffer_cache.clear();
     }
 
-    /// Resize the G-Buffer (call when viewport size changes)
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
-        // Skip if dimensions are invalid
         if width == 0 || height == 0 {
             return Ok(());
         }
 
-        // Check current G-Buffer size - skip if already the right size
         let current_extent = self.gbuffer.position.image().extent();
         if current_extent[0] == width && current_extent[1] == height {
             return Ok(());
         }
 
-        // Recreate G-Buffer with new dimensions
         self.gbuffer = GBuffer::new(self.device.clone(), self.allocator.clone(), width, height)?;
 
-        // Recreate the G-Buffer descriptor set for lighting pass
         self.gbuffer_descriptor_set = self.lighting_pass.create_descriptor_set(
             self.descriptor_set_allocator.clone(),
             self.gbuffer.position.clone(),
@@ -239,18 +369,44 @@ impl DeferredRenderer {
             self.gbuffer.material.clone(),
         )?;
 
-        // Clear framebuffer caches (grid framebuffer needs new depth attachment)
+        self.hdr_target = create_hdr_target(self.allocator.clone(), width, height)?;
+
+        self.hdr_framebuffer = Framebuffer::new(
+            self.lighting_pass.render_pass(),
+            FramebufferCreateInfo {
+                attachments: vec![self.hdr_target.clone()],
+                ..Default::default()
+            },
+        )?;
+
+        self.ssao_pass
+            .resize(self.allocator.clone(), width, height)?;
+
+        self.ssao_descriptor_set = self.lighting_pass.create_ssao_descriptor_set(
+            self.descriptor_set_allocator.clone(),
+            self.ssao_pass.ssao_blurred(),
+            self.ssao_sampler.clone(),
+        )?;
+
+        self.bloom_pass
+            .resize(self.allocator.clone(), width, height)?;
+
+        self.luminance_pass
+            .resize(self.allocator.clone())?;
+
+        self.composite_descriptor_set = self.composite_pass.create_descriptor_set(
+            self.descriptor_set_allocator.clone(),
+            self.hdr_target.clone(),
+            self.bloom_pass.bloom_result(),
+            self.luminance_pass.persistent_1x1(),
+        )?;
+
         self.framebuffer_cache.clear();
         self.grid_framebuffer_cache.clear();
 
         Ok(())
     }
 
-    /// Render scene using deferred pipeline
-    ///
-    /// Accepts a `RenderTarget` that can be either a swapchain image (standalone)
-    /// or a texture (editor viewport). Uses a render graph to determine pass
-    /// execution order based on declared resource dependencies.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -261,6 +417,7 @@ impl DeferredRenderer {
         view_proj: Mat4,
         camera_pos: Vec3,
         debug_draw: &DebugDrawData,
+        settings: &PostProcessingSettings,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
@@ -285,7 +442,6 @@ impl DeferredRenderer {
             (target_framebuffer, depth_framebuffer, builder)
         };
 
-        // Build the render graph for this frame
         let graph = {
             crate::profile_scope!("graph_setup");
 
@@ -298,6 +454,9 @@ impl DeferredRenderer {
             let gbuffer_depth = graph.declare_virtual("gbuffer_depth");
             let target_res = graph.declare_virtual("target");
 
+            let shadow_map_res = graph.import_image("shadow_map", self.shadow_pass.shadow_map());
+            let hdr_res = graph.import_image("hdr_target", self.hdr_target.clone());
+
             graph.add_pass("geometry", |b| {
                 b.write(gbuffer_position);
                 b.write(gbuffer_normal);
@@ -306,11 +465,58 @@ impl DeferredRenderer {
                 b.write(gbuffer_depth);
             });
 
+            if light_data.shadow_enabled > 0.5 {
+                graph.add_pass("shadow", |b| {
+                    b.write(shadow_map_res);
+                });
+            }
+
+            if settings.ssao_enabled {
+                let ssao_raw_res = graph.declare_virtual("ssao_raw");
+                let ssao_blurred_res = graph.declare_virtual("ssao_blurred");
+
+                graph.add_pass("ssao", |b| {
+                    b.read(gbuffer_position);
+                    b.read(gbuffer_normal);
+                    b.write(ssao_raw_res);
+                });
+
+                graph.add_pass("ssao_blur", |b| {
+                    b.read(ssao_raw_res);
+                    b.write(ssao_blurred_res);
+                });
+            }
+
             graph.add_pass("lighting", |b| {
                 b.read(gbuffer_position);
                 b.read(gbuffer_normal);
                 b.read(gbuffer_albedo);
                 b.read(gbuffer_material);
+                b.read(shadow_map_res);
+                b.write(hdr_res);
+            });
+
+            let bloom_res = graph.declare_virtual("bloom_result");
+            let lum_res = graph.declare_virtual("luminance_result");
+
+            if settings.bloom_enabled {
+                graph.add_pass("bloom", |b| {
+                    b.read(hdr_res);
+                    b.write(bloom_res);
+                });
+            }
+
+            if matches!(settings.exposure_mode, ExposureMode::Auto) {
+                graph.add_pass("luminance", |b| {
+                    b.read(hdr_res);
+                    b.write(lum_res);
+                });
+            }
+
+            graph.add_pass("composite", |b| {
+                b.read(hdr_res);
+                b.read(bloom_res);
+                b.read(lum_res);
                 b.write(target_res);
             });
 
@@ -334,10 +540,12 @@ impl DeferredRenderer {
             graph
         };
 
-        // Execute passes in graph-determined order
         for &pass_idx in graph.compiled_order() {
             let pass_name = graph.pass_name(pass_idx);
             match pass_name {
+                "shadow" => {
+                    self.render_shadow_pass(&mut builder, mesh_data, light_data)?;
+                }
                 "geometry" => {
                     crate::profile_scope!("geometry_pass");
 
@@ -416,10 +624,76 @@ impl DeferredRenderer {
 
                     builder.end_render_pass(SubpassEndInfo::default())?;
                 }
+                "ssao" => {
+                    self.render_ssao_pass(&mut builder, view_proj, settings)?;
+                }
+                "ssao_blur" => {
+                    self.render_ssao_blur_pass(&mut builder)?;
+                }
+                "luminance" => {
+                    self.render_luminance_pass(&mut builder)?;
+                }
                 "lighting" => {
                     crate::profile_scope!("lighting_pass");
 
-                    let gbuffer_descriptor_set = self.gbuffer_descriptor_set.clone();
+                    let hdr_extent = self.hdr_framebuffer.extent();
+                    let hdr_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                        offset: [0.0, 0.0],
+                        extent: [hdr_extent[0] as f32, hdr_extent[1] as f32],
+                        depth_range: 0.0..=1.0,
+                    };
+                    let hdr_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                        offset: [0, 0],
+                        extent: [hdr_extent[0], hdr_extent[1]],
+                    };
+
+                    builder
+                        .begin_render_pass(
+                            RenderPassBeginInfo {
+                                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                                ..RenderPassBeginInfo::framebuffer(self.hdr_framebuffer.clone())
+                            },
+                            SubpassBeginInfo {
+                                contents: SubpassContents::Inline,
+                                ..Default::default()
+                            },
+                        )?
+                        .bind_pipeline_graphics(self.lighting_pass.pipeline())?
+                        .set_viewport(0, smallvec![hdr_viewport])?
+                        .set_scissor(0, smallvec![hdr_scissor])?
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            self.lighting_pass.layout(),
+                            0,
+                            self.gbuffer_descriptor_set.clone(),
+                        )?
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            self.lighting_pass.layout(),
+                            1,
+                            self.shadow_descriptor_set.clone(),
+                        )?
+                        .bind_descriptor_sets(
+                            PipelineBindPoint::Graphics,
+                            self.lighting_pass.layout(),
+                            2,
+                            if settings.ssao_enabled {
+                                self.ssao_descriptor_set.clone()
+                            } else {
+                                self.ssao_fallback_descriptor_set.clone()
+                            },
+                        )?
+                        .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
+                    unsafe {
+                        builder.draw(3, 1, 0, 0)?;
+                    }
+                    builder.end_render_pass(SubpassEndInfo::default())?;
+                }
+                "bloom" => {
+                    self.render_bloom_pass(&mut builder, settings)?;
+                }
+                "composite" => {
+                    crate::profile_scope!("composite_pass");
 
                     let target_extent = target_framebuffer.extent();
                     let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
@@ -430,6 +704,31 @@ impl DeferredRenderer {
                     let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
                         offset: [0, 0],
                         extent: [target_extent[0], target_extent[1]],
+                    };
+
+                    let exposure_val = match settings.exposure_mode {
+                        ExposureMode::Manual(v) => v,
+                        ExposureMode::Auto => 1.0,
+                    };
+                    let composite_push = CompositePushConstants {
+                        exposure: exposure_val,
+                        bloom_intensity: if settings.bloom_enabled {
+                            settings.bloom_intensity
+                        } else {
+                            0.0
+                        },
+                        vignette_intensity: settings.vignette_intensity,
+                        tone_map_mode: match settings.tone_map_mode {
+                            ToneMapMode::Reinhard => 0.0,
+                            ToneMapMode::AcesFilmic => 1.0,
+                        },
+                        exposure_mode: match settings.exposure_mode {
+                            ExposureMode::Auto => 0.0,
+                            ExposureMode::Manual(_) => 1.0,
+                        },
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                        _pad2: 0.0,
                     };
 
                     builder
@@ -443,16 +742,16 @@ impl DeferredRenderer {
                                 ..Default::default()
                             },
                         )?
-                        .bind_pipeline_graphics(self.lighting_pass.pipeline())?
-                        .set_viewport(0, smallvec![target_viewport.clone()])?
+                        .bind_pipeline_graphics(self.composite_pass.pipeline())?
+                        .set_viewport(0, smallvec![target_viewport])?
                         .set_scissor(0, smallvec![target_scissor])?
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
-                            self.lighting_pass.layout(),
+                            self.composite_pass.layout(),
                             0,
-                            gbuffer_descriptor_set,
+                            self.composite_descriptor_set.clone(),
                         )?
-                        .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
+                        .push_constants(self.composite_pass.layout(), 0, composite_push)?;
                     unsafe {
                         builder.draw(3, 1, 0, 0)?;
                     }
@@ -592,13 +891,475 @@ impl DeferredRenderer {
         &self.render_counters
     }
 
-    /// Returns the geometry pass pipeline (for creating SkinningBackend externally).
     pub fn geometry_pipeline(&self) -> Arc<vulkano::pipeline::GraphicsPipeline> {
         self.geometry_pass.pipeline()
     }
+
+    fn render_shadow_pass(
+        &mut self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        mesh_data: &[MeshRenderData],
+        light_data: &LightUniformData,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("shadow_pass");
+
+        let shadow_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [2048.0, 2048.0],
+            depth_range: 0.0..=1.0,
+        };
+        let shadow_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [2048, 2048],
+        };
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some(1.0.into())],
+                    ..RenderPassBeginInfo::framebuffer(self.shadow_pass.framebuffer())
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.shadow_pass.pipeline())?
+            .set_viewport(0, smallvec![shadow_viewport])?
+            .set_scissor(0, smallvec![shadow_scissor])?;
+
+        let shadow_layout = self.shadow_pass.layout();
+        for mesh in mesh_data {
+            builder
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    shadow_layout.clone(),
+                    0,
+                    mesh.bone_palette_set.clone(),
+                )?
+                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
+                .bind_index_buffer(mesh.index_buffer.clone())?
+                .push_constants(
+                    shadow_layout.clone(),
+                    0,
+                    PushConstantData {
+                        model: mesh.push_constants.model,
+                        view_projection: light_data.light_vp,
+                    },
+                )?;
+            unsafe {
+                builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+            }
+            self.render_counters.draw_calls += 1;
+        }
+
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn render_ssao_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        view_proj: Mat4,
+        settings: &PostProcessingSettings,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("ssao_pass");
+
+        let fb = self.ssao_pass.ssao_raw_framebuffer();
+        let extent = fb.extent();
+        let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [extent[0], extent[1]],
+        };
+
+        let ssao_desc = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            self.ssao_pass.ssao_layout().set_layouts().first().ok_or("Missing SSAO Set 0")?.clone(),
+            [
+                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                    0,
+                    self.gbuffer.position.clone(),
+                    self.ssao_pass.sampler(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                    1,
+                    self.gbuffer.normal.clone(),
+                    self.ssao_pass.sampler(),
+                ),
+                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                    2,
+                    self.ssao_pass.noise_texture(),
+                    self.ssao_pass.sampler(),
+                ),
+            ],
+            [],
+        )?;
+
+        let kernel_desc = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            self.ssao_pass.ssao_layout().set_layouts().get(1).ok_or("Missing SSAO Set 1")?.clone(),
+            [vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                0,
+                self.ssao_pass.kernel_buffer().clone(),
+            )],
+            [],
+        )?;
+
+        let push = SsaoPushConstants {
+            view_projection: view_proj.to_cols_array_2d(),
+            screen_size: [extent[0] as f32, extent[1] as f32],
+            radius: settings.ssao_radius,
+            bias: 0.025,
+        };
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![None],
+                    ..RenderPassBeginInfo::framebuffer(fb)
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.ssao_pass.ssao_pipeline())?
+            .set_viewport(0, smallvec![viewport])?
+            .set_scissor(0, smallvec![scissor])?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.ssao_pass.ssao_layout().clone(),
+                0,
+                ssao_desc,
+            )?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.ssao_pass.ssao_layout().clone(),
+                1,
+                kernel_desc,
+            )?
+            .push_constants(self.ssao_pass.ssao_layout().clone(), 0, push)?;
+        unsafe {
+            builder.draw(3, 1, 0, 0)?;
+        }
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn render_ssao_blur_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("ssao_blur_pass");
+
+        let fb = self.ssao_pass.ssao_blur_framebuffer();
+        let extent = fb.extent();
+        let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [extent[0] as f32, extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [extent[0], extent[1]],
+        };
+
+        let blur_desc = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            self.ssao_pass.blur_layout().set_layouts().first().ok_or("Missing blur Set 0")?.clone(),
+            [vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                0,
+                self.ssao_pass.ssao_raw(),
+                self.ssao_pass.sampler(),
+            )],
+            [],
+        )?;
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![None],
+                    ..RenderPassBeginInfo::framebuffer(fb)
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.ssao_pass.blur_pipeline())?
+            .set_viewport(0, smallvec![viewport])?
+            .set_scissor(0, smallvec![scissor])?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.ssao_pass.blur_layout().clone(),
+                0,
+                blur_desc,
+            )?;
+        unsafe {
+            builder.draw(3, 1, 0, 0)?;
+        }
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn render_luminance_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("luminance_pass");
+
+        let level_count = self.luminance_pass.level_count();
+        let level_fbs = self.luminance_pass.level_framebuffers();
+        let level_sizes = self.luminance_pass.level_sizes();
+        let level_images = self.luminance_pass.level_images();
+
+        for i in 0..level_count {
+            let size = level_sizes[i];
+            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [size as f32, size as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [size, size],
+            };
+
+            let source = if i == 0 {
+                self.hdr_target.clone()
+            } else {
+                level_images[i - 1].clone()
+            };
+
+            let desc = self.luminance_pass.create_descriptor_set(
+                self.descriptor_set_allocator.clone(),
+                source,
+            )?;
+
+            let push = LuminancePush {
+                is_first_pass: if i == 0 { 1.0 } else { 0.0 },
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+            };
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(level_fbs[i].clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.luminance_pass.pipeline())?
+                .set_viewport(0, smallvec![viewport])?
+                .set_scissor(0, smallvec![scissor])?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.luminance_pass.layout().clone(),
+                    0,
+                    desc,
+                )?
+                .push_constants(self.luminance_pass.layout().clone(), 0, push)?;
+            unsafe {
+                builder.draw(3, 1, 0, 0)?;
+            }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        Ok(())
+    }
+
+    fn render_bloom_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        settings: &PostProcessingSettings,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("bloom_pass");
+
+        let mip_count = self.bloom_pass.mip_count();
+        let mip_sizes = self.bloom_pass.mip_sizes();
+        let mip_fbs = self.bloom_pass.mip_framebuffers();
+        let additive_fbs = self.bloom_pass.additive_framebuffers();
+        let mip_images = self.bloom_pass.mip_images();
+
+        // Threshold: HDR → mip[0]
+        {
+            let size = mip_sizes[0];
+            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [size[0] as f32, size[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [size[0], size[1]],
+            };
+
+            let desc = self.bloom_pass.create_descriptor_set(
+                self.descriptor_set_allocator.clone(),
+                self.bloom_pass.threshold_layout(),
+                self.hdr_target.clone(),
+            )?;
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(mip_fbs[0].clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.bloom_pass.threshold_pipeline())?
+                .set_viewport(0, smallvec![viewport])?
+                .set_scissor(0, smallvec![scissor])?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.bloom_pass.threshold_layout().clone(),
+                    0,
+                    desc,
+                )?
+                .push_constants(
+                    self.bloom_pass.threshold_layout().clone(),
+                    0,
+                    BloomThresholdPush {
+                        threshold: settings.bloom_threshold,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                        _pad2: 0.0,
+                    },
+                )?;
+            unsafe {
+                builder.draw(3, 1, 0, 0)?;
+            }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        // Downsample: mip[i-1] → mip[i]
+        for i in 1..mip_count {
+            let size = mip_sizes[i];
+            let src_size = mip_sizes[i - 1];
+            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [size[0] as f32, size[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [size[0], size[1]],
+            };
+
+            let desc = self.bloom_pass.create_descriptor_set(
+                self.descriptor_set_allocator.clone(),
+                self.bloom_pass.downsample_layout(),
+                mip_images[i - 1].clone(),
+            )?;
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(mip_fbs[i].clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.bloom_pass.downsample_pipeline())?
+                .set_viewport(0, smallvec![viewport])?
+                .set_scissor(0, smallvec![scissor])?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.bloom_pass.downsample_layout().clone(),
+                    0,
+                    desc,
+                )?
+                .push_constants(
+                    self.bloom_pass.downsample_layout().clone(),
+                    0,
+                    BloomSamplePush {
+                        texel_size: [1.0 / src_size[0] as f32, 1.0 / src_size[1] as f32],
+                        is_first_pass: if i == 1 { 1.0 } else { 0.0 },
+                        _pad: 0.0,
+                    },
+                )?;
+            unsafe {
+                builder.draw(3, 1, 0, 0)?;
+            }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        // Upsample: mip[i] → mip[i-1] (additive)
+        for i in (0..mip_count - 1).rev() {
+            let size = mip_sizes[i];
+            let src_size = mip_sizes[i + 1];
+            let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+                offset: [0.0, 0.0],
+                extent: [size[0] as f32, size[1] as f32],
+                depth_range: 0.0..=1.0,
+            };
+            let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+                offset: [0, 0],
+                extent: [size[0], size[1]],
+            };
+
+            let desc = self.bloom_pass.create_descriptor_set(
+                self.descriptor_set_allocator.clone(),
+                self.bloom_pass.upsample_layout(),
+                mip_images[i + 1].clone(),
+            )?;
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![None],
+                        ..RenderPassBeginInfo::framebuffer(additive_fbs[i].clone())
+                    },
+                    SubpassBeginInfo {
+                        contents: SubpassContents::Inline,
+                        ..Default::default()
+                    },
+                )?
+                .bind_pipeline_graphics(self.bloom_pass.upsample_pipeline())?
+                .set_viewport(0, smallvec![viewport])?
+                .set_scissor(0, smallvec![scissor])?
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    self.bloom_pass.upsample_layout().clone(),
+                    0,
+                    desc,
+                )?
+                .push_constants(
+                    self.bloom_pass.upsample_layout().clone(),
+                    0,
+                    BloomSamplePush {
+                        texel_size: [1.0 / src_size[0] as f32, 1.0 / src_size[1] as f32],
+                        is_first_pass: 0.0,
+                        _pad: 0.0,
+                    },
+                )?;
+            unsafe {
+                builder.draw(3, 1, 0, 0)?;
+            }
+            builder.end_render_pass(SubpassEndInfo::default())?;
+        }
+
+        Ok(())
+    }
 }
 
-// Helper structures (define these based on your engine)
 pub struct MeshRenderData {
     pub vertex_buffer: Subbuffer<[crate::engine::rendering::rendering_3d::Vertex3D]>,
     pub index_buffer: Subbuffer<[u32]>,
@@ -619,23 +1380,69 @@ pub struct PushConstantData {
 unsafe impl bytemuck::Pod for PushConstantData {}
 unsafe impl bytemuck::Zeroable for PushConstantData {}
 
-/// Light data for deferred lighting pass (push constants).
-///
-/// Note: This layout matches the `lighting.frag` shader's push_constant block.
-/// It differs from `LightingUniformData` in pipeline_3d.rs which is used for
-/// forward rendering with additional metallic/roughness fields.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LightUniformData {
     pub camera_position: [f32; 3],
-    pub _pad0: f32,
+    pub shadow_bias: f32,
     pub directional_light_dir: [f32; 3],
-    pub _pad1: f32,
+    pub shadow_enabled: f32,
     pub directional_light_color: [f32; 3],
     pub directional_light_intensity: f32,
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
+    pub light_vp: [[f32; 4]; 4],
 }
 
 unsafe impl bytemuck::Pod for LightUniformData {}
 unsafe impl bytemuck::Zeroable for LightUniformData {}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExposureMode {
+    Auto,
+    Manual(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToneMapMode {
+    Reinhard,
+    AcesFilmic,
+}
+
+pub struct PostProcessingSettings {
+    pub bloom_enabled: bool,
+    pub bloom_intensity: f32,
+    pub bloom_threshold: f32,
+    pub ssao_enabled: bool,
+    pub ssao_radius: f32,
+    pub ssao_intensity: f32,
+    pub exposure_mode: ExposureMode,
+    pub vignette_intensity: f32,
+    pub tone_map_mode: ToneMapMode,
+}
+
+impl Default for PostProcessingSettings {
+    fn default() -> Self {
+        Self {
+            bloom_enabled: true,
+            bloom_intensity: 0.04,
+            bloom_threshold: 1.0,
+            ssao_enabled: true,
+            ssao_radius: 0.5,
+            ssao_intensity: 1.0,
+            exposure_mode: ExposureMode::Auto,
+            vignette_intensity: 0.0,
+            tone_map_mode: ToneMapMode::Reinhard,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_uniform_data_size() {
+        assert_eq!(std::mem::size_of::<LightUniformData>(), 128);
+    }
+}

@@ -6,7 +6,9 @@
 //! shared mutable state crosses the boundary.
 
 use crate::engine::debug_draw::DebugDrawData;
-use crate::engine::rendering::rendering_3d::{LightUniformData, MeshRenderData};
+use crate::engine::rendering::rendering_3d::{
+    LightUniformData, MeshRenderData, PostProcessingSettings,
+};
 use glam::{Mat4, Vec3};
 #[cfg(feature = "editor")]
 use std::sync::Arc;
@@ -37,6 +39,7 @@ pub struct FramePacket {
     pub camera_pos: Vec3,
     pub grid_visible: bool,
     pub debug_draw: DebugDrawData,
+    pub post_processing: PostProcessingSettings,
 
     // egui data (None until Step 7 wires up the egui split)
     #[cfg(feature = "editor")]
@@ -84,6 +87,7 @@ pub enum RenderEvent {
 
 impl FramePacket {
     /// Build a standalone-mode frame packet from prepared render data.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_standalone(
         mesh_data: Vec<MeshRenderData>,
         light_data: LightUniformData,
@@ -101,6 +105,7 @@ impl FramePacket {
             camera_pos,
             grid_visible,
             debug_draw,
+            post_processing: PostProcessingSettings::default(),
             #[cfg(feature = "editor")]
             egui_primitives: None,
             #[cfg(feature = "editor")]
@@ -137,6 +142,7 @@ impl FramePacket {
             camera_pos,
             grid_visible,
             debug_draw,
+            post_processing: PostProcessingSettings::default(),
             egui_primitives: None,
             egui_texture_deltas: None,
             render_mode: RenderMode::Editor,

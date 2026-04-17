@@ -377,6 +377,7 @@ impl BenchmarkRunner {
             self.renderer.camera_3d.view_projection_matrix(),
             self.renderer.camera_3d.position,
             &debug_draw_data,
+            &rust_engine::engine::rendering::rendering_3d::PostProcessingSettings::default(),
         )?;
 
         let future = {
