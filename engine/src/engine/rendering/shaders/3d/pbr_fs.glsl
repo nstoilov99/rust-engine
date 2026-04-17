@@ -82,11 +82,13 @@ float calculate_shadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
     // Perspective divide
     vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
 
-    // Transform to [0,1] range
-    proj_coords = proj_coords * 0.5 + 0.5;
+    // glam's orthographic_rh produces NDC.z in [0, 1] (Vulkan convention),
+    // so only XY need the [-1,1] -> [0,1] remap. Z is already a depth value.
+    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
     // Outside shadow map = fully lit
-    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+    if (proj_coords.z > 1.0 || proj_coords.z < 0.0 ||
+        proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
         proj_coords.y < 0.0 || proj_coords.y > 1.0) {
         return 1.0;
     }

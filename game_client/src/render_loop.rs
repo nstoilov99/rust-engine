@@ -34,12 +34,14 @@ pub fn prepare_mesh_data(
     asset_manager: &Arc<AssetManager>,
     renderer: &Renderer,
     mesh_data_buffer: &mut Vec<MeshRenderData>,
+    shadow_caster_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
     skinning: &SkinningBackend,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
     mesh_data_buffer.clear();
+    shadow_caster_buffer.clear();
 
     let meshes = asset_manager.meshes.read();
     let identity_set = skinning.identity_set();
@@ -48,7 +50,7 @@ pub fn prepare_mesh_data(
     let projection_matrix = renderer.camera_3d.projection_matrix();
     let view_projection = projection_matrix * view_matrix;
 
-    let frustum = Frustum::from_view_projection(view_projection);
+    let camera_frustum = Frustum::from_view_projection(view_projection);
 
     let vp_array: [[f32; 4]; 4] = view_projection.to_cols_array_2d();
 
@@ -59,7 +61,6 @@ pub fn prepare_mesh_data(
             continue;
         }
 
-        // Resolve mesh_path → submesh indices (multi-submesh support)
         let submesh_indices: &[usize] = if !mesh_renderer.mesh_path.is_empty() {
             if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
                 indices
@@ -76,7 +77,6 @@ pub fn prepare_mesh_data(
         });
         let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
-        // GPU bone palette: use skeleton's palette if present, else identity
         let palette_set = if let Some(skel) = skeleton {
             if !skel.palette.is_empty() {
                 match skinning.create_palette_set(&skel.palette) {
@@ -92,14 +92,11 @@ pub fn prepare_mesh_data(
 
         for &mesh_idx in submesh_indices {
             if let Some(gpu_mesh) = meshes.get(mesh_idx) {
-                // AABB frustum culling per submesh
                 let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
                 let world_aabb = local_aabb.transformed(&glam_model);
-                if !frustum.contains_aabb(world_aabb.min, world_aabb.max) {
-                    continue;
-                }
+                let in_camera = camera_frustum.contains_aabb(world_aabb.min, world_aabb.max);
 
-                mesh_data_buffer.push(MeshRenderData {
+                let data = MeshRenderData {
                     vertex_buffer: gpu_mesh.vertex_buffer.clone(),
                     index_buffer: gpu_mesh.index_buffer.clone(),
                     index_count: gpu_mesh.index_count,
@@ -110,12 +107,21 @@ pub fn prepare_mesh_data(
                         view_projection: vp_array,
                     },
                     bone_palette_set: palette_set.clone(),
-                });
+                };
+
+                // Shadow casters are not camera-frustum culled — an off-screen
+                // object can still cast a shadow into the visible region.
+                shadow_caster_buffer.push(data.clone());
+
+                if in_camera {
+                    mesh_data_buffer.push(data);
+                }
             }
         }
     }
 
     mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
+    shadow_caster_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
 }
 
 fn compute_light_vp(light_dir_render: glm::Vec3) -> glam::Mat4 {

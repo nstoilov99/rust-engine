@@ -65,9 +65,12 @@ vec3 fresnel_schlick(float cos_theta, vec3 F0) {
 
 float calculate_shadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
     vec3 proj_coords = frag_pos_light_space.xyz / frag_pos_light_space.w;
-    proj_coords = proj_coords * 0.5 + 0.5;
+    // glam's orthographic_rh produces NDC.z in [0, 1] (Vulkan convention),
+    // so only XY need the [-1,1] -> [0,1] remap. Z is already a depth value.
+    proj_coords.xy = proj_coords.xy * 0.5 + 0.5;
 
-    if (proj_coords.z > 1.0 || proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+    if (proj_coords.z > 1.0 || proj_coords.z < 0.0 ||
+        proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
         proj_coords.y < 0.0 || proj_coords.y > 1.0) {
         return 1.0;
     }
@@ -75,15 +78,18 @@ float calculate_shadow(vec4 frag_pos_light_space, vec3 normal, vec3 light_dir) {
     float bias = max(lights.shadow_bias * (1.0 - dot(normal, light_dir)), lights.shadow_bias * 0.1);
     float current_depth = proj_coords.z - bias;
 
+    // 5x5 PCF with a 1.5-texel stride. The hardware shadow sampler already
+    // does a 2x2 bilinear compare per tap, so effective filter footprint is
+    // ~8 texels — soft enough to read as a real shadow without looking blurry.
     float shadow = 0.0;
     vec2 texel_size = 1.0 / textureSize(shadow_map, 0);
-    for(int x = -1; x <= 1; ++x) {
-        for(int y = -1; y <= 1; ++y) {
-            vec2 offset = vec2(x, y) * texel_size;
+    for(int x = -2; x <= 2; ++x) {
+        for(int y = -2; y <= 2; ++y) {
+            vec2 offset = vec2(x, y) * texel_size * 1.5;
             shadow += texture(shadow_map, vec3(proj_coords.xy + offset, current_depth));
         }
     }
-    shadow /= 9.0;
+    shadow /= 25.0;
     return shadow;
 }
 

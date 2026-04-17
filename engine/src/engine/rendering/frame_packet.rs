@@ -34,6 +34,10 @@ pub struct TextureBindCommand {
 pub struct FramePacket {
     // Scene data
     pub mesh_data: Vec<MeshRenderData>,
+    /// All shadow-casting meshes, NOT camera-frustum culled. Off-screen
+    /// casters must still render into the shadow map or their shadows
+    /// pop in/out as the camera turns.
+    pub shadow_caster_data: Vec<MeshRenderData>,
     pub light_data: LightUniformData,
     pub view_proj: Mat4,
     pub camera_pos: Vec3,
@@ -90,6 +94,7 @@ impl FramePacket {
     #[allow(clippy::too_many_arguments)]
     pub fn build_standalone(
         mesh_data: Vec<MeshRenderData>,
+        shadow_caster_data: Vec<MeshRenderData>,
         light_data: LightUniformData,
         view_proj: Mat4,
         camera_pos: Vec3,
@@ -100,6 +105,7 @@ impl FramePacket {
     ) -> Self {
         Self {
             mesh_data,
+            shadow_caster_data,
             light_data,
             view_proj,
             camera_pos,
@@ -126,6 +132,7 @@ impl FramePacket {
     #[cfg(feature = "editor")]
     pub fn build_editor(
         mesh_data: Vec<MeshRenderData>,
+        shadow_caster_data: Vec<MeshRenderData>,
         light_data: LightUniformData,
         view_proj: Mat4,
         camera_pos: Vec3,
@@ -137,6 +144,7 @@ impl FramePacket {
     ) -> Self {
         Self {
             mesh_data,
+            shadow_caster_data,
             light_data,
             view_proj,
             camera_pos,

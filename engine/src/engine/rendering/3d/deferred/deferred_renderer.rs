@@ -97,9 +97,14 @@ fn create_hdr_target(
 
 fn create_ssao_fallback(
     allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+    use vulkano::command_buffer::CopyBufferToImageInfo;
+
     let image = Image::new(
-        allocator,
+        allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
             format: Format::R8_UNORM,
@@ -112,6 +117,36 @@ fn create_ssao_fallback(
             ..Default::default()
         },
     )?;
+
+    // Upload a single white pixel (0xFF) so ambient multiplication passes through
+    // unchanged when SSAO is disabled and this fallback is bound.
+    let staging = Buffer::from_iter(
+        allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        [255u8],
+    )?;
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        command_buffer_allocator,
+        queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )?;
+    builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(staging, image.clone()))?;
+    use vulkano::command_buffer::PrimaryCommandBufferAbstract;
+    use vulkano::sync::GpuFuture;
+    builder
+        .build()?
+        .execute(queue)?
+        .then_signal_fence_and_flush()?
+        .wait(None)?;
+
     ImageView::new_default(image).map_err(|e| e.into())
 }
 
@@ -241,7 +276,11 @@ impl DeferredRenderer {
             },
         )?;
 
-        let ssao_fallback = create_ssao_fallback(allocator.clone())?;
+        let ssao_fallback = create_ssao_fallback(
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?;
 
         let ssao_descriptor_set = lighting_pass.create_ssao_descriptor_set(
             descriptor_set_allocator.clone(),
@@ -411,6 +450,7 @@ impl DeferredRenderer {
     pub fn render(
         &mut self,
         mesh_data: &[MeshRenderData],
+        shadow_caster_data: &[MeshRenderData],
         light_data: &LightUniformData,
         target: RenderTarget,
         grid_visible: bool,
@@ -544,7 +584,7 @@ impl DeferredRenderer {
             let pass_name = graph.pass_name(pass_idx);
             match pass_name {
                 "shadow" => {
-                    self.render_shadow_pass(&mut builder, mesh_data, light_data)?;
+                    self.render_shadow_pass(&mut builder, shadow_caster_data, light_data)?;
                 }
                 "geometry" => {
                     crate::profile_scope!("geometry_pass");
@@ -903,14 +943,17 @@ impl DeferredRenderer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::profile_scope!("shadow_pass");
 
+        let shadow_extent = self.shadow_pass.shadow_map().image().extent();
+        let shadow_w = shadow_extent[0];
+        let shadow_h = shadow_extent[1];
         let shadow_viewport = vulkano::pipeline::graphics::viewport::Viewport {
             offset: [0.0, 0.0],
-            extent: [2048.0, 2048.0],
+            extent: [shadow_w as f32, shadow_h as f32],
             depth_range: 0.0..=1.0,
         };
         let shadow_scissor = vulkano::pipeline::graphics::viewport::Scissor {
             offset: [0, 0],
-            extent: [2048, 2048],
+            extent: [shadow_w, shadow_h],
         };
 
         builder
@@ -1360,6 +1403,7 @@ impl DeferredRenderer {
     }
 }
 
+#[derive(Clone)]
 pub struct MeshRenderData {
     pub vertex_buffer: Subbuffer<[crate::engine::rendering::rendering_3d::Vertex3D]>,
     pub index_buffer: Subbuffer<[u32]>,
@@ -1430,7 +1474,10 @@ impl Default for PostProcessingSettings {
             ssao_enabled: true,
             ssao_radius: 0.5,
             ssao_intensity: 1.0,
-            exposure_mode: ExposureMode::Auto,
+            // Manual default avoids the "darker when close" snap from the
+            // instant auto-exposure path. Scene brightness should be driven by
+            // light intensity; users can opt into Auto for adaptive behavior.
+            exposure_mode: ExposureMode::Manual(1.0),
             vignette_intensity: 0.0,
             tone_map_mode: ToneMapMode::Reinhard,
         }

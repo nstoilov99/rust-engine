@@ -48,6 +48,7 @@ pub struct StandaloneApp {
     pub _mesh_indices: Vec<usize>,
     pub _descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    shadow_caster_buffer: Vec<MeshRenderData>,
     schedule: Schedule,
     frame_number: u64,
     render_thread: Option<RenderThread>,
@@ -252,6 +253,7 @@ impl StandaloneApp {
             _mesh_indices: mesh_indices,
             _descriptor_set: descriptor_set,
             mesh_data_buffer: Vec::with_capacity(64),
+            shadow_caster_buffer: Vec::with_capacity(64),
             schedule,
             frame_number: 0,
             render_thread: Some(render_thread),
@@ -397,6 +399,7 @@ impl StandaloneApp {
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
+            &mut self.shadow_caster_buffer,
             tc,
             &self.skinning,
         );
@@ -409,6 +412,7 @@ impl StandaloneApp {
 
         let packet = FramePacket::build_standalone(
             std::mem::take(&mut self.mesh_data_buffer),
+            std::mem::take(&mut self.shadow_caster_buffer),
             light_data,
             view_proj,
             camera_pos,

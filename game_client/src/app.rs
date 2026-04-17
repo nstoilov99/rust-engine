@@ -102,6 +102,7 @@ pub struct CoreApp {
     pub cube_mesh_index: usize,
     pub descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    shadow_caster_buffer: Vec<MeshRenderData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
     #[cfg(debug_assertions)]
@@ -416,6 +417,7 @@ impl App {
             cube_mesh_index,
             descriptor_set,
             mesh_data_buffer: Vec::with_capacity(64),
+            shadow_caster_buffer: Vec::with_capacity(64),
             frame_number: 0,
             render_thread: Some(render_thread),
             #[cfg(debug_assertions)]
@@ -1081,6 +1083,7 @@ impl App {
             &self.core.asset_manager,
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
+            &mut self.core.shadow_caster_buffer,
             transform_cache,
             &self.core.skinning,
         );
@@ -1168,6 +1171,7 @@ impl App {
         let (vp_w, vp_h) = self.editor.viewport.size;
         let packet = FramePacket::build_editor(
             std::mem::take(&mut self.core.mesh_data_buffer),
+            std::mem::take(&mut self.core.shadow_caster_buffer),
             light_data,
             view_proj,
             camera_pos,

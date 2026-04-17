@@ -33,16 +33,16 @@ pub struct Frustum {
 impl Frustum {
     /// Extract frustum planes from a view-projection matrix
     ///
-    /// Uses the Gribb/Hartmann method for extracting planes from
-    /// a combined view-projection matrix.
+    /// Uses the Gribb/Hartmann method with Vulkan/D3D clip-space conventions
+    /// (NDC.z in [0, 1]). The near plane is extracted from `row2` alone, not
+    /// `row3 + row2` — the latter is the OpenGL form for NDC.z in [-1, 1] and
+    /// places the near plane at the wrong distance for a Vulkan projection.
     pub fn from_view_projection(vp: Mat4) -> Self {
-        // Get matrix rows for plane extraction
         let row0 = vp.row(0);
         let row1 = vp.row(1);
         let row2 = vp.row(2);
         let row3 = vp.row(3);
 
-        // Extract and normalize each plane
         let extract_plane = |coeffs: Vec4| {
             let normal = Vec3::new(coeffs.x, coeffs.y, coeffs.z);
             let len = normal.length();
@@ -61,12 +61,12 @@ impl Frustum {
 
         Self {
             planes: [
-                extract_plane(row3 + row0), // Left
-                extract_plane(row3 - row0), // Right
-                extract_plane(row3 + row1), // Bottom
-                extract_plane(row3 - row1), // Top
-                extract_plane(row3 + row2), // Near
-                extract_plane(row3 - row2), // Far
+                extract_plane(row3 + row0), // Left:   -w <= x
+                extract_plane(row3 - row0), // Right:   x <= w
+                extract_plane(row3 + row1), // Bottom: -w <= y
+                extract_plane(row3 - row1), // Top:     y <= w
+                extract_plane(row2),        // Near:    0 <= z   (Vulkan/D3D convention)
+                extract_plane(row3 - row2), // Far:     z <= w
             ],
         }
     }

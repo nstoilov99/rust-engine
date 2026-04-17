@@ -309,6 +309,7 @@ impl RenderThread {
                         };
                         match deferred_renderer.render(
                             &packet.mesh_data,
+                            &packet.shadow_caster_data,
                             &packet.light_data,
                             render_target,
                             packet.grid_visible,
@@ -451,6 +452,7 @@ impl RenderThread {
                     };
                     match deferred_renderer.render(
                         &packet.mesh_data,
+                        &packet.shadow_caster_data,
                         &packet.light_data,
                         render_target,
                         packet.grid_visible,

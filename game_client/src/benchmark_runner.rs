@@ -171,6 +171,7 @@ struct BenchmarkRunner {
     game_loop: GameLoop,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
+    shadow_caster_buffer: Vec<MeshRenderData>,
     config: BenchmarkConfig,
     rendered_frames: u32,
     frame_times_ms: Vec<f64>,
@@ -272,6 +273,7 @@ impl BenchmarkRunner {
             game_loop: GameLoop::new(),
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(1024),
+            shadow_caster_buffer: Vec::with_capacity(1024),
             config,
             rendered_frames: 0,
             frame_times_ms: Vec::new(),
@@ -328,6 +330,7 @@ impl BenchmarkRunner {
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
+            &mut self.shadow_caster_buffer,
             tc,
             &self.skinning,
         );
@@ -369,6 +372,7 @@ impl BenchmarkRunner {
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
         let deferred_cb = self.deferred_renderer.render(
             &self.mesh_data_buffer,
+            &self.shadow_caster_buffer,
             &light_data,
             RenderTarget::Swapchain {
                 image: target_image.clone(),
