@@ -1,8 +1,9 @@
 //! Scene serialization and deserialization
 
 use super::scene_format::{
-    BlendModeData, CameraProjectionData, ColliderShapeData, ComponentData, EmissionShapeData,
-    EntityData, LightFalloffData, RigidBodyTypeData, SceneFile,
+    CameraProjectionData, ColliderShapeData, ComponentData,
+    EntityData, LightFalloffData, RenderModeData, RigidBodyTypeData, SceneFile,
+    SpawnShapeData, UpdateModuleData,
 };
 use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
@@ -173,43 +174,49 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         });
     }
 
-    if let Ok(emitter) = world.get::<&PlanktonEmitter>(entity) {
-        components.push(ComponentData::PlanktonEmitter {
-            enabled: emitter.enabled,
-            capacity: emitter.capacity,
-            emission_rate: emitter.emission_rate,
-            burst_count: emitter.burst_count,
-            burst_interval: emitter.burst_interval,
-            emission_shape: match emitter.emission_shape {
-                EmissionShape::Point => EmissionShapeData::Point,
-                EmissionShape::Sphere { radius } => EmissionShapeData::Sphere { radius },
-                EmissionShape::Cone { angle_rad, radius } => {
-                    EmissionShapeData::Cone { angle_rad, radius }
+    if let Ok(effect) = world.get::<&ParticleEffect>(entity) {
+        let modules_data: Vec<UpdateModuleData> = effect.update_modules.iter().map(|m| match m {
+            UpdateModule::Gravity(v) => UpdateModuleData::Gravity(*v),
+            UpdateModule::Drag(v) => UpdateModuleData::Drag(*v),
+            UpdateModule::Wind(v) => UpdateModuleData::Wind(*v),
+            UpdateModule::CurlNoise { strength, scale, speed } => {
+                UpdateModuleData::CurlNoise { strength: *strength, scale: *scale, speed: *speed }
+            }
+            UpdateModule::ColorOverLife { start, end } => {
+                UpdateModuleData::ColorOverLife { start: *start, end: *end }
+            }
+            UpdateModule::SizeOverLife { start, end } => {
+                UpdateModuleData::SizeOverLife { start: *start, end: *end }
+            }
+        }).collect();
+
+        components.push(ComponentData::ParticleEffect {
+            enabled: effect.enabled,
+            capacity: effect.capacity,
+            emission_rate: effect.emission_rate,
+            burst_count: effect.burst_count,
+            burst_interval: effect.burst_interval,
+            spawn_shape: match effect.spawn_shape {
+                SpawnShape::Point => SpawnShapeData::Point,
+                SpawnShape::Sphere { radius } => SpawnShapeData::Sphere { radius },
+                SpawnShape::Cone { angle_rad, radius } => {
+                    SpawnShapeData::Cone { angle_rad, radius }
                 }
-                EmissionShape::Box { half_extents } => {
-                    EmissionShapeData::Box { half_extents }
+                SpawnShape::Box { half_extents } => {
+                    SpawnShapeData::Box { half_extents }
                 }
             },
-            lifetime_min: emitter.lifetime_min,
-            lifetime_max: emitter.lifetime_max,
-            initial_velocity: emitter.initial_velocity,
-            velocity_variance: emitter.velocity_variance,
-            gravity: emitter.gravity,
-            wind: emitter.wind,
-            drag: emitter.drag,
-            turbulence_strength: emitter.turbulence_strength,
-            turbulence_scale: emitter.turbulence_scale,
-            turbulence_speed: emitter.turbulence_speed,
-            size_start: emitter.size_start,
-            size_end: emitter.size_end,
-            color_start: emitter.color_start,
-            color_end: emitter.color_end,
-            texture_path: emitter.texture_path.clone(),
-            soft_fade_distance: emitter.soft_fade_distance,
-            blend_mode: match emitter.blend_mode {
-                BlendMode::Additive => BlendModeData::Additive,
+            lifetime_min: effect.lifetime_min,
+            lifetime_max: effect.lifetime_max,
+            initial_velocity: effect.initial_velocity,
+            velocity_variance: effect.velocity_variance,
+            update_modules: modules_data,
+            render_mode: match effect.render_mode {
+                RenderMode::Billboard => RenderModeData::Billboard,
             },
-            show_gizmos: emitter.show_gizmos,
+            texture_path: effect.texture_path.clone(),
+            soft_fade_distance: effect.soft_fade_distance,
+            show_gizmos: effect.show_gizmos,
         });
     }
 
@@ -592,51 +599,57 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             ComponentData::AudioListener { active } => {
                 builder.add(AudioListener { active: *active });
             }
-            ComponentData::PlanktonEmitter {
+            ComponentData::ParticleEffect {
                 enabled,
                 capacity,
                 emission_rate,
                 burst_count,
                 burst_interval,
-                emission_shape,
+                spawn_shape,
                 lifetime_min,
                 lifetime_max,
                 initial_velocity,
                 velocity_variance,
-                gravity,
-                wind,
-                drag,
-                turbulence_strength,
-                turbulence_scale,
-                turbulence_speed,
-                size_start,
-                size_end,
-                color_start,
-                color_end,
+                update_modules,
+                render_mode: _render_mode,
                 texture_path,
                 soft_fade_distance,
-                blend_mode,
                 show_gizmos,
             } => {
-                builder.add(PlanktonEmitter {
+                let modules: Vec<UpdateModule> = update_modules.iter().map(|m| match m {
+                    UpdateModuleData::Gravity(v) => UpdateModule::Gravity(*v),
+                    UpdateModuleData::Drag(v) => UpdateModule::Drag(*v),
+                    UpdateModuleData::Wind(v) => UpdateModule::Wind(*v),
+                    UpdateModuleData::CurlNoise { strength, scale, speed } => {
+                        UpdateModule::CurlNoise { strength: *strength, scale: *scale, speed: *speed }
+                    }
+                    UpdateModuleData::ColorOverLife { start, end } => {
+                        UpdateModule::ColorOverLife { start: *start, end: *end }
+                    }
+                    UpdateModuleData::SizeOverLife { start, end } => {
+                        UpdateModule::SizeOverLife { start: *start, end: *end }
+                    }
+                }).collect();
+
+                builder.add(ParticleEffect {
                     enabled: *enabled,
                     capacity: (*capacity).clamp(256, 4096),
                     emission_rate: *emission_rate,
                     burst_count: *burst_count,
                     burst_interval: *burst_interval,
-                    emission_shape: match emission_shape {
-                        EmissionShapeData::Point => EmissionShape::Point,
-                        EmissionShapeData::Sphere { radius } => {
-                            EmissionShape::Sphere { radius: *radius }
+                    spawn_shape: match spawn_shape {
+                        SpawnShapeData::Point => SpawnShape::Point,
+                        SpawnShapeData::Sphere { radius } => {
+                            SpawnShape::Sphere { radius: *radius }
                         }
-                        EmissionShapeData::Cone { angle_rad, radius } => {
-                            EmissionShape::Cone {
+                        SpawnShapeData::Cone { angle_rad, radius } => {
+                            SpawnShape::Cone {
                                 angle_rad: *angle_rad,
                                 radius: *radius,
                             }
                         }
-                        EmissionShapeData::Box { half_extents } => {
-                            EmissionShape::Box {
+                        SpawnShapeData::Box { half_extents } => {
+                            SpawnShape::Box {
                                 half_extents: *half_extents,
                             }
                         }
@@ -645,21 +658,10 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     lifetime_max: *lifetime_max,
                     initial_velocity: *initial_velocity,
                     velocity_variance: *velocity_variance,
-                    gravity: *gravity,
-                    wind: *wind,
-                    drag: *drag,
-                    turbulence_strength: *turbulence_strength,
-                    turbulence_scale: *turbulence_scale,
-                    turbulence_speed: *turbulence_speed,
-                    size_start: *size_start,
-                    size_end: *size_end,
-                    color_start: *color_start,
-                    color_end: *color_end,
+                    update_modules: modules,
+                    render_mode: RenderMode::Billboard,
                     texture_path: texture_path.clone(),
                     soft_fade_distance: *soft_fade_distance,
-                    blend_mode: match blend_mode {
-                        BlendModeData::Additive => BlendMode::Additive,
-                    },
                     show_gizmos: *show_gizmos,
                 });
             }

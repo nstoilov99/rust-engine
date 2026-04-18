@@ -248,31 +248,59 @@ fn default_shadow_bias() -> f32 {
     0.005
 }
 
-/// Emission shape for particle emitters (Z-up game space)
+/// Spawn shape for particle emitters (Z-up game space)
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum EmissionShape {
+pub enum SpawnShape {
     Point,
     Sphere { radius: f32 },
     Cone { angle_rad: f32, radius: f32 },
     Box { half_extents: [f32; 3] },
 }
 
-impl Default for EmissionShape {
+impl Default for SpawnShape {
     fn default() -> Self {
         Self::Point
     }
 }
 
-/// Particle blend mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlendMode {
-    Additive,
-    // Alpha, // v2 — requires sorting
+/// Composable particle simulation module.
+///
+/// Each variant represents a single behavior applied during the simulate stage.
+/// Modules are evaluated in order, so a `Gravity` followed by `Drag` applies
+/// drag to the gravity-accelerated velocity.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum UpdateModule {
+    Gravity([f32; 3]),
+    Drag(f32),
+    Wind([f32; 3]),
+    CurlNoise { strength: f32, scale: f32, speed: f32 },
+    ColorOverLife { start: [f32; 4], end: [f32; 4] },
+    SizeOverLife { start: f32, end: f32 },
 }
 
-impl Default for BlendMode {
+impl UpdateModule {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Gravity(_) => "Gravity",
+            Self::Drag(_) => "Drag",
+            Self::Wind(_) => "Wind",
+            Self::CurlNoise { .. } => "Curl Noise",
+            Self::ColorOverLife { .. } => "Color Over Life",
+            Self::SizeOverLife { .. } => "Size Over Life",
+        }
+    }
+}
+
+/// Particle render mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenderMode {
+    Billboard,
+    // Ribbon, Mesh, Light — future
+}
+
+impl Default for RenderMode {
     fn default() -> Self {
-        Self::Additive
+        Self::Billboard
     }
 }
 
@@ -282,7 +310,7 @@ fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> R
     let clamped = val.clamp(256, 4096);
     if clamped != val {
         log::warn!(
-            "PlanktonEmitter capacity {} clamped to {}",
+            "ParticleEffect capacity {} clamped to {}",
             val,
             clamped
         );
@@ -290,9 +318,14 @@ fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> R
     Ok(clamped)
 }
 
-/// Particle emitter component (codename: Plankton)
+/// Composable GPU particle effect component (codename: Plankton).
+///
+/// Core emitter properties (spawn shape, rate, lifetime, velocity) live as
+/// direct fields. Simulation behaviors are composed via an ordered list of
+/// `UpdateModule` entries. The GPU pipeline flattens modules into per-frame
+/// push constants — the module list itself is an authoring-side concept.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanktonEmitter {
+pub struct ParticleEffect {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_plankton_capacity", deserialize_with = "deserialize_clamped_capacity")]
@@ -304,7 +337,7 @@ pub struct PlanktonEmitter {
     #[serde(default)]
     pub burst_interval: f32,
     #[serde(default)]
-    pub emission_shape: EmissionShape,
+    pub spawn_shape: SpawnShape,
     #[serde(default = "default_plankton_lifetime_min")]
     pub lifetime_min: f32,
     #[serde(default = "default_plankton_lifetime_max")]
@@ -314,31 +347,13 @@ pub struct PlanktonEmitter {
     #[serde(default)]
     pub velocity_variance: f32,
     #[serde(default)]
-    pub gravity: [f32; 3],
+    pub update_modules: Vec<UpdateModule>,
     #[serde(default)]
-    pub wind: [f32; 3],
-    #[serde(default)]
-    pub drag: f32,
-    #[serde(default)]
-    pub turbulence_strength: f32,
-    #[serde(default = "default_plankton_turbulence_scale")]
-    pub turbulence_scale: f32,
-    #[serde(default)]
-    pub turbulence_speed: f32,
-    #[serde(default = "default_plankton_size_start")]
-    pub size_start: f32,
-    #[serde(default)]
-    pub size_end: f32,
-    #[serde(default = "default_plankton_color_start")]
-    pub color_start: [f32; 4],
-    #[serde(default = "default_plankton_color_end")]
-    pub color_end: [f32; 4],
+    pub render_mode: RenderMode,
     #[serde(default)]
     pub texture_path: String,
     #[serde(default)]
     pub soft_fade_distance: f32,
-    #[serde(default)]
-    pub blend_mode: BlendMode,
     #[serde(default)]
     pub show_gizmos: bool,
 }
@@ -348,12 +363,8 @@ fn default_plankton_emission_rate() -> f32 { 20.0 }
 fn default_plankton_lifetime_min() -> f32 { 1.0 }
 fn default_plankton_lifetime_max() -> f32 { 2.0 }
 fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] } // upward in Z-up
-fn default_plankton_turbulence_scale() -> f32 { 1.0 }
-fn default_plankton_size_start() -> f32 { 0.1 }
-fn default_plankton_color_start() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
-fn default_plankton_color_end() -> [f32; 4] { [1.0, 1.0, 1.0, 0.0] }
 
-impl Default for PlanktonEmitter {
+impl Default for ParticleEffect {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -361,31 +372,77 @@ impl Default for PlanktonEmitter {
             emission_rate: default_plankton_emission_rate(),
             burst_count: 0,
             burst_interval: 0.0,
-            emission_shape: EmissionShape::default(),
+            spawn_shape: SpawnShape::default(),
             lifetime_min: default_plankton_lifetime_min(),
             lifetime_max: default_plankton_lifetime_max(),
             initial_velocity: default_plankton_initial_velocity(),
             velocity_variance: 0.5,
-            gravity: [0.0, 0.0, 0.0],
-            wind: [0.0, 0.0, 0.0],
-            drag: 0.0,
-            turbulence_strength: 0.0,
-            turbulence_scale: default_plankton_turbulence_scale(),
-            turbulence_speed: 0.0,
-            size_start: default_plankton_size_start(),
-            size_end: 0.0,
-            color_start: default_plankton_color_start(),
-            color_end: default_plankton_color_end(),
+            update_modules: vec![
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 1.0, 1.0, 1.0],
+                    end: [1.0, 1.0, 1.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.1,
+                    end: 0.0,
+                },
+            ],
+            render_mode: RenderMode::default(),
             texture_path: String::new(),
             soft_fade_distance: 0.0,
-            blend_mode: BlendMode::default(),
             show_gizmos: false,
         }
     }
 }
 
-impl PlanktonEmitter {
-    /// Fire preset: upward velocity, orange→red, short life
+impl ParticleEffect {
+    // === Module query helpers ===
+
+    pub fn gravity(&self) -> Option<[f32; 3]> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Gravity(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn drag(&self) -> Option<f32> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Drag(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn wind(&self) -> Option<[f32; 3]> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Wind(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn curl_noise(&self) -> Option<(f32, f32, f32)> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::CurlNoise { strength, scale, speed } => Some((*strength, *scale, *speed)),
+            _ => None,
+        })
+    }
+
+    pub fn color_over_life(&self) -> Option<([f32; 4], [f32; 4])> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::ColorOverLife { start, end } => Some((*start, *end)),
+            _ => None,
+        })
+    }
+
+    pub fn size_over_life(&self) -> Option<(f32, f32)> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::SizeOverLife { start, end } => Some((*start, *end)),
+            _ => None,
+        })
+    }
+
+    // === Presets ===
+
+    /// Fire preset: upward velocity, orange->red, short life
     pub fn fire() -> Self {
         Self {
             emission_rate: 60.0,
@@ -393,11 +450,17 @@ impl PlanktonEmitter {
             lifetime_max: 0.8,
             initial_velocity: [0.0, 0.0, 3.0],
             velocity_variance: 1.0,
-            gravity: [0.0, 0.0, 1.0],
-            size_start: 0.15,
-            size_end: 0.02,
-            color_start: [1.0, 0.6, 0.1, 1.0],
-            color_end: [1.0, 0.1, 0.0, 0.0],
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, 1.0]),
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.6, 0.1, 1.0],
+                    end: [1.0, 0.1, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.15,
+                    end: 0.02,
+                },
+            ],
             ..Self::default()
         }
     }
@@ -410,14 +473,18 @@ impl PlanktonEmitter {
             lifetime_max: 4.0,
             initial_velocity: [0.0, 0.0, 0.8],
             velocity_variance: 0.3,
-            drag: 0.5,
-            turbulence_strength: 1.0,
-            turbulence_scale: 0.5,
-            turbulence_speed: 0.3,
-            size_start: 0.1,
-            size_end: 0.4,
-            color_start: [0.5, 0.5, 0.5, 0.6],
-            color_end: [0.3, 0.3, 0.3, 0.0],
+            update_modules: vec![
+                UpdateModule::Drag(0.5),
+                UpdateModule::CurlNoise { strength: 1.0, scale: 0.5, speed: 0.3 },
+                UpdateModule::ColorOverLife {
+                    start: [0.5, 0.5, 0.5, 0.6],
+                    end: [0.3, 0.3, 0.3, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.1,
+                    end: 0.4,
+                },
+            ],
             ..Self::default()
         }
     }
@@ -430,11 +497,17 @@ impl PlanktonEmitter {
             lifetime_max: 1.5,
             initial_velocity: [0.0, 0.0, 5.0],
             velocity_variance: 3.0,
-            gravity: [0.0, 0.0, -9.8],
-            size_start: 0.04,
-            size_end: 0.01,
-            color_start: [1.0, 0.9, 0.3, 1.0],
-            color_end: [1.0, 0.4, 0.0, 0.0],
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, -9.8]),
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.9, 0.3, 1.0],
+                    end: [1.0, 0.4, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.04,
+                    end: 0.01,
+                },
+            ],
             ..Self::default()
         }
     }
@@ -447,14 +520,18 @@ impl PlanktonEmitter {
             lifetime_max: 6.0,
             initial_velocity: [0.0, 0.0, 0.2],
             velocity_variance: 0.5,
-            drag: 1.0,
-            turbulence_strength: 0.5,
-            turbulence_scale: 2.0,
-            turbulence_speed: 0.1,
-            size_start: 0.03,
-            size_end: 0.05,
-            color_start: [0.6, 0.55, 0.5, 0.4],
-            color_end: [0.5, 0.45, 0.4, 0.0],
+            update_modules: vec![
+                UpdateModule::Drag(1.0),
+                UpdateModule::CurlNoise { strength: 0.5, scale: 2.0, speed: 0.1 },
+                UpdateModule::ColorOverLife {
+                    start: [0.6, 0.55, 0.5, 0.4],
+                    end: [0.5, 0.45, 0.4, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.03,
+                    end: 0.05,
+                },
+            ],
             ..Self::default()
         }
     }

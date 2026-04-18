@@ -282,36 +282,37 @@ fn multiple_entities_roundtrip() {
 }
 
 #[test]
-fn plankton_emitter_roundtrip() {
+fn particle_effect_roundtrip() {
     let mut world = hecs::World::new();
     let entity = world.spawn((
         Name::new("ParticleEmitter"),
         EntityGuid::new(),
         Transform::default(),
-        PlanktonEmitter {
+        ParticleEffect {
             enabled: true,
             capacity: 1024,
             emission_rate: 50.0,
             burst_count: 10,
             burst_interval: 0.5,
-            emission_shape: EmissionShape::Sphere { radius: 2.0 },
+            spawn_shape: SpawnShape::Sphere { radius: 2.0 },
             lifetime_min: 0.5,
             lifetime_max: 3.0,
             initial_velocity: [1.0, 2.0, 3.0],
             velocity_variance: 1.5,
-            gravity: [0.0, 0.0, -9.8],
-            wind: [1.0, 0.0, 0.0],
-            drag: 0.5,
-            turbulence_strength: 2.0,
-            turbulence_scale: 0.5,
-            turbulence_speed: 1.0,
-            size_start: 0.2,
-            size_end: 0.05,
-            color_start: [1.0, 0.5, 0.0, 1.0],
-            color_end: [1.0, 0.0, 0.0, 0.0],
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, -9.8]),
+                UpdateModule::Wind([1.0, 0.0, 0.0]),
+                UpdateModule::Drag(0.5),
+                UpdateModule::CurlNoise { strength: 2.0, scale: 0.5, speed: 1.0 },
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.5, 0.0, 1.0],
+                    end: [1.0, 0.0, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife { start: 0.2, end: 0.05 },
+            ],
+            render_mode: RenderMode::Billboard,
             texture_path: "textures/spark.png".to_string(),
             soft_fade_distance: 0.5,
-            blend_mode: BlendMode::Additive,
             show_gizmos: true,
         },
     ));
@@ -319,57 +320,65 @@ fn plankton_emitter_roundtrip() {
     let new_world = roundtrip(&world, &[entity]);
 
     let mut found = false;
-    for (_, emitter) in new_world.query::<&PlanktonEmitter>().iter() {
+    for (_, effect) in new_world.query::<&ParticleEffect>().iter() {
         found = true;
-        assert!(emitter.enabled);
-        assert_eq!(emitter.capacity, 1024);
-        assert_approx_eq(emitter.emission_rate, 50.0, 0.01);
-        assert_eq!(emitter.burst_count, 10);
-        assert_approx_eq(emitter.burst_interval, 0.5, 0.01);
-        match emitter.emission_shape {
-            EmissionShape::Sphere { radius } => {
+        assert!(effect.enabled);
+        assert_eq!(effect.capacity, 1024);
+        assert_approx_eq(effect.emission_rate, 50.0, 0.01);
+        assert_eq!(effect.burst_count, 10);
+        assert_approx_eq(effect.burst_interval, 0.5, 0.01);
+        match effect.spawn_shape {
+            SpawnShape::Sphere { radius } => {
                 assert_approx_eq(radius, 2.0, 0.01);
             }
-            _ => panic!("expected Sphere emission shape"),
+            _ => panic!("expected Sphere spawn shape"),
         }
-        assert_approx_eq(emitter.lifetime_min, 0.5, 0.01);
-        assert_approx_eq(emitter.lifetime_max, 3.0, 0.01);
-        assert_approx_eq(emitter.initial_velocity[0], 1.0, 0.01);
-        assert_approx_eq(emitter.initial_velocity[1], 2.0, 0.01);
-        assert_approx_eq(emitter.initial_velocity[2], 3.0, 0.01);
-        assert_approx_eq(emitter.velocity_variance, 1.5, 0.01);
-        assert_approx_eq(emitter.gravity[2], -9.8, 0.01);
-        assert_approx_eq(emitter.wind[0], 1.0, 0.01);
-        assert_approx_eq(emitter.drag, 0.5, 0.01);
-        assert_approx_eq(emitter.turbulence_strength, 2.0, 0.01);
-        assert_approx_eq(emitter.size_start, 0.2, 0.01);
-        assert_approx_eq(emitter.size_end, 0.05, 0.01);
-        assert_approx_eq(emitter.color_start[0], 1.0, 0.01);
-        assert_approx_eq(emitter.color_start[1], 0.5, 0.01);
-        assert_approx_eq(emitter.color_end[3], 0.0, 0.01);
-        assert_eq!(emitter.texture_path, "textures/spark.png");
-        assert_approx_eq(emitter.soft_fade_distance, 0.5, 0.01);
-        assert!(matches!(emitter.blend_mode, BlendMode::Additive));
-        assert!(emitter.show_gizmos);
+        assert_approx_eq(effect.lifetime_min, 0.5, 0.01);
+        assert_approx_eq(effect.lifetime_max, 3.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[0], 1.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[1], 2.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[2], 3.0, 0.01);
+        assert_approx_eq(effect.velocity_variance, 1.5, 0.01);
+
+        // Verify modules survived roundtrip
+        assert_eq!(effect.update_modules.len(), 6);
+        assert_approx_eq(effect.gravity().unwrap()[2], -9.8, 0.01);
+        assert_approx_eq(effect.wind().unwrap()[0], 1.0, 0.01);
+        assert_approx_eq(effect.drag().unwrap(), 0.5, 0.01);
+        let (turb_str, turb_scale, turb_speed) = effect.curl_noise().unwrap();
+        assert_approx_eq(turb_str, 2.0, 0.01);
+        assert_approx_eq(turb_scale, 0.5, 0.01);
+        assert_approx_eq(turb_speed, 1.0, 0.01);
+        let (color_start, color_end) = effect.color_over_life().unwrap();
+        assert_approx_eq(color_start[0], 1.0, 0.01);
+        assert_approx_eq(color_start[1], 0.5, 0.01);
+        assert_approx_eq(color_end[3], 0.0, 0.01);
+        let (size_start, size_end) = effect.size_over_life().unwrap();
+        assert_approx_eq(size_start, 0.2, 0.01);
+        assert_approx_eq(size_end, 0.05, 0.01);
+
+        assert_eq!(effect.texture_path, "textures/spark.png");
+        assert_approx_eq(effect.soft_fade_distance, 0.5, 0.01);
+        assert!(effect.show_gizmos);
     }
-    assert!(found, "PlanktonEmitter should survive roundtrip");
+    assert!(found, "ParticleEffect should survive roundtrip");
 }
 
 #[test]
-fn plankton_emitter_capacity_clamped_on_deserialize() {
+fn particle_effect_capacity_clamped_on_deserialize() {
     let mut world = hecs::World::new();
     let entity = world.spawn((
         Name::new("ClampTest"),
         EntityGuid::new(),
         Transform::default(),
-        PlanktonEmitter {
+        ParticleEffect {
             capacity: 8192, // above max
-            ..PlanktonEmitter::default()
+            ..ParticleEffect::default()
         },
     ));
 
     let new_world = roundtrip(&world, &[entity]);
-    for (_, emitter) in new_world.query::<&PlanktonEmitter>().iter() {
-        assert_eq!(emitter.capacity, 4096, "capacity should be clamped to max");
+    for (_, effect) in new_world.query::<&ParticleEffect>().iter() {
+        assert_eq!(effect.capacity, 4096, "capacity should be clamped to max");
     }
 }

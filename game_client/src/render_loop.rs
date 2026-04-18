@@ -8,7 +8,7 @@ use rust_engine::assets::AssetManager;
 use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{
-    BlendMode, EmissionShape, EntityGuid, PlanktonEmitter,
+    EntityGuid, ParticleEffect, SpawnShape,
 };
 use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
@@ -346,11 +346,11 @@ pub fn prepare_plankton_data(
     rust_engine::profile_scope!("prepare_plankton_data");
     frame_buffer.clear();
 
-    for (entity, (emitter, guid)) in world
-        .query::<(&PlanktonEmitter, &EntityGuid)>()
+    for (entity, (effect, guid)) in world
+        .query::<(&ParticleEffect, &EntityGuid)>()
         .iter()
     {
-        if !emitter.enabled {
+        if !effect.enabled {
             continue;
         }
 
@@ -360,26 +360,31 @@ pub fn prepare_plankton_data(
             std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(world_matrix_yup)
         };
 
+        // Extract module values with defaults
+        let gravity_raw = effect.gravity().unwrap_or([0.0, 0.0, 0.0]);
+        let wind_raw = effect.wind().unwrap_or([0.0, 0.0, 0.0]);
+        let drag_val = effect.drag().unwrap_or(0.0);
+        let (turb_strength, turb_scale, turb_speed) = effect.curl_noise().unwrap_or((0.0, 1.0, 0.0));
+        let (color_start, color_end) = effect.color_over_life()
+            .unwrap_or(([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]));
+        let (size_start, size_end) = effect.size_over_life().unwrap_or((0.1, 0.0));
+
         // Convert Z-up force vectors to Y-up render space
-        let gravity_zup = glm::vec3(emitter.gravity[0], emitter.gravity[1], emitter.gravity[2]);
-        let gravity_yup = render_adapter::direction_to_render(&gravity_zup);
-
-        let wind_zup = glm::vec3(emitter.wind[0], emitter.wind[1], emitter.wind[2]);
-        let wind_yup = render_adapter::direction_to_render(&wind_zup);
-
-        // Convert initial velocity to Y-up render space
-        let vel_zup = glm::vec3(
-            emitter.initial_velocity[0],
-            emitter.initial_velocity[1],
-            emitter.initial_velocity[2],
+        let gravity_yup = render_adapter::direction_to_render(
+            &glm::vec3(gravity_raw[0], gravity_raw[1], gravity_raw[2]),
         );
-        let vel_yup = render_adapter::direction_to_render(&vel_zup);
+        let wind_yup = render_adapter::direction_to_render(
+            &glm::vec3(wind_raw[0], wind_raw[1], wind_raw[2]),
+        );
+        let vel_yup = render_adapter::direction_to_render(
+            &glm::vec3(effect.initial_velocity[0], effect.initial_velocity[1], effect.initial_velocity[2]),
+        );
 
-        let (shape_type, shape_params) = match emitter.emission_shape {
-            EmissionShape::Point => (0u32, [0.0f32; 4]),
-            EmissionShape::Sphere { radius } => (1, [radius, 0.0, 0.0, 0.0]),
-            EmissionShape::Cone { angle_rad, radius } => (2, [angle_rad, radius, 0.0, 0.0]),
-            EmissionShape::Box { half_extents } => {
+        let (shape_type, shape_params) = match effect.spawn_shape {
+            SpawnShape::Point => (0u32, [0.0f32; 4]),
+            SpawnShape::Sphere { radius } => (1, [radius, 0.0, 0.0, 0.0]),
+            SpawnShape::Cone { angle_rad, radius } => (2, [angle_rad, radius, 0.0, 0.0]),
+            SpawnShape::Box { half_extents } => {
                 (3, [half_extents[0], half_extents[1], half_extents[2], 0.0])
             }
         };
@@ -390,37 +395,35 @@ pub fn prepare_plankton_data(
             emission: EmissionParameters {
                 shape_type,
                 shape_params,
-                emission_rate: emitter.emission_rate,
-                burst_count: emitter.burst_count,
-                burst_interval: emitter.burst_interval,
+                emission_rate: effect.emission_rate,
+                burst_count: effect.burst_count,
+                burst_interval: effect.burst_interval,
                 velocity_base: [vel_yup.x, vel_yup.y, vel_yup.z],
-                velocity_variance: emitter.velocity_variance,
-                lifetime_min: emitter.lifetime_min,
-                lifetime_max: emitter.lifetime_max,
+                velocity_variance: effect.velocity_variance,
+                lifetime_min: effect.lifetime_min,
+                lifetime_max: effect.lifetime_max,
             },
             forces: ForceParameters {
                 gravity: [gravity_yup.x, gravity_yup.y, gravity_yup.z],
-                drag: emitter.drag,
+                drag: drag_val,
                 wind: [wind_yup.x, wind_yup.y, wind_yup.z],
-                turbulence_strength: emitter.turbulence_strength,
-                turbulence_scale: emitter.turbulence_scale,
-                turbulence_speed: emitter.turbulence_speed,
+                turbulence_strength: turb_strength,
+                turbulence_scale: turb_scale,
+                turbulence_speed: turb_speed,
             },
             visual: VisualParameters {
-                size_start: emitter.size_start,
-                size_end: emitter.size_end,
-                color_start: emitter.color_start,
-                color_end: emitter.color_end,
-                texture_path: emitter.texture_path.clone(),
-                soft_fade_distance: emitter.soft_fade_distance,
+                size_start,
+                size_end,
+                color_start,
+                color_end,
+                texture_path: effect.texture_path.clone(),
+                soft_fade_distance: effect.soft_fade_distance,
             },
             flags: EmitterFlags {
-                blend_mode: match emitter.blend_mode {
-                    BlendMode::Additive => 0,
-                },
+                blend_mode: 0, // Additive
             },
             delta_time,
-            capacity: emitter.capacity,
+            capacity: effect.capacity,
         });
     }
 }

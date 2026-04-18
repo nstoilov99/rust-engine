@@ -277,8 +277,8 @@ impl Prefab {
                 ComponentData::AudioListener { active } => {
                     builder.add(AudioListener { active: *active });
                 }
-                ComponentData::PlanktonEmitter { .. } => {
-                    // PlanktonEmitter prefab instantiation handled via scene serializer
+                ComponentData::ParticleEffect { .. } => {
+                    // ParticleEffect prefab instantiation handled via scene serializer
                 }
                 ComponentData::Parent { .. } => {
                     // Parent relationships are not applicable for prefabs
