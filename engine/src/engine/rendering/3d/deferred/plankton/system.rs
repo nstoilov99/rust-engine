@@ -51,7 +51,12 @@ impl PlanktonSystem {
         let init_pass = PlanktonInitPass::new(device.clone())?;
         let emit_pass = PlanktonEmitPass::new(device.clone())?;
         let mut simulate_pass = PlanktonSimulatePass::new(device.clone(), allocator.clone())?;
-        let render_pass = PlanktonRenderPass::new(device.clone(), allocator.clone())?;
+        let render_pass = PlanktonRenderPass::new(
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?;
 
         // Generate the 3D curl-noise texture and wire it into the simulate pass
         let noise_texture = super::noise::generate_curl_noise_texture(

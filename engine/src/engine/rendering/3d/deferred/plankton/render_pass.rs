@@ -72,6 +72,8 @@ impl PlanktonRenderPass {
     pub fn new(
         device: Arc<Device>,
         allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+        queue: Arc<vulkano::device::Queue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // HDR render pass with load_op: Load (preserves lighting output)
         let render_pass = vulkano::single_pass_renderpass!(
@@ -150,8 +152,12 @@ impl PlanktonRenderPass {
             },
         )?;
 
-        // Create 1x1 white fallback texture
-        let fallback_texture = Self::create_fallback_texture(allocator)?;
+        // Create 1x1 white fallback texture (with actual white pixel data uploaded)
+        let fallback_texture = Self::create_fallback_texture(
+            allocator,
+            command_buffer_allocator,
+            queue,
+        )?;
 
         let texture_sampler = Sampler::new(
             device.clone(),
@@ -187,9 +193,15 @@ impl PlanktonRenderPass {
 
     fn create_fallback_texture(
         allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+        queue: Arc<vulkano::device::Queue>,
     ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+        use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+        use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo};
+        use vulkano::sync::GpuFuture;
+
         let image = Image::new(
-            allocator,
+            allocator.clone(),
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R8G8B8A8_UNORM,
@@ -202,6 +214,40 @@ impl PlanktonRenderPass {
                 ..Default::default()
             },
         )?;
+
+        // Upload a single white pixel (RGBA = 255,255,255,255)
+        let pixel_data: [u8; 4] = [255, 255, 255, 255];
+        let staging_buffer = Buffer::from_iter(
+            allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            pixel_data.into_iter(),
+        )?;
+
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator,
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging_buffer,
+            image.clone(),
+        ))?;
+
+        let command_buffer = builder.build()?;
+        let future = vulkano::sync::now(queue.device().clone())
+            .then_execute(queue, command_buffer)?
+            .then_signal_fence_and_flush()?;
+        future.wait(None)?;
+
         ImageView::new_default(image).map_err(|e| e.into())
     }
 
