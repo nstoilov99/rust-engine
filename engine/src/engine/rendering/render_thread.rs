@@ -317,6 +317,7 @@ impl RenderThread {
                             packet.camera_pos,
                             &packet.debug_draw,
                             &packet.post_processing,
+                            &packet.plankton_emitters,
                         ) {
                             Ok(cb) => Some(cb),
                             Err(e) => {
@@ -460,6 +461,7 @@ impl RenderThread {
                         packet.camera_pos,
                         &packet.debug_draw,
                         &packet.post_processing,
+                        &packet.plankton_emitters,
                     ) {
                         Ok(cb) => cb,
                         Err(e) => {

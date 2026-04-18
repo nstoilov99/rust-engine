@@ -1,6 +1,6 @@
 //! Core ECS components
 use nalgebra_glm as glm;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// 3D transform component
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -246,6 +246,295 @@ fn default_clear_color() -> [f32; 3] {
 
 fn default_shadow_bias() -> f32 {
     0.005
+}
+
+/// Spawn shape for particle emitters (Z-up game space)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum SpawnShape {
+    Point,
+    Sphere { radius: f32 },
+    Cone { angle_rad: f32, radius: f32 },
+    Box { half_extents: [f32; 3] },
+}
+
+impl Default for SpawnShape {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
+/// Composable particle simulation module.
+///
+/// Each variant represents a single behavior applied during the simulate stage.
+/// Modules are evaluated in order, so a `Gravity` followed by `Drag` applies
+/// drag to the gravity-accelerated velocity.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum UpdateModule {
+    Gravity([f32; 3]),
+    Drag(f32),
+    Wind([f32; 3]),
+    CurlNoise { strength: f32, scale: f32, speed: f32 },
+    ColorOverLife { start: [f32; 4], end: [f32; 4] },
+    SizeOverLife { start: f32, end: f32 },
+}
+
+impl UpdateModule {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Gravity(_) => "Gravity",
+            Self::Drag(_) => "Drag",
+            Self::Wind(_) => "Wind",
+            Self::CurlNoise { .. } => "Curl Noise",
+            Self::ColorOverLife { .. } => "Color Over Life",
+            Self::SizeOverLife { .. } => "Size Over Life",
+        }
+    }
+}
+
+/// Particle render mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenderMode {
+    Billboard,
+    // Ribbon, Mesh, Light — future
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        Self::Billboard
+    }
+}
+
+/// Deserialize capacity with clamping to 256..=4096
+fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let val = u32::deserialize(deserializer)?;
+    let clamped = val.clamp(256, 4096);
+    if clamped != val {
+        log::warn!(
+            "ParticleEffect capacity {} clamped to {}",
+            val,
+            clamped
+        );
+    }
+    Ok(clamped)
+}
+
+/// Composable GPU particle effect component (codename: Plankton).
+///
+/// Core emitter properties (spawn shape, rate, lifetime, velocity) live as
+/// direct fields. Simulation behaviors are composed via an ordered list of
+/// `UpdateModule` entries. The GPU pipeline flattens modules into per-frame
+/// push constants — the module list itself is an authoring-side concept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticleEffect {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_plankton_capacity", deserialize_with = "deserialize_clamped_capacity")]
+    pub capacity: u32,
+    #[serde(default = "default_plankton_emission_rate")]
+    pub emission_rate: f32,
+    #[serde(default)]
+    pub burst_count: u32,
+    #[serde(default)]
+    pub burst_interval: f32,
+    #[serde(default)]
+    pub spawn_shape: SpawnShape,
+    #[serde(default = "default_plankton_lifetime_min")]
+    pub lifetime_min: f32,
+    #[serde(default = "default_plankton_lifetime_max")]
+    pub lifetime_max: f32,
+    #[serde(default = "default_plankton_initial_velocity")]
+    pub initial_velocity: [f32; 3],
+    #[serde(default)]
+    pub velocity_variance: f32,
+    #[serde(default)]
+    pub update_modules: Vec<UpdateModule>,
+    #[serde(default)]
+    pub render_mode: RenderMode,
+    #[serde(default)]
+    pub texture_path: String,
+    #[serde(default)]
+    pub soft_fade_distance: f32,
+    #[serde(default)]
+    pub show_gizmos: bool,
+}
+
+fn default_plankton_capacity() -> u32 { 2048 }
+fn default_plankton_emission_rate() -> f32 { 20.0 }
+fn default_plankton_lifetime_min() -> f32 { 1.0 }
+fn default_plankton_lifetime_max() -> f32 { 2.0 }
+fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] } // upward in Z-up
+
+impl Default for ParticleEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            capacity: default_plankton_capacity(),
+            emission_rate: default_plankton_emission_rate(),
+            burst_count: 0,
+            burst_interval: 0.0,
+            spawn_shape: SpawnShape::default(),
+            lifetime_min: default_plankton_lifetime_min(),
+            lifetime_max: default_plankton_lifetime_max(),
+            initial_velocity: default_plankton_initial_velocity(),
+            velocity_variance: 0.5,
+            update_modules: vec![
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 1.0, 1.0, 1.0],
+                    end: [1.0, 1.0, 1.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.1,
+                    end: 0.0,
+                },
+            ],
+            render_mode: RenderMode::default(),
+            texture_path: String::new(),
+            soft_fade_distance: 0.0,
+            show_gizmos: false,
+        }
+    }
+}
+
+impl ParticleEffect {
+    // === Module query helpers ===
+
+    pub fn gravity(&self) -> Option<[f32; 3]> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Gravity(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn drag(&self) -> Option<f32> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Drag(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn wind(&self) -> Option<[f32; 3]> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::Wind(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    pub fn curl_noise(&self) -> Option<(f32, f32, f32)> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::CurlNoise { strength, scale, speed } => Some((*strength, *scale, *speed)),
+            _ => None,
+        })
+    }
+
+    pub fn color_over_life(&self) -> Option<([f32; 4], [f32; 4])> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::ColorOverLife { start, end } => Some((*start, *end)),
+            _ => None,
+        })
+    }
+
+    pub fn size_over_life(&self) -> Option<(f32, f32)> {
+        self.update_modules.iter().find_map(|m| match m {
+            UpdateModule::SizeOverLife { start, end } => Some((*start, *end)),
+            _ => None,
+        })
+    }
+
+    // === Presets ===
+
+    /// Fire preset: upward velocity, orange->red, short life
+    pub fn fire() -> Self {
+        Self {
+            emission_rate: 60.0,
+            lifetime_min: 0.3,
+            lifetime_max: 0.8,
+            initial_velocity: [0.0, 0.0, 3.0],
+            velocity_variance: 1.0,
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, 1.0]),
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.6, 0.1, 1.0],
+                    end: [1.0, 0.1, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.15,
+                    end: 0.02,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
+    /// Smoke preset: slow rise, gray, long fade
+    pub fn smoke() -> Self {
+        Self {
+            emission_rate: 15.0,
+            lifetime_min: 2.0,
+            lifetime_max: 4.0,
+            initial_velocity: [0.0, 0.0, 0.8],
+            velocity_variance: 0.3,
+            update_modules: vec![
+                UpdateModule::Drag(0.5),
+                UpdateModule::CurlNoise { strength: 1.0, scale: 0.5, speed: 0.3 },
+                UpdateModule::ColorOverLife {
+                    start: [0.5, 0.5, 0.5, 0.6],
+                    end: [0.3, 0.3, 0.3, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.1,
+                    end: 0.4,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
+    /// Sparks preset: random dirs, bright yellow, gravity, short life
+    pub fn sparks() -> Self {
+        Self {
+            emission_rate: 40.0,
+            lifetime_min: 0.5,
+            lifetime_max: 1.5,
+            initial_velocity: [0.0, 0.0, 5.0],
+            velocity_variance: 3.0,
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, -9.8]),
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.9, 0.3, 1.0],
+                    end: [1.0, 0.4, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.04,
+                    end: 0.01,
+                },
+            ],
+            ..Self::default()
+        }
+    }
+
+    /// Dust preset: slow drift, gray, long life
+    pub fn dust() -> Self {
+        Self {
+            emission_rate: 10.0,
+            lifetime_min: 3.0,
+            lifetime_max: 6.0,
+            initial_velocity: [0.0, 0.0, 0.2],
+            velocity_variance: 0.5,
+            update_modules: vec![
+                UpdateModule::Drag(1.0),
+                UpdateModule::CurlNoise { strength: 0.5, scale: 2.0, speed: 0.1 },
+                UpdateModule::ColorOverLife {
+                    start: [0.6, 0.55, 0.5, 0.4],
+                    end: [0.5, 0.45, 0.4, 0.0],
+                },
+                UpdateModule::SizeOverLife {
+                    start: 0.03,
+                    end: 0.05,
+                },
+            ],
+            ..Self::default()
+        }
+    }
 }
 
 /// Marker component indicating that an entity's transform has changed

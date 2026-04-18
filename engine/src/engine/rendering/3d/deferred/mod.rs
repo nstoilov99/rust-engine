@@ -6,6 +6,7 @@ pub mod geometry_pass;
 pub mod grid_pass;
 pub mod lighting_pass;
 pub mod luminance_pass;
+pub mod plankton;
 pub mod shadow_pass;
 pub mod ssao_pass;
 

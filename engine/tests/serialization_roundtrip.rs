@@ -10,6 +10,8 @@ use rust_engine::engine::ecs::hierarchy::Parent;
 use rust_engine::engine::physics::{Collider, RigidBody};
 use rust_engine::engine::scene::{load_scene_from_string, serialize_scene_to_string};
 
+use common::assert_approx_eq;
+
 use common::{spawn_child_entity, spawn_named_entity};
 
 /// Serialize a world to RON and deserialize into a fresh world.
@@ -277,4 +279,106 @@ fn multiple_entities_roundtrip() {
     assert!(names.contains(&"A".to_string()));
     assert!(names.contains(&"B".to_string()));
     assert!(names.contains(&"C".to_string()));
+}
+
+#[test]
+fn particle_effect_roundtrip() {
+    let mut world = hecs::World::new();
+    let entity = world.spawn((
+        Name::new("ParticleEmitter"),
+        EntityGuid::new(),
+        Transform::default(),
+        ParticleEffect {
+            enabled: true,
+            capacity: 1024,
+            emission_rate: 50.0,
+            burst_count: 10,
+            burst_interval: 0.5,
+            spawn_shape: SpawnShape::Sphere { radius: 2.0 },
+            lifetime_min: 0.5,
+            lifetime_max: 3.0,
+            initial_velocity: [1.0, 2.0, 3.0],
+            velocity_variance: 1.5,
+            update_modules: vec![
+                UpdateModule::Gravity([0.0, 0.0, -9.8]),
+                UpdateModule::Wind([1.0, 0.0, 0.0]),
+                UpdateModule::Drag(0.5),
+                UpdateModule::CurlNoise { strength: 2.0, scale: 0.5, speed: 1.0 },
+                UpdateModule::ColorOverLife {
+                    start: [1.0, 0.5, 0.0, 1.0],
+                    end: [1.0, 0.0, 0.0, 0.0],
+                },
+                UpdateModule::SizeOverLife { start: 0.2, end: 0.05 },
+            ],
+            render_mode: RenderMode::Billboard,
+            texture_path: "textures/spark.png".to_string(),
+            soft_fade_distance: 0.5,
+            show_gizmos: true,
+        },
+    ));
+
+    let new_world = roundtrip(&world, &[entity]);
+
+    let mut found = false;
+    for (_, effect) in new_world.query::<&ParticleEffect>().iter() {
+        found = true;
+        assert!(effect.enabled);
+        assert_eq!(effect.capacity, 1024);
+        assert_approx_eq(effect.emission_rate, 50.0, 0.01);
+        assert_eq!(effect.burst_count, 10);
+        assert_approx_eq(effect.burst_interval, 0.5, 0.01);
+        match effect.spawn_shape {
+            SpawnShape::Sphere { radius } => {
+                assert_approx_eq(radius, 2.0, 0.01);
+            }
+            _ => panic!("expected Sphere spawn shape"),
+        }
+        assert_approx_eq(effect.lifetime_min, 0.5, 0.01);
+        assert_approx_eq(effect.lifetime_max, 3.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[0], 1.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[1], 2.0, 0.01);
+        assert_approx_eq(effect.initial_velocity[2], 3.0, 0.01);
+        assert_approx_eq(effect.velocity_variance, 1.5, 0.01);
+
+        // Verify modules survived roundtrip
+        assert_eq!(effect.update_modules.len(), 6);
+        assert_approx_eq(effect.gravity().unwrap()[2], -9.8, 0.01);
+        assert_approx_eq(effect.wind().unwrap()[0], 1.0, 0.01);
+        assert_approx_eq(effect.drag().unwrap(), 0.5, 0.01);
+        let (turb_str, turb_scale, turb_speed) = effect.curl_noise().unwrap();
+        assert_approx_eq(turb_str, 2.0, 0.01);
+        assert_approx_eq(turb_scale, 0.5, 0.01);
+        assert_approx_eq(turb_speed, 1.0, 0.01);
+        let (color_start, color_end) = effect.color_over_life().unwrap();
+        assert_approx_eq(color_start[0], 1.0, 0.01);
+        assert_approx_eq(color_start[1], 0.5, 0.01);
+        assert_approx_eq(color_end[3], 0.0, 0.01);
+        let (size_start, size_end) = effect.size_over_life().unwrap();
+        assert_approx_eq(size_start, 0.2, 0.01);
+        assert_approx_eq(size_end, 0.05, 0.01);
+
+        assert_eq!(effect.texture_path, "textures/spark.png");
+        assert_approx_eq(effect.soft_fade_distance, 0.5, 0.01);
+        assert!(effect.show_gizmos);
+    }
+    assert!(found, "ParticleEffect should survive roundtrip");
+}
+
+#[test]
+fn particle_effect_capacity_clamped_on_deserialize() {
+    let mut world = hecs::World::new();
+    let entity = world.spawn((
+        Name::new("ClampTest"),
+        EntityGuid::new(),
+        Transform::default(),
+        ParticleEffect {
+            capacity: 8192, // above max
+            ..ParticleEffect::default()
+        },
+    ));
+
+    let new_world = roundtrip(&world, &[entity]);
+    for (_, effect) in new_world.query::<&ParticleEffect>().iter() {
+        assert_eq!(effect.capacity, 4096, "capacity should be clamped to max");
+    }
 }

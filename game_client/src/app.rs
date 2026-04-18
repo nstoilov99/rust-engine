@@ -103,6 +103,7 @@ pub struct CoreApp {
     pub descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
+    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
     #[cfg(debug_assertions)]
@@ -418,6 +419,7 @@ impl App {
             descriptor_set,
             mesh_data_buffer: Vec::with_capacity(64),
             shadow_caster_buffer: Vec::with_capacity(64),
+            plankton_emitter_buffer: Vec::with_capacity(32),
             frame_number: 0,
             render_thread: Some(render_thread),
             #[cfg(debug_assertions)]
@@ -1090,6 +1092,21 @@ impl App {
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);
 
+        {
+            let tc = self
+                .core
+                .game_world
+                .resource::<TransformCache>()
+                .expect("TransformCache resource missing");
+            let dt = self.core.game_loop.delta();
+            render_loop::prepare_plankton_data(
+                self.core.game_world.hecs(),
+                &mut self.core.plankton_emitter_buffer,
+                tc,
+                dt,
+            );
+        }
+
         if self.editor.viewport.pending_sync {
             let (vp_width, vp_height) = self.editor.viewport.size;
             if vp_width > 0 && vp_height > 0 {
@@ -1159,6 +1176,13 @@ impl App {
             !is_editing,
         );
 
+        // Submit plankton particle emitter debug gizmos
+        #[cfg(debug_assertions)]
+        rust_engine::engine::ecs::plankton_debug_draw::submit_plankton_debug_draws(
+            self.core.game_world.hecs(),
+            &mut self.core.debug_draw_buffer,
+        );
+
         #[cfg(debug_assertions)]
         let debug_draw_data = render_loop::prepare_debug_draw_data(
             &mut self.core.debug_draw_buffer,
@@ -1180,6 +1204,7 @@ impl App {
             [window_size.width, window_size.height],
             Some([vp_w, vp_h]),
             self.core.frame_number,
+            std::mem::take(&mut self.core.plankton_emitter_buffer),
         );
         self.core.frame_number += 1;
 

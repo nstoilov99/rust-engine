@@ -1,0 +1,146 @@
+#version 460
+layout(local_size_x = 64) in;
+
+struct Plankton {
+    vec3 position; float lifetime;
+    vec3 velocity; float age;
+    vec4 color;
+    float size; float seed; vec2 _reserved;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles { Plankton particles[]; };
+layout(std430, set = 0, binding = 1) buffer DeadList  { uint dead_list[]; };
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint alive_count;
+    uint dead_count;
+    uint emit_count;
+    uint _pad;
+};
+
+layout(push_constant) uniform EmitParams {
+    mat4  emitter_transform;       // 64 bytes
+    vec4  velocity_base_variance;  // .xyz = base velocity, .w = variance
+    vec4  color_start;             // 16 bytes
+    vec4  color_end;               // 16 bytes
+    vec4  size_lifetime;           // .x = size_start, .y = size_end, .z = lifetime_min, .w = lifetime_max
+    vec4  shape_params;            // shape-specific params
+    uint  shape_type;              // 0=Point, 1=Sphere, 2=Cone, 3=Box
+    uint  random_seed;
+    float dt;
+    uint  emit_count;
+} params;
+
+// PCG hash for random number generation
+uint pcg_hash(uint seed) {
+    uint state = seed * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rand_float(inout uint seed) {
+    seed = pcg_hash(seed);
+    return float(seed) / float(0xFFFFFFFFu);
+}
+
+vec3 rand_unit_vector(inout uint seed) {
+    float z = rand_float(seed) * 2.0 - 1.0;
+    float a = rand_float(seed) * 6.28318530718;
+    float r = sqrt(1.0 - z * z);
+    return vec3(r * cos(a), r * sin(a), z);
+}
+
+// Sample spawn position based on emission shape
+vec3 sample_shape(inout uint rng) {
+    switch (params.shape_type) {
+        case 1u: {
+            // Sphere: params.x = radius
+            float radius = params.shape_params.x;
+            vec3 dir = rand_unit_vector(rng);
+            // Uniform volume distribution: radius * cbrt(rand)
+            float r = radius * pow(rand_float(rng), 1.0 / 3.0);
+            return dir * r;
+        }
+        case 2u: {
+            // Cone: params.x = angle_rad, params.y = radius
+            float angle = params.shape_params.x;
+            float radius = params.shape_params.y;
+            // Spawn on a disk of given radius in local XZ plane
+            float disk_r = radius * sqrt(rand_float(rng));
+            float disk_angle = rand_float(rng) * 6.28318530718;
+            return vec3(disk_r * cos(disk_angle), 0.0, disk_r * sin(disk_angle));
+        }
+        case 3u: {
+            // Box: params.xyz = half_extents
+            vec3 he = params.shape_params.xyz;
+            return vec3(
+                (rand_float(rng) * 2.0 - 1.0) * he.x,
+                (rand_float(rng) * 2.0 - 1.0) * he.y,
+                (rand_float(rng) * 2.0 - 1.0) * he.z
+            );
+        }
+        default: // Point
+            return vec3(0.0);
+    }
+}
+
+// Sample initial velocity based on emission shape
+vec3 sample_velocity(inout uint rng) {
+    vec3 vel_base = params.velocity_base_variance.xyz;
+    float variance = params.velocity_base_variance.w;
+
+    if (params.shape_type == 2u) {
+        // Cone: velocity direction bounded by cone angle
+        float angle = params.shape_params.x;
+        float cos_angle = cos(angle);
+        float z = mix(cos_angle, 1.0, rand_float(rng));
+        float phi = rand_float(rng) * 6.28318530718;
+        float sin_theta = sqrt(1.0 - z * z);
+        vec3 cone_dir = vec3(sin_theta * cos(phi), z, sin_theta * sin(phi));
+        return cone_dir * length(vel_base) + rand_unit_vector(rng) * variance;
+    }
+
+    // Default: base velocity + random perturbation
+    return vel_base + rand_unit_vector(rng) * variance;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.emit_count) return;
+
+    // Atomic dead-list pop with revert-on-empty
+    uint prev_dead = atomicAdd(dead_count, -1u);
+    if (prev_dead == 0u) {
+        atomicAdd(dead_count, 1u);
+        return;
+    }
+    uint slot = dead_list[prev_dead - 1u];
+
+    // RNG seed from base seed + invocation
+    uint rng = pcg_hash(params.random_seed ^ (id * 1099087573u));
+
+    // Sample spawn position and velocity based on shape
+    vec3 local_pos = sample_shape(rng);
+    vec3 vel = sample_velocity(rng);
+
+    // Transform spawn position to world space
+    vec4 world_pos = params.emitter_transform * vec4(local_pos, 1.0);
+
+    // Random lifetime in [min, max]
+    float life_min = params.size_lifetime.z;
+    float life_max = params.size_lifetime.w;
+    float lifetime = mix(life_min, life_max, rand_float(rng));
+
+    // Fill particle slot
+    Plankton p;
+    p.position = world_pos.xyz;
+    p.lifetime = lifetime;
+    p.velocity = vel;
+    p.age = 0.0;
+    p.color = params.color_start;
+    p.size = params.size_lifetime.x;
+    p.seed = rand_float(rng);
+    p._reserved = vec2(0.0);
+
+    particles[slot] = p;
+    atomicAdd(alive_count, 1u);
+}

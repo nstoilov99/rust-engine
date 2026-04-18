@@ -9,7 +9,7 @@ use crate::engine::assets::handle::AssetId;
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
-    Transform,
+    Transform, ParticleEffect, SpawnShape, UpdateModule,
 };
 use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
 use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
@@ -45,6 +45,7 @@ enum ComponentAction {
     RemoveCollider,
     RemoveAudioEmitter,
     RemoveAudioListener,
+    RemoveParticleEffect,
 }
 
 /// Bitflags for which inspectable components an entity has.
@@ -67,6 +68,7 @@ impl ComponentPresence {
     const ANIM_PLAYER: u16 = 1 << 9;
     const AUDIO_EMITTER: u16 = 1 << 10;
     const AUDIO_LISTENER: u16 = 1 << 11;
+    const PARTICLE_EFFECT: u16 = 1 << 12;
 
     fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -105,6 +107,9 @@ impl ComponentPresence {
         }
         if world.get::<&AudioListener>(entity).is_ok() {
             bits |= Self::AUDIO_LISTENER;
+        }
+        if world.get::<&ParticleEffect>(entity).is_ok() {
+            bits |= Self::PARTICLE_EFFECT;
         }
         Self { bits }
     }
@@ -464,6 +469,21 @@ impl InspectorPanel {
             }
         }
 
+        if (self.matches_filter("plankton") || self.matches_filter("vfx") || self.matches_filter("particle"))
+            && p.has(ComponentPresence::PARTICLE_EFFECT)
+        {
+            if component_count > 0 {
+                Self::draw_component_divider(ui);
+            }
+            if let Some(action) =
+                self.edit_particle_effect(ui, world, entity, ComponentCategory::Rendering)
+            {
+                pending_action = action;
+            }
+            component_count += 1;
+        }
+        let _ = component_count; // suppress unused warning
+
         // Execute pending action and invalidate snapshot
         let mutated = !matches!(pending_action, ComponentAction::None);
         match pending_action {
@@ -491,6 +511,9 @@ impl InspectorPanel {
             }
             ComponentAction::RemoveAudioListener => {
                 let _ = world.remove_one::<AudioListener>(entity);
+            }
+            ComponentAction::RemoveParticleEffect => {
+                let _ = world.remove_one::<ParticleEffect>(entity);
             }
         }
         if mutated {
@@ -1905,6 +1928,289 @@ impl InspectorPanel {
         action
     }
 
+    /// Edit ParticleEffect component (module-stack architecture)
+    fn edit_particle_effect(
+        &self,
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        category: ComponentCategory,
+    ) -> Option<ComponentAction> {
+        let mut action = None;
+        if let Ok(mut effect) = world.get::<&mut ParticleEffect>(entity) {
+            let color = Self::category_color(category);
+            let start_y = ui.cursor().top();
+
+            CollapsingHeader::new(RichText::new("Particle Effect").strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    // Preset dropdown
+                    egui::ComboBox::from_label("Preset")
+                        .selected_text("Select preset...")
+                        .show_ui(ui, |ui| {
+                            for (label, preset_fn) in [
+                                ("Fire", ParticleEffect::fire as fn() -> ParticleEffect),
+                                ("Smoke", ParticleEffect::smoke),
+                                ("Sparks", ParticleEffect::sparks),
+                                ("Dust", ParticleEffect::dust),
+                            ] {
+                                if ui.selectable_label(false, label).clicked() {
+                                    let preset = preset_fn();
+                                    let capacity = effect.capacity;
+                                    let show_gizmos = effect.show_gizmos;
+                                    let texture_path = effect.texture_path.clone();
+                                    *effect = preset;
+                                    effect.capacity = capacity;
+                                    effect.show_gizmos = show_gizmos;
+                                    effect.texture_path = texture_path;
+                                }
+                            }
+                        });
+
+                    ui.add_space(4.0);
+
+                    // Lifecycle
+                    CollapsingHeader::new("Lifecycle")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut effect.enabled, "Enabled");
+                            ui.add(
+                                egui::Slider::new(&mut effect.capacity, 256..=4096)
+                                    .text("Capacity"),
+                            );
+                        });
+
+                    // Emission
+                    CollapsingHeader::new("Emission")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let shape_label = match effect.spawn_shape {
+                                SpawnShape::Point => "Point",
+                                SpawnShape::Sphere { .. } => "Sphere",
+                                SpawnShape::Cone { .. } => "Cone",
+                                SpawnShape::Box { .. } => "Box",
+                            };
+                            egui::ComboBox::from_label("Shape")
+                                .selected_text(shape_label)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Point), "Point").clicked() {
+                                        effect.spawn_shape = SpawnShape::Point;
+                                    }
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Sphere { .. }), "Sphere").clicked() {
+                                        effect.spawn_shape = SpawnShape::Sphere { radius: 1.0 };
+                                    }
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Cone { .. }), "Cone").clicked() {
+                                        effect.spawn_shape = SpawnShape::Cone { angle_rad: 0.5, radius: 0.5 };
+                                    }
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Box { .. }), "Box").clicked() {
+                                        effect.spawn_shape = SpawnShape::Box { half_extents: [0.5, 0.5, 0.5] };
+                                    }
+                                });
+
+                            match &mut effect.spawn_shape {
+                                SpawnShape::Point => {}
+                                SpawnShape::Sphere { radius } => {
+                                    ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
+                                }
+                                SpawnShape::Cone { angle_rad, radius } => {
+                                    ui.add(DragValue::new(angle_rad).speed(0.01).prefix("Angle: "));
+                                    ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
+                                }
+                                SpawnShape::Box { half_extents } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Half Extents:");
+                                        ui.add(DragValue::new(&mut half_extents[0]).speed(0.05).prefix("X: "));
+                                        ui.add(DragValue::new(&mut half_extents[1]).speed(0.05).prefix("Y: "));
+                                        ui.add(DragValue::new(&mut half_extents[2]).speed(0.05).prefix("Z: "));
+                                    });
+                                }
+                            }
+
+                            ui.add(DragValue::new(&mut effect.emission_rate).speed(0.5).range(0.0..=1000.0).prefix("Rate: "));
+                            ui.add(DragValue::new(&mut effect.burst_count).speed(1.0).prefix("Burst Count: "));
+                            ui.add(DragValue::new(&mut effect.burst_interval).speed(0.01).prefix("Burst Interval: "));
+                        });
+
+                    // Lifetime
+                    CollapsingHeader::new("Lifetime")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.add(DragValue::new(&mut effect.lifetime_min).speed(0.01).range(0.01..=f32::MAX).prefix("Min: "));
+                            ui.add(DragValue::new(&mut effect.lifetime_max).speed(0.01).range(0.01..=f32::MAX).prefix("Max: "));
+                            if effect.lifetime_min > effect.lifetime_max {
+                                effect.lifetime_max = effect.lifetime_min;
+                            }
+                        });
+
+                    // Velocity
+                    CollapsingHeader::new("Velocity")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Initial:");
+                                ui.add(DragValue::new(&mut effect.initial_velocity[0]).speed(0.1).prefix("X: "));
+                                ui.add(DragValue::new(&mut effect.initial_velocity[1]).speed(0.1).prefix("Y: "));
+                                ui.add(DragValue::new(&mut effect.initial_velocity[2]).speed(0.1).prefix("Z: "));
+                            });
+                            ui.add(DragValue::new(&mut effect.velocity_variance).speed(0.05).range(0.0..=f32::MAX).prefix("Variance: "));
+                        });
+
+                    // Modules (composable update stack)
+                    CollapsingHeader::new("Modules")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let mut remove_idx: Option<usize> = None;
+
+                            for (idx, module) in effect.update_modules.iter_mut().enumerate() {
+                                let id = ui.make_persistent_id(format!("module_{}", idx));
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(), id, true,
+                                ).show_header(ui, |ui| {
+                                    ui.label(RichText::new(module.display_name()).strong());
+                                    if ui.small_button("X").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                }).body(|ui| {
+                                    match module {
+                                        UpdateModule::Gravity(v) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
+                                            });
+                                        }
+                                        UpdateModule::Drag(v) => {
+                                            ui.add(DragValue::new(v).speed(0.01).range(0.0..=f32::MAX).prefix("Drag: "));
+                                        }
+                                        UpdateModule::Wind(v) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
+                                            });
+                                        }
+                                        UpdateModule::CurlNoise { strength, scale, speed } => {
+                                            ui.add(DragValue::new(strength).speed(0.05).range(0.0..=f32::MAX).prefix("Strength: "));
+                                            ui.add(DragValue::new(scale).speed(0.05).range(0.01..=f32::MAX).prefix("Scale: "));
+                                            ui.add(DragValue::new(speed).speed(0.01).prefix("Speed: "));
+                                        }
+                                        UpdateModule::ColorOverLife { start, end } => {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Start:");
+                                                let mut c = [
+                                                    (start[0] * 255.0) as u8,
+                                                    (start[1] * 255.0) as u8,
+                                                    (start[2] * 255.0) as u8,
+                                                    (start[3] * 255.0) as u8,
+                                                ];
+                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                                                    *start = [
+                                                        c[0] as f32 / 255.0,
+                                                        c[1] as f32 / 255.0,
+                                                        c[2] as f32 / 255.0,
+                                                        c[3] as f32 / 255.0,
+                                                    ];
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("End:");
+                                                let mut c = [
+                                                    (end[0] * 255.0) as u8,
+                                                    (end[1] * 255.0) as u8,
+                                                    (end[2] * 255.0) as u8,
+                                                    (end[3] * 255.0) as u8,
+                                                ];
+                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                                                    *end = [
+                                                        c[0] as f32 / 255.0,
+                                                        c[1] as f32 / 255.0,
+                                                        c[2] as f32 / 255.0,
+                                                        c[3] as f32 / 255.0,
+                                                    ];
+                                                }
+                                            });
+                                        }
+                                        UpdateModule::SizeOverLife { start, end } => {
+                                            ui.add(DragValue::new(start).speed(0.005).range(0.0..=f32::MAX).prefix("Start: "));
+                                            ui.add(DragValue::new(end).speed(0.005).range(0.0..=f32::MAX).prefix("End: "));
+                                        }
+                                    }
+                                });
+                            }
+
+                            if let Some(idx) = remove_idx {
+                                effect.update_modules.remove(idx);
+                            }
+
+                            // Add Module dropdown
+                            ui.add_space(4.0);
+                            egui::ComboBox::from_id_salt("add_module")
+                                .selected_text("Add Module...")
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(false, "Gravity").clicked() {
+                                        effect.update_modules.push(UpdateModule::Gravity([0.0, 0.0, -9.8]));
+                                    }
+                                    if ui.selectable_label(false, "Drag").clicked() {
+                                        effect.update_modules.push(UpdateModule::Drag(0.5));
+                                    }
+                                    if ui.selectable_label(false, "Wind").clicked() {
+                                        effect.update_modules.push(UpdateModule::Wind([1.0, 0.0, 0.0]));
+                                    }
+                                    if ui.selectable_label(false, "Curl Noise").clicked() {
+                                        effect.update_modules.push(UpdateModule::CurlNoise {
+                                            strength: 1.0, scale: 1.0, speed: 0.5,
+                                        });
+                                    }
+                                    if ui.selectable_label(false, "Color Over Life").clicked() {
+                                        effect.update_modules.push(UpdateModule::ColorOverLife {
+                                            start: [1.0, 1.0, 1.0, 1.0],
+                                            end: [1.0, 1.0, 1.0, 0.0],
+                                        });
+                                    }
+                                    if ui.selectable_label(false, "Size Over Life").clicked() {
+                                        effect.update_modules.push(UpdateModule::SizeOverLife {
+                                            start: 0.1, end: 0.0,
+                                        });
+                                    }
+                                });
+                        });
+
+                    // Texture & Soft Fade
+                    CollapsingHeader::new("Rendering")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Texture:");
+                                ui.text_edit_singleline(&mut effect.texture_path);
+                            });
+                            ui.add(
+                                egui::Slider::new(&mut effect.soft_fade_distance, 0.0..=5.0)
+                                    .text("Soft Fade"),
+                            );
+                        });
+
+                    // Gizmos
+                    ui.checkbox(&mut effect.show_gizmos, "Show Gizmos");
+
+                    ui.add_space(4.0);
+                    if ui
+                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                        .clicked()
+                    {
+                        action = Some(ComponentAction::RemoveParticleEffect);
+                    }
+                });
+
+            let end_y = ui.cursor().top();
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(ui.min_rect().left(), start_y),
+                egui::pos2(ui.min_rect().left() + 4.0, end_y),
+            );
+            ui.painter().rect_filled(accent_rect, 1.0, color);
+        }
+        action
+    }
+
     /// Render "Add Component" UI with compatibility validation.
     /// Uses `self.cached_presence` to avoid per-frame world probing.
     fn render_add_component(&mut self, ui: &mut Ui, world: &mut World, entity: Entity) {
@@ -2002,6 +2308,20 @@ impl InspectorPanel {
                     && ui.selectable_label(false, "Audio Listener").clicked()
                 {
                     let _ = world.insert_one(entity, AudioListener::default());
+                    added = true;
+                }
+
+                ui.separator();
+                ui.label(RichText::new("VFX").strong().size(11.0));
+
+                if !p.has(ComponentPresence::PARTICLE_EFFECT)
+                    && ui.selectable_label(false, "Particle Effect").clicked()
+                {
+                    let _ = world.insert_one(entity, ParticleEffect::default());
+                    // Ensure the entity has an EntityGuid (required for plankton tracking)
+                    if world.get::<&crate::engine::ecs::EntityGuid>(entity).is_err() {
+                        let _ = world.insert_one(entity, crate::engine::ecs::EntityGuid::new());
+                    }
                     added = true;
                 }
             });

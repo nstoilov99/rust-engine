@@ -9,6 +9,7 @@ pub mod resources;
 pub mod schedule;
 pub mod systems;
 pub mod system_names;
+pub mod plankton_debug_draw;
 pub mod world;
 
 #[cfg(test)]
