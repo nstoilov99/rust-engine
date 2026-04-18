@@ -10,6 +10,8 @@ use rust_engine::engine::ecs::hierarchy::Parent;
 use rust_engine::engine::physics::{Collider, RigidBody};
 use rust_engine::engine::scene::{load_scene_from_string, serialize_scene_to_string};
 
+use common::assert_approx_eq;
+
 use common::{spawn_child_entity, spawn_named_entity};
 
 /// Serialize a world to RON and deserialize into a fresh world.
@@ -277,4 +279,97 @@ fn multiple_entities_roundtrip() {
     assert!(names.contains(&"A".to_string()));
     assert!(names.contains(&"B".to_string()));
     assert!(names.contains(&"C".to_string()));
+}
+
+#[test]
+fn plankton_emitter_roundtrip() {
+    let mut world = hecs::World::new();
+    let entity = world.spawn((
+        Name::new("ParticleEmitter"),
+        EntityGuid::new(),
+        Transform::default(),
+        PlanktonEmitter {
+            enabled: true,
+            capacity: 1024,
+            emission_rate: 50.0,
+            burst_count: 10,
+            burst_interval: 0.5,
+            emission_shape: EmissionShape::Sphere { radius: 2.0 },
+            lifetime_min: 0.5,
+            lifetime_max: 3.0,
+            initial_velocity: [1.0, 2.0, 3.0],
+            velocity_variance: 1.5,
+            gravity: [0.0, 0.0, -9.8],
+            wind: [1.0, 0.0, 0.0],
+            drag: 0.5,
+            turbulence_strength: 2.0,
+            turbulence_scale: 0.5,
+            turbulence_speed: 1.0,
+            size_start: 0.2,
+            size_end: 0.05,
+            color_start: [1.0, 0.5, 0.0, 1.0],
+            color_end: [1.0, 0.0, 0.0, 0.0],
+            texture_path: "textures/spark.png".to_string(),
+            soft_fade_distance: 0.5,
+            blend_mode: BlendMode::Additive,
+            show_gizmos: true,
+        },
+    ));
+
+    let new_world = roundtrip(&world, &[entity]);
+
+    let mut found = false;
+    for (_, emitter) in new_world.query::<&PlanktonEmitter>().iter() {
+        found = true;
+        assert!(emitter.enabled);
+        assert_eq!(emitter.capacity, 1024);
+        assert_approx_eq(emitter.emission_rate, 50.0, 0.01);
+        assert_eq!(emitter.burst_count, 10);
+        assert_approx_eq(emitter.burst_interval, 0.5, 0.01);
+        match emitter.emission_shape {
+            EmissionShape::Sphere { radius } => {
+                assert_approx_eq(radius, 2.0, 0.01);
+            }
+            _ => panic!("expected Sphere emission shape"),
+        }
+        assert_approx_eq(emitter.lifetime_min, 0.5, 0.01);
+        assert_approx_eq(emitter.lifetime_max, 3.0, 0.01);
+        assert_approx_eq(emitter.initial_velocity[0], 1.0, 0.01);
+        assert_approx_eq(emitter.initial_velocity[1], 2.0, 0.01);
+        assert_approx_eq(emitter.initial_velocity[2], 3.0, 0.01);
+        assert_approx_eq(emitter.velocity_variance, 1.5, 0.01);
+        assert_approx_eq(emitter.gravity[2], -9.8, 0.01);
+        assert_approx_eq(emitter.wind[0], 1.0, 0.01);
+        assert_approx_eq(emitter.drag, 0.5, 0.01);
+        assert_approx_eq(emitter.turbulence_strength, 2.0, 0.01);
+        assert_approx_eq(emitter.size_start, 0.2, 0.01);
+        assert_approx_eq(emitter.size_end, 0.05, 0.01);
+        assert_approx_eq(emitter.color_start[0], 1.0, 0.01);
+        assert_approx_eq(emitter.color_start[1], 0.5, 0.01);
+        assert_approx_eq(emitter.color_end[3], 0.0, 0.01);
+        assert_eq!(emitter.texture_path, "textures/spark.png");
+        assert_approx_eq(emitter.soft_fade_distance, 0.5, 0.01);
+        assert!(matches!(emitter.blend_mode, BlendMode::Additive));
+        assert!(emitter.show_gizmos);
+    }
+    assert!(found, "PlanktonEmitter should survive roundtrip");
+}
+
+#[test]
+fn plankton_emitter_capacity_clamped_on_deserialize() {
+    let mut world = hecs::World::new();
+    let entity = world.spawn((
+        Name::new("ClampTest"),
+        EntityGuid::new(),
+        Transform::default(),
+        PlanktonEmitter {
+            capacity: 8192, // above max
+            ..PlanktonEmitter::default()
+        },
+    ));
+
+    let new_world = roundtrip(&world, &[entity]);
+    for (_, emitter) in new_world.query::<&PlanktonEmitter>().iter() {
+        assert_eq!(emitter.capacity, 4096, "capacity should be clamped to max");
+    }
 }

@@ -382,6 +382,162 @@ fn default_max_distance() -> f32 {
     50.0
 }
 
+fn default_plankton_capacity() -> u32 { 2048 }
+fn default_plankton_emission_rate() -> f32 { 20.0 }
+fn default_plankton_lifetime_min() -> f32 { 1.0 }
+fn default_plankton_lifetime_max() -> f32 { 2.0 }
+fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] }
+fn default_plankton_turbulence_scale() -> f32 { 1.0 }
+fn default_plankton_size_start() -> f32 { 0.1 }
+fn default_plankton_color_start() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
+fn default_plankton_color_end() -> [f32; 4] { [1.0, 1.0, 1.0, 0.0] }
+
+/// Emission shape for scene serialization.
+/// Custom serde impl for the same RON internally-tagged enum reason as CameraProjectionData.
+#[derive(Debug, Clone, Copy)]
+pub enum EmissionShapeData {
+    Point,
+    Sphere { radius: f32 },
+    Cone { angle_rad: f32, radius: f32 },
+    Box { half_extents: [f32; 3] },
+}
+
+impl Default for EmissionShapeData {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
+impl Serialize for EmissionShapeData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            EmissionShapeData::Point => serializer.serialize_str("Point"),
+            EmissionShapeData::Sphere { radius } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("shape", "Sphere")?;
+                map.serialize_entry("radius", radius)?;
+                map.end()
+            }
+            EmissionShapeData::Cone { angle_rad, radius } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("shape", "Cone")?;
+                map.serialize_entry("angle_rad", angle_rad)?;
+                map.serialize_entry("radius", radius)?;
+                map.end()
+            }
+            EmissionShapeData::Box { half_extents } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("shape", "Box")?;
+                map.serialize_entry("half_extents", half_extents)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EmissionShapeData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct Visitor;
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = EmissionShapeData;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"Point\" or a map with shape-specific params")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "Point" => Ok(EmissionShapeData::Point),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["Point", "Sphere", "Cone", "Box"],
+                    )),
+                }
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(EmissionShapeData::Point)
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut shape: Option<String> = None;
+                let mut radius: Option<f32> = None;
+                let mut angle_rad: Option<f32> = None;
+                let mut half_extents: Option<[f32; 3]> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "shape" => shape = Some(map.next_value()?),
+                        "radius" => radius = Some(map.next_value()?),
+                        "angle_rad" => angle_rad = Some(map.next_value()?),
+                        "half_extents" => half_extents = Some(map.next_value()?),
+                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                    }
+                }
+                let kind = shape.as_deref().unwrap_or("Point");
+                match kind {
+                    "Point" => Ok(EmissionShapeData::Point),
+                    "Sphere" => Ok(EmissionShapeData::Sphere {
+                        radius: radius.unwrap_or(1.0),
+                    }),
+                    "Cone" => Ok(EmissionShapeData::Cone {
+                        angle_rad: angle_rad.unwrap_or(0.5),
+                        radius: radius.unwrap_or(0.5),
+                    }),
+                    "Box" => Ok(EmissionShapeData::Box {
+                        half_extents: half_extents.unwrap_or([0.5, 0.5, 0.5]),
+                    }),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["Point", "Sphere", "Cone", "Box"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Blend mode for scene serialization.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum BlendModeData {
+    #[default]
+    Additive,
+}
+
+impl Serialize for BlendModeData {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            BlendModeData::Additive => serializer.serialize_str("Additive"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BlendModeData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = BlendModeData;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"Additive\"")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "Additive" => Ok(BlendModeData::Additive),
+                    other => Err(E::unknown_variant(other, &["Additive"])),
+                }
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BlendModeData::Additive)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Component data enum for all component types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -497,6 +653,56 @@ pub enum ComponentData {
     AudioListener {
         #[serde(default = "default_true")]
         active: bool,
+    },
+    PlanktonEmitter {
+        #[serde(default = "default_true")]
+        enabled: bool,
+        #[serde(default = "default_plankton_capacity")]
+        capacity: u32,
+        #[serde(default = "default_plankton_emission_rate")]
+        emission_rate: f32,
+        #[serde(default)]
+        burst_count: u32,
+        #[serde(default)]
+        burst_interval: f32,
+        #[serde(default)]
+        emission_shape: EmissionShapeData,
+        #[serde(default = "default_plankton_lifetime_min")]
+        lifetime_min: f32,
+        #[serde(default = "default_plankton_lifetime_max")]
+        lifetime_max: f32,
+        #[serde(default = "default_plankton_initial_velocity")]
+        initial_velocity: [f32; 3],
+        #[serde(default)]
+        velocity_variance: f32,
+        #[serde(default)]
+        gravity: [f32; 3],
+        #[serde(default)]
+        wind: [f32; 3],
+        #[serde(default)]
+        drag: f32,
+        #[serde(default)]
+        turbulence_strength: f32,
+        #[serde(default = "default_plankton_turbulence_scale")]
+        turbulence_scale: f32,
+        #[serde(default)]
+        turbulence_speed: f32,
+        #[serde(default = "default_plankton_size_start")]
+        size_start: f32,
+        #[serde(default)]
+        size_end: f32,
+        #[serde(default = "default_plankton_color_start")]
+        color_start: [f32; 4],
+        #[serde(default = "default_plankton_color_end")]
+        color_end: [f32; 4],
+        #[serde(default)]
+        texture_path: String,
+        #[serde(default)]
+        soft_fade_distance: f32,
+        #[serde(default)]
+        blend_mode: BlendModeData,
+        #[serde(default)]
+        show_gizmos: bool,
     },
 }
 

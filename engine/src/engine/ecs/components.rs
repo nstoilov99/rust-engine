@@ -1,6 +1,6 @@
 //! Core ECS components
 use nalgebra_glm as glm;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// 3D transform component
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -246,6 +246,218 @@ fn default_clear_color() -> [f32; 3] {
 
 fn default_shadow_bias() -> f32 {
     0.005
+}
+
+/// Emission shape for particle emitters (Z-up game space)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum EmissionShape {
+    Point,
+    Sphere { radius: f32 },
+    Cone { angle_rad: f32, radius: f32 },
+    Box { half_extents: [f32; 3] },
+}
+
+impl Default for EmissionShape {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
+/// Particle blend mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlendMode {
+    Additive,
+    // Alpha, // v2 — requires sorting
+}
+
+impl Default for BlendMode {
+    fn default() -> Self {
+        Self::Additive
+    }
+}
+
+/// Deserialize capacity with clamping to 256..=4096
+fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let val = u32::deserialize(deserializer)?;
+    let clamped = val.clamp(256, 4096);
+    if clamped != val {
+        log::warn!(
+            "PlanktonEmitter capacity {} clamped to {}",
+            val,
+            clamped
+        );
+    }
+    Ok(clamped)
+}
+
+/// Particle emitter component (codename: Plankton)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanktonEmitter {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_plankton_capacity", deserialize_with = "deserialize_clamped_capacity")]
+    pub capacity: u32,
+    #[serde(default = "default_plankton_emission_rate")]
+    pub emission_rate: f32,
+    #[serde(default)]
+    pub burst_count: u32,
+    #[serde(default)]
+    pub burst_interval: f32,
+    #[serde(default)]
+    pub emission_shape: EmissionShape,
+    #[serde(default = "default_plankton_lifetime_min")]
+    pub lifetime_min: f32,
+    #[serde(default = "default_plankton_lifetime_max")]
+    pub lifetime_max: f32,
+    #[serde(default = "default_plankton_initial_velocity")]
+    pub initial_velocity: [f32; 3],
+    #[serde(default)]
+    pub velocity_variance: f32,
+    #[serde(default)]
+    pub gravity: [f32; 3],
+    #[serde(default)]
+    pub wind: [f32; 3],
+    #[serde(default)]
+    pub drag: f32,
+    #[serde(default)]
+    pub turbulence_strength: f32,
+    #[serde(default = "default_plankton_turbulence_scale")]
+    pub turbulence_scale: f32,
+    #[serde(default)]
+    pub turbulence_speed: f32,
+    #[serde(default = "default_plankton_size_start")]
+    pub size_start: f32,
+    #[serde(default)]
+    pub size_end: f32,
+    #[serde(default = "default_plankton_color_start")]
+    pub color_start: [f32; 4],
+    #[serde(default = "default_plankton_color_end")]
+    pub color_end: [f32; 4],
+    #[serde(default)]
+    pub texture_path: String,
+    #[serde(default)]
+    pub soft_fade_distance: f32,
+    #[serde(default)]
+    pub blend_mode: BlendMode,
+    #[serde(default)]
+    pub show_gizmos: bool,
+}
+
+fn default_plankton_capacity() -> u32 { 2048 }
+fn default_plankton_emission_rate() -> f32 { 20.0 }
+fn default_plankton_lifetime_min() -> f32 { 1.0 }
+fn default_plankton_lifetime_max() -> f32 { 2.0 }
+fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] } // upward in Z-up
+fn default_plankton_turbulence_scale() -> f32 { 1.0 }
+fn default_plankton_size_start() -> f32 { 0.1 }
+fn default_plankton_color_start() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
+fn default_plankton_color_end() -> [f32; 4] { [1.0, 1.0, 1.0, 0.0] }
+
+impl Default for PlanktonEmitter {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            capacity: default_plankton_capacity(),
+            emission_rate: default_plankton_emission_rate(),
+            burst_count: 0,
+            burst_interval: 0.0,
+            emission_shape: EmissionShape::default(),
+            lifetime_min: default_plankton_lifetime_min(),
+            lifetime_max: default_plankton_lifetime_max(),
+            initial_velocity: default_plankton_initial_velocity(),
+            velocity_variance: 0.5,
+            gravity: [0.0, 0.0, 0.0],
+            wind: [0.0, 0.0, 0.0],
+            drag: 0.0,
+            turbulence_strength: 0.0,
+            turbulence_scale: default_plankton_turbulence_scale(),
+            turbulence_speed: 0.0,
+            size_start: default_plankton_size_start(),
+            size_end: 0.0,
+            color_start: default_plankton_color_start(),
+            color_end: default_plankton_color_end(),
+            texture_path: String::new(),
+            soft_fade_distance: 0.0,
+            blend_mode: BlendMode::default(),
+            show_gizmos: false,
+        }
+    }
+}
+
+impl PlanktonEmitter {
+    /// Fire preset: upward velocity, orange→red, short life
+    pub fn fire() -> Self {
+        Self {
+            emission_rate: 60.0,
+            lifetime_min: 0.3,
+            lifetime_max: 0.8,
+            initial_velocity: [0.0, 0.0, 3.0],
+            velocity_variance: 1.0,
+            gravity: [0.0, 0.0, 1.0],
+            size_start: 0.15,
+            size_end: 0.02,
+            color_start: [1.0, 0.6, 0.1, 1.0],
+            color_end: [1.0, 0.1, 0.0, 0.0],
+            ..Self::default()
+        }
+    }
+
+    /// Smoke preset: slow rise, gray, long fade
+    pub fn smoke() -> Self {
+        Self {
+            emission_rate: 15.0,
+            lifetime_min: 2.0,
+            lifetime_max: 4.0,
+            initial_velocity: [0.0, 0.0, 0.8],
+            velocity_variance: 0.3,
+            drag: 0.5,
+            turbulence_strength: 1.0,
+            turbulence_scale: 0.5,
+            turbulence_speed: 0.3,
+            size_start: 0.1,
+            size_end: 0.4,
+            color_start: [0.5, 0.5, 0.5, 0.6],
+            color_end: [0.3, 0.3, 0.3, 0.0],
+            ..Self::default()
+        }
+    }
+
+    /// Sparks preset: random dirs, bright yellow, gravity, short life
+    pub fn sparks() -> Self {
+        Self {
+            emission_rate: 40.0,
+            lifetime_min: 0.5,
+            lifetime_max: 1.5,
+            initial_velocity: [0.0, 0.0, 5.0],
+            velocity_variance: 3.0,
+            gravity: [0.0, 0.0, -9.8],
+            size_start: 0.04,
+            size_end: 0.01,
+            color_start: [1.0, 0.9, 0.3, 1.0],
+            color_end: [1.0, 0.4, 0.0, 0.0],
+            ..Self::default()
+        }
+    }
+
+    /// Dust preset: slow drift, gray, long life
+    pub fn dust() -> Self {
+        Self {
+            emission_rate: 10.0,
+            lifetime_min: 3.0,
+            lifetime_max: 6.0,
+            initial_velocity: [0.0, 0.0, 0.2],
+            velocity_variance: 0.5,
+            drag: 1.0,
+            turbulence_strength: 0.5,
+            turbulence_scale: 2.0,
+            turbulence_speed: 0.1,
+            size_start: 0.03,
+            size_end: 0.05,
+            color_start: [0.6, 0.55, 0.5, 0.4],
+            color_end: [0.5, 0.45, 0.4, 0.0],
+            ..Self::default()
+        }
+    }
 }
 
 /// Marker component indicating that an entity's transform has changed

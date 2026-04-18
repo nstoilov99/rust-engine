@@ -1,0 +1,89 @@
+#version 460
+layout(local_size_x = 64) in;
+
+struct Plankton {
+    vec3 position; float lifetime;
+    vec3 velocity; float age;
+    vec4 color;
+    float size; float seed; vec2 _reserved;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles { Plankton particles[]; };
+layout(std430, set = 0, binding = 1) buffer DeadList  { uint dead_list[]; };
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint alive_count;
+    uint dead_count;
+    uint emit_count;
+    uint _pad;
+};
+layout(set = 0, binding = 3) uniform sampler3D noise_texture;
+
+layout(push_constant) uniform SimParams {
+    vec4 gravity_and_drag;          // .xyz = gravity (Y-up), .w = drag
+    vec4 wind_and_turb_strength;    // .xyz = wind (Y-up), .w = turbulence_strength
+    vec4 turb_scale_speed_pad;      // .x = turb_scale, .y = turb_speed, .zw = unused
+    vec4 color_start;
+    vec4 color_end;
+    float size_start;
+    float size_end;
+    float delta_time;
+    float time;
+    uint  capacity;
+    uint  _sim_pad0;
+    uint  _sim_pad1;
+    uint  _sim_pad2;
+} sim;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= sim.capacity) return;
+
+    Plankton p = particles[id];
+
+    // Skip dead particles
+    if (p.lifetime <= 0.0) return;
+
+    // Age the particle
+    p.age += sim.delta_time;
+
+    // Kill expired particles
+    if (p.age >= p.lifetime) {
+        uint prev_dead = atomicAdd(dead_count, 1u);
+        dead_list[prev_dead] = id;
+        atomicAdd(alive_count, -1u);
+        p.lifetime = 0.0;
+        particles[id] = p;
+        return;
+    }
+
+    float t = p.age / p.lifetime; // normalized age [0, 1]
+
+    // Accumulate forces
+    vec3 accel = sim.gravity_and_drag.xyz;
+
+    // Wind (Step 7 will enable this from CPU side)
+    accel += sim.wind_and_turb_strength.xyz;
+
+    // Turbulence (gated on strength > 0; Step 7 swaps fallback texture for real noise)
+    if (sim.wind_and_turb_strength.w > 0.0) {
+        vec3 sample_pos = p.position * sim.turb_scale_speed_pad.x
+                        + vec3(sim.time * sim.turb_scale_speed_pad.y);
+        vec3 turb = texture(noise_texture, sample_pos).rgb * 2.0 - 1.0;
+        accel += turb * sim.wind_and_turb_strength.w;
+    }
+
+    // Integrate velocity
+    p.velocity += accel * sim.delta_time;
+
+    // Apply drag
+    p.velocity *= exp(-sim.gravity_and_drag.w * sim.delta_time);
+
+    // Integrate position
+    p.position += p.velocity * sim.delta_time;
+
+    // Interpolate visual properties
+    p.color = mix(sim.color_start, sim.color_end, t);
+    p.size = mix(sim.size_start, sim.size_end, t);
+
+    particles[id] = p;
+}

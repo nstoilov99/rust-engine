@@ -172,6 +172,7 @@ struct BenchmarkRunner {
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
+    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     config: BenchmarkConfig,
     rendered_frames: u32,
     frame_times_ms: Vec<f64>,
@@ -274,6 +275,7 @@ impl BenchmarkRunner {
             previous_frame_end,
             mesh_data_buffer: Vec::with_capacity(1024),
             shadow_caster_buffer: Vec::with_capacity(1024),
+            plankton_emitter_buffer: Vec::with_capacity(32),
             config,
             rendered_frames: 0,
             frame_times_ms: Vec::new(),
@@ -382,6 +384,7 @@ impl BenchmarkRunner {
             self.renderer.camera_3d.position,
             &debug_draw_data,
             &rust_engine::engine::rendering::rendering_3d::PostProcessingSettings::default(),
+            &self.plankton_emitter_buffer,
         )?;
 
         let future = {

@@ -1,8 +1,8 @@
 //! Scene serialization and deserialization
 
 use super::scene_format::{
-    CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
-    RigidBodyTypeData, SceneFile,
+    BlendModeData, CameraProjectionData, ColliderShapeData, ComponentData, EmissionShapeData,
+    EntityData, LightFalloffData, RigidBodyTypeData, SceneFile,
 };
 use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
@@ -170,6 +170,46 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
     if let Ok(listener) = world.get::<&AudioListener>(entity) {
         components.push(ComponentData::AudioListener {
             active: listener.active,
+        });
+    }
+
+    if let Ok(emitter) = world.get::<&PlanktonEmitter>(entity) {
+        components.push(ComponentData::PlanktonEmitter {
+            enabled: emitter.enabled,
+            capacity: emitter.capacity,
+            emission_rate: emitter.emission_rate,
+            burst_count: emitter.burst_count,
+            burst_interval: emitter.burst_interval,
+            emission_shape: match emitter.emission_shape {
+                EmissionShape::Point => EmissionShapeData::Point,
+                EmissionShape::Sphere { radius } => EmissionShapeData::Sphere { radius },
+                EmissionShape::Cone { angle_rad, radius } => {
+                    EmissionShapeData::Cone { angle_rad, radius }
+                }
+                EmissionShape::Box { half_extents } => {
+                    EmissionShapeData::Box { half_extents }
+                }
+            },
+            lifetime_min: emitter.lifetime_min,
+            lifetime_max: emitter.lifetime_max,
+            initial_velocity: emitter.initial_velocity,
+            velocity_variance: emitter.velocity_variance,
+            gravity: emitter.gravity,
+            wind: emitter.wind,
+            drag: emitter.drag,
+            turbulence_strength: emitter.turbulence_strength,
+            turbulence_scale: emitter.turbulence_scale,
+            turbulence_speed: emitter.turbulence_speed,
+            size_start: emitter.size_start,
+            size_end: emitter.size_end,
+            color_start: emitter.color_start,
+            color_end: emitter.color_end,
+            texture_path: emitter.texture_path.clone(),
+            soft_fade_distance: emitter.soft_fade_distance,
+            blend_mode: match emitter.blend_mode {
+                BlendMode::Additive => BlendModeData::Additive,
+            },
+            show_gizmos: emitter.show_gizmos,
         });
     }
 
@@ -551,6 +591,77 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             }
             ComponentData::AudioListener { active } => {
                 builder.add(AudioListener { active: *active });
+            }
+            ComponentData::PlanktonEmitter {
+                enabled,
+                capacity,
+                emission_rate,
+                burst_count,
+                burst_interval,
+                emission_shape,
+                lifetime_min,
+                lifetime_max,
+                initial_velocity,
+                velocity_variance,
+                gravity,
+                wind,
+                drag,
+                turbulence_strength,
+                turbulence_scale,
+                turbulence_speed,
+                size_start,
+                size_end,
+                color_start,
+                color_end,
+                texture_path,
+                soft_fade_distance,
+                blend_mode,
+                show_gizmos,
+            } => {
+                builder.add(PlanktonEmitter {
+                    enabled: *enabled,
+                    capacity: (*capacity).clamp(256, 4096),
+                    emission_rate: *emission_rate,
+                    burst_count: *burst_count,
+                    burst_interval: *burst_interval,
+                    emission_shape: match emission_shape {
+                        EmissionShapeData::Point => EmissionShape::Point,
+                        EmissionShapeData::Sphere { radius } => {
+                            EmissionShape::Sphere { radius: *radius }
+                        }
+                        EmissionShapeData::Cone { angle_rad, radius } => {
+                            EmissionShape::Cone {
+                                angle_rad: *angle_rad,
+                                radius: *radius,
+                            }
+                        }
+                        EmissionShapeData::Box { half_extents } => {
+                            EmissionShape::Box {
+                                half_extents: *half_extents,
+                            }
+                        }
+                    },
+                    lifetime_min: *lifetime_min,
+                    lifetime_max: *lifetime_max,
+                    initial_velocity: *initial_velocity,
+                    velocity_variance: *velocity_variance,
+                    gravity: *gravity,
+                    wind: *wind,
+                    drag: *drag,
+                    turbulence_strength: *turbulence_strength,
+                    turbulence_scale: *turbulence_scale,
+                    turbulence_speed: *turbulence_speed,
+                    size_start: *size_start,
+                    size_end: *size_end,
+                    color_start: *color_start,
+                    color_end: *color_end,
+                    texture_path: texture_path.clone(),
+                    soft_fade_distance: *soft_fade_distance,
+                    blend_mode: match blend_mode {
+                        BlendModeData::Additive => BlendMode::Additive,
+                    },
+                    show_gizmos: *show_gizmos,
+                });
             }
             ComponentData::Parent { .. } => {
                 // Parent relationships are handled in second pass of load_scene()

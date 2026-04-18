@@ -7,9 +7,15 @@ use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
+use rust_engine::engine::ecs::components::{
+    BlendMode, EmissionShape, EntityGuid, PlanktonEmitter,
+};
 use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
 use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::rendering::frame_packet::{
+    EmissionParameters, EmitterFlags, ForceParameters, PlanktonEmitterFrameData, VisualParameters,
+};
 use rust_engine::engine::math::{Aabb, Frustum};
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinningBackend,
@@ -324,5 +330,97 @@ pub fn prepare_debug_draw_data(
         depth_vertex_count,
         overlay_buffer,
         overlay_vertex_count,
+    }
+}
+
+/// Prepare plankton emitter frame data from ECS world.
+///
+/// Extracts enabled emitters with EntityGuids, converts transforms and
+/// force vectors from Z-up game space to Y-up render space.
+pub fn prepare_plankton_data(
+    world: &World,
+    frame_buffer: &mut Vec<PlanktonEmitterFrameData>,
+    transform_cache: &TransformCache,
+    delta_time: f32,
+) {
+    rust_engine::profile_scope!("prepare_plankton_data");
+    frame_buffer.clear();
+
+    for (entity, (emitter, guid)) in world
+        .query::<(&PlanktonEmitter, &EntityGuid)>()
+        .iter()
+    {
+        if !emitter.enabled {
+            continue;
+        }
+
+        let world_matrix_zup = transform_cache.get_world(entity);
+        let world_matrix_yup = render_adapter::world_matrix_to_render(&world_matrix_zup);
+        let model_array: [[f32; 4]; 4] = unsafe {
+            std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(world_matrix_yup)
+        };
+
+        // Convert Z-up force vectors to Y-up render space
+        let gravity_zup = glm::vec3(emitter.gravity[0], emitter.gravity[1], emitter.gravity[2]);
+        let gravity_yup = render_adapter::direction_to_render(&gravity_zup);
+
+        let wind_zup = glm::vec3(emitter.wind[0], emitter.wind[1], emitter.wind[2]);
+        let wind_yup = render_adapter::direction_to_render(&wind_zup);
+
+        // Convert initial velocity to Y-up render space
+        let vel_zup = glm::vec3(
+            emitter.initial_velocity[0],
+            emitter.initial_velocity[1],
+            emitter.initial_velocity[2],
+        );
+        let vel_yup = render_adapter::direction_to_render(&vel_zup);
+
+        let (shape_type, shape_params) = match emitter.emission_shape {
+            EmissionShape::Point => (0u32, [0.0f32; 4]),
+            EmissionShape::Sphere { radius } => (1, [radius, 0.0, 0.0, 0.0]),
+            EmissionShape::Cone { angle_rad, radius } => (2, [angle_rad, radius, 0.0, 0.0]),
+            EmissionShape::Box { half_extents } => {
+                (3, [half_extents[0], half_extents[1], half_extents[2], 0.0])
+            }
+        };
+
+        frame_buffer.push(PlanktonEmitterFrameData {
+            entity_guid: guid.0,
+            world_transform: model_array,
+            emission: EmissionParameters {
+                shape_type,
+                shape_params,
+                emission_rate: emitter.emission_rate,
+                burst_count: emitter.burst_count,
+                burst_interval: emitter.burst_interval,
+                velocity_base: [vel_yup.x, vel_yup.y, vel_yup.z],
+                velocity_variance: emitter.velocity_variance,
+                lifetime_min: emitter.lifetime_min,
+                lifetime_max: emitter.lifetime_max,
+            },
+            forces: ForceParameters {
+                gravity: [gravity_yup.x, gravity_yup.y, gravity_yup.z],
+                drag: emitter.drag,
+                wind: [wind_yup.x, wind_yup.y, wind_yup.z],
+                turbulence_strength: emitter.turbulence_strength,
+                turbulence_scale: emitter.turbulence_scale,
+                turbulence_speed: emitter.turbulence_speed,
+            },
+            visual: VisualParameters {
+                size_start: emitter.size_start,
+                size_end: emitter.size_end,
+                color_start: emitter.color_start,
+                color_end: emitter.color_end,
+                texture_path: emitter.texture_path.clone(),
+                soft_fade_distance: emitter.soft_fade_distance,
+            },
+            flags: EmitterFlags {
+                blend_mode: match emitter.blend_mode {
+                    BlendMode::Additive => 0,
+                },
+            },
+            delta_time,
+            capacity: emitter.capacity,
+        });
     }
 }

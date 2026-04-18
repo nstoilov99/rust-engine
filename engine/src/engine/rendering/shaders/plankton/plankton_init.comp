@@ -1,0 +1,31 @@
+#version 460
+layout(local_size_x = 64) in;
+
+struct Plankton {
+    vec3 position; float lifetime;
+    vec3 velocity; float age;
+    vec4 color;
+    float size; float seed; vec2 _reserved;
+};
+
+layout(std430, set = 0, binding = 0) buffer Particles { Plankton particles[]; };
+layout(std430, set = 0, binding = 1) buffer DeadList  { uint dead_list[]; };
+layout(std430, set = 0, binding = 2) buffer Counters {
+    uint alive_count;
+    uint dead_count;
+    uint emit_count;
+    uint _pad;
+};
+layout(push_constant) uniform Init { uint capacity; } init;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= init.capacity) return;
+    dead_list[id] = id;
+    particles[id].lifetime = 0.0;     // dead sentinel
+    if (id == 0u) {
+        alive_count = 0u;
+        dead_count = init.capacity;
+        emit_count = 0u;
+    }
+}

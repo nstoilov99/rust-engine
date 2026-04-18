@@ -6,12 +6,13 @@ use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
 use super::luminance_pass::{LuminancePass, LuminancePush};
 use super::shadow_pass::ShadowPass;
+use super::plankton::PlanktonSystem;
 use super::ssao_pass::{SsaoPass, SsaoPushConstants};
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::render_target::RenderTarget;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,6 +65,7 @@ pub struct DeferredRenderer {
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_render_pass: Arc<RenderPass>,
+    plankton_system: PlanktonSystem,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,6 +303,16 @@ impl DeferredRenderer {
             luminance_pass.persistent_1x1(),
         )?;
 
+        let mut plankton_system = PlanktonSystem::new(
+            device.clone(),
+            queue.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            descriptor_set_allocator.clone(),
+        )?;
+        plankton_system.set_gbuffer_depth(gbuffer.depth.clone())?;
+        plankton_system.set_hdr_target(hdr_target.clone())?;
+
         Ok(Self {
             gbuffer,
             geometry_pass,
@@ -332,6 +344,7 @@ impl DeferredRenderer {
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
             grid_render_pass,
+            plankton_system,
         })
     }
 
@@ -440,6 +453,11 @@ impl DeferredRenderer {
             self.luminance_pass.persistent_1x1(),
         )?;
 
+        self.plankton_system
+            .set_gbuffer_depth(self.gbuffer.depth.clone())?;
+        self.plankton_system
+            .set_hdr_target(self.hdr_target.clone())?;
+
         self.framebuffer_cache.clear();
         self.grid_framebuffer_cache.clear();
 
@@ -458,6 +476,7 @@ impl DeferredRenderer {
         camera_pos: Vec3,
         debug_draw: &DebugDrawData,
         settings: &PostProcessingSettings,
+        plankton_emitters: &[crate::engine::rendering::frame_packet::PlanktonEmitterFrameData],
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         crate::profile_function!();
 
@@ -481,6 +500,22 @@ impl DeferredRenderer {
             )?;
             (target_framebuffer, depth_framebuffer, builder)
         };
+
+        // Run plankton compute passes (init/emit/simulate) before graph execution
+        // Extract camera right/up vectors for billboarding from the view-projection matrix
+        let vp_inverse = view_proj.inverse();
+        let cam_right = (vp_inverse * Vec4::new(1.0, 0.0, 0.0, 0.0)).truncate().normalize();
+        let cam_up = (vp_inverse * Vec4::new(0.0, 1.0, 0.0, 0.0)).truncate().normalize();
+        let vp_cols = view_proj.to_cols_array_2d();
+        self.plankton_system.update_frame(
+            &mut builder,
+            plankton_emitters,
+            &vp_cols,
+            cam_right.into(),
+            cam_up.into(),
+            0.1,  // near plane (TODO: pass from camera)
+            1000.0, // far plane (TODO: pass from camera)
+        )?;
 
         let graph = {
             crate::profile_scope!("graph_setup");
@@ -535,6 +570,13 @@ impl DeferredRenderer {
                 b.read(shadow_map_res);
                 b.write(hdr_res);
             });
+
+            if self.plankton_system.has_pending_draws() {
+                graph.add_pass("plankton", |b| {
+                    b.read(gbuffer_depth);
+                    b.modify(hdr_res);
+                });
+            }
 
             let bloom_res = graph.declare_virtual("bloom_result");
             let lum_res = graph.declare_virtual("luminance_result");
@@ -728,6 +770,10 @@ impl DeferredRenderer {
                         builder.draw(3, 1, 0, 0)?;
                     }
                     builder.end_render_pass(SubpassEndInfo::default())?;
+                }
+                "plankton" => {
+                    crate::profile_scope!("plankton_pass");
+                    self.plankton_system.render_particles(&mut builder)?;
                 }
                 "bloom" => {
                     self.render_bloom_pass(&mut builder, settings)?;

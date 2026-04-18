@@ -49,6 +49,7 @@ pub struct StandaloneApp {
     pub _descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
+    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     schedule: Schedule,
     frame_number: u64,
     render_thread: Option<RenderThread>,
@@ -254,6 +255,7 @@ impl StandaloneApp {
             _descriptor_set: descriptor_set,
             mesh_data_buffer: Vec::with_capacity(64),
             shadow_caster_buffer: Vec::with_capacity(64),
+            plankton_emitter_buffer: Vec::with_capacity(32),
             schedule,
             frame_number: 0,
             render_thread: Some(render_thread),
@@ -405,6 +407,20 @@ impl StandaloneApp {
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
+        {
+            let tc = self
+                .game_world
+                .resource::<TransformCache>()
+                .expect("TransformCache resource missing");
+            let dt = self.game_loop.delta();
+            render_loop::prepare_plankton_data(
+                self.game_world.hecs(),
+                &mut self.plankton_emitter_buffer,
+                tc,
+                dt,
+            );
+        }
+
         let view_proj = self.renderer.camera_3d.view_projection_matrix();
         let camera_pos = self.renderer.camera_3d.position;
 
@@ -420,6 +436,7 @@ impl StandaloneApp {
             debug_draw_data,
             [size.width, size.height],
             self.frame_number,
+            std::mem::take(&mut self.plankton_emitter_buffer),
         );
         self.frame_number += 1;
 
