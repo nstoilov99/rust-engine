@@ -90,6 +90,11 @@ pub struct BloomPass {
     mip_framebuffers: Vec<Arc<Framebuffer>>,
     additive_framebuffers: Vec<Arc<Framebuffer>>,
     mip_sizes: Vec<[u32; 2]>,
+    // Cached descriptor sets — populated by prepare_sets() after init/resize.
+    // Sampling textures are stable per-resize, so per-frame allocation is wasteful.
+    threshold_set: Option<Arc<DescriptorSet>>,
+    downsample_sets: Vec<Arc<DescriptorSet>>,
+    upsample_sets: Vec<Arc<DescriptorSet>>,
 }
 
 impl BloomPass {
@@ -315,7 +320,76 @@ impl BloomPass {
             mip_framebuffers,
             additive_framebuffers,
             mip_sizes,
+            threshold_set: None,
+            downsample_sets: Vec::new(),
+            upsample_sets: Vec::new(),
         })
+    }
+
+    /// Build (or rebuild) the cached descriptor sets for every bloom dispatch.
+    /// Call after construction and after each `resize()`. The threshold set needs
+    /// the external HDR target; the other sets reference internal mip images.
+    pub fn prepare_sets(
+        &mut self,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        hdr_target: Arc<ImageView>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.threshold_set = Some(Self::build_set(
+            descriptor_set_allocator.clone(),
+            self.threshold_layout.set_layouts().first().ok_or("Missing threshold Set 0")?.clone(),
+            hdr_target,
+            self.sampler.clone(),
+        )?);
+
+        let mip_count = self.mip_images.len();
+        self.downsample_sets = Vec::with_capacity(mip_count.saturating_sub(1));
+        for i in 1..mip_count {
+            self.downsample_sets.push(Self::build_set(
+                descriptor_set_allocator.clone(),
+                self.downsample_layout.set_layouts().first().ok_or("Missing downsample Set 0")?.clone(),
+                self.mip_images[i - 1].clone(),
+                self.sampler.clone(),
+            )?);
+        }
+
+        self.upsample_sets = Vec::with_capacity(mip_count.saturating_sub(1));
+        for i in 0..mip_count.saturating_sub(1) {
+            self.upsample_sets.push(Self::build_set(
+                descriptor_set_allocator.clone(),
+                self.upsample_layout.set_layouts().first().ok_or("Missing upsample Set 0")?.clone(),
+                self.mip_images[i + 1].clone(),
+                self.sampler.clone(),
+            )?);
+        }
+
+        Ok(())
+    }
+
+    fn build_set(
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        set_layout: Arc<vulkano::descriptor_set::layout::DescriptorSetLayout>,
+        source: Arc<ImageView>,
+        sampler: Arc<Sampler>,
+    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
+        DescriptorSet::new(
+            descriptor_set_allocator,
+            set_layout,
+            [WriteDescriptorSet::image_view_sampler(0, source, sampler)],
+            [],
+        )
+        .map_err(|e| e.into())
+    }
+
+    pub fn threshold_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.threshold_set.as_ref()
+    }
+
+    pub fn downsample_set(&self, idx: usize) -> Option<&Arc<DescriptorSet>> {
+        self.downsample_sets.get(idx)
+    }
+
+    pub fn upsample_set(&self, idx: usize) -> Option<&Arc<DescriptorSet>> {
+        self.upsample_sets.get(idx)
     }
 
     #[allow(clippy::type_complexity)]
@@ -401,6 +475,10 @@ impl BloomPass {
         self.mip_framebuffers = framebuffers;
         self.additive_framebuffers = additive_fbs;
         self.mip_sizes = sizes;
+        // Caller must call prepare_sets() after resize — clear stale references.
+        self.threshold_set = None;
+        self.downsample_sets.clear();
+        self.upsample_sets.clear();
         Ok(())
     }
 

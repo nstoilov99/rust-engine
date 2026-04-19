@@ -132,6 +132,13 @@ impl PlanktonSystem {
         camera_near: f32,
         camera_far: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Fast path: no emitters this frame and no pools to evict or drain.
+        // Skips profile scope, counter bumps, and the HashMap iteration below.
+        if emitters.is_empty() && self.pools.is_empty() {
+            self.pending_draws.clear();
+            return Ok(());
+        }
+
         crate::profile_scope!("plankton_update_frame");
 
         self.frame_counter = self.frame_counter.wrapping_add(1);

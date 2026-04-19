@@ -207,11 +207,14 @@ impl DeferredRenderer {
 
         let composite_pass = CompositePass::new(device.clone(), composite_render_pass.clone())?;
 
-        let bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
+        let mut bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
 
-        let luminance_pass = LuminancePass::new(device.clone(), allocator.clone())?;
+        let mut luminance_pass = LuminancePass::new(device.clone(), allocator.clone())?;
 
         let hdr_target = create_hdr_target(allocator.clone(), width, height)?;
+
+        bloom_pass.prepare_sets(descriptor_set_allocator.clone(), hdr_target.clone())?;
+        luminance_pass.prepare_sets(descriptor_set_allocator.clone(), hdr_target.clone())?;
 
         let hdr_framebuffer = Framebuffer::new(
             lighting_pass.render_pass(),
@@ -260,12 +263,17 @@ impl DeferredRenderer {
             shadow_pass.shadow_sampler(),
         )?;
 
-        let ssao_pass = SsaoPass::new(
+        let mut ssao_pass = SsaoPass::new(
             device.clone(),
             allocator.clone(),
             descriptor_set_allocator.clone(),
             width,
             height,
+        )?;
+        ssao_pass.prepare_sets(
+            descriptor_set_allocator.clone(),
+            gbuffer.position.clone(),
+            gbuffer.normal.clone(),
         )?;
 
         let ssao_sampler = Sampler::new(
@@ -433,6 +441,11 @@ impl DeferredRenderer {
 
         self.ssao_pass
             .resize(self.allocator.clone(), width, height)?;
+        self.ssao_pass.prepare_sets(
+            self.descriptor_set_allocator.clone(),
+            self.gbuffer.position.clone(),
+            self.gbuffer.normal.clone(),
+        )?;
 
         self.ssao_descriptor_set = self.lighting_pass.create_ssao_descriptor_set(
             self.descriptor_set_allocator.clone(),
@@ -442,9 +455,17 @@ impl DeferredRenderer {
 
         self.bloom_pass
             .resize(self.allocator.clone(), width, height)?;
+        self.bloom_pass.prepare_sets(
+            self.descriptor_set_allocator.clone(),
+            self.hdr_target.clone(),
+        )?;
 
         self.luminance_pass
             .resize(self.allocator.clone())?;
+        self.luminance_pass.prepare_sets(
+            self.descriptor_set_allocator.clone(),
+            self.hdr_target.clone(),
+        )?;
 
         self.composite_descriptor_set = self.composite_pass.create_descriptor_set(
             self.descriptor_set_allocator.clone(),
@@ -501,21 +522,34 @@ impl DeferredRenderer {
             (target_framebuffer, depth_framebuffer, builder)
         };
 
-        // Run plankton compute passes (init/emit/simulate) before graph execution
-        // Extract camera right/up vectors for billboarding from the view-projection matrix
-        let vp_inverse = view_proj.inverse();
-        let cam_right = (vp_inverse * Vec4::new(1.0, 0.0, 0.0, 0.0)).truncate().normalize();
-        let cam_up = (vp_inverse * Vec4::new(0.0, 1.0, 0.0, 0.0)).truncate().normalize();
-        let vp_cols = view_proj.to_cols_array_2d();
-        self.plankton_system.update_frame(
-            &mut builder,
-            plankton_emitters,
-            &vp_cols,
-            cam_right.into(),
-            cam_up.into(),
-            0.1,  // near plane (TODO: pass from camera)
-            1000.0, // far plane (TODO: pass from camera)
-        )?;
+        // Run plankton compute passes (init/emit/simulate) before graph execution.
+        // Skip expensive camera-vector math when no emitters are active this frame —
+        // update_frame still runs so pool eviction/absence counters keep progressing.
+        if !plankton_emitters.is_empty() {
+            let vp_inverse = view_proj.inverse();
+            let cam_right = (vp_inverse * Vec4::new(1.0, 0.0, 0.0, 0.0)).truncate().normalize();
+            let cam_up = (vp_inverse * Vec4::new(0.0, 1.0, 0.0, 0.0)).truncate().normalize();
+            let vp_cols = view_proj.to_cols_array_2d();
+            self.plankton_system.update_frame(
+                &mut builder,
+                plankton_emitters,
+                &vp_cols,
+                cam_right.into(),
+                cam_up.into(),
+                0.1,  // near plane (TODO: pass from camera)
+                1000.0, // far plane (TODO: pass from camera)
+            )?;
+        } else {
+            self.plankton_system.update_frame(
+                &mut builder,
+                &[],
+                &[[0.0; 4]; 4],
+                [0.0; 3],
+                [0.0; 3],
+                0.1,
+                1000.0,
+            )?;
+        }
 
         let graph = {
             crate::profile_scope!("graph_setup");
@@ -1066,38 +1100,16 @@ impl DeferredRenderer {
             extent: [extent[0], extent[1]],
         };
 
-        let ssao_desc = DescriptorSet::new(
-            self.descriptor_set_allocator.clone(),
-            self.ssao_pass.ssao_layout().set_layouts().first().ok_or("Missing SSAO Set 0")?.clone(),
-            [
-                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
-                    0,
-                    self.gbuffer.position.clone(),
-                    self.ssao_pass.sampler(),
-                ),
-                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
-                    1,
-                    self.gbuffer.normal.clone(),
-                    self.ssao_pass.sampler(),
-                ),
-                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
-                    2,
-                    self.ssao_pass.noise_texture(),
-                    self.ssao_pass.sampler(),
-                ),
-            ],
-            [],
-        )?;
-
-        let kernel_desc = DescriptorSet::new(
-            self.descriptor_set_allocator.clone(),
-            self.ssao_pass.ssao_layout().set_layouts().get(1).ok_or("Missing SSAO Set 1")?.clone(),
-            [vulkano::descriptor_set::WriteDescriptorSet::buffer(
-                0,
-                self.ssao_pass.kernel_buffer().clone(),
-            )],
-            [],
-        )?;
+        let ssao_desc = self
+            .ssao_pass
+            .ssao_gbuffer_set()
+            .ok_or("ssao gbuffer set not prepared")?
+            .clone();
+        let kernel_desc = self
+            .ssao_pass
+            .ssao_kernel_set()
+            .ok_or("ssao kernel set not prepared")?
+            .clone();
 
         let push = SsaoPushConstants {
             view_projection: view_proj.to_cols_array_2d(),
@@ -1158,16 +1170,11 @@ impl DeferredRenderer {
             extent: [extent[0], extent[1]],
         };
 
-        let blur_desc = DescriptorSet::new(
-            self.descriptor_set_allocator.clone(),
-            self.ssao_pass.blur_layout().set_layouts().first().ok_or("Missing blur Set 0")?.clone(),
-            [vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
-                0,
-                self.ssao_pass.ssao_raw(),
-                self.ssao_pass.sampler(),
-            )],
-            [],
-        )?;
+        let blur_desc = self
+            .ssao_pass
+            .blur_set()
+            .ok_or("ssao blur set not prepared")?
+            .clone();
 
         builder
             .begin_render_pass(
@@ -1205,7 +1212,6 @@ impl DeferredRenderer {
         let level_count = self.luminance_pass.level_count();
         let level_fbs = self.luminance_pass.level_framebuffers();
         let level_sizes = self.luminance_pass.level_sizes();
-        let level_images = self.luminance_pass.level_images();
 
         for i in 0..level_count {
             let size = level_sizes[i];
@@ -1219,16 +1225,11 @@ impl DeferredRenderer {
                 extent: [size, size],
             };
 
-            let source = if i == 0 {
-                self.hdr_target.clone()
-            } else {
-                level_images[i - 1].clone()
-            };
-
-            let desc = self.luminance_pass.create_descriptor_set(
-                self.descriptor_set_allocator.clone(),
-                source,
-            )?;
+            let desc = self
+                .luminance_pass
+                .level_set(i)
+                .ok_or("luminance level set not prepared")?
+                .clone();
 
             let push = LuminancePush {
                 is_first_pass: if i == 0 { 1.0 } else { 0.0 },
@@ -1278,7 +1279,6 @@ impl DeferredRenderer {
         let mip_sizes = self.bloom_pass.mip_sizes();
         let mip_fbs = self.bloom_pass.mip_framebuffers();
         let additive_fbs = self.bloom_pass.additive_framebuffers();
-        let mip_images = self.bloom_pass.mip_images();
 
         // Threshold: HDR → mip[0]
         {
@@ -1293,11 +1293,11 @@ impl DeferredRenderer {
                 extent: [size[0], size[1]],
             };
 
-            let desc = self.bloom_pass.create_descriptor_set(
-                self.descriptor_set_allocator.clone(),
-                self.bloom_pass.threshold_layout(),
-                self.hdr_target.clone(),
-            )?;
+            let desc = self
+                .bloom_pass
+                .threshold_set()
+                .ok_or("bloom threshold set not prepared")?
+                .clone();
 
             builder
                 .begin_render_pass(
@@ -1349,11 +1349,11 @@ impl DeferredRenderer {
                 extent: [size[0], size[1]],
             };
 
-            let desc = self.bloom_pass.create_descriptor_set(
-                self.descriptor_set_allocator.clone(),
-                self.bloom_pass.downsample_layout(),
-                mip_images[i - 1].clone(),
-            )?;
+            let desc = self
+                .bloom_pass
+                .downsample_set(i - 1)
+                .ok_or("bloom downsample set not prepared")?
+                .clone();
 
             builder
                 .begin_render_pass(
@@ -1404,11 +1404,11 @@ impl DeferredRenderer {
                 extent: [size[0], size[1]],
             };
 
-            let desc = self.bloom_pass.create_descriptor_set(
-                self.descriptor_set_allocator.clone(),
-                self.bloom_pass.upsample_layout(),
-                mip_images[i + 1].clone(),
-            )?;
+            let desc = self
+                .bloom_pass
+                .upsample_set(i)
+                .ok_or("bloom upsample set not prepared")?
+                .clone();
 
             builder
                 .begin_render_pass(

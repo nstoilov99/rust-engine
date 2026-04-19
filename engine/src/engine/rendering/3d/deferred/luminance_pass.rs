@@ -58,6 +58,9 @@ pub struct LuminancePass {
     level_framebuffers: Vec<Arc<Framebuffer>>,
     level_sizes: Vec<u32>,
     persistent_1x1: Arc<ImageView>,
+    // One cached set per level — source is hdr_target for level 0 and
+    // level_images[i - 1] otherwise. Populated by prepare_sets().
+    level_sets: Vec<Arc<DescriptorSet>>,
 }
 
 impl LuminancePass {
@@ -161,7 +164,49 @@ impl LuminancePass {
             level_framebuffers,
             level_sizes,
             persistent_1x1,
+            level_sets: Vec::new(),
         })
+    }
+
+    /// Build (or rebuild) the cached descriptor sets for every luminance level.
+    /// Call after construction and after each `resize()`. Level 0 reads from the
+    /// external HDR target; higher levels read from internal chain images.
+    pub fn prepare_sets(
+        &mut self,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        hdr_target: Arc<ImageView>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let set_layout = self
+            .layout
+            .set_layouts()
+            .first()
+            .ok_or("Missing Set 0 layout")?
+            .clone();
+        let level_count = self.level_images.len();
+        self.level_sets = Vec::with_capacity(level_count);
+        for i in 0..level_count {
+            let source = if i == 0 {
+                hdr_target.clone()
+            } else {
+                self.level_images[i - 1].clone()
+            };
+            let set = DescriptorSet::new(
+                descriptor_set_allocator.clone(),
+                set_layout.clone(),
+                [WriteDescriptorSet::image_view_sampler(
+                    0,
+                    source,
+                    self.sampler.clone(),
+                )],
+                [],
+            )?;
+            self.level_sets.push(set);
+        }
+        Ok(())
+    }
+
+    pub fn level_set(&self, idx: usize) -> Option<&Arc<DescriptorSet>> {
+        self.level_sets.get(idx)
     }
 
     #[allow(clippy::type_complexity)]
@@ -228,6 +273,8 @@ impl LuminancePass {
         self.level_images = images;
         self.level_framebuffers = framebuffers;
         self.level_sizes = sizes;
+        // Caller must call prepare_sets() after resize — clear stale references.
+        self.level_sets.clear();
         Ok(())
     }
 

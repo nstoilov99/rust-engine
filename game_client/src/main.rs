@@ -803,6 +803,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let event_loop = EventLoop::new()?;
+    // Poll keeps the event loop spinning continuously instead of sleeping between
+    // events. On Windows the DWM delivers RedrawRequested at vblank, so Wait caps
+    // the app to display refresh even when the swapchain itself isn't VSync-bound.
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     if let Some(config) = benchmark_runner::parse_benchmark_config(&args) {
         let mut benchmark_app = benchmark_runner::BenchmarkApp::new(config);

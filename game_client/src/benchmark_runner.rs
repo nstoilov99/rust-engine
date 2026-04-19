@@ -169,7 +169,12 @@ struct BenchmarkRunner {
     deferred_renderer: DeferredRenderer,
     skinning: rust_engine::engine::rendering::rendering_3d::SkinningBackend,
     game_loop: GameLoop,
-    previous_frame_end: Option<Box<dyn GpuFuture>>,
+    // 3-slot fence ring. Vulkano's FenceSignalFuture::Drop blocks on
+    // fence.wait(None) if the fence isn't signaled yet. On Windows with DWM the
+    // present fence is delayed 2–3 vblanks by the compositor, so 3 slots ensures
+    // the fence is always signaled before we drop it — making Drop a no-op.
+    previous_frame_ends: [Option<Box<dyn GpuFuture>>; 3],
+    frame_slot: usize,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
     plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
@@ -261,7 +266,11 @@ impl BenchmarkRunner {
         );
         game_world.resources_mut().insert(transform_cache);
 
-        let previous_frame_end = Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed());
+        let previous_frame_ends = [
+            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
+            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
+            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
+        ];
         let (profile_collector, profile_sink_id) = create_profile_sink();
 
         Ok(Self {
@@ -272,7 +281,8 @@ impl BenchmarkRunner {
             deferred_renderer,
             skinning,
             game_loop: GameLoop::new(),
-            previous_frame_end,
+            previous_frame_ends,
+            frame_slot: 0,
             mesh_data_buffer: Vec::with_capacity(1024),
             shadow_caster_buffer: Vec::with_capacity(1024),
             plankton_emitter_buffer: Vec::with_capacity(32),
@@ -338,7 +348,10 @@ impl BenchmarkRunner {
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
-        if let Some(mut prev_future) = self.previous_frame_end.take() {
+        // Reclaim the fence from 3 frames ago — signaled long before drop.
+        let slot = self.frame_slot;
+        self.frame_slot = (self.frame_slot + 1) % 3;
+        if let Some(mut prev_future) = self.previous_frame_ends[slot].take() {
             prev_future.cleanup_finished();
         }
 
@@ -348,7 +361,8 @@ impl BenchmarkRunner {
                 &mut self.deferred_renderer,
             )? {
                 false => {
-                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+                    self.previous_frame_ends[slot] =
+                        Some(render_loop::create_now_future(&self.renderer));
                     return Ok(());
                 }
                 true => {
@@ -366,7 +380,8 @@ impl BenchmarkRunner {
             match render_loop::acquire_swapchain_image(&mut self.renderer) {
                 Ok(result) => result,
                 Err(_) => {
-                    self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+                    self.previous_frame_ends[slot] =
+                        Some(render_loop::create_now_future(&self.renderer));
                     return Ok(());
                 }
             };
@@ -404,10 +419,10 @@ impl BenchmarkRunner {
 
         match future {
             Ok(future) => {
-                self.previous_frame_end = Some(future.boxed());
+                self.previous_frame_ends[slot] = Some(future.boxed());
             }
             Err(error) => {
-                self.previous_frame_end = Some(render_loop::create_now_future(&self.renderer));
+                self.previous_frame_ends[slot] = Some(render_loop::create_now_future(&self.renderer));
                 return Err(format!("Present error: {error:?}").into());
             }
         }

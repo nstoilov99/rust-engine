@@ -39,6 +39,17 @@ pub fn print_summary(path: &Path, results: &BenchmarkResults) {
         results.render_counters.material_changes,
         results.render_counters.visible_entities,
     );
+
+    if !results.category_averages.is_empty() {
+        let mut entries: Vec<(&String, &f64)> = results.category_averages.iter().collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        println!("Scope breakdown (avg ms/frame):");
+        for (name, ms) in entries {
+            if *ms >= 0.01 {
+                println!("  {:<24} {:>7.3} ms", name, ms);
+            }
+        }
+    }
 }
 
 fn timestamp_string() -> String {

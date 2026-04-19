@@ -2,6 +2,7 @@ use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
 use vulkano::format::Format;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
@@ -68,6 +69,10 @@ pub struct SsaoPass {
     ssao_blurred: Arc<ImageView>,
     ssao_raw_framebuffer: Arc<Framebuffer>,
     ssao_blur_framebuffer: Arc<Framebuffer>,
+    // Cached descriptor sets — populated by prepare_sets() after init/resize.
+    ssao_gbuffer_set: Option<Arc<DescriptorSet>>,
+    ssao_kernel_set: Option<Arc<DescriptorSet>>,
+    blur_set: Option<Arc<DescriptorSet>>,
 }
 
 impl SsaoPass {
@@ -254,7 +259,86 @@ impl SsaoPass {
             ssao_blurred,
             ssao_raw_framebuffer,
             ssao_blur_framebuffer,
+            ssao_gbuffer_set: None,
+            ssao_kernel_set: None,
+            blur_set: None,
         })
+    }
+
+    /// Build (or rebuild) the cached descriptor sets for SSAO dispatches.
+    /// Call after construction and after each `resize()`. The gbuffer set
+    /// references external position/normal textures; kernel+blur sets reference
+    /// internal buffers/images.
+    pub fn prepare_sets(
+        &mut self,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        gbuffer_position: Arc<ImageView>,
+        gbuffer_normal: Arc<ImageView>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ssao_set_0 = self
+            .ssao_layout
+            .set_layouts()
+            .first()
+            .ok_or("Missing SSAO Set 0")?
+            .clone();
+        self.ssao_gbuffer_set = Some(DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            ssao_set_0,
+            [
+                WriteDescriptorSet::image_view_sampler(0, gbuffer_position, self.sampler.clone()),
+                WriteDescriptorSet::image_view_sampler(1, gbuffer_normal, self.sampler.clone()),
+                WriteDescriptorSet::image_view_sampler(
+                    2,
+                    self.noise_texture.clone(),
+                    self.sampler.clone(),
+                ),
+            ],
+            [],
+        )?);
+
+        let ssao_set_1 = self
+            .ssao_layout
+            .set_layouts()
+            .get(1)
+            .ok_or("Missing SSAO Set 1")?
+            .clone();
+        self.ssao_kernel_set = Some(DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            ssao_set_1,
+            [WriteDescriptorSet::buffer(0, self.kernel_buffer.clone())],
+            [],
+        )?);
+
+        let blur_set_0 = self
+            .blur_layout
+            .set_layouts()
+            .first()
+            .ok_or("Missing blur Set 0")?
+            .clone();
+        self.blur_set = Some(DescriptorSet::new(
+            descriptor_set_allocator,
+            blur_set_0,
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                self.ssao_raw.clone(),
+                self.sampler.clone(),
+            )],
+            [],
+        )?);
+
+        Ok(())
+    }
+
+    pub fn ssao_gbuffer_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.ssao_gbuffer_set.as_ref()
+    }
+
+    pub fn ssao_kernel_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.ssao_kernel_set.as_ref()
+    }
+
+    pub fn blur_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.blur_set.as_ref()
     }
 
     fn generate_kernel() -> [[f32; 4]; 64] {
@@ -379,6 +463,10 @@ impl SsaoPass {
         self.ssao_blurred = blurred;
         self.ssao_raw_framebuffer = raw_fb;
         self.ssao_blur_framebuffer = blur_fb;
+        // Caller must call prepare_sets() after resize — clear stale references.
+        self.ssao_gbuffer_set = None;
+        self.ssao_kernel_set = None;
+        self.blur_set = None;
         Ok(())
     }
 

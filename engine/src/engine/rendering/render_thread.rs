@@ -44,11 +44,15 @@ pub struct RenderThread {
 impl RenderThread {
     /// Spawn the render thread with the given configuration.
     pub fn spawn(config: RenderThreadConfig) -> Self {
-        let (packet_tx, packet_rx) = bounded::<FramePacket>(1);
+        // Depth of 2 matches the 2-slot GPU fence ring — lets the main thread
+        // prepare frame N+1 while the render thread is still processing frame N,
+        // so CPU work on both threads pipelines cleanly. Depth of 1 forces them
+        // to alternate and adds a full ping-pong of sync overhead per frame.
+        let (packet_tx, packet_rx) = bounded::<FramePacket>(2);
         let (response_tx, response_rx) = bounded::<RenderEvent>(4);
 
         let join_handle = thread::Builder::new()
-            .name("render_thread".into())
+            .name("renderer".into())
             .spawn(move || {
                 Self::thread_entry(config, packet_rx, response_tx);
             })
@@ -98,7 +102,14 @@ impl RenderThread {
         } else {
             (None, None, None)
         };
-        let mut fence_slots: [Option<Box<dyn GpuFuture>>; 2] = [None, None];
+        // 3-slot fence ring. Why 3 and not 2: Vulkano's `FenceSignalFuture::Drop`
+        // blocks on `fence.wait(None)` if the fence isn't signaled yet. On Windows
+        // with DWM, the present fence only signals after the image has been through
+        // the compositor (~2–3 vblanks delayed), so with a 2-slot ring we'd drop
+        // each fence ~12ms after submission and still block for a few ms waiting on
+        // it. 3 slots gives us ~18ms of head-start — fence is always signaled by
+        // the time we drop it, so Drop is an instant no-op.
+        let mut fence_slots: [Option<Box<dyn GpuFuture>>; 3] = [None, None, None];
         let mut frame_count: u64 = 0;
         let mut needs_recreate = false;
 
@@ -153,16 +164,16 @@ impl RenderThread {
         }
 
         loop {
-            let packet = {
-                crate::profile_scope!("render_thread_recv");
-                match receiver.recv() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        log::info!("render_thread: channel disconnected, shutting down");
-                        break;
-                    }
+            // Do NOT scope the blocking recv() — the idle wait would show up as work time
+            // in the profiler (e.g. a scope stretching from 0ms through the whole frame).
+            let packet = match receiver.recv() {
+                Ok(p) => p,
+                Err(_) => {
+                    log::info!("render_thread: channel disconnected, shutting down");
+                    break;
                 }
             };
+            crate::profile_scope!("render_frame");
 
             log::trace!("render_thread: received frame {}", packet.frame_number);
 
@@ -174,8 +185,8 @@ impl RenderThread {
             let images_ref = sc_images.as_ref().unwrap();
             let surface_ref = surface.as_ref().unwrap();
 
-            // Wait on the fence slot for this frame (2 slots, round-robin)
-            let slot = (frame_count % 2) as usize;
+            // Wait on the fence slot for this frame (3 slots, round-robin).
+            let slot = (frame_count % 3) as usize;
             if let Some(mut prev) = fence_slots[slot].take() {
                 prev.cleanup_finished();
             }
@@ -219,7 +230,7 @@ impl RenderThread {
 
             // Acquire swapchain image
             let (image_index, target_image, acquire_future) = {
-                crate::profile_scope!("render_thread_acquire");
+                crate::profile_scope!("acquire_image");
                 match acquire_next_image(swapchain_ref.clone(), None) {
                     Ok((idx, suboptimal, future)) => {
                         if suboptimal {
@@ -303,7 +314,7 @@ impl RenderThread {
                 {
                     // Editor mode: render deferred to viewport texture, then egui to swapchain
                     let deferred_cb = if let Some(ref vt) = viewport_texture {
-                        crate::profile_scope!("render_thread_record_deferred");
+                        crate::profile_scope!("record_deferred");
                         let render_target = RenderTarget::Texture {
                             image: vt.image(),
                         };
@@ -334,7 +345,7 @@ impl RenderThread {
                         packet.egui_primitives,
                         packet.egui_texture_deltas,
                     ) {
-                        crate::profile_scope!("render_thread_record_egui");
+                        crate::profile_scope!("record_egui");
                         let screen_rect = egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
                             egui::vec2(
@@ -356,7 +367,6 @@ impl RenderThread {
                     // Chain and submit whatever command buffers we have
                     let submit_result = match (deferred_cb, egui_cb) {
                         (Some(d_cb), Some(e_cb)) => {
-                            crate::profile_scope!("render_thread_submit_editor");
                             let future = acquire_future
                                 .then_execute(gpu.queue.clone(), d_cb)
                                 .and_then(|f| f.then_execute(gpu.queue.clone(), e_cb));
@@ -447,7 +457,7 @@ impl RenderThread {
             } else {
                 // Standalone mode: render deferred directly to swapchain
                 let deferred_cb = {
-                    crate::profile_scope!("render_thread_record");
+                    crate::profile_scope!("record_deferred");
                     let render_target = RenderTarget::Swapchain {
                         image: target_image,
                     };
@@ -471,21 +481,18 @@ impl RenderThread {
                     }
                 };
 
-                let future = {
-                    crate::profile_scope!("render_thread_submit");
-                    acquire_future
-                        .then_execute(gpu.queue.clone(), deferred_cb)
-                        .map(|f| {
-                            f.then_swapchain_present(
-                                gpu.queue.clone(),
-                                SwapchainPresentInfo::swapchain_image_index(
-                                    swapchain_ref.clone(),
-                                    image_index,
-                                ),
-                            )
-                            .then_signal_fence_and_flush()
-                        })
-                };
+                let future = acquire_future
+                    .then_execute(gpu.queue.clone(), deferred_cb)
+                    .map(|f| {
+                        f.then_swapchain_present(
+                            gpu.queue.clone(),
+                            SwapchainPresentInfo::swapchain_image_index(
+                                swapchain_ref.clone(),
+                                image_index,
+                            ),
+                        )
+                        .then_signal_fence_and_flush()
+                    });
 
                 match future {
                     Ok(Ok(f)) => {
