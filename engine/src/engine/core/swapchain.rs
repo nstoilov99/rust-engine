@@ -11,8 +11,14 @@ type SwapchainResult = Result<(Arc<Swapchain>, Vec<Arc<Image>>), Box<dyn std::er
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapchainPresentModePreference {
+    /// Falls back: Immediate → Mailbox → Fifo. Used when no explicit choice is provided.
     Default,
+    /// No VSync — uncapped frame rate, may tear. Falls back to Mailbox then Fifo.
     Immediate,
+    /// Triple-buffered tear-free. Falls back to Fifo.
+    Mailbox,
+    /// Strict VSync — pinned to display refresh rate. Always available.
+    Fifo,
 }
 
 /// Creates swapchain with at least 2 images for smooth rendering
@@ -70,12 +76,25 @@ pub fn create_swapchain_with_present_mode(
         .surface_present_modes(&surface, Default::default())?;
     let present_mode = choose_present_mode(&present_modes, present_mode_preference);
 
-    // Create swapchain with double buffering (min 2 images)
+    // Request 3 images for proper triple-buffering. With only 2, the CPU stalls
+    // on acquire_next_image waiting for the image being scanned out to be released —
+    // this pins frame rate to display refresh (~6ms on 165Hz) even in Immediate
+    // mode, because DWM on Windows holds the presented image across a vblank cycle.
+    // Only Fifo is genuinely fine with 2 (strict VSync anyway).
+    let desired_min_images = match present_mode {
+        PresentMode::Fifo => 2,
+        _ => 3,
+    };
+    let min_image_count = surface_capabilities
+        .min_image_count
+        .max(desired_min_images)
+        .min(surface_capabilities.max_image_count.unwrap_or(u32::MAX));
+
     let (swapchain, images) = Swapchain::new(
         device.clone(),
         surface.clone(),
         SwapchainCreateInfo {
-            min_image_count: surface_capabilities.min_image_count.max(2),
+            min_image_count,
             image_format: image_format.0,
             image_extent: [window_size.width, window_size.height],
             image_usage: ImageUsage::COLOR_ATTACHMENT,
@@ -86,8 +105,8 @@ pub fn create_swapchain_with_present_mode(
     )?;
 
     println!(
-        "✓ Swapchain: {}x{}, {:?}",
-        window_size.width, window_size.height, present_mode
+        "✓ Swapchain: {}x{}, present_mode={:?}, images={}",
+        window_size.width, window_size.height, present_mode, min_image_count,
     );
 
     Ok((swapchain, images))
@@ -98,7 +117,8 @@ fn choose_present_mode(
     preference: SwapchainPresentModePreference,
 ) -> PresentMode {
     match preference {
-        SwapchainPresentModePreference::Immediate => {
+        SwapchainPresentModePreference::Default
+        | SwapchainPresentModePreference::Immediate => {
             if present_modes.contains(&PresentMode::Immediate) {
                 PresentMode::Immediate
             } else if present_modes.contains(&PresentMode::Mailbox) {
@@ -107,13 +127,14 @@ fn choose_present_mode(
                 PresentMode::Fifo
             }
         }
-        SwapchainPresentModePreference::Default => {
+        SwapchainPresentModePreference::Mailbox => {
             if present_modes.contains(&PresentMode::Mailbox) {
                 PresentMode::Mailbox
             } else {
                 PresentMode::Fifo
             }
         }
+        SwapchainPresentModePreference::Fifo => PresentMode::Fifo,
     }
 }
 
@@ -168,7 +189,16 @@ mod tests {
     use vulkano::swapchain::PresentMode;
 
     #[test]
-    fn default_preference_keeps_mailbox_behavior() {
+    fn default_preference_prefers_immediate() {
+        let modes = [PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate];
+        assert_eq!(
+            choose_present_mode(&modes, SwapchainPresentModePreference::Default),
+            PresentMode::Immediate
+        );
+    }
+
+    #[test]
+    fn default_preference_falls_back_to_mailbox() {
         let modes = [PresentMode::Fifo, PresentMode::Mailbox];
         assert_eq!(
             choose_present_mode(&modes, SwapchainPresentModePreference::Default),

@@ -200,7 +200,13 @@ impl App {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up...");
 
-        let renderer = Renderer::new(window.clone())?;
+        let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
+        let present_preference = window_config.vsync.as_present_preference();
+        println!(
+            "VSync = {:?} (present mode = {:?})",
+            window_config.vsync, present_preference
+        );
+        let renderer = Renderer::new_with_present_mode(window.clone(), present_preference)?;
 
         let swapchain_format = renderer.swapchain_state.images[0].format();
         let gui = Gui::new(
@@ -531,14 +537,14 @@ impl App {
         let is_fullscreen = self.core.window.fullscreen().is_some();
         let is_maximized = self.core.window.is_maximized();
 
-        let window_config = WindowConfig {
-            width: size.width,
-            height: size.height,
-            x: position.x,
-            y: position.y,
-            maximized: is_maximized,
-            fullscreen: is_fullscreen,
-        };
+        // Preserve non-window fields (like vsync) by loading existing config first.
+        let mut window_config = WindowConfig::load_or_default();
+        window_config.width = size.width;
+        window_config.height = size.height;
+        window_config.x = position.x;
+        window_config.y = position.y;
+        window_config.maximized = is_maximized;
+        window_config.fullscreen = is_fullscreen;
 
         if let Err(e) = window_config.save_to_default() {
             eprintln!("Warning: Failed to save window config on exit: {}", e);

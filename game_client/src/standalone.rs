@@ -59,7 +59,13 @@ impl StandaloneApp {
     pub fn new(window: Arc<Window>, plugin: &dyn rust_engine::engine::plugin::GamePlugin) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up (standalone)...");
 
-        let mut renderer = Renderer::new(window.clone())?;
+        let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
+        let present_preference = window_config.vsync.as_present_preference();
+        println!(
+            "VSync = {:?} (present mode = {:?})",
+            window_config.vsync, present_preference
+        );
+        let mut renderer = Renderer::new_with_present_mode(window.clone(), present_preference)?;
         let (asset_manager, _hot_reload_stub, _reload_rx_stub) = {
             let asset_manager = Arc::new(AssetManager::new(
                 renderer.gpu.device.clone(),

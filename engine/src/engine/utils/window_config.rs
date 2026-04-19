@@ -9,6 +9,35 @@ use std::path::{Path, PathBuf};
 /// Configuration file name stored in the current directory
 const CONFIG_FILE: &str = "window_config.ron";
 
+/// VSync / present mode preference for the swapchain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum VSyncMode {
+    /// No VSync — uncapped frame rate, may tear. Lowest input latency.
+    /// Maps to `PresentMode::Immediate`.
+    #[default]
+    Off,
+    /// Triple-buffered — tear-free with lower latency than strict VSync.
+    /// Maps to `PresentMode::Mailbox`, falls back to Fifo if unavailable.
+    Mailbox,
+    /// Strict VSync — tear-free, pinned to display refresh rate.
+    /// Maps to `PresentMode::Fifo`.
+    On,
+}
+
+impl VSyncMode {
+    /// Convert to the engine's swapchain preference enum.
+    pub fn as_present_preference(
+        self,
+    ) -> crate::engine::core::swapchain::SwapchainPresentModePreference {
+        use crate::engine::core::swapchain::SwapchainPresentModePreference as P;
+        match self {
+            VSyncMode::Off => P::Immediate,
+            VSyncMode::Mailbox => P::Mailbox,
+            VSyncMode::On => P::Fifo,
+        }
+    }
+}
+
 /// Window configuration that persists between sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowConfig {
@@ -24,6 +53,10 @@ pub struct WindowConfig {
     pub maximized: bool,
     /// Whether window was in fullscreen mode
     pub fullscreen: bool,
+    /// VSync / present mode. Default is Off (uncapped) — set to Mailbox or On
+    /// for a tear-free experience at the cost of a framerate cap.
+    #[serde(default)]
+    pub vsync: VSyncMode,
 }
 
 impl Default for WindowConfig {
@@ -35,6 +68,7 @@ impl Default for WindowConfig {
             y: 100,
             maximized: false,
             fullscreen: false,
+            vsync: VSyncMode::default(),
         }
     }
 }

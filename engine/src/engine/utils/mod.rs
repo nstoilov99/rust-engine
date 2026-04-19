@@ -6,4 +6,4 @@ pub mod window_config;
 pub use coords::*;
 pub use game_loop::GameLoop;
 pub use math_convert::*;
-pub use window_config::WindowConfig;
+pub use window_config::{VSyncMode, WindowConfig};
