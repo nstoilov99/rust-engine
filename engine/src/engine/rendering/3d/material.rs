@@ -250,6 +250,10 @@ impl MaterialInstance {
 ///
 /// Uses a staging buffer + one-shot command buffer, matching the pattern
 /// in `TextureManager::load_texture_from_disk` and `create_ssao_fallback`.
+///
+/// Use `R8G8B8A8_SRGB` for albedo/color textures and `R8G8B8A8_UNORM`
+/// for data textures (normals, metallic-roughness, AO) to avoid
+/// unwanted sRGB-to-linear conversion.
 pub fn create_default_texture(
     _device: Arc<Device>,
     allocator: Arc<StandardMemoryAllocator>,
@@ -257,12 +261,28 @@ pub fn create_default_texture(
     queue: Arc<Queue>,
     color: [u8; 4],
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
+    create_default_texture_with_format(
+        allocator,
+        command_buffer_allocator,
+        queue,
+        color,
+        vulkano::format::Format::R8G8B8A8_SRGB,
+    )
+}
+
+/// Creates a 1×1 solid-color texture with an explicit Vulkan format.
+pub fn create_default_texture_with_format(
+    allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
+    color: [u8; 4],
+    format: vulkano::format::Format,
+) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
     use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
     use vulkano::command_buffer::{
         AutoCommandBufferBuilder, CopyBufferToImageInfo,
         PrimaryCommandBufferAbstract,
     };
-    use vulkano::format::Format;
     use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
     use vulkano::sync::GpuFuture;
@@ -271,7 +291,7 @@ pub fn create_default_texture(
         allocator.clone(),
         ImageCreateInfo {
             image_type: ImageType::Dim2d,
-            format: Format::R8G8B8A8_SRGB,
+            format,
             extent: [1, 1, 1],
             usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
             ..Default::default()

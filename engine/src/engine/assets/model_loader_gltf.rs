@@ -591,7 +591,7 @@ pub fn extract_material_from_gltf(
         let image_index = texture.source().index();
         load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        create_default_texture(device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA)?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
     // Extract metallic-roughness map
@@ -600,7 +600,7 @@ pub fn extract_material_from_gltf(
         let image_index = texture.source().index();
         load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        create_default_texture(device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA)?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
     // Extract ambient occlusion map
@@ -609,7 +609,7 @@ pub fn extract_material_from_gltf(
         let image_index = texture.source().index();
         load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        create_default_texture(device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA)?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
     let base_color = pbr.base_color_factor();

@@ -14,8 +14,8 @@ use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
 use crate::engine::rendering::rendering_3d::material::{
-    create_default_texture, PbrMaterial, DEFAULT_ALBEDO_RGBA, DEFAULT_AO_RGBA,
-    DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+    create_default_texture, create_default_texture_with_format, PbrMaterial,
+    DEFAULT_ALBEDO_RGBA, DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
 };
 use glam::{Mat4, Vec3, Vec4};
 use smallvec::smallvec;
@@ -424,17 +424,22 @@ impl DeferredRenderer {
                 ..Default::default()
             },
         )?;
+        // Albedo is a color texture → SRGB for automatic gamma decoding.
         let default_albedo = create_default_texture(
             device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA,
         )?;
-        let default_normal = create_default_texture(
-            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA,
+        // Normal, metallic-roughness, and AO are data textures → UNORM (no gamma).
+        let default_normal = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA,
+            Format::R8G8B8A8_UNORM,
         )?;
-        let default_mr = create_default_texture(
-            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA,
+        let default_mr = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA,
+            Format::R8G8B8A8_UNORM,
         )?;
-        let default_ao = create_default_texture(
-            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA,
+        let default_ao = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA,
+            Format::R8G8B8A8_UNORM,
         )?;
         let geom_pipeline_layout = pipeline_registry
             .get(crate::engine::rendering::pipeline_registry::PipelineId::Geometry)
