@@ -66,18 +66,14 @@ pub fn prepare_mesh_data(
     for (entity, (_transform, mesh_renderer, skeleton)) in
         world.query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>().iter()
     {
-        if !mesh_renderer.visible {
+        if !mesh_renderer.visible || mesh_renderer.mesh_path.is_empty() {
             continue;
         }
 
-        let submesh_indices: &[usize] = if !mesh_renderer.mesh_path.is_empty() {
-            if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
-                indices
-            } else {
-                std::slice::from_ref(&mesh_renderer.mesh_index)
-            }
+        let submesh_indices: &[usize] = if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
+            indices
         } else {
-            std::slice::from_ref(&mesh_renderer.mesh_index)
+            continue;
         };
 
         let model_matrix = transform_cache.get_render(entity);

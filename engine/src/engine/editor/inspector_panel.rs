@@ -1059,9 +1059,13 @@ impl InspectorPanel {
 
         // Open asset picker popup on click
         let popup_id = ui.id().with(id_salt).with("asset_picker_popup");
-        if response.clicked() {
+        let just_opened = if response.clicked() {
+            let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
             egui::Popup::toggle_id(ui.ctx(), popup_id);
-        }
+            !was_open // true if we just opened it
+        } else {
+            false
+        };
 
         // Use a child UI constrained to the slot rect for proper clipping and layout
         let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -1395,8 +1399,8 @@ impl InspectorPanel {
                     });
                 });
 
-            // Close popup when clicking outside
-            if area_response.response.clicked_elsewhere() {
+            // Close popup when clicking outside (but not on the frame we just opened it)
+            if !just_opened && area_response.response.clicked_elsewhere() && !response.clicked() {
                 egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
