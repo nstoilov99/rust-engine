@@ -912,27 +912,6 @@ impl InspectorPanel {
                         mesh_idx,
                     );
 
-                    // Primitive mesh dropdown
-                    use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
-                    let current_label: String = if renderer.mesh_path.starts_with("__primitive__/") {
-                        renderer.mesh_path.rsplit('/').next().unwrap_or("Select...").to_string()
-                    } else {
-                        "Select...".to_string()
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label("Primitive:");
-                        egui::ComboBox::from_id_salt("primitive_mesh_combo")
-                            .selected_text(&current_label)
-                            .show_ui(ui, |ui| {
-                                for &prim in PRIMITIVE_PATHS {
-                                    let label = prim.rsplit('/').next().unwrap_or(prim);
-                                    if ui.selectable_label(renderer.mesh_path == prim, label).clicked() {
-                                        renderer.mesh_path = prim.to_string();
-                                    }
-                                }
-                            });
-                    });
-
                     ui.add_space(4.0);
 
                     // Material slots — one slot per submesh material
@@ -1048,7 +1027,7 @@ impl InspectorPanel {
         path: &mut String,
         allowed_types: &[AssetType],
         asset_browser: &mut AssetBrowserPanel,
-        legacy_index: usize,
+        _legacy_index: usize,
     ) {
         let slot_size: f32 = 90.0;
         let thumb_size: f32 = slot_size - 8.0;
@@ -1056,7 +1035,7 @@ impl InspectorPanel {
 
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(slot_width, slot_size),
-            egui::Sense::hover(),
+            egui::Sense::click(),
         );
 
         // Check for DnD hover
@@ -1078,6 +1057,12 @@ impl InspectorPanel {
             }
         }
 
+        // Open asset picker popup on click
+        let popup_id = ui.id().with(id_salt).with("asset_picker_popup");
+        if response.clicked() {
+            egui::Popup::toggle_id(ui.ctx(), popup_id);
+        }
+
         // Use a child UI constrained to the slot rect for proper clipping and layout
         let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
 
@@ -1086,6 +1071,8 @@ impl InspectorPanel {
         // Background
         let bg_color = if is_valid_hover {
             Color32::from_rgba_premultiplied(40, 60, 90, 255)
+        } else if response.hovered() {
+            Color32::from_gray(45)
         } else {
             Color32::from_gray(35)
         };
@@ -1094,6 +1081,8 @@ impl InspectorPanel {
         // Border
         let border_color = if is_valid_hover {
             Color32::from_rgb(100, 180, 255)
+        } else if response.hovered() {
+            Color32::from_gray(100)
         } else {
             Color32::from_gray(60)
         };
@@ -1105,15 +1094,11 @@ impl InspectorPanel {
         );
 
         if path.is_empty() {
-            // Empty slot — centered wrapped text
-            let hint = if legacy_index > 0 {
-                format!("Index: {} (legacy, drag to replace)", legacy_index)
-            } else {
-                let type_names: Vec<&str> =
-                    allowed_types.iter().map(|t| t.display_name()).collect();
-                format!("Drop {} here", type_names.join("/"))
-            };
-            let text_color = Color32::from_gray(if legacy_index > 0 { 140 } else { 120 });
+            // Empty slot — click prompt
+            let type_names: Vec<&str> =
+                allowed_types.iter().map(|t| t.display_name()).collect();
+            let hint = format!("Click to select\n{}", type_names.join("/"));
+            let text_color = Color32::from_gray(120);
             let inner = rect.shrink(6.0);
             slot_ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.vertical_centered(|ui| {
@@ -1142,7 +1127,17 @@ impl InspectorPanel {
                     painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
                 }
             } else {
+                // For primitives or unregistered assets, show type icon placeholder
                 painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
+                if path.starts_with("__primitive__/") {
+                    painter.text(
+                        thumb_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "\u{25A6}",
+                        egui::FontId::proportional(24.0),
+                        Color32::from_gray(140),
+                    );
+                }
             }
 
             // Filename text at bottom of thumbnail
@@ -1189,6 +1184,220 @@ impl InspectorPanel {
             );
             if clear_response.clicked() {
                 *path = String::new();
+            }
+        }
+
+        // Asset picker popup
+        let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+        if is_open {
+            let area_response = egui::Area::new(popup_id)
+                .order(egui::Order::Foreground)
+                .default_pos(rect.left_bottom() + egui::vec2(0.0, 4.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(280.0);
+                        ui.set_max_width(320.0);
+                        ui.set_max_height(350.0);
+
+                        // Search bar
+                        let search_id = popup_id.with("search_text");
+                        let mut search_text: String = ui.data_mut(|d| {
+                            d.get_temp_mut_or_default::<String>(search_id).clone()
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Search:");
+                            let te = ui.text_edit_singleline(&mut search_text);
+                            if te.changed() {
+                                ui.data_mut(|d| {
+                                    *d.get_temp_mut_or_default::<String>(search_id) = search_text.clone();
+                                });
+                            }
+                            // Auto-focus search on open
+                            if !te.has_focus() {
+                                te.request_focus();
+                            }
+                        });
+
+                        ui.separator();
+
+                        // Collect matching assets
+                        let search_lower = search_text.to_lowercase();
+                        let include_meshes = allowed_types.contains(&AssetType::Mesh)
+                            || allowed_types.contains(&AssetType::Model);
+
+                        ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            let item_size = 60.0;
+                            let cols = ((ui.available_width()) / (item_size + 4.0)).floor().max(1.0) as usize;
+
+                            // Primitives section (only for mesh slots)
+                            if include_meshes {
+                                use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+                                let matching_prims: Vec<&str> = PRIMITIVE_PATHS
+                                    .iter()
+                                    .filter(|p| {
+                                        search_text.is_empty()
+                                            || p.to_lowercase().contains(&search_lower)
+                                    })
+                                    .copied()
+                                    .collect();
+
+                                if !matching_prims.is_empty() {
+                                    ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
+                                    ui.add_space(2.0);
+                                    egui::Grid::new(popup_id.with("prims_grid"))
+                                        .spacing(egui::vec2(4.0, 4.0))
+                                        .show(ui, |ui| {
+                                            for (i, &prim_path) in matching_prims.iter().enumerate() {
+                                                let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
+                                                let is_selected = path.as_str() == prim_path;
+
+                                                let (item_rect, item_resp) = ui.allocate_exact_size(
+                                                    egui::vec2(item_size, item_size),
+                                                    egui::Sense::click(),
+                                                );
+
+                                                let bg = if is_selected {
+                                                    Color32::from_rgb(40, 60, 100)
+                                                } else if item_resp.hovered() {
+                                                    Color32::from_gray(55)
+                                                } else {
+                                                    Color32::from_gray(40)
+                                                };
+                                                ui.painter().rect_filled(item_rect, 3.0, bg);
+                                                // Icon
+                                                ui.painter().text(
+                                                    item_rect.center_top() + egui::vec2(0.0, 18.0),
+                                                    egui::Align2::CENTER_CENTER,
+                                                    "\u{25A6}",
+                                                    egui::FontId::proportional(20.0),
+                                                    Color32::from_gray(180),
+                                                );
+                                                // Label
+                                                ui.painter().text(
+                                                    egui::pos2(item_rect.center().x, item_rect.max.y - 6.0),
+                                                    egui::Align2::CENTER_BOTTOM,
+                                                    label,
+                                                    egui::FontId::proportional(10.0),
+                                                    Color32::from_gray(200),
+                                                );
+
+                                                if item_resp.clicked() {
+                                                    *path = prim_path.to_string();
+                                                    egui::Popup::close_id(ui.ctx(), popup_id);
+                                                }
+
+                                                if (i + 1) % cols == 0 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                    ui.add_space(4.0);
+                                    ui.separator();
+                                    ui.add_space(2.0);
+                                }
+                            }
+
+                            // Registry assets section
+                            let filter = super::asset_browser::AssetFilter {
+                                search_text: if search_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(search_text.clone())
+                                },
+                                asset_types: Some(allowed_types.to_vec()),
+                                include_subfolders: true,
+                                ..Default::default()
+                            };
+                            let results = asset_browser.registry.query(&filter);
+
+                            if results.is_empty() && !include_meshes {
+                                ui.label(
+                                    RichText::new("No assets found")
+                                        .color(Color32::from_gray(100)),
+                                );
+                            } else if !results.is_empty() {
+                                ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
+                                ui.add_space(2.0);
+                                egui::Grid::new(popup_id.with("assets_grid"))
+                                    .spacing(egui::vec2(4.0, 4.0))
+                                    .show(ui, |ui| {
+                                        for (i, meta) in results.iter().enumerate() {
+                                            let asset_path =
+                                                meta.path.to_string_lossy().to_string();
+                                            let display = &meta.display_name;
+                                            let is_selected = path.as_str() == asset_path;
+
+                                            let (item_rect, item_resp) = ui.allocate_exact_size(
+                                                egui::vec2(item_size, item_size),
+                                                egui::Sense::click(),
+                                            );
+
+                                            let bg = if is_selected {
+                                                Color32::from_rgb(40, 60, 100)
+                                            } else if item_resp.hovered() {
+                                                Color32::from_gray(55)
+                                            } else {
+                                                Color32::from_gray(40)
+                                            };
+                                            ui.painter().rect_filled(item_rect, 3.0, bg);
+
+                                            // Thumbnail
+                                            let thumb_r = item_rect.shrink(4.0);
+                                            let thumb_r = egui::Rect::from_min_size(
+                                                thumb_r.min,
+                                                egui::vec2(thumb_r.width(), thumb_r.height() - 14.0),
+                                            );
+                                            if let Some(tex_id) = asset_browser
+                                                .thumbnails
+                                                .get_texture_id(ui.ctx(), meta)
+                                            {
+                                                ui.painter().image(
+                                                    tex_id,
+                                                    thumb_r,
+                                                    egui::Rect::from_min_max(
+                                                        egui::Pos2::ZERO,
+                                                        egui::pos2(1.0, 1.0),
+                                                    ),
+                                                    Color32::WHITE,
+                                                );
+                                            } else {
+                                                ui.painter().rect_filled(
+                                                    thumb_r,
+                                                    2.0,
+                                                    Color32::from_gray(50),
+                                                );
+                                            }
+
+                                            // Label
+                                            ui.painter().text(
+                                                egui::pos2(
+                                                    item_rect.center().x,
+                                                    item_rect.max.y - 4.0,
+                                                ),
+                                                egui::Align2::CENTER_BOTTOM,
+                                                display,
+                                                egui::FontId::proportional(9.0),
+                                                Color32::from_gray(200),
+                                            );
+
+                                            if item_resp.clicked() {
+                                                *path = asset_path;
+                                                egui::Popup::close_id(ui.ctx(), popup_id);
+                                            }
+
+                                            if (i + 1) % cols == 0 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
+                            }
+                        });
+                    });
+                });
+
+            // Close popup when clicking outside
+            if area_response.response.clicked_elsewhere() {
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         }
     }
