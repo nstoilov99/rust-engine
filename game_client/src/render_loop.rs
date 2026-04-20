@@ -45,6 +45,7 @@ pub fn prepare_mesh_data(
     transform_cache: &TransformCache,
     skinning: &SkinningBackend,
     default_material_set: &Arc<vulkano::descriptor_set::DescriptorSet>,
+    material_cache: &std::collections::HashMap<String, Arc<vulkano::descriptor_set::DescriptorSet>>,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
@@ -98,11 +99,18 @@ pub fn prepare_mesh_data(
             identity_set.clone()
         };
 
-        for &mesh_idx in submesh_indices {
+        for (sub_i, &mesh_idx) in submesh_indices.iter().enumerate() {
             if let Some(gpu_mesh) = meshes.get(mesh_idx) {
                 let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
                 let world_aabb = local_aabb.transformed(&glam_model);
                 let in_camera = camera_frustum.contains_aabb(world_aabb.min, world_aabb.max);
+
+                // Resolve material descriptor set from cache, falling back to default
+                let mat_set = mesh_renderer.material_paths
+                    .get(sub_i)
+                    .and_then(|p| if p.is_empty() { None } else { material_cache.get(p) })
+                    .cloned()
+                    .unwrap_or_else(|| default_material_set.clone());
 
                 let data = MeshRenderData {
                     vertex_buffer: gpu_mesh.vertex_buffer.clone(),
@@ -115,7 +123,7 @@ pub fn prepare_mesh_data(
                         view_projection: vp_array,
                     },
                     bone_palette_set: palette_set.clone(),
-                    material_descriptor_set: Some(default_material_set.clone()),
+                    material_descriptor_set: Some(mat_set),
                 };
 
                 // Shadow casters are not camera-frustum culled — an off-screen

@@ -106,6 +106,8 @@ pub struct CoreApp {
     plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
+    /// Cache of loaded material descriptor sets, keyed by content-relative .material.ron path.
+    pub material_cache: std::collections::HashMap<String, Arc<DescriptorSet>>,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
@@ -428,6 +430,7 @@ impl App {
             plankton_emitter_buffer: Vec::with_capacity(32),
             frame_number: 0,
             render_thread: Some(render_thread),
+            material_cache: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
@@ -660,6 +663,7 @@ impl App {
 
         self.process_hot_reload();
         self.resolve_mesh_paths();
+        self.resolve_material_sets();
 
         let delta_time = self.core.game_loop.tick();
 
@@ -768,6 +772,136 @@ impl App {
                     if all_empty || mr.material_paths.len() != slots.len() {
                         mr.material_paths = slots.clone();
                     }
+                }
+            }
+        }
+    }
+
+    /// Load `.material.ron` files referenced by MeshRenderers and cache their
+    /// GPU descriptor sets so `prepare_mesh_data` can bind them.
+    fn resolve_material_sets(&mut self) {
+        use rust_engine::engine::assets::mesh_import::load_material_ron;
+        use rust_engine::engine::ecs::components::MeshRenderer;
+        use rust_engine::engine::rendering::rendering_3d::material::{
+            create_default_texture_with_format, PbrMaterial,
+            DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+        };
+        use vulkano::format::Format;
+        use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
+        use vulkano::pipeline::Pipeline;
+
+        // Collect unique material paths that aren't cached yet
+        let mut uncached: Vec<String> = Vec::new();
+        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
+            for mp in &mr.material_paths {
+                if !mp.is_empty() && !self.core.material_cache.contains_key(mp) {
+                    uncached.push(mp.clone());
+                }
+            }
+        }
+        uncached.sort();
+        uncached.dedup();
+
+        if uncached.is_empty() {
+            return;
+        }
+
+        let content_root = match rust_engine::engine::assets::asset_source::content_root_path() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let geom_layout = self.core.deferred_renderer.geometry_pipeline().layout().clone();
+        let allocator = self.core.renderer.gpu.memory_allocator.clone();
+        let ds_allocator = self.core.renderer.gpu.descriptor_set_allocator.clone();
+        let cmd_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
+        let queue = self.core.renderer.gpu.queue.clone();
+        let device = self.core.renderer.gpu.device.clone();
+
+        let sampler = match Sampler::new(
+            device,
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::Repeat; 3],
+                ..Default::default()
+            },
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Failed to create material sampler: {}", e);
+                return;
+            }
+        };
+
+        for mat_path in &uncached {
+            let mat_ron_path = content_root.join(mat_path);
+            let mat_dir = mat_ron_path.parent().unwrap_or(&content_root);
+
+            let def = match load_material_ron(&mat_ron_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("Failed to load material '{}': {}", mat_path, e);
+                    continue;
+                }
+            };
+
+            // Helper: load a texture relative to the material file's directory,
+            // or return a 1×1 fallback.
+            let load_tex = |filename: &str, fallback: [u8; 4], format: Format| -> Result<Arc<vulkano::image::view::ImageView>, Box<dyn std::error::Error>> {
+                if filename.is_empty() {
+                    return create_default_texture_with_format(
+                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                    );
+                }
+                // Try to find the texture relative to the material file
+                let tex_path = mat_dir.join(filename);
+                if tex_path.exists() {
+                    // Convert to content-relative for TextureManager
+                    let content_relative = tex_path.strip_prefix(&content_root)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| filename.to_string());
+                    match self.core.asset_manager.textures.load(&content_relative) {
+                        Ok(handle) => Ok(handle.get_arc()),
+                        Err(e) => {
+                            log::warn!("Failed to load texture '{}': {}", content_relative, e);
+                            create_default_texture_with_format(
+                                allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                            )
+                        }
+                    }
+                } else {
+                    log::warn!("Material texture not found: {}", tex_path.display());
+                    create_default_texture_with_format(
+                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                    )
+                }
+            };
+
+            let albedo = match load_tex(&def.albedo_texture, [255, 255, 255, 255], Format::R8G8B8A8_SRGB) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let normal = match load_tex(&def.normal_texture, DEFAULT_NORMAL_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let mr = match load_tex(&def.metallic_roughness_texture, DEFAULT_METALLIC_ROUGHNESS_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let ao = match load_tex(&def.ao_texture, DEFAULT_AO_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+
+            match PbrMaterial::new(
+                albedo, normal, mr, ao, sampler.clone(),
+                def.base_color_factor, def.metallic_factor, def.roughness_factor, def.emissive_factor,
+                allocator.clone(), ds_allocator.clone(), geom_layout.clone(),
+            ) {
+                Ok(mat) => {
+                    println!("✅ Loaded material: {}", mat_path);
+                    self.core.material_cache.insert(mat_path.clone(), mat.descriptor_set);
+                }
+                Err(e) => {
+                    log::warn!("Failed to create PbrMaterial for '{}': {}", mat_path, e);
                 }
             }
         }
@@ -1204,6 +1338,7 @@ impl App {
             transform_cache,
             &self.core.skinning,
             self.core.deferred_renderer.default_material_set(),
+            &self.core.material_cache,
         );
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);

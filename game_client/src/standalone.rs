@@ -405,6 +405,7 @@ impl StandaloneApp {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
+        let empty_mat_cache = std::collections::HashMap::new();
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
@@ -414,6 +415,7 @@ impl StandaloneApp {
             tc,
             &self.skinning,
             &self.default_material_set,
+            &empty_mat_cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
