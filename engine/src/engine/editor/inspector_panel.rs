@@ -943,6 +943,58 @@ impl InspectorPanel {
                         .on_hover_text("Whether this mesh casts shadows");
                     ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
                         .on_hover_text("Whether this mesh receives shadows from other objects");
+
+                    // --- Material Instance Overrides ---
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(RichText::new("Material Overrides").strong());
+
+                    // Base Color
+                    ui.horizontal(|ui| {
+                        ui.label("Base Color:");
+                        let mut color3 = [
+                            renderer.base_color_factor[0],
+                            renderer.base_color_factor[1],
+                            renderer.base_color_factor[2],
+                        ];
+                        if ui.color_edit_button_rgb(&mut color3).changed() {
+                            renderer.base_color_factor[0] = color3[0];
+                            renderer.base_color_factor[1] = color3[1];
+                            renderer.base_color_factor[2] = color3[2];
+                        }
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut renderer.base_color_factor[3], 0.0..=1.0)
+                            .text("Alpha"),
+                    );
+
+                    ui.add(
+                        egui::Slider::new(&mut renderer.metallic_factor, 0.0..=1.0)
+                            .text("Metallic"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut renderer.roughness_factor, 0.0..=1.0)
+                            .text("Roughness"),
+                    );
+
+                    // Emissive
+                    ui.horizontal(|ui| {
+                        ui.label("Emissive:");
+                        let mut em = renderer.emissive_factor;
+                        let mut changed = false;
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[0]).speed(0.01).range(0.0..=10.0).prefix("R: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[1]).speed(0.01).range(0.0..=10.0).prefix("G: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[2]).speed(0.01).range(0.0..=10.0).prefix("B: "))
+                            .changed();
+                        if changed {
+                            renderer.emissive_factor = em;
+                        }
+                    });
                 });
 
             // Context menu for component removal

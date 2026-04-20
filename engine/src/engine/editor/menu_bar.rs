@@ -40,6 +40,8 @@ pub enum MenuAction {
     Resume,
     /// Stop play mode and restore snapshot (Playing|Paused -> Edit)
     Stop,
+    /// Rebuild all registered shader pipelines from source.
+    RebuildShaders,
 }
 
 pub(super) mod play_colors {
@@ -450,6 +452,14 @@ pub fn render_menu_bar(
 
                     if ui.button("Reset Layout").clicked() {
                         action = MenuAction::ResetLayout;
+                        ui.close();
+                    }
+                });
+
+                // Debug menu
+                ui.menu_button("Debug", |ui| {
+                    if ui.button("Rebuild All Shaders").clicked() {
+                        action = MenuAction::RebuildShaders;
                         ui.close();
                     }
                 });

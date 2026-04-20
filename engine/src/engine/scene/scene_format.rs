@@ -346,6 +346,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_base_color_factor() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+fn default_one() -> f32 {
+    1.0
+}
+
+fn default_half() -> f32 {
+    0.5
+}
+
 fn default_clear_color() -> [f32; 3] {
     [0.1, 0.1, 0.15]
 }
@@ -704,6 +716,14 @@ pub enum ComponentData {
         cast_shadows: bool,
         #[serde(default = "default_true")]
         receive_shadows: bool,
+        #[serde(default = "default_base_color_factor")]
+        base_color_factor: [f32; 4],
+        #[serde(default = "default_one")]
+        metallic_factor: f32,
+        #[serde(default = "default_half")]
+        roughness_factor: f32,
+        #[serde(default)]
+        emissive_factor: [f32; 3],
     },
     Camera {
         fov: f32,

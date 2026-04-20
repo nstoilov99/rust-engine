@@ -754,6 +754,61 @@ impl App {
                 ReloadEvent::ReloadFailed { path, error } => {
                     eprintln!("Auto-reload failed for {}: {}", path, error);
                 }
+                ReloadEvent::MaterialInstanceChanged { path } => {
+                    println!("Material instance changed: {}", path);
+                    self.editor
+                        .console
+                        .messages
+                        .push(LogMessage::info(format!(
+                            "Material instance file changed: {}",
+                            path,
+                        )));
+                    // Full material instance hot-reload requires MaterialManager
+                    // integration at the scene level — log for now.
+                }
+                ReloadEvent::ShaderChanged { path } => {
+                    use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
+
+                    println!("Shader changed: {}", path);
+                    let compiler = match ShaderCompiler::new() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.editor
+                                .console
+                                .messages
+                                .push(LogMessage::error(format!(
+                                    "Shader compiler init failed: {e}"
+                                )));
+                            continue;
+                        }
+                    };
+
+                    let device = &self.core.renderer.gpu.device;
+                    let shader_path = std::path::Path::new(&path);
+                    let results = self
+                        .core
+                        .deferred_renderer
+                        .pipeline_registry()
+                        .rebuild_for_shader(shader_path, &compiler, device);
+
+                    for result in &results {
+                        match &result.outcome {
+                            Ok(()) => {
+                                self.editor.console.messages.push(LogMessage::info(
+                                    format!("Hot-reloaded pipeline {:?}", result.id),
+                                ));
+                            }
+                            Err(e) => {
+                                self.editor.console.messages.push(LogMessage::error(
+                                    format!(
+                                        "Pipeline {:?} hot-reload failed: {}",
+                                        result.id, e
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1494,6 +1549,7 @@ impl App {
             MenuAction::Pause => self.pause_play_mode(),
             MenuAction::Resume => self.resume_play_mode(),
             MenuAction::Stop => self.stop_play_mode(),
+            MenuAction::RebuildShaders => self.rebuild_all_shaders(),
         }
 
         // Process OS file drops (files dragged from Windows Explorer / file manager)
@@ -2674,6 +2730,45 @@ impl App {
             Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                 "Failed to resolve current executable: {error}"
             ))),
+        }
+    }
+
+    fn rebuild_all_shaders(&mut self) {
+        use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
+
+        let compiler = match ShaderCompiler::new() {
+            Ok(c) => c,
+            Err(e) => {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Shader compiler init failed: {e}")));
+                return;
+            }
+        };
+
+        let device = &self.core.renderer.gpu.device;
+        let results = self
+            .core
+            .deferred_renderer
+            .pipeline_registry()
+            .rebuild_all(&compiler, device);
+
+        for result in &results {
+            match &result.outcome {
+                Ok(()) => {
+                    self.editor.console.messages.push(LogMessage::info(format!(
+                        "Rebuilt pipeline {:?}",
+                        result.id
+                    )));
+                }
+                Err(e) => {
+                    self.editor.console.messages.push(LogMessage::error(format!(
+                        "Pipeline {:?} rebuild failed: {}",
+                        result.id, e
+                    )));
+                }
+            }
         }
     }
 

@@ -98,6 +98,18 @@ pub struct MeshRenderer {
     /// Whether this mesh receives shadows from other objects
     #[serde(default = "default_true")]
     pub receive_shadows: bool,
+    /// Per-instance base color factor override (RGBA).
+    #[serde(default = "default_base_color_factor")]
+    pub base_color_factor: [f32; 4],
+    /// Per-instance metallic factor override.
+    #[serde(default = "default_one")]
+    pub metallic_factor: f32,
+    /// Per-instance roughness factor override.
+    #[serde(default = "default_half")]
+    pub roughness_factor: f32,
+    /// Per-instance emissive factor override (RGB).
+    #[serde(default)]
+    pub emissive_factor: [f32; 3],
 }
 
 impl MeshRenderer {
@@ -120,6 +132,10 @@ impl Default for MeshRenderer {
             visible: true,
             cast_shadows: true,
             receive_shadows: true,
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 1.0,
+            roughness_factor: 0.5,
+            emissive_factor: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -238,6 +254,18 @@ impl Default for PointLight {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_base_color_factor() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+fn default_one() -> f32 {
+    1.0
+}
+
+fn default_half() -> f32 {
+    0.5
 }
 
 fn default_clear_color() -> [f32; 3] {

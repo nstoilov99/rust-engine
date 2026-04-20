@@ -113,6 +113,7 @@ pub fn prepare_mesh_data(
                         view_projection: vp_array,
                     },
                     bone_palette_set: palette_set.clone(),
+                    material_descriptor_set: None, // Resolved by MaterialManager when available
                 };
 
                 // Shadow casters are not camera-frustum culled — an off-screen

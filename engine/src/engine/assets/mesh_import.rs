@@ -122,6 +122,8 @@ pub struct MaterialDefinition {
     pub base_color_factor: [f32; 4],
     pub metallic_factor: f32,
     pub roughness_factor: f32,
+    #[serde(default)]
+    pub emissive_factor: [f32; 3],
     pub albedo_texture: String,
     pub normal_texture: String,
     pub metallic_roughness_texture: String,
@@ -952,6 +954,7 @@ fn read_material(
             base_color_factor,
             metallic_factor,
             roughness_factor,
+            emissive_factor: [0.0, 0.0, 0.0], // Not in binary format; default to zero
         },
         cursor,
     ))
@@ -1069,6 +1072,7 @@ fn export_materials(
             base_color_factor: mat.base_color_factor,
             metallic_factor: mat.metallic_factor,
             roughness_factor: mat.roughness_factor,
+            emissive_factor: mat.emissive_factor,
             albedo_texture: albedo_file,
             normal_texture: normal_file,
             metallic_roughness_texture: mr_file,
@@ -1580,5 +1584,49 @@ mod tests {
         assert!(!s.flip_uvs);
         assert_eq!(s.up_axis, UpAxis::YUp);
         assert!(s.import_animations);
+    }
+
+    #[test]
+    fn material_definition_emissive_default() {
+        // Legacy .material.ron without emissive_factor should deserialize with zeros
+        let ron_str = r#"(
+            name: "LegacyMat",
+            base_color_factor: (1.0, 0.5, 0.25, 1.0),
+            metallic_factor: 0.0,
+            roughness_factor: 0.5,
+            albedo_texture: "",
+            normal_texture: "",
+            metallic_roughness_texture: "",
+            ao_texture: "",
+        )"#;
+
+        let def: MaterialDefinition = ron::from_str(ron_str).expect("deserialize legacy");
+        assert_eq!(def.emissive_factor, [0.0, 0.0, 0.0]);
+
+        // Re-serialize should include emissive_factor
+        let serialized = ron::to_string(&def).expect("serialize");
+        assert!(
+            serialized.contains("emissive_factor"),
+            "re-serialized output should contain emissive_factor"
+        );
+    }
+
+    #[test]
+    fn material_definition_emissive_roundtrip() {
+        let def = MaterialDefinition {
+            name: "Emissive".to_string(),
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 0.0,
+            roughness_factor: 0.5,
+            emissive_factor: [3.0, 0.0, 0.0],
+            albedo_texture: String::new(),
+            normal_texture: String::new(),
+            metallic_roughness_texture: String::new(),
+            ao_texture: String::new(),
+        };
+
+        let serialized = ron::to_string(&def).expect("serialize");
+        let deserialized: MaterialDefinition = ron::from_str(&serialized).expect("deserialize");
+        assert_eq!(deserialized.emissive_factor, [3.0, 0.0, 0.0]);
     }
 }
