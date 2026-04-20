@@ -35,6 +35,7 @@ type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainErro
 /// Reads pre-computed transforms from `transform_cache` (populated by
 /// `TransformCache::propagate` earlier in the frame).  No recursive
 /// hierarchy traversal happens here.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_mesh_data(
     world: &World,
     asset_manager: &Arc<AssetManager>,
@@ -43,6 +44,7 @@ pub fn prepare_mesh_data(
     shadow_caster_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
     skinning: &SkinningBackend,
+    default_material_set: &Arc<vulkano::descriptor_set::DescriptorSet>,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
@@ -113,7 +115,7 @@ pub fn prepare_mesh_data(
                         view_projection: vp_array,
                     },
                     bone_palette_set: palette_set.clone(),
-                    material_descriptor_set: None, // Resolved by MaterialManager when available
+                    material_descriptor_set: Some(default_material_set.clone()),
                 };
 
                 // Shadow casters are not camera-frustum culled — an off-screen

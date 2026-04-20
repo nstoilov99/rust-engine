@@ -102,7 +102,7 @@ impl ShaderCompiler {
             let requesting_path = Path::new(requesting_source);
             let requesting_dir = if requesting_source.is_empty() {
                 base_dir.clone()
-            } else if requesting_path.parent().map_or(true, |p| p.as_os_str().is_empty()) {
+            } else if requesting_path.parent().is_none_or(|p| p.as_os_str().is_empty()) {
                 // Requesting source has no directory component — use base dir
                 base_dir.clone()
             } else {

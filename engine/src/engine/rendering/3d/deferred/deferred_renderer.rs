@@ -13,6 +13,10 @@ use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
+use crate::engine::rendering::rendering_3d::material::{
+    create_default_texture, PbrMaterial, DEFAULT_ALBEDO_RGBA, DEFAULT_AO_RGBA,
+    DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+};
 use glam::{Mat4, Vec3, Vec4};
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -31,7 +35,7 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::PipelineBindPoint;
+use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 pub struct DeferredRenderer {
@@ -60,6 +64,7 @@ pub struct DeferredRenderer {
     ssao_sampler: Arc<Sampler>,
     #[allow(dead_code)]
     ssao_fallback: Arc<ImageView>,
+    default_material_set: Arc<DescriptorSet>,
     hdr_target: Arc<ImageView>,
     hdr_framebuffer: Arc<Framebuffer>,
     composite_descriptor_set: Arc<DescriptorSet>,
@@ -409,6 +414,48 @@ impl DeferredRenderer {
             );
         }
 
+        // --- Default material descriptor set (fallback for meshes without a material) ---
+        let mat_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::Repeat; 3],
+                ..Default::default()
+            },
+        )?;
+        let default_albedo = create_default_texture(
+            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA,
+        )?;
+        let default_normal = create_default_texture(
+            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA,
+        )?;
+        let default_mr = create_default_texture(
+            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA,
+        )?;
+        let default_ao = create_default_texture(
+            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA,
+        )?;
+        let geom_pipeline_layout = pipeline_registry
+            .get(crate::engine::rendering::pipeline_registry::PipelineId::Geometry)
+            .layout()
+            .clone();
+        let default_material = PbrMaterial::new(
+            default_albedo,
+            default_normal,
+            default_mr,
+            default_ao,
+            mat_sampler,
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+            0.5,
+            [0.0, 0.0, 0.0],
+            allocator.clone(),
+            descriptor_set_allocator.clone(),
+            geom_pipeline_layout,
+        )?;
+        let default_material_set = default_material.descriptor_set.clone();
+
         Ok(Self {
             gbuffer,
             geometry_pass,
@@ -434,6 +481,7 @@ impl DeferredRenderer {
             ssao_fallback_descriptor_set,
             ssao_sampler,
             ssao_fallback,
+            default_material_set,
             hdr_target,
             hdr_framebuffer,
             composite_descriptor_set,
@@ -804,14 +852,16 @@ impl DeferredRenderer {
                             self.render_counters.triangles += mesh.index_count / 3;
 
                             if last_material != Some(mesh.material_index) {
-                                if let Some(ref mat_set) = mesh.material_descriptor_set {
-                                    builder.bind_descriptor_sets(
-                                        PipelineBindPoint::Graphics,
-                                        geom_layout.clone(),
-                                        1,
-                                        mat_set.clone(),
-                                    )?;
-                                }
+                                let mat_set = mesh
+                                    .material_descriptor_set
+                                    .as_ref()
+                                    .unwrap_or(&self.default_material_set);
+                                builder.bind_descriptor_sets(
+                                    PipelineBindPoint::Graphics,
+                                    geom_layout.clone(),
+                                    1,
+                                    mat_set.clone(),
+                                )?;
                                 last_material = Some(mesh.material_index);
                                 self.render_counters.material_changes += 1;
                             }
@@ -1121,6 +1171,11 @@ impl DeferredRenderer {
     /// Access the pipeline registry (for debug menu rebuild triggers).
     pub fn pipeline_registry(&self) -> &PipelineRegistry {
         &self.pipeline_registry
+    }
+
+    /// Default material descriptor set (Set 1) for meshes without a material.
+    pub fn default_material_set(&self) -> &Arc<DescriptorSet> {
+        &self.default_material_set
     }
 
     fn render_shadow_pass(

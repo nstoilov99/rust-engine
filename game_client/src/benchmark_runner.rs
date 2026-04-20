@@ -345,6 +345,7 @@ impl BenchmarkRunner {
             &mut self.shadow_caster_buffer,
             tc,
             &self.skinning,
+            self.deferred_renderer.default_material_set(),
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 

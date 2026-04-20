@@ -1149,6 +1149,7 @@ impl App {
             &mut self.core.shadow_caster_buffer,
             transform_cache,
             &self.core.skinning,
+            self.core.deferred_renderer.default_material_set(),
         );
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);

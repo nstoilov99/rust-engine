@@ -20,6 +20,12 @@ use super::material::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MaterialInstanceId(pub Uuid);
 
+impl Default for MaterialInstanceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MaterialInstanceId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -93,6 +99,7 @@ impl MaterialManager {
     }
 
     /// Create a new material instance from a base and factor overrides.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_instance(
         &mut self,
         base_id: MaterialBaseId,
@@ -126,6 +133,7 @@ impl MaterialManager {
     }
 
     /// Create an instance with a pre-determined ID (for deserialization).
+    #[allow(clippy::too_many_arguments)]
     pub fn create_instance_with_id(
         &mut self,
         id: MaterialInstanceId,
@@ -164,6 +172,7 @@ impl MaterialManager {
     }
 
     /// Update the per-instance factors and rebuild the UBO + descriptor set.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_instance(
         &mut self,
         id: MaterialInstanceId,

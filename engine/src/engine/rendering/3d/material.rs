@@ -132,6 +132,12 @@ impl PbrMaterial {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MaterialBaseId(pub Uuid);
 
+impl Default for MaterialBaseId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MaterialBaseId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -160,6 +166,7 @@ pub struct MaterialInstance {
 
 impl MaterialInstance {
     /// Create a new instance from a `MaterialBase` and per-instance factor overrides.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base: &MaterialBase,
         base_color_factor: [f32; 4],

@@ -41,19 +41,22 @@ pub struct RebuildResult {
     pub outcome: Result<(), PipelineError>,
 }
 
+#[cfg(feature = "editor")]
+type RebuildFn = Box<
+    dyn Fn(
+            &super::shader_compiler::ShaderCompiler,
+            &Arc<vulkano::device::Device>,
+        ) -> Result<Arc<GraphicsPipeline>, PipelineError>
+        + Send
+        + Sync,
+>;
+
 struct RegistryEntry {
     current: arc_swap::ArcSwap<GraphicsPipeline>,
     #[cfg(feature = "editor")]
     shader_paths: Vec<PathBuf>,
     #[cfg(feature = "editor")]
-    rebuild: Box<
-        dyn Fn(
-                &super::shader_compiler::ShaderCompiler,
-                &Arc<vulkano::device::Device>,
-            ) -> Result<Arc<GraphicsPipeline>, PipelineError>
-            + Send
-            + Sync,
-    >,
+    rebuild: RebuildFn,
 }
 
 /// Central registry that owns Geometry and Lighting pipelines behind `ArcSwap`.
@@ -62,6 +65,12 @@ struct RegistryEntry {
 /// that recompiles from disk and constructs a fresh pipeline.
 pub struct PipelineRegistry {
     entries: HashMap<PipelineId, RegistryEntry>,
+}
+
+impl Default for PipelineRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PipelineRegistry {
@@ -78,14 +87,7 @@ impl PipelineRegistry {
         id: PipelineId,
         pipeline: Arc<GraphicsPipeline>,
         #[cfg(feature = "editor")] shader_paths: Vec<PathBuf>,
-        #[cfg(feature = "editor")] rebuild: Box<
-            dyn Fn(
-                    &super::shader_compiler::ShaderCompiler,
-                    &Arc<vulkano::device::Device>,
-                ) -> Result<Arc<GraphicsPipeline>, PipelineError>
-                + Send
-                + Sync,
-        >,
+        #[cfg(feature = "editor")] rebuild: RebuildFn,
     ) {
         self.entries.insert(
             id,
