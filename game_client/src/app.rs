@@ -742,10 +742,23 @@ impl App {
                 if let Ok(meta) =
                     rust_engine::engine::assets::mesh_import::load_mesh_sidecar(&mesh_fs_path)
                 {
+                    // Material paths in sidecar are relative to the mesh file's directory.
+                    // Convert them to content-relative paths.
+                    let mesh_dir = std::path::Path::new(path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""));
                     let mat_paths: Vec<String> = meta
                         .material_slots
                         .iter()
-                        .map(|s| s.material_path.clone())
+                        .map(|s| {
+                            if s.material_path.is_empty() {
+                                String::new()
+                            } else {
+                                mesh_dir.join(&s.material_path)
+                                    .to_string_lossy()
+                                    .replace('\\', "/")
+                            }
+                        })
                         .collect();
                     if !mat_paths.is_empty() {
                         sidecar_slots.insert(path.clone(), mat_paths);

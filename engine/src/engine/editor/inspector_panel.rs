@@ -1057,15 +1057,8 @@ impl InspectorPanel {
             }
         }
 
-        // Open asset picker popup on click
+        // Popup ID for asset picker
         let popup_id = ui.id().with(id_salt).with("asset_picker_popup");
-        let just_opened = if response.clicked() {
-            let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-            egui::Popup::toggle_id(ui.ctx(), popup_id);
-            !was_open // true if we just opened it
-        } else {
-            false
-        };
 
         // Use a child UI constrained to the slot rect for proper clipping and layout
         let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -1191,219 +1184,208 @@ impl InspectorPanel {
             }
         }
 
-        // Asset picker popup
-        let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-        if is_open {
-            let area_response = egui::Area::new(popup_id)
-                .order(egui::Order::Foreground)
-                .default_pos(rect.left_bottom() + egui::vec2(0.0, 4.0))
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(280.0);
-                        ui.set_max_width(320.0);
-                        ui.set_max_height(350.0);
+        // Asset picker popup — uses egui's built-in toggle + close-on-click-outside
+        egui::Popup::from_toggle_button_response(&response)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(300.0)
+            .show(|ui| {
+                ui.set_max_height(350.0);
 
-                        // Search bar
-                        let search_id = popup_id.with("search_text");
-                        let mut search_text: String = ui.data_mut(|d| {
-                            d.get_temp_mut_or_default::<String>(search_id).clone()
+                // Search bar
+                let search_id = popup_id.with("search_text");
+                let mut search_text: String = ui.data_mut(|d| {
+                    d.get_temp_mut_or_default::<String>(search_id).clone()
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    let te = ui.text_edit_singleline(&mut search_text);
+                    if te.changed() {
+                        ui.data_mut(|d| {
+                            *d.get_temp_mut_or_default::<String>(search_id) = search_text.clone();
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("Search:");
-                            let te = ui.text_edit_singleline(&mut search_text);
-                            if te.changed() {
-                                ui.data_mut(|d| {
-                                    *d.get_temp_mut_or_default::<String>(search_id) = search_text.clone();
-                                });
-                            }
-                            // Auto-focus search on open
-                            if !te.has_focus() {
-                                te.request_focus();
-                            }
-                        });
-
-                        ui.separator();
-
-                        // Collect matching assets
-                        let search_lower = search_text.to_lowercase();
-                        let include_meshes = allowed_types.contains(&AssetType::Mesh)
-                            || allowed_types.contains(&AssetType::Model);
-
-                        ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            let item_size = 60.0;
-                            let cols = ((ui.available_width()) / (item_size + 4.0)).floor().max(1.0) as usize;
-
-                            // Primitives section (only for mesh slots)
-                            if include_meshes {
-                                use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
-                                let matching_prims: Vec<&str> = PRIMITIVE_PATHS
-                                    .iter()
-                                    .filter(|p| {
-                                        search_text.is_empty()
-                                            || p.to_lowercase().contains(&search_lower)
-                                    })
-                                    .copied()
-                                    .collect();
-
-                                if !matching_prims.is_empty() {
-                                    ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
-                                    ui.add_space(2.0);
-                                    egui::Grid::new(popup_id.with("prims_grid"))
-                                        .spacing(egui::vec2(4.0, 4.0))
-                                        .show(ui, |ui| {
-                                            for (i, &prim_path) in matching_prims.iter().enumerate() {
-                                                let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
-                                                let is_selected = path.as_str() == prim_path;
-
-                                                let (item_rect, item_resp) = ui.allocate_exact_size(
-                                                    egui::vec2(item_size, item_size),
-                                                    egui::Sense::click(),
-                                                );
-
-                                                let bg = if is_selected {
-                                                    Color32::from_rgb(40, 60, 100)
-                                                } else if item_resp.hovered() {
-                                                    Color32::from_gray(55)
-                                                } else {
-                                                    Color32::from_gray(40)
-                                                };
-                                                ui.painter().rect_filled(item_rect, 3.0, bg);
-                                                // Icon
-                                                ui.painter().text(
-                                                    item_rect.center_top() + egui::vec2(0.0, 18.0),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    "\u{25A6}",
-                                                    egui::FontId::proportional(20.0),
-                                                    Color32::from_gray(180),
-                                                );
-                                                // Label
-                                                ui.painter().text(
-                                                    egui::pos2(item_rect.center().x, item_rect.max.y - 6.0),
-                                                    egui::Align2::CENTER_BOTTOM,
-                                                    label,
-                                                    egui::FontId::proportional(10.0),
-                                                    Color32::from_gray(200),
-                                                );
-
-                                                if item_resp.clicked() {
-                                                    *path = prim_path.to_string();
-                                                    egui::Popup::close_id(ui.ctx(), popup_id);
-                                                }
-
-                                                if (i + 1) % cols == 0 {
-                                                    ui.end_row();
-                                                }
-                                            }
-                                        });
-                                    ui.add_space(4.0);
-                                    ui.separator();
-                                    ui.add_space(2.0);
-                                }
-                            }
-
-                            // Registry assets section
-                            let filter = super::asset_browser::AssetFilter {
-                                search_text: if search_text.is_empty() {
-                                    None
-                                } else {
-                                    Some(search_text.clone())
-                                },
-                                asset_types: Some(allowed_types.to_vec()),
-                                include_subfolders: true,
-                                ..Default::default()
-                            };
-                            let results = asset_browser.registry.query(&filter);
-
-                            if results.is_empty() && !include_meshes {
-                                ui.label(
-                                    RichText::new("No assets found")
-                                        .color(Color32::from_gray(100)),
-                                );
-                            } else if !results.is_empty() {
-                                ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
-                                ui.add_space(2.0);
-                                egui::Grid::new(popup_id.with("assets_grid"))
-                                    .spacing(egui::vec2(4.0, 4.0))
-                                    .show(ui, |ui| {
-                                        for (i, meta) in results.iter().enumerate() {
-                                            let asset_path =
-                                                meta.path.to_string_lossy().to_string();
-                                            let display = &meta.display_name;
-                                            let is_selected = path.as_str() == asset_path;
-
-                                            let (item_rect, item_resp) = ui.allocate_exact_size(
-                                                egui::vec2(item_size, item_size),
-                                                egui::Sense::click(),
-                                            );
-
-                                            let bg = if is_selected {
-                                                Color32::from_rgb(40, 60, 100)
-                                            } else if item_resp.hovered() {
-                                                Color32::from_gray(55)
-                                            } else {
-                                                Color32::from_gray(40)
-                                            };
-                                            ui.painter().rect_filled(item_rect, 3.0, bg);
-
-                                            // Thumbnail
-                                            let thumb_r = item_rect.shrink(4.0);
-                                            let thumb_r = egui::Rect::from_min_size(
-                                                thumb_r.min,
-                                                egui::vec2(thumb_r.width(), thumb_r.height() - 14.0),
-                                            );
-                                            if let Some(tex_id) = asset_browser
-                                                .thumbnails
-                                                .get_texture_id(ui.ctx(), meta)
-                                            {
-                                                ui.painter().image(
-                                                    tex_id,
-                                                    thumb_r,
-                                                    egui::Rect::from_min_max(
-                                                        egui::Pos2::ZERO,
-                                                        egui::pos2(1.0, 1.0),
-                                                    ),
-                                                    Color32::WHITE,
-                                                );
-                                            } else {
-                                                ui.painter().rect_filled(
-                                                    thumb_r,
-                                                    2.0,
-                                                    Color32::from_gray(50),
-                                                );
-                                            }
-
-                                            // Label
-                                            ui.painter().text(
-                                                egui::pos2(
-                                                    item_rect.center().x,
-                                                    item_rect.max.y - 4.0,
-                                                ),
-                                                egui::Align2::CENTER_BOTTOM,
-                                                display,
-                                                egui::FontId::proportional(9.0),
-                                                Color32::from_gray(200),
-                                            );
-
-                                            if item_resp.clicked() {
-                                                *path = asset_path;
-                                                egui::Popup::close_id(ui.ctx(), popup_id);
-                                            }
-
-                                            if (i + 1) % cols == 0 {
-                                                ui.end_row();
-                                            }
-                                        }
-                                    });
-                            }
-                        });
-                    });
+                    }
+                    // Auto-focus search on open
+                    if !te.has_focus() {
+                        te.request_focus();
+                    }
                 });
 
-            // Close popup when clicking outside (but not on the frame we just opened it)
-            if !just_opened && area_response.response.clicked_elsewhere() && !response.clicked() {
-                egui::Popup::close_id(ui.ctx(), popup_id);
-            }
-        }
+                ui.separator();
+
+                // Collect matching assets
+                let search_lower = search_text.to_lowercase();
+                let include_meshes = allowed_types.contains(&AssetType::Mesh)
+                    || allowed_types.contains(&AssetType::Model);
+
+                ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    let item_size = 60.0;
+                    let cols = ((ui.available_width()) / (item_size + 4.0)).floor().max(1.0) as usize;
+
+                    // Primitives section (only for mesh slots)
+                    if include_meshes {
+                        use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+                        let matching_prims: Vec<&str> = PRIMITIVE_PATHS
+                            .iter()
+                            .filter(|p| {
+                                search_text.is_empty()
+                                    || p.to_lowercase().contains(&search_lower)
+                            })
+                            .copied()
+                            .collect();
+
+                        if !matching_prims.is_empty() {
+                            ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
+                            ui.add_space(2.0);
+                            egui::Grid::new(popup_id.with("prims_grid"))
+                                .spacing(egui::vec2(4.0, 4.0))
+                                .show(ui, |ui| {
+                                    for (i, &prim_path) in matching_prims.iter().enumerate() {
+                                        let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
+                                        let is_selected = path.as_str() == prim_path;
+
+                                        let (item_rect, item_resp) = ui.allocate_exact_size(
+                                            egui::vec2(item_size, item_size),
+                                            egui::Sense::click(),
+                                        );
+
+                                        let bg = if is_selected {
+                                            Color32::from_rgb(40, 60, 100)
+                                        } else if item_resp.hovered() {
+                                            Color32::from_gray(55)
+                                        } else {
+                                            Color32::from_gray(40)
+                                        };
+                                        ui.painter().rect_filled(item_rect, 3.0, bg);
+                                        // Icon
+                                        ui.painter().text(
+                                            item_rect.center_top() + egui::vec2(0.0, 18.0),
+                                            egui::Align2::CENTER_CENTER,
+                                            "\u{25A6}",
+                                            egui::FontId::proportional(20.0),
+                                            Color32::from_gray(180),
+                                        );
+                                        // Label
+                                        ui.painter().text(
+                                            egui::pos2(item_rect.center().x, item_rect.max.y - 6.0),
+                                            egui::Align2::CENTER_BOTTOM,
+                                            label,
+                                            egui::FontId::proportional(10.0),
+                                            Color32::from_gray(200),
+                                        );
+
+                                        if item_resp.clicked() {
+                                            *path = prim_path.to_string();
+                                            ui.close();
+                                        }
+
+                                        if (i + 1) % cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
+                        }
+                    }
+
+                    // Registry assets section
+                    let filter = super::asset_browser::AssetFilter {
+                        search_text: if search_text.is_empty() {
+                            None
+                        } else {
+                            Some(search_text.clone())
+                        },
+                        asset_types: Some(allowed_types.to_vec()),
+                        include_subfolders: true,
+                        ..Default::default()
+                    };
+                    let results = asset_browser.registry.query(&filter);
+
+                    if results.is_empty() && !include_meshes {
+                        ui.label(
+                            RichText::new("No assets found")
+                                .color(Color32::from_gray(100)),
+                        );
+                    } else if !results.is_empty() {
+                        ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
+                        ui.add_space(2.0);
+                        egui::Grid::new(popup_id.with("assets_grid"))
+                            .spacing(egui::vec2(4.0, 4.0))
+                            .show(ui, |ui| {
+                                for (i, meta) in results.iter().enumerate() {
+                                    let asset_path =
+                                        meta.path.to_string_lossy().to_string();
+                                    let display = &meta.display_name;
+                                    let is_selected = path.as_str() == asset_path;
+
+                                    let (item_rect, item_resp) = ui.allocate_exact_size(
+                                        egui::vec2(item_size, item_size),
+                                        egui::Sense::click(),
+                                    );
+
+                                    let bg = if is_selected {
+                                        Color32::from_rgb(40, 60, 100)
+                                    } else if item_resp.hovered() {
+                                        Color32::from_gray(55)
+                                    } else {
+                                        Color32::from_gray(40)
+                                    };
+                                    ui.painter().rect_filled(item_rect, 3.0, bg);
+
+                                    // Thumbnail
+                                    let thumb_r = item_rect.shrink(4.0);
+                                    let thumb_r = egui::Rect::from_min_size(
+                                        thumb_r.min,
+                                        egui::vec2(thumb_r.width(), thumb_r.height() - 14.0),
+                                    );
+                                    if let Some(tex_id) = asset_browser
+                                        .thumbnails
+                                        .get_texture_id(ui.ctx(), meta)
+                                    {
+                                        ui.painter().image(
+                                            tex_id,
+                                            thumb_r,
+                                            egui::Rect::from_min_max(
+                                                egui::Pos2::ZERO,
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            thumb_r,
+                                            2.0,
+                                            Color32::from_gray(50),
+                                        );
+                                    }
+
+                                    // Label
+                                    ui.painter().text(
+                                        egui::pos2(
+                                            item_rect.center().x,
+                                            item_rect.max.y - 4.0,
+                                        ),
+                                        egui::Align2::CENTER_BOTTOM,
+                                        display,
+                                        egui::FontId::proportional(9.0),
+                                        Color32::from_gray(200),
+                                    );
+
+                                    if item_resp.clicked() {
+                                        *path = asset_path;
+                                        ui.close();
+                                    }
+
+                                    if (i + 1) % cols == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    }
+                });
+            });
     }
 
     /// Edit DirectionalLight component
