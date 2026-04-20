@@ -707,13 +707,33 @@ impl App {
             }
         }
 
-        // Pre-load sidecar material slot info for newly loaded paths
+        // Collect mesh paths that need material slot sync from sidecar.
+        // This includes newly loaded paths AND any resolved meshes whose
+        // material_paths are still empty (e.g. after re-import).
+        let mut needs_sidecar: Vec<String> = paths_to_load.clone();
+        for (_entity, mr) in self
+            .core
+            .game_world
+            .hecs_mut()
+            .query_mut::<&MeshRenderer>()
+        {
+            if !mr.mesh_path.is_empty()
+                && !mr.mesh_path.starts_with("__primitive__/")
+                && mr.material_paths.iter().all(|p| p.is_empty())
+            {
+                needs_sidecar.push(mr.mesh_path.clone());
+            }
+        }
+        needs_sidecar.sort();
+        needs_sidecar.dedup();
+
+        // Load sidecar material slot info
         let mut sidecar_slots: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         if let Some(content_root) =
             rust_engine::engine::assets::asset_source::content_root_path()
         {
-            for path in &paths_to_load {
+            for path in &needs_sidecar {
                 let mesh_fs_path = content_root.join(path);
                 if let Ok(meta) =
                     rust_engine::engine::assets::mesh_import::load_mesh_sidecar(&mesh_fs_path)
