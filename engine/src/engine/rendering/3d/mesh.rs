@@ -235,3 +235,68 @@ pub fn create_plane(size: f32) -> (Vec<Vertex3D>, Vec<u32>) {
 
     (vertices, indices)
 }
+
+/// Well-known content-relative paths for built-in primitive meshes.
+pub const PRIMITIVE_CUBE: &str = "__primitive__/Cube";
+pub const PRIMITIVE_SPHERE: &str = "__primitive__/Sphere";
+pub const PRIMITIVE_PLANE: &str = "__primitive__/Plane";
+
+/// All primitive mesh paths, for UI dropdowns.
+pub const PRIMITIVE_PATHS: &[&str] = &[PRIMITIVE_CUBE, PRIMITIVE_SPHERE, PRIMITIVE_PLANE];
+
+/// Generates a UV sphere with the given number of segments and rings.
+pub fn create_sphere(segments: u32, rings: u32) -> (Vec<Vertex3D>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    for ring in 0..=rings {
+        let theta = std::f32::consts::PI * ring as f32 / rings as f32;
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        for seg in 0..=segments {
+            let phi = 2.0 * std::f32::consts::PI * seg as f32 / segments as f32;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            let x = cos_phi * sin_theta;
+            let y = cos_theta;
+            let z = sin_phi * sin_theta;
+
+            let u = seg as f32 / segments as f32;
+            let v = ring as f32 / rings as f32;
+
+            // Tangent in the direction of increasing phi
+            let tx = -sin_phi;
+            let tz = cos_phi;
+
+            vertices.push(Vertex3D {
+                position: [x * 0.5, y * 0.5, z * 0.5],
+                normal: [x, y, z],
+                uv: [u, v],
+                tangent: [tx, 0.0, tz, 1.0],
+                ..Default::default()
+            });
+        }
+    }
+
+    for ring in 0..rings {
+        for seg in 0..segments {
+            let curr = ring * (segments + 1) + seg;
+            let next = curr + segments + 1;
+
+            if ring != 0 {
+                indices.push(curr);
+                indices.push(next);
+                indices.push(curr + 1);
+            }
+            if ring != rings - 1 {
+                indices.push(curr + 1);
+                indices.push(next);
+                indices.push(next + 1);
+            }
+        }
+    }
+
+    (vertices, indices)
+}

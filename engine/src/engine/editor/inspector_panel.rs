@@ -912,6 +912,27 @@ impl InspectorPanel {
                         mesh_idx,
                     );
 
+                    // Primitive mesh dropdown
+                    use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+                    let current_label: String = if renderer.mesh_path.starts_with("__primitive__/") {
+                        renderer.mesh_path.rsplit('/').next().unwrap_or("Select...").to_string()
+                    } else {
+                        "Select...".to_string()
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label("Primitive:");
+                        egui::ComboBox::from_id_salt("primitive_mesh_combo")
+                            .selected_text(&current_label)
+                            .show_ui(ui, |ui| {
+                                for &prim in PRIMITIVE_PATHS {
+                                    let label = prim.rsplit('/').next().unwrap_or(prim);
+                                    if ui.selectable_label(renderer.mesh_path == prim, label).clicked() {
+                                        renderer.mesh_path = prim.to_string();
+                                    }
+                                }
+                            });
+                    });
+
                     ui.add_space(4.0);
 
                     // Material slots — one slot per submesh material

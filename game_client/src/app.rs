@@ -677,6 +677,8 @@ impl App {
     /// Resolve `mesh_path` to `mesh_index` for all MeshRenderer components.
     ///
     /// Loads meshes via the AssetManager if they aren't already uploaded.
+    /// Also auto-adapts `material_paths` from the `.mesh.ron` sidecar when a
+    /// mesh is first resolved.
     fn resolve_mesh_paths(&mut self) {
         use rust_engine::engine::ecs::components::MeshRenderer;
 
@@ -705,7 +707,30 @@ impl App {
             }
         }
 
-        // Resolve indices
+        // Pre-load sidecar material slot info for newly loaded paths
+        let mut sidecar_slots: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if let Some(content_root) =
+            rust_engine::engine::assets::asset_source::content_root_path()
+        {
+            for path in &paths_to_load {
+                let mesh_fs_path = content_root.join(path);
+                if let Ok(meta) =
+                    rust_engine::engine::assets::mesh_import::load_mesh_sidecar(&mesh_fs_path)
+                {
+                    let mat_paths: Vec<String> = meta
+                        .material_slots
+                        .iter()
+                        .map(|s| s.material_path.clone())
+                        .collect();
+                    if !mat_paths.is_empty() {
+                        sidecar_slots.insert(path.clone(), mat_paths);
+                    }
+                }
+            }
+        }
+
+        // Resolve indices and sync material slots
         let meshes = self.core.asset_manager.meshes.read();
         for (_entity, mr) in self
             .core
@@ -716,6 +741,13 @@ impl App {
             if !mr.mesh_path.is_empty() {
                 if let Some(idx) = meshes.first_index_for_path(&mr.mesh_path) {
                     mr.mesh_index = idx;
+                }
+                // Auto-adapt material_paths from sidecar when all slots are empty
+                if let Some(slots) = sidecar_slots.get(&mr.mesh_path) {
+                    let all_empty = mr.material_paths.iter().all(|p| p.is_empty());
+                    if all_empty || mr.material_paths.len() != slots.len() {
+                        mr.material_paths = slots.clone();
+                    }
                 }
             }
         }
@@ -729,14 +761,16 @@ impl App {
                     mesh_indices: new_indices,
                     model: _,
                 } => {
-                    for (_entity, mesh_renderer) in
-                        self.core
-                            .game_world
-                            .hecs_mut()
-                            .query_mut::<&mut rust_engine::engine::ecs::components::MeshRenderer>()
-                    {
-                        if !new_indices.is_empty() {
-                            mesh_renderer.mesh_index = new_indices[0];
+                    if !new_indices.is_empty() {
+                        for (_entity, mesh_renderer) in
+                            self.core
+                                .game_world
+                                .hecs_mut()
+                                .query_mut::<&mut rust_engine::engine::ecs::components::MeshRenderer>()
+                        {
+                            if mesh_renderer.mesh_path == path {
+                                mesh_renderer.mesh_index = new_indices[0];
+                            }
                         }
                     }
                     println!("Auto-reload complete: {}", path);

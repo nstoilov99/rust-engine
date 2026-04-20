@@ -13,8 +13,8 @@ use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::PipelineLayout;
 
 use super::model_loader::{
-    calculate_tangents_safe, compute_bounding_sphere, AnimationChannel, BoneData, LoadedMesh,
-    Model, RawAnimationClip, VertexBoneData,
+    calculate_tangents_safe, compute_bounding_sphere, AnimationChannel, BoneData, ImportedMaterial,
+    LoadedMesh, Model, RawAnimationClip, VertexBoneData,
 };
 
 /// Result type for GLTF loading operations.
@@ -186,6 +186,49 @@ fn build_model(
         };
 
         model.textures.push(rgba_image);
+    }
+
+    // Extract materials (PBR factors + texture references from the already-decoded images)
+    for material in document.materials() {
+        let pbr = material.pbr_metallic_roughness();
+        let base_color_factor = pbr.base_color_factor();
+        let metallic_factor = pbr.metallic_factor();
+        let roughness_factor = pbr.roughness_factor();
+        let emissive_factor = material.emissive_factor();
+
+        let albedo = pbr
+            .base_color_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let normal = material
+            .normal_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let metallic_roughness = pbr
+            .metallic_roughness_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let ao = material
+            .occlusion_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+
+        let name = material
+            .name()
+            .unwrap_or("Unnamed")
+            .to_string();
+
+        model.materials.push(ImportedMaterial {
+            name,
+            albedo,
+            normal,
+            metallic_roughness,
+            ao,
+            base_color_factor,
+            metallic_factor,
+            roughness_factor,
+            emissive_factor,
+        });
     }
 
     // Extract skeleton from first skin
