@@ -1265,8 +1265,9 @@ impl InspectorPanel {
                                             egui::FontId::proportional(20.0),
                                             Color32::from_gray(180),
                                         );
-                                        // Label
-                                        ui.painter().text(
+                                        // Label (clipped to item rect)
+                                        let clipped = ui.painter().with_clip_rect(item_rect);
+                                        clipped.text(
                                             egui::pos2(item_rect.center().x, item_rect.max.y - 6.0),
                                             egui::Align2::CENTER_BOTTOM,
                                             label,
@@ -1361,8 +1362,9 @@ impl InspectorPanel {
                                         );
                                     }
 
-                                    // Label
-                                    ui.painter().text(
+                                    // Label (clipped to item rect)
+                                    let clipped = ui.painter().with_clip_rect(item_rect);
+                                    clipped.text(
                                         egui::pos2(
                                             item_rect.center().x,
                                             item_rect.max.y - 4.0,

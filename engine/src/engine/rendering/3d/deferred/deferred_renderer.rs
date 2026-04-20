@@ -848,7 +848,7 @@ impl DeferredRenderer {
 
                     {
                         crate::profile_scope!("mesh_loop");
-                        let mut last_material: Option<usize> = None;
+                        let mut last_material_ptr: Option<usize> = None;
                         let mut last_palette: Option<usize> = None;
                         let geom_layout = self.geometry_pass.layout();
                         for mesh in mesh_data {
@@ -856,18 +856,19 @@ impl DeferredRenderer {
                             self.render_counters.draw_calls += 1;
                             self.render_counters.triangles += mesh.index_count / 3;
 
-                            if last_material != Some(mesh.material_index) {
-                                let mat_set = mesh
-                                    .material_descriptor_set
-                                    .as_ref()
-                                    .unwrap_or(&self.default_material_set);
+                            let mat_set = mesh
+                                .material_descriptor_set
+                                .as_ref()
+                                .unwrap_or(&self.default_material_set);
+                            let mat_ptr = Arc::as_ptr(mat_set) as usize;
+                            if last_material_ptr != Some(mat_ptr) {
                                 builder.bind_descriptor_sets(
                                     PipelineBindPoint::Graphics,
                                     geom_layout.clone(),
                                     1,
                                     mat_set.clone(),
                                 )?;
-                                last_material = Some(mesh.material_index);
+                                last_material_ptr = Some(mat_ptr);
                                 self.render_counters.material_changes += 1;
                             }
 
