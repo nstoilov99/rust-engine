@@ -497,16 +497,18 @@ fn write_material(buf: &mut Vec<u8>, mat: &ImportedMaterial) {
 
 /// Load a `Model` from a `.mesh` binary file on disk.
 ///
-/// FBX and glTF loaders (ufbx / gltf-rs) always produce Y-up data, but the
-/// game engine uses Z-up.  When the sidecar indicates an FBX/glTF source,
-/// convert the stored Y-up positions back to Z-up so the render pipeline's
-/// model matrix (which does Z-up → Y-up) works correctly.
+/// The render pipeline expects vertex data in Y-up (render space), which
+/// matches what FBX/glTF loaders produce.  The model matrix handles the
+/// Z-up game-space → Y-up conversion via `C * M_zup * C_inv`.
+///
+/// The only case requiring correction is when an FBX/glTF source was
+/// imported with `up_axis: ZUp` — the import applied a redundant Z-up
+/// conversion on top of the loader's Y-up output.  We undo that here.
 pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     let mut model = load_mesh_binary_from_bytes(&data, path.to_string_lossy().as_ref())?;
 
-    // FBX/glTF data is always stored in Y-up (from ufbx/gltf-rs target_axes).
-    // Convert to Z-up so the render pipeline's Z-up→Y-up model matrix works.
+    // Check sidecar for double axis conversion that needs undoing
     let sidecar_path = PathBuf::from(format!("{}.ron", path.display()));
     if let Ok(text) = std::fs::read_to_string(&sidecar_path) {
         if let Ok(meta) = ron::from_str::<MeshImportMeta>(&text) {
@@ -515,9 +517,11 @@ pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if matches!(src_ext.as_str(), "fbx" | "gltf" | "glb") {
+            if meta.settings.up_axis == UpAxis::ZUp
+                && matches!(src_ext.as_str(), "fbx" | "gltf" | "glb")
+            {
                 log::info!(
-                    "Converting Y-up to Z-up for {:?} (FBX/glTF source)",
+                    "Undoing double axis conversion for {:?} (FBX/glTF + ZUp)",
                     path
                 );
                 undo_double_axis_conversion(&mut model);
