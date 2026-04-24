@@ -1148,7 +1148,8 @@ impl InspectorPanel {
                 thumb_rect.max,
             );
             painter.rect_filled(text_bg, 0.0, Color32::from_black_alpha(160));
-            painter.text(
+            let clipped = painter.with_clip_rect(thumb_rect);
+            clipped.text(
                 egui::pos2(thumb_rect.center().x, thumb_rect.max.y - 4.0),
                 egui::Align2::CENTER_BOTTOM,
                 &filename,
@@ -1219,8 +1220,10 @@ impl InspectorPanel {
                     || allowed_types.contains(&AssetType::Model);
 
                 ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    let item_size = 60.0;
-                    let cols = ((ui.available_width()) / (item_size + 4.0)).floor().max(1.0) as usize;
+                    let item_w = 60.0;
+                    let label_h = 16.0;
+                    let item_h = item_w + label_h;
+                    let cols = ((ui.available_width()) / (item_w + 4.0)).floor().max(1.0) as usize;
 
                     // Primitives section (only for mesh slots)
                     if include_meshes {
@@ -1245,7 +1248,7 @@ impl InspectorPanel {
                                         let is_selected = path.as_str() == prim_path;
 
                                         let (item_rect, item_resp) = ui.allocate_exact_size(
-                                            egui::vec2(item_size, item_size),
+                                            egui::vec2(item_w, item_h),
                                             egui::Sense::click(),
                                         );
 
@@ -1257,9 +1260,10 @@ impl InspectorPanel {
                                             Color32::from_gray(40)
                                         };
                                         ui.painter().rect_filled(item_rect, 3.0, bg);
-                                        // Icon
+                                        // Icon (centered in the square thumb area)
+                                        let thumb_bottom = item_rect.max.y - label_h;
                                         ui.painter().text(
-                                            item_rect.center_top() + egui::vec2(0.0, 18.0),
+                                            egui::pos2(item_rect.center().x, (item_rect.min.y + thumb_bottom) / 2.0),
                                             egui::Align2::CENTER_CENTER,
                                             "\u{25A6}",
                                             egui::FontId::proportional(20.0),
@@ -1268,7 +1272,7 @@ impl InspectorPanel {
                                         // Label (clipped to item rect)
                                         let clipped = ui.painter().with_clip_rect(item_rect);
                                         clipped.text(
-                                            egui::pos2(item_rect.center().x, item_rect.max.y - 6.0),
+                                            egui::pos2(item_rect.center().x, item_rect.max.y - 3.0),
                                             egui::Align2::CENTER_BOTTOM,
                                             label,
                                             egui::FontId::proportional(10.0),
@@ -1322,7 +1326,7 @@ impl InspectorPanel {
                                     let is_selected = path.as_str() == asset_path;
 
                                     let (item_rect, item_resp) = ui.allocate_exact_size(
-                                        egui::vec2(item_size, item_size),
+                                        egui::vec2(item_w, item_h),
                                         egui::Sense::click(),
                                     );
 
@@ -1335,11 +1339,10 @@ impl InspectorPanel {
                                     };
                                     ui.painter().rect_filled(item_rect, 3.0, bg);
 
-                                    // Thumbnail
-                                    let thumb_r = item_rect.shrink(4.0);
+                                    // Square thumbnail area above the label
                                     let thumb_r = egui::Rect::from_min_size(
-                                        thumb_r.min,
-                                        egui::vec2(thumb_r.width(), thumb_r.height() - 14.0),
+                                        item_rect.min + egui::vec2(4.0, 4.0),
+                                        egui::vec2(item_w - 8.0, item_w - 8.0),
                                     );
                                     if let Some(tex_id) = asset_browser
                                         .thumbnails
@@ -1367,7 +1370,7 @@ impl InspectorPanel {
                                     clipped.text(
                                         egui::pos2(
                                             item_rect.center().x,
-                                            item_rect.max.y - 4.0,
+                                            item_rect.max.y - 3.0,
                                         ),
                                         egui::Align2::CENTER_BOTTOM,
                                         display,

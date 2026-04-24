@@ -497,14 +497,16 @@ fn write_material(buf: &mut Vec<u8>, mat: &ImportedMaterial) {
 
 /// Load a `Model` from a `.mesh` binary file on disk.
 ///
-/// Automatically detects and undoes double axis conversion caused by
-/// FBX/glTF sources imported with `up_axis: ZUp` (the loader already
-/// converts to Y-up, so the import settings conversion was redundant).
+/// FBX and glTF loaders (ufbx / gltf-rs) always produce Y-up data, but the
+/// game engine uses Z-up.  When the sidecar indicates an FBX/glTF source,
+/// convert the stored Y-up positions back to Z-up so the render pipeline's
+/// model matrix (which does Z-up → Y-up) works correctly.
 pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     let mut model = load_mesh_binary_from_bytes(&data, path.to_string_lossy().as_ref())?;
 
-    // Check sidecar for double axis conversion that needs undoing
+    // FBX/glTF data is always stored in Y-up (from ufbx/gltf-rs target_axes).
+    // Convert to Z-up so the render pipeline's Z-up→Y-up model matrix works.
     let sidecar_path = PathBuf::from(format!("{}.ron", path.display()));
     if let Ok(text) = std::fs::read_to_string(&sidecar_path) {
         if let Ok(meta) = ron::from_str::<MeshImportMeta>(&text) {
@@ -513,11 +515,9 @@ pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if meta.settings.up_axis == UpAxis::ZUp
-                && matches!(src_ext.as_str(), "fbx" | "gltf" | "glb")
-            {
+            if matches!(src_ext.as_str(), "fbx" | "gltf" | "glb") {
                 log::info!(
-                    "Undoing double axis conversion for {:?} (FBX/glTF + ZUp)",
+                    "Converting Y-up to Z-up for {:?} (FBX/glTF source)",
                     path
                 );
                 undo_double_axis_conversion(&mut model);
