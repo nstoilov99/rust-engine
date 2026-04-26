@@ -1,11 +1,11 @@
 (
-    source: "C:\\Users\\nstoi\\Downloads\\Defeated.fbx",
+    source: "E:\\Programs\\cyrus-app\\.cyrus\\worktrees\\CRU-9\\content\\Defeated.fbx",
     settings: (
         scale: 1.0,
         generate_tangents: true,
         import_materials: true,
         flip_uvs: false,
-        up_axis: ZUp,
+        up_axis: YUp,
         import_animations: true,
     ),
     source_hash: 369653710,

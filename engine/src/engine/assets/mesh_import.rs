@@ -226,7 +226,7 @@ pub fn import_model_to_mesh(
 
     let meta = MeshImportMeta {
         source: source_path.to_string_lossy().to_string(),
-        settings: settings.clone(),
+        settings: effective_settings.clone(),
         source_hash,
         material_slots,
     };
