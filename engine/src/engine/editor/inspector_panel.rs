@@ -1123,18 +1123,20 @@ impl InspectorPanel {
                 } else {
                     painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
                 }
-            } else {
-                // For primitives or unregistered assets, show type icon placeholder
-                painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
-                if path.starts_with("__primitive__/") {
-                    painter.text(
-                        thumb_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "\u{25A6}",
-                        egui::FontId::proportional(24.0),
-                        Color32::from_gray(140),
+            } else if path.starts_with("__primitive__/") {
+                // Primitive mesh — use GPU-rendered thumbnail
+                if let Some(tex_id) = asset_browser.thumbnails.get_primitive_texture_id(ui.ctx(), path) {
+                    painter.image(
+                        tex_id,
+                        thumb_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
                     );
+                } else {
+                    painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
                 }
+            } else {
+                painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
             }
 
             // Filename text at bottom of thumbnail
@@ -1260,15 +1262,26 @@ impl InspectorPanel {
                                             Color32::from_gray(40)
                                         };
                                         ui.painter().rect_filled(item_rect, 3.0, bg);
-                                        // Icon (centered in the square thumb area)
+                                        // 3D thumbnail (same as asset thumbnails)
                                         let thumb_bottom = item_rect.max.y - label_h;
-                                        ui.painter().text(
-                                            egui::pos2(item_rect.center().x, (item_rect.min.y + thumb_bottom) / 2.0),
-                                            egui::Align2::CENTER_CENTER,
-                                            "\u{25A6}",
-                                            egui::FontId::proportional(20.0),
-                                            Color32::from_gray(180),
+                                        let thumb_r = egui::Rect::from_min_max(
+                                            item_rect.min,
+                                            egui::pos2(item_rect.max.x, thumb_bottom),
                                         );
+                                        if let Some(tex_id) = asset_browser
+                                            .thumbnails
+                                            .get_primitive_texture_id(ui.ctx(), prim_path)
+                                        {
+                                            ui.painter().image(
+                                                tex_id,
+                                                thumb_r,
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(0.0, 0.0),
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                Color32::WHITE,
+                                            );
+                                        }
                                         // Label (clipped to item rect)
                                         let clipped = ui.painter().with_clip_rect(item_rect);
                                         clipped.text(
