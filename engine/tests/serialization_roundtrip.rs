@@ -63,6 +63,7 @@ fn mesh_renderer_roundtrip() {
             visible: false,
             cast_shadows: true,
             receive_shadows: false,
+            ..Default::default()
         },
     ));
 
