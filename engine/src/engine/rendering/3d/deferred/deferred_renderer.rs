@@ -256,12 +256,14 @@ impl DeferredRenderer {
                             final_layout: ImageLayout::ColorAttachmentOptimal,
                             ..Default::default()
                         },
-                        // Attachment 1: depth (G-buffer depth, read-only)
+                        // Attachment 1: depth (G-buffer depth, read-only for depth testing)
+                        // Store so the depth survives between grid and debug-draw
+                        // render passes that share this framebuffer.
                         AttachmentDescription {
                             format: Format::D32_SFLOAT,
                             samples: SampleCount::Sample1,
                             load_op: AttachmentLoadOp::Load,
-                            store_op: AttachmentStoreOp::DontCare,
+                            store_op: AttachmentStoreOp::Store,
                             initial_layout: ImageLayout::DepthStencilReadOnlyOptimal,
                             final_layout: ImageLayout::DepthStencilReadOnlyOptimal,
                             ..Default::default()
@@ -275,7 +277,7 @@ impl DeferredRenderer {
                         })],
                         depth_stencil_attachment: Some(AttachmentReference {
                             attachment: 1,
-                            layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            layout: ImageLayout::DepthStencilAttachmentOptimal,
                             ..Default::default()
                         }),
                         ..Default::default()
