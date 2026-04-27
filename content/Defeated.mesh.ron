@@ -1,5 +1,5 @@
 (
-    source: "E:\\Programs\\cyrus-app\\.cyrus\\worktrees\\CRU-9\\content\\Defeated.fbx",
+    source: "../content/Defeated.fbx",
     settings: (
         scale: 0.01,
         generate_tangents: true,
