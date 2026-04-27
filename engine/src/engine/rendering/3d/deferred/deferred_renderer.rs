@@ -233,27 +233,57 @@ impl DeferredRenderer {
             },
         )?;
 
-        let grid_render_pass = vulkano::single_pass_renderpass!(
-            device.clone(),
-            attachments: {
-                color: {
-                    format: Format::B8G8R8A8_SRGB,
-                    samples: 1,
-                    load_op: Load,
-                    store_op: Store,
+        // Grid/debug-draw render pass — must match the G-buffer depth's
+        // final_layout (DepthStencilReadOnlyOptimal) as initial_layout so the
+        // depth values survive the layout transition for correct depth testing.
+        let grid_render_pass = {
+            use vulkano::image::{ImageLayout, SampleCount};
+            use vulkano::render_pass::{
+                AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+                RenderPassCreateInfo, SubpassDescription,
+            };
+            RenderPass::new(
+                device.clone(),
+                RenderPassCreateInfo {
+                    attachments: vec![
+                        // Attachment 0: color (composite output)
+                        AttachmentDescription {
+                            format: Format::B8G8R8A8_SRGB,
+                            samples: SampleCount::Sample1,
+                            load_op: AttachmentLoadOp::Load,
+                            store_op: AttachmentStoreOp::Store,
+                            initial_layout: ImageLayout::ColorAttachmentOptimal,
+                            final_layout: ImageLayout::ColorAttachmentOptimal,
+                            ..Default::default()
+                        },
+                        // Attachment 1: depth (G-buffer depth, read-only)
+                        AttachmentDescription {
+                            format: Format::D32_SFLOAT,
+                            samples: SampleCount::Sample1,
+                            load_op: AttachmentLoadOp::Load,
+                            store_op: AttachmentStoreOp::DontCare,
+                            initial_layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            final_layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            ..Default::default()
+                        },
+                    ],
+                    subpasses: vec![SubpassDescription {
+                        color_attachments: vec![Some(AttachmentReference {
+                            attachment: 0,
+                            layout: ImageLayout::ColorAttachmentOptimal,
+                            ..Default::default()
+                        })],
+                        depth_stencil_attachment: Some(AttachmentReference {
+                            attachment: 1,
+                            layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
                 },
-                depth: {
-                    format: Format::D32_SFLOAT,
-                    samples: 1,
-                    load_op: Load,
-                    store_op: DontCare,
-                }
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {depth}
-            }
-        )?;
+            )?
+        };
 
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
         let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
