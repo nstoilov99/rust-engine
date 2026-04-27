@@ -13,7 +13,7 @@
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.56106806,
+                    fraction: 0.46067768,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -24,7 +24,7 @@
                             y: 24.0,
                         ),
                         max: (
-                            x: 1435.0,
+                            x: 1178.0,
                             y: 1369.0,
                         ),
                     ),
@@ -35,7 +35,7 @@
                 Vertical((
                     rect: (
                         min: (
-                            x: 1437.0,
+                            x: 1180.0,
                             y: 24.0,
                         ),
                         max: (
@@ -54,7 +54,7 @@
                             y: 24.0,
                         ),
                         max: (
-                            x: 1435.0,
+                            x: 1178.0,
                             y: 742.0,
                         ),
                     ),
@@ -64,7 +64,7 @@
                             y: 48.0,
                         ),
                         max: (
-                            x: 1435.0,
+                            x: 1178.0,
                             y: 742.0,
                         ),
                     ),
@@ -82,7 +82,7 @@
                             y: 744.0,
                         ),
                         max: (
-                            x: 1435.0,
+                            x: 1178.0,
                             y: 1369.0,
                         ),
                     ),
@@ -92,7 +92,7 @@
                             y: 768.0,
                         ),
                         max: (
-                            x: 1435.0,
+                            x: 1178.0,
                             y: 1369.0,
                         ),
                     ),
@@ -101,14 +101,14 @@
                         AssetBrowser,
                         Console,
                     ],
-                    active: (0),
+                    active: (1),
                     scroll: 0.0,
                     collapsed: false,
                 )),
                 Leaf((
                     rect: (
                         min: (
-                            x: 1437.0,
+                            x: 1180.0,
                             y: 24.0,
                         ),
                         max: (
@@ -118,7 +118,7 @@
                     ),
                     viewport: (
                         min: (
-                            x: 1437.0,
+                            x: 1180.0,
                             y: 48.0,
                         ),
                         max: (
@@ -136,7 +136,7 @@
                 Leaf((
                     rect: (
                         min: (
-                            x: 1437.0,
+                            x: 1180.0,
                             y: 314.0,
                         ),
                         max: (
@@ -146,7 +146,7 @@
                     ),
                     viewport: (
                         min: (
-                            x: 1437.0,
+                            x: 1180.0,
                             y: 338.0,
                         ),
                         max: (
@@ -162,7 +162,7 @@
                     collapsed: false,
                 )),
             ],
-            focused_node: Some((5)),
+            focused_node: Some((6)),
             collapsed: false,
             collapsed_leaf_count: 0,
         )),

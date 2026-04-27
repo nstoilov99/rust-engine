@@ -1,0 +1,18 @@
+(
+    source: "E:\\Programs\\cyrus-app\\.cyrus\\worktrees\\CRU-9\\content\\models\\Duck.glb",
+    settings: (
+        scale: 0.01,
+        generate_tangents: true,
+        import_materials: true,
+        flip_uvs: false,
+        up_axis: YUp,
+        import_animations: true,
+    ),
+    source_hash: 1446541631,
+    material_slots: [
+        (
+            name: "blinn3-fx",
+            material_path: "Duck_blinn3-fx.material.ron",
+        ),
+    ],
+)
