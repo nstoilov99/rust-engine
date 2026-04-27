@@ -317,7 +317,11 @@ pub fn apply_import_settings(model: &mut Model, settings: &MeshImportSettings) {
         let inv_transform = transform.inverse();
 
         for bone in &mut model.bones {
-            bone.inverse_bind_matrix *= inv_transform;
+            // Similarity transform: ibm' = transform * ibm * inv_transform
+            // This ensures palette' * pos' = S * palette * pos (correctly scaled skinning).
+            // A simple right-multiply (ibm *= inv_transform) breaks because uniform scale
+            // doesn't commute with the translation component of affine transforms.
+            bone.inverse_bind_matrix = transform * bone.inverse_bind_matrix * inv_transform;
         }
     }
 
@@ -573,15 +577,15 @@ fn undo_double_axis_conversion(model: &mut Model) {
 
     // Undo bone inverse bind matrices
     if !model.bones.is_empty() {
-        // The forward conversion applied: ibm *= inv_transform
-        // where transform = axis_mat. So: ibm_stored = ibm_original * axis_mat.inverse()
-        // Undo: ibm_original = ibm_stored * axis_mat
+        // Forward applied similarity transform: ibm' = transform * ibm * inv_transform
+        // Undo: ibm = inv_transform * ibm' * transform
         let axis_mat = Mat4::from_cols_array(&[
             1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             1.0,
         ]);
+        let inv_axis = axis_mat.inverse();
         for bone in &mut model.bones {
-            bone.inverse_bind_matrix *= axis_mat;
+            bone.inverse_bind_matrix = inv_axis * bone.inverse_bind_matrix * axis_mat;
         }
     }
 
