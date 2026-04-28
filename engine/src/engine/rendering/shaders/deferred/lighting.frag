@@ -6,6 +6,7 @@ layout(set = 0, binding = 0) uniform sampler2D g_position;
 layout(set = 0, binding = 1) uniform sampler2D g_normal;
 layout(set = 0, binding = 2) uniform sampler2D g_albedo;
 layout(set = 0, binding = 3) uniform sampler2D g_material;
+layout(set = 0, binding = 4) uniform sampler2D g_emissive;
 
 layout(set = 1, binding = 0) uniform sampler2DShadow shadow_map;
 
@@ -134,7 +135,10 @@ void main() {
     float ssao = texture(ssao_map, frag_uv).r;
     vec3 ambient = lights.ambient_color * lights.ambient_intensity * albedo * ao * ssao;
 
-    vec3 color = ambient + shadow * Lo;
+    // Emissive is added after shadow — it's a light source, not a shadow receiver.
+    vec3 emissive = texture(g_emissive, frag_uv).rgb;
+
+    vec3 color = ambient + shadow * Lo + emissive;
 
     out_color = vec4(color, 1.0);
 }

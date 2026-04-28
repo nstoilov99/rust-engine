@@ -112,6 +112,10 @@ impl Prefab {
                     visible,
                     cast_shadows,
                     receive_shadows,
+                    base_color_factor,
+                    metallic_factor,
+                    roughness_factor,
+                    emissive_factor,
                 } => {
                     let mut mr = MeshRenderer {
                         mesh_path: mesh_path.clone(),
@@ -122,6 +126,10 @@ impl Prefab {
                         visible: *visible,
                         cast_shadows: *cast_shadows,
                         receive_shadows: *receive_shadows,
+                        base_color_factor: *base_color_factor,
+                        metallic_factor: *metallic_factor,
+                        roughness_factor: *roughness_factor,
+                        emissive_factor: *emissive_factor,
                     };
                     mr.migrate_legacy_material_path();
                     builder.add(mr);

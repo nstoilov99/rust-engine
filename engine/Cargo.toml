@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio"]
+editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc"]
 tracy = ["tracy-client"]
 
 [dependencies]
@@ -86,6 +86,12 @@ kira = { version = "0.12", features = ["cpal", "symphonia"] }
 
 # Gamepad input
 gilrs = "0.11"
+
+# Runtime shader compilation (editor only)
+shaderc = { version = "0.8", optional = true }
+
+# Atomic reference-counted pointer swap (for pipeline hot-reload)
+arc-swap = "1"
 
 # Shared gameplay types
 game_shared = { path = "../game_shared" }

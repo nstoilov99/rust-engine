@@ -81,6 +81,7 @@ fn build_model_from_tobj(
             base_color_factor: [diffuse[0], diffuse[1], diffuse[2], 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.5,
+            emissive_factor: [0.0, 0.0, 0.0],
         });
     }
 

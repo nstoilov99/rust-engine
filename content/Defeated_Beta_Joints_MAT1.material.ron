@@ -3,6 +3,7 @@
     base_color_factor: (0.33333334, 0.12452888, 0.10101473, 1.0),
     metallic_factor: 0.0,
     roughness_factor: 0.8585786,
+    emissive_factor: (0.0, 0.0, 0.0),
     albedo_texture: "",
     normal_texture: "",
     metallic_roughness_texture: "",

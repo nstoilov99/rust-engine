@@ -11,7 +11,12 @@ use super::ssao_pass::{SsaoPass, SsaoPushConstants};
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
 use crate::engine::rendering::graph::RenderGraph;
+use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
+use crate::engine::rendering::rendering_3d::material::{
+    create_default_texture, create_default_texture_with_format, PbrMaterial,
+    DEFAULT_ALBEDO_RGBA, DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+};
 use glam::{Mat4, Vec3, Vec4};
 use smallvec::smallvec;
 use std::collections::HashMap;
@@ -30,13 +35,14 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::PipelineBindPoint;
+use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 pub struct DeferredRenderer {
     gbuffer: GBuffer,
     geometry_pass: GeometryPass,
     lighting_pass: LightingPass,
+    pipeline_registry: PipelineRegistry,
     shadow_pass: ShadowPass,
     ssao_pass: SsaoPass,
     bloom_pass: BloomPass,
@@ -58,6 +64,7 @@ pub struct DeferredRenderer {
     ssao_sampler: Arc<Sampler>,
     #[allow(dead_code)]
     ssao_fallback: Arc<ImageView>,
+    default_material_set: Arc<DescriptorSet>,
     hdr_target: Arc<ImageView>,
     hdr_framebuffer: Arc<Framebuffer>,
     composite_descriptor_set: Arc<DescriptorSet>,
@@ -163,7 +170,8 @@ impl DeferredRenderer {
         height: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let gbuffer = GBuffer::new(device.clone(), allocator.clone(), width, height)?;
-        let geometry_pass = GeometryPass::new(device.clone(), gbuffer.render_pass.clone())?;
+        let (geometry_pass, geometry_pipeline) =
+            GeometryPass::new(device.clone(), gbuffer.render_pass.clone())?;
 
         let hdr_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -181,7 +189,8 @@ impl DeferredRenderer {
             }
         )?;
 
-        let lighting_pass = LightingPass::new(device.clone(), hdr_render_pass)?;
+        let (lighting_pass, lighting_pipeline) =
+            LightingPass::new(device.clone(), hdr_render_pass)?;
 
         let shadow_pass = ShadowPass::new(
             device.clone(),
@@ -224,27 +233,59 @@ impl DeferredRenderer {
             },
         )?;
 
-        let grid_render_pass = vulkano::single_pass_renderpass!(
-            device.clone(),
-            attachments: {
-                color: {
-                    format: Format::B8G8R8A8_SRGB,
-                    samples: 1,
-                    load_op: Load,
-                    store_op: Store,
+        // Grid/debug-draw render pass — must match the G-buffer depth's
+        // final_layout (DepthStencilReadOnlyOptimal) as initial_layout so the
+        // depth values survive the layout transition for correct depth testing.
+        let grid_render_pass = {
+            use vulkano::image::{ImageLayout, SampleCount};
+            use vulkano::render_pass::{
+                AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+                RenderPassCreateInfo, SubpassDescription,
+            };
+            RenderPass::new(
+                device.clone(),
+                RenderPassCreateInfo {
+                    attachments: vec![
+                        // Attachment 0: color (composite output)
+                        AttachmentDescription {
+                            format: Format::B8G8R8A8_SRGB,
+                            samples: SampleCount::Sample1,
+                            load_op: AttachmentLoadOp::Load,
+                            store_op: AttachmentStoreOp::Store,
+                            initial_layout: ImageLayout::ColorAttachmentOptimal,
+                            final_layout: ImageLayout::ColorAttachmentOptimal,
+                            ..Default::default()
+                        },
+                        // Attachment 1: depth (G-buffer depth, read-only for depth testing)
+                        // Store so the depth survives between grid and debug-draw
+                        // render passes that share this framebuffer.
+                        AttachmentDescription {
+                            format: Format::D32_SFLOAT,
+                            samples: SampleCount::Sample1,
+                            load_op: AttachmentLoadOp::Load,
+                            store_op: AttachmentStoreOp::Store,
+                            initial_layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            final_layout: ImageLayout::DepthStencilReadOnlyOptimal,
+                            ..Default::default()
+                        },
+                    ],
+                    subpasses: vec![SubpassDescription {
+                        color_attachments: vec![Some(AttachmentReference {
+                            attachment: 0,
+                            layout: ImageLayout::ColorAttachmentOptimal,
+                            ..Default::default()
+                        })],
+                        depth_stencil_attachment: Some(AttachmentReference {
+                            attachment: 1,
+                            layout: ImageLayout::DepthStencilAttachmentOptimal,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
                 },
-                depth: {
-                    format: Format::D32_SFLOAT,
-                    samples: 1,
-                    load_op: Load,
-                    store_op: DontCare,
-                }
-            },
-            pass: {
-                color: [color],
-                depth_stencil: {depth}
-            }
-        )?;
+            )?
+        };
 
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
         let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
@@ -255,6 +296,7 @@ impl DeferredRenderer {
             gbuffer.normal.clone(),
             gbuffer.albedo.clone(),
             gbuffer.material.clone(),
+            gbuffer.emissive.clone(),
         )?;
 
         let shadow_descriptor_set = lighting_pass.create_shadow_descriptor_set(
@@ -321,10 +363,141 @@ impl DeferredRenderer {
         plankton_system.set_gbuffer_depth(gbuffer.depth.clone())?;
         plankton_system.set_hdr_target(hdr_target.clone())?;
 
+        // --- Pipeline Registry ---
+        let mut pipeline_registry = PipelineRegistry::new();
+
+        {
+            #[cfg(feature = "editor")]
+            let gbuffer_rp = gbuffer.render_pass.clone();
+
+            pipeline_registry.register(
+                crate::engine::rendering::pipeline_registry::PipelineId::Geometry,
+                geometry_pipeline,
+                #[cfg(feature = "editor")]
+                vec![
+                    std::path::PathBuf::from("src/engine/rendering/shaders/deferred/gbuffer.vert"),
+                    std::path::PathBuf::from("src/engine/rendering/shaders/deferred/gbuffer.frag"),
+                ],
+                #[cfg(feature = "editor")]
+                Box::new(move |compiler, device| {
+                    use crate::engine::rendering::pipeline_registry::PipelineError;
+                    use crate::engine::rendering::shader_compiler::ShaderKind;
+                    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                    let vs_spirv = compiler
+                        .compile(
+                            &base.join("src/engine/rendering/shaders/deferred/gbuffer.vert"),
+                            ShaderKind::Vertex,
+                        )
+                        .map_err(PipelineError::Shader)?;
+                    let fs_spirv = compiler
+                        .compile(
+                            &base.join("src/engine/rendering/shaders/deferred/gbuffer.frag"),
+                            ShaderKind::Fragment,
+                        )
+                        .map_err(PipelineError::Shader)?;
+                    GeometryPass::create_pipeline_from_spirv(
+                        device.clone(),
+                        gbuffer_rp.clone(),
+                        &vs_spirv,
+                        &fs_spirv,
+                    )
+                    .map_err(|e| PipelineError::Vulkan(e.to_string()))
+                }),
+            );
+        }
+
+        {
+            #[cfg(feature = "editor")]
+            let lighting_rp = lighting_pass.render_pass();
+
+            pipeline_registry.register(
+                crate::engine::rendering::pipeline_registry::PipelineId::Lighting,
+                lighting_pipeline,
+                #[cfg(feature = "editor")]
+                vec![
+                    std::path::PathBuf::from("src/engine/rendering/shaders/deferred/lighting.vert"),
+                    std::path::PathBuf::from("src/engine/rendering/shaders/deferred/lighting.frag"),
+                ],
+                #[cfg(feature = "editor")]
+                Box::new(move |compiler, device| {
+                    use crate::engine::rendering::pipeline_registry::PipelineError;
+                    use crate::engine::rendering::shader_compiler::ShaderKind;
+                    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                    let vs_spirv = compiler
+                        .compile(
+                            &base.join("src/engine/rendering/shaders/deferred/lighting.vert"),
+                            ShaderKind::Vertex,
+                        )
+                        .map_err(PipelineError::Shader)?;
+                    let fs_spirv = compiler
+                        .compile(
+                            &base.join("src/engine/rendering/shaders/deferred/lighting.frag"),
+                            ShaderKind::Fragment,
+                        )
+                        .map_err(PipelineError::Shader)?;
+                    LightingPass::create_pipeline_from_spirv(
+                        device.clone(),
+                        lighting_rp.clone(),
+                        &vs_spirv,
+                        &fs_spirv,
+                    )
+                    .map_err(|e| PipelineError::Vulkan(e.to_string()))
+                }),
+            );
+        }
+
+        // --- Default material descriptor set (fallback for meshes without a material) ---
+        let mat_sampler = Sampler::new(
+            device.clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::Repeat; 3],
+                ..Default::default()
+            },
+        )?;
+        // Albedo is a color texture → SRGB for automatic gamma decoding.
+        let default_albedo = create_default_texture(
+            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA,
+        )?;
+        // Normal, metallic-roughness, and AO are data textures → UNORM (no gamma).
+        let default_normal = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA,
+            Format::R8G8B8A8_UNORM,
+        )?;
+        let default_mr = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA,
+            Format::R8G8B8A8_UNORM,
+        )?;
+        let default_ao = create_default_texture_with_format(
+            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA,
+            Format::R8G8B8A8_UNORM,
+        )?;
+        let geom_pipeline_layout = pipeline_registry
+            .get(crate::engine::rendering::pipeline_registry::PipelineId::Geometry)
+            .layout()
+            .clone();
+        let default_material = PbrMaterial::new(
+            default_albedo,
+            default_normal,
+            default_mr,
+            default_ao,
+            mat_sampler,
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+            0.5,
+            [0.0, 0.0, 0.0],
+            allocator.clone(),
+            descriptor_set_allocator.clone(),
+            geom_pipeline_layout,
+        )?;
+        let default_material_set = default_material.descriptor_set.clone();
+
         Ok(Self {
             gbuffer,
             geometry_pass,
             lighting_pass,
+            pipeline_registry,
             shadow_pass,
             ssao_pass,
             bloom_pass,
@@ -345,6 +518,7 @@ impl DeferredRenderer {
             ssao_fallback_descriptor_set,
             ssao_sampler,
             ssao_fallback,
+            default_material_set,
             hdr_target,
             hdr_framebuffer,
             composite_descriptor_set,
@@ -427,6 +601,7 @@ impl DeferredRenderer {
             self.gbuffer.normal.clone(),
             self.gbuffer.albedo.clone(),
             self.gbuffer.material.clone(),
+            self.gbuffer.emissive.clone(),
         )?;
 
         self.hdr_target = create_hdr_target(self.allocator.clone(), width, height)?;
@@ -560,6 +735,7 @@ impl DeferredRenderer {
             let gbuffer_normal = graph.declare_virtual("gbuffer_normal");
             let gbuffer_albedo = graph.declare_virtual("gbuffer_albedo");
             let gbuffer_material = graph.declare_virtual("gbuffer_material");
+            let gbuffer_emissive = graph.declare_virtual("gbuffer_emissive");
             let gbuffer_depth = graph.declare_virtual("gbuffer_depth");
             let target_res = graph.declare_virtual("target");
 
@@ -571,6 +747,7 @@ impl DeferredRenderer {
                 b.write(gbuffer_normal);
                 b.write(gbuffer_albedo);
                 b.write(gbuffer_material);
+                b.write(gbuffer_emissive);
                 b.write(gbuffer_depth);
             });
 
@@ -601,6 +778,7 @@ impl DeferredRenderer {
                 b.read(gbuffer_normal);
                 b.read(gbuffer_albedo);
                 b.read(gbuffer_material);
+                b.read(gbuffer_emissive);
                 b.read(shadow_map_res);
                 b.write(hdr_res);
             });
@@ -684,6 +862,7 @@ impl DeferredRenderer {
                                     Some([0.0, 0.0, 0.0, 1.0].into()),
                                     Some([0.0, 0.0, 0.0, 1.0].into()),
                                     Some([0.0, 0.0, 0.0, 1.0].into()),
+                                    Some([0.0, 0.0, 0.0, 0.0].into()), // emissive
                                     Some(1.0.into()),
                                 ],
                                 ..RenderPassBeginInfo::framebuffer(
@@ -695,22 +874,34 @@ impl DeferredRenderer {
                                 ..Default::default()
                             },
                         )?
-                        .bind_pipeline_graphics(self.geometry_pass.pipeline())?
+                        .bind_pipeline_graphics(self.geometry_pass.pipeline(&self.pipeline_registry))?
                         .set_viewport(0, smallvec![viewport.clone()])?
                         .set_scissor(0, smallvec![scissor])?;
 
                     {
                         crate::profile_scope!("mesh_loop");
-                        let mut last_material = None;
+                        let mut last_material_ptr: Option<usize> = None;
                         let mut last_palette: Option<usize> = None;
                         let geom_layout = self.geometry_pass.layout();
                         for mesh in mesh_data {
                             self.render_counters.visible_entities += 1;
                             self.render_counters.draw_calls += 1;
                             self.render_counters.triangles += mesh.index_count / 3;
-                            if last_material != Some(mesh.material_index) {
+
+                            let mat_set = mesh
+                                .material_descriptor_set
+                                .as_ref()
+                                .unwrap_or(&self.default_material_set);
+                            let mat_ptr = Arc::as_ptr(mat_set) as usize;
+                            if last_material_ptr != Some(mat_ptr) {
+                                builder.bind_descriptor_sets(
+                                    PipelineBindPoint::Graphics,
+                                    geom_layout.clone(),
+                                    1,
+                                    mat_set.clone(),
+                                )?;
+                                last_material_ptr = Some(mat_ptr);
                                 self.render_counters.material_changes += 1;
-                                last_material = Some(mesh.material_index);
                             }
 
                             let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
@@ -774,7 +965,7 @@ impl DeferredRenderer {
                                 ..Default::default()
                             },
                         )?
-                        .bind_pipeline_graphics(self.lighting_pass.pipeline())?
+                        .bind_pipeline_graphics(self.lighting_pass.pipeline(&self.pipeline_registry))?
                         .set_viewport(0, smallvec![hdr_viewport])?
                         .set_scissor(0, smallvec![hdr_scissor])?
                         .bind_descriptor_sets(
@@ -1012,7 +1203,17 @@ impl DeferredRenderer {
     }
 
     pub fn geometry_pipeline(&self) -> Arc<vulkano::pipeline::GraphicsPipeline> {
-        self.geometry_pass.pipeline()
+        self.geometry_pass.pipeline(&self.pipeline_registry)
+    }
+
+    /// Access the pipeline registry (for debug menu rebuild triggers).
+    pub fn pipeline_registry(&self) -> &PipelineRegistry {
+        &self.pipeline_registry
+    }
+
+    /// Default material descriptor set (Set 1) for meshes without a material.
+    pub fn default_material_set(&self) -> &Arc<DescriptorSet> {
+        &self.default_material_set
     }
 
     fn render_shadow_pass(
@@ -1458,6 +1659,9 @@ pub struct MeshRenderData {
     pub material_index: usize,
     pub push_constants: PushConstantData,
     pub bone_palette_set: Arc<DescriptorSet>,
+    /// Pre-resolved material descriptor set (Set 1 for geometry pass).
+    /// Resolved at `prepare_mesh_data` time — the render thread does no manager lookups.
+    pub material_descriptor_set: Option<Arc<DescriptorSet>>,
 }
 
 #[repr(C)]

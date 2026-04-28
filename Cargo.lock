@@ -163,6 +163,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arg_enum_proc_macro"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2890,6 +2899,7 @@ name = "rust_engine"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "arc-swap",
  "bytemuck",
  "crossbeam-channel",
  "egui",
@@ -2910,6 +2920,7 @@ dependencies = [
  "rapier3d",
  "ron",
  "serde",
+ "shaderc",
  "smallvec",
  "tobj",
  "tokio",
