@@ -35,6 +35,7 @@ type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainErro
 /// Reads pre-computed transforms from `transform_cache` (populated by
 /// `TransformCache::propagate` earlier in the frame).  No recursive
 /// hierarchy traversal happens here.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_mesh_data(
     world: &World,
     asset_manager: &Arc<AssetManager>,
@@ -43,6 +44,8 @@ pub fn prepare_mesh_data(
     shadow_caster_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
     skinning: &SkinningBackend,
+    default_material_set: &Arc<vulkano::descriptor_set::DescriptorSet>,
+    material_cache: &std::collections::HashMap<String, Arc<vulkano::descriptor_set::DescriptorSet>>,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
@@ -63,18 +66,14 @@ pub fn prepare_mesh_data(
     for (entity, (_transform, mesh_renderer, skeleton)) in
         world.query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>().iter()
     {
-        if !mesh_renderer.visible {
+        if !mesh_renderer.visible || mesh_renderer.mesh_path.is_empty() {
             continue;
         }
 
-        let submesh_indices: &[usize] = if !mesh_renderer.mesh_path.is_empty() {
-            if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
-                indices
-            } else {
-                std::slice::from_ref(&mesh_renderer.mesh_index)
-            }
+        let submesh_indices: &[usize] = if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
+            indices
         } else {
-            std::slice::from_ref(&mesh_renderer.mesh_index)
+            continue;
         };
 
         let model_matrix = transform_cache.get_render(entity);
@@ -96,11 +95,18 @@ pub fn prepare_mesh_data(
             identity_set.clone()
         };
 
-        for &mesh_idx in submesh_indices {
+        for (sub_i, &mesh_idx) in submesh_indices.iter().enumerate() {
             if let Some(gpu_mesh) = meshes.get(mesh_idx) {
                 let local_aabb = Aabb::new(gpu_mesh.aabb_min, gpu_mesh.aabb_max);
                 let world_aabb = local_aabb.transformed(&glam_model);
                 let in_camera = camera_frustum.contains_aabb(world_aabb.min, world_aabb.max);
+
+                // Resolve material descriptor set from cache, falling back to default
+                let mat_set = mesh_renderer.material_paths
+                    .get(sub_i)
+                    .and_then(|p| if p.is_empty() { None } else { material_cache.get(p) })
+                    .cloned()
+                    .unwrap_or_else(|| default_material_set.clone());
 
                 let data = MeshRenderData {
                     vertex_buffer: gpu_mesh.vertex_buffer.clone(),
@@ -113,6 +119,7 @@ pub fn prepare_mesh_data(
                         view_projection: vp_array,
                     },
                     bone_palette_set: palette_set.clone(),
+                    material_descriptor_set: Some(mat_set),
                 };
 
                 // Shadow casters are not camera-frustum culled — an off-screen

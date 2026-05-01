@@ -10,11 +10,12 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 /// G-Buffer attachments
 pub struct GBuffer {
-    pub position: Arc<ImageView>, // RT0: RGB16F (world position)
-    pub normal: Arc<ImageView>,   // RT1: RGB16F (world normal)
-    pub albedo: Arc<ImageView>,   // RT2: RGBA8 (albedo + roughness)
-    pub material: Arc<ImageView>, // RT3: RGBA8 (metallic, AO, etc.)
-    pub depth: Arc<ImageView>,    // Depth buffer
+    pub position: Arc<ImageView>,  // RT0: RGB16F (world position)
+    pub normal: Arc<ImageView>,    // RT1: RGB16F (world normal)
+    pub albedo: Arc<ImageView>,    // RT2: RGBA8 (albedo + roughness)
+    pub material: Arc<ImageView>,  // RT3: RGBA8 (metallic, AO, etc.)
+    pub emissive: Arc<ImageView>,  // RT4: R11G11B10_UFLOAT (emissive)
+    pub depth: Arc<ImageView>,     // Depth buffer
     pub framebuffer: Arc<Framebuffer>,
     pub render_pass: Arc<RenderPass>,
 }
@@ -85,6 +86,20 @@ impl GBuffer {
         )?;
         let material = ImageView::new_default(material_image)?;
 
+        // Create emissive attachment (R11G11B10_UFLOAT)
+        let emissive_image = Image::new(
+            allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::B10G11R11_UFLOAT_PACK32,
+                extent: [width, height, 1],
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )?;
+        let emissive = ImageView::new_default(emissive_image)?;
+
         // Create depth attachment (D32F)
         let depth_image = Image::new(
             allocator.clone(),
@@ -108,6 +123,7 @@ impl GBuffer {
                     normal.clone(),
                     albedo.clone(),
                     material.clone(),
+                    emissive.clone(),
                     depth.clone(),
                 ],
                 ..Default::default()
@@ -119,6 +135,7 @@ impl GBuffer {
             normal,
             albedo,
             material,
+            emissive,
             depth,
             framebuffer,
             render_pass,
@@ -126,7 +143,7 @@ impl GBuffer {
     }
 }
 
-/// Create G-Buffer render pass with 4 color attachments + depth
+/// Create G-Buffer render pass with 5 color attachments + depth
 fn create_gbuffer_render_pass(
     device: Arc<Device>,
 ) -> Result<Arc<RenderPass>, Box<dyn std::error::Error>> {
@@ -177,7 +194,17 @@ fn create_gbuffer_render_pass(
             final_layout: vulkano::image::ImageLayout::ShaderReadOnlyOptimal,
             ..Default::default()
         },
-        // Attachment 4: Depth (D32F)
+        // Attachment 4: Emissive (R11G11B10)
+        AttachmentDescription {
+            format: Format::B10G11R11_UFLOAT_PACK32,
+            samples: SampleCount::Sample1,
+            load_op: AttachmentLoadOp::Clear,
+            store_op: AttachmentStoreOp::Store,
+            initial_layout: vulkano::image::ImageLayout::Undefined,
+            final_layout: vulkano::image::ImageLayout::ShaderReadOnlyOptimal,
+            ..Default::default()
+        },
+        // Attachment 5: Depth (D32F)
         // Use DepthStencilReadOnlyOptimal to allow sampling in subsequent passes (grid shader)
         AttachmentDescription {
             format: Format::D32_SFLOAT,
@@ -211,10 +238,15 @@ fn create_gbuffer_render_pass(
             layout: vulkano::image::ImageLayout::ColorAttachmentOptimal,
             ..Default::default()
         }),
+        Some(AttachmentReference {
+            attachment: 4,
+            layout: vulkano::image::ImageLayout::ColorAttachmentOptimal,
+            ..Default::default()
+        }),
     ];
 
     let depth_attachment_ref = Some(AttachmentReference {
-        attachment: 4,
+        attachment: 5,
         layout: vulkano::image::ImageLayout::DepthStencilAttachmentOptimal,
         ..Default::default()
     });

@@ -66,7 +66,7 @@ impl AssetType {
         if filename.ends_with(".scene.ron") {
             return AssetType::Scene;
         }
-        if filename.ends_with(".material.ron") {
+        if filename.ends_with(".material.ron") || filename.ends_with(".matinst.ron") {
             return AssetType::Material;
         }
         if filename.ends_with(".prefab.ron") {
@@ -116,7 +116,7 @@ impl AssetType {
             AssetType::Mesh => &["mesh"],
             AssetType::Animation => &["anim"],
             AssetType::Scene => &["scene.ron"],
-            AssetType::Material => &["material.ron"],
+            AssetType::Material => &["material.ron", "matinst.ron"],
             AssetType::Audio => &["wav", "ogg", "mp3", "flac"],
             AssetType::Shader => &["glsl", "vert", "frag", "comp", "spv"],
             AssetType::Prefab => &["prefab.ron"],

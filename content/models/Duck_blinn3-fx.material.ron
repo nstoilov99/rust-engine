@@ -1,0 +1,11 @@
+(
+    name: "blinn3-fx",
+    base_color_factor: (1.0, 1.0, 1.0, 1.0),
+    metallic_factor: 0.0,
+    roughness_factor: 1.0,
+    emissive_factor: (0.0, 0.0, 0.0),
+    albedo_texture: "Duck_blinn3-fx_albedo.png",
+    normal_texture: "",
+    metallic_roughness_texture: "",
+    ao_texture: "",
+)

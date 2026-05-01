@@ -146,6 +146,11 @@ impl MeshManager {
         self.path_index.get(path).map(|v| v.as_slice())
     }
 
+    /// Manually register a content-relative path → mesh index mapping.
+    pub fn register_path(&mut self, path: &str, indices: Vec<usize>) {
+        self.path_index.insert(path.to_string(), indices);
+    }
+
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
     }

@@ -27,6 +27,14 @@ pub enum ReloadEvent {
         path: String,
         error: String,
     },
+    /// A shader source file (.vert, .frag, .comp, .glsl) was modified.
+    ShaderChanged {
+        path: String,
+    },
+    /// A material instance definition (.matinst.ron) was modified.
+    MaterialInstanceChanged {
+        path: String,
+    },
 }
 
 /// Watches asset files and triggers hot-reload
@@ -64,6 +72,31 @@ impl HotReloadWatcher {
                             if let Some(path_str) = path.to_str() {
                                 // Normalize path separators to forward slashes
                                 let normalized_path = path_str.replace('\\', "/");
+
+                                // Shader source files trigger rebuild regardless of tracking
+                                {
+                                    let ext = Path::new(&normalized_path)
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .unwrap_or("")
+                                        .to_lowercase();
+                                    if matches!(ext.as_str(), "vert" | "frag" | "comp" | "glsl") {
+                                        let _ = reload_sender.send(ReloadEvent::ShaderChanged {
+                                            path: normalized_path.clone(),
+                                        });
+                                        continue;
+                                    }
+                                }
+
+                                // Material instance definitions trigger reload regardless of tracking
+                                if normalized_path.ends_with(".matinst.ron") {
+                                    let _ = reload_sender.send(
+                                        ReloadEvent::MaterialInstanceChanged {
+                                            path: normalized_path.clone(),
+                                        },
+                                    );
+                                    continue;
+                                }
 
                                 // Check if we're tracking this asset (check both absolute and relative paths)
                                 let watched = watched_paths.read();

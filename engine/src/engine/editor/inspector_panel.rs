@@ -943,6 +943,58 @@ impl InspectorPanel {
                         .on_hover_text("Whether this mesh casts shadows");
                     ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
                         .on_hover_text("Whether this mesh receives shadows from other objects");
+
+                    // --- Material Instance Overrides ---
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(RichText::new("Material Overrides").strong());
+
+                    // Base Color
+                    ui.horizontal(|ui| {
+                        ui.label("Base Color:");
+                        let mut color3 = [
+                            renderer.base_color_factor[0],
+                            renderer.base_color_factor[1],
+                            renderer.base_color_factor[2],
+                        ];
+                        if ui.color_edit_button_rgb(&mut color3).changed() {
+                            renderer.base_color_factor[0] = color3[0];
+                            renderer.base_color_factor[1] = color3[1];
+                            renderer.base_color_factor[2] = color3[2];
+                        }
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut renderer.base_color_factor[3], 0.0..=1.0)
+                            .text("Alpha"),
+                    );
+
+                    ui.add(
+                        egui::Slider::new(&mut renderer.metallic_factor, 0.0..=1.0)
+                            .text("Metallic"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut renderer.roughness_factor, 0.0..=1.0)
+                            .text("Roughness"),
+                    );
+
+                    // Emissive
+                    ui.horizontal(|ui| {
+                        ui.label("Emissive:");
+                        let mut em = renderer.emissive_factor;
+                        let mut changed = false;
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[0]).speed(0.01).range(0.0..=10.0).prefix("R: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[1]).speed(0.01).range(0.0..=10.0).prefix("G: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[2]).speed(0.01).range(0.0..=10.0).prefix("B: "))
+                            .changed();
+                        if changed {
+                            renderer.emissive_factor = em;
+                        }
+                    });
                 });
 
             // Context menu for component removal
@@ -975,7 +1027,7 @@ impl InspectorPanel {
         path: &mut String,
         allowed_types: &[AssetType],
         asset_browser: &mut AssetBrowserPanel,
-        legacy_index: usize,
+        _legacy_index: usize,
     ) {
         let slot_size: f32 = 90.0;
         let thumb_size: f32 = slot_size - 8.0;
@@ -983,7 +1035,7 @@ impl InspectorPanel {
 
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(slot_width, slot_size),
-            egui::Sense::hover(),
+            egui::Sense::click(),
         );
 
         // Check for DnD hover
@@ -1005,6 +1057,9 @@ impl InspectorPanel {
             }
         }
 
+        // Popup ID for asset picker
+        let popup_id = ui.id().with(id_salt).with("asset_picker_popup");
+
         // Use a child UI constrained to the slot rect for proper clipping and layout
         let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
 
@@ -1013,6 +1068,8 @@ impl InspectorPanel {
         // Background
         let bg_color = if is_valid_hover {
             Color32::from_rgba_premultiplied(40, 60, 90, 255)
+        } else if response.hovered() {
+            Color32::from_gray(45)
         } else {
             Color32::from_gray(35)
         };
@@ -1021,6 +1078,8 @@ impl InspectorPanel {
         // Border
         let border_color = if is_valid_hover {
             Color32::from_rgb(100, 180, 255)
+        } else if response.hovered() {
+            Color32::from_gray(100)
         } else {
             Color32::from_gray(60)
         };
@@ -1032,15 +1091,11 @@ impl InspectorPanel {
         );
 
         if path.is_empty() {
-            // Empty slot — centered wrapped text
-            let hint = if legacy_index > 0 {
-                format!("Index: {} (legacy, drag to replace)", legacy_index)
-            } else {
-                let type_names: Vec<&str> =
-                    allowed_types.iter().map(|t| t.display_name()).collect();
-                format!("Drop {} here", type_names.join("/"))
-            };
-            let text_color = Color32::from_gray(if legacy_index > 0 { 140 } else { 120 });
+            // Empty slot — click prompt
+            let type_names: Vec<&str> =
+                allowed_types.iter().map(|t| t.display_name()).collect();
+            let hint = format!("Click to select\n{}", type_names.join("/"));
+            let text_color = Color32::from_gray(120);
             let inner = rect.shrink(6.0);
             slot_ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.vertical_centered(|ui| {
@@ -1068,6 +1123,18 @@ impl InspectorPanel {
                 } else {
                     painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
                 }
+            } else if path.starts_with("__primitive__/") {
+                // Primitive mesh — use GPU-rendered thumbnail
+                if let Some(tex_id) = asset_browser.thumbnails.get_primitive_texture_id(ui.ctx(), path) {
+                    painter.image(
+                        tex_id,
+                        thumb_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
+                }
             } else {
                 painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
             }
@@ -1083,7 +1150,8 @@ impl InspectorPanel {
                 thumb_rect.max,
             );
             painter.rect_filled(text_bg, 0.0, Color32::from_black_alpha(160));
-            painter.text(
+            let clipped = painter.with_clip_rect(thumb_rect);
+            clipped.text(
                 egui::pos2(thumb_rect.center().x, thumb_rect.max.y - 4.0),
                 egui::Align2::CENTER_BOTTOM,
                 &filename,
@@ -1118,6 +1186,224 @@ impl InspectorPanel {
                 *path = String::new();
             }
         }
+
+        // Asset picker popup — uses egui's built-in toggle + close-on-click-outside
+        egui::Popup::from_toggle_button_response(&response)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(300.0)
+            .show(|ui| {
+                ui.set_max_height(350.0);
+
+                // Search bar
+                let search_id = popup_id.with("search_text");
+                let mut search_text: String = ui.data_mut(|d| {
+                    d.get_temp_mut_or_default::<String>(search_id).clone()
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    let te = ui.text_edit_singleline(&mut search_text);
+                    if te.changed() {
+                        ui.data_mut(|d| {
+                            *d.get_temp_mut_or_default::<String>(search_id) = search_text.clone();
+                        });
+                    }
+                    // Auto-focus search on open
+                    if !te.has_focus() {
+                        te.request_focus();
+                    }
+                });
+
+                ui.separator();
+
+                // Collect matching assets
+                let search_lower = search_text.to_lowercase();
+                let include_meshes = allowed_types.contains(&AssetType::Mesh)
+                    || allowed_types.contains(&AssetType::Model);
+
+                ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    let item_w = 60.0;
+                    let label_h = 16.0;
+                    let item_h = item_w + label_h;
+                    let cols = ((ui.available_width()) / (item_w + 4.0)).floor().max(1.0) as usize;
+
+                    // Primitives section (only for mesh slots)
+                    if include_meshes {
+                        use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+                        let matching_prims: Vec<&str> = PRIMITIVE_PATHS
+                            .iter()
+                            .filter(|p| {
+                                search_text.is_empty()
+                                    || p.to_lowercase().contains(&search_lower)
+                            })
+                            .copied()
+                            .collect();
+
+                        if !matching_prims.is_empty() {
+                            ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
+                            ui.add_space(2.0);
+                            egui::Grid::new(popup_id.with("prims_grid"))
+                                .spacing(egui::vec2(4.0, 4.0))
+                                .show(ui, |ui| {
+                                    for (i, &prim_path) in matching_prims.iter().enumerate() {
+                                        let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
+                                        let is_selected = path.as_str() == prim_path;
+
+                                        let (item_rect, item_resp) = ui.allocate_exact_size(
+                                            egui::vec2(item_w, item_h),
+                                            egui::Sense::click(),
+                                        );
+
+                                        let bg = if is_selected {
+                                            Color32::from_rgb(40, 60, 100)
+                                        } else if item_resp.hovered() {
+                                            Color32::from_gray(55)
+                                        } else {
+                                            Color32::from_gray(40)
+                                        };
+                                        ui.painter().rect_filled(item_rect, 3.0, bg);
+                                        // 3D thumbnail (same as asset thumbnails)
+                                        let thumb_bottom = item_rect.max.y - label_h;
+                                        let thumb_r = egui::Rect::from_min_max(
+                                            item_rect.min,
+                                            egui::pos2(item_rect.max.x, thumb_bottom),
+                                        );
+                                        if let Some(tex_id) = asset_browser
+                                            .thumbnails
+                                            .get_primitive_texture_id(ui.ctx(), prim_path)
+                                        {
+                                            ui.painter().image(
+                                                tex_id,
+                                                thumb_r,
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(0.0, 0.0),
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                Color32::WHITE,
+                                            );
+                                        }
+                                        // Label (clipped to item rect)
+                                        let clipped = ui.painter().with_clip_rect(item_rect);
+                                        clipped.text(
+                                            egui::pos2(item_rect.center().x, item_rect.max.y - 3.0),
+                                            egui::Align2::CENTER_BOTTOM,
+                                            label,
+                                            egui::FontId::proportional(10.0),
+                                            Color32::from_gray(200),
+                                        );
+
+                                        if item_resp.clicked() {
+                                            *path = prim_path.to_string();
+                                            ui.close();
+                                        }
+
+                                        if (i + 1) % cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
+                        }
+                    }
+
+                    // Registry assets section
+                    let filter = super::asset_browser::AssetFilter {
+                        search_text: if search_text.is_empty() {
+                            None
+                        } else {
+                            Some(search_text.clone())
+                        },
+                        asset_types: Some(allowed_types.to_vec()),
+                        include_subfolders: true,
+                        ..Default::default()
+                    };
+                    let results = asset_browser.registry.query(&filter);
+
+                    if results.is_empty() && !include_meshes {
+                        ui.label(
+                            RichText::new("No assets found")
+                                .color(Color32::from_gray(100)),
+                        );
+                    } else if !results.is_empty() {
+                        ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
+                        ui.add_space(2.0);
+                        egui::Grid::new(popup_id.with("assets_grid"))
+                            .spacing(egui::vec2(4.0, 4.0))
+                            .show(ui, |ui| {
+                                for (i, meta) in results.iter().enumerate() {
+                                    let asset_path =
+                                        meta.path.to_string_lossy().to_string();
+                                    let display = &meta.display_name;
+                                    let is_selected = path.as_str() == asset_path;
+
+                                    let (item_rect, item_resp) = ui.allocate_exact_size(
+                                        egui::vec2(item_w, item_h),
+                                        egui::Sense::click(),
+                                    );
+
+                                    let bg = if is_selected {
+                                        Color32::from_rgb(40, 60, 100)
+                                    } else if item_resp.hovered() {
+                                        Color32::from_gray(55)
+                                    } else {
+                                        Color32::from_gray(40)
+                                    };
+                                    ui.painter().rect_filled(item_rect, 3.0, bg);
+
+                                    // Square thumbnail area above the label
+                                    let thumb_r = egui::Rect::from_min_size(
+                                        item_rect.min + egui::vec2(4.0, 4.0),
+                                        egui::vec2(item_w - 8.0, item_w - 8.0),
+                                    );
+                                    if let Some(tex_id) = asset_browser
+                                        .thumbnails
+                                        .get_texture_id(ui.ctx(), meta)
+                                    {
+                                        ui.painter().image(
+                                            tex_id,
+                                            thumb_r,
+                                            egui::Rect::from_min_max(
+                                                egui::Pos2::ZERO,
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            thumb_r,
+                                            2.0,
+                                            Color32::from_gray(50),
+                                        );
+                                    }
+
+                                    // Label (clipped to item rect)
+                                    let clipped = ui.painter().with_clip_rect(item_rect);
+                                    clipped.text(
+                                        egui::pos2(
+                                            item_rect.center().x,
+                                            item_rect.max.y - 3.0,
+                                        ),
+                                        egui::Align2::CENTER_BOTTOM,
+                                        display,
+                                        egui::FontId::proportional(9.0),
+                                        Color32::from_gray(200),
+                                    );
+
+                                    if item_resp.clicked() {
+                                        *path = asset_path;
+                                        ui.close();
+                                    }
+
+                                    if (i + 1) % cols == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    }
+                });
+            });
     }
 
     /// Edit DirectionalLight component

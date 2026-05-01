@@ -60,6 +60,10 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
             visible: mesh_renderer.visible,
             cast_shadows: mesh_renderer.cast_shadows,
             receive_shadows: mesh_renderer.receive_shadows,
+            base_color_factor: mesh_renderer.base_color_factor,
+            metallic_factor: mesh_renderer.metallic_factor,
+            roughness_factor: mesh_renderer.roughness_factor,
+            emissive_factor: mesh_renderer.emissive_factor,
         });
     }
 
@@ -434,6 +438,10 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                 visible,
                 cast_shadows,
                 receive_shadows,
+                base_color_factor,
+                metallic_factor,
+                roughness_factor,
+                emissive_factor,
             } => {
                 let mut mr = MeshRenderer {
                     mesh_path: mesh_path.clone(),
@@ -444,6 +452,10 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     visible: *visible,
                     cast_shadows: *cast_shadows,
                     receive_shadows: *receive_shadows,
+                    base_color_factor: *base_color_factor,
+                    metallic_factor: *metallic_factor,
+                    roughness_factor: *roughness_factor,
+                    emissive_factor: *emissive_factor,
                 };
                 mr.migrate_legacy_material_path();
                 builder.add(mr);

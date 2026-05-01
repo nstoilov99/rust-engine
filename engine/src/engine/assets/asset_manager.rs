@@ -92,11 +92,24 @@ impl AssetManager {
         self.load_model_gpu(&relative)
     }
 
-    /// Upload procedural geometry to GPU, returns mesh index
+    /// Upload procedural geometry to GPU, returns mesh index.
+    ///
+    /// If `name` is provided, the mesh is registered under that path so
+    /// `MeshRenderer.mesh_path` can reference it (e.g. `"__primitive__/Cube"`).
     pub fn upload_procedural_mesh(
         &self,
         vertices: &[Vertex3D],
         indices: &[u32],
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        self.upload_procedural_mesh_named(vertices, indices, None)
+    }
+
+    /// Upload procedural geometry with an optional content-relative name.
+    pub fn upload_procedural_mesh_named(
+        &self,
+        vertices: &[Vertex3D],
+        indices: &[u32],
+        name: Option<&str>,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         crate::profile_scope!("upload_procedural_mesh");
 
@@ -122,6 +135,11 @@ impl AssetManager {
         )?;
         let index = meshes.meshes.len();
         meshes.meshes.push(gpu_mesh);
+
+        if let Some(path) = name {
+            meshes.register_path(path, vec![index]);
+        }
+
         Ok(index)
     }
 

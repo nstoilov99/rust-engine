@@ -94,6 +94,8 @@ fn build_model_from_fbx(
         let base_color = &pbr.base_color;
         let color = base_color.value_vec4;
 
+        let emissive = &pbr.emission_color;
+        let emissive_val = emissive.value_vec4;
         model.materials.push(ImportedMaterial {
             name: mat.element.name.to_string(),
             albedo: None, // Texture loading deferred to future phases
@@ -103,6 +105,7 @@ fn build_model_from_fbx(
             base_color_factor: [color.x as f32, color.y as f32, color.z as f32, color.w as f32],
             metallic_factor: pbr.metalness.value_vec4.x as f32,
             roughness_factor: pbr.roughness.value_vec4.x as f32,
+            emissive_factor: [emissive_val.x as f32, emissive_val.y as f32, emissive_val.z as f32],
         });
     }
 

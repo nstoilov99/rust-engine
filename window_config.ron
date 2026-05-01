@@ -3,6 +3,7 @@
     height: 1369,
     x: -8,
     y: -8,
-    maximized: false,
+    maximized: true,
     fullscreen: false,
+    vsync: Off,
 )

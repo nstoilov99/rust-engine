@@ -1,20 +1,20 @@
 use crate::engine::rendering::rendering_3d::material::*;
-use crate::engine::rendering::rendering_3d::pipeline_3d::create_pbr_material_descriptor_set;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use glam::{Mat4, Quat, Vec3};
 use gltf;
 use std::collections::HashMap;
 use std::sync::Arc;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::device::Device;
+use vulkano::device::{Device, Queue};
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
-use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::PipelineLayout;
 
 use super::model_loader::{
-    calculate_tangents_safe, compute_bounding_sphere, AnimationChannel, BoneData, LoadedMesh,
-    Model, RawAnimationClip, VertexBoneData,
+    calculate_tangents_safe, compute_bounding_sphere, AnimationChannel, BoneData, ImportedMaterial,
+    LoadedMesh, Model, RawAnimationClip, VertexBoneData,
 };
 
 /// Result type for GLTF loading operations.
@@ -186,6 +186,49 @@ fn build_model(
         };
 
         model.textures.push(rgba_image);
+    }
+
+    // Extract materials (PBR factors + texture references from the already-decoded images)
+    for material in document.materials() {
+        let pbr = material.pbr_metallic_roughness();
+        let base_color_factor = pbr.base_color_factor();
+        let metallic_factor = pbr.metallic_factor();
+        let roughness_factor = pbr.roughness_factor();
+        let emissive_factor = material.emissive_factor();
+
+        let albedo = pbr
+            .base_color_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let normal = material
+            .normal_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let metallic_roughness = pbr
+            .metallic_roughness_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+        let ao = material
+            .occlusion_texture()
+            .and_then(|info| model.textures.get(info.texture().source().index()))
+            .cloned();
+
+        let name = material
+            .name()
+            .unwrap_or("Unnamed")
+            .to_string();
+
+        model.materials.push(ImportedMaterial {
+            name,
+            albedo,
+            normal,
+            metallic_roughness,
+            ao,
+            base_color_factor,
+            metallic_factor,
+            roughness_factor,
+            emissive_factor,
+        });
     }
 
     // Extract skeleton from first skin
@@ -563,8 +606,10 @@ pub fn extract_material_from_gltf(
     material_index: usize,
     device: Arc<Device>,
     allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    pipeline: Arc<GraphicsPipeline>,
+    geom_pipeline_layout: Arc<PipelineLayout>,
     sampler: Arc<Sampler>,
 ) -> Result<PbrMaterial, Box<dyn std::error::Error>> {
     let material = document
@@ -578,60 +623,57 @@ pub fn extract_material_from_gltf(
     let albedo_view = if let Some(info) = pbr.base_color_texture() {
         let texture = info.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        // Default white texture
-        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
+        create_default_texture(device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA)?
     };
 
     // Extract normal map
     let normal_view = if let Some(normal_texture) = material.normal_texture() {
         let texture = normal_texture.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        // Default normal map (pointing up: 128, 128, 255)
-        create_default_texture(device.clone(), allocator.clone(), [128, 128, 255, 255])?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
     // Extract metallic-roughness map
     let metallic_roughness_view = if let Some(info) = pbr.metallic_roughness_texture() {
         let texture = info.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        // Default: non-metallic (B=0), half-rough (G=128)
-        create_default_texture(device.clone(), allocator.clone(), [0, 128, 0, 255])?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
     // Extract ambient occlusion map
     let ao_view = if let Some(ao_texture) = material.occlusion_texture() {
         let texture = ao_texture.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone())?
+        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
     } else {
-        // Default: no occlusion (white = 255)
-        create_default_texture(device.clone(), allocator.clone(), [255, 255, 255, 255])?
+        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
     };
 
-    // Create descriptor set
-    let descriptor_set = create_pbr_material_descriptor_set(
-        descriptor_set_allocator,
-        pipeline,
-        albedo_view.clone(),
-        normal_view.clone(),
-        metallic_roughness_view.clone(),
-        ao_view.clone(),
-        sampler,
-    )?;
+    let base_color = pbr.base_color_factor();
+    let metallic = pbr.metallic_factor();
+    let roughness = pbr.roughness_factor();
+    let emissive = material.emissive_factor();
 
-    Ok(PbrMaterial::new(
+    PbrMaterial::new(
         albedo_view,
         normal_view,
         metallic_roughness_view,
         ao_view,
-        descriptor_set,
-    ))
+        sampler,
+        base_color,
+        metallic,
+        roughness,
+        emissive,
+        allocator,
+        descriptor_set_allocator,
+        geom_pipeline_layout,
+    )
 }
 
 /// Helper: Load GLTF image data to Vulkan texture
@@ -639,6 +681,8 @@ fn load_gltf_image(
     _image_data: &gltf::image::Data,
     device: Arc<Device>,
     allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    queue: Arc<Queue>,
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
     // Convert GLTF image format to Vulkan format
     // TODO: Implement texture upload from image_data.pixels
@@ -646,6 +690,8 @@ fn load_gltf_image(
     create_default_texture(
         device,
         allocator,
+        command_buffer_allocator,
+        queue,
         [255, 0, 255, 255], // Magenta = "texture not loaded"
     )
 }

@@ -122,6 +122,8 @@ pub struct MaterialDefinition {
     pub base_color_factor: [f32; 4],
     pub metallic_factor: f32,
     pub roughness_factor: f32,
+    #[serde(default)]
+    pub emissive_factor: [f32; 3],
     pub albedo_texture: String,
     pub normal_texture: String,
     pub metallic_roughness_texture: String,
@@ -224,7 +226,7 @@ pub fn import_model_to_mesh(
 
     let meta = MeshImportMeta {
         source: source_path.to_string_lossy().to_string(),
-        settings: settings.clone(),
+        settings: effective_settings.clone(),
         source_hash,
         material_slots,
     };
@@ -315,7 +317,11 @@ pub fn apply_import_settings(model: &mut Model, settings: &MeshImportSettings) {
         let inv_transform = transform.inverse();
 
         for bone in &mut model.bones {
-            bone.inverse_bind_matrix *= inv_transform;
+            // Similarity transform: ibm' = transform * ibm * inv_transform
+            // This ensures palette' * pos' = S * palette * pos (correctly scaled skinning).
+            // A simple right-multiply (ibm *= inv_transform) breaks because uniform scale
+            // doesn't commute with the translation component of affine transforms.
+            bone.inverse_bind_matrix = transform * bone.inverse_bind_matrix * inv_transform;
         }
     }
 
@@ -495,9 +501,13 @@ fn write_material(buf: &mut Vec<u8>, mat: &ImportedMaterial) {
 
 /// Load a `Model` from a `.mesh` binary file on disk.
 ///
-/// Automatically detects and undoes double axis conversion caused by
-/// FBX/glTF sources imported with `up_axis: ZUp` (the loader already
-/// converts to Y-up, so the import settings conversion was redundant).
+/// The render pipeline expects vertex data in Y-up (render space), which
+/// matches what FBX/glTF loaders produce.  The model matrix handles the
+/// Z-up game-space → Y-up conversion via `C * M_zup * C_inv`.
+///
+/// The only case requiring correction is when an FBX/glTF source was
+/// imported with `up_axis: ZUp` — the import applied a redundant Z-up
+/// conversion on top of the loader's Y-up output.  We undo that here.
 pub fn load_mesh_binary(path: &Path) -> Result<Model, Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     let mut model = load_mesh_binary_from_bytes(&data, path.to_string_lossy().as_ref())?;
@@ -567,15 +577,15 @@ fn undo_double_axis_conversion(model: &mut Model) {
 
     // Undo bone inverse bind matrices
     if !model.bones.is_empty() {
-        // The forward conversion applied: ibm *= inv_transform
-        // where transform = axis_mat. So: ibm_stored = ibm_original * axis_mat.inverse()
-        // Undo: ibm_original = ibm_stored * axis_mat
+        // Forward applied similarity transform: ibm' = transform * ibm * inv_transform
+        // Undo: ibm = inv_transform * ibm' * transform
         let axis_mat = Mat4::from_cols_array(&[
             1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             1.0,
         ]);
+        let inv_axis = axis_mat.inverse();
         for bone in &mut model.bones {
-            bone.inverse_bind_matrix *= axis_mat;
+            bone.inverse_bind_matrix = inv_axis * bone.inverse_bind_matrix * axis_mat;
         }
     }
 
@@ -952,6 +962,7 @@ fn read_material(
             base_color_factor,
             metallic_factor,
             roughness_factor,
+            emissive_factor: [0.0, 0.0, 0.0], // Not in binary format; default to zero
         },
         cursor,
     ))
@@ -1069,6 +1080,7 @@ fn export_materials(
             base_color_factor: mat.base_color_factor,
             metallic_factor: mat.metallic_factor,
             roughness_factor: mat.roughness_factor,
+            emissive_factor: mat.emissive_factor,
             albedo_texture: albedo_file,
             normal_texture: normal_file,
             metallic_roughness_texture: mr_file,
@@ -1580,5 +1592,49 @@ mod tests {
         assert!(!s.flip_uvs);
         assert_eq!(s.up_axis, UpAxis::YUp);
         assert!(s.import_animations);
+    }
+
+    #[test]
+    fn material_definition_emissive_default() {
+        // Legacy .material.ron without emissive_factor should deserialize with zeros
+        let ron_str = r#"(
+            name: "LegacyMat",
+            base_color_factor: (1.0, 0.5, 0.25, 1.0),
+            metallic_factor: 0.0,
+            roughness_factor: 0.5,
+            albedo_texture: "",
+            normal_texture: "",
+            metallic_roughness_texture: "",
+            ao_texture: "",
+        )"#;
+
+        let def: MaterialDefinition = ron::from_str(ron_str).expect("deserialize legacy");
+        assert_eq!(def.emissive_factor, [0.0, 0.0, 0.0]);
+
+        // Re-serialize should include emissive_factor
+        let serialized = ron::to_string(&def).expect("serialize");
+        assert!(
+            serialized.contains("emissive_factor"),
+            "re-serialized output should contain emissive_factor"
+        );
+    }
+
+    #[test]
+    fn material_definition_emissive_roundtrip() {
+        let def = MaterialDefinition {
+            name: "Emissive".to_string(),
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 0.0,
+            roughness_factor: 0.5,
+            emissive_factor: [3.0, 0.0, 0.0],
+            albedo_texture: String::new(),
+            normal_texture: String::new(),
+            metallic_roughness_texture: String::new(),
+            ao_texture: String::new(),
+        };
+
+        let serialized = ron::to_string(&def).expect("serialize");
+        let deserialized: MaterialDefinition = ron::from_str(&serialized).expect("deserialize");
+        assert_eq!(deserialized.emissive_factor, [3.0, 0.0, 0.0]);
     }
 }

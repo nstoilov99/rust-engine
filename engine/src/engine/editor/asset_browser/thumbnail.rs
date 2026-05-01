@@ -120,6 +120,37 @@ impl ThumbnailCache {
         self.placeholder.as_ref().map(|t| t.id())
     }
 
+    /// Get or request thumbnail for a built-in primitive mesh (Cube, Sphere, Plane).
+    ///
+    /// Uses deterministic `AssetId` derived from the primitive path so thumbnails
+    /// are generated once and cached for the session lifetime.
+    pub fn get_primitive_texture_id(&mut self, ctx: &Context, prim_path: &str) -> Option<TextureId> {
+        self.ensure_placeholders(ctx);
+
+        let id = AssetId::from_path(prim_path);
+
+        if let Some(entry) = self.cache.get(&id) {
+            return Some(entry.texture.id());
+        }
+
+        if self.pending.contains(&id) {
+            return self.placeholder.as_ref().map(|t| t.id());
+        }
+
+        if let Some(tx) = &self.request_tx {
+            let request = ThumbnailRequest {
+                id,
+                path: PathBuf::from(prim_path),
+                asset_type: AssetType::Mesh,
+            };
+            if tx.send(request).is_ok() {
+                self.pending.insert(id);
+            }
+        }
+
+        self.placeholder.as_ref().map(|t| t.id())
+    }
+
     /// Request thumbnail generation
     fn request_thumbnail(&mut self, asset: &AssetMetadata) {
         if !asset.asset_type.has_thumbnail() {
@@ -225,6 +256,12 @@ fn generate_thumbnail(
     gpu_ctx: &Option<super::thumbnail_renderer::GpuThumbnailContext>,
     renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
 ) -> ThumbnailResult {
+    // Handle built-in primitives (paths like "__primitive__/Cube")
+    let path_str = request.path.to_string_lossy();
+    if path_str.starts_with("__primitive__/") {
+        return generate_primitive_thumbnail(request.id, &path_str, gpu_ctx, renderer);
+    }
+
     let full_path = assets_root.join(&request.path);
 
     match request.asset_type {
@@ -241,6 +278,62 @@ fn generate_thumbnail(
             image_data: None,
         },
     }
+}
+
+/// Generate a 3D thumbnail for a built-in primitive mesh.
+fn generate_primitive_thumbnail(
+    id: AssetId,
+    prim_path: &str,
+    gpu_ctx: &Option<super::thumbnail_renderer::GpuThumbnailContext>,
+    renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
+) -> ThumbnailResult {
+    use crate::engine::assets::model_loader::{compute_bounding_sphere, LoadedMesh, Model};
+    use crate::engine::rendering::rendering_3d::mesh::{
+        create_cube, create_plane, create_sphere, PRIMITIVE_CUBE, PRIMITIVE_PLANE,
+        PRIMITIVE_SPHERE,
+    };
+
+    let (vertices, indices) = match prim_path {
+        PRIMITIVE_CUBE => create_cube(),
+        PRIMITIVE_SPHERE => create_sphere(32, 16),
+        PRIMITIVE_PLANE => create_plane(1.0),
+        _ => {
+            return ThumbnailResult {
+                id,
+                image_data: None,
+            };
+        }
+    };
+
+    let (center, radius) = compute_bounding_sphere(&vertices);
+    let (mut aabb_min, mut aabb_max) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+    for v in &vertices {
+        let p = glam::Vec3::from(v.position);
+        aabb_min = aabb_min.min(p);
+        aabb_max = aabb_max.max(p);
+    }
+
+    let mesh = LoadedMesh {
+        vertices,
+        indices,
+        material_index: None,
+        center,
+        radius,
+        aabb_min,
+        aabb_max,
+        skinning: None,
+    };
+
+    let model = Model {
+        meshes: vec![mesh],
+        name: prim_path.to_string(),
+        textures: Vec::new(),
+        materials: Vec::new(),
+        bones: Vec::new(),
+        animations: Vec::new(),
+    };
+
+    generate_model_from_loaded(id, model, gpu_ctx, renderer)
 }
 
 /// Generate thumbnail for a texture asset

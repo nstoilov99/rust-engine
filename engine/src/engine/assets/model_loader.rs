@@ -73,6 +73,8 @@ pub struct ImportedMaterial {
     pub metallic_factor: f32,
     /// Roughness factor [0..1].
     pub roughness_factor: f32,
+    /// Emissive factor (linear RGB).
+    pub emissive_factor: [f32; 3],
 }
 
 impl Default for ImportedMaterial {
@@ -86,6 +88,7 @@ impl Default for ImportedMaterial {
             base_color_factor: [1.0, 1.0, 1.0, 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.5,
+            emissive_factor: [0.0, 0.0, 0.0],
         }
     }
 }

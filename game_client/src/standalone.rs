@@ -47,6 +47,7 @@ pub struct StandaloneApp {
     pub _camera_distance: f32,
     pub _mesh_indices: Vec<usize>,
     pub _descriptor_set: Arc<DescriptorSet>,
+    default_material_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
     plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
@@ -133,9 +134,10 @@ impl StandaloneApp {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        // Create a temporary DeferredRenderer to extract the geometry pipeline for SkinningBackend.
-        // The render thread creates its own DeferredRenderer for actual rendering.
-        let geometry_pipeline = {
+        // Create a temporary DeferredRenderer to extract the geometry pipeline for SkinningBackend
+        // and the default material descriptor set. The render thread creates its own
+        // DeferredRenderer for actual rendering.
+        let (geometry_pipeline, default_material_set) = {
             let tmp = DeferredRenderer::new(
                 renderer.gpu.device.clone(),
                 renderer.gpu.queue.clone(),
@@ -145,7 +147,7 @@ impl StandaloneApp {
                 width,
                 height,
             )?;
-            tmp.geometry_pipeline()
+            (tmp.geometry_pipeline(), tmp.default_material_set().clone())
         };
 
         let skinning = SkinningBackend::new(
@@ -259,6 +261,7 @@ impl StandaloneApp {
             _camera_distance: 5.0,
             _mesh_indices: mesh_indices,
             _descriptor_set: descriptor_set,
+            default_material_set,
             mesh_data_buffer: Vec::with_capacity(64),
             shadow_caster_buffer: Vec::with_capacity(64),
             plankton_emitter_buffer: Vec::with_capacity(32),
@@ -402,6 +405,7 @@ impl StandaloneApp {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
+        let empty_mat_cache = std::collections::HashMap::new();
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
@@ -410,6 +414,8 @@ impl StandaloneApp {
             &mut self.shadow_caster_buffer,
             tc,
             &self.skinning,
+            &self.default_material_set,
+            &empty_mat_cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
