@@ -25,9 +25,9 @@ use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
     CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
-    EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
-    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
-    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
+    EditorServices, EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel,
+    IconManager, ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor,
+    InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
     PendingWindowRequest, ProfilerPanel, RenameTarget, SecondaryWindowKind, Selection,
     ViewportSettings, ViewportTexture, WindowConfig,
 };
@@ -178,6 +178,7 @@ pub struct PlayModeState {
 
 /// Editor-specific state, decomposed into semantic sub-structures.
 pub struct EditorApp {
+    pub services: EditorServices,
     pub viewport: ViewportState,
     pub console: ConsoleState,
     pub scene: SceneEditorState,
@@ -449,6 +450,7 @@ impl App {
         }
 
         let editor = EditorApp {
+            services: EditorServices::new(),
             viewport: ViewportState {
                 texture: viewport_texture,
                 texture_id: None,
@@ -1324,6 +1326,13 @@ impl App {
                 .ui
                 .icon_manager
                 .load_asset_browser_icons(self.editor.ui.gui.context(), engine_path);
+            // Load editor icon registry and install theme + icons into egui context
+            self.editor
+                .services
+                .load_icons(self.editor.ui.gui.context());
+            self.editor
+                .services
+                .install_into_context(self.editor.ui.gui.context());
             self.editor.ui.icons_loaded = true;
         }
 
@@ -1495,6 +1504,7 @@ impl App {
             .resource::<InputSubsystem>()
             .map(|s| s.action_set.clone());
 
+        let services = &mut self.editor.services;
         let show_profiler = &mut self.editor.ui.show_profiler;
         let hierarchy_panel = &mut self.editor.scene.hierarchy_panel;
         let inspector_panel = &mut self.editor.scene.inspector_panel;
@@ -1558,6 +1568,7 @@ impl App {
                     );
 
                     let editor_ctx = EditorContext {
+                        services,
                         world,
                         selection,
                         hierarchy_panel,

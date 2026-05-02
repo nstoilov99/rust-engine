@@ -12,6 +12,7 @@ use super::{
     input_context_editor::{InputContextEditor, InputContextEditorState},
     menu_bar::MenuAction,
     profiler::ProfilerPanel,
+    services::EditorServices,
     viewport::{
         render_viewport_toolbar_overlay, CameraControlMode, EditorCamera, GizmoHandler,
         GizmoInteractionResult, ToolMode, ViewportSettings,
@@ -27,6 +28,7 @@ use hecs::World;
 
 /// Context passed to tab viewer for rendering panels
 pub struct EditorContext<'a> {
+    pub services: &'a mut EditorServices,
     pub world: &'a mut World,
     pub selection: &'a mut Selection,
     pub hierarchy_panel: &'a mut HierarchyPanel,
