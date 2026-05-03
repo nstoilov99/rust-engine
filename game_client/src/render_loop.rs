@@ -30,22 +30,6 @@ use vulkano::{Validated, VulkanError};
 /// Result type for swapchain image acquisition.
 type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError>;
 
-pub fn material_override_cache_key(material_path: &str, renderer: &MeshRenderer) -> String {
-    format!(
-        "{}|bc:{:08x}:{:08x}:{:08x}:{:08x}|m:{:08x}|r:{:08x}|e:{:08x}:{:08x}:{:08x}",
-        material_path,
-        renderer.base_color_factor[0].to_bits(),
-        renderer.base_color_factor[1].to_bits(),
-        renderer.base_color_factor[2].to_bits(),
-        renderer.base_color_factor[3].to_bits(),
-        renderer.metallic_factor.to_bits(),
-        renderer.roughness_factor.to_bits(),
-        renderer.emissive_factor[0].to_bits(),
-        renderer.emissive_factor[1].to_bits(),
-        renderer.emissive_factor[2].to_bits(),
-    )
-}
-
 /// Prepare mesh render data from ECS world into a reusable buffer.
 ///
 /// Reads pre-computed transforms from `transform_cache` (populated by
@@ -62,7 +46,6 @@ pub fn prepare_mesh_data(
     skinning: &SkinningBackend,
     default_material_set: &Arc<vulkano::descriptor_set::DescriptorSet>,
     material_cache: &std::collections::HashMap<String, Arc<vulkano::descriptor_set::DescriptorSet>>,
-    material_override_cache: &std::collections::HashMap<String, Arc<vulkano::descriptor_set::DescriptorSet>>,
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
@@ -121,15 +104,7 @@ pub fn prepare_mesh_data(
                 // Resolve material descriptor set from cache, falling back to default
                 let mat_set = mesh_renderer.material_paths
                     .get(sub_i)
-                    .and_then(|p| {
-                        if p.is_empty() {
-                            None
-                        } else {
-                            material_override_cache
-                                .get(&material_override_cache_key(p, mesh_renderer))
-                                .or_else(|| material_cache.get(p))
-                        }
-                    })
+                    .and_then(|p| if p.is_empty() { None } else { material_cache.get(p) })
                     .cloned()
                     .unwrap_or_else(|| default_material_set.clone());
 

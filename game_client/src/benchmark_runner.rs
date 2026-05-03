@@ -348,7 +348,6 @@ impl BenchmarkRunner {
             &self.skinning,
             self.deferred_renderer.default_material_set(),
             &empty_mat_cache,
-            &empty_mat_cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 
