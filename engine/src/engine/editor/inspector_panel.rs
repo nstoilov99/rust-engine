@@ -757,6 +757,8 @@ impl InspectorPanel {
                 for item in &mut euler {
                     if !item.is_finite() {
                         *item = 0.0;
+                    } else {
+                        *item = clean_display_degrees(*item);
                     }
                 }
 
@@ -2644,21 +2646,29 @@ fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
     let euler = glm::quat_euler_angles(&q_norm);
     [
         if euler.x.is_finite() {
-            euler.x.to_degrees()
+            clean_display_degrees(euler.x.to_degrees())
         } else {
             0.0
         },
         if euler.y.is_finite() {
-            euler.y.to_degrees()
+            clean_display_degrees(euler.y.to_degrees())
         } else {
             0.0
         },
         if euler.z.is_finite() {
-            euler.z.to_degrees()
+            clean_display_degrees(euler.z.to_degrees())
         } else {
             0.0
         },
     ]
+}
+
+fn clean_display_degrees(value: f32) -> f32 {
+    if value.abs() < 0.000_1 {
+        0.0
+    } else {
+        value
+    }
 }
 
 /// Convert Euler angles (degrees) to quaternion
