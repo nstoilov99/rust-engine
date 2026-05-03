@@ -4,38 +4,20 @@
 
 use super::asset_browser::AssetBrowserPanel;
 use super::Selection;
-use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
 use crate::engine::assets::asset_type::AssetType;
 use crate::engine::assets::handle::AssetId;
-use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
-    Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, ParticleEffect,
-    PointLight, SpawnShape, Transform, UpdateModule,
+    Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
+    Transform, ParticleEffect, SpawnShape, UpdateModule,
 };
+use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
+use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{CollapsingHeader, Color32, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::collections::{HashMap, HashSet};
-
-const INSPECTOR_ROW_HEIGHT: f32 = 22.0;
-const INSPECTOR_LABEL_WIDTH: f32 = 74.0;
-const TRANSFORM_RESET_WIDTH: f32 = 24.0;
-const TRANSFORM_AXIS_WIDTH: f32 = 12.0;
-const TRANSFORM_FIELD_WIDTH: f32 = 86.0;
-const MATERIAL_LABEL_WIDTH: f32 = 86.0;
-const MATERIAL_SLIDER_WIDTH: f32 = 96.0;
-const MATERIAL_VALUE_WIDTH: f32 = 66.0;
-const MATERIAL_SWATCH_WIDTH: f32 = 72.0;
-
-const INSPECTOR_SURFACE_ALT: Color32 = Color32::from_rgb(24, 25, 29);
-const INSPECTOR_FIELD_STROKE: Color32 = Color32::from_rgb(72, 76, 86);
-const INSPECTOR_FIELD_STROKE_HOVER: Color32 = Color32::from_rgb(96, 104, 120);
-const INSPECTOR_TEXT: Color32 = Color32::from_rgb(220, 222, 226);
-const INSPECTOR_TEXT_MUTED: Color32 = Color32::from_rgb(150, 154, 164);
-const INSPECTOR_TRACK_BG: Color32 = Color32::from_rgb(15, 17, 22);
-const INSPECTOR_TRACK_FILL: Color32 = Color32::from_rgb(45, 95, 170);
 
 /// Axis colors (industry standard: X=red, Y=green, Z=blue)
 const AXIS_COLOR_X: Color32 = Color32::from_rgb(220, 80, 80); // Red
@@ -301,7 +283,7 @@ impl InspectorPanel {
             ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80), // Yellow/Gold
             ComponentCategory::Physics => Color32::from_rgb(100, 180, 120), // Green
             ComponentCategory::Animation => Color32::from_rgb(200, 120, 200), // Purple
-            ComponentCategory::Audio => Color32::from_rgb(220, 140, 80), // Orange
+            ComponentCategory::Audio => Color32::from_rgb(220, 140, 80),     // Orange
         }
     }
 
@@ -313,292 +295,6 @@ impl InspectorPanel {
         ui.painter()
             .hline(rect.x_range(), y, Stroke::new(1.0, Color32::from_gray(70)));
         ui.add_space(8.0);
-    }
-
-    fn inspector_label(ui: &mut Ui, text: &str, width: f32) {
-        ui.add_sized(
-            egui::vec2(width, INSPECTOR_ROW_HEIGHT),
-            egui::Label::new(RichText::new(text).color(INSPECTOR_TEXT_MUTED)),
-        );
-    }
-
-    fn fixed_drag_f32(
-        ui: &mut Ui,
-        value: &mut f32,
-        width: f32,
-        speed: f64,
-        range: std::ops::RangeInclusive<f32>,
-        suffix: Option<&str>,
-    ) -> egui::Response {
-        let mut drag = DragValue::new(value).speed(speed).range(range);
-        if let Some(suffix) = suffix {
-            drag = drag.suffix(suffix);
-        }
-        ui.add_sized(egui::vec2(width, INSPECTOR_ROW_HEIGHT), drag)
-    }
-
-    fn reset_button(ui: &mut Ui) -> egui::Response {
-        ui.add_sized(
-            egui::vec2(TRANSFORM_RESET_WIDTH, INSPECTOR_ROW_HEIGHT),
-            egui::Button::new(RichText::new("R").size(11.0)).min_size(egui::Vec2::ZERO),
-        )
-        .on_hover_text("Reset")
-    }
-
-    fn transform_axis_value(
-        ui: &mut Ui,
-        axis: &str,
-        color: Color32,
-        value: &mut f32,
-        speed: f64,
-        range: std::ops::RangeInclusive<f32>,
-        suffix: Option<&str>,
-    ) -> egui::Response {
-        ui.add_sized(
-            egui::vec2(TRANSFORM_AXIS_WIDTH, INSPECTOR_ROW_HEIGHT),
-            egui::Label::new(RichText::new(axis).color(color)),
-        );
-        Self::fixed_drag_f32(ui, value, TRANSFORM_FIELD_WIDTH, speed, range, suffix)
-    }
-
-    fn material_numeric(
-        ui: &mut Ui,
-        value: &mut f32,
-        range: std::ops::RangeInclusive<f32>,
-    ) -> egui::Response {
-        Self::fixed_drag_f32(ui, value, MATERIAL_VALUE_WIDTH, 0.01, range, None)
-    }
-
-    fn compact_slider(
-        ui: &mut Ui,
-        value: &mut f32,
-        range: std::ops::RangeInclusive<f32>,
-    ) -> egui::Response {
-        let desired = egui::vec2(MATERIAL_SLIDER_WIDTH, INSPECTOR_ROW_HEIGHT);
-        let (rect, mut response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
-        let min = *range.start();
-        let max = *range.end();
-        let denom = (max - min).max(f32::EPSILON);
-
-        if response.dragged() || response.clicked() {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                let t = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let next = min + t * denom;
-                if (*value - next).abs() > f32::EPSILON {
-                    *value = next;
-                    response.mark_changed();
-                }
-            }
-        }
-
-        if ui.is_rect_visible(rect) {
-            let painter = ui.painter();
-            let t = ((*value - min) / denom).clamp(0.0, 1.0);
-            let track_rect =
-                egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 4.0));
-            let fill_rect = egui::Rect::from_min_max(
-                track_rect.left_top(),
-                egui::pos2(
-                    track_rect.left() + track_rect.width() * t,
-                    track_rect.bottom(),
-                ),
-            );
-            painter.rect_filled(track_rect, 2.0, INSPECTOR_TRACK_BG);
-            painter.rect_filled(fill_rect, 2.0, INSPECTOR_TRACK_FILL);
-            painter.rect_stroke(
-                track_rect,
-                2.0,
-                Stroke::new(1.0, Color32::from_rgb(38, 42, 50)),
-                egui::epaint::StrokeKind::Inside,
-            );
-
-            let thumb_x = egui::lerp(track_rect.left()..=track_rect.right(), t);
-            let thumb_center = egui::pos2(thumb_x, track_rect.center().y);
-            let thumb_radius = if response.dragged() { 5.5 } else { 5.0 };
-            let thumb_fill = if response.dragged() {
-                Color32::from_rgb(235, 240, 250)
-            } else if response.hovered() {
-                Color32::from_rgb(215, 222, 235)
-            } else {
-                Color32::from_rgb(190, 198, 214)
-            };
-            painter.circle_filled(thumb_center, thumb_radius, thumb_fill);
-            painter.circle_stroke(
-                thumb_center,
-                thumb_radius,
-                Stroke::new(1.0, Color32::from_rgb(25, 28, 34)),
-            );
-        }
-
-        response
-    }
-
-    fn color_swatch_picker(ui: &mut Ui, id_salt: &str, color: &mut [f32; 3]) -> bool {
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(MATERIAL_SWATCH_WIDTH, INSPECTOR_ROW_HEIGHT),
-            egui::Sense::click(),
-        );
-        let color32 = Color32::from_rgb(
-            (color[0].clamp(0.0, 1.0) * 255.0) as u8,
-            (color[1].clamp(0.0, 1.0) * 255.0) as u8,
-            (color[2].clamp(0.0, 1.0) * 255.0) as u8,
-        );
-        ui.painter().rect_filled(rect, 3.0, color32);
-        ui.painter().rect_stroke(
-            rect,
-            3.0,
-            Stroke::new(
-                1.0,
-                if response.hovered() {
-                    INSPECTOR_FIELD_STROKE_HOVER
-                } else {
-                    INSPECTOR_FIELD_STROKE
-                },
-            ),
-            egui::epaint::StrokeKind::Inside,
-        );
-
-        let popup_id = ui.id().with(id_salt).with("modern_color_picker");
-        let mut changed = false;
-        egui::Popup::from_toggle_button_response(&response)
-            .id(popup_id)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .width(260.0)
-            .show(|ui| {
-                changed |= Self::modern_color_picker_contents(ui, color);
-            });
-        changed
-    }
-
-    fn modern_color_picker_contents(ui: &mut Ui, color: &mut [f32; 3]) -> bool {
-        let (mut hue, mut saturation, mut value) = rgb_to_hsv(color[0], color[1], color[2]);
-        let mut changed = false;
-
-        egui::Frame::new()
-            .fill(INSPECTOR_SURFACE_ALT)
-            .stroke(Stroke::new(1.0, INSPECTOR_FIELD_STROKE))
-            .corner_radius(4.0)
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("RGB").color(INSPECTOR_TEXT_MUTED));
-                    ui.add_space(8.0);
-                    ui.label(format!("R {}", (color[0] * 255.0).round() as i32));
-                    ui.label(format!("G {}", (color[1] * 255.0).round() as i32));
-                    ui.label(format!("B {}", (color[2] * 255.0).round() as i32));
-                });
-                ui.add_space(6.0);
-
-                let sv_size = egui::vec2(220.0, 160.0);
-                let (sv_rect, sv_response) =
-                    ui.allocate_exact_size(sv_size, egui::Sense::click_and_drag());
-                if ui.is_rect_visible(sv_rect) {
-                    let painter = ui.painter();
-                    let steps_x = 36;
-                    let steps_y = 26;
-                    for ix in 0..steps_x {
-                        for iy in 0..steps_y {
-                            let s0 = ix as f32 / steps_x as f32;
-                            let s1 = (ix + 1) as f32 / steps_x as f32;
-                            let v0 = 1.0 - iy as f32 / steps_y as f32;
-                            let v1 = 1.0 - (iy + 1) as f32 / steps_y as f32;
-                            let rgb = hsv_to_rgb(hue, (s0 + s1) * 0.5, (v0 + v1) * 0.5);
-                            let cell = egui::Rect::from_min_max(
-                                egui::pos2(
-                                    egui::lerp(sv_rect.left()..=sv_rect.right(), s0),
-                                    egui::lerp(
-                                        sv_rect.top()..=sv_rect.bottom(),
-                                        iy as f32 / steps_y as f32,
-                                    ),
-                                ),
-                                egui::pos2(
-                                    egui::lerp(sv_rect.left()..=sv_rect.right(), s1),
-                                    egui::lerp(
-                                        sv_rect.top()..=sv_rect.bottom(),
-                                        (iy + 1) as f32 / steps_y as f32,
-                                    ),
-                                ),
-                            );
-                            painter.rect_filled(cell, 0.0, rgb_color32(rgb));
-                        }
-                    }
-                    painter.rect_stroke(
-                        sv_rect,
-                        3.0,
-                        Stroke::new(1.0, INSPECTOR_FIELD_STROKE),
-                        egui::epaint::StrokeKind::Inside,
-                    );
-                    let marker = egui::pos2(
-                        egui::lerp(sv_rect.left()..=sv_rect.right(), saturation),
-                        egui::lerp(sv_rect.bottom()..=sv_rect.top(), value),
-                    );
-                    painter.circle_stroke(marker, 6.0, Stroke::new(1.5, Color32::WHITE));
-                    painter.circle_stroke(marker, 7.5, Stroke::new(1.0, Color32::BLACK));
-                }
-                if sv_response.dragged() || sv_response.clicked() {
-                    if let Some(pointer) = sv_response.interact_pointer_pos() {
-                        saturation =
-                            ((pointer.x - sv_rect.left()) / sv_rect.width()).clamp(0.0, 1.0);
-                        value =
-                            (1.0 - (pointer.y - sv_rect.top()) / sv_rect.height()).clamp(0.0, 1.0);
-                        let rgb = hsv_to_rgb(hue, saturation, value);
-                        *color = rgb;
-                        changed = true;
-                    }
-                }
-
-                ui.add_space(6.0);
-                let hue_size = egui::vec2(220.0, 14.0);
-                let (hue_rect, hue_response) =
-                    ui.allocate_exact_size(hue_size, egui::Sense::click_and_drag());
-                if ui.is_rect_visible(hue_rect) {
-                    let painter = ui.painter();
-                    let segments = 48;
-                    for i in 0..segments {
-                        let h0 = i as f32 / segments as f32;
-                        let h1 = (i + 1) as f32 / segments as f32;
-                        let rect = egui::Rect::from_min_max(
-                            egui::pos2(
-                                egui::lerp(hue_rect.left()..=hue_rect.right(), h0),
-                                hue_rect.top(),
-                            ),
-                            egui::pos2(
-                                egui::lerp(hue_rect.left()..=hue_rect.right(), h1),
-                                hue_rect.bottom(),
-                            ),
-                        );
-                        ui.painter().rect_filled(
-                            rect,
-                            0.0,
-                            rgb_color32(hsv_to_rgb((h0 + h1) * 0.5, 1.0, 1.0)),
-                        );
-                    }
-                    painter.rect_stroke(
-                        hue_rect,
-                        2.0,
-                        Stroke::new(1.0, INSPECTOR_FIELD_STROKE),
-                        egui::epaint::StrokeKind::Inside,
-                    );
-                    let marker_x = egui::lerp(hue_rect.left()..=hue_rect.right(), hue);
-                    painter.line_segment(
-                        [
-                            egui::pos2(marker_x, hue_rect.top() - 2.0),
-                            egui::pos2(marker_x, hue_rect.bottom() + 2.0),
-                        ],
-                        Stroke::new(1.5, Color32::WHITE),
-                    );
-                }
-                if hue_response.dragged() || hue_response.clicked() {
-                    if let Some(pointer) = hue_response.interact_pointer_pos() {
-                        hue = ((pointer.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0);
-                        let rgb = hsv_to_rgb(hue, saturation, value);
-                        *color = rgb;
-                        changed = true;
-                    }
-                }
-            });
-
-        changed
     }
 
     /// Render all component editors using the cached presence snapshot.
@@ -655,13 +351,9 @@ impl InspectorPanel {
             if component_count > 0 {
                 Self::draw_component_divider(ui);
             }
-            if let Some(action) = self.edit_mesh_renderer(
-                ui,
-                world,
-                entity,
-                ComponentCategory::Rendering,
-                asset_browser,
-            ) {
+            if let Some(action) =
+                self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering, asset_browser)
+            {
                 pending_action = action;
             }
             component_count += 1;
@@ -777,9 +469,7 @@ impl InspectorPanel {
             }
         }
 
-        if (self.matches_filter("plankton")
-            || self.matches_filter("vfx")
-            || self.matches_filter("particle"))
+        if (self.matches_filter("plankton") || self.matches_filter("vfx") || self.matches_filter("particle"))
             && p.has(ComponentPresence::PARTICLE_EFFECT)
         {
             if component_count > 0 {
@@ -883,7 +573,13 @@ impl InspectorPanel {
             CollapsingHeader::new(RichText::new("Transform").strong())
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                    // Position
+                    ui.horizontal(|ui| {
+                        ui.label("Position");
+                        if ui.small_button("R").on_hover_text("Reset").clicked() {
+                            transform.position = glm::vec3(0.0, 0.0, 0.0);
+                        }
+                    });
                     // Sanitize position values to prevent NaN/Infinity issues
                     if !transform.position.x.is_finite() {
                         transform.position.x = 0.0;
@@ -894,19 +590,30 @@ impl InspectorPanel {
                     if !transform.position.z.is_finite() {
                         transform.position.z = 0.0;
                     }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        ui.add(DragValue::new(&mut transform.position.x).speed(0.1));
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        ui.add(DragValue::new(&mut transform.position.y).speed(0.1));
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        ui.add(DragValue::new(&mut transform.position.z).speed(0.1));
+                    });
 
-                    // Sanitize scale values to prevent DragValue crash
-                    if !transform.scale.x.is_finite() {
-                        transform.scale.x = 1.0;
-                    }
-                    if !transform.scale.y.is_finite() {
-                        transform.scale.y = 1.0;
-                    }
-                    if !transform.scale.z.is_finite() {
-                        transform.scale.z = 1.0;
-                    }
+                    // Rotation (as Euler angles in degrees)
+                    ui.horizontal(|ui| {
+                        ui.label("Rotation");
+                        if ui.small_button("R").on_hover_text("Reset").clicked() {
+                            transform.rotation = glm::quat_identity();
+                            self.euler_cache.insert(
+                                entity.id() as u64,
+                                (glm::quat_identity(), [0.0, 0.0, 0.0]),
+                            );
+                        }
+                    });
 
                     // Get or calculate euler angles.
+                    // The cache stores (quaternion, euler) pairs so we can detect when
+                    // the quaternion has been modified externally (e.g., by the gizmo).
                     let entity_id = entity.id() as u64;
                     let needs_recompute = match self.euler_cache.get(&entity_id) {
                         Some((cached_quat, _)) => {
@@ -920,135 +627,88 @@ impl InspectorPanel {
                             .insert(entity_id, (transform.rotation, new_euler));
                     }
 
+                    // Get a copy of euler to work with (avoids borrow issues with closure)
                     let mut euler = self.euler_cache.get(&entity_id).unwrap().1;
+
+                    // Sanitize cached euler values to prevent DragValue crash
                     for item in &mut euler {
                         if !item.is_finite() {
                             *item = 0.0;
                         }
                     }
 
-                    egui::Frame::new()
-                        .fill(INSPECTOR_SURFACE_ALT)
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(42, 45, 52)))
-                        .inner_margin(egui::Margin::symmetric(8, 6))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
+                    let mut euler_changed = false;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        let response_x = ui.add(
+                            DragValue::new(&mut euler[0])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        let response_y = ui.add(
+                            DragValue::new(&mut euler[1])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        let response_z = ui.add(
+                            DragValue::new(&mut euler[2])
+                                .speed(1.0)
+                                .suffix("°")
+                                .range(-180.0..=180.0),
+                        );
 
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Position", INSPECTOR_LABEL_WIDTH);
-                                if Self::reset_button(ui).clicked() {
-                                    transform.position = glm::vec3(0.0, 0.0, 0.0);
-                                }
-                                Self::transform_axis_value(
-                                    ui,
-                                    "X",
-                                    AXIS_COLOR_X,
-                                    &mut transform.position.x,
-                                    0.1,
-                                    f32::MIN..=f32::MAX,
-                                    None,
-                                );
-                                Self::transform_axis_value(
-                                    ui,
-                                    "Y",
-                                    AXIS_COLOR_Y,
-                                    &mut transform.position.y,
-                                    0.1,
-                                    f32::MIN..=f32::MAX,
-                                    None,
-                                );
-                                Self::transform_axis_value(
-                                    ui,
-                                    "Z",
-                                    AXIS_COLOR_Z,
-                                    &mut transform.position.z,
-                                    0.1,
-                                    f32::MIN..=f32::MAX,
-                                    None,
-                                );
-                            });
+                        euler_changed =
+                            response_x.changed() || response_y.changed() || response_z.changed();
+                    });
 
-                            let mut euler_changed = false;
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Rotation", INSPECTOR_LABEL_WIDTH);
-                                if Self::reset_button(ui).clicked() {
-                                    transform.rotation = glm::quat_identity();
-                                    euler = [0.0, 0.0, 0.0];
-                                    self.euler_cache
-                                        .insert(entity_id, (glm::quat_identity(), euler));
-                                }
-                                euler_changed |= Self::transform_axis_value(
-                                    ui,
-                                    "X",
-                                    AXIS_COLOR_X,
-                                    &mut euler[0],
-                                    1.0,
-                                    -180.0..=180.0,
-                                    Some("°"),
-                                )
-                                .changed();
-                                euler_changed |= Self::transform_axis_value(
-                                    ui,
-                                    "Y",
-                                    AXIS_COLOR_Y,
-                                    &mut euler[1],
-                                    1.0,
-                                    -180.0..=180.0,
-                                    Some("°"),
-                                )
-                                .changed();
-                                euler_changed |= Self::transform_axis_value(
-                                    ui,
-                                    "Z",
-                                    AXIS_COLOR_Z,
-                                    &mut euler[2],
-                                    1.0,
-                                    -180.0..=180.0,
-                                    Some("°"),
-                                )
-                                .changed();
-                            });
+                    if euler_changed {
+                        let new_quat = euler_degrees_to_quaternion(&euler);
+                        transform.rotation = new_quat;
+                        // Update cache with new quaternion so we don't recompute euler next frame
+                        self.euler_cache.insert(entity_id, (new_quat, euler));
+                    }
 
-                            if euler_changed {
-                                let new_quat = euler_degrees_to_quaternion(&euler);
-                                transform.rotation = new_quat;
-                                self.euler_cache.insert(entity_id, (new_quat, euler));
-                            }
-
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Scale", INSPECTOR_LABEL_WIDTH);
-                                if Self::reset_button(ui).clicked() {
-                                    transform.scale = glm::vec3(1.0, 1.0, 1.0);
-                                }
-                                Self::transform_axis_value(
-                                    ui,
-                                    "X",
-                                    AXIS_COLOR_X,
-                                    &mut transform.scale.x,
-                                    0.01,
-                                    0.001..=1000.0,
-                                    None,
-                                );
-                                Self::transform_axis_value(
-                                    ui,
-                                    "Y",
-                                    AXIS_COLOR_Y,
-                                    &mut transform.scale.y,
-                                    0.01,
-                                    0.001..=1000.0,
-                                    None,
-                                );
-                                Self::transform_axis_value(
-                                    ui,
-                                    "Z",
-                                    AXIS_COLOR_Z,
-                                    &mut transform.scale.z,
-                                    0.01,
-                                    0.001..=1000.0,
-                                    None,
-                                );
-                            });
-                        });
+                    // Scale
+                    ui.horizontal(|ui| {
+                        ui.label("Scale");
+                        if ui.small_button("R").on_hover_text("Reset").clicked() {
+                            transform.scale = glm::vec3(1.0, 1.0, 1.0);
+                        }
+                    });
+                    // Sanitize scale values to prevent DragValue crash
+                    if !transform.scale.x.is_finite() {
+                        transform.scale.x = 1.0;
+                    }
+                    if !transform.scale.y.is_finite() {
+                        transform.scale.y = 1.0;
+                    }
+                    if !transform.scale.z.is_finite() {
+                        transform.scale.z = 1.0;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.x)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
+                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.y)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
+                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                        ui.add(
+                            DragValue::new(&mut transform.scale.z)
+                                .speed(0.01)
+                                .range(0.001..=1000.0),
+                        );
+                    });
                 });
 
             // Draw colored accent bar
@@ -1237,147 +897,104 @@ impl InspectorPanel {
             let header = CollapsingHeader::new(RichText::new("Mesh Renderer").strong())
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    egui::Frame::new()
-                        .fill(INSPECTOR_SURFACE_ALT)
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(42, 45, 52)))
-                        .inner_margin(egui::Margin::symmetric(8, 8))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
+                    ui.checkbox(&mut renderer.visible, "Visible")
+                        .on_hover_text("Whether this mesh is rendered");
 
-                            ui.checkbox(&mut renderer.visible, "Visible")
-                                .on_hover_text("Whether this mesh is rendered");
+                    // Mesh asset slot
+                    let mesh_idx = renderer.mesh_index;
+                    ui.label("Mesh:");
+                    Self::asset_slot(
+                        ui,
+                        "mesh_slot",
+                        &mut renderer.mesh_path,
+                        &[AssetType::Mesh, AssetType::Model],
+                        asset_browser,
+                        mesh_idx,
+                    );
 
-                            let mesh_idx = renderer.mesh_index;
-                            ui.add_space(4.0);
-                            ui.vertical(|ui| {
-                                Self::inspector_label(ui, "Mesh", INSPECTOR_LABEL_WIDTH);
-                                Self::asset_slot(
-                                    ui,
-                                    "mesh_slot",
-                                    &mut renderer.mesh_path,
-                                    &[AssetType::Mesh, AssetType::Model],
-                                    asset_browser,
-                                    mesh_idx,
-                                );
-                            });
+                    ui.add_space(4.0);
 
-                            ui.add_space(8.0);
+                    // Material slots — one slot per submesh material
+                    if renderer.material_paths.is_empty() {
+                        renderer.material_paths.push(String::new());
+                    }
+                    let slot_count = renderer.material_paths.len();
+                    for i in 0..slot_count {
+                        let label = if slot_count == 1 {
+                            "Material:".to_string()
+                        } else {
+                            format!("Material [{}]:", i)
+                        };
+                        ui.label(&label);
+                        Self::asset_slot(
+                            ui,
+                            &format!("material_slot_{}", i),
+                            &mut renderer.material_paths[i],
+                            &[AssetType::Material],
+                            asset_browser,
+                            0,
+                        );
+                        ui.add_space(2.0);
+                    }
 
-                            if renderer.material_paths.is_empty() {
-                                renderer.material_paths.push(String::new());
-                            }
-                            let slot_count = renderer.material_paths.len();
-                            for i in 0..slot_count {
-                                let label = if slot_count == 1 {
-                                    "Material".to_string()
-                                } else {
-                                    format!("Material [{}]", i)
-                                };
-                                ui.vertical(|ui| {
-                                    Self::inspector_label(ui, &label, INSPECTOR_LABEL_WIDTH);
-                                    Self::asset_slot(
-                                        ui,
-                                        &format!("material_slot_{}", i),
-                                        &mut renderer.material_paths[i],
-                                        &[AssetType::Material],
-                                        asset_browser,
-                                        0,
-                                    );
-                                });
-                                ui.add_space(6.0);
-                            }
+                    ui.add_space(4.0);
 
-                            ui.add_space(2.0);
-                            ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
-                                .on_hover_text("Whether this mesh casts shadows");
-                            ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
-                                .on_hover_text(
-                                    "Whether this mesh receives shadows from other objects",
-                                );
+                    ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
+                        .on_hover_text("Whether this mesh casts shadows");
+                    ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
+                        .on_hover_text("Whether this mesh receives shadows from other objects");
 
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.label(
-                                RichText::new("Material Overrides")
-                                    .strong()
-                                    .color(INSPECTOR_TEXT),
-                            );
-                            ui.add_space(4.0);
+                    // --- Material Instance Overrides ---
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(RichText::new("Material Overrides").strong());
 
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Base Color", MATERIAL_LABEL_WIDTH);
-                                let mut color3 = [
-                                    renderer.base_color_factor[0],
-                                    renderer.base_color_factor[1],
-                                    renderer.base_color_factor[2],
-                                ];
-                                if Self::color_swatch_picker(ui, "mesh_base_color", &mut color3) {
-                                    renderer.base_color_factor[0] = color3[0];
-                                    renderer.base_color_factor[1] = color3[1];
-                                    renderer.base_color_factor[2] = color3[2];
-                                }
-                            });
+                    // Base Color
+                    ui.horizontal(|ui| {
+                        ui.label("Base Color:");
+                        let mut color3 = [
+                            renderer.base_color_factor[0],
+                            renderer.base_color_factor[1],
+                            renderer.base_color_factor[2],
+                        ];
+                        if ui.color_edit_button_rgb(&mut color3).changed() {
+                            renderer.base_color_factor[0] = color3[0];
+                            renderer.base_color_factor[1] = color3[1];
+                            renderer.base_color_factor[2] = color3[2];
+                        }
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut renderer.base_color_factor[3], 0.0..=1.0)
+                            .text("Alpha"),
+                    );
 
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Alpha", MATERIAL_LABEL_WIDTH);
-                                Self::compact_slider(
-                                    ui,
-                                    &mut renderer.base_color_factor[3],
-                                    0.0..=1.0,
-                                );
-                                Self::material_numeric(
-                                    ui,
-                                    &mut renderer.base_color_factor[3],
-                                    0.0..=1.0,
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Metallic", MATERIAL_LABEL_WIDTH);
-                                Self::compact_slider(ui, &mut renderer.metallic_factor, 0.0..=1.0);
-                                Self::material_numeric(
-                                    ui,
-                                    &mut renderer.metallic_factor,
-                                    0.0..=1.0,
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Roughness", MATERIAL_LABEL_WIDTH);
-                                Self::compact_slider(ui, &mut renderer.roughness_factor, 0.0..=1.0);
-                                Self::material_numeric(
-                                    ui,
-                                    &mut renderer.roughness_factor,
-                                    0.0..=1.0,
-                                );
-                            });
+                    ui.add(
+                        egui::Slider::new(&mut renderer.metallic_factor, 0.0..=1.0)
+                            .text("Metallic"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut renderer.roughness_factor, 0.0..=1.0)
+                            .text("Roughness"),
+                    );
 
-                            ui.horizontal(|ui| {
-                                Self::inspector_label(ui, "Emissive", MATERIAL_LABEL_WIDTH);
-                                let mut em = renderer.emissive_factor;
-                                let mut changed = false;
-                                ui.add_sized(
-                                    egui::vec2(16.0, INSPECTOR_ROW_HEIGHT),
-                                    egui::Label::new(RichText::new("R").color(AXIS_COLOR_X)),
-                                );
-                                changed |=
-                                    Self::material_numeric(ui, &mut em[0], 0.0..=10.0).changed();
-                                ui.add_sized(
-                                    egui::vec2(16.0, INSPECTOR_ROW_HEIGHT),
-                                    egui::Label::new(RichText::new("G").color(AXIS_COLOR_Y)),
-                                );
-                                changed |=
-                                    Self::material_numeric(ui, &mut em[1], 0.0..=10.0).changed();
-                                ui.add_sized(
-                                    egui::vec2(16.0, INSPECTOR_ROW_HEIGHT),
-                                    egui::Label::new(RichText::new("B").color(AXIS_COLOR_Z)),
-                                );
-                                changed |=
-                                    Self::material_numeric(ui, &mut em[2], 0.0..=10.0).changed();
-                                if changed {
-                                    renderer.emissive_factor = em;
-                                }
-                            });
-                        });
+                    // Emissive
+                    ui.horizontal(|ui| {
+                        ui.label("Emissive:");
+                        let mut em = renderer.emissive_factor;
+                        let mut changed = false;
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[0]).speed(0.01).range(0.0..=10.0).prefix("R: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[1]).speed(0.01).range(0.0..=10.0).prefix("G: "))
+                            .changed();
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut em[2]).speed(0.01).range(0.0..=10.0).prefix("B: "))
+                            .changed();
+                        if changed {
+                            renderer.emissive_factor = em;
+                        }
+                    });
                 });
 
             // Context menu for component removal
@@ -1416,8 +1033,10 @@ impl InspectorPanel {
         let thumb_size: f32 = slot_size - 8.0;
         let slot_width = slot_size.max(ui.available_width().min(slot_size));
 
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(slot_width, slot_size), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(slot_width, slot_size),
+            egui::Sense::click(),
+        );
 
         // Check for DnD hover
         let mut is_valid_hover = false;
@@ -1473,18 +1092,15 @@ impl InspectorPanel {
 
         if path.is_empty() {
             // Empty slot — click prompt
-            let type_names: Vec<&str> = allowed_types.iter().map(|t| t.display_name()).collect();
+            let type_names: Vec<&str> =
+                allowed_types.iter().map(|t| t.display_name()).collect();
             let hint = format!("Click to select\n{}", type_names.join("/"));
             let text_color = Color32::from_gray(120);
             let inner = rect.shrink(6.0);
             slot_ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((inner.height() - 28.0).max(0.0) / 2.0);
-                    ui.label(
-                        RichText::new(hint)
-                            .font(egui::FontId::proportional(11.0))
-                            .color(text_color),
-                    );
+                    ui.label(RichText::new(hint).font(egui::FontId::proportional(11.0)).color(text_color));
                 });
             });
         } else {
@@ -1509,10 +1125,7 @@ impl InspectorPanel {
                 }
             } else if path.starts_with("__primitive__/") {
                 // Primitive mesh — use GPU-rendered thumbnail
-                if let Some(tex_id) = asset_browser
-                    .thumbnails
-                    .get_primitive_texture_id(ui.ctx(), path)
-                {
+                if let Some(tex_id) = asset_browser.thumbnails.get_primitive_texture_id(ui.ctx(), path) {
                     painter.image(
                         tex_id,
                         thumb_rect,
@@ -1584,8 +1197,9 @@ impl InspectorPanel {
 
                 // Search bar
                 let search_id = popup_id.with("search_text");
-                let mut search_text: String =
-                    ui.data_mut(|d| d.get_temp_mut_or_default::<String>(search_id).clone());
+                let mut search_text: String = ui.data_mut(|d| {
+                    d.get_temp_mut_or_default::<String>(search_id).clone()
+                });
                 ui.horizontal(|ui| {
                     ui.label("Search:");
                     let te = ui.text_edit_singleline(&mut search_text);
@@ -1619,24 +1233,20 @@ impl InspectorPanel {
                         let matching_prims: Vec<&str> = PRIMITIVE_PATHS
                             .iter()
                             .filter(|p| {
-                                search_text.is_empty() || p.to_lowercase().contains(&search_lower)
+                                search_text.is_empty()
+                                    || p.to_lowercase().contains(&search_lower)
                             })
                             .copied()
                             .collect();
 
                         if !matching_prims.is_empty() {
-                            ui.label(
-                                RichText::new("Primitives")
-                                    .small()
-                                    .color(Color32::from_gray(140)),
-                            );
+                            ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
                             ui.add_space(2.0);
                             egui::Grid::new(popup_id.with("prims_grid"))
                                 .spacing(egui::vec2(4.0, 4.0))
                                 .show(ui, |ui| {
                                     for (i, &prim_path) in matching_prims.iter().enumerate() {
-                                        let label =
-                                            prim_path.rsplit('/').next().unwrap_or(prim_path);
+                                        let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
                                         let is_selected = path.as_str() == prim_path;
 
                                         let (item_rect, item_resp) = ui.allocate_exact_size(
@@ -1712,19 +1322,19 @@ impl InspectorPanel {
                     let results = asset_browser.registry.query(&filter);
 
                     if results.is_empty() && !include_meshes {
-                        ui.label(RichText::new("No assets found").color(Color32::from_gray(100)));
-                    } else if !results.is_empty() {
                         ui.label(
-                            RichText::new("Assets")
-                                .small()
-                                .color(Color32::from_gray(140)),
+                            RichText::new("No assets found")
+                                .color(Color32::from_gray(100)),
                         );
+                    } else if !results.is_empty() {
+                        ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
                         ui.add_space(2.0);
                         egui::Grid::new(popup_id.with("assets_grid"))
                             .spacing(egui::vec2(4.0, 4.0))
                             .show(ui, |ui| {
                                 for (i, meta) in results.iter().enumerate() {
-                                    let asset_path = meta.path.to_string_lossy().to_string();
+                                    let asset_path =
+                                        meta.path.to_string_lossy().to_string();
                                     let display = &meta.display_name;
                                     let is_selected = path.as_str() == asset_path;
 
@@ -1747,8 +1357,9 @@ impl InspectorPanel {
                                         item_rect.min + egui::vec2(4.0, 4.0),
                                         egui::vec2(item_w - 8.0, item_w - 8.0),
                                     );
-                                    if let Some(tex_id) =
-                                        asset_browser.thumbnails.get_texture_id(ui.ctx(), meta)
+                                    if let Some(tex_id) = asset_browser
+                                        .thumbnails
+                                        .get_texture_id(ui.ctx(), meta)
                                     {
                                         ui.painter().image(
                                             tex_id,
@@ -1770,7 +1381,10 @@ impl InspectorPanel {
                                     // Label (clipped to item rect)
                                     let clipped = ui.painter().with_clip_rect(item_rect);
                                     clipped.text(
-                                        egui::pos2(item_rect.center().x, item_rect.max.y - 3.0),
+                                        egui::pos2(
+                                            item_rect.center().x,
+                                            item_rect.max.y - 3.0,
+                                        ),
                                         egui::Align2::CENTER_BOTTOM,
                                         display,
                                         egui::FontId::proportional(9.0),
@@ -2665,46 +2279,17 @@ impl InspectorPanel {
                             egui::ComboBox::from_label("Shape")
                                 .selected_text(shape_label)
                                 .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            matches!(effect.spawn_shape, SpawnShape::Point),
-                                            "Point",
-                                        )
-                                        .clicked()
-                                    {
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Point), "Point").clicked() {
                                         effect.spawn_shape = SpawnShape::Point;
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            matches!(effect.spawn_shape, SpawnShape::Sphere { .. }),
-                                            "Sphere",
-                                        )
-                                        .clicked()
-                                    {
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Sphere { .. }), "Sphere").clicked() {
                                         effect.spawn_shape = SpawnShape::Sphere { radius: 1.0 };
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            matches!(effect.spawn_shape, SpawnShape::Cone { .. }),
-                                            "Cone",
-                                        )
-                                        .clicked()
-                                    {
-                                        effect.spawn_shape = SpawnShape::Cone {
-                                            angle_rad: 0.5,
-                                            radius: 0.5,
-                                        };
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Cone { .. }), "Cone").clicked() {
+                                        effect.spawn_shape = SpawnShape::Cone { angle_rad: 0.5, radius: 0.5 };
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            matches!(effect.spawn_shape, SpawnShape::Box { .. }),
-                                            "Box",
-                                        )
-                                        .clicked()
-                                    {
-                                        effect.spawn_shape = SpawnShape::Box {
-                                            half_extents: [0.5, 0.5, 0.5],
-                                        };
+                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Box { .. }), "Box").clicked() {
+                                        effect.spawn_shape = SpawnShape::Box { half_extents: [0.5, 0.5, 0.5] };
                                     }
                                 });
 
@@ -2720,59 +2305,24 @@ impl InspectorPanel {
                                 SpawnShape::Box { half_extents } => {
                                     ui.horizontal(|ui| {
                                         ui.label("Half Extents:");
-                                        ui.add(
-                                            DragValue::new(&mut half_extents[0])
-                                                .speed(0.05)
-                                                .prefix("X: "),
-                                        );
-                                        ui.add(
-                                            DragValue::new(&mut half_extents[1])
-                                                .speed(0.05)
-                                                .prefix("Y: "),
-                                        );
-                                        ui.add(
-                                            DragValue::new(&mut half_extents[2])
-                                                .speed(0.05)
-                                                .prefix("Z: "),
-                                        );
+                                        ui.add(DragValue::new(&mut half_extents[0]).speed(0.05).prefix("X: "));
+                                        ui.add(DragValue::new(&mut half_extents[1]).speed(0.05).prefix("Y: "));
+                                        ui.add(DragValue::new(&mut half_extents[2]).speed(0.05).prefix("Z: "));
                                     });
                                 }
                             }
 
-                            ui.add(
-                                DragValue::new(&mut effect.emission_rate)
-                                    .speed(0.5)
-                                    .range(0.0..=1000.0)
-                                    .prefix("Rate: "),
-                            );
-                            ui.add(
-                                DragValue::new(&mut effect.burst_count)
-                                    .speed(1.0)
-                                    .prefix("Burst Count: "),
-                            );
-                            ui.add(
-                                DragValue::new(&mut effect.burst_interval)
-                                    .speed(0.01)
-                                    .prefix("Burst Interval: "),
-                            );
+                            ui.add(DragValue::new(&mut effect.emission_rate).speed(0.5).range(0.0..=1000.0).prefix("Rate: "));
+                            ui.add(DragValue::new(&mut effect.burst_count).speed(1.0).prefix("Burst Count: "));
+                            ui.add(DragValue::new(&mut effect.burst_interval).speed(0.01).prefix("Burst Interval: "));
                         });
 
                     // Lifetime
                     CollapsingHeader::new("Lifetime")
                         .default_open(true)
                         .show(ui, |ui| {
-                            ui.add(
-                                DragValue::new(&mut effect.lifetime_min)
-                                    .speed(0.01)
-                                    .range(0.01..=f32::MAX)
-                                    .prefix("Min: "),
-                            );
-                            ui.add(
-                                DragValue::new(&mut effect.lifetime_max)
-                                    .speed(0.01)
-                                    .range(0.01..=f32::MAX)
-                                    .prefix("Max: "),
-                            );
+                            ui.add(DragValue::new(&mut effect.lifetime_min).speed(0.01).range(0.01..=f32::MAX).prefix("Min: "));
+                            ui.add(DragValue::new(&mut effect.lifetime_max).speed(0.01).range(0.01..=f32::MAX).prefix("Max: "));
                             if effect.lifetime_min > effect.lifetime_max {
                                 effect.lifetime_max = effect.lifetime_min;
                             }
@@ -2784,28 +2334,11 @@ impl InspectorPanel {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("Initial:");
-                                ui.add(
-                                    DragValue::new(&mut effect.initial_velocity[0])
-                                        .speed(0.1)
-                                        .prefix("X: "),
-                                );
-                                ui.add(
-                                    DragValue::new(&mut effect.initial_velocity[1])
-                                        .speed(0.1)
-                                        .prefix("Y: "),
-                                );
-                                ui.add(
-                                    DragValue::new(&mut effect.initial_velocity[2])
-                                        .speed(0.1)
-                                        .prefix("Z: "),
-                                );
+                                ui.add(DragValue::new(&mut effect.initial_velocity[0]).speed(0.1).prefix("X: "));
+                                ui.add(DragValue::new(&mut effect.initial_velocity[1]).speed(0.1).prefix("Y: "));
+                                ui.add(DragValue::new(&mut effect.initial_velocity[2]).speed(0.1).prefix("Z: "));
                             });
-                            ui.add(
-                                DragValue::new(&mut effect.velocity_variance)
-                                    .speed(0.05)
-                                    .range(0.0..=f32::MAX)
-                                    .prefix("Variance: "),
-                            );
+                            ui.add(DragValue::new(&mut effect.velocity_variance).speed(0.05).range(0.0..=f32::MAX).prefix("Variance: "));
                         });
 
                     // Modules (composable update stack)
@@ -2817,125 +2350,76 @@ impl InspectorPanel {
                             for (idx, module) in effect.update_modules.iter_mut().enumerate() {
                                 let id = ui.make_persistent_id(format!("module_{}", idx));
                                 egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    id,
-                                    true,
-                                )
-                                .show_header(ui, |ui| {
+                                    ui.ctx(), id, true,
+                                ).show_header(ui, |ui| {
                                     ui.label(RichText::new(module.display_name()).strong());
                                     if ui.small_button("X").clicked() {
                                         remove_idx = Some(idx);
                                     }
-                                })
-                                .body(|ui| match module {
-                                    UpdateModule::Gravity(v) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add(
-                                                DragValue::new(&mut v[0]).speed(0.1).prefix("X: "),
-                                            );
-                                            ui.add(
-                                                DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "),
-                                            );
-                                            ui.add(
-                                                DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "),
-                                            );
-                                        });
-                                    }
-                                    UpdateModule::Drag(v) => {
-                                        ui.add(
-                                            DragValue::new(v)
-                                                .speed(0.01)
-                                                .range(0.0..=f32::MAX)
-                                                .prefix("Drag: "),
-                                        );
-                                    }
-                                    UpdateModule::Wind(v) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add(
-                                                DragValue::new(&mut v[0]).speed(0.1).prefix("X: "),
-                                            );
-                                            ui.add(
-                                                DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "),
-                                            );
-                                            ui.add(
-                                                DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "),
-                                            );
-                                        });
-                                    }
-                                    UpdateModule::CurlNoise {
-                                        strength,
-                                        scale,
-                                        speed,
-                                    } => {
-                                        ui.add(
-                                            DragValue::new(strength)
-                                                .speed(0.05)
-                                                .range(0.0..=f32::MAX)
-                                                .prefix("Strength: "),
-                                        );
-                                        ui.add(
-                                            DragValue::new(scale)
-                                                .speed(0.05)
-                                                .range(0.01..=f32::MAX)
-                                                .prefix("Scale: "),
-                                        );
-                                        ui.add(DragValue::new(speed).speed(0.01).prefix("Speed: "));
-                                    }
-                                    UpdateModule::ColorOverLife { start, end } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Start:");
-                                            let mut c = [
-                                                (start[0] * 255.0) as u8,
-                                                (start[1] * 255.0) as u8,
-                                                (start[2] * 255.0) as u8,
-                                                (start[3] * 255.0) as u8,
-                                            ];
-                                            if ui
-                                                .color_edit_button_srgba_unmultiplied(&mut c)
-                                                .changed()
-                                            {
-                                                *start = [
-                                                    c[0] as f32 / 255.0,
-                                                    c[1] as f32 / 255.0,
-                                                    c[2] as f32 / 255.0,
-                                                    c[3] as f32 / 255.0,
+                                }).body(|ui| {
+                                    match module {
+                                        UpdateModule::Gravity(v) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
+                                            });
+                                        }
+                                        UpdateModule::Drag(v) => {
+                                            ui.add(DragValue::new(v).speed(0.01).range(0.0..=f32::MAX).prefix("Drag: "));
+                                        }
+                                        UpdateModule::Wind(v) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
+                                            });
+                                        }
+                                        UpdateModule::CurlNoise { strength, scale, speed } => {
+                                            ui.add(DragValue::new(strength).speed(0.05).range(0.0..=f32::MAX).prefix("Strength: "));
+                                            ui.add(DragValue::new(scale).speed(0.05).range(0.01..=f32::MAX).prefix("Scale: "));
+                                            ui.add(DragValue::new(speed).speed(0.01).prefix("Speed: "));
+                                        }
+                                        UpdateModule::ColorOverLife { start, end } => {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Start:");
+                                                let mut c = [
+                                                    (start[0] * 255.0) as u8,
+                                                    (start[1] * 255.0) as u8,
+                                                    (start[2] * 255.0) as u8,
+                                                    (start[3] * 255.0) as u8,
                                                 ];
-                                            }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("End:");
-                                            let mut c = [
-                                                (end[0] * 255.0) as u8,
-                                                (end[1] * 255.0) as u8,
-                                                (end[2] * 255.0) as u8,
-                                                (end[3] * 255.0) as u8,
-                                            ];
-                                            if ui
-                                                .color_edit_button_srgba_unmultiplied(&mut c)
-                                                .changed()
-                                            {
-                                                *end = [
-                                                    c[0] as f32 / 255.0,
-                                                    c[1] as f32 / 255.0,
-                                                    c[2] as f32 / 255.0,
-                                                    c[3] as f32 / 255.0,
+                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                                                    *start = [
+                                                        c[0] as f32 / 255.0,
+                                                        c[1] as f32 / 255.0,
+                                                        c[2] as f32 / 255.0,
+                                                        c[3] as f32 / 255.0,
+                                                    ];
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("End:");
+                                                let mut c = [
+                                                    (end[0] * 255.0) as u8,
+                                                    (end[1] * 255.0) as u8,
+                                                    (end[2] * 255.0) as u8,
+                                                    (end[3] * 255.0) as u8,
                                                 ];
-                                            }
-                                        });
-                                    }
-                                    UpdateModule::SizeOverLife { start, end } => {
-                                        ui.add(
-                                            DragValue::new(start)
-                                                .speed(0.005)
-                                                .range(0.0..=f32::MAX)
-                                                .prefix("Start: "),
-                                        );
-                                        ui.add(
-                                            DragValue::new(end)
-                                                .speed(0.005)
-                                                .range(0.0..=f32::MAX)
-                                                .prefix("End: "),
-                                        );
+                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                                                    *end = [
+                                                        c[0] as f32 / 255.0,
+                                                        c[1] as f32 / 255.0,
+                                                        c[2] as f32 / 255.0,
+                                                        c[3] as f32 / 255.0,
+                                                    ];
+                                                }
+                                            });
+                                        }
+                                        UpdateModule::SizeOverLife { start, end } => {
+                                            ui.add(DragValue::new(start).speed(0.005).range(0.0..=f32::MAX).prefix("Start: "));
+                                            ui.add(DragValue::new(end).speed(0.005).range(0.0..=f32::MAX).prefix("End: "));
+                                        }
                                     }
                                 });
                             }
@@ -2950,23 +2434,17 @@ impl InspectorPanel {
                                 .selected_text("Add Module...")
                                 .show_ui(ui, |ui| {
                                     if ui.selectable_label(false, "Gravity").clicked() {
-                                        effect
-                                            .update_modules
-                                            .push(UpdateModule::Gravity([0.0, 0.0, -9.8]));
+                                        effect.update_modules.push(UpdateModule::Gravity([0.0, 0.0, -9.8]));
                                     }
                                     if ui.selectable_label(false, "Drag").clicked() {
                                         effect.update_modules.push(UpdateModule::Drag(0.5));
                                     }
                                     if ui.selectable_label(false, "Wind").clicked() {
-                                        effect
-                                            .update_modules
-                                            .push(UpdateModule::Wind([1.0, 0.0, 0.0]));
+                                        effect.update_modules.push(UpdateModule::Wind([1.0, 0.0, 0.0]));
                                     }
                                     if ui.selectable_label(false, "Curl Noise").clicked() {
                                         effect.update_modules.push(UpdateModule::CurlNoise {
-                                            strength: 1.0,
-                                            scale: 1.0,
-                                            speed: 0.5,
+                                            strength: 1.0, scale: 1.0, speed: 0.5,
                                         });
                                     }
                                     if ui.selectable_label(false, "Color Over Life").clicked() {
@@ -2977,8 +2455,7 @@ impl InspectorPanel {
                                     }
                                     if ui.selectable_label(false, "Size Over Life").clicked() {
                                         effect.update_modules.push(UpdateModule::SizeOverLife {
-                                            start: 0.1,
-                                            end: 0.0,
+                                            start: 0.1, end: 0.0,
                                         });
                                     }
                                 });
@@ -3128,10 +2605,7 @@ impl InspectorPanel {
                 {
                     let _ = world.insert_one(entity, ParticleEffect::default());
                     // Ensure the entity has an EntityGuid (required for plankton tracking)
-                    if world
-                        .get::<&crate::engine::ecs::EntityGuid>(entity)
-                        .is_err()
-                    {
+                    if world.get::<&crate::engine::ecs::EntityGuid>(entity).is_err() {
                         let _ = world.insert_one(entity, crate::engine::ecs::EntityGuid::new());
                     }
                     added = true;
@@ -3142,61 +2616,6 @@ impl InspectorPanel {
             self.cached_presence = ComponentPresence::probe(world, entity);
         }
     }
-}
-
-fn rgb_color32(rgb: [f32; 3]) -> Color32 {
-    Color32::from_rgb(
-        (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-        (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-        (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-    )
-}
-
-fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let r = r.clamp(0.0, 1.0);
-    let g = g.clamp(0.0, 1.0);
-    let b = b.clamp(0.0, 1.0);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-
-    let hue = if delta <= f32::EPSILON {
-        0.0
-    } else if (max - r).abs() <= f32::EPSILON {
-        ((g - b) / delta).rem_euclid(6.0) / 6.0
-    } else if (max - g).abs() <= f32::EPSILON {
-        (((b - r) / delta) + 2.0) / 6.0
-    } else {
-        (((r - g) / delta) + 4.0) / 6.0
-    };
-
-    let saturation = if max <= f32::EPSILON {
-        0.0
-    } else {
-        delta / max
-    };
-    (hue, saturation, max)
-}
-
-fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
-    let h = hue.rem_euclid(1.0) * 6.0;
-    let c = value * saturation;
-    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
-    let m = value - c;
-    let (r, g, b) = if h < 1.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 {
-        (0.0, c, x)
-    } else if h < 4.0 {
-        (0.0, x, c)
-    } else if h < 5.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    [r + m, g + m, b + m]
 }
 
 /// Convert quaternion to Euler angles (degrees)
