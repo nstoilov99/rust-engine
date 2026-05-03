@@ -3,16 +3,17 @@
 //! Displays and allows editing of component properties for the selected entity.
 
 use super::asset_browser::AssetBrowserPanel;
+use super::widgets::UiExt;
 use super::Selection;
+use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
 use crate::engine::assets::asset_type::AssetType;
 use crate::engine::assets::handle::AssetId;
+use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
-    Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, PointLight,
-    Transform, ParticleEffect, SpawnShape, UpdateModule,
+    Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, ParticleEffect,
+    PointLight, SpawnShape, Transform, UpdateModule,
 };
-use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
-use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
 use egui::{CollapsingHeader, Color32, DragValue, RichText, ScrollArea, Stroke, Ui};
 use hecs::{Entity, World};
@@ -283,18 +284,500 @@ impl InspectorPanel {
             ComponentCategory::Rendering => Color32::from_rgb(220, 180, 80), // Yellow/Gold
             ComponentCategory::Physics => Color32::from_rgb(100, 180, 120), // Green
             ComponentCategory::Animation => Color32::from_rgb(200, 120, 200), // Purple
-            ComponentCategory::Audio => Color32::from_rgb(220, 140, 80),     // Orange
+            ComponentCategory::Audio => Color32::from_rgb(220, 140, 80), // Orange
         }
     }
 
     /// Draw a visual divider between component sections
     fn draw_component_divider(ui: &mut Ui) {
-        ui.add_space(10.0);
-        let rect = ui.available_rect_before_wrap();
-        let y = rect.top();
-        ui.painter()
-            .hline(rect.x_range(), y, Stroke::new(1.0, Color32::from_gray(70)));
-        ui.add_space(8.0);
+        ui.add_space(6.0);
+    }
+
+    /// Render a component section with a raised header background, category accent
+    /// stripe, and collapsible body. Returns the `CollapsingResponse` for context
+    /// menu attachment.
+    fn component_section<R>(
+        ui: &mut Ui,
+        title: &str,
+        category: ComponentCategory,
+        add_body: impl FnOnce(&mut Ui) -> R,
+    ) -> egui::CollapsingResponse<R> {
+        let theme = ui.theme();
+        let color = Self::category_color(category);
+        let header_bg = theme.palette.header_bg;
+        let stroke_color = theme.palette.stroke;
+        let text_color = theme.palette.text_primary;
+        let panel_rect = ui.available_rect_before_wrap();
+        let panel_left = panel_rect.left();
+        let panel_right = panel_rect.right();
+
+        let start_y = ui.cursor().top();
+
+        // Paint the header background *before* the CollapsingHeader.
+        // We allocate a fixed-height rect for the background, then overlay
+        // the CollapsingHeader on top. Since we know the header height
+        // from interact_size, we can pre-paint.
+        let header_height = ui.spacing().interact_size.y + 4.0;
+        let header_bg_rect = egui::Rect::from_min_size(
+            egui::pos2(panel_left, start_y),
+            egui::vec2(panel_right - panel_left, header_height),
+        );
+        ui.painter().rect_filled(header_bg_rect, 0.0, header_bg);
+
+        // Separator line below the header background
+        ui.painter().hline(
+            panel_left..=panel_right,
+            header_bg_rect.bottom(),
+            Stroke::new(1.0, stroke_color),
+        );
+
+        // Render the CollapsingHeader on top of the pre-painted background
+        let header = CollapsingHeader::new(RichText::new(title).strong().color(text_color))
+            .default_open(true)
+            .show(ui, add_body);
+
+        // Draw accent stripe on the left (full height of section)
+        let end_y = ui.cursor().top();
+        let accent_rect = egui::Rect::from_min_max(
+            egui::pos2(panel_left, start_y),
+            egui::pos2(panel_left + 3.0, end_y),
+        );
+        ui.painter().rect_filled(accent_rect, 0.0, color);
+
+        // Bottom separator between sections
+        ui.painter().hline(
+            panel_left..=panel_right,
+            end_y,
+            Stroke::new(1.0, stroke_color),
+        );
+
+        header
+    }
+
+    // -- Fixed column widths for consistent Transform / Vec3 alignment --
+    const VEC3_LABEL_W: f32 = 62.0; // "Position" / "Rotation" / "Scale"
+    const VEC3_RESET_W: f32 = 22.0; // reset button "R"
+    const VEC3_AXIS_LABEL_W: f32 = 14.0; // "X" / "Y" / "Z" colored label
+    const VEC3_INPUT_W: f32 = 92.0;
+
+    /// Render a two-column row with a label (+ optional extras like reset button) and
+    /// a Vec3 drag-value field (X/Y/Z with colored axis labels).
+    fn vector3_row(
+        ui: &mut Ui,
+        label: &str,
+        vec: &mut glm::Vec3,
+        speed: f32,
+        label_extra: impl FnOnce(&mut Ui),
+    ) {
+        Self::vector3_row_with_range(ui, label, vec, speed, f32::MIN..=f32::MAX, label_extra);
+    }
+
+    /// Like `vector3_row` but with a value range clamp.
+    fn vector3_row_with_range(
+        ui: &mut Ui,
+        label: &str,
+        vec: &mut glm::Vec3,
+        speed: f32,
+        range: std::ops::RangeInclusive<f32>,
+        label_extra: impl FnOnce(&mut Ui),
+    ) {
+        // Sanitize values
+        if !vec.x.is_finite() {
+            vec.x = 0.0;
+        }
+        if !vec.y.is_finite() {
+            vec.y = 0.0;
+        }
+        if !vec.z.is_finite() {
+            vec.z = 0.0;
+        }
+
+        let mut arr = [vec.x, vec.y, vec.z];
+        Self::vec3_row_inner(ui, label, &mut arr, speed, range, None, label_extra);
+        vec.x = arr[0];
+        vec.y = arr[1];
+        vec.z = arr[2];
+    }
+
+    /// Inner helper that lays out a label + reset + 3 axis drag values in fixed columns.
+    /// `suffix` is applied to all three drag values (e.g. "°" for rotation).
+    fn vec3_row_inner(
+        ui: &mut Ui,
+        label: &str,
+        vals: &mut [f32; 3],
+        speed: f32,
+        range: std::ops::RangeInclusive<f32>,
+        suffix: Option<&str>,
+        label_extra: impl FnOnce(&mut Ui),
+    ) {
+        let row_h = ui.spacing().interact_size.y;
+        let available = ui.available_width();
+
+        ui.horizontal(|ui| {
+            ui.set_min_width(available);
+
+            // Label column (fixed width)
+            ui.allocate_ui_with_layout(
+                egui::vec2(Self::VEC3_LABEL_W, row_h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        RichText::new(label)
+                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                    );
+                },
+            );
+
+            // Reset button column (fixed width)
+            ui.allocate_ui_with_layout(
+                egui::vec2(Self::VEC3_RESET_W, row_h),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    label_extra(ui);
+                },
+            );
+
+            let axis_colors = [AXIS_COLOR_X, AXIS_COLOR_Y, AXIS_COLOR_Z];
+            let axis_labels = ["X", "Y", "Z"];
+
+            for i in 0..3 {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(Self::VEC3_AXIS_LABEL_W, row_h),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        ui.label(RichText::new(axis_labels[i]).color(axis_colors[i]).strong());
+                    },
+                );
+                let mut dv = DragValue::new(&mut vals[i])
+                    .speed(speed)
+                    .range(range.clone());
+                if let Some(s) = suffix {
+                    dv = dv.suffix(s);
+                }
+                ui.add_sized(egui::vec2(Self::VEC3_INPUT_W, row_h), dv);
+            }
+        });
+    }
+
+    // Fixed label width for property rows (matches VEC3_LABEL_W + VEC3_RESET_W for alignment)
+    const PROP_LABEL_W: f32 = 90.0;
+    const MATERIAL_SLIDER_W: f32 = 112.0;
+    const MATERIAL_VALUE_W: f32 = 66.0;
+    const MATERIAL_SWATCH_W: f32 = 74.0;
+    /// Height for slider widgets — smaller than interact_size.y to produce compact circular thumbs.
+    /// egui handle radius = height / 2.5 - 1.0, so 16px → ~5.4px radius (vs 7.8px at 22px).
+    const SLIDER_HEIGHT: f32 = 16.0;
+
+    /// Render a standard two-column property row (label on left, value widget on right).
+    fn property_row<R>(ui: &mut Ui, label: &str, add_value: impl FnOnce(&mut Ui) -> R) -> R {
+        let available = ui.available_width();
+        let row_h = ui.spacing().interact_size.y;
+
+        ui.horizontal(|ui| {
+            ui.set_min_width(available);
+            ui.allocate_ui_with_layout(
+                egui::vec2(Self::PROP_LABEL_W, row_h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        RichText::new(label)
+                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                    );
+                },
+            );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), add_value)
+                .inner
+        })
+        .inner
+    }
+
+    /// Render a property row with a height-constrained slider for compact circular thumbs.
+    fn slider_row(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> egui::Response {
+        Self::property_row(ui, label, |ui| {
+            let w = ui.available_width();
+            ui.add_sized(egui::vec2(w, Self::SLIDER_HEIGHT), slider)
+        })
+    }
+
+    fn asset_slot_column(
+        ui: &mut Ui,
+        label: &str,
+        id_salt: &str,
+        path: &mut String,
+        allowed_types: &[AssetType],
+        asset_browser: &mut AssetBrowserPanel,
+        legacy_index: usize,
+    ) {
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(label).color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+            );
+            ui.add_space(3.0);
+            Self::asset_slot(
+                ui,
+                id_salt,
+                path,
+                allowed_types,
+                asset_browser,
+                legacy_index,
+            );
+        });
+    }
+
+    fn compact_slider(
+        ui: &mut Ui,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> egui::Response {
+        let desired = egui::vec2(Self::MATERIAL_SLIDER_W, Self::SLIDER_HEIGHT);
+        let (rect, mut response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
+        let min = *range.start();
+        let max = *range.end();
+        let span = (max - min).max(f32::EPSILON);
+
+        if response.clicked() || response.dragged() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let t = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let next = min + t * span;
+                if (*value - next).abs() > f32::EPSILON {
+                    *value = next;
+                    response.mark_changed();
+                }
+            }
+        }
+
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            let t = ((*value - min) / span).clamp(0.0, 1.0);
+            let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 4.0));
+            let fill = egui::Rect::from_min_max(
+                track.left_top(),
+                egui::pos2(track.left() + track.width() * t, track.bottom()),
+            );
+            painter.rect_filled(track, 2.0, Color32::from_rgb(11, 13, 17));
+            painter.rect_filled(fill, 2.0, Color32::from_rgb(52, 105, 190));
+            painter.rect_stroke(
+                track,
+                2.0,
+                Stroke::new(1.0, Color32::from_rgb(39, 43, 52)),
+                egui::epaint::StrokeKind::Inside,
+            );
+
+            let thumb = egui::pos2(
+                egui::lerp(track.left()..=track.right(), t),
+                track.center().y,
+            );
+            let radius = if response.dragged() { 5.0 } else { 4.5 };
+            let fill = if response.hovered() || response.dragged() {
+                Color32::from_rgb(232, 238, 250)
+            } else {
+                Color32::from_rgb(190, 199, 216)
+            };
+            painter.circle_filled(thumb, radius, fill);
+            painter.circle_stroke(
+                thumb,
+                radius,
+                Stroke::new(1.0, Color32::from_rgb(20, 22, 28)),
+            );
+        }
+
+        response
+    }
+
+    fn material_slider_row(ui: &mut Ui, label: &str, value: &mut f32) {
+        let row_h = ui.spacing().interact_size.y;
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                egui::vec2(Self::PROP_LABEL_W, row_h),
+                egui::Label::new(
+                    RichText::new(label).color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                ),
+            );
+            let _ = Self::compact_slider(ui, value, 0.0..=1.0);
+            ui.add_sized(
+                egui::vec2(Self::MATERIAL_VALUE_W, row_h),
+                DragValue::new(value).speed(0.01).range(0.0..=1.0),
+            );
+        });
+    }
+
+    fn color_swatch_picker(ui: &mut Ui, id_salt: &str, color: &mut [f32; 3]) -> bool {
+        let row_h = ui.spacing().interact_size.y;
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(Self::MATERIAL_SWATCH_W, row_h),
+            egui::Sense::click(),
+        );
+        let color32 = rgb_color32(*color);
+        ui.painter().rect_filled(rect, 3.0, color32);
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            Stroke::new(
+                1.0,
+                if response.hovered() {
+                    Color32::from_rgb(105, 113, 132)
+                } else {
+                    Color32::from_rgb(64, 69, 82)
+                },
+            ),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        let popup_id = ui.id().with(id_salt).with("color_picker");
+        let mut changed = false;
+        egui::Popup::from_toggle_button_response(&response)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .width(286.0)
+            .show(|ui| {
+                changed |= Self::modern_color_picker(ui, color);
+            });
+        changed
+    }
+
+    fn modern_color_picker(ui: &mut Ui, color: &mut [f32; 3]) -> bool {
+        let (mut hue, mut saturation, mut value) = rgb_to_hsv(color[0], color[1], color[2]);
+        let mut changed = false;
+        egui::Frame::new()
+            .fill(Color32::from_rgb(23, 25, 30))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(73, 79, 94)))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("RGB").color(Color32::from_rgb(156, 162, 174)));
+                    ui.add_space(8.0);
+                    let mut changed_rgb = false;
+                    for (name, channel) in ["R", "G", "B"].iter().zip(color.iter_mut()) {
+                        ui.label(*name);
+                        let mut byte = (*channel * 255.0).round();
+                        changed_rgb |= ui
+                            .add_sized(
+                                egui::vec2(44.0, ui.spacing().interact_size.y),
+                                DragValue::new(&mut byte).range(0.0..=255.0).speed(1.0),
+                            )
+                            .changed();
+                        *channel = (byte / 255.0).clamp(0.0, 1.0);
+                    }
+                    let preview_rect = ui
+                        .allocate_exact_size(egui::vec2(28.0, 18.0), egui::Sense::hover())
+                        .0;
+                    ui.painter()
+                        .rect_filled(preview_rect, 3.0, rgb_color32(*color));
+                    ui.painter().rect_stroke(
+                        preview_rect,
+                        3.0,
+                        Stroke::new(1.0, Color32::from_rgb(70, 76, 90)),
+                        egui::epaint::StrokeKind::Inside,
+                    );
+                    if changed_rgb {
+                        (hue, saturation, value) = rgb_to_hsv(color[0], color[1], color[2]);
+                        changed = true;
+                    }
+                });
+                ui.add_space(7.0);
+
+                let sv_size = egui::vec2(252.0, 166.0);
+                let (sv_rect, sv_response) =
+                    ui.allocate_exact_size(sv_size, egui::Sense::click_and_drag());
+                if ui.is_rect_visible(sv_rect) {
+                    let painter = ui.painter();
+                    let steps_x = 56;
+                    let steps_y = 36;
+                    for ix in 0..steps_x {
+                        for iy in 0..steps_y {
+                            let s0 = ix as f32 / steps_x as f32;
+                            let s1 = (ix + 1) as f32 / steps_x as f32;
+                            let y0 = iy as f32 / steps_y as f32;
+                            let y1 = (iy + 1) as f32 / steps_y as f32;
+                            let rgb = hsv_to_rgb(hue, (s0 + s1) * 0.5, 1.0 - (y0 + y1) * 0.5);
+                            let cell = egui::Rect::from_min_max(
+                                egui::pos2(
+                                    egui::lerp(sv_rect.left()..=sv_rect.right(), s0),
+                                    egui::lerp(sv_rect.top()..=sv_rect.bottom(), y0),
+                                ),
+                                egui::pos2(
+                                    egui::lerp(sv_rect.left()..=sv_rect.right(), s1),
+                                    egui::lerp(sv_rect.top()..=sv_rect.bottom(), y1),
+                                ),
+                            );
+                            painter.rect_filled(cell, 0.0, rgb_color32(rgb));
+                        }
+                    }
+                    painter.rect_stroke(
+                        sv_rect,
+                        4.0,
+                        Stroke::new(1.0, Color32::from_rgb(77, 84, 101)),
+                        egui::epaint::StrokeKind::Inside,
+                    );
+                    let marker = egui::pos2(
+                        egui::lerp(sv_rect.left()..=sv_rect.right(), saturation),
+                        egui::lerp(sv_rect.bottom()..=sv_rect.top(), value),
+                    );
+                    painter.circle_stroke(marker, 5.0, Stroke::new(1.5, Color32::WHITE));
+                    painter.circle_stroke(marker, 6.25, Stroke::new(1.0, Color32::BLACK));
+                }
+                if sv_response.clicked() || sv_response.dragged() {
+                    if let Some(pointer) = sv_response.interact_pointer_pos() {
+                        saturation =
+                            ((pointer.x - sv_rect.left()) / sv_rect.width()).clamp(0.0, 1.0);
+                        value =
+                            (1.0 - (pointer.y - sv_rect.top()) / sv_rect.height()).clamp(0.0, 1.0);
+                        *color = hsv_to_rgb(hue, saturation, value);
+                        changed = true;
+                    }
+                }
+
+                ui.add_space(7.0);
+                let hue_size = egui::vec2(252.0, 14.0);
+                let (hue_rect, hue_response) =
+                    ui.allocate_exact_size(hue_size, egui::Sense::click_and_drag());
+                if ui.is_rect_visible(hue_rect) {
+                    let painter = ui.painter();
+                    let segments = 72;
+                    for i in 0..segments {
+                        let h0 = i as f32 / segments as f32;
+                        let h1 = (i + 1) as f32 / segments as f32;
+                        let rect = egui::Rect::from_min_max(
+                            egui::pos2(
+                                egui::lerp(hue_rect.left()..=hue_rect.right(), h0),
+                                hue_rect.top(),
+                            ),
+                            egui::pos2(
+                                egui::lerp(hue_rect.left()..=hue_rect.right(), h1),
+                                hue_rect.bottom(),
+                            ),
+                        );
+                        painter.rect_filled(
+                            rect,
+                            0.0,
+                            rgb_color32(hsv_to_rgb((h0 + h1) * 0.5, 1.0, 1.0)),
+                        );
+                    }
+                    painter.rect_stroke(
+                        hue_rect,
+                        3.0,
+                        Stroke::new(1.0, Color32::from_rgb(77, 84, 101)),
+                        egui::epaint::StrokeKind::Inside,
+                    );
+                    let x = egui::lerp(hue_rect.left()..=hue_rect.right(), hue);
+                    painter.line_segment(
+                        [
+                            egui::pos2(x, hue_rect.top() - 2.0),
+                            egui::pos2(x, hue_rect.bottom() + 2.0),
+                        ],
+                        Stroke::new(1.5, Color32::WHITE),
+                    );
+                }
+                if hue_response.clicked() || hue_response.dragged() {
+                    if let Some(pointer) = hue_response.interact_pointer_pos() {
+                        hue = ((pointer.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0);
+                        *color = hsv_to_rgb(hue, saturation, value);
+                        changed = true;
+                    }
+                }
+            });
+        changed
     }
 
     /// Render all component editors using the cached presence snapshot.
@@ -351,9 +834,13 @@ impl InspectorPanel {
             if component_count > 0 {
                 Self::draw_component_divider(ui);
             }
-            if let Some(action) =
-                self.edit_mesh_renderer(ui, world, entity, ComponentCategory::Rendering, asset_browser)
-            {
+            if let Some(action) = self.edit_mesh_renderer(
+                ui,
+                world,
+                entity,
+                ComponentCategory::Rendering,
+                asset_browser,
+            ) {
                 pending_action = action;
             }
             component_count += 1;
@@ -469,7 +956,9 @@ impl InspectorPanel {
             }
         }
 
-        if (self.matches_filter("plankton") || self.matches_filter("vfx") || self.matches_filter("particle"))
+        if (self.matches_filter("plankton")
+            || self.matches_filter("vfx")
+            || self.matches_filter("particle"))
             && p.has(ComponentPresence::PARTICLE_EFFECT)
         {
             if component_count > 0 {
@@ -530,28 +1019,15 @@ impl InspectorPanel {
         category: ComponentCategory,
     ) {
         if let Ok(mut name) = world.get::<&mut Name>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Name").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Name:");
-                        let mut name_str = name.0.clone();
-                        if ui.text_edit_singleline(&mut name_str).changed() {
-                            name.0 = name_str;
-                        }
-                    });
+            Self::component_section(ui, "Name", category, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    let mut name_str = name.0.clone();
+                    if ui.text_edit_singleline(&mut name_str).changed() {
+                        name.0 = name_str;
+                    }
                 });
-
-            // Draw colored accent bar on the left side of the component
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+            });
         }
     }
 
@@ -567,157 +1043,77 @@ impl InspectorPanel {
         let snapshot = world.get::<&Transform>(entity).ok().map(|t| *t);
 
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Transform").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Position
-                    ui.horizontal(|ui| {
-                        ui.label("Position");
-                        if ui.small_button("R").on_hover_text("Reset").clicked() {
-                            transform.position = glm::vec3(0.0, 0.0, 0.0);
-                        }
-                    });
-                    // Sanitize position values to prevent NaN/Infinity issues
-                    if !transform.position.x.is_finite() {
-                        transform.position.x = 0.0;
-                    }
-                    if !transform.position.y.is_finite() {
-                        transform.position.y = 0.0;
-                    }
-                    if !transform.position.z.is_finite() {
-                        transform.position.z = 0.0;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        ui.add(DragValue::new(&mut transform.position.x).speed(0.1));
-                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        ui.add(DragValue::new(&mut transform.position.y).speed(0.1));
-                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        ui.add(DragValue::new(&mut transform.position.z).speed(0.1));
-                    });
-
-                    // Rotation (as Euler angles in degrees)
-                    ui.horizontal(|ui| {
-                        ui.label("Rotation");
-                        if ui.small_button("R").on_hover_text("Reset").clicked() {
-                            transform.rotation = glm::quat_identity();
-                            self.euler_cache.insert(
-                                entity.id() as u64,
-                                (glm::quat_identity(), [0.0, 0.0, 0.0]),
-                            );
-                        }
-                    });
-
-                    // Get or calculate euler angles.
-                    // The cache stores (quaternion, euler) pairs so we can detect when
-                    // the quaternion has been modified externally (e.g., by the gizmo).
-                    let entity_id = entity.id() as u64;
-                    let needs_recompute = match self.euler_cache.get(&entity_id) {
-                        Some((cached_quat, _)) => {
-                            !quaternions_approximately_equal(cached_quat, &transform.rotation)
-                        }
-                        None => true,
-                    };
-                    if needs_recompute {
-                        let new_euler = quaternion_to_euler_degrees(&transform.rotation);
-                        self.euler_cache
-                            .insert(entity_id, (transform.rotation, new_euler));
-                    }
-
-                    // Get a copy of euler to work with (avoids borrow issues with closure)
-                    let mut euler = self.euler_cache.get(&entity_id).unwrap().1;
-
-                    // Sanitize cached euler values to prevent DragValue crash
-                    for item in &mut euler {
-                        if !item.is_finite() {
-                            *item = 0.0;
-                        }
-                    }
-
-                    let mut euler_changed = false;
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        let response_x = ui.add(
-                            DragValue::new(&mut euler[0])
-                                .speed(1.0)
-                                .suffix("°")
-                                .range(-180.0..=180.0),
-                        );
-                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        let response_y = ui.add(
-                            DragValue::new(&mut euler[1])
-                                .speed(1.0)
-                                .suffix("°")
-                                .range(-180.0..=180.0),
-                        );
-                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        let response_z = ui.add(
-                            DragValue::new(&mut euler[2])
-                                .speed(1.0)
-                                .suffix("°")
-                                .range(-180.0..=180.0),
-                        );
-
-                        euler_changed =
-                            response_x.changed() || response_y.changed() || response_z.changed();
-                    });
-
-                    if euler_changed {
-                        let new_quat = euler_degrees_to_quaternion(&euler);
-                        transform.rotation = new_quat;
-                        // Update cache with new quaternion so we don't recompute euler next frame
-                        self.euler_cache.insert(entity_id, (new_quat, euler));
-                    }
-
-                    // Scale
-                    ui.horizontal(|ui| {
-                        ui.label("Scale");
-                        if ui.small_button("R").on_hover_text("Reset").clicked() {
-                            transform.scale = glm::vec3(1.0, 1.0, 1.0);
-                        }
-                    });
-                    // Sanitize scale values to prevent DragValue crash
-                    if !transform.scale.x.is_finite() {
-                        transform.scale.x = 1.0;
-                    }
-                    if !transform.scale.y.is_finite() {
-                        transform.scale.y = 1.0;
-                    }
-                    if !transform.scale.z.is_finite() {
-                        transform.scale.z = 1.0;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                        ui.add(
-                            DragValue::new(&mut transform.scale.x)
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
-                        ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                        ui.add(
-                            DragValue::new(&mut transform.scale.y)
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
-                        ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                        ui.add(
-                            DragValue::new(&mut transform.scale.z)
-                                .speed(0.01)
-                                .range(0.001..=1000.0),
-                        );
-                    });
+            Self::component_section(ui, "Transform", category, |ui| {
+                // Position
+                let mut reset_pos = false;
+                Self::vector3_row(ui, "Position", &mut transform.position, 0.1, |ui| {
+                    reset_pos = ui.small_button("R").on_hover_text("Reset").clicked();
                 });
+                if reset_pos {
+                    transform.position = glm::vec3(0.0, 0.0, 0.0);
+                }
 
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                // Rotation (as Euler angles in degrees)
+                let entity_id = entity.id() as u64;
+                let needs_recompute = match self.euler_cache.get(&entity_id) {
+                    Some((cached_quat, _)) => {
+                        !quaternions_approximately_equal(cached_quat, &transform.rotation)
+                    }
+                    None => true,
+                };
+                if needs_recompute {
+                    let new_euler = quaternion_to_euler_degrees(&transform.rotation);
+                    self.euler_cache
+                        .insert(entity_id, (transform.rotation, new_euler));
+                }
+
+                let mut euler = self.euler_cache.get(&entity_id).unwrap().1;
+                for item in &mut euler {
+                    if !item.is_finite() {
+                        *item = 0.0;
+                    }
+                }
+
+                let mut reset_rot = false;
+                let euler_before = euler;
+                Self::vec3_row_inner(
+                    ui,
+                    "Rotation",
+                    &mut euler,
+                    1.0,
+                    -180.0..=180.0,
+                    Some("°"),
+                    |ui| {
+                        reset_rot = ui.small_button("R").on_hover_text("Reset").clicked();
+                    },
+                );
+                if euler != euler_before {
+                    let new_quat = euler_degrees_to_quaternion(&euler);
+                    transform.rotation = new_quat;
+                    self.euler_cache.insert(entity_id, (new_quat, euler));
+                }
+                if reset_rot {
+                    transform.rotation = glm::quat_identity();
+                    self.euler_cache
+                        .insert(entity_id, (glm::quat_identity(), [0.0, 0.0, 0.0]));
+                }
+
+                // Scale
+                let mut reset_scale = false;
+                Self::vector3_row_with_range(
+                    ui,
+                    "Scale",
+                    &mut transform.scale,
+                    0.01,
+                    0.001..=1000.0,
+                    |ui| {
+                        reset_scale = ui.small_button("R").on_hover_text("Reset").clicked();
+                    },
+                );
+                if reset_scale {
+                    transform.scale = glm::vec3(1.0, 1.0, 1.0);
+                }
+            });
         }
 
         // After the mutable borrow is released, check if transform changed
@@ -744,122 +1140,104 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut camera) = world.get::<&mut Camera>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            let header = CollapsingHeader::new(RichText::new("Camera").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut camera.active, "Active")
-                        .on_hover_text("Whether this camera is currently rendering");
-
-                    // Projection type
-                    ui.horizontal(|ui| {
-                        ui.label("Projection:");
-                        let current_label = match camera.projection {
-                            CameraProjection::Perspective => "Perspective",
-                            CameraProjection::Orthographic { .. } => "Orthographic",
-                        };
-                        egui::ComboBox::from_id_salt("cam_projection")
-                            .selected_text(current_label)
-                            .show_ui(ui, |ui| {
-                                let is_perspective =
-                                    matches!(camera.projection, CameraProjection::Perspective);
-                                if ui.selectable_label(is_perspective, "Perspective").clicked() {
-                                    camera.projection = CameraProjection::Perspective;
-                                }
-                                let is_ortho = matches!(
-                                    camera.projection,
-                                    CameraProjection::Orthographic { .. }
-                                );
-                                if ui.selectable_label(is_ortho, "Orthographic").clicked() {
-                                    camera.projection =
-                                        CameraProjection::Orthographic { size: 10.0 };
-                                }
-                            });
-                    });
-
-                    // Sanitize camera values to prevent DragValue crash
-                    if !camera.fov.is_finite() {
-                        camera.fov = 60.0;
-                    }
-                    if !camera.near.is_finite() || camera.near <= 0.0 {
-                        camera.near = 0.1;
-                    }
-                    if !camera.far.is_finite() || camera.far <= camera.near {
-                        camera.far = 1000.0;
-                    }
-
-                    // FOV or Ortho Size depending on projection
-                    match &mut camera.projection {
-                        CameraProjection::Perspective => {
-                            ui.horizontal(|ui| {
-                                ui.label("FOV:");
-                                ui.add(
-                                    egui::Slider::new(&mut camera.fov, 30.0..=120.0)
-                                        .suffix("°")
-                                        .clamping(egui::SliderClamping::Always),
-                                )
-                                .on_hover_text("Field of view angle. Wider = more visible area");
-                            });
-                        }
-                        CameraProjection::Orthographic { size } => {
-                            if !size.is_finite() {
-                                *size = 10.0;
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("Ortho Size:");
-                                ui.add(DragValue::new(size).speed(0.1).range(0.1..=1000.0))
-                                    .on_hover_text("Orthographic camera view size");
-                            });
-                        }
-                    }
-
-                    // Near/Far planes - calculate safe dynamic ranges
-                    let near_max = (camera.far - 0.001).max(0.002);
-                    let far_min = (camera.near + 0.001).min(99999.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("Near:");
-                        ui.add(
-                            DragValue::new(&mut camera.near)
-                                .speed(0.01)
-                                .range(0.001..=near_max),
-                        )
-                        .on_hover_text(
-                            "Near clipping plane. Objects closer than this won't render",
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Far:");
-                        ui.add(
-                            DragValue::new(&mut camera.far)
-                                .speed(1.0)
-                                .range(far_min..=100000.0),
-                        )
-                        .on_hover_text(
-                            "Far clipping plane. Objects farther than this won't render",
-                        );
-                    });
-
-                    // Clear color
-                    ui.horizontal(|ui| {
-                        ui.label("Clear Color:");
-                        ui.color_edit_button_rgb(&mut camera.clear_color)
-                            .on_hover_text("Background color when nothing is rendered");
-                    });
-
-                    // Priority
-                    ui.horizontal(|ui| {
-                        ui.label("Priority:");
-                        ui.add(
-                            DragValue::new(&mut camera.priority)
-                                .speed(1)
-                                .range(-100..=100),
-                        )
-                        .on_hover_text("Camera render order. Higher priority renders on top");
-                    });
+            let header = Self::component_section(ui, "Camera", category, |ui| {
+                Self::property_row(ui, "Active", |ui| {
+                    ui.checkbox(&mut camera.active, "")
+                        .on_hover_text("Whether this camera is currently rendering")
                 });
+
+                // Projection type
+                Self::property_row(ui, "Projection", |ui| {
+                    let current_label = match camera.projection {
+                        CameraProjection::Perspective => "Perspective",
+                        CameraProjection::Orthographic { .. } => "Orthographic",
+                    };
+                    egui::ComboBox::from_id_salt("cam_projection")
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            let is_perspective =
+                                matches!(camera.projection, CameraProjection::Perspective);
+                            if ui.selectable_label(is_perspective, "Perspective").clicked() {
+                                camera.projection = CameraProjection::Perspective;
+                            }
+                            let is_ortho =
+                                matches!(camera.projection, CameraProjection::Orthographic { .. });
+                            if ui.selectable_label(is_ortho, "Orthographic").clicked() {
+                                camera.projection = CameraProjection::Orthographic { size: 10.0 };
+                            }
+                        });
+                });
+
+                // Sanitize camera values to prevent DragValue crash
+                if !camera.fov.is_finite() {
+                    camera.fov = 60.0;
+                }
+                if !camera.near.is_finite() || camera.near <= 0.0 {
+                    camera.near = 0.1;
+                }
+                if !camera.far.is_finite() || camera.far <= camera.near {
+                    camera.far = 1000.0;
+                }
+
+                // FOV or Ortho Size depending on projection
+                match &mut camera.projection {
+                    CameraProjection::Perspective => {
+                        Self::slider_row(
+                            ui,
+                            "FOV",
+                            egui::Slider::new(&mut camera.fov, 30.0..=120.0)
+                                .suffix("°")
+                                .clamping(egui::SliderClamping::Always),
+                        );
+                    }
+                    CameraProjection::Orthographic { size } => {
+                        if !size.is_finite() {
+                            *size = 10.0;
+                        }
+                        Self::property_row(ui, "Ortho Size", |ui| {
+                            ui.add(DragValue::new(size).speed(0.1).range(0.1..=1000.0))
+                                .on_hover_text("Orthographic camera view size")
+                        });
+                    }
+                }
+
+                // Near/Far planes
+                let near_max = (camera.far - 0.001).max(0.002);
+                let far_min = (camera.near + 0.001).min(99999.0);
+
+                Self::property_row(ui, "Near", |ui| {
+                    ui.add(
+                        DragValue::new(&mut camera.near)
+                            .speed(0.01)
+                            .range(0.001..=near_max),
+                    )
+                    .on_hover_text("Near clipping plane. Objects closer than this won't render")
+                });
+                Self::property_row(ui, "Far", |ui| {
+                    ui.add(
+                        DragValue::new(&mut camera.far)
+                            .speed(1.0)
+                            .range(far_min..=100000.0),
+                    )
+                    .on_hover_text("Far clipping plane. Objects farther than this won't render")
+                });
+
+                // Clear color
+                Self::property_row(ui, "Clear Color", |ui| {
+                    ui.color_edit_button_rgb(&mut camera.clear_color)
+                        .on_hover_text("Background color when nothing is rendered")
+                });
+
+                // Priority
+                Self::property_row(ui, "Priority", |ui| {
+                    ui.add(
+                        DragValue::new(&mut camera.priority)
+                            .speed(1)
+                            .range(-100..=100),
+                    )
+                    .on_hover_text("Camera render order. Higher priority renders on top")
+                });
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -868,14 +1246,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -891,111 +1261,113 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            let header = CollapsingHeader::new(RichText::new("Mesh Renderer").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut renderer.visible, "Visible")
-                        .on_hover_text("Whether this mesh is rendered");
-
-                    // Mesh asset slot
-                    let mesh_idx = renderer.mesh_index;
-                    ui.label("Mesh:");
-                    Self::asset_slot(
-                        ui,
-                        "mesh_slot",
-                        &mut renderer.mesh_path,
-                        &[AssetType::Mesh, AssetType::Model],
-                        asset_browser,
-                        mesh_idx,
-                    );
-
-                    ui.add_space(4.0);
-
-                    // Material slots — one slot per submesh material
-                    if renderer.material_paths.is_empty() {
-                        renderer.material_paths.push(String::new());
-                    }
-                    let slot_count = renderer.material_paths.len();
-                    for i in 0..slot_count {
-                        let label = if slot_count == 1 {
-                            "Material:".to_string()
-                        } else {
-                            format!("Material [{}]:", i)
-                        };
-                        ui.label(&label);
-                        Self::asset_slot(
-                            ui,
-                            &format!("material_slot_{}", i),
-                            &mut renderer.material_paths[i],
-                            &[AssetType::Material],
-                            asset_browser,
-                            0,
-                        );
-                        ui.add_space(2.0);
-                    }
-
-                    ui.add_space(4.0);
-
-                    ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
-                        .on_hover_text("Whether this mesh casts shadows");
-                    ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
-                        .on_hover_text("Whether this mesh receives shadows from other objects");
-
-                    // --- Material Instance Overrides ---
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.label(RichText::new("Material Overrides").strong());
-
-                    // Base Color
-                    ui.horizontal(|ui| {
-                        ui.label("Base Color:");
-                        let mut color3 = [
-                            renderer.base_color_factor[0],
-                            renderer.base_color_factor[1],
-                            renderer.base_color_factor[2],
-                        ];
-                        if ui.color_edit_button_rgb(&mut color3).changed() {
-                            renderer.base_color_factor[0] = color3[0];
-                            renderer.base_color_factor[1] = color3[1];
-                            renderer.base_color_factor[2] = color3[2];
-                        }
-                    });
-                    ui.add(
-                        egui::Slider::new(&mut renderer.base_color_factor[3], 0.0..=1.0)
-                            .text("Alpha"),
-                    );
-
-                    ui.add(
-                        egui::Slider::new(&mut renderer.metallic_factor, 0.0..=1.0)
-                            .text("Metallic"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut renderer.roughness_factor, 0.0..=1.0)
-                            .text("Roughness"),
-                    );
-
-                    // Emissive
-                    ui.horizontal(|ui| {
-                        ui.label("Emissive:");
-                        let mut em = renderer.emissive_factor;
-                        let mut changed = false;
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut em[0]).speed(0.01).range(0.0..=10.0).prefix("R: "))
-                            .changed();
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut em[1]).speed(0.01).range(0.0..=10.0).prefix("G: "))
-                            .changed();
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut em[2]).speed(0.01).range(0.0..=10.0).prefix("B: "))
-                            .changed();
-                        if changed {
-                            renderer.emissive_factor = em;
-                        }
-                    });
+            let header = Self::component_section(ui, "Mesh Renderer", category, |ui| {
+                Self::property_row(ui, "Visible", |ui| {
+                    ui.checkbox(&mut renderer.visible, "")
+                        .on_hover_text("Whether this mesh is rendered")
                 });
+
+                // Mesh asset slot
+                let mesh_idx = renderer.mesh_index;
+                Self::asset_slot_column(
+                    ui,
+                    "Mesh",
+                    "mesh_slot",
+                    &mut renderer.mesh_path,
+                    &[AssetType::Mesh, AssetType::Model],
+                    asset_browser,
+                    mesh_idx,
+                );
+
+                ui.add_space(4.0);
+
+                // Material slots — one slot per submesh material
+                if renderer.material_paths.is_empty() {
+                    renderer.material_paths.push(String::new());
+                }
+                let slot_count = renderer.material_paths.len();
+                for i in 0..slot_count {
+                    let label = if slot_count == 1 {
+                        "Material".to_string()
+                    } else {
+                        format!("Material [{}]", i)
+                    };
+                    Self::asset_slot_column(
+                        ui,
+                        &label,
+                        &format!("material_slot_{}", i),
+                        &mut renderer.material_paths[i],
+                        &[AssetType::Material],
+                        asset_browser,
+                        0,
+                    );
+                    ui.add_space(4.0);
+                }
+
+                ui.add_space(4.0);
+
+                ui.checkbox(&mut renderer.cast_shadows, "Cast Shadows")
+                    .on_hover_text("Whether this mesh casts shadows");
+                ui.checkbox(&mut renderer.receive_shadows, "Receive Shadows")
+                    .on_hover_text("Whether this mesh receives shadows from other objects");
+
+                // --- Material Instance Overrides ---
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(RichText::new("Material Overrides").strong());
+
+                Self::property_row(ui, "Base Color", |ui| {
+                    let mut color3 = [
+                        renderer.base_color_factor[0],
+                        renderer.base_color_factor[1],
+                        renderer.base_color_factor[2],
+                    ];
+                    if Self::color_swatch_picker(ui, "base_color_override", &mut color3) {
+                        renderer.base_color_factor[0] = color3[0];
+                        renderer.base_color_factor[1] = color3[1];
+                        renderer.base_color_factor[2] = color3[2];
+                    }
+                });
+                Self::material_slider_row(ui, "Alpha", &mut renderer.base_color_factor[3]);
+                Self::material_slider_row(ui, "Metallic", &mut renderer.metallic_factor);
+                Self::material_slider_row(ui, "Roughness", &mut renderer.roughness_factor);
+
+                // Emissive
+                Self::property_row(ui, "Emissive", |ui| {
+                    let mut em = renderer.emissive_factor;
+                    let mut changed = false;
+                    changed |= ui
+                        .add_sized(
+                            egui::vec2(Self::MATERIAL_VALUE_W, ui.spacing().interact_size.y),
+                            DragValue::new(&mut em[0])
+                                .speed(0.01)
+                                .range(0.0..=10.0)
+                                .prefix("R: "),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add_sized(
+                            egui::vec2(Self::MATERIAL_VALUE_W, ui.spacing().interact_size.y),
+                            DragValue::new(&mut em[1])
+                                .speed(0.01)
+                                .range(0.0..=10.0)
+                                .prefix("G: "),
+                        )
+                        .changed();
+                    let resp = ui.add_sized(
+                        egui::vec2(Self::MATERIAL_VALUE_W, ui.spacing().interact_size.y),
+                        DragValue::new(&mut em[2])
+                            .speed(0.01)
+                            .range(0.0..=10.0)
+                            .prefix("B: "),
+                    );
+                    changed |= resp.changed();
+                    if changed {
+                        renderer.emissive_factor = em;
+                    }
+                    resp
+                });
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -1004,14 +1376,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -1033,10 +1397,8 @@ impl InspectorPanel {
         let thumb_size: f32 = slot_size - 8.0;
         let slot_width = slot_size.max(ui.available_width().min(slot_size));
 
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(slot_width, slot_size),
-            egui::Sense::click(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(slot_width, slot_size), egui::Sense::click());
 
         // Check for DnD hover
         let mut is_valid_hover = false;
@@ -1092,15 +1454,18 @@ impl InspectorPanel {
 
         if path.is_empty() {
             // Empty slot — click prompt
-            let type_names: Vec<&str> =
-                allowed_types.iter().map(|t| t.display_name()).collect();
+            let type_names: Vec<&str> = allowed_types.iter().map(|t| t.display_name()).collect();
             let hint = format!("Click to select\n{}", type_names.join("/"));
             let text_color = Color32::from_gray(120);
             let inner = rect.shrink(6.0);
             slot_ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((inner.height() - 28.0).max(0.0) / 2.0);
-                    ui.label(RichText::new(hint).font(egui::FontId::proportional(11.0)).color(text_color));
+                    ui.label(
+                        RichText::new(hint)
+                            .font(egui::FontId::proportional(11.0))
+                            .color(text_color),
+                    );
                 });
             });
         } else {
@@ -1125,7 +1490,10 @@ impl InspectorPanel {
                 }
             } else if path.starts_with("__primitive__/") {
                 // Primitive mesh — use GPU-rendered thumbnail
-                if let Some(tex_id) = asset_browser.thumbnails.get_primitive_texture_id(ui.ctx(), path) {
+                if let Some(tex_id) = asset_browser
+                    .thumbnails
+                    .get_primitive_texture_id(ui.ctx(), path)
+                {
                     painter.image(
                         tex_id,
                         thumb_rect,
@@ -1197,9 +1565,8 @@ impl InspectorPanel {
 
                 // Search bar
                 let search_id = popup_id.with("search_text");
-                let mut search_text: String = ui.data_mut(|d| {
-                    d.get_temp_mut_or_default::<String>(search_id).clone()
-                });
+                let mut search_text: String =
+                    ui.data_mut(|d| d.get_temp_mut_or_default::<String>(search_id).clone());
                 ui.horizontal(|ui| {
                     ui.label("Search:");
                     let te = ui.text_edit_singleline(&mut search_text);
@@ -1233,20 +1600,24 @@ impl InspectorPanel {
                         let matching_prims: Vec<&str> = PRIMITIVE_PATHS
                             .iter()
                             .filter(|p| {
-                                search_text.is_empty()
-                                    || p.to_lowercase().contains(&search_lower)
+                                search_text.is_empty() || p.to_lowercase().contains(&search_lower)
                             })
                             .copied()
                             .collect();
 
                         if !matching_prims.is_empty() {
-                            ui.label(RichText::new("Primitives").small().color(Color32::from_gray(140)));
+                            ui.label(
+                                RichText::new("Primitives")
+                                    .small()
+                                    .color(Color32::from_gray(140)),
+                            );
                             ui.add_space(2.0);
                             egui::Grid::new(popup_id.with("prims_grid"))
                                 .spacing(egui::vec2(4.0, 4.0))
                                 .show(ui, |ui| {
                                     for (i, &prim_path) in matching_prims.iter().enumerate() {
-                                        let label = prim_path.rsplit('/').next().unwrap_or(prim_path);
+                                        let label =
+                                            prim_path.rsplit('/').next().unwrap_or(prim_path);
                                         let is_selected = path.as_str() == prim_path;
 
                                         let (item_rect, item_resp) = ui.allocate_exact_size(
@@ -1322,19 +1693,19 @@ impl InspectorPanel {
                     let results = asset_browser.registry.query(&filter);
 
                     if results.is_empty() && !include_meshes {
-                        ui.label(
-                            RichText::new("No assets found")
-                                .color(Color32::from_gray(100)),
-                        );
+                        ui.label(RichText::new("No assets found").color(Color32::from_gray(100)));
                     } else if !results.is_empty() {
-                        ui.label(RichText::new("Assets").small().color(Color32::from_gray(140)));
+                        ui.label(
+                            RichText::new("Assets")
+                                .small()
+                                .color(Color32::from_gray(140)),
+                        );
                         ui.add_space(2.0);
                         egui::Grid::new(popup_id.with("assets_grid"))
                             .spacing(egui::vec2(4.0, 4.0))
                             .show(ui, |ui| {
                                 for (i, meta) in results.iter().enumerate() {
-                                    let asset_path =
-                                        meta.path.to_string_lossy().to_string();
+                                    let asset_path = meta.path.to_string_lossy().to_string();
                                     let display = &meta.display_name;
                                     let is_selected = path.as_str() == asset_path;
 
@@ -1357,9 +1728,8 @@ impl InspectorPanel {
                                         item_rect.min + egui::vec2(4.0, 4.0),
                                         egui::vec2(item_w - 8.0, item_w - 8.0),
                                     );
-                                    if let Some(tex_id) = asset_browser
-                                        .thumbnails
-                                        .get_texture_id(ui.ctx(), meta)
+                                    if let Some(tex_id) =
+                                        asset_browser.thumbnails.get_texture_id(ui.ctx(), meta)
                                     {
                                         ui.painter().image(
                                             tex_id,
@@ -1381,10 +1751,7 @@ impl InspectorPanel {
                                     // Label (clipped to item rect)
                                     let clipped = ui.painter().with_clip_rect(item_rect);
                                     clipped.text(
-                                        egui::pos2(
-                                            item_rect.center().x,
-                                            item_rect.max.y - 3.0,
-                                        ),
+                                        egui::pos2(item_rect.center().x, item_rect.max.y - 3.0),
                                         egui::Align2::CENTER_BOTTOM,
                                         display,
                                         egui::FontId::proportional(9.0),
@@ -1416,93 +1783,84 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut light) = world.get::<&mut DirectionalLight>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            let header = CollapsingHeader::new(RichText::new("Directional Light").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Direction
-                    ui.label("Direction:")
-                        .on_hover_text("Direction the light is pointing (normalized)");
-                    // Sanitize direction to prevent DragValue crash
-                    if !light.direction.x.is_finite() {
-                        light.direction.x = 0.0;
-                    }
-                    if !light.direction.y.is_finite() {
-                        light.direction.y = -1.0;
-                    }
-                    if !light.direction.z.is_finite() {
-                        light.direction.z = 0.0;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            DragValue::new(&mut light.direction.x)
-                                .prefix("X: ")
-                                .speed(0.01)
-                                .range(-1.0..=1.0),
-                        );
-                        ui.add(
-                            DragValue::new(&mut light.direction.y)
-                                .prefix("Y: ")
-                                .speed(0.01)
-                                .range(-1.0..=1.0),
-                        );
-                        ui.add(
-                            DragValue::new(&mut light.direction.z)
-                                .prefix("Z: ")
-                                .speed(0.01)
-                                .range(-1.0..=1.0),
-                        );
-                    });
-
-                    // Normalize direction (safe - values are now bounded)
-                    let len = glm::length(&light.direction);
-                    if len > 0.001 {
-                        light.direction /= len;
-                    }
-
-                    // Color (RGB)
-                    ui.horizontal(|ui| {
-                        ui.label("Color:");
-                        let mut color = [light.color.x, light.color.y, light.color.z];
-                        if ui
-                            .color_edit_button_rgb(&mut color)
-                            .on_hover_text("Light color")
-                            .changed()
-                        {
-                            light.color = glm::vec3(color[0], color[1], color[2]);
-                        }
-                    });
-
-                    // Intensity
-                    ui.horizontal(|ui| {
-                        ui.label("Intensity:");
-                        ui.add(
-                            egui::Slider::new(&mut light.intensity, 0.0..=10.0)
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Light brightness multiplier");
-                    });
-
-                    // Shadows
-                    ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
-                        .on_hover_text("Enable shadow casting from this light");
-                    if light.shadow_enabled {
-                        if !light.shadow_bias.is_finite() {
-                            light.shadow_bias = 0.005;
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Shadow Bias:");
-                            ui.add(
-                                DragValue::new(&mut light.shadow_bias)
-                                    .speed(0.001)
-                                    .range(0.0..=0.1),
-                            )
-                            .on_hover_text("Bias to prevent shadow acne artifacts");
-                        });
-                    }
+            let header = Self::component_section(ui, "Directional Light", category, |ui| {
+                // Direction
+                ui.label("Direction:")
+                    .on_hover_text("Direction the light is pointing (normalized)");
+                // Sanitize direction to prevent DragValue crash
+                if !light.direction.x.is_finite() {
+                    light.direction.x = 0.0;
+                }
+                if !light.direction.y.is_finite() {
+                    light.direction.y = -1.0;
+                }
+                if !light.direction.z.is_finite() {
+                    light.direction.z = 0.0;
+                }
+                Self::property_row(ui, "Direction", |ui| {
+                    ui.add(
+                        DragValue::new(&mut light.direction.x)
+                            .prefix("X: ")
+                            .speed(0.01)
+                            .range(-1.0..=1.0),
+                    );
+                    ui.add(
+                        DragValue::new(&mut light.direction.y)
+                            .prefix("Y: ")
+                            .speed(0.01)
+                            .range(-1.0..=1.0),
+                    );
+                    ui.add(
+                        DragValue::new(&mut light.direction.z)
+                            .prefix("Z: ")
+                            .speed(0.01)
+                            .range(-1.0..=1.0),
+                    )
                 });
+
+                // Normalize direction (safe - values are now bounded)
+                let len = glm::length(&light.direction);
+                if len > 0.001 {
+                    light.direction /= len;
+                }
+
+                // Color (RGB)
+                Self::property_row(ui, "Color", |ui| {
+                    let mut color = [light.color.x, light.color.y, light.color.z];
+                    let resp = ui
+                        .color_edit_button_rgb(&mut color)
+                        .on_hover_text("Light color");
+                    if resp.changed() {
+                        light.color = glm::vec3(color[0], color[1], color[2]);
+                    }
+                    resp
+                });
+
+                // Intensity
+                Self::slider_row(
+                    ui,
+                    "Intensity",
+                    egui::Slider::new(&mut light.intensity, 0.0..=10.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
+
+                // Shadows
+                ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
+                    .on_hover_text("Enable shadow casting from this light");
+                if light.shadow_enabled {
+                    if !light.shadow_bias.is_finite() {
+                        light.shadow_bias = 0.005;
+                    }
+                    Self::property_row(ui, "Shadow Bias", |ui| {
+                        ui.add(
+                            DragValue::new(&mut light.shadow_bias)
+                                .speed(0.001)
+                                .range(0.0..=0.1),
+                        )
+                        .on_hover_text("Bias to prevent shadow acne artifacts")
+                    });
+                }
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -1511,14 +1869,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -1533,85 +1883,71 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut light) = world.get::<&mut PointLight>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
+            let header = Self::component_section(ui, "Point Light", category, |ui| {
+                // Sanitize light values to prevent DragValue crash
+                if !light.intensity.is_finite() {
+                    light.intensity = 1.0;
+                }
+                if !light.radius.is_finite() {
+                    light.radius = 10.0;
+                }
 
-            let header = CollapsingHeader::new(RichText::new("Point Light").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Sanitize light values to prevent DragValue crash
-                    if !light.intensity.is_finite() {
-                        light.intensity = 1.0;
+                // Color
+                Self::property_row(ui, "Color", |ui| {
+                    let mut color = [light.color.x, light.color.y, light.color.z];
+                    let resp = ui
+                        .color_edit_button_rgb(&mut color)
+                        .on_hover_text("Light color");
+                    if resp.changed() {
+                        light.color = glm::vec3(color[0], color[1], color[2]);
                     }
-                    if !light.radius.is_finite() {
-                        light.radius = 10.0;
-                    }
-
-                    // Color
-                    ui.horizontal(|ui| {
-                        ui.label("Color:");
-                        let mut color = [light.color.x, light.color.y, light.color.z];
-                        if ui
-                            .color_edit_button_rgb(&mut color)
-                            .on_hover_text("Light color")
-                            .changed()
-                        {
-                            light.color = glm::vec3(color[0], color[1], color[2]);
-                        }
-                    });
-
-                    // Intensity
-                    ui.horizontal(|ui| {
-                        ui.label("Intensity:");
-                        ui.add(
-                            egui::Slider::new(&mut light.intensity, 0.0..=100.0)
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Light brightness multiplier");
-                    });
-
-                    // Radius
-                    ui.horizontal(|ui| {
-                        ui.label("Radius:");
-                        ui.add(
-                            DragValue::new(&mut light.radius)
-                                .speed(0.1)
-                                .range(0.1..=1000.0),
-                        )
-                        .on_hover_text("Maximum distance the light reaches");
-                    });
-
-                    // Falloff
-                    ui.horizontal(|ui| {
-                        ui.label("Falloff:");
-                        egui::ComboBox::from_id_salt("pl_falloff")
-                            .selected_text(format!("{:?}", light.falloff))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut light.falloff,
-                                    LightFalloff::Linear,
-                                    "Linear",
-                                )
-                                .on_hover_text("Light decreases linearly with distance");
-                                ui.selectable_value(
-                                    &mut light.falloff,
-                                    LightFalloff::Quadratic,
-                                    "Quadratic",
-                                )
-                                .on_hover_text("Realistic falloff (default)");
-                                ui.selectable_value(
-                                    &mut light.falloff,
-                                    LightFalloff::InverseSquare,
-                                    "Inverse Square",
-                                )
-                                .on_hover_text("Physically accurate inverse-square law");
-                            });
-                    });
-
-                    // Shadows
-                    ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
-                        .on_hover_text("Enable shadow casting from this light");
+                    resp
                 });
+
+                // Intensity
+                Self::slider_row(
+                    ui,
+                    "Intensity",
+                    egui::Slider::new(&mut light.intensity, 0.0..=100.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
+
+                // Radius
+                Self::property_row(ui, "Radius", |ui| {
+                    ui.add(
+                        DragValue::new(&mut light.radius)
+                            .speed(0.1)
+                            .range(0.1..=1000.0),
+                    )
+                    .on_hover_text("Maximum distance the light reaches")
+                });
+
+                // Falloff
+                Self::property_row(ui, "Falloff", |ui| {
+                    egui::ComboBox::from_id_salt("pl_falloff")
+                        .selected_text(format!("{:?}", light.falloff))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut light.falloff, LightFalloff::Linear, "Linear")
+                                .on_hover_text("Light decreases linearly with distance");
+                            ui.selectable_value(
+                                &mut light.falloff,
+                                LightFalloff::Quadratic,
+                                "Quadratic",
+                            )
+                            .on_hover_text("Realistic falloff (default)");
+                            ui.selectable_value(
+                                &mut light.falloff,
+                                LightFalloff::InverseSquare,
+                                "Inverse Square",
+                            )
+                            .on_hover_text("Physically accurate inverse-square law");
+                        });
+                });
+
+                // Shadows
+                ui.checkbox(&mut light.shadow_enabled, "Cast Shadows")
+                    .on_hover_text("Enable shadow casting from this light");
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -1620,14 +1956,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -1642,104 +1970,104 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut rb) = world.get::<&mut RigidBody>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
+            let header = Self::component_section(ui, "Rigid Body", category, |ui| {
+                // Sanitize rigidbody values to prevent DragValue crash
+                if !rb.mass.is_finite() {
+                    rb.mass = 1.0;
+                }
+                if !rb.linear_damping.is_finite() {
+                    rb.linear_damping = 0.0;
+                }
+                if !rb.angular_damping.is_finite() {
+                    rb.angular_damping = 0.0;
+                }
 
-            let header = CollapsingHeader::new(RichText::new("Rigid Body").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Sanitize rigidbody values to prevent DragValue crash
-                    if !rb.mass.is_finite() { rb.mass = 1.0; }
-                    if !rb.linear_damping.is_finite() { rb.linear_damping = 0.0; }
-                    if !rb.angular_damping.is_finite() { rb.angular_damping = 0.0; }
+                // Body type dropdown
+                Self::property_row(ui, "Type", |ui| {
+                    egui::ComboBox::from_id_salt("rb_type")
+                        .selected_text(format!("{:?}", rb.body_type))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut rb.body_type,
+                                RigidBodyType::Dynamic,
+                                "Dynamic",
+                            );
+                            ui.selectable_value(
+                                &mut rb.body_type,
+                                RigidBodyType::Kinematic,
+                                "Kinematic",
+                            );
+                            ui.selectable_value(&mut rb.body_type, RigidBodyType::Static, "Static");
+                        })
+                });
 
-                    // Body type dropdown
-                    ui.horizontal(|ui| {
-                        ui.label("Type:").on_hover_text(
-                            "Dynamic: Affected by forces\nKinematic: Moved by code only\nStatic: Never moves",
-                        );
-                        egui::ComboBox::from_id_salt("rb_type")
-                            .selected_text(format!("{:?}", rb.body_type))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut rb.body_type,
-                                    RigidBodyType::Dynamic,
-                                    "Dynamic",
-                                );
-                                ui.selectable_value(
-                                    &mut rb.body_type,
-                                    RigidBodyType::Kinematic,
-                                    "Kinematic",
-                                );
-                                ui.selectable_value(
-                                    &mut rb.body_type,
-                                    RigidBodyType::Static,
-                                    "Static",
-                                );
-                            });
-                    });
-
-                    // Mass (only for dynamic bodies)
-                    if rb.body_type == RigidBodyType::Dynamic {
-                        ui.horizontal(|ui| {
-                            ui.label("Mass:");
-                            ui.add(
-                                DragValue::new(&mut rb.mass)
-                                    .speed(0.1)
-                                    .range(0.001..=10000.0),
-                            )
-                            .on_hover_text("Object weight. Affects momentum and collision response");
-                        });
-                    }
-
-                    // Damping
-                    ui.horizontal(|ui| {
-                        ui.label("Linear Damping:");
+                // Mass (only for dynamic bodies)
+                if rb.body_type == RigidBodyType::Dynamic {
+                    Self::property_row(ui, "Mass", |ui| {
                         ui.add(
-                            egui::Slider::new(&mut rb.linear_damping, 0.0..=10.0)
-                                .clamping(egui::SliderClamping::Always),
+                            DragValue::new(&mut rb.mass)
+                                .speed(0.1)
+                                .range(0.001..=10000.0),
                         )
-                        .on_hover_text("Air resistance. Higher values slow movement faster");
+                        .on_hover_text("Object weight. Affects momentum and collision response")
                     });
+                }
 
-                    ui.horizontal(|ui| {
-                        ui.label("Angular Damping:");
-                        ui.add(
-                            egui::Slider::new(&mut rb.angular_damping, 0.0..=10.0)
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Rotational resistance. Higher values stop spinning faster");
-                    });
+                // Damping
+                Self::slider_row(
+                    ui,
+                    "Linear Damp",
+                    egui::Slider::new(&mut rb.linear_damping, 0.0..=10.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
+                Self::slider_row(
+                    ui,
+                    "Angular Damp",
+                    egui::Slider::new(&mut rb.angular_damping, 0.0..=10.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
 
-                    ui.checkbox(&mut rb.can_sleep, "Can Sleep")
-                        .on_hover_text("Allow physics to deactivate this body when at rest");
+                ui.checkbox(&mut rb.can_sleep, "Can Sleep")
+                    .on_hover_text("Allow physics to deactivate this body when at rest");
 
-                    // Gravity scale (dynamic only)
-                    if rb.body_type == RigidBodyType::Dynamic {
-                        if !rb.gravity_scale.is_finite() { rb.gravity_scale = 1.0; }
-                        ui.horizontal(|ui| {
-                            ui.label("Gravity Scale:");
-                            ui.add(
-                                DragValue::new(&mut rb.gravity_scale)
-                                    .speed(0.1)
-                                    .range(-10.0..=10.0),
-                            )
-                            .on_hover_text("Gravity multiplier. 0 = no gravity, negative = anti-gravity");
-                        });
+                // Gravity scale (dynamic only)
+                if rb.body_type == RigidBodyType::Dynamic {
+                    if !rb.gravity_scale.is_finite() {
+                        rb.gravity_scale = 1.0;
                     }
+                    Self::property_row(ui, "Gravity Scale", |ui| {
+                        ui.add(
+                            DragValue::new(&mut rb.gravity_scale)
+                                .speed(0.1)
+                                .range(-10.0..=10.0),
+                        )
+                        .on_hover_text(
+                            "Gravity multiplier. 0 = no gravity, negative = anti-gravity",
+                        )
+                    });
+                }
 
-                    // CCD
-                    ui.checkbox(&mut rb.continuous_collision, "CCD (Continuous)")
+                // CCD
+                ui.checkbox(&mut rb.continuous_collision, "CCD (Continuous)")
                         .on_hover_text("Continuous collision detection. Prevents fast objects from tunneling through thin walls");
 
-                    // Lock rotation axes
-                    ui.label("Lock Rotation:");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut rb.lock_rotation[0], RichText::new("X").color(AXIS_COLOR_X));
-                        ui.checkbox(&mut rb.lock_rotation[1], RichText::new("Y").color(AXIS_COLOR_Y));
-                        ui.checkbox(&mut rb.lock_rotation[2], RichText::new("Z").color(AXIS_COLOR_Z));
-                    });
+                // Lock rotation axes
+                ui.label("Lock Rotation:");
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut rb.lock_rotation[0],
+                        RichText::new("X").color(AXIS_COLOR_X),
+                    );
+                    ui.checkbox(
+                        &mut rb.lock_rotation[1],
+                        RichText::new("Y").color(AXIS_COLOR_Y),
+                    );
+                    ui.checkbox(
+                        &mut rb.lock_rotation[2],
+                        RichText::new("Z").color(AXIS_COLOR_Z),
+                    );
                 });
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -1748,14 +2076,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -1770,155 +2090,141 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut collider) = world.get::<&mut Collider>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            let header = CollapsingHeader::new(RichText::new("Collider").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Shape type dropdown
-                    let current_shape_name = match &collider.shape {
-                        ColliderShape::Cuboid { .. } => "Cuboid",
-                        ColliderShape::Ball { .. } => "Ball",
-                        ColliderShape::Capsule { .. } => "Capsule",
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label("Shape:").on_hover_text("Collision shape geometry");
-                        egui::ComboBox::from_id_salt("collider_shape")
-                            .selected_text(current_shape_name)
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(
-                                        matches!(&collider.shape, ColliderShape::Cuboid { .. }),
-                                        "Cuboid",
-                                    )
-                                    .clicked()
-                                    && !matches!(&collider.shape, ColliderShape::Cuboid { .. })
-                                {
-                                    collider.shape = ColliderShape::Cuboid {
-                                        half_extents: glm::vec3(0.5, 0.5, 0.5),
-                                    };
-                                }
-                                if ui
-                                    .selectable_label(
-                                        matches!(&collider.shape, ColliderShape::Ball { .. }),
-                                        "Ball",
-                                    )
-                                    .clicked()
-                                    && !matches!(&collider.shape, ColliderShape::Ball { .. })
-                                {
-                                    collider.shape = ColliderShape::Ball { radius: 0.5 };
-                                }
-                                if ui
-                                    .selectable_label(
-                                        matches!(&collider.shape, ColliderShape::Capsule { .. }),
-                                        "Capsule",
-                                    )
-                                    .clicked()
-                                    && !matches!(&collider.shape, ColliderShape::Capsule { .. })
-                                {
-                                    collider.shape = ColliderShape::Capsule {
-                                        half_height: 0.5,
-                                        radius: 0.25,
-                                    };
-                                }
-                            });
-                    });
-
-                    // Shape-specific parameters
-                    match &mut collider.shape {
-                        ColliderShape::Cuboid { half_extents } => {
-                            if !half_extents.x.is_finite() {
-                                half_extents.x = 0.5;
+            let header = Self::component_section(ui, "Collider", category, |ui| {
+                // Shape type dropdown
+                let current_shape_name = match &collider.shape {
+                    ColliderShape::Cuboid { .. } => "Cuboid",
+                    ColliderShape::Ball { .. } => "Ball",
+                    ColliderShape::Capsule { .. } => "Capsule",
+                };
+                Self::property_row(ui, "Shape", |ui| {
+                    egui::ComboBox::from_id_salt("collider_shape")
+                        .selected_text(current_shape_name)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    matches!(&collider.shape, ColliderShape::Cuboid { .. }),
+                                    "Cuboid",
+                                )
+                                .clicked()
+                                && !matches!(&collider.shape, ColliderShape::Cuboid { .. })
+                            {
+                                collider.shape = ColliderShape::Cuboid {
+                                    half_extents: glm::vec3(0.5, 0.5, 0.5),
+                                };
                             }
-                            if !half_extents.y.is_finite() {
-                                half_extents.y = 0.5;
+                            if ui
+                                .selectable_label(
+                                    matches!(&collider.shape, ColliderShape::Ball { .. }),
+                                    "Ball",
+                                )
+                                .clicked()
+                                && !matches!(&collider.shape, ColliderShape::Ball { .. })
+                            {
+                                collider.shape = ColliderShape::Ball { radius: 0.5 };
                             }
-                            if !half_extents.z.is_finite() {
-                                half_extents.z = 0.5;
+                            if ui
+                                .selectable_label(
+                                    matches!(&collider.shape, ColliderShape::Capsule { .. }),
+                                    "Capsule",
+                                )
+                                .clicked()
+                                && !matches!(&collider.shape, ColliderShape::Capsule { .. })
+                            {
+                                collider.shape = ColliderShape::Capsule {
+                                    half_height: 0.5,
+                                    radius: 0.25,
+                                };
                             }
-                            ui.label("Half Extents:");
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("X").color(AXIS_COLOR_X));
-                                ui.add(
-                                    DragValue::new(&mut half_extents.x)
-                                        .speed(0.01)
-                                        .range(0.001..=1000.0),
-                                );
-                                ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
-                                ui.add(
-                                    DragValue::new(&mut half_extents.y)
-                                        .speed(0.01)
-                                        .range(0.001..=1000.0),
-                                );
-                                ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
-                                ui.add(
-                                    DragValue::new(&mut half_extents.z)
-                                        .speed(0.01)
-                                        .range(0.001..=1000.0),
-                                );
-                            });
-                        }
-                        ColliderShape::Ball { radius } => {
-                            if !radius.is_finite() {
-                                *radius = 0.5;
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("Radius:");
-                                ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0));
-                            });
-                        }
-                        ColliderShape::Capsule {
-                            half_height,
-                            radius,
-                        } => {
-                            if !half_height.is_finite() {
-                                *half_height = 0.5;
-                            }
-                            if !radius.is_finite() {
-                                *radius = 0.25;
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("Half Height:");
-                                ui.add(
-                                    DragValue::new(half_height)
-                                        .speed(0.01)
-                                        .range(0.001..=1000.0),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Radius:");
-                                ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0));
-                            });
-                        }
-                    }
-
-                    // Friction
-                    ui.horizontal(|ui| {
-                        ui.label("Friction:");
-                        ui.add(
-                            egui::Slider::new(&mut collider.friction, 0.0..=2.0)
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Surface grip. 0 = ice, 1 = rubber, 2 = very sticky");
-                    });
-
-                    // Restitution (bounciness)
-                    ui.horizontal(|ui| {
-                        ui.label("Restitution:");
-                        ui.add(
-                            egui::Slider::new(&mut collider.restitution, 0.0..=1.0)
-                                .clamping(egui::SliderClamping::Always),
-                        )
-                        .on_hover_text("Bounciness. 0 = no bounce, 1 = perfect bounce");
-                    });
-
-                    ui.checkbox(&mut collider.is_sensor, "Is Sensor (Trigger)")
-                        .on_hover_text("Detects overlaps without physical collision");
-
-                    ui.checkbox(&mut collider.debug_draw_visible, "Debug Draw")
-                        .on_hover_text("Show collider wireframe in viewport");
+                        });
                 });
+
+                // Shape-specific parameters
+                match &mut collider.shape {
+                    ColliderShape::Cuboid { half_extents } => {
+                        if !half_extents.x.is_finite() {
+                            half_extents.x = 0.5;
+                        }
+                        if !half_extents.y.is_finite() {
+                            half_extents.y = 0.5;
+                        }
+                        if !half_extents.z.is_finite() {
+                            half_extents.z = 0.5;
+                        }
+                        Self::property_row(ui, "Half Extents", |ui| {
+                            ui.label(RichText::new("X").color(AXIS_COLOR_X));
+                            ui.add(
+                                DragValue::new(&mut half_extents.x)
+                                    .speed(0.01)
+                                    .range(0.001..=1000.0),
+                            );
+                            ui.label(RichText::new("Y").color(AXIS_COLOR_Y));
+                            ui.add(
+                                DragValue::new(&mut half_extents.y)
+                                    .speed(0.01)
+                                    .range(0.001..=1000.0),
+                            );
+                            ui.label(RichText::new("Z").color(AXIS_COLOR_Z));
+                            ui.add(
+                                DragValue::new(&mut half_extents.z)
+                                    .speed(0.01)
+                                    .range(0.001..=1000.0),
+                            )
+                        });
+                    }
+                    ColliderShape::Ball { radius } => {
+                        if !radius.is_finite() {
+                            *radius = 0.5;
+                        }
+                        Self::property_row(ui, "Radius", |ui| {
+                            ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0))
+                        });
+                    }
+                    ColliderShape::Capsule {
+                        half_height,
+                        radius,
+                    } => {
+                        if !half_height.is_finite() {
+                            *half_height = 0.5;
+                        }
+                        if !radius.is_finite() {
+                            *radius = 0.25;
+                        }
+                        Self::property_row(ui, "Half Height", |ui| {
+                            ui.add(
+                                DragValue::new(half_height)
+                                    .speed(0.01)
+                                    .range(0.001..=1000.0),
+                            )
+                        });
+                        Self::property_row(ui, "Radius", |ui| {
+                            ui.add(DragValue::new(radius).speed(0.01).range(0.001..=1000.0))
+                        });
+                    }
+                }
+
+                // Friction
+                Self::slider_row(
+                    ui,
+                    "Friction",
+                    egui::Slider::new(&mut collider.friction, 0.0..=2.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
+
+                // Restitution (bounciness)
+                Self::slider_row(
+                    ui,
+                    "Restitution",
+                    egui::Slider::new(&mut collider.restitution, 0.0..=1.0)
+                        .clamping(egui::SliderClamping::Always),
+                );
+
+                ui.checkbox(&mut collider.is_sensor, "Is Sensor (Trigger)")
+                    .on_hover_text("Detects overlaps without physical collision");
+
+                ui.checkbox(&mut collider.debug_draw_visible, "Debug Draw")
+                    .on_hover_text("Show collider wireframe in viewport");
+            });
 
             // Context menu for component removal
             header.header_response.context_menu(|ui| {
@@ -1927,14 +2233,6 @@ impl InspectorPanel {
                     ui.close();
                 }
             });
-
-            // Draw colored accent bar
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
         }
         action
     }
@@ -1948,48 +2246,33 @@ impl InspectorPanel {
         category: ComponentCategory,
     ) {
         if let Ok(mut skeleton) = world.get::<&mut SkeletonInstance>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Skeleton").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Bones:");
-                        ui.label(format!("{}", skeleton.bones.len()));
-                    });
-
-                    ui.checkbox(&mut skeleton.debug_draw_visible, "Debug Draw")
-                        .on_hover_text("Show bone hierarchy wireframe in viewport");
-
-                    if !skeleton.bones.is_empty() {
-                        CollapsingHeader::new("Bone List")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                for (i, bone) in skeleton.bones.iter().enumerate() {
-                                    let parent_str = bone
-                                        .parent_index
-                                        .map(|p| format!(" (parent: {})", p))
-                                        .unwrap_or_default();
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "[{}] {}{}",
-                                            i, bone.name, parent_str
-                                        ))
-                                        .monospace()
-                                        .size(11.0),
-                                    );
-                                }
-                            });
-                    }
+            Self::component_section(ui, "Skeleton", category, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Bones:");
+                    ui.label(format!("{}", skeleton.bones.len()));
                 });
 
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                ui.checkbox(&mut skeleton.debug_draw_visible, "Debug Draw")
+                    .on_hover_text("Show bone hierarchy wireframe in viewport");
+
+                if !skeleton.bones.is_empty() {
+                    CollapsingHeader::new("Bone List")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            for (i, bone) in skeleton.bones.iter().enumerate() {
+                                let parent_str = bone
+                                    .parent_index
+                                    .map(|p| format!(" (parent: {})", p))
+                                    .unwrap_or_default();
+                                ui.label(
+                                    RichText::new(format!("[{}] {}{}", i, bone.name, parent_str))
+                                        .monospace()
+                                        .size(11.0),
+                                );
+                            }
+                        });
+                }
+            });
         }
     }
 
@@ -2002,77 +2285,61 @@ impl InspectorPanel {
         category: ComponentCategory,
     ) {
         if let Ok(mut player) = world.get::<&mut AnimationPlayer>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Animation Player").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Clip info
-                    ui.horizontal(|ui| {
-                        ui.label("Clip:");
-                        ui.label(&player.clip.name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Duration:");
-                        ui.label(format!("{:.2}s", player.clip.duration_seconds));
-                    });
-
-                    // Playback controls
-                    ui.horizontal(|ui| {
-                        let is_playing = player.state == PlaybackState::Playing;
-                        if ui
-                            .button(if is_playing { "Stop" } else { "Play" })
-                            .clicked()
-                        {
-                            if is_playing {
-                                player.stop();
-                            } else {
-                                player.play();
-                            }
-                        }
-                        if ui.button("Reset").clicked() {
-                            player.reset();
-                        }
-                    });
-
-                    // Time scrubber
-                    let duration = player.clip.duration_seconds.max(0.001);
-                    ui.horizontal(|ui| {
-                        ui.label("Time:");
-                        ui.add(
-                            DragValue::new(&mut player.time)
-                                .speed(0.01)
-                                .range(0.0..=duration)
-                                .suffix("s"),
-                        );
-                    });
-                    ui.add(
-                        egui::Slider::new(&mut player.time, 0.0..=duration)
-                            .show_value(false)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-
-                    // Speed
-                    ui.horizontal(|ui| {
-                        ui.label("Speed:");
-                        ui.add(
-                            DragValue::new(&mut player.speed)
-                                .speed(0.01)
-                                .range(0.0..=10.0),
-                        );
-                    });
-
-                    // Looping
-                    ui.checkbox(&mut player.looping, "Loop");
+            Self::component_section(ui, "Animation Player", category, |ui| {
+                // Clip info
+                Self::property_row(ui, "Clip", |ui| ui.label(&player.clip.name));
+                Self::property_row(ui, "Duration", |ui| {
+                    ui.label(format!("{:.2}s", player.clip.duration_seconds))
                 });
 
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                // Playback controls
+                ui.horizontal(|ui| {
+                    let is_playing = player.state == PlaybackState::Playing;
+                    if ui
+                        .button(if is_playing { "Stop" } else { "Play" })
+                        .clicked()
+                    {
+                        if is_playing {
+                            player.stop();
+                        } else {
+                            player.play();
+                        }
+                    }
+                    if ui.button("Reset").clicked() {
+                        player.reset();
+                    }
+                });
+
+                // Time scrubber
+                let duration = player.clip.duration_seconds.max(0.001);
+                Self::property_row(ui, "Time", |ui| {
+                    ui.add(
+                        DragValue::new(&mut player.time)
+                            .speed(0.01)
+                            .range(0.0..=duration)
+                            .suffix("s"),
+                    )
+                });
+                let slider_w = ui.available_width();
+                ui.add_sized(
+                    egui::vec2(slider_w, Self::SLIDER_HEIGHT),
+                    egui::Slider::new(&mut player.time, 0.0..=duration)
+                        .show_value(false)
+                        .clamping(egui::SliderClamping::Always),
+                );
+
+                // Speed
+                Self::property_row(ui, "Speed", |ui| {
+                    ui.add(
+                        DragValue::new(&mut player.speed)
+                            .speed(0.01)
+                            .range(0.0..=10.0),
+                    )
+                });
+
+                // Looping
+                ui.checkbox(&mut player.looping, "Loop");
+            });
         }
     }
 
@@ -2087,14 +2354,9 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut emitter) = world.get::<&mut AudioEmitter>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Audio Emitter").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Clip path (drag-drop from asset browser)
-                    ui.label("Clip:");
+            Self::component_section(ui, "Audio Emitter", category, |ui| {
+                // Clip path (drag-drop from asset browser)
+                Self::property_row(ui, "Clip", |ui| {
                     Self::asset_slot(
                         ui,
                         "audio_clip_slot",
@@ -2102,77 +2364,67 @@ impl InspectorPanel {
                         &[AssetType::Audio],
                         asset_browser,
                         0,
-                    );
-
-                    // Bus dropdown
-                    ui.horizontal(|ui| {
-                        ui.label("Bus:");
-                        egui::ComboBox::from_id_salt("audio_bus")
-                            .selected_text(emitter.bus.display_name())
-                            .show_ui(ui, |ui| {
-                                for &bus in AudioBus::ALL {
-                                    ui.selectable_value(&mut emitter.bus, bus, bus.display_name());
-                                }
-                            });
-                    });
-
-                    // Volume (dB)
-                    ui.horizontal(|ui| {
-                        ui.label("Volume (dB):");
-                        ui.add(
-                            DragValue::new(&mut emitter.volume_db)
-                                .speed(0.1)
-                                .range(-80.0..=12.0)
-                                .suffix(" dB"),
-                        );
-                    });
-
-                    // Pitch
-                    ui.horizontal(|ui| {
-                        ui.label("Pitch:");
-                        ui.add(
-                            DragValue::new(&mut emitter.pitch)
-                                .speed(0.01)
-                                .range(0.1..=4.0),
-                        );
-                    });
-
-                    // Looping & Auto-play
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut emitter.looping, "Loop");
-                        ui.checkbox(&mut emitter.auto_play, "Auto-play");
-                    });
-
-                    // Spatial
-                    ui.checkbox(&mut emitter.spatial, "Spatial (3D)");
-                    if emitter.spatial {
-                        ui.horizontal(|ui| {
-                            ui.label("Max Distance:");
-                            ui.add(
-                                DragValue::new(&mut emitter.max_distance)
-                                    .speed(0.5)
-                                    .range(1.0..=1000.0)
-                                    .suffix(" m"),
-                            );
-                        });
-                        ui.checkbox(&mut emitter.hide_range_in_game, "Hidden in Game");
-                    }
-
-                    ui.add_space(4.0);
-                    if ui
-                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
-                        .clicked()
-                    {
-                        action = Some(ComponentAction::RemoveAudioEmitter);
-                    }
+                    )
                 });
 
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                // Bus dropdown
+                Self::property_row(ui, "Bus", |ui| {
+                    egui::ComboBox::from_id_salt("audio_bus")
+                        .selected_text(emitter.bus.display_name())
+                        .show_ui(ui, |ui| {
+                            for &bus in AudioBus::ALL {
+                                ui.selectable_value(&mut emitter.bus, bus, bus.display_name());
+                            }
+                        })
+                });
+
+                // Volume (dB)
+                Self::property_row(ui, "Volume (dB)", |ui| {
+                    ui.add(
+                        DragValue::new(&mut emitter.volume_db)
+                            .speed(0.1)
+                            .range(-80.0..=12.0)
+                            .suffix(" dB"),
+                    )
+                });
+
+                // Pitch
+                Self::property_row(ui, "Pitch", |ui| {
+                    ui.add(
+                        DragValue::new(&mut emitter.pitch)
+                            .speed(0.01)
+                            .range(0.1..=4.0),
+                    )
+                });
+
+                // Looping & Auto-play
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut emitter.looping, "Loop");
+                    ui.checkbox(&mut emitter.auto_play, "Auto-play");
+                });
+
+                // Spatial
+                ui.checkbox(&mut emitter.spatial, "Spatial (3D)");
+                if emitter.spatial {
+                    Self::property_row(ui, "Max Distance", |ui| {
+                        ui.add(
+                            DragValue::new(&mut emitter.max_distance)
+                                .speed(0.5)
+                                .range(1.0..=1000.0)
+                                .suffix(" m"),
+                        )
+                    });
+                    ui.checkbox(&mut emitter.hide_range_in_game, "Hidden in Game");
+                }
+
+                ui.add_space(4.0);
+                if ui
+                    .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                    .clicked()
+                {
+                    action = Some(ComponentAction::RemoveAudioEmitter);
+                }
+            });
         }
         action
     }
@@ -2187,29 +2439,17 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut listener) = world.get::<&mut AudioListener>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
+            Self::component_section(ui, "Audio Listener", category, |ui| {
+                ui.checkbox(&mut listener.active, "Active");
 
-            CollapsingHeader::new(RichText::new("Audio Listener").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut listener.active, "Active");
-
-                    ui.add_space(4.0);
-                    if ui
-                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
-                        .clicked()
-                    {
-                        action = Some(ComponentAction::RemoveAudioListener);
-                    }
-                });
-
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                ui.add_space(4.0);
+                if ui
+                    .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                    .clicked()
+                {
+                    action = Some(ComponentAction::RemoveAudioListener);
+                }
+            });
         }
         action
     }
@@ -2224,275 +2464,392 @@ impl InspectorPanel {
     ) -> Option<ComponentAction> {
         let mut action = None;
         if let Ok(mut effect) = world.get::<&mut ParticleEffect>(entity) {
-            let color = Self::category_color(category);
-            let start_y = ui.cursor().top();
-
-            CollapsingHeader::new(RichText::new("Particle Effect").strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    // Preset dropdown
-                    egui::ComboBox::from_label("Preset")
-                        .selected_text("Select preset...")
-                        .show_ui(ui, |ui| {
-                            for (label, preset_fn) in [
-                                ("Fire", ParticleEffect::fire as fn() -> ParticleEffect),
-                                ("Smoke", ParticleEffect::smoke),
-                                ("Sparks", ParticleEffect::sparks),
-                                ("Dust", ParticleEffect::dust),
-                            ] {
-                                if ui.selectable_label(false, label).clicked() {
-                                    let preset = preset_fn();
-                                    let capacity = effect.capacity;
-                                    let show_gizmos = effect.show_gizmos;
-                                    let texture_path = effect.texture_path.clone();
-                                    *effect = preset;
-                                    effect.capacity = capacity;
-                                    effect.show_gizmos = show_gizmos;
-                                    effect.texture_path = texture_path;
-                                }
+            Self::component_section(ui, "Particle Effect", category, |ui| {
+                // Preset dropdown
+                egui::ComboBox::from_label("Preset")
+                    .selected_text("Select preset...")
+                    .show_ui(ui, |ui| {
+                        for (label, preset_fn) in [
+                            ("Fire", ParticleEffect::fire as fn() -> ParticleEffect),
+                            ("Smoke", ParticleEffect::smoke),
+                            ("Sparks", ParticleEffect::sparks),
+                            ("Dust", ParticleEffect::dust),
+                        ] {
+                            if ui.selectable_label(false, label).clicked() {
+                                let preset = preset_fn();
+                                let capacity = effect.capacity;
+                                let show_gizmos = effect.show_gizmos;
+                                let texture_path = effect.texture_path.clone();
+                                *effect = preset;
+                                effect.capacity = capacity;
+                                effect.show_gizmos = show_gizmos;
+                                effect.texture_path = texture_path;
                             }
-                        });
+                        }
+                    });
 
-                    ui.add_space(4.0);
+                ui.add_space(4.0);
 
-                    // Lifecycle
-                    CollapsingHeader::new("Lifecycle")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.checkbox(&mut effect.enabled, "Enabled");
-                            ui.add(
+                // Lifecycle
+                CollapsingHeader::new("Lifecycle")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut effect.enabled, "Enabled");
+                        {
+                            let w = ui.available_width();
+                            ui.add_sized(
+                                egui::vec2(w, Self::SLIDER_HEIGHT),
                                 egui::Slider::new(&mut effect.capacity, 256..=4096)
                                     .text("Capacity"),
                             );
-                        });
+                        }
+                    });
 
-                    // Emission
-                    CollapsingHeader::new("Emission")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let shape_label = match effect.spawn_shape {
-                                SpawnShape::Point => "Point",
-                                SpawnShape::Sphere { .. } => "Sphere",
-                                SpawnShape::Cone { .. } => "Cone",
-                                SpawnShape::Box { .. } => "Box",
-                            };
-                            egui::ComboBox::from_label("Shape")
-                                .selected_text(shape_label)
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Point), "Point").clicked() {
-                                        effect.spawn_shape = SpawnShape::Point;
-                                    }
-                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Sphere { .. }), "Sphere").clicked() {
-                                        effect.spawn_shape = SpawnShape::Sphere { radius: 1.0 };
-                                    }
-                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Cone { .. }), "Cone").clicked() {
-                                        effect.spawn_shape = SpawnShape::Cone { angle_rad: 0.5, radius: 0.5 };
-                                    }
-                                    if ui.selectable_label(matches!(effect.spawn_shape, SpawnShape::Box { .. }), "Box").clicked() {
-                                        effect.spawn_shape = SpawnShape::Box { half_extents: [0.5, 0.5, 0.5] };
-                                    }
+                // Emission
+                CollapsingHeader::new("Emission")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let shape_label = match effect.spawn_shape {
+                            SpawnShape::Point => "Point",
+                            SpawnShape::Sphere { .. } => "Sphere",
+                            SpawnShape::Cone { .. } => "Cone",
+                            SpawnShape::Box { .. } => "Box",
+                        };
+                        egui::ComboBox::from_label("Shape")
+                            .selected_text(shape_label)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        matches!(effect.spawn_shape, SpawnShape::Point),
+                                        "Point",
+                                    )
+                                    .clicked()
+                                {
+                                    effect.spawn_shape = SpawnShape::Point;
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(effect.spawn_shape, SpawnShape::Sphere { .. }),
+                                        "Sphere",
+                                    )
+                                    .clicked()
+                                {
+                                    effect.spawn_shape = SpawnShape::Sphere { radius: 1.0 };
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(effect.spawn_shape, SpawnShape::Cone { .. }),
+                                        "Cone",
+                                    )
+                                    .clicked()
+                                {
+                                    effect.spawn_shape = SpawnShape::Cone {
+                                        angle_rad: 0.5,
+                                        radius: 0.5,
+                                    };
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(effect.spawn_shape, SpawnShape::Box { .. }),
+                                        "Box",
+                                    )
+                                    .clicked()
+                                {
+                                    effect.spawn_shape = SpawnShape::Box {
+                                        half_extents: [0.5, 0.5, 0.5],
+                                    };
+                                }
+                            });
+
+                        match &mut effect.spawn_shape {
+                            SpawnShape::Point => {}
+                            SpawnShape::Sphere { radius } => {
+                                ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
+                            }
+                            SpawnShape::Cone { angle_rad, radius } => {
+                                ui.add(DragValue::new(angle_rad).speed(0.01).prefix("Angle: "));
+                                ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
+                            }
+                            SpawnShape::Box { half_extents } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Half Extents:");
+                                    ui.add(
+                                        DragValue::new(&mut half_extents[0])
+                                            .speed(0.05)
+                                            .prefix("X: "),
+                                    );
+                                    ui.add(
+                                        DragValue::new(&mut half_extents[1])
+                                            .speed(0.05)
+                                            .prefix("Y: "),
+                                    );
+                                    ui.add(
+                                        DragValue::new(&mut half_extents[2])
+                                            .speed(0.05)
+                                            .prefix("Z: "),
+                                    );
                                 });
+                            }
+                        }
 
-                            match &mut effect.spawn_shape {
-                                SpawnShape::Point => {}
-                                SpawnShape::Sphere { radius } => {
-                                    ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
+                        ui.add(
+                            DragValue::new(&mut effect.emission_rate)
+                                .speed(0.5)
+                                .range(0.0..=1000.0)
+                                .prefix("Rate: "),
+                        );
+                        ui.add(
+                            DragValue::new(&mut effect.burst_count)
+                                .speed(1.0)
+                                .prefix("Burst Count: "),
+                        );
+                        ui.add(
+                            DragValue::new(&mut effect.burst_interval)
+                                .speed(0.01)
+                                .prefix("Burst Interval: "),
+                        );
+                    });
+
+                // Lifetime
+                CollapsingHeader::new("Lifetime")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add(
+                            DragValue::new(&mut effect.lifetime_min)
+                                .speed(0.01)
+                                .range(0.01..=f32::MAX)
+                                .prefix("Min: "),
+                        );
+                        ui.add(
+                            DragValue::new(&mut effect.lifetime_max)
+                                .speed(0.01)
+                                .range(0.01..=f32::MAX)
+                                .prefix("Max: "),
+                        );
+                        if effect.lifetime_min > effect.lifetime_max {
+                            effect.lifetime_max = effect.lifetime_min;
+                        }
+                    });
+
+                // Velocity
+                CollapsingHeader::new("Velocity")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Initial:");
+                            ui.add(
+                                DragValue::new(&mut effect.initial_velocity[0])
+                                    .speed(0.1)
+                                    .prefix("X: "),
+                            );
+                            ui.add(
+                                DragValue::new(&mut effect.initial_velocity[1])
+                                    .speed(0.1)
+                                    .prefix("Y: "),
+                            );
+                            ui.add(
+                                DragValue::new(&mut effect.initial_velocity[2])
+                                    .speed(0.1)
+                                    .prefix("Z: "),
+                            );
+                        });
+                        ui.add(
+                            DragValue::new(&mut effect.velocity_variance)
+                                .speed(0.05)
+                                .range(0.0..=f32::MAX)
+                                .prefix("Variance: "),
+                        );
+                    });
+
+                // Modules (composable update stack)
+                CollapsingHeader::new("Modules")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let mut remove_idx: Option<usize> = None;
+
+                        for (idx, module) in effect.update_modules.iter_mut().enumerate() {
+                            let id = ui.make_persistent_id(format!("module_{}", idx));
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                id,
+                                true,
+                            )
+                            .show_header(ui, |ui| {
+                                ui.label(RichText::new(module.display_name()).strong());
+                                if ui.small_button("X").clicked() {
+                                    remove_idx = Some(idx);
                                 }
-                                SpawnShape::Cone { angle_rad, radius } => {
-                                    ui.add(DragValue::new(angle_rad).speed(0.01).prefix("Angle: "));
-                                    ui.add(DragValue::new(radius).speed(0.05).prefix("Radius: "));
-                                }
-                                SpawnShape::Box { half_extents } => {
+                            })
+                            .body(|ui| match module {
+                                UpdateModule::Gravity(v) => {
                                     ui.horizontal(|ui| {
-                                        ui.label("Half Extents:");
-                                        ui.add(DragValue::new(&mut half_extents[0]).speed(0.05).prefix("X: "));
-                                        ui.add(DragValue::new(&mut half_extents[1]).speed(0.05).prefix("Y: "));
-                                        ui.add(DragValue::new(&mut half_extents[2]).speed(0.05).prefix("Z: "));
+                                        ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                        ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                        ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
                                     });
                                 }
-                            }
-
-                            ui.add(DragValue::new(&mut effect.emission_rate).speed(0.5).range(0.0..=1000.0).prefix("Rate: "));
-                            ui.add(DragValue::new(&mut effect.burst_count).speed(1.0).prefix("Burst Count: "));
-                            ui.add(DragValue::new(&mut effect.burst_interval).speed(0.01).prefix("Burst Interval: "));
-                        });
-
-                    // Lifetime
-                    CollapsingHeader::new("Lifetime")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.add(DragValue::new(&mut effect.lifetime_min).speed(0.01).range(0.01..=f32::MAX).prefix("Min: "));
-                            ui.add(DragValue::new(&mut effect.lifetime_max).speed(0.01).range(0.01..=f32::MAX).prefix("Max: "));
-                            if effect.lifetime_min > effect.lifetime_max {
-                                effect.lifetime_max = effect.lifetime_min;
-                            }
-                        });
-
-                    // Velocity
-                    CollapsingHeader::new("Velocity")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Initial:");
-                                ui.add(DragValue::new(&mut effect.initial_velocity[0]).speed(0.1).prefix("X: "));
-                                ui.add(DragValue::new(&mut effect.initial_velocity[1]).speed(0.1).prefix("Y: "));
-                                ui.add(DragValue::new(&mut effect.initial_velocity[2]).speed(0.1).prefix("Z: "));
+                                UpdateModule::Drag(v) => {
+                                    ui.add(
+                                        DragValue::new(v)
+                                            .speed(0.01)
+                                            .range(0.0..=f32::MAX)
+                                            .prefix("Drag: "),
+                                    );
+                                }
+                                UpdateModule::Wind(v) => {
+                                    ui.horizontal(|ui| {
+                                        ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
+                                        ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
+                                        ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
+                                    });
+                                }
+                                UpdateModule::CurlNoise {
+                                    strength,
+                                    scale,
+                                    speed,
+                                } => {
+                                    ui.add(
+                                        DragValue::new(strength)
+                                            .speed(0.05)
+                                            .range(0.0..=f32::MAX)
+                                            .prefix("Strength: "),
+                                    );
+                                    ui.add(
+                                        DragValue::new(scale)
+                                            .speed(0.05)
+                                            .range(0.01..=f32::MAX)
+                                            .prefix("Scale: "),
+                                    );
+                                    ui.add(DragValue::new(speed).speed(0.01).prefix("Speed: "));
+                                }
+                                UpdateModule::ColorOverLife { start, end } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Start:");
+                                        let mut c = [
+                                            (start[0] * 255.0) as u8,
+                                            (start[1] * 255.0) as u8,
+                                            (start[2] * 255.0) as u8,
+                                            (start[3] * 255.0) as u8,
+                                        ];
+                                        if ui.color_edit_button_srgba_unmultiplied(&mut c).changed()
+                                        {
+                                            *start = [
+                                                c[0] as f32 / 255.0,
+                                                c[1] as f32 / 255.0,
+                                                c[2] as f32 / 255.0,
+                                                c[3] as f32 / 255.0,
+                                            ];
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("End:");
+                                        let mut c = [
+                                            (end[0] * 255.0) as u8,
+                                            (end[1] * 255.0) as u8,
+                                            (end[2] * 255.0) as u8,
+                                            (end[3] * 255.0) as u8,
+                                        ];
+                                        if ui.color_edit_button_srgba_unmultiplied(&mut c).changed()
+                                        {
+                                            *end = [
+                                                c[0] as f32 / 255.0,
+                                                c[1] as f32 / 255.0,
+                                                c[2] as f32 / 255.0,
+                                                c[3] as f32 / 255.0,
+                                            ];
+                                        }
+                                    });
+                                }
+                                UpdateModule::SizeOverLife { start, end } => {
+                                    ui.add(
+                                        DragValue::new(start)
+                                            .speed(0.005)
+                                            .range(0.0..=f32::MAX)
+                                            .prefix("Start: "),
+                                    );
+                                    ui.add(
+                                        DragValue::new(end)
+                                            .speed(0.005)
+                                            .range(0.0..=f32::MAX)
+                                            .prefix("End: "),
+                                    );
+                                }
                             });
-                            ui.add(DragValue::new(&mut effect.velocity_variance).speed(0.05).range(0.0..=f32::MAX).prefix("Variance: "));
-                        });
+                        }
 
-                    // Modules (composable update stack)
-                    CollapsingHeader::new("Modules")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let mut remove_idx: Option<usize> = None;
+                        if let Some(idx) = remove_idx {
+                            effect.update_modules.remove(idx);
+                        }
 
-                            for (idx, module) in effect.update_modules.iter_mut().enumerate() {
-                                let id = ui.make_persistent_id(format!("module_{}", idx));
-                                egui::collapsing_header::CollapsingState::load_with_default_open(
-                                    ui.ctx(), id, true,
-                                ).show_header(ui, |ui| {
-                                    ui.label(RichText::new(module.display_name()).strong());
-                                    if ui.small_button("X").clicked() {
-                                        remove_idx = Some(idx);
-                                    }
-                                }).body(|ui| {
-                                    match module {
-                                        UpdateModule::Gravity(v) => {
-                                            ui.horizontal(|ui| {
-                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
-                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
-                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
-                                            });
-                                        }
-                                        UpdateModule::Drag(v) => {
-                                            ui.add(DragValue::new(v).speed(0.01).range(0.0..=f32::MAX).prefix("Drag: "));
-                                        }
-                                        UpdateModule::Wind(v) => {
-                                            ui.horizontal(|ui| {
-                                                ui.add(DragValue::new(&mut v[0]).speed(0.1).prefix("X: "));
-                                                ui.add(DragValue::new(&mut v[1]).speed(0.1).prefix("Y: "));
-                                                ui.add(DragValue::new(&mut v[2]).speed(0.1).prefix("Z: "));
-                                            });
-                                        }
-                                        UpdateModule::CurlNoise { strength, scale, speed } => {
-                                            ui.add(DragValue::new(strength).speed(0.05).range(0.0..=f32::MAX).prefix("Strength: "));
-                                            ui.add(DragValue::new(scale).speed(0.05).range(0.01..=f32::MAX).prefix("Scale: "));
-                                            ui.add(DragValue::new(speed).speed(0.01).prefix("Speed: "));
-                                        }
-                                        UpdateModule::ColorOverLife { start, end } => {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Start:");
-                                                let mut c = [
-                                                    (start[0] * 255.0) as u8,
-                                                    (start[1] * 255.0) as u8,
-                                                    (start[2] * 255.0) as u8,
-                                                    (start[3] * 255.0) as u8,
-                                                ];
-                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
-                                                    *start = [
-                                                        c[0] as f32 / 255.0,
-                                                        c[1] as f32 / 255.0,
-                                                        c[2] as f32 / 255.0,
-                                                        c[3] as f32 / 255.0,
-                                                    ];
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("End:");
-                                                let mut c = [
-                                                    (end[0] * 255.0) as u8,
-                                                    (end[1] * 255.0) as u8,
-                                                    (end[2] * 255.0) as u8,
-                                                    (end[3] * 255.0) as u8,
-                                                ];
-                                                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
-                                                    *end = [
-                                                        c[0] as f32 / 255.0,
-                                                        c[1] as f32 / 255.0,
-                                                        c[2] as f32 / 255.0,
-                                                        c[3] as f32 / 255.0,
-                                                    ];
-                                                }
-                                            });
-                                        }
-                                        UpdateModule::SizeOverLife { start, end } => {
-                                            ui.add(DragValue::new(start).speed(0.005).range(0.0..=f32::MAX).prefix("Start: "));
-                                            ui.add(DragValue::new(end).speed(0.005).range(0.0..=f32::MAX).prefix("End: "));
-                                        }
-                                    }
-                                });
-                            }
-
-                            if let Some(idx) = remove_idx {
-                                effect.update_modules.remove(idx);
-                            }
-
-                            // Add Module dropdown
-                            ui.add_space(4.0);
-                            egui::ComboBox::from_id_salt("add_module")
-                                .selected_text("Add Module...")
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(false, "Gravity").clicked() {
-                                        effect.update_modules.push(UpdateModule::Gravity([0.0, 0.0, -9.8]));
-                                    }
-                                    if ui.selectable_label(false, "Drag").clicked() {
-                                        effect.update_modules.push(UpdateModule::Drag(0.5));
-                                    }
-                                    if ui.selectable_label(false, "Wind").clicked() {
-                                        effect.update_modules.push(UpdateModule::Wind([1.0, 0.0, 0.0]));
-                                    }
-                                    if ui.selectable_label(false, "Curl Noise").clicked() {
-                                        effect.update_modules.push(UpdateModule::CurlNoise {
-                                            strength: 1.0, scale: 1.0, speed: 0.5,
-                                        });
-                                    }
-                                    if ui.selectable_label(false, "Color Over Life").clicked() {
-                                        effect.update_modules.push(UpdateModule::ColorOverLife {
-                                            start: [1.0, 1.0, 1.0, 1.0],
-                                            end: [1.0, 1.0, 1.0, 0.0],
-                                        });
-                                    }
-                                    if ui.selectable_label(false, "Size Over Life").clicked() {
-                                        effect.update_modules.push(UpdateModule::SizeOverLife {
-                                            start: 0.1, end: 0.0,
-                                        });
-                                    }
-                                });
-                        });
-
-                    // Texture & Soft Fade
-                    CollapsingHeader::new("Rendering")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Texture:");
-                                ui.text_edit_singleline(&mut effect.texture_path);
+                        // Add Module dropdown
+                        ui.add_space(4.0);
+                        egui::ComboBox::from_id_salt("add_module")
+                            .selected_text("Add Module...")
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(false, "Gravity").clicked() {
+                                    effect
+                                        .update_modules
+                                        .push(UpdateModule::Gravity([0.0, 0.0, -9.8]));
+                                }
+                                if ui.selectable_label(false, "Drag").clicked() {
+                                    effect.update_modules.push(UpdateModule::Drag(0.5));
+                                }
+                                if ui.selectable_label(false, "Wind").clicked() {
+                                    effect
+                                        .update_modules
+                                        .push(UpdateModule::Wind([1.0, 0.0, 0.0]));
+                                }
+                                if ui.selectable_label(false, "Curl Noise").clicked() {
+                                    effect.update_modules.push(UpdateModule::CurlNoise {
+                                        strength: 1.0,
+                                        scale: 1.0,
+                                        speed: 0.5,
+                                    });
+                                }
+                                if ui.selectable_label(false, "Color Over Life").clicked() {
+                                    effect.update_modules.push(UpdateModule::ColorOverLife {
+                                        start: [1.0, 1.0, 1.0, 1.0],
+                                        end: [1.0, 1.0, 1.0, 0.0],
+                                    });
+                                }
+                                if ui.selectable_label(false, "Size Over Life").clicked() {
+                                    effect.update_modules.push(UpdateModule::SizeOverLife {
+                                        start: 0.1,
+                                        end: 0.0,
+                                    });
+                                }
                             });
-                            ui.add(
+                    });
+
+                // Texture & Soft Fade
+                CollapsingHeader::new("Rendering")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Texture:");
+                            ui.text_edit_singleline(&mut effect.texture_path);
+                        });
+                        {
+                            let w = ui.available_width();
+                            ui.add_sized(
+                                egui::vec2(w, Self::SLIDER_HEIGHT),
                                 egui::Slider::new(&mut effect.soft_fade_distance, 0.0..=5.0)
                                     .text("Soft Fade"),
                             );
-                        });
+                        }
+                    });
 
-                    // Gizmos
-                    ui.checkbox(&mut effect.show_gizmos, "Show Gizmos");
+                // Gizmos
+                ui.checkbox(&mut effect.show_gizmos, "Show Gizmos");
 
-                    ui.add_space(4.0);
-                    if ui
-                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
-                        .clicked()
-                    {
-                        action = Some(ComponentAction::RemoveParticleEffect);
-                    }
-                });
-
-            let end_y = ui.cursor().top();
-            let accent_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left(), start_y),
-                egui::pos2(ui.min_rect().left() + 4.0, end_y),
-            );
-            ui.painter().rect_filled(accent_rect, 1.0, color);
+                ui.add_space(4.0);
+                if ui
+                    .button(RichText::new("Remove").color(Color32::from_rgb(220, 80, 80)))
+                    .clicked()
+                {
+                    action = Some(ComponentAction::RemoveParticleEffect);
+                }
+            });
         }
         action
     }
@@ -2605,7 +2962,10 @@ impl InspectorPanel {
                 {
                     let _ = world.insert_one(entity, ParticleEffect::default());
                     // Ensure the entity has an EntityGuid (required for plankton tracking)
-                    if world.get::<&crate::engine::ecs::EntityGuid>(entity).is_err() {
+                    if world
+                        .get::<&crate::engine::ecs::EntityGuid>(entity)
+                        .is_err()
+                    {
                         let _ = world.insert_one(entity, crate::engine::ecs::EntityGuid::new());
                     }
                     added = true;
@@ -2616,6 +2976,61 @@ impl InspectorPanel {
             self.cached_presence = ComponentPresence::probe(world, entity);
         }
     }
+}
+
+fn rgb_color32(rgb: [f32; 3]) -> Color32 {
+    Color32::from_rgb(
+        (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let r = r.clamp(0.0, 1.0);
+    let g = g.clamp(0.0, 1.0);
+    let b = b.clamp(0.0, 1.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let hue = if delta <= f32::EPSILON {
+        0.0
+    } else if (max - r).abs() <= f32::EPSILON {
+        ((g - b) / delta).rem_euclid(6.0) / 6.0
+    } else if (max - g).abs() <= f32::EPSILON {
+        (((b - r) / delta) + 2.0) / 6.0
+    } else {
+        (((r - g) / delta) + 4.0) / 6.0
+    };
+
+    let saturation = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
+    (hue, saturation, max)
+}
+
+fn hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> [f32; 3] {
+    let h = hue.rem_euclid(1.0) * 6.0;
+    let c = value * saturation;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let m = value - c;
+    let (r, g, b) = if h < 1.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 {
+        (0.0, c, x)
+    } else if h < 4.0 {
+        (0.0, x, c)
+    } else if h < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    [r + m, g + m, b + m]
 }
 
 /// Convert quaternion to Euler angles (degrees)

@@ -16,6 +16,11 @@ pub struct Palette {
     /// surface[0] = main background, surface[1] = panel bg, surface[2] = elevated,
     /// surface[3] = hover, surface[4] = active/pressed.
     pub surface: [Color32; 5],
+    /// Background color for editable fields (TextEdit, DragValue, Slider track).
+    /// Darker than panel fill to create clear visual separation.
+    pub field_bg: Color32,
+    /// Component section header background — slightly raised from panel fill.
+    pub header_bg: Color32,
     /// Primary text color — used for body text, headings
     pub text_primary: Color32,
     /// Secondary text color — used for labels, captions, less important info
@@ -52,13 +57,20 @@ impl Palette {
             accent: Color32::from_rgb(66, 133, 244),
 
             // Surface stack: darkest to lightest
+            // Darker overall — clear separation between each level.
             surface: [
-                Color32::from_rgb(25, 25, 28),    // [0] main background
-                Color32::from_rgb(32, 33, 36),    // [1] panel background
-                Color32::from_rgb(41, 42, 46),    // [2] elevated (cards, popups)
-                Color32::from_rgb(53, 54, 58),    // [3] hover
-                Color32::from_rgb(65, 66, 71),    // [4] active/pressed
+                Color32::from_rgb(18, 18, 21),    // [0] main/window background (darkest)
+                Color32::from_rgb(24, 24, 28),    // [1] panel background
+                Color32::from_rgb(34, 35, 39),    // [2] elevated (cards, popups, menus)
+                Color32::from_rgb(48, 49, 54),    // [3] hover
+                Color32::from_rgb(60, 62, 68),    // [4] active/pressed
             ],
+
+            // Editable field background — darker than panel fill (surface[1])
+            // to create a visible "inset" like Godot/Unity input fields.
+            field_bg: Color32::from_rgb(14, 14, 17),
+            // Component section header background — slightly raised from panel fill.
+            header_bg: Color32::from_rgb(30, 31, 35),
 
             // Text — AA contrast ratios against surface[0..2]:
             // text_primary (#E8EAED) on surface[0] (#19191C) = ~14.5:1
@@ -79,7 +91,7 @@ impl Palette {
             },
 
             focus_ring: Color32::from_rgb(100, 165, 255),
-            stroke: Color32::from_rgb(60, 62, 66),
+            stroke: Color32::from_rgb(55, 57, 63),
         }
     }
 }
@@ -141,10 +153,11 @@ impl Palette {
     pub fn verify_wcag_aa(&self) -> Vec<ContrastIssue> {
         let mut issues = Vec::new();
 
-        let bg_surfaces: [(&str, Color32); 3] = [
+        let bg_surfaces: [(&str, Color32); 4] = [
             ("surface[0]", self.surface[0]),
             ("surface[1]", self.surface[1]),
             ("surface[2]", self.surface[2]),
+            ("field_bg", self.field_bg),
         ];
 
         // Body text pairs — need 4.5:1

@@ -108,6 +108,8 @@ pub struct CoreApp {
     pub render_thread: Option<RenderThread>,
     /// Cache of loaded material descriptor sets, keyed by content-relative .material.ron path.
     pub material_cache: std::collections::HashMap<String, Arc<DescriptorSet>>,
+    /// Cache of material descriptor sets with per-entity inspector overrides applied.
+    pub material_override_cache: std::collections::HashMap<String, Arc<DescriptorSet>>,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
@@ -432,6 +434,7 @@ impl App {
             frame_number: 0,
             render_thread: Some(render_thread),
             material_cache: std::collections::HashMap::new(),
+            material_override_cache: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
@@ -805,19 +808,28 @@ impl App {
         use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
         use vulkano::pipeline::Pipeline;
 
-        // Collect unique material paths that aren't cached yet
+        // Collect unique material paths and per-entity override variants that aren't cached yet.
         let mut uncached: Vec<String> = Vec::new();
+        let mut uncached_overrides: Vec<(String, String, MeshRenderer)> = Vec::new();
         for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
             for mp in &mr.material_paths {
                 if !mp.is_empty() && !self.core.material_cache.contains_key(mp) {
                     uncached.push(mp.clone());
                 }
+                if !mp.is_empty() {
+                    let key = render_loop::material_override_cache_key(mp, mr);
+                    if !self.core.material_override_cache.contains_key(&key) {
+                        uncached_overrides.push((key, mp.clone(), MeshRenderer::clone(mr)));
+                    }
+                }
             }
         }
         uncached.sort();
         uncached.dedup();
+        uncached_overrides.sort_by(|a, b| a.0.cmp(&b.0));
+        uncached_overrides.dedup_by(|a, b| a.0 == b.0);
 
-        if uncached.is_empty() {
+        if uncached.is_empty() && uncached_overrides.is_empty() {
             return;
         }
 
@@ -917,6 +929,76 @@ impl App {
                 }
                 Err(e) => {
                     log::warn!("Failed to create PbrMaterial for '{}': {}", mat_path, e);
+                }
+            }
+        }
+
+        for (cache_key, mat_path, renderer) in &uncached_overrides {
+            let mat_ron_path = content_root.join(mat_path);
+            let mat_dir = mat_ron_path.parent().unwrap_or(&content_root);
+
+            let def = match load_material_ron(&mat_ron_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("Failed to load material override '{}': {}", mat_path, e);
+                    continue;
+                }
+            };
+
+            let load_tex = |filename: &str, fallback: [u8; 4], format: Format| -> Result<Arc<vulkano::image::view::ImageView>, Box<dyn std::error::Error>> {
+                if filename.is_empty() {
+                    return create_default_texture_with_format(
+                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                    );
+                }
+                let tex_path = mat_dir.join(filename);
+                if tex_path.exists() {
+                    let content_relative = tex_path.strip_prefix(&content_root)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| filename.to_string());
+                    match self.core.asset_manager.textures.load(&content_relative) {
+                        Ok(handle) => Ok(handle.get_arc()),
+                        Err(e) => {
+                            log::warn!("Failed to load texture '{}': {}", content_relative, e);
+                            create_default_texture_with_format(
+                                allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                            )
+                        }
+                    }
+                } else {
+                    log::warn!("Material texture not found: {}", tex_path.display());
+                    create_default_texture_with_format(
+                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                    )
+                }
+            };
+
+            let albedo = match load_tex(&def.albedo_texture, [255, 255, 255, 255], Format::R8G8B8A8_SRGB) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let normal = match load_tex(&def.normal_texture, DEFAULT_NORMAL_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let mr = match load_tex(&def.metallic_roughness_texture, DEFAULT_METALLIC_ROUGHNESS_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+            let ao = match load_tex(&def.ao_texture, DEFAULT_AO_RGBA, Format::R8G8B8A8_UNORM) {
+                Ok(v) => v, Err(_) => continue,
+            };
+
+            match PbrMaterial::new(
+                albedo, normal, mr, ao, sampler.clone(),
+                renderer.base_color_factor,
+                renderer.metallic_factor,
+                renderer.roughness_factor,
+                renderer.emissive_factor,
+                allocator.clone(), ds_allocator.clone(), geom_layout.clone(),
+            ) {
+                Ok(mat) => {
+                    self.core.material_override_cache.insert(cache_key.clone(), mat.descriptor_set);
+                }
+                Err(e) => {
+                    log::warn!("Failed to create material override for '{}': {}", mat_path, e);
                 }
             }
         }
@@ -1361,6 +1443,7 @@ impl App {
             &self.core.skinning,
             self.core.deferred_renderer.default_material_set(),
             &self.core.material_cache,
+            &self.core.material_override_cache,
         );
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);

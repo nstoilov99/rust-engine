@@ -20,7 +20,9 @@ impl EditorTheme {
         visuals.window_fill = p.surface[2];
         visuals.panel_fill = p.surface[1];
         visuals.faint_bg_color = p.surface[0];
-        visuals.extreme_bg_color = p.surface[0];
+        // extreme_bg_color is used for TextEdit and Slider track backgrounds —
+        // use the darker field_bg to create a visible "inset" against the panel.
+        visuals.extreme_bg_color = p.field_bg;
 
         // Selection
         visuals.selection.bg_fill = p.accent.gamma_multiply(0.35);
@@ -30,7 +32,7 @@ impl EditorTheme {
         visuals.hyperlink_color = p.accent;
 
         // Corner radius
-        let corner_radius = CornerRadius::same(4);
+        let corner_radius = CornerRadius::same(3);
         visuals.window_corner_radius = CornerRadius::same(6);
         visuals.menu_corner_radius = CornerRadius::same(4);
 
@@ -38,28 +40,29 @@ impl EditorTheme {
         // Noninteractive (labels, panel backgrounds)
         visuals.widgets.noninteractive.bg_fill = p.surface[1];
         visuals.widgets.noninteractive.weak_bg_fill = p.surface[1];
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(0.5, p.stroke);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.stroke);
         visuals.widgets.noninteractive.corner_radius = corner_radius;
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text_secondary);
 
-        // Inactive (clickable but not hovered)
-        visuals.widgets.inactive.bg_fill = p.surface[2];
-        visuals.widgets.inactive.weak_bg_fill = p.surface[2];
-        visuals.widgets.inactive.bg_stroke = Stroke::new(0.5, p.stroke);
+        // Inactive (clickable but not hovered) — buttons, combo boxes, drag values
+        // Use field_bg to give inputs a clear inset look against the panel background.
+        visuals.widgets.inactive.bg_fill = p.field_bg;
+        visuals.widgets.inactive.weak_bg_fill = p.field_bg;
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, p.stroke);
         visuals.widgets.inactive.corner_radius = corner_radius;
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text_primary);
 
-        // Hovered
+        // Hovered — brighter fill + accent border
         visuals.widgets.hovered.bg_fill = p.surface[3];
         visuals.widgets.hovered.weak_bg_fill = p.surface[3];
         visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
         visuals.widgets.hovered.corner_radius = corner_radius;
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text_primary);
 
-        // Active (being clicked / dragged)
+        // Active (being clicked / dragged) — accent outline
         visuals.widgets.active.bg_fill = p.surface[4];
         visuals.widgets.active.weak_bg_fill = p.surface[4];
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.5, p.accent);
         visuals.widgets.active.corner_radius = corner_radius;
         visuals.widgets.active.fg_stroke = Stroke::new(1.0, p.text_primary);
 
@@ -88,11 +91,17 @@ impl EditorTheme {
         // Window stroke
         visuals.window_stroke = Stroke::new(1.0, p.stroke);
 
+        // Slider: show trailing fill so the value amount is visible
+        visuals.slider_trailing_fill = true;
+
         // Semantic colors
         visuals.warn_fg_color = p.semantic.warning;
         visuals.error_fg_color = p.semantic.error;
 
         style.visuals = visuals;
+
+        // Slider rail height — slightly thicker for visibility
+        style.spacing.slider_rail_height = 4.0;
 
         // --- Spacing ---
         let sp = &self.spacing;
