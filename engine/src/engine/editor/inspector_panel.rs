@@ -360,105 +360,6 @@ impl InspectorPanel {
     const VEC3_AXIS_LABEL_W: f32 = 14.0; // "X" / "Y" / "Z" colored label
     const VEC3_INPUT_W: f32 = 92.0;
 
-    /// Render a two-column row with a label (+ optional extras like reset button) and
-    /// a Vec3 drag-value field (X/Y/Z with colored axis labels).
-    fn vector3_row(
-        ui: &mut Ui,
-        label: &str,
-        vec: &mut glm::Vec3,
-        speed: f32,
-        label_extra: impl FnOnce(&mut Ui),
-    ) {
-        Self::vector3_row_with_range(ui, label, vec, speed, f32::MIN..=f32::MAX, label_extra);
-    }
-
-    /// Like `vector3_row` but with a value range clamp.
-    fn vector3_row_with_range(
-        ui: &mut Ui,
-        label: &str,
-        vec: &mut glm::Vec3,
-        speed: f32,
-        range: std::ops::RangeInclusive<f32>,
-        label_extra: impl FnOnce(&mut Ui),
-    ) {
-        // Sanitize values
-        if !vec.x.is_finite() {
-            vec.x = 0.0;
-        }
-        if !vec.y.is_finite() {
-            vec.y = 0.0;
-        }
-        if !vec.z.is_finite() {
-            vec.z = 0.0;
-        }
-
-        let mut arr = [vec.x, vec.y, vec.z];
-        Self::vec3_row_inner(ui, label, &mut arr, speed, range, None, label_extra);
-        vec.x = arr[0];
-        vec.y = arr[1];
-        vec.z = arr[2];
-    }
-
-    /// Inner helper that lays out a label + reset + 3 axis drag values in fixed columns.
-    /// `suffix` is applied to all three drag values (e.g. "°" for rotation).
-    fn vec3_row_inner(
-        ui: &mut Ui,
-        label: &str,
-        vals: &mut [f32; 3],
-        speed: f32,
-        range: std::ops::RangeInclusive<f32>,
-        suffix: Option<&str>,
-        label_extra: impl FnOnce(&mut Ui),
-    ) {
-        let row_h = ui.spacing().interact_size.y;
-        let available = ui.available_width();
-
-        ui.horizontal(|ui| {
-            ui.set_min_width(available);
-
-            // Label column (fixed width)
-            ui.allocate_ui_with_layout(
-                egui::vec2(Self::VEC3_LABEL_W, row_h),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        RichText::new(label)
-                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                    );
-                },
-            );
-
-            // Reset button column (fixed width)
-            ui.allocate_ui_with_layout(
-                egui::vec2(Self::VEC3_RESET_W, row_h),
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                |ui| {
-                    label_extra(ui);
-                },
-            );
-
-            let axis_colors = [AXIS_COLOR_X, AXIS_COLOR_Y, AXIS_COLOR_Z];
-            let axis_labels = ["X", "Y", "Z"];
-
-            for i in 0..3 {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(Self::VEC3_AXIS_LABEL_W, row_h),
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.label(RichText::new(axis_labels[i]).color(axis_colors[i]).strong());
-                    },
-                );
-                let mut dv = DragValue::new(&mut vals[i])
-                    .speed(speed)
-                    .range(range.clone());
-                if let Some(s) = suffix {
-                    dv = dv.suffix(s);
-                }
-                ui.add_sized(egui::vec2(Self::VEC3_INPUT_W, row_h), dv);
-            }
-        });
-    }
-
     // Fixed label width for property rows (matches VEC3_LABEL_W + VEC3_RESET_W for alignment)
     const PROP_LABEL_W: f32 = 90.0;
     const MATERIAL_SLIDER_W: f32 = 112.0;
@@ -468,23 +369,70 @@ impl InspectorPanel {
     /// egui handle radius = height / 2.5 - 1.0, so 16px → ~5.4px radius (vs 7.8px at 22px).
     const SLIDER_HEIGHT: f32 = 16.0;
 
+    fn fixed_label(ui: &mut Ui, label: &str, width: f32) {
+        let row_h = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(
+                    RichText::new(label).color(ui.visuals().widgets.noninteractive.fg_stroke.color),
+                );
+            },
+        );
+    }
+
+    fn transform_grid_row(
+        ui: &mut Ui,
+        label: &str,
+        vals: &mut [f32; 3],
+        speed: f32,
+        range: std::ops::RangeInclusive<f32>,
+        suffix: Option<&str>,
+    ) -> bool {
+        Self::fixed_label(ui, label, Self::VEC3_LABEL_W);
+        let reset = ui
+            .add_sized(
+                egui::vec2(Self::VEC3_RESET_W, ui.spacing().interact_size.y),
+                egui::Button::new(RichText::new("R").size(11.0)),
+            )
+            .on_hover_text("Reset")
+            .clicked();
+
+        for (i, (axis, color)) in [
+            ("X", AXIS_COLOR_X),
+            ("Y", AXIS_COLOR_Y),
+            ("Z", AXIS_COLOR_Z),
+        ]
+        .iter()
+        .enumerate()
+        {
+            ui.add_sized(
+                egui::vec2(Self::VEC3_AXIS_LABEL_W, ui.spacing().interact_size.y),
+                egui::Label::new(RichText::new(*axis).color(*color).strong()),
+            );
+            let mut drag = DragValue::new(&mut vals[i])
+                .speed(speed)
+                .range(range.clone());
+            if let Some(suffix) = suffix {
+                drag = drag.suffix(suffix);
+            }
+            ui.add_sized(
+                egui::vec2(Self::VEC3_INPUT_W, ui.spacing().interact_size.y),
+                drag,
+            );
+        }
+        ui.end_row();
+        reset
+    }
+
     /// Render a standard two-column property row (label on left, value widget on right).
     fn property_row<R>(ui: &mut Ui, label: &str, add_value: impl FnOnce(&mut Ui) -> R) -> R {
         let available = ui.available_width();
-        let row_h = ui.spacing().interact_size.y;
 
         ui.horizontal(|ui| {
             ui.set_min_width(available);
-            ui.allocate_ui_with_layout(
-                egui::vec2(Self::PROP_LABEL_W, row_h),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        RichText::new(label)
-                            .color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                    );
-                },
-            );
+            Self::fixed_label(ui, label, Self::PROP_LABEL_W);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), add_value)
                 .inner
         })
@@ -585,17 +533,11 @@ impl InspectorPanel {
     }
 
     fn material_slider_row(ui: &mut Ui, label: &str, value: &mut f32) {
-        let row_h = ui.spacing().interact_size.y;
         ui.horizontal(|ui| {
-            ui.add_sized(
-                egui::vec2(Self::PROP_LABEL_W, row_h),
-                egui::Label::new(
-                    RichText::new(label).color(ui.visuals().widgets.noninteractive.fg_stroke.color),
-                ),
-            );
+            Self::fixed_label(ui, label, Self::PROP_LABEL_W);
             let _ = Self::compact_slider(ui, value, 0.0..=1.0);
             ui.add_sized(
-                egui::vec2(Self::MATERIAL_VALUE_W, row_h),
+                egui::vec2(Self::MATERIAL_VALUE_W, ui.spacing().interact_size.y),
                 DragValue::new(value).speed(0.01).range(0.0..=1.0),
             );
         });
@@ -1044,13 +986,15 @@ impl InspectorPanel {
 
         if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
             Self::component_section(ui, "Transform", category, |ui| {
-                // Position
-                let mut reset_pos = false;
-                Self::vector3_row(ui, "Position", &mut transform.position, 0.1, |ui| {
-                    reset_pos = ui.small_button("R").on_hover_text("Reset").clicked();
-                });
-                if reset_pos {
-                    transform.position = glm::vec3(0.0, 0.0, 0.0);
+                let mut position = [
+                    transform.position.x,
+                    transform.position.y,
+                    transform.position.z,
+                ];
+                for item in &mut position {
+                    if !item.is_finite() {
+                        *item = 0.0;
+                    }
                 }
 
                 // Rotation (as Euler angles in degrees)
@@ -1074,42 +1018,65 @@ impl InspectorPanel {
                     }
                 }
 
-                let mut reset_rot = false;
                 let euler_before = euler;
-                Self::vec3_row_inner(
-                    ui,
-                    "Rotation",
-                    &mut euler,
-                    1.0,
-                    -180.0..=180.0,
-                    Some("°"),
-                    |ui| {
-                        reset_rot = ui.small_button("R").on_hover_text("Reset").clicked();
-                    },
-                );
+
+                let mut scale = [transform.scale.x, transform.scale.y, transform.scale.z];
+                for item in &mut scale {
+                    if !item.is_finite() {
+                        *item = 1.0;
+                    }
+                }
+
+                let mut reset_pos = false;
+                let mut reset_rot = false;
+                let mut reset_scale = false;
+
+                egui::Grid::new(ui.id().with("transform_grid"))
+                    .num_columns(8)
+                    .spacing(egui::vec2(6.0, 4.0))
+                    .show(ui, |ui| {
+                        reset_pos |= Self::transform_grid_row(
+                            ui,
+                            "Position",
+                            &mut position,
+                            0.1,
+                            f32::MIN..=f32::MAX,
+                            None,
+                        );
+                        reset_rot |= Self::transform_grid_row(
+                            ui,
+                            "Rotation",
+                            &mut euler,
+                            1.0,
+                            -180.0..=180.0,
+                            Some("°"),
+                        );
+                        reset_scale |= Self::transform_grid_row(
+                            ui,
+                            "Scale",
+                            &mut scale,
+                            0.01,
+                            0.001..=1000.0,
+                            None,
+                        );
+                    });
+
+                transform.position = glm::vec3(position[0], position[1], position[2]);
+                transform.scale = glm::vec3(scale[0], scale[1], scale[2]);
+
                 if euler != euler_before {
                     let new_quat = euler_degrees_to_quaternion(&euler);
                     transform.rotation = new_quat;
                     self.euler_cache.insert(entity_id, (new_quat, euler));
+                }
+                if reset_pos {
+                    transform.position = glm::vec3(0.0, 0.0, 0.0);
                 }
                 if reset_rot {
                     transform.rotation = glm::quat_identity();
                     self.euler_cache
                         .insert(entity_id, (glm::quat_identity(), [0.0, 0.0, 0.0]));
                 }
-
-                // Scale
-                let mut reset_scale = false;
-                Self::vector3_row_with_range(
-                    ui,
-                    "Scale",
-                    &mut transform.scale,
-                    0.01,
-                    0.001..=1000.0,
-                    |ui| {
-                        reset_scale = ui.small_button("R").on_hover_text("Reset").clicked();
-                    },
-                );
                 if reset_scale {
                     transform.scale = glm::vec3(1.0, 1.0, 1.0);
                 }
