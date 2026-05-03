@@ -355,9 +355,7 @@ impl InspectorPanel {
     }
 
     // -- Fixed column widths for consistent Transform / Vec3 alignment --
-    const VEC3_LABEL_W: f32 = 50.0; // Widest label: "Rotation"
     const VEC3_RESET_W: f32 = 20.0; // reset button "R"
-    const VEC3_AXIS_LABEL_W: f32 = 10.0; // "X" / "Y" / "Z" colored label
     const VEC3_INPUT_W: f32 = 92.0;
 
     // Fixed label width for property rows (matches VEC3_LABEL_W + VEC3_RESET_W for alignment)
@@ -387,7 +385,7 @@ impl InspectorPanel {
         range: std::ops::RangeInclusive<f32>,
         suffix: Option<&str>,
     ) -> bool {
-        Self::fixed_label(ui, label, Self::VEC3_LABEL_W);
+        ui.label(RichText::new(label).color(ui.visuals().widgets.noninteractive.fg_stroke.color));
         let reset = ui
             .add_sized(
                 egui::vec2(Self::VEC3_RESET_W, ui.spacing().interact_size.y),
@@ -404,10 +402,7 @@ impl InspectorPanel {
         .iter()
         .enumerate()
         {
-            ui.add_sized(
-                egui::vec2(Self::VEC3_AXIS_LABEL_W, ui.spacing().interact_size.y),
-                egui::Label::new(RichText::new(*axis).color(*color).strong()),
-            );
+            ui.label(RichText::new(*axis).color(*color).strong());
             let mut drag = DragValue::new(&mut vals[i])
                 .speed(speed)
                 .range(range.clone());
@@ -778,8 +773,10 @@ impl InspectorPanel {
                 let mut reset_rot = false;
                 let mut reset_scale = false;
 
+                ui.add_space(6.0);
                 egui::Grid::new(ui.id().with("transform_grid"))
                     .num_columns(8)
+                    .min_col_width(0.0)
                     .spacing(egui::vec2(6.0, 4.0))
                     .show(ui, |ui| {
                         reset_pos |= Self::transform_grid_row(
@@ -807,6 +804,7 @@ impl InspectorPanel {
                             None,
                         );
                     });
+                ui.add_space(6.0);
 
                 transform.position = glm::vec3(position[0], position[1], position[2]);
                 transform.scale = glm::vec3(scale[0], scale[1], scale[2]);
