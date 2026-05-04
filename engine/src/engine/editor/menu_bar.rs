@@ -42,6 +42,12 @@ pub enum MenuAction {
     Stop,
     /// Rebuild all registered shader pipelines from source.
     RebuildShaders,
+    /// Toggle the Icon Inspector window (editor-debug only).
+    #[cfg(feature = "editor-debug")]
+    ToggleIconInspector,
+    /// Toggle the Widget Showcase window (editor-debug only).
+    #[cfg(feature = "editor-debug")]
+    ToggleShowcase,
 }
 
 pub(super) mod play_colors {
@@ -461,6 +467,19 @@ pub fn render_menu_bar(
                     if ui.button("Rebuild All Shaders").clicked() {
                         action = MenuAction::RebuildShaders;
                         ui.close();
+                    }
+
+                    #[cfg(feature = "editor-debug")]
+                    {
+                        ui.separator();
+                        if ui.button("Icon Inspector").clicked() {
+                            action = MenuAction::ToggleIconInspector;
+                            ui.close();
+                        }
+                        if ui.button("Widget Showcase").clicked() {
+                            action = MenuAction::ToggleShowcase;
+                            ui.close();
+                        }
                     }
                 });
 

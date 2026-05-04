@@ -165,6 +165,10 @@ pub struct EditorUIState {
     pub icons_loaded: bool,
     pub profiler_panel: ProfilerPanel,
     pub input_settings_panel: InputSettingsPanel,
+    #[cfg(feature = "editor-debug")]
+    pub icon_inspector: rust_engine::engine::editor::icon_inspector::IconInspectorWindow,
+    #[cfg(feature = "editor-debug")]
+    pub showcase: rust_engine::engine::editor::showcase::ShowcaseWindow,
 }
 
 /// Play-mode snapshots and build dialog.
@@ -498,6 +502,10 @@ impl App {
                 icons_loaded: false,
                 profiler_panel,
                 input_settings_panel: InputSettingsPanel::new(),
+                #[cfg(feature = "editor-debug")]
+                icon_inspector: Default::default(),
+                #[cfg(feature = "editor-debug")]
+                showcase: Default::default(),
             },
             play: PlayModeState {
                 snapshot: None,
@@ -1546,6 +1554,9 @@ impl App {
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
 
+        #[cfg(feature = "editor-debug")]
+        let showcase = &mut self.editor.ui.showcase;
+
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
         let mut import_action = ImportDialogAction::None;
@@ -1610,6 +1621,13 @@ impl App {
                     DockArea::new(&mut dock_state.dock_state)
                         .style(create_editor_dock_style(ctx))
                         .show(ctx, &mut tab_viewer);
+
+                    // Debug windows (editor-debug feature)
+                    // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
+                    #[cfg(feature = "editor-debug")]
+                    {
+                        showcase.show(ctx);
+                    }
 
                     // Show file drop overlay when hovering external files
                     if is_hovering_files {
@@ -1764,6 +1782,29 @@ impl App {
             MenuAction::Resume => self.resume_play_mode(),
             MenuAction::Stop => self.stop_play_mode(),
             MenuAction::RebuildShaders => self.rebuild_all_shaders(),
+            #[cfg(feature = "editor-debug")]
+            MenuAction::ToggleIconInspector => {
+                let is_open = self.editor.ui.icon_inspector.open;
+                if is_open {
+                    // Close: setting open=false will cause the secondary window to be removed by retain logic
+                    self.editor.ui.icon_inspector.open = false;
+                } else {
+                    self.editor.ui.icon_inspector.open = true;
+                    let kind = SecondaryWindowKind::IconInspector;
+                    let (width, height) = kind.default_size();
+                    self.pending_window_requests.push(PendingWindowRequest {
+                        editor_key: "__icon_inspector__".to_string(),
+                        kind,
+                        title: kind.window_title(""),
+                        width,
+                        height,
+                    });
+                }
+            }
+            #[cfg(feature = "editor-debug")]
+            MenuAction::ToggleShowcase => {
+                self.editor.ui.showcase.open = !self.editor.ui.showcase.open;
+            }
         }
 
         // Process OS file drops (files dragged from Windows Explorer / file manager)

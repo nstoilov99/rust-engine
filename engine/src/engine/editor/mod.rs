@@ -17,6 +17,7 @@
 //! * `icons.rs` — existing `IconManager` + `ToolbarIcon` + `AssetBrowserIcon`. Step 1
 //!   extends this into a full `IconRegistry`.
 
+pub mod icon_classes;
 pub mod services;
 pub mod theme;
 pub mod widgets;
@@ -27,6 +28,8 @@ pub mod status_bar;
 pub mod dirty_state;
 pub mod layout;
 pub mod preview;
+#[cfg(feature = "editor-debug")]
+pub mod icon_inspector;
 #[cfg(feature = "editor-debug")]
 pub mod showcase;
 

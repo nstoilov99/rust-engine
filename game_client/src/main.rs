@@ -139,6 +139,10 @@ impl ApplicationHandler for GameApp {
                                     data.open = false;
                                 }
                             }
+                            #[cfg(feature = "editor-debug")]
+                            SecondaryWindowKind::IconInspector => {
+                                app.editor.ui.icon_inspector.open = false;
+                            }
                             // Built-in panels: closing the window just closes it, no state cleanup needed
                             _ => {}
                         }
@@ -287,6 +291,10 @@ impl ApplicationHandler for GameApp {
                 SecondaryWindowKind::InputContext => {
                     app.editor.scene.input_context_editor.open_contexts.get(&sec.editor_key).is_some_and(|d| d.open)
                 }
+                #[cfg(feature = "editor-debug")]
+                SecondaryWindowKind::IconInspector => {
+                    app.editor.ui.icon_inspector.open
+                }
                 // Built-in panels: keep alive (removed only when docked back or closed)
                 _ => !sec.dock_requested,
             }
@@ -366,6 +374,23 @@ impl ApplicationHandler for GameApp {
         let device = app.core.renderer.gpu.device.clone();
         let queue = app.core.renderer.gpu.queue.clone();
 
+        // Temporarily remove the IconRegistry Arc from the main egui context so
+        // Arc::get_mut succeeds when the Icon Inspector secondary window needs
+        // mutable access to the palette. Only do this when an inspector window
+        // is actually present — otherwise we'd thrash the main ctx data store
+        // every frame for no gain.
+        #[cfg(feature = "editor-debug")]
+        let icon_inspector_active = secondary_windows
+            .values()
+            .any(|s| s.kind == SecondaryWindowKind::IconInspector);
+        #[cfg(feature = "editor-debug")]
+        if icon_inspector_active {
+            let main_ctx = app.editor.ui.gui.context().clone();
+            main_ctx.data_mut(|d| {
+                d.remove::<std::sync::Arc<rust_engine::engine::editor::widgets::IconRegistry>>(egui::Id::NULL);
+            });
+        }
+
         // Collect dock requests from secondary windows
         let dock_requests: Vec<(String, SecondaryWindowKind)> = {
         let mesh_editors = &mut app.editor.scene.mesh_editors;
@@ -380,6 +405,10 @@ impl ApplicationHandler for GameApp {
         let console_messages = &mut app.editor.console.messages;
         let log_filter = &mut app.editor.console.log_filter;
         let world = app.core.game_world.hecs_mut();
+        #[cfg(feature = "editor-debug")]
+        let icon_inspector = &mut app.editor.ui.icon_inspector;
+        #[cfg(feature = "editor-debug")]
+        let icon_registry = &mut app.editor.services.icons;
 
         let mut dock_requests: Vec<(String, SecondaryWindowKind)> = Vec::new();
 
@@ -520,6 +549,14 @@ impl ApplicationHandler for GameApp {
                         log::error!("Console window render error: {}", e);
                     }
                 }
+                #[cfg(feature = "editor-debug")]
+                SecondaryWindowKind::IconInspector => {
+                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                        icon_inspector.show(ctx, icon_registry);
+                    }) {
+                        log::error!("Icon Inspector window render error: {}", e);
+                    }
+                }
             }
 
             if dock_requested.get() {
@@ -534,6 +571,20 @@ impl ApplicationHandler for GameApp {
         // Process dock requests (re-dock secondary windows as tabs)
         for (key, kind) in dock_requests {
             app.dock_tab(&key, kind);
+        }
+
+        // Reinstall the IconRegistry Arc into the main egui context — only
+        // necessary when we removed it above for an active inspector window.
+        #[cfg(feature = "editor-debug")]
+        if icon_inspector_active {
+            let main_ctx = app.editor.ui.gui.context().clone();
+            let icons_clone = app.editor.services.icons.clone();
+            main_ctx.data_mut(|d| {
+                d.insert_temp::<std::sync::Arc<rust_engine::engine::editor::widgets::IconRegistry>>(
+                    egui::Id::NULL,
+                    icons_clone,
+                );
+            });
         }
     }
 
