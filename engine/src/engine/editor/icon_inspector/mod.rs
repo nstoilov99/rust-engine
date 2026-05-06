@@ -7,12 +7,39 @@
 //! Use the **Export Palette** button to copy a Rust snippet to the clipboard.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{Color32, Context, RichText, TextureHandle, Ui};
 
 use crate::engine::editor::icon_classes::{ChromeState, Severity, TintMode, TypeCategory};
 use crate::engine::editor::widgets::{load_icon_textures, IconKind, IconRegistry};
+
+/// What the inspector is currently focused on. The detail panel uses this to
+/// decide which editor to render — `IconKind` overrides for the typed/
+/// chrome/severity classes, or panel-icon overrides for an SVG inside one of
+/// the auto-discovered subfolders of `engine/icons/`.
+#[derive(Clone)]
+enum InspectorSelection {
+    /// One of the enum-keyed icons the rest of the editor renders through
+    /// `IconRegistry`.
+    Kind(IconKind),
+    /// An SVG inside `engine/icons/<panel>/<stem>.svg`.
+    Panel { panel: String, stem: String },
+}
+
+impl InspectorSelection {
+    fn is_kind(&self, kind: IconKind) -> bool {
+        matches!(self, InspectorSelection::Kind(k) if *k == kind)
+    }
+
+    fn is_panel(&self, panel: &str, stem: &str) -> bool {
+        matches!(
+            self,
+            InspectorSelection::Panel { panel: p, stem: s } if p == panel && s == stem
+        )
+    }
+}
 
 /// Persistent state for the Icon Inspector window.
 pub struct IconInspectorWindow {
@@ -21,19 +48,50 @@ pub struct IconInspectorWindow {
     icon_size: f32,
     /// Current chrome state for chrome icon preview.
     chrome_state: ChromeState,
-    /// Currently selected icon for the detail panel.
-    selected_icon: Option<IconKind>,
+    /// Whatever's selected for the detail panel — IconKind or panel SVG.
+    selection: Option<InspectorSelection>,
     /// Icon textures loaded into the secondary window's egui context.
     /// `IconRegistry`'s textures are bound to the main window's context,
     /// so the secondary renderer cannot sample them — we keep a local copy
     /// bound to whichever context we render into.
     local_textures: HashMap<IconKind, TextureHandle>,
+    /// Per-panel icon sets auto-discovered from `engine/icons/<panel>/*.svg`.
+    /// Each subdirectory becomes its own collapsible section in the inspector,
+    /// keyed by file stem. New panels appear by simply creating a subfolder
+    /// with SVGs in it — no code change needed here.
+    panel_sets: Vec<PanelIconSet>,
+    /// Free-text filter (matches IconKind name and panel-icon stems).
+    search: String,
     /// Marker identifying which egui context `local_textures` were loaded for.
     /// When this differs from the current context's marker, textures are reloaded
     /// (e.g. the inspector was closed and a fresh secondary window was created).
     last_ctx_marker: Option<u64>,
     /// Transient feedback for the most recent Save action.
     save_status: Option<SaveStatus>,
+}
+
+/// A panel-scoped icon set: every SVG inside a single subfolder of
+/// `engine/icons/`, keyed by file stem.
+struct PanelIconSet {
+    /// Display name (the folder name, title-cased).
+    name: String,
+    /// Source folder, kept around for diagnostics in the toolbar.
+    folder: PathBuf,
+    /// Stem-keyed icon textures — same shape as `HierarchyIcons`.
+    textures: HashMap<String, TextureHandle>,
+}
+
+impl PanelIconSet {
+    /// Stable key used for palette overrides (raw folder name in lowercase).
+    /// Diverges from `name` (which is title-cased for display) so the on-disk
+    /// override key matches what the panel code looks up.
+    fn folder_key(&self) -> String {
+        self.folder
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -46,10 +104,12 @@ impl Default for IconInspectorWindow {
     fn default() -> Self {
         Self {
             open: false,
-            icon_size: 24.0,
+            icon_size: 28.0,
             chrome_state: ChromeState::Default,
-            selected_icon: None,
+            selection: None,
             local_textures: HashMap::new(),
+            panel_sets: Vec::new(),
+            search: String::new(),
             last_ctx_marker: None,
             save_status: None,
         }
@@ -78,40 +138,53 @@ impl IconInspectorWindow {
         if let Some(registry) = Arc::get_mut(icons_arc) {
             egui::CentralPanel::default().show(ctx, |ui| {
                 self.show_toolbar(ui, registry);
+                self.show_search_row(ui);
                 ui.separator();
 
                 // Two-column layout: icon browser (left) + detail panel (right)
-                let detail_width = if self.selected_icon.is_some() {
-                    240.0
-                } else {
-                    0.0
-                };
+                let detail_width = if self.selection.is_some() { 260.0 } else { 0.0 };
 
                 ui.horizontal_top(|ui| {
                     // Left: scrollable icon browser
-                    let browser_width = (ui.available_width() - detail_width).max(200.0);
+                    let browser_width = (ui.available_width() - detail_width).max(220.0);
                     ui.vertical(|ui| {
                         ui.set_width(browser_width);
                         egui::ScrollArea::vertical()
                             .id_salt("icon_browser_scroll")
                             .show(ui, |ui| {
+                                // Panel-folder sections come FIRST so icons
+                                // tied to a specific editor surface (Hierarchy,
+                                // future Asset Browser, …) are easy to find.
+                                self.show_panel_sections(ui, registry);
+                                if !self.panel_sets.is_empty() {
+                                    ui.add_space(6.0);
+                                }
                                 self.show_chrome_section(ui, registry);
-                                ui.add_space(8.0);
+                                ui.add_space(6.0);
                                 self.show_typed_section(ui, registry);
-                                ui.add_space(8.0);
+                                ui.add_space(6.0);
                                 self.show_severity_section(ui, registry);
                             });
                     });
 
                     // Right: detail panel for selected icon
-                    if let Some(selected) = self.selected_icon {
+                    if let Some(selected) = self.selection.clone() {
                         ui.separator();
                         ui.vertical(|ui| {
                             ui.set_width(detail_width);
                             egui::ScrollArea::vertical()
                                 .id_salt("icon_detail_scroll")
                                 .show(ui, |ui| {
-                                    self.show_detail_panel(ui, selected, registry);
+                                    match selected {
+                                        InspectorSelection::Kind(kind) => {
+                                            self.show_detail_panel(ui, kind, registry);
+                                        }
+                                        InspectorSelection::Panel { panel, stem } => {
+                                            self.show_panel_detail_panel(
+                                                ui, &panel, &stem, registry,
+                                            );
+                                        }
+                                    }
                                 });
                         });
                     }
@@ -149,7 +222,13 @@ impl IconInspectorWindow {
 
         if self.last_ctx_marker != Some(ctx_marker) {
             self.local_textures = load_icon_textures(ctx);
+            self.panel_sets = discover_panel_sets(ctx);
             self.last_ctx_marker = Some(ctx_marker);
+            // Request another frame so any textures the renderer is still
+            // uploading get a chance to show without forcing the user to
+            // click around — addresses the "icons only appear after I click"
+            // first-frame artefact.
+            ctx.request_repaint();
         }
     }
 
@@ -157,10 +236,11 @@ impl IconInspectorWindow {
         ui.horizontal(|ui| {
             // Save persists the current palette to `editor_icon_palette.ron`
             // (workspace root). It's auto-loaded on next launch.
-            let save_resp = ui
-                .button("Save Palette")
-                .on_hover_text("Persist current colors to editor_icon_palette.ron");
-            if save_resp.clicked() {
+            if ui
+                .button("\u{1F4BE} Save")
+                .on_hover_text("Save palette to editor_icon_palette.ron")
+                .clicked()
+            {
                 match registry.palette().save_to_default() {
                     Ok(()) => {
                         let path = crate::engine::editor::icon_classes::IconPalette::default_path();
@@ -174,14 +254,18 @@ impl IconInspectorWindow {
                 }
             }
 
-            if ui.button("Reset Palette").clicked() {
+            if ui
+                .button("Reset")
+                .on_hover_text("Discard local edits and revert to default_dark")
+                .clicked()
+            {
                 registry.reset_palette();
-                self.selected_icon = None;
+                self.selection = None;
                 self.save_status = None;
             }
 
             if ui
-                .button("Export Snippet")
+                .button("Export")
                 .on_hover_text("Copy a Rust snippet to clipboard for IconPalette::default_dark()")
                 .clicked()
             {
@@ -201,24 +285,287 @@ impl IconInspectorWindow {
                 }
             }
 
-            // Inline status pill so the user gets feedback without opening logs.
-            if let Some(status) = self.save_status {
-                ui.separator();
-                let (text, color) = match status {
-                    SaveStatus::Saved => ("Saved \u{2713}", Color32::from_rgb(0x6E, 0xCB, 0x7C)),
-                    SaveStatus::Failed => ("Save failed", Color32::from_rgb(0xE5, 0x6B, 0x6B)),
-                };
-                ui.colored_label(color, text);
+            // Save status pill — pinned to the right so it doesn't push the
+            // size slider around as it appears / disappears.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(status) = self.save_status {
+                    let (text, color) = match status {
+                        SaveStatus::Saved => ("Saved \u{2713}", Color32::from_rgb(0x6E, 0xCB, 0x7C)),
+                        SaveStatus::Failed => ("Save failed", Color32::from_rgb(0xE5, 0x6B, 0x6B)),
+                    };
+                    ui.colored_label(color, text);
+                }
+            });
+        });
+    }
+
+    /// Second toolbar row: search field + size slider. Splitting these out of
+    /// the main button bar keeps the file-action buttons readable.
+    fn show_search_row(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Search:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .desired_width(220.0)
+                    .hint_text("Filter by name…"),
+            );
+            if !self.search.is_empty() && ui.small_button("\u{2715}").clicked() {
+                self.search.clear();
             }
 
-            ui.separator();
-            ui.label("Size:");
-            ui.add(
-                egui::Slider::new(&mut self.icon_size, 12.0..=64.0)
-                    .step_by(4.0)
-                    .suffix("px"),
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Slider::new(&mut self.icon_size, 16.0..=64.0)
+                        .step_by(4.0)
+                        .suffix(" px"),
+                );
+                ui.label("Size:");
+            });
         });
+    }
+
+    /// Render one collapsible section per discovered `engine/icons/<panel>/`
+    /// subfolder. Each section lays out its SVGs in a wrapping grid with the
+    /// stem name as a tooltip — adding new icons is a drag-drop into the
+    /// folder, no code change required here.
+    fn show_panel_sections(&mut self, ui: &mut Ui, registry: &IconRegistry) {
+        let panel_count = self.panel_sets.len();
+        for set_idx in 0..panel_count {
+            // `name` is cheap to clone and lets us avoid an aliasing borrow
+            // of `self.panel_sets` while we call self-methods inside the body.
+            let name = self.panel_sets[set_idx].name.clone();
+            let count = self.panel_sets[set_idx].textures.len();
+            let header = format!("{name} ({count})");
+
+            egui::CollapsingHeader::new(RichText::new(header).strong())
+                .default_open(true)
+                .id_salt(format!("panel_section_{name}"))
+                .show(ui, |ui| {
+                    if count == 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "No SVG files yet — drop them into {}",
+                                self.panel_sets[set_idx].folder.display()
+                            ))
+                            .weak()
+                            .small()
+                            .italics(),
+                        );
+                        return;
+                    }
+                    self.draw_named_icon_grid(ui, set_idx, registry);
+                });
+        }
+    }
+
+    /// Wrapping grid of stem-keyed icons drawn at the inspector's icon_size.
+    /// Search filter dims the section to nothing if no matches.
+    fn draw_named_icon_grid(&mut self, ui: &mut Ui, set_idx: usize, registry: &IconRegistry) {
+        let panel = self.panel_sets[set_idx].folder_key();
+        let mut stems: Vec<String> = self.panel_sets[set_idx]
+            .textures
+            .keys()
+            .cloned()
+            .collect();
+        stems.sort();
+
+        let needle = self.search.trim().to_lowercase();
+        let cell_size = self.icon_size + 6.0;
+        let spacing = 4.0;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
+            for stem in &stems {
+                if !needle.is_empty() && !stem.to_lowercase().contains(&needle) {
+                    continue;
+                }
+
+                let is_selected = self
+                    .selection
+                    .as_ref()
+                    .map_or(false, |s| s.is_panel(&panel, stem));
+                let has_override = registry.panel_icon_has_any_override(&panel, stem);
+
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(cell_size, cell_size),
+                    egui::Sense::click(),
+                );
+
+                if response.clicked() {
+                    self.selection = if is_selected {
+                        None
+                    } else {
+                        Some(InspectorSelection::Panel {
+                            panel: panel.clone(),
+                            stem: stem.clone(),
+                        })
+                    };
+                }
+
+                let painter = ui.painter();
+
+                if is_selected {
+                    painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+                } else if response.hovered() {
+                    painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+                }
+
+                let icon_rect = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::vec2(self.icon_size, self.icon_size),
+                );
+
+                // Tint resolved through the registry so the inspector reflects
+                // saved overrides immediately.
+                let tint = registry.panel_icon_tint(
+                    &panel,
+                    stem,
+                    self.chrome_state,
+                    Color32::WHITE,
+                );
+
+                if let Some(tex) = self.panel_sets[set_idx].textures.get(stem) {
+                    painter.image(
+                        tex.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        tint,
+                    );
+                }
+
+                if has_override {
+                    let r = 2.5;
+                    let c = egui::pos2(rect.right() - r - 2.0, rect.top() + r + 2.0);
+                    painter.circle_filled(c, r, Color32::from_rgb(0xFF, 0xC8, 0x57));
+                }
+
+                let mut tooltip = stem.clone();
+                if has_override {
+                    tooltip.push_str(" — overridden");
+                }
+                response.on_hover_text(tooltip);
+            }
+        });
+    }
+
+    /// Detail panel for a selected panel-folder SVG: large preview at the
+    /// current chrome state, classification info, and the same per-state
+    /// override grid as `IconKind` icons.
+    fn show_panel_detail_panel(
+        &mut self,
+        ui: &mut Ui,
+        panel: &str,
+        stem: &str,
+        registry: &mut IconRegistry,
+    ) {
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new(stem).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("\u{2715}").clicked() {
+                    self.selection = None;
+                }
+            });
+        });
+        ui.label(
+            RichText::new(format!("Panel: {panel}"))
+                .weak()
+                .small(),
+        );
+
+        ui.separator();
+
+        // Large preview at the current chrome state.
+        let preview_size = 64.0;
+        let (preview_rect, _) = ui.allocate_exact_size(
+            egui::vec2(preview_size, preview_size),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(preview_rect, 4.0, Color32::from_gray(30));
+
+        let preview_tint = registry.panel_icon_tint(panel, stem, self.chrome_state, Color32::WHITE);
+        // Find the texture for this (panel, stem) in our local panel_sets.
+        let texture = self
+            .panel_sets
+            .iter()
+            .find(|s| s.folder_key() == panel)
+            .and_then(|s| s.textures.get(stem));
+
+        if let Some(tex) = texture {
+            painter.image(
+                tex.id(),
+                preview_rect.shrink(4.0),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                preview_tint,
+            );
+        } else {
+            painter.text(
+                preview_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "?",
+                egui::FontId::proportional(32.0),
+                Color32::from_gray(120),
+            );
+        }
+
+        ui.add_space(8.0);
+
+        // Per-state overrides — same model as IconKind, but stored against
+        // (panel, stem, state) so adding new SVGs needs no enum work.
+        ui.label(RichText::new("Per-State Overrides").strong());
+        ui.label(
+            RichText::new(
+                "Set any state explicitly. Unset states fall back to the \
+                 Default override, then to the icon's authored colours.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(4.0);
+
+        egui::Grid::new(format!("panel_overrides_{panel}_{stem}"))
+            .num_columns(3)
+            .spacing([6.0, 4.0])
+            .show(ui, |ui| {
+                for &state in ChromeState::ALL {
+                    let has_override = registry.panel_icon_override(panel, stem, state).is_some();
+                    let effective = registry.panel_icon_tint(
+                        panel,
+                        stem,
+                        state,
+                        Color32::WHITE,
+                    );
+                    let mut display_color =
+                        registry.panel_icon_override(panel, stem, state).unwrap_or(effective);
+
+                    ui.label(state.display_name());
+
+                    let resp = ui.color_edit_button_srgba(&mut display_color);
+                    if resp.changed() {
+                        registry.set_panel_icon_override(panel, stem, state, display_color);
+                    }
+
+                    if has_override {
+                        if ui
+                            .small_button("\u{2715}")
+                            .on_hover_text("Clear this state's override")
+                            .clicked()
+                        {
+                            registry.clear_panel_icon_override(panel, stem, state);
+                        }
+                    } else {
+                        ui.label(RichText::new("inherits").weak().small().italics());
+                    }
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(6.0);
+        if registry.panel_icon_has_any_override(panel, stem)
+            && ui.button("Clear All Overrides").clicked()
+        {
+            registry.clear_all_panel_icon_overrides(panel, stem);
+        }
     }
 
     fn show_chrome_section(&mut self, ui: &mut Ui, registry: &mut IconRegistry) {
@@ -356,7 +703,12 @@ impl IconInspectorWindow {
         });
     }
 
-    /// Render a wrapping grid of icons. Clicking selects for the detail panel.
+    /// Render a wrapping grid of `IconKind` cells.
+    ///
+    /// Cells are square (just the icon — no per-cell label below) so the
+    /// grid stays dense; the icon's display name appears on hover and a small
+    /// dot in the corner marks per-state overrides. Click selects the icon
+    /// for the detail panel on the right.
     fn icon_grid(
         &mut self,
         ui: &mut Ui,
@@ -364,108 +716,107 @@ impl IconInspectorWindow {
         icons: Vec<IconKind>,
         state: ChromeState,
     ) {
-        let cell_size = self.icon_size + 8.0; // icon + padding
+        let cell_size = self.icon_size + 6.0;
         let spacing = 4.0;
+        let needle = self.search.trim().to_lowercase();
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(spacing, spacing);
 
             for &kind in &icons {
-                let is_selected = self.selected_icon == Some(kind);
+                if !needle.is_empty()
+                    && !kind.display_name().to_lowercase().contains(&needle)
+                {
+                    continue;
+                }
+
+                let is_selected = self
+                    .selection
+                    .as_ref()
+                    .map_or(false, |s| s.is_kind(kind));
                 let has_override = registry.icon_has_any_override(kind);
                 let is_authored = registry.tint_mode(kind) == TintMode::Authored;
                 let tint = registry.tint(kind, state);
 
-                // Each icon is a clickable cell
-                let total_height = cell_size + 14.0; // icon + label below
-                let cell_width = cell_size.max(48.0);
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(cell_width, total_height), egui::Sense::click());
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(cell_size, cell_size),
+                    egui::Sense::click(),
+                );
 
                 if response.clicked() {
-                    self.selected_icon = if is_selected { None } else { Some(kind) };
+                    self.selection = if is_selected {
+                        None
+                    } else {
+                        Some(InspectorSelection::Kind(kind))
+                    };
                 }
 
-                if ui.is_rect_visible(rect) {
-                    let painter = ui.painter();
+                let painter = ui.painter();
 
-                    // Selection highlight
-                    if is_selected {
-                        painter.rect_filled(
-                            rect.expand(1.0),
-                            4.0,
-                            ui.visuals().selection.bg_fill,
-                        );
-                    } else if response.hovered() {
-                        painter.rect_filled(
-                            rect.expand(1.0),
-                            4.0,
-                            ui.visuals().widgets.hovered.bg_fill,
-                        );
-                    }
+                // Selection / hover background.
+                if is_selected {
+                    painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+                } else if response.hovered() {
+                    painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+                }
 
-                    // Icon centered in upper portion
-                    let icon_center = egui::pos2(
-                        rect.center().x,
-                        rect.top() + 4.0 + self.icon_size / 2.0,
+                let icon_rect = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::vec2(self.icon_size, self.icon_size),
+                );
+
+                let draw_tint = match registry.tint_mode(kind) {
+                    TintMode::Tinted => tint,
+                    TintMode::Authored => Color32::WHITE,
+                };
+
+                if let Some(texture) = self.local_textures.get(&kind) {
+                    painter.image(
+                        texture.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        draw_tint,
                     );
-                    let icon_rect = egui::Rect::from_center_size(
-                        icon_center,
-                        egui::vec2(self.icon_size, self.icon_size),
-                    );
-
-                    let draw_tint = match registry.tint_mode(kind) {
-                        TintMode::Tinted => tint,
-                        TintMode::Authored => Color32::WHITE,
-                    };
-
-                    if let Some(texture) = self.local_textures.get(&kind) {
-                        painter.image(
-                            texture.id(),
-                            icon_rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            draw_tint,
-                        );
-                    } else {
-                        let text = IconRegistry::fallback_text(kind);
-                        let font_size = (self.icon_size * 0.6).max(8.0);
-                        painter.text(
-                            icon_center,
-                            egui::Align2::CENTER_CENTER,
-                            text,
-                            egui::FontId::proportional(font_size),
-                            draw_tint,
-                        );
-                    }
-
-                    // Label below icon
-                    let label_pos = egui::pos2(rect.center().x, rect.bottom() - 10.0);
-                    let mut label = kind.display_name().to_string();
-                    if has_override {
-                        label.push_str(" \u{25CF}"); // dot
-                    }
-                    if is_authored {
-                        label.push_str(" A");
-                    }
-
-                    let label_color = if is_selected {
-                        ui.visuals().selection.stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    };
+                } else {
+                    // Fallback glyph for IconKinds with no PNG mapping.
+                    let text = IconRegistry::fallback_text(kind);
+                    let font_size = (self.icon_size * 0.6).max(10.0);
                     painter.text(
-                        label_pos,
+                        rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        &label,
-                        egui::FontId::proportional(9.0),
-                        label_color,
+                        text,
+                        egui::FontId::proportional(font_size),
+                        draw_tint,
                     );
                 }
 
-                // Tooltip on hover
-                if response.hovered() {
-                    response.on_hover_text(kind.display_name());
+                // Corner badges:
+                //   • dot   = at least one per-state override
+                //   • "A"   = authored mode (drawn as-is, no tint)
+                if has_override {
+                    let r = 2.5;
+                    let c = egui::pos2(rect.right() - r - 2.0, rect.top() + r + 2.0);
+                    painter.circle_filled(c, r, Color32::from_rgb(0xFF, 0xC8, 0x57));
                 }
+                if is_authored {
+                    painter.text(
+                        egui::pos2(rect.left() + 2.0, rect.top() + 1.0),
+                        egui::Align2::LEFT_TOP,
+                        "A",
+                        egui::FontId::proportional(8.0),
+                        Color32::from_gray(160),
+                    );
+                }
+
+                // Tooltip carries the full display name.
+                let mut tooltip = kind.display_name().to_string();
+                if has_override {
+                    tooltip.push_str(" — overridden");
+                }
+                if is_authored {
+                    tooltip.push_str(" — authored");
+                }
+                response.on_hover_text(tooltip);
             }
         });
     }
@@ -477,7 +828,7 @@ impl IconInspectorWindow {
             ui.heading(RichText::new(kind.display_name()).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("\u{2715}").clicked() {
-                    self.selected_icon = None;
+                    self.selection = None;
                 }
             });
         });
@@ -637,6 +988,85 @@ impl IconInspectorWindow {
 }
 
 /// Generate a Rust snippet for `IconPalette::default_dark()` body from the current palette.
+/// Walk every subdirectory of `engine/icons/` and load each one as a panel
+/// icon set. Subdirectory name → section title (title-cased), `*.svg` files
+/// inside → keyed-by-stem texture entries.
+///
+/// Adding a new panel is therefore a no-code task: create the folder, drop
+/// SVGs in. Errors / missing folder are logged once and yield no sections.
+fn discover_panel_sets(ctx: &Context) -> Vec<PanelIconSet> {
+    use crate::engine::editor::hierarchy_icons::load_svg_texture;
+
+    let root = Path::new("engine/icons");
+    let mut sets = Vec::new();
+
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("Icons root unreadable ({}): {}", root.display(), e);
+            return sets;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let raw_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        // SVG list inside the folder.
+        let mut textures = HashMap::new();
+        if let Ok(inner) = std::fs::read_dir(&path) {
+            for f in inner.flatten() {
+                let fp = f.path();
+                if fp.extension().and_then(|e| e.to_str()) != Some("svg") {
+                    continue;
+                }
+                let stem = match fp.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                match load_svg_texture(ctx, &fp, &format!("inspector_{raw_name}_{stem}")) {
+                    Ok(tex) => {
+                        textures.insert(stem, tex);
+                    }
+                    Err(e) => {
+                        log::warn!("Inspector SVG load failed ({}): {}", fp.display(), e);
+                    }
+                }
+            }
+        }
+
+        sets.push(PanelIconSet {
+            name: title_case_folder(&raw_name),
+            folder: path,
+            textures,
+        });
+    }
+
+    sets.sort_by(|a, b| a.name.cmp(&b.name));
+    sets
+}
+
+/// Convert a folder name like `asset_browser` to `Asset Browser` for display.
+fn title_case_folder(name: &str) -> String {
+    name.split(|c: char| c == '_' || c == '-')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn export_palette_snippet(registry: &IconRegistry) -> String {
     let palette = registry.palette();
     let mut s = String::with_capacity(2048);

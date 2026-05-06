@@ -17,6 +17,7 @@
 //! * `icons.rs` — existing `IconManager` + `ToolbarIcon` + `AssetBrowserIcon`. Step 1
 //!   extends this into a full `IconRegistry`.
 
+pub mod hierarchy_icons;
 pub mod icon_classes;
 pub mod services;
 pub mod theme;

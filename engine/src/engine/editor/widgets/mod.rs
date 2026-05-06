@@ -511,6 +511,91 @@ impl IconRegistry {
         self.palette.overrides.retain(|(k, _), _| *k != kind);
     }
 
+    // ── Panel-icon overrides (engine/icons/<panel>/<stem>.svg) ────────────
+
+    /// Resolve the tint to apply to an SVG drawn from
+    /// `engine/icons/<panel>/<stem>.svg` at the given state.
+    ///
+    /// Lookup order:
+    /// 1. `(panel, stem, state)` per-state override
+    /// 2. `(panel, stem, ChromeState::Default)` override (fallback so an icon
+    ///    customised only on Default keeps that colour across all states)
+    /// 3. `default_tint` — typically `Color32::WHITE` so the SVG paints as
+    ///    authored.
+    pub fn panel_icon_tint(
+        &self,
+        panel: &str,
+        stem: &str,
+        state: ChromeState,
+        default_tint: egui::Color32,
+    ) -> egui::Color32 {
+        if let Some(&c) = self.palette.panel_overrides.get(&(
+            panel.to_string(),
+            stem.to_string(),
+            state,
+        )) {
+            return c;
+        }
+        if state != ChromeState::Default {
+            if let Some(&c) = self.palette.panel_overrides.get(&(
+                panel.to_string(),
+                stem.to_string(),
+                ChromeState::Default,
+            )) {
+                return c;
+            }
+        }
+        default_tint
+    }
+
+    /// Read the per-state override for a panel icon, if one is set.
+    pub fn panel_icon_override(
+        &self,
+        panel: &str,
+        stem: &str,
+        state: ChromeState,
+    ) -> Option<egui::Color32> {
+        self.palette
+            .panel_overrides
+            .get(&(panel.to_string(), stem.to_string(), state))
+            .copied()
+    }
+
+    /// True if the panel icon has any per-state override set.
+    pub fn panel_icon_has_any_override(&self, panel: &str, stem: &str) -> bool {
+        self.palette
+            .panel_overrides
+            .keys()
+            .any(|(p, s, _)| p == panel && s == stem)
+    }
+
+    /// Set / upsert a per-state override for a panel icon.
+    pub fn set_panel_icon_override(
+        &mut self,
+        panel: &str,
+        stem: &str,
+        state: ChromeState,
+        color: egui::Color32,
+    ) {
+        self.palette
+            .panel_overrides
+            .insert((panel.to_string(), stem.to_string(), state), color);
+    }
+
+    /// Clear the override for a specific (panel, stem, state) triple.
+    pub fn clear_panel_icon_override(&mut self, panel: &str, stem: &str, state: ChromeState) {
+        self.palette
+            .panel_overrides
+            .remove(&(panel.to_string(), stem.to_string(), state));
+    }
+
+    /// Clear every per-state override for the given panel icon.
+    pub fn clear_all_panel_icon_overrides(&mut self, panel: &str, stem: &str) {
+        self.palette
+            .panel_overrides
+            .retain(|(p, s, _), _| !(p == panel && s == stem));
+    }
+
     /// Set a per-icon tint mode override.
     pub fn set_icon_tint_mode(&mut self, kind: IconKind, mode: TintMode) {
         self.palette.tint_modes.insert(kind, mode);

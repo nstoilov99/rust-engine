@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc"]
+editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
 editor-debug = ["editor"]
 tracy = ["tracy-client"]
 
@@ -32,6 +32,9 @@ vulkano-shaders = "0.35"
 
 # Image loading (for textures later)
 image = "0.25"
+
+# SVG rasterization (editor only — used for hierarchy panel icons)
+resvg = { version = "0.45", optional = true, default-features = false, features = ["text", "system-fonts"] }
 bytemuck = "1.24.0"
 
 gltf = "1.4"

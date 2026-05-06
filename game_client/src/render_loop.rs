@@ -8,10 +8,11 @@ use rust_engine::assets::AssetManager;
 use rust_engine::engine::adapters::render_adapter;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{
-    EntityGuid, ParticleEffect, SpawnShape,
+    EditorVisibility, EntityGuid, ParticleEffect, SpawnShape,
 };
 use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
+use rust_engine::engine::ecs::hierarchy::Parent;
 use rust_engine::engine::ecs::hierarchy::TransformCache;
 use rust_engine::engine::rendering::frame_packet::{
     EmissionParameters, EmitterFlags, ForceParameters, PlanktonEmitterFrameData, VisualParameters,
@@ -29,6 +30,25 @@ use vulkano::{Validated, VulkanError};
 
 /// Result type for swapchain image acquisition.
 type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError>;
+
+/// Walk the parent chain to resolve effective editor visibility. Returns
+/// `true` unless `entity` or any ancestor carries `EditorVisibility { visible:
+/// false }`. Visibility-component absence is treated as "visible" so the
+/// flag is opt-in.
+fn is_editor_visible(world: &World, entity: hecs::Entity) -> bool {
+    let mut current = entity;
+    loop {
+        if let Ok(v) = world.get::<&EditorVisibility>(current) {
+            if !v.visible {
+                return false;
+            }
+        }
+        match world.get::<&Parent>(current) {
+            Ok(p) => current = p.0,
+            Err(_) => return true,
+        }
+    }
+}
 
 /// Prepare mesh render data from ECS world into a reusable buffer.
 ///
@@ -67,6 +87,12 @@ pub fn prepare_mesh_data(
         world.query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>().iter()
     {
         if !mesh_renderer.visible || mesh_renderer.mesh_path.is_empty() {
+            continue;
+        }
+        // Editor visibility cascades — hiding a parent hides its descendants.
+        // Walks up the Parent chain; cheap because depths are typically small,
+        // and entities without an `EditorVisibility` component default to visible.
+        if !is_editor_visible(world, entity) {
             continue;
         }
 

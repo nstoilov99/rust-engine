@@ -153,6 +153,17 @@ pub struct IconPalette {
     pub overrides: HashMap<(super::widgets::IconKind, ChromeState), Color32>,
     /// Per-icon tint mode overrides.
     pub tint_modes: HashMap<super::widgets::IconKind, TintMode>,
+    /// Per-panel-icon, per-state tint overrides. Keyed by
+    /// `(panel_folder_name, file_stem, state)` — e.g.
+    /// `("hierarchy", "camera", ChromeState::Hovered)`. Lets panels render
+    /// SVGs from `engine/icons/<panel>/<stem>.svg` with user-tuneable colours
+    /// without forcing every new icon into the `IconKind` enum.
+    ///
+    /// Lookup chain (see `IconRegistry::panel_icon_tint`):
+    /// `(panel, stem, state)` → `(panel, stem, Default)` → no tint
+    /// (falls through to whatever colour the caller defaults to —
+    /// usually `Color32::WHITE` so the SVG paints as authored).
+    pub panel_overrides: HashMap<(String, String, ChromeState), Color32>,
 }
 
 impl IconPalette {
@@ -189,6 +200,7 @@ impl IconPalette {
             chrome,
             overrides: HashMap::new(),
             tint_modes: HashMap::new(),
+            panel_overrides: HashMap::new(),
         }
     }
 
@@ -244,6 +256,11 @@ struct PaletteFile {
     /// of tuples — easy to read, easy to diff, no nested maps.
     overrides: Vec<(super::widgets::IconKind, ChromeState, [u8; 4])>,
     tint_modes: Vec<(super::widgets::IconKind, TintMode)>,
+    /// Panel-icon overrides as `(panel, stem, state, RGBA)` tuples.
+    /// Defaulted via `serde(default)` so palette files written before this
+    /// field existed still load — they just come back with no panel overrides.
+    #[serde(default)]
+    panel_overrides: Vec<(String, String, ChromeState, [u8; 4])>,
 }
 
 fn color_to_rgba(c: Color32) -> [u8; 4] {
@@ -265,6 +282,13 @@ impl From<&IconPalette> for PaletteFile {
             .map(|((kind, state), v)| (*kind, *state, color_to_rgba(*v)))
             .collect();
         let mut tint_modes: Vec<_> = p.tint_modes.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut panel_overrides: Vec<_> = p
+            .panel_overrides
+            .iter()
+            .map(|((panel, stem, state), v)| {
+                (panel.clone(), stem.clone(), *state, color_to_rgba(*v))
+            })
+            .collect();
 
         // Stable order so diffs stay readable.
         category.sort_by_key(|(k, _)| format!("{k:?}"));
@@ -272,8 +296,9 @@ impl From<&IconPalette> for PaletteFile {
         chrome.sort_by_key(|(k, _)| format!("{k:?}"));
         overrides.sort_by_key(|(kind, state, _)| format!("{kind:?}/{state:?}"));
         tint_modes.sort_by_key(|(k, _)| format!("{k:?}"));
+        panel_overrides.sort_by(|a, b| (&a.0, &a.1, format!("{:?}", a.2)).cmp(&(&b.0, &b.1, format!("{:?}", b.2))));
 
-        Self { category, severity, chrome, overrides, tint_modes }
+        Self { category, severity, chrome, overrides, tint_modes, panel_overrides }
     }
 }
 
@@ -286,6 +311,7 @@ impl From<PaletteFile> for IconPalette {
         // file is the source of truth for the keys it does contain.
         palette.overrides.clear();
         palette.tint_modes.clear();
+        palette.panel_overrides.clear();
 
         for (k, v) in f.category {
             palette.category.insert(k, rgba_to_color(v));
@@ -301,6 +327,11 @@ impl From<PaletteFile> for IconPalette {
         }
         for (k, v) in f.tint_modes {
             palette.tint_modes.insert(k, v);
+        }
+        for (panel, stem, state, v) in f.panel_overrides {
+            palette
+                .panel_overrides
+                .insert((panel, stem, state), rgba_to_color(v));
         }
         palette
     }

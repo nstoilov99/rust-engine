@@ -140,6 +140,27 @@ impl Default for MeshRenderer {
     }
 }
 
+/// Editor-only visibility flag, toggled from the Hierarchy panel's eye icon.
+///
+/// Absence of the component means "visible" (the default). When present and
+/// `visible == false`, the entity (and any of its descendants that resolve
+/// through `is_entity_visible_in_editor`) are skipped during render.
+///
+/// This is independent of `MeshRenderer.visible`, which is a per-mesh flag
+/// the runtime uses for game-side gating; `EditorVisibility` is a higher-level
+/// editor toggle so non-mesh entities (lights, empty groups, …) can be hidden
+/// without losing their underlying state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EditorVisibility {
+    pub visible: bool,
+}
+
+impl Default for EditorVisibility {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
 /// Camera projection type
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CameraProjection {

@@ -1,15 +1,20 @@
 //! Scene Hierarchy Panel - tree view of all entities
 
+use super::hierarchy_icons::HierarchyIcons;
+use super::icon_classes::ChromeState;
+use super::widgets::IconRegistry;
 use super::Selection;
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     hierarchy::{can_set_parent, despawn_recursive, get_root_entities, remove_parent, set_parent},
-    Camera, Children, DirectionalLight, EntityGuid, MeshRenderer, Name, Parent, PointLight,
-    Transform,
+    Camera, Children, DirectionalLight, EditorVisibility, EntityGuid, MeshRenderer, Name, Parent,
+    PointLight, Transform,
 };
 use egui::{pos2, Color32, Context, RichText, ScrollArea, SidePanel, Stroke, TextEdit, Ui};
 use hecs::{Entity, World};
+use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Drop mode for drag-and-drop operations
@@ -31,11 +36,38 @@ struct VisibleRow {
     name: String,
     has_children: bool,
     is_expanded: bool,
-    icon: &'static str,
-    icon_color: Color32,
+    /// File stem of the SVG to render for this entity (e.g. `"camera"`,
+    /// `"sun"`, `"object"`). Resolved against `HierarchyIcons` at draw time.
+    /// Easily extended: pick the stem in `entity_icon_stem` and add the SVG.
+    icon_stem: &'static str,
+    /// Tint applied when the SVG is rendered. White by default — set it
+    /// only when an entity kind needs a brand colour.
+    icon_tint: Color32,
+    /// Editor visibility flag, mirrored into the row so render code can
+    /// dim the entry without re-querying. True == shown.
+    is_visible: bool,
+    /// Per-ancestor (and self) "is this the last sibling at its depth?" flags.
+    /// Index `d` covers the chain element at depth `d`; index `depth` is the
+    /// row itself. Used to render Godot-style L / T tree connectors:
+    ///   - passing column `d` (0 ≤ d < depth-1) draws a full vertical iff
+    ///     `!chain_is_last[d + 1]` (the descendant we belong to has more
+    ///     siblings still to come).
+    ///   - parent column `depth - 1` draws an L when `chain_is_last[depth]`
+    ///     is true, a T otherwise.
+    chain_is_last: SmallVec<[bool; 16]>,
 }
 
 const ROW_HEIGHT: f32 = 22.0;
+/// Horizontal spacing used for both indentation and tree-guide column centers.
+const INDENT: f32 = 16.0;
+/// Distance from the row's content left edge to column 0's center.
+const COL_PAD: f32 = 8.0;
+/// Pixel size icons are drawn at inside the row.
+const ICON_SIZE: f32 = 16.0;
+/// Width reserved on the right edge for the visibility eye column. Keeps the
+/// icon away from the panel's right resize edge so clicking it never grabs
+/// the dock separator.
+const VISIBILITY_COL_WIDTH: f32 = 22.0;
 
 /// Scene Hierarchy Panel state
 pub struct HierarchyPanel {
@@ -195,12 +227,22 @@ impl HierarchyPanel {
         self.flat_rows.clear();
 
         let roots: Vec<Entity> = self.root_order.clone();
-        for root in roots {
-            self.collect_rows(world, root, 0);
+        let last_idx = roots.len().saturating_sub(1);
+        let parent_chain: SmallVec<[bool; 16]> = SmallVec::new();
+        for (i, root) in roots.into_iter().enumerate() {
+            let is_last = i == last_idx;
+            self.collect_rows(world, root, 0, &parent_chain, is_last);
         }
     }
 
-    fn collect_rows(&mut self, world: &World, entity: Entity, depth: usize) {
+    fn collect_rows(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        depth: usize,
+        parent_chain_is_last: &[bool],
+        is_last_sibling: bool,
+    ) {
         let name = world
             .get::<&Name>(entity)
             .map(|n| n.0.clone())
@@ -218,7 +260,17 @@ impl HierarchyPanel {
         let has_children = !children.is_empty();
         let entity_id = entity.id() as u64;
         let is_expanded = self.expanded.contains(&entity_id);
-        let (icon, icon_color) = Self::entity_icon(world, entity);
+        let (icon_stem, icon_tint) = Self::entity_icon_stem(world, entity);
+        let is_visible = world
+            .get::<&EditorVisibility>(entity)
+            .map(|v| v.visible)
+            .unwrap_or(true);
+
+        // Build this row's chain: parent chain + self's last-sibling flag.
+        let mut chain_is_last: SmallVec<[bool; 16]> =
+            SmallVec::with_capacity(parent_chain_is_last.len() + 1);
+        chain_is_last.extend_from_slice(parent_chain_is_last);
+        chain_is_last.push(is_last_sibling);
 
         self.flat_rows.push(VisibleRow {
             entity,
@@ -226,13 +278,17 @@ impl HierarchyPanel {
             name,
             has_children,
             is_expanded,
-            icon,
-            icon_color,
+            icon_stem,
+            icon_tint,
+            is_visible,
+            chain_is_last: chain_is_last.clone(),
         });
 
         if has_children && is_expanded {
-            for child in children {
-                self.collect_rows(world, child, depth + 1);
+            let last_idx = children.len().saturating_sub(1);
+            for (i, child) in children.into_iter().enumerate() {
+                let child_is_last = i == last_idx;
+                self.collect_rows(world, child, depth + 1, &chain_is_last, child_is_last);
             }
         }
     }
@@ -269,6 +325,17 @@ impl HierarchyPanel {
                     return;
                 }
 
+                // Resolve the per-context icon set once per render so the
+                // virtualized loop doesn't re-fetch on every row. None when
+                // we're rendering inside a secondary window whose ctx data
+                // doesn't carry the icons — we fall back to text glyphs.
+                let icons = ui
+                    .data(|d| d.get_temp::<Arc<HierarchyIcons>>(egui::Id::NULL));
+                // Also pick up the icon registry so per-state SVG tint
+                // overrides edited in the Icon Inspector show up live.
+                let registry = ui
+                    .data(|d| d.get_temp::<Arc<IconRegistry>>(egui::Id::NULL));
+
                 for idx in row_range {
                     if idx >= self.flat_rows.len() {
                         break;
@@ -279,10 +346,12 @@ impl HierarchyPanel {
                     let depth = self.flat_rows[idx].depth;
                     let has_children = self.flat_rows[idx].has_children;
                     let is_expanded = self.flat_rows[idx].is_expanded;
-                    let icon = self.flat_rows[idx].icon;
-                    let icon_color = self.flat_rows[idx].icon_color;
-                    // Clone the name to avoid borrow conflicts.
+                    let icon_stem = self.flat_rows[idx].icon_stem;
+                    let icon_tint = self.flat_rows[idx].icon_tint;
+                    let is_visible = self.flat_rows[idx].is_visible;
+                    // Clone the name + chain to avoid borrow conflicts.
                     let name = self.flat_rows[idx].name.clone();
+                    let chain_is_last = self.flat_rows[idx].chain_is_last.clone();
 
                     self.render_row(
                         ui,
@@ -293,8 +362,12 @@ impl HierarchyPanel {
                         &name,
                         has_children,
                         is_expanded,
-                        icon,
-                        icon_color,
+                        icon_stem,
+                        icon_tint,
+                        is_visible,
+                        &chain_is_last,
+                        icons.as_deref(),
+                        registry.as_deref(),
                         read_only,
                     );
                 }
@@ -325,8 +398,12 @@ impl HierarchyPanel {
         name: &str,
         has_children: bool,
         is_expanded: bool,
-        icon: &str,
-        icon_color: Color32,
+        icon_stem: &str,
+        icon_tint: Color32,
+        is_visible: bool,
+        chain_is_last: &[bool],
+        icons: Option<&HierarchyIcons>,
+        registry: Option<&IconRegistry>,
         read_only: bool,
     ) {
         let is_selected = selection.is_selected(entity);
@@ -338,9 +415,9 @@ impl HierarchyPanel {
             .is_some_and(|source| source != entity && can_set_parent(world, source, entity));
 
         let row_response = ui.horizontal(|ui| {
-            Self::draw_tree_guides(ui, depth);
+            Self::draw_tree_guides(ui, depth, chain_is_last, is_selected);
 
-            let indent = depth as f32 * 16.0;
+            let indent = depth as f32 * INDENT;
             ui.add_space(indent);
 
             if has_children {
@@ -383,7 +460,54 @@ impl HierarchyPanel {
                 ui.add_space(16.0);
             }
 
-            ui.label(RichText::new(icon).color(icon_color));
+            // Entity icon: SVG when available, otherwise a faint dot fallback.
+            //
+            // Resolved tint walks the chain:
+            //   1. user-set per-state override in the IconPalette (Icon Inspector)
+            //   2. `(hierarchy, stem, Default)` override (icon-wide colour)
+            //   3. `icon_tint` argument — the row-builder default (white).
+            //
+            // Row state mapping: selected → Active, hovered → Hovered, else
+            // Default. Disabled / Accent are reserved for future use.
+            let row_state = if is_selected {
+                ChromeState::Active
+            } else {
+                ChromeState::Default
+            };
+            let resolved_tint = registry
+                .map(|r| r.panel_icon_tint("hierarchy", icon_stem, row_state, icon_tint))
+                .unwrap_or(icon_tint);
+            let icon_draw_tint = if is_visible {
+                resolved_tint
+            } else {
+                // Hidden entities are dimmed so the eye toggle's effect reads
+                // immediately in the row.
+                resolved_tint.gamma_multiply(0.45)
+            };
+            let texture = icons.and_then(|i| i.get(icon_stem));
+            let (icon_rect, _) = ui.allocate_exact_size(
+                egui::vec2(ICON_SIZE, ICON_SIZE),
+                egui::Sense::hover(),
+            );
+            if ui.is_rect_visible(icon_rect) {
+                if let Some(tex) = texture {
+                    ui.painter().image(
+                        tex.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        icon_draw_tint,
+                    );
+                } else {
+                    // Tiny dot fallback (used inside secondary windows where the
+                    // icon set isn't installed on the local egui context).
+                    ui.painter().circle_filled(
+                        icon_rect.center(),
+                        ICON_SIZE * 0.18,
+                        icon_draw_tint,
+                    );
+                }
+            }
+            ui.add_space(4.0);
 
             if is_renaming {
                 let response =
@@ -400,10 +524,17 @@ impl HierarchyPanel {
                     self.renaming_entity = None;
                 }
             } else {
-                let label = if is_selected {
-                    RichText::new(name).strong().color(Color32::WHITE)
+                let label_color = if !is_visible {
+                    Color32::from_gray(120)
+                } else if is_selected {
+                    Color32::WHITE
                 } else {
-                    RichText::new(name)
+                    ui.visuals().text_color()
+                };
+                let label = if is_selected {
+                    RichText::new(name).strong().color(label_color)
+                } else {
+                    RichText::new(name).color(label_color)
                 };
 
                 let response = ui.label(label).interact(egui::Sense::click_and_drag());
@@ -436,6 +567,20 @@ impl HierarchyPanel {
                     self.handle_drag_drop(ui, &response, world, entity);
                 }
             }
+
+            // Right-aligned visibility column. Pinned to the row's right edge
+            // so future per-row indicators (lock, prefab badge, …) can stack
+            // here in the same gutter.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                Self::render_visibility_toggle(
+                    ui,
+                    world,
+                    entity,
+                    is_visible,
+                    icons,
+                    read_only,
+                );
+            });
         });
 
         let row_rect = row_response.response.rect;
@@ -482,38 +627,199 @@ impl HierarchyPanel {
 
     // ─── helpers ───────────────────────────────────────────────────────
 
-    fn draw_tree_guides(ui: &mut Ui, depth: usize) {
+    /// Draw Godot-style tree guides for a row at `depth`.
+    ///
+    /// `chain_is_last` is the row's per-depth "is this chain element the last
+    /// sibling at its level?" array (length = `depth + 1`, root at index 0,
+    /// self at index `depth`). The guide layout is:
+    ///
+    /// ```text
+    ///  passing columns         parent column      icon
+    ///  ───┬─                   ┌──                 │
+    ///  …  │   …  (vertical     │  ─── ●            ▼
+    ///  ───┴─    if !is_last)   └──    (L when last sibling,
+    ///                                  T-with-tail otherwise)
+    /// ```
+    fn draw_tree_guides(ui: &mut Ui, depth: usize, chain_is_last: &[bool], is_selected: bool) {
         if depth == 0 {
             return;
         }
         let row_rect = ui.max_rect();
-        let guide_color = Color32::from_gray(75);
-        for d in 0..depth {
-            let x = 8.0 + (d as f32 * 16.0);
+        let row_top = row_rect.top();
+        let row_bottom = row_rect.bottom();
+        let row_middle = 0.5 * (row_top + row_bottom);
+        let left = row_rect.left();
+
+        // Base guide style.
+        let base_color = Color32::from_gray(95);
+        let base_stroke = Stroke::new(1.0, base_color);
+
+        // Selected rows get a thicker, brighter L/T connector so the chain
+        // leading to the focused entity reads at a glance — matches the
+        // Godot reference where the active node's bracket pops.
+        let highlight_color = Color32::from_gray(220);
+        let highlight_stroke = Stroke::new(1.7, highlight_color);
+        let parent_stroke = if is_selected {
+            highlight_stroke
+        } else {
+            base_stroke
+        };
+
+        // Passing columns 0 .. depth - 1: only draw a full vertical line if
+        // the descendant we belong to at that level still has more siblings
+        // below us. These are *always* the muted color — only the row's own
+        // hook lights up on selection.
+        for d in 0..depth.saturating_sub(1) {
+            if chain_is_last.get(d + 1).copied().unwrap_or(true) {
+                continue;
+            }
+            let x = left + COL_PAD + d as f32 * INDENT;
+            ui.painter()
+                .line_segment([pos2(x, row_top), pos2(x, row_bottom)], base_stroke);
+        }
+
+        // Parent column = depth - 1.
+        let x_parent = left + COL_PAD + (depth - 1) as f32 * INDENT;
+
+        // 1) Vertical from row top down to the row's vertical center —
+        //    always present (it carries the line down from the parent).
+        ui.painter().line_segment(
+            [pos2(x_parent, row_top), pos2(x_parent, row_middle)],
+            parent_stroke,
+        );
+
+        // 2) Horizontal hook from the parent column to just before the icon.
+        let x_hook_end = left + depth as f32 * INDENT - 2.0;
+        ui.painter().line_segment(
+            [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
+            parent_stroke,
+        );
+
+        // 3) Continue the vertical past row middle iff this row has more
+        //    siblings still to come (T-junction). Otherwise the hook forms
+        //    an L and the line ends here.
+        let self_is_last = chain_is_last.last().copied().unwrap_or(true);
+        if !self_is_last {
             ui.painter().line_segment(
-                [pos2(x, row_rect.top()), pos2(x, row_rect.bottom())],
-                Stroke::new(1.0, guide_color),
+                [pos2(x_parent, row_middle), pos2(x_parent, row_bottom)],
+                parent_stroke,
             );
         }
     }
 
-    fn entity_icon(world: &World, entity: Entity) -> (&'static str, Color32) {
+    /// Pick which `engine/icons/hierarchy/<stem>.svg` to render for an entity.
+    ///
+    /// Add a new entity kind by:
+    ///   1. Dropping `engine/icons/hierarchy/<your_name>.svg`,
+    ///   2. Adding a branch here returning `("your_name", tint)`.
+    /// No registry edit needed — the icon set is auto-discovered at startup.
+    fn entity_icon_stem(world: &World, entity: Entity) -> (&'static str, Color32) {
         if world.get::<&Camera>(entity).is_ok() {
-            return ("\u{1F3A5}", Color32::from_rgb(100, 180, 255));
+            return ("camera", Color32::WHITE);
         }
-        if world.get::<&DirectionalLight>(entity).is_ok() {
-            return ("\u{2600}", Color32::from_rgb(255, 220, 100));
+        if world.get::<&DirectionalLight>(entity).is_ok() || world.get::<&PointLight>(entity).is_ok() {
+            return ("sun", Color32::WHITE);
         }
-        if world.get::<&PointLight>(entity).is_ok() {
-            return ("\u{1F4A1}", Color32::from_rgb(255, 180, 100));
+        // Default for everything else (groups, meshes, generics) — covers
+        // entries with `Children`, `MeshRenderer`, or no special component.
+        let _ = (world.get::<&MeshRenderer>(entity), world.get::<&Children>(entity));
+        ("object", Color32::WHITE)
+    }
+
+    /// Draw the eye icon at the row's right edge and toggle
+    /// `EditorVisibility` on click. Falls back to a unicode glyph if the SVG
+    /// set isn't available in this egui context.
+    fn render_visibility_toggle(
+        ui: &mut Ui,
+        world: &mut World,
+        entity: Entity,
+        is_visible: bool,
+        icons: Option<&HierarchyIcons>,
+        read_only: bool,
+    ) {
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(VISIBILITY_COL_WIDTH, ROW_HEIGHT - 2.0),
+            egui::Sense::click(),
+        );
+
+        let tint_alpha = if is_visible { 255 } else { 110 };
+        let base_color = if response.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(200)
+        };
+        let tint = Color32::from_rgba_unmultiplied(
+            base_color.r(),
+            base_color.g(),
+            base_color.b(),
+            tint_alpha,
+        );
+
+        let icon_rect = egui::Rect::from_center_size(
+            rect.center(),
+            egui::vec2(ICON_SIZE, ICON_SIZE),
+        );
+
+        if ui.is_rect_visible(rect) {
+            if let Some(tex) = icons.and_then(|i| i.get("visibility")) {
+                ui.painter().image(
+                    tex.id(),
+                    icon_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    tint,
+                );
+            } else {
+                let glyph = if is_visible { "\u{25C9}" } else { "\u{25CB}" };
+                ui.painter().text(
+                    icon_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    egui::FontId::proportional(ICON_SIZE),
+                    tint,
+                );
+            }
         }
-        if world.get::<&MeshRenderer>(entity).is_ok() {
-            return ("\u{25A6}", Color32::from_rgb(150, 150, 255));
+
+        if !is_visible {
+            // Faint diagonal slash so a hidden state reads even at a glance,
+            // matching the "eye crossed out" pattern in the references.
+            let slash_color = Color32::from_rgba_unmultiplied(255, 120, 120, 200);
+            ui.painter().line_segment(
+                [
+                    pos2(icon_rect.left() + 1.0, icon_rect.bottom() - 1.0),
+                    pos2(icon_rect.right() - 1.0, icon_rect.top() + 1.0),
+                ],
+                Stroke::new(1.5, slash_color),
+            );
         }
-        if world.get::<&Children>(entity).is_ok() {
-            return ("\u{1F4C1}", Color32::from_rgb(180, 180, 180));
+
+        response.clone().on_hover_text(if is_visible {
+            "Hide in editor"
+        } else {
+            "Show in editor"
+        });
+
+        if response.clicked() && !read_only {
+            let new_visible = !is_visible;
+            // Scope the mutable component borrow so it's dropped before
+            // `insert_one` (which needs a mutable borrow of the world itself).
+            let updated = {
+                if let Ok(mut existing) = world.get::<&mut EditorVisibility>(entity) {
+                    existing.visible = new_visible;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !updated {
+                let _ = world.insert_one(
+                    entity,
+                    EditorVisibility {
+                        visible: new_visible,
+                    },
+                );
+            }
         }
-        ("\u{25CB}", Color32::from_rgb(140, 140, 140))
     }
 
     fn matches_filter(&self, name: &str, world: &World, entity: Entity) -> bool {
@@ -854,8 +1160,9 @@ impl HierarchyPanel {
                     .get::<&Name>(source)
                     .map(|n| n.0.clone())
                     .unwrap_or_else(|_| format!("Entity {:?}", source.id()));
-                let (icon, _) = Self::entity_icon(world, source);
-                let ghost_text = format!("{} {}", icon, name);
+                // Drag ghost is text-only (no SVG sampling on the tooltip
+                // layer); just show the entity name.
+                let ghost_text = name;
 
                 let layer_id =
                     egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag_ghost"));

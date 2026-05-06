@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use super::hierarchy_icons::HierarchyIcons;
 use super::theme::EditorTheme;
 use super::widgets::IconRegistry;
 
@@ -18,6 +19,10 @@ pub struct EditorServices {
     pub theme: Arc<EditorTheme>,
     /// Canonical icon registry. Also installed into `egui::Context::data()`.
     pub icons: Arc<IconRegistry>,
+    /// Hierarchy panel icon set (auto-discovered SVGs in
+    /// `engine/icons/hierarchy/`). Also installed into `egui::Context::data()`
+    /// so panels can fetch via `ui.data(...)` without threading a reference.
+    pub hierarchy_icons: Arc<HierarchyIcons>,
 }
 
 impl EditorServices {
@@ -29,12 +34,14 @@ impl EditorServices {
         Self {
             theme: Arc::new(EditorTheme::dark_default()),
             icons: Arc::new(IconRegistry::empty()),
+            hierarchy_icons: Arc::new(HierarchyIcons::empty()),
         }
     }
 
     /// Load icons from disk. Must be called after egui context is available.
     pub fn load_icons(&mut self, ctx: &egui::Context) {
         self.icons = Arc::new(IconRegistry::load(ctx));
+        self.hierarchy_icons = Arc::new(HierarchyIcons::load(ctx));
     }
 
     /// Apply the theme to egui's style/visuals and push the current theme +
@@ -49,6 +56,7 @@ impl EditorServices {
         ctx.data_mut(|d| {
             d.insert_temp::<Arc<EditorTheme>>(egui::Id::NULL, self.theme.clone());
             d.insert_temp::<Arc<IconRegistry>>(egui::Id::NULL, self.icons.clone());
+            d.insert_temp::<Arc<HierarchyIcons>>(egui::Id::NULL, self.hierarchy_icons.clone());
         });
     }
 
