@@ -345,21 +345,32 @@ impl HierarchyPanel {
 
         let total_rows = self.flat_rows.len();
 
-        // Selected entity's full ancestor chain (root → selected). Empty
-        // when nothing is selected. Used to highlight the *path* of guides
-        // leading to the focused entity, not just the selected row's own L.
-        let selected_chain: SmallVec<[Entity; 16]> = if let Some(primary) =
+        // Selected entity's chain → indices in `flat_rows`. Each chain
+        // element is at some `flat_rows` index; we precompute those once so
+        // every row can ask "is the trunk between chain[c-1] and chain[c]
+        // currently passing through me?" with a constant-time index compare.
+        // Empty when nothing is selected.
+        let chain_indices: SmallVec<[usize; 16]> = if let Some(primary) =
             selection.primary()
         {
-            self.flat_rows
+            let chain = self
+                .flat_rows
                 .iter()
                 .find(|r| r.entity == primary)
                 .map(|r| r.entity_chain.clone())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            chain
+                .iter()
+                .map(|&e| {
+                    self.flat_rows
+                        .iter()
+                        .position(|r| r.entity == e)
+                        .unwrap_or(usize::MAX)
+                })
+                .collect()
         } else {
             SmallVec::new()
         };
-        let selected_depth = selected_chain.len().saturating_sub(1);
 
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -403,11 +414,12 @@ impl HierarchyPanel {
                     let chain_is_last = self.flat_rows[idx].chain_is_last.clone();
                     let entity_chain = self.flat_rows[idx].entity_chain.clone();
 
-                    // How far does this row's ancestor chain match the
-                    // selected entity's? The number of leading entries that
-                    // agree — turned into per-column "is on selection path"
-                    // via `path_columns_for_row` below.
-                    let path_match_len = leading_match(&entity_chain, &selected_chain);
+                    // entity_chain isn't needed for highlighting now (we use
+                    // index-range checks against chain_indices instead) but
+                    // still has to be cloned out so we can release the
+                    // immutable borrow of self.flat_rows before render_row
+                    // takes &mut self.
+                    drop(entity_chain);
 
                     self.render_row(
                         ui,
@@ -422,8 +434,8 @@ impl HierarchyPanel {
                         icon_tint,
                         is_visible,
                         &chain_is_last,
-                        path_match_len,
-                        selected_depth,
+                        idx,
+                        &chain_indices,
                         icons.as_deref(),
                         registry.as_deref(),
                         read_only,
@@ -460,11 +472,11 @@ impl HierarchyPanel {
         icon_tint: Color32,
         is_visible: bool,
         chain_is_last: &[bool],
-        // path_match_len: leading entries of this row's chain that agree
-        // with the selected entity's chain. 0 = no shared path.
-        // selected_depth: depth of the selected entity itself (0 if none).
-        path_match_len: usize,
-        selected_depth: usize,
+        // row_idx: this row's index in flat_rows.
+        // chain_indices: indices of the selected entity's chain elements
+        // in flat_rows (root → selected). Empty when no selection.
+        row_idx: usize,
+        chain_indices: &[usize],
         icons: Option<&HierarchyIcons>,
         registry: Option<&IconRegistry>,
         read_only: bool,
@@ -478,23 +490,20 @@ impl HierarchyPanel {
             .is_some_and(|source| source != entity && can_set_parent(world, source, entity));
 
         let row_response = ui.horizontal(|ui| {
-            // A column index is "on the selected path" when both
-            //  c < path_match_len   (the row's chain agrees with the
-            //                       selection's up to and including depth c)
-            // and
-            //  c < selected_depth   (the path continues past depth c —
-            //                       columns after the selection's own depth
-            //                       carry nothing of interest).
-            let path_cap = path_match_len.min(selected_depth);
             Self::draw_tree_guides(
                 ui,
                 depth,
                 chain_is_last,
                 is_selected,
-                path_cap,
+                row_idx,
+                chain_indices,
             );
 
-            let indent = depth as f32 * INDENT;
+            // Layout shifted right by one INDENT so visual column 0 is the
+            // root spine (drawn by draw_tree_guides) — every row, even
+            // root-level entries with no children, now has a tree marker
+            // on its left.
+            let indent = (depth as f32 + 1.0) * INDENT;
             ui.add_space(indent);
 
             if has_children {
@@ -504,11 +513,15 @@ impl HierarchyPanel {
                 let center = rect.center();
                 let sz = 3.5;
 
-                // Is this chevron's column on the selected entity's path?
-                // True when the selection passes *through* this row down to
-                // a deeper descendant — so the tail beneath it is part of
-                // the chain leading to the selection.
-                let chevron_on_path = depth < path_match_len.min(selected_depth);
+                // The chevron's column carries the selection's path only
+                // when this row IS one of the selected entity's ancestors
+                // (i.e., row's index matches chain_indices[depth]) AND the
+                // selection sits deeper still (so the tail under the
+                // chevron is actually part of the chain heading down).
+                let selected_depth = chain_indices.len().saturating_sub(1);
+                let chevron_on_path = !chain_indices.is_empty()
+                    && depth < selected_depth
+                    && chain_indices.get(depth).copied() == Some(row_idx);
 
                 let chevron_color = if response.hovered() {
                     Color32::WHITE
@@ -766,85 +779,126 @@ impl HierarchyPanel {
     /// ```
     /// Draws Godot-style L/T tree guides for one row.
     ///
-    /// `path_cap` = the number of leading columns at this row that sit on the
-    /// selected entity's path (0 ⇒ no highlight). Lit columns get a thicker,
-    /// brighter stroke; everything else uses the muted default.
+    /// Visual column system (one extra column to the left of the OLD layout):
+    ///   - column 0: scene-root spine, present at every row so depth-0 rows
+    ///     also have a tree marker.
+    ///   - columns 1..=depth: passing trunks for ancestors at logical depths
+    ///     1..=depth (drawn iff `!chain_is_last[c]`).
+    ///   - column depth+1: this row's chevron / icon area.
+    ///
+    /// Path highlighting walks `chain_indices` (root → selected, indexed in
+    /// flat_rows). Each line segment is checked separately so:
+    ///   - the horizontal hook only lights up at *ancestor* rows of the
+    ///     selection (where row_idx == chain_indices[depth]),
+    ///   - vertical segments light up only while the selection trunk is
+    ///     genuinely passing through that y-range,
+    /// — so selecting Dust no longer brightens Fire's hook just because they
+    /// share the Vfx parent.
     fn draw_tree_guides(
         ui: &mut Ui,
         depth: usize,
         chain_is_last: &[bool],
         is_selected: bool,
-        path_cap: usize,
+        row_idx: usize,
+        chain_indices: &[usize],
     ) {
-        if depth == 0 {
-            return;
-        }
         let row_rect = ui.max_rect();
-        // Extend by 1px at top and bottom so the lines drawn here visually
-        // overlap with the previous / next row's guides. Combined with
-        // `item_spacing.y = 0`, this guarantees there's never a visible gap
-        // where the painter clips at sub-pixel boundaries.
+        // Extend by 1 px above/below so adjacent rows' guides always overlap
+        // — combined with `item_spacing.y = 0`, no gap can show through at
+        // sub-pixel boundaries.
         let row_top = row_rect.top() - 1.0;
         let row_bottom = row_rect.bottom() + 1.0;
         let row_middle = 0.5 * (row_rect.top() + row_rect.bottom());
         let left = row_rect.left();
 
-        // Base / highlight strokes.
         let base_stroke = Stroke::new(1.0, Color32::from_gray(95));
         let highlight_stroke = Stroke::new(1.7, Color32::from_gray(220));
-        let stroke_for = |on_path: bool| if on_path { highlight_stroke } else { base_stroke };
+        let stroke_for = |on: bool| if on { highlight_stroke } else { base_stroke };
 
-        // Passing columns 0 .. depth - 1. Drawn iff the descendant of this
-        // column at depth d+1 still has siblings below (chain_is_last false).
-        // Lit iff this column lies on the selected entity's path.
-        for d in 0..depth.saturating_sub(1) {
-            if chain_is_last.get(d + 1).copied().unwrap_or(true) {
+        let selected_depth = chain_indices.len().saturating_sub(1);
+        let has_selection = !chain_indices.is_empty();
+
+        // Trunk-segment "on path" tests. The trunk at visual column c
+        // connects chain[c-1]'s chevron tail to chain[c]'s parent-column
+        // hook (for c == 0, the upper end is the implicit "scene root"
+        // above all rows).
+        let segment_top_on_path = |c: usize| -> bool {
+            if !has_selection || c > selected_depth {
+                return false;
+            }
+            if c == 0 {
+                row_idx <= chain_indices[0]
+            } else {
+                row_idx > chain_indices[c - 1] && row_idx <= chain_indices[c]
+            }
+        };
+        let segment_bottom_on_path = |c: usize| -> bool {
+            if !has_selection || c > selected_depth {
+                return false;
+            }
+            if c == 0 {
+                row_idx < chain_indices[0]
+            } else {
+                row_idx >= chain_indices[c - 1] && row_idx < chain_indices[c]
+            }
+        };
+
+        // 1) Passing visual columns 0 .. depth (excludes the parent column
+        //    `depth` and the chevron column `depth+1`). Visual column 0 is
+        //    drawn unconditionally so every row gets the spine; columns
+        //    >= 1 use !chain_is_last[c] like before.
+        for c in 0..depth {
+            let drawn = if c == 0 {
+                true
+            } else {
+                !chain_is_last.get(c).copied().unwrap_or(true)
+            };
+            if !drawn {
                 continue;
             }
-            let on_path = d < path_cap;
-            let x = left + COL_PAD + d as f32 * INDENT;
+            let on_path = segment_top_on_path(c) && segment_bottom_on_path(c);
+            let x = left + COL_PAD + c as f32 * INDENT;
             ui.painter().line_segment(
                 [pos2(x, row_top), pos2(x, row_bottom)],
                 stroke_for(on_path),
             );
         }
 
-        // Parent column = depth - 1. The L/T hook for this row.
-        // Lit when the parent column is on the path *or* when this row is
-        // itself the selected entity (so the hook to the selected row
-        // visibly closes the path).
-        let parent_col = depth - 1;
-        let parent_on_path = parent_col < path_cap || is_selected;
-        let parent_stroke = stroke_for(parent_on_path);
+        // 2) Parent column = visual column `depth` (the L/T for this row).
+        let parent_col = depth;
         let x_parent = left + COL_PAD + parent_col as f32 * INDENT;
 
-        // 1) Vertical from row top down to the row's vertical center.
+        // Top-to-middle vertical — always drawn (carries the line down
+        // from the parent above into this row).
         ui.painter().line_segment(
             [pos2(x_parent, row_top), pos2(x_parent, row_middle)],
-            parent_stroke,
+            stroke_for(segment_top_on_path(parent_col)),
         );
 
-        // 2) Horizontal hook from the parent column across to the chevron
-        //    column's centre — meeting the chevron / tail line head-on.
-        let x_hook_end = left + COL_PAD + depth as f32 * INDENT;
+        // Horizontal hook to the chevron column's centre. Lit only when
+        // *this row itself* is one of the selected entity's ancestors —
+        // i.e., row_idx matches the chain entry at this depth.
+        let x_hook_end = left + COL_PAD + (parent_col + 1) as f32 * INDENT;
+        let hook_on_path = has_selection
+            && depth <= selected_depth
+            && chain_indices.get(depth).copied() == Some(row_idx);
         ui.painter().line_segment(
             [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
-            parent_stroke,
+            stroke_for(hook_on_path || (is_selected && hook_on_path)),
         );
 
-        // 3) Continue the vertical past row middle iff this row has more
-        //    siblings still to come (T-junction). Below the row's middle
-        //    the line is no longer "carrying us" but the next sibling, so
-        //    drop back to the muted stroke unless the path keeps going.
-        let self_is_last = chain_is_last.last().copied().unwrap_or(true);
+        // Middle-to-bottom vertical — only when this row isn't its
+        // parent's last child (T-junction). On path iff the trunk
+        // continues *past* this row (which it doesn't for the chain
+        // endpoint row, so chain[depth] won't light its lower half).
+        let self_is_last = chain_is_last
+            .get(depth)
+            .copied()
+            .unwrap_or(true);
         if !self_is_last {
-            // Below middle, the column is only on path if it's still under
-            // path_cap *without* the is_selected nudge (the selected row's
-            // own bracket only highlights the upper half).
-            let below_on_path = parent_col < path_cap;
             ui.painter().line_segment(
                 [pos2(x_parent, row_middle), pos2(x_parent, row_bottom)],
-                stroke_for(below_on_path),
+                stroke_for(segment_bottom_on_path(parent_col)),
             );
         }
     }
@@ -1372,9 +1426,3 @@ impl HierarchyPanel {
     }
 }
 
-/// Number of leading entries in `a` that match `b` (1-to-1, in order). Used
-/// to find how deep a row's ancestor chain agrees with the selected entity's
-/// chain — the result feeds `path_cap` in `draw_tree_guides`.
-fn leading_match(a: &[Entity], b: &[Entity]) -> usize {
-    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
-}
