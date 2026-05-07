@@ -422,32 +422,53 @@ impl HierarchyPanel {
 
             if has_children {
                 let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                    ui.allocate_exact_size(egui::vec2(INDENT, INDENT), egui::Sense::click());
 
                 let center = rect.center();
                 let sz = 3.5;
                 let color = if response.hovered() {
                     Color32::WHITE
                 } else {
-                    Color32::from_gray(165)
+                    Color32::from_gray(190)
                 };
 
+                // Caret-style chevron — two stroked segments forming `>`
+                // (collapsed) or `v` (expanded), matching the references.
+                // Stroked instead of filled so the row guides reading through
+                // it stay visible.
+                let stroke = Stroke::new(1.5, color);
+                let s = sz;
                 let points = if is_expanded {
                     vec![
-                        pos2(center.x - sz, center.y - sz * 0.4),
-                        pos2(center.x + sz, center.y - sz * 0.4),
-                        pos2(center.x, center.y + sz * 0.6),
+                        pos2(center.x - s, center.y - s * 0.45),
+                        pos2(center.x, center.y + s * 0.55),
+                        pos2(center.x + s, center.y - s * 0.45),
                     ]
                 } else {
                     vec![
-                        pos2(center.x - sz * 0.4, center.y - sz),
-                        pos2(center.x + sz * 0.6, center.y),
-                        pos2(center.x - sz * 0.4, center.y + sz),
+                        pos2(center.x - s * 0.45, center.y - s),
+                        pos2(center.x + s * 0.55, center.y),
+                        pos2(center.x - s * 0.45, center.y + s),
                     ]
                 };
+                ui.painter().add(egui::Shape::line(points, stroke));
 
-                ui.painter()
-                    .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+                // Tail: when expanded, run a thin vertical from just below
+                // the chevron down to the row's bottom edge, at the chevron's
+                // centre x. This sits at the same x as the *children's*
+                // parent-column hooks, so the tree reads as a single
+                // continuous path from this node into its first child.
+                if is_expanded {
+                    let row_rect = ui.max_rect();
+                    let tail_top = center.y + s + 2.0;
+                    let tail_bottom = row_rect.bottom();
+                    if tail_bottom > tail_top {
+                        ui.painter().line_segment(
+                            [pos2(center.x, tail_top), pos2(center.x, tail_bottom)],
+                            Stroke::new(1.0, Color32::from_gray(95)),
+                        );
+                    }
+                }
 
                 if response.clicked() {
                     if is_expanded {
@@ -457,7 +478,7 @@ impl HierarchyPanel {
                     }
                 }
             } else {
-                ui.add_space(16.0);
+                ui.add_space(INDENT);
             }
 
             // Entity icon: SVG when available, otherwise a faint dot fallback.
@@ -485,8 +506,16 @@ impl HierarchyPanel {
                 resolved_tint.gamma_multiply(0.45)
             };
             let texture = icons.and_then(|i| i.get(icon_stem));
+            // Per-icon size override from the Icon Inspector (palette).
+            // Clamped to the row's height so a too-large value can't blow out
+            // the layout — for bigger icons the user can lift ROW_HEIGHT, but
+            // rows stay flush by default.
+            let effective_icon_size = registry
+                .and_then(|r| r.panel_icon_size("hierarchy", icon_stem))
+                .unwrap_or(ICON_SIZE)
+                .clamp(8.0, ROW_HEIGHT - 2.0);
             let (icon_rect, _) = ui.allocate_exact_size(
-                egui::vec2(ICON_SIZE, ICON_SIZE),
+                egui::vec2(effective_icon_size, effective_icon_size),
                 egui::Sense::hover(),
             );
             if ui.is_rect_visible(icon_rect) {
@@ -502,7 +531,7 @@ impl HierarchyPanel {
                     // icon set isn't installed on the local egui context).
                     ui.painter().circle_filled(
                         icon_rect.center(),
-                        ICON_SIZE * 0.18,
+                        effective_icon_size * 0.18,
                         icon_draw_tint,
                     );
                 }
@@ -688,8 +717,11 @@ impl HierarchyPanel {
             parent_stroke,
         );
 
-        // 2) Horizontal hook from the parent column to just before the icon.
-        let x_hook_end = left + depth as f32 * INDENT - 2.0;
+        // 2) Horizontal hook from the parent column across to the chevron
+        //    column's centre — meeting the chevron / tail line head-on so
+        //    the tree reads as one continuous path with no visible gap
+        //    between the hook and the dropdown indicator.
+        let x_hook_end = left + COL_PAD + depth as f32 * INDENT;
         ui.painter().line_segment(
             [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
             parent_stroke,

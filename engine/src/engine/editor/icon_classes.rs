@@ -164,6 +164,10 @@ pub struct IconPalette {
     /// (falls through to whatever colour the caller defaults to —
     /// usually `Color32::WHITE` so the SVG paints as authored).
     pub panel_overrides: HashMap<(String, String, ChromeState), Color32>,
+    /// Per-panel-icon size (px) override. Absent → caller's default.
+    /// Lets a single SVG (e.g. `hierarchy/visibility`) render larger or
+    /// smaller than its neighbours without forking the SVG.
+    pub panel_sizes: HashMap<(String, String), f32>,
 }
 
 impl IconPalette {
@@ -201,6 +205,7 @@ impl IconPalette {
             overrides: HashMap::new(),
             tint_modes: HashMap::new(),
             panel_overrides: HashMap::new(),
+            panel_sizes: HashMap::new(),
         }
     }
 
@@ -261,6 +266,9 @@ struct PaletteFile {
     /// field existed still load — they just come back with no panel overrides.
     #[serde(default)]
     panel_overrides: Vec<(String, String, ChromeState, [u8; 4])>,
+    /// Per-icon size overrides as `(panel, stem, size_px)`.
+    #[serde(default)]
+    panel_sizes: Vec<(String, String, f32)>,
 }
 
 fn color_to_rgba(c: Color32) -> [u8; 4] {
@@ -289,6 +297,11 @@ impl From<&IconPalette> for PaletteFile {
                 (panel.clone(), stem.clone(), *state, color_to_rgba(*v))
             })
             .collect();
+        let mut panel_sizes: Vec<_> = p
+            .panel_sizes
+            .iter()
+            .map(|((panel, stem), v)| (panel.clone(), stem.clone(), *v))
+            .collect();
 
         // Stable order so diffs stay readable.
         category.sort_by_key(|(k, _)| format!("{k:?}"));
@@ -297,8 +310,9 @@ impl From<&IconPalette> for PaletteFile {
         overrides.sort_by_key(|(kind, state, _)| format!("{kind:?}/{state:?}"));
         tint_modes.sort_by_key(|(k, _)| format!("{k:?}"));
         panel_overrides.sort_by(|a, b| (&a.0, &a.1, format!("{:?}", a.2)).cmp(&(&b.0, &b.1, format!("{:?}", b.2))));
+        panel_sizes.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
 
-        Self { category, severity, chrome, overrides, tint_modes, panel_overrides }
+        Self { category, severity, chrome, overrides, tint_modes, panel_overrides, panel_sizes }
     }
 }
 
@@ -312,6 +326,7 @@ impl From<PaletteFile> for IconPalette {
         palette.overrides.clear();
         palette.tint_modes.clear();
         palette.panel_overrides.clear();
+        palette.panel_sizes.clear();
 
         for (k, v) in f.category {
             palette.category.insert(k, rgba_to_color(v));
@@ -332,6 +347,9 @@ impl From<PaletteFile> for IconPalette {
             palette
                 .panel_overrides
                 .insert((panel, stem, state), rgba_to_color(v));
+        }
+        for (panel, stem, size) in f.panel_sizes {
+            palette.panel_sizes.insert((panel, stem), size);
         }
         palette
     }

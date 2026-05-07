@@ -510,6 +510,33 @@ impl IconInspectorWindow {
 
         ui.add_space(8.0);
 
+        // Per-icon render size. Default fall-through is whatever the panel's
+        // own code asks for (e.g. the hierarchy panel's ICON_SIZE).
+        ui.label(RichText::new("Size").strong());
+        let mut size = registry.panel_icon_size(panel, stem).unwrap_or(16.0);
+        let has_size_override = registry.panel_icon_size(panel, stem).is_some();
+        ui.horizontal(|ui| {
+            let resp = ui.add(
+                egui::Slider::new(&mut size, 8.0..=64.0)
+                    .step_by(1.0)
+                    .suffix(" px"),
+            );
+            if resp.changed() {
+                registry.set_panel_icon_size(panel, stem, size);
+            }
+            if has_size_override
+                && ui
+                    .small_button("\u{2715}")
+                    .on_hover_text("Clear size override (use panel default)")
+                    .clicked()
+            {
+                registry.clear_panel_icon_size(panel, stem);
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+
         // Per-state overrides — same model as IconKind, but stored against
         // (panel, stem, state) so adding new SVGs needs no enum work.
         ui.label(RichText::new("Per-State Overrides").strong());

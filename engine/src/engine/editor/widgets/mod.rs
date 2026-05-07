@@ -596,6 +596,28 @@ impl IconRegistry {
             .retain(|(p, s, _), _| !(p == panel && s == stem));
     }
 
+    /// Read the per-icon size override (px), if one is set.
+    pub fn panel_icon_size(&self, panel: &str, stem: &str) -> Option<f32> {
+        self.palette
+            .panel_sizes
+            .get(&(panel.to_string(), stem.to_string()))
+            .copied()
+    }
+
+    /// Set / upsert the size for a panel icon.
+    pub fn set_panel_icon_size(&mut self, panel: &str, stem: &str, size: f32) {
+        self.palette
+            .panel_sizes
+            .insert((panel.to_string(), stem.to_string()), size);
+    }
+
+    /// Remove the size override for a panel icon (revert to caller default).
+    pub fn clear_panel_icon_size(&mut self, panel: &str, stem: &str) {
+        self.palette
+            .panel_sizes
+            .remove(&(panel.to_string(), stem.to_string()));
+    }
+
     /// Set a per-icon tint mode override.
     pub fn set_icon_tint_mode(&mut self, kind: IconKind, mode: TintMode) {
         self.palette.tint_modes.insert(kind, mode);
