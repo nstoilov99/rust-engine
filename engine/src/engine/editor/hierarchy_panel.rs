@@ -489,7 +489,43 @@ impl HierarchyPanel {
             .drag_source
             .is_some_and(|source| source != entity && can_set_parent(world, source, entity));
 
-        let row_response = ui.horizontal(|ui| {
+        // Register a row-wide click+drag area BEFORE rendering the row's
+        // contents. egui's hit-testing prefers later-registered widgets, so
+        // by going first this sits underneath the chevron / visibility eye —
+        // they still capture their own clicks, but a click anywhere else on
+        // the row (icon, label, blank space) lands here and selects.
+        let row_id = ui.id().with(("hierarchy_row_click", entity_id));
+        let row_pos = ui.cursor().min;
+        let row_size = egui::vec2(ui.available_width(), ROW_HEIGHT);
+        let row_rect = egui::Rect::from_min_size(row_pos, row_size);
+        let row_click = ui.interact(
+            row_rect,
+            row_id,
+            if read_only {
+                egui::Sense::click()
+            } else {
+                egui::Sense::click_and_drag()
+            },
+        );
+
+        // Selection / hover backgrounds — painted FIRST so they sit behind
+        // the row's icons and text. The horizontal layout below paints over
+        // this on the same egui layer.
+        if is_selected {
+            ui.painter().rect_filled(
+                row_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(60, 90, 140, 160),
+            );
+        } else if row_click.hovered() && self.drag_source.is_none() && !is_renaming {
+            ui.painter().rect_filled(
+                row_rect,
+                2.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 24),
+            );
+        }
+
+        let _row_response = ui.horizontal(|ui| {
             Self::draw_tree_guides(
                 ui,
                 depth,
@@ -669,36 +705,10 @@ impl HierarchyPanel {
                 } else {
                     RichText::new(name).color(label_color)
                 };
-
-                let response = ui.label(label).interact(egui::Sense::click_and_drag());
-
-                if is_selected {
-                    ui.painter().rect_filled(
-                        response.rect.expand(2.0),
-                        3.0,
-                        Color32::from_rgba_unmultiplied(60, 90, 140, 160),
-                    );
-                }
-
-                if response.clicked() {
-                    if ui.input(|i| i.modifiers.ctrl) {
-                        selection.toggle(entity);
-                    } else {
-                        selection.select(entity);
-                    }
-                }
-
-                if !read_only {
-                    if response.double_clicked() {
-                        self.start_rename(world, entity);
-                    }
-
-                    response.context_menu(|ui| {
-                        self.render_context_menu(ui, world, selection, entity);
-                    });
-
-                    self.handle_drag_drop(ui, &response, world, entity);
-                }
+                // Plain Label — no interact. Clicks fall through to the
+                // row-wide handler so the WHOLE row selects, not just the
+                // text rectangle.
+                ui.label(label);
             }
 
             // Right-aligned visibility column. Pinned to the row's right edge
@@ -716,18 +726,30 @@ impl HierarchyPanel {
             });
         });
 
-        let row_rect = row_response.response.rect;
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-        let is_hovered = pointer_pos.map(|p| row_rect.contains(p)).unwrap_or(false);
-
-        if is_hovered && self.drag_source.is_none() && !is_renaming {
-            ui.painter().rect_filled(
-                row_rect,
-                2.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 40),
-            );
+        // ─── row-wide interactions ────────────────────────────────────────
+        // Click anywhere on the row that wasn't on the chevron / eye →
+        // select. Double-click → rename. Drag from anywhere → drag-drop.
+        if !is_renaming && row_click.clicked() {
+            if ui.input(|i| i.modifiers.ctrl) {
+                selection.toggle(entity);
+            } else {
+                selection.select(entity);
+            }
+        }
+        if !read_only {
+            if row_click.double_clicked() {
+                self.start_rename(world, entity);
+            }
+            row_click.clone().context_menu(|ui| {
+                self.render_context_menu(ui, world, selection, entity);
+            });
+            self.handle_drag_drop(ui, &row_click, world, entity);
         }
 
+        // Drop-target visual feedback (yellow tint when a drag is in flight
+        // and this row would be a valid drop). Hover highlight is already
+        // drawn at the start of the row using `row_click.hovered()`.
+        let is_hovered = row_click.hovered();
         if is_hovered && is_valid_drop_target {
             ui.painter().rect_filled(
                 row_rect,
