@@ -499,11 +499,7 @@ impl HierarchyPanel {
                 chain_indices,
             );
 
-            // Layout shifted right by one INDENT so visual column 0 is the
-            // root spine (drawn by draw_tree_guides) — every row, even
-            // root-level entries with no children, now has a tree marker
-            // on its left.
-            let indent = (depth as f32 + 1.0) * INDENT;
+            let indent = depth as f32 * INDENT;
             ui.add_space(indent);
 
             if has_children {
@@ -513,29 +509,28 @@ impl HierarchyPanel {
                 let center = rect.center();
                 let sz = 3.5;
 
-                // The chevron's column carries the selection's path only
-                // when this row IS one of the selected entity's ancestors
-                // (i.e., row's index matches chain_indices[depth]) AND the
-                // selection sits deeper still (so the tail under the
-                // chevron is actually part of the chain heading down).
+                // The chevron sits on the selection's path only when this
+                // row IS one of the selected entity's ancestors AND the
+                // selection sits deeper still — that's the only case where
+                // the tail beneath the chevron actually carries the chain
+                // down to the next ancestor. Everything else: tail off.
                 let selected_depth = chain_indices.len().saturating_sub(1);
                 let chevron_on_path = !chain_indices.is_empty()
                     && depth < selected_depth
                     && chain_indices.get(depth).copied() == Some(row_idx);
+                // Path-only mode: the chevron caret itself stays at its
+                // base colour (it's a control, not a tree line); only the
+                // tail underneath is gated on path membership.
 
                 let chevron_color = if response.hovered() {
                     Color32::WHITE
-                } else if chevron_on_path {
-                    Color32::from_gray(230)
                 } else {
                     Color32::from_gray(190)
                 };
 
                 // Caret-style chevron — two stroked segments forming `>`
                 // (collapsed) or `v` (expanded), matching the references.
-                // Stroked instead of filled so the row guides reading through
-                // it stay visible.
-                let chevron_stroke = Stroke::new(if chevron_on_path { 1.7 } else { 1.5 }, chevron_color);
+                let chevron_stroke = Stroke::new(1.5, chevron_color);
                 let s = sz;
                 let points = if is_expanded {
                     vec![
@@ -552,28 +547,17 @@ impl HierarchyPanel {
                 };
                 ui.painter().add(egui::Shape::line(points, chevron_stroke));
 
-                // Tail: when expanded, run a thin vertical from just below
-                // the chevron down to the row's bottom edge, at the chevron's
-                // centre x. This sits at the same x as the *children's*
-                // parent-column hooks, so the tree reads as a single
-                // continuous path from this node into its first child.
-                //
-                // Highlighted variant when this column is on the selection
-                // path (the line really *is* the path going to the selected
-                // entity below us) — thicker + brighter, just like the L/T.
-                if is_expanded {
+                // Tail: only drawn when this row is on the selected entity's
+                // path (chevron_on_path) — it's a tree line, and tree lines
+                // exist only when there's a selection to trace.
+                if is_expanded && chevron_on_path {
                     let row_rect = ui.max_rect();
                     let tail_top = center.y + s + 2.0;
-                    let tail_bottom = row_rect.bottom() + 1.0; // +1px overlap
+                    let tail_bottom = row_rect.bottom() + 1.0;
                     if tail_bottom > tail_top {
-                        let tail_stroke = if chevron_on_path {
-                            Stroke::new(1.7, Color32::from_gray(220))
-                        } else {
-                            Stroke::new(1.0, Color32::from_gray(95))
-                        };
                         ui.painter().line_segment(
                             [pos2(center.x, tail_top), pos2(center.x, tail_bottom)],
-                            tail_stroke,
+                            Stroke::new(1.5, Color32::from_gray(200)),
                         );
                     }
                 }
@@ -777,128 +761,105 @@ impl HierarchyPanel {
     ///  ───┴─    if !is_last)   └──    (L when last sibling,
     ///                                  T-with-tail otherwise)
     /// ```
-    /// Draws Godot-style L/T tree guides for one row.
+    /// Draws **only** the tree path leading to the currently selected
+    /// entity. When nothing is selected, or this row sits outside that
+    /// path's render range, draws nothing. The hierarchy stays clean and
+    /// uncrowded by default; lines appear on demand to trace the focused
+    /// node back up to its root.
     ///
-    /// Visual column system (one extra column to the left of the OLD layout):
-    ///   - column 0: scene-root spine, present at every row so depth-0 rows
-    ///     also have a tree marker.
-    ///   - columns 1..=depth: passing trunks for ancestors at logical depths
-    ///     1..=depth (drawn iff `!chain_is_last[c]`).
-    ///   - column depth+1: this row's chevron / icon area.
-    ///
-    /// Path highlighting walks `chain_indices` (root → selected, indexed in
-    /// flat_rows). Each line segment is checked separately so:
-    ///   - the horizontal hook only lights up at *ancestor* rows of the
-    ///     selection (where row_idx == chain_indices[depth]),
-    ///   - vertical segments light up only while the selection trunk is
-    ///     genuinely passing through that y-range,
-    /// — so selecting Dust no longer brightens Fire's hook just because they
-    /// share the Vfx parent.
+    /// `chain_indices` is the list of `flat_rows` indices for the selected
+    /// entity's ancestor chain (root → selected). Each segment of the L
+    /// hook is decided independently — see the inline comments.
     fn draw_tree_guides(
         ui: &mut Ui,
         depth: usize,
-        chain_is_last: &[bool],
-        is_selected: bool,
+        _chain_is_last: &[bool],
+        _is_selected: bool,
         row_idx: usize,
         chain_indices: &[usize],
     ) {
+        // Roots have no parent column, and with nothing selected we draw
+        // nothing at all.
+        if depth == 0 || chain_indices.is_empty() {
+            return;
+        }
+
         let row_rect = ui.max_rect();
-        // Extend by 1 px above/below so adjacent rows' guides always overlap
-        // — combined with `item_spacing.y = 0`, no gap can show through at
-        // sub-pixel boundaries.
+        // Extend ±1 px so neighbouring rows' lines overlap (combined with
+        // `item_spacing.y = 0` this guarantees the path reads as one
+        // continuous bracket without sub-pixel gaps).
         let row_top = row_rect.top() - 1.0;
         let row_bottom = row_rect.bottom() + 1.0;
         let row_middle = 0.5 * (row_rect.top() + row_rect.bottom());
         let left = row_rect.left();
 
-        let base_stroke = Stroke::new(1.0, Color32::from_gray(95));
-        let highlight_stroke = Stroke::new(1.7, Color32::from_gray(220));
-        let stroke_for = |on: bool| if on { highlight_stroke } else { base_stroke };
-
+        let stroke = Stroke::new(1.5, Color32::from_gray(200));
         let selected_depth = chain_indices.len().saturating_sub(1);
-        let has_selection = !chain_indices.is_empty();
 
-        // Trunk-segment "on path" tests. The trunk at visual column c
-        // connects chain[c-1]'s chevron tail to chain[c]'s parent-column
-        // hook (for c == 0, the upper end is the implicit "scene root"
-        // above all rows).
-        let segment_top_on_path = |c: usize| -> bool {
-            if !has_selection || c > selected_depth {
-                return false;
-            }
-            if c == 0 {
-                row_idx <= chain_indices[0]
-            } else {
-                row_idx > chain_indices[c - 1] && row_idx <= chain_indices[c]
-            }
+        // The selection trunk at column `c` runs from `chain[c]`'s chevron
+        // tail (a row identified by `chain_indices[c]`) down to
+        // `chain[c+1]`'s parent-column hook (`chain_indices[c+1]`).
+        //   - The vertical *above* row middle is alive when
+        //     `chain_indices[c] < row_idx <= chain_indices[c+1]`.
+        //   - The vertical *below* middle is alive when
+        //     `chain_indices[c] <= row_idx < chain_indices[c+1]`.
+        // Strict / non-strict picks the right boundary at the chain
+        // endpoints — the tail draws below middle at `chain[c]`'s row, the
+        // L hook draws above middle at `chain[c+1]`'s row.
+        let trunk_top = |c: usize| -> bool {
+            c + 1 <= selected_depth
+                && chain_indices[c] < row_idx
+                && row_idx <= chain_indices[c + 1]
         };
-        let segment_bottom_on_path = |c: usize| -> bool {
-            if !has_selection || c > selected_depth {
-                return false;
-            }
-            if c == 0 {
-                row_idx < chain_indices[0]
-            } else {
-                row_idx >= chain_indices[c - 1] && row_idx < chain_indices[c]
-            }
+        let trunk_bottom = |c: usize| -> bool {
+            c + 1 <= selected_depth
+                && chain_indices[c] <= row_idx
+                && row_idx < chain_indices[c + 1]
         };
 
-        // 1) Passing visual columns 0 .. depth (excludes the parent column
-        //    `depth` and the chevron column `depth+1`). Visual column 0 is
-        //    drawn unconditionally so every row gets the spine; columns
-        //    >= 1 use !chain_is_last[c] like before.
-        for c in 0..depth {
-            let drawn = if c == 0 {
-                true
-            } else {
-                !chain_is_last.get(c).copied().unwrap_or(true)
-            };
-            if !drawn {
-                continue;
+        // Passing columns 0 .. depth - 1 — full verticals when the trunk
+        // is alive both above and below middle at this row (a non-endpoint
+        // row in the trunk's range).
+        for c in 0..depth.saturating_sub(1) {
+            if trunk_top(c) && trunk_bottom(c) {
+                let x = left + COL_PAD + c as f32 * INDENT;
+                ui.painter()
+                    .line_segment([pos2(x, row_top), pos2(x, row_bottom)], stroke);
             }
-            let on_path = segment_top_on_path(c) && segment_bottom_on_path(c);
-            let x = left + COL_PAD + c as f32 * INDENT;
+        }
+
+        // Parent column = depth - 1: the L/T for this row.
+        let parent_col = depth - 1;
+        let x_parent = left + COL_PAD + parent_col as f32 * INDENT;
+        let x_hook_end = left + COL_PAD + depth as f32 * INDENT;
+
+        // Top-to-middle vertical.
+        if trunk_top(parent_col) {
             ui.painter().line_segment(
-                [pos2(x, row_top), pos2(x, row_bottom)],
-                stroke_for(on_path),
+                [pos2(x_parent, row_top), pos2(x_parent, row_middle)],
+                stroke,
             );
         }
 
-        // 2) Parent column = visual column `depth` (the L/T for this row).
-        let parent_col = depth;
-        let x_parent = left + COL_PAD + parent_col as f32 * INDENT;
-
-        // Top-to-middle vertical — always drawn (carries the line down
-        // from the parent above into this row).
-        ui.painter().line_segment(
-            [pos2(x_parent, row_top), pos2(x_parent, row_middle)],
-            stroke_for(segment_top_on_path(parent_col)),
-        );
-
-        // Horizontal hook to the chevron column's centre. Lit only when
-        // *this row itself* is one of the selected entity's ancestors —
-        // i.e., row_idx matches the chain entry at this depth.
-        let x_hook_end = left + COL_PAD + (parent_col + 1) as f32 * INDENT;
-        let hook_on_path = has_selection
-            && depth <= selected_depth
+        // Horizontal hook — only when this row IS the chain entry at its
+        // depth (i.e., row_idx == chain_indices[depth]). That's the only
+        // place the trunk hooks into an icon.
+        let hook_lit = depth <= selected_depth
             && chain_indices.get(depth).copied() == Some(row_idx);
-        ui.painter().line_segment(
-            [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
-            stroke_for(hook_on_path || (is_selected && hook_on_path)),
-        );
+        if hook_lit {
+            ui.painter().line_segment(
+                [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
+                stroke,
+            );
+        }
 
-        // Middle-to-bottom vertical — only when this row isn't its
-        // parent's last child (T-junction). On path iff the trunk
-        // continues *past* this row (which it doesn't for the chain
-        // endpoint row, so chain[depth] won't light its lower half).
-        let self_is_last = chain_is_last
-            .get(depth)
-            .copied()
-            .unwrap_or(true);
-        if !self_is_last {
+        // Middle-to-bottom vertical — drawn iff trunk continues past this
+        // row toward `chain[c+1]`. Naturally false at the chain endpoint
+        // (the selected ancestor at this depth), forming the L.
+        if trunk_bottom(parent_col) {
             ui.painter().line_segment(
                 [pos2(x_parent, row_middle), pos2(x_parent, row_bottom)],
-                stroke_for(segment_bottom_on_path(parent_col)),
+                stroke,
             );
         }
     }
