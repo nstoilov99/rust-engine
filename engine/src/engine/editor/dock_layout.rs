@@ -3,6 +3,7 @@
 //! Provides a dockable panel layout with drag-and-drop rearrangement,
 //! tabbed panels, and persistent layouts.
 
+use super::scene_tab::SceneId;
 use egui_dock::{DockState, NodeIndex};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -14,8 +15,8 @@ const LAYOUT_FILE: &str = "editor_layout.ron";
 /// All available editor panels/tabs
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EditorTab {
-    /// 3D viewport - renders the scene
-    Viewport,
+    /// 3D viewport - renders a scene tab (carries its scene id).
+    Viewport(SceneId),
     /// Scene hierarchy tree view
     Hierarchy,
     /// Property inspector for selected entities
@@ -40,7 +41,7 @@ impl EditorTab {
     /// Display name for the tab.
     pub fn title_string(&self) -> String {
         match self {
-            EditorTab::Viewport => "Viewport".to_string(),
+            EditorTab::Viewport(_) => "Viewport".to_string(),
             EditorTab::Hierarchy => "Hierarchy".to_string(),
             EditorTab::Inspector => "Inspector".to_string(),
             EditorTab::AssetBrowser => "Assets".to_string(),
@@ -81,7 +82,7 @@ impl EditorTab {
     /// Unique string ID for this tab (used for egui ID generation).
     pub fn id_string(&self) -> String {
         match self {
-            EditorTab::Viewport => "tab_viewport".to_string(),
+            EditorTab::Viewport(id) => format!("tab_viewport_{}", id.0),
             EditorTab::Hierarchy => "tab_hierarchy".to_string(),
             EditorTab::Inspector => "tab_inspector".to_string(),
             EditorTab::AssetBrowser => "tab_assets".to_string(),
@@ -99,7 +100,7 @@ impl EditorTab {
     pub fn to_window_kind(&self) -> Option<(super::SecondaryWindowKind, String)> {
         use super::SecondaryWindowKind as K;
         match self {
-            EditorTab::Viewport => None,
+            EditorTab::Viewport(_) => None,
             EditorTab::Hierarchy => Some((K::Hierarchy, String::new())),
             EditorTab::Inspector => Some((K::Inspector, String::new())),
             EditorTab::AssetBrowser => Some((K::AssetBrowser, String::new())),
@@ -160,6 +161,49 @@ impl EditorDockState {
         self.dock_state.push_to_focused_leaf(tab);
     }
 
+    /// Open a `Viewport(_)` tab in the dock leaf that already hosts other viewport
+    /// tabs (so all scenes share the same tab strip), and focus it.
+    /// Falls back to `open_tab` if no leaf currently contains a viewport.
+    pub fn open_viewport_tab(&mut self, scene_id: SceneId) {
+        let target = self.dock_state.iter_all_nodes().find_map(|(surface, node)| {
+            if let egui_dock::Node::Leaf(leaf) = node {
+                if leaf
+                    .tabs
+                    .iter()
+                    .any(|t| matches!(t, EditorTab::Viewport(_)))
+                {
+                    // Find this leaf's NodeIndex by enumerating the surface's tree.
+                    return self.dock_state[surface]
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, n)| {
+                            let ni = NodeIndex(idx);
+                            if std::ptr::eq(n, node) {
+                                Some((surface, ni))
+                            } else if let egui_dock::Node::Leaf(other) = n {
+                                if other.tabs.as_slice() == leaf.tabs.as_slice() {
+                                    Some((surface, ni))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        });
+                }
+            }
+            None
+        });
+
+        let tab = EditorTab::Viewport(scene_id);
+        if let Some((surface, node)) = target {
+            self.dock_state.set_focused_node_and_surface((surface, node));
+            self.dock_state.push_to_focused_leaf(tab);
+        } else {
+            self.open_tab(tab);
+        }
+    }
+
     /// Get the default layout file path
     pub fn default_layout_path() -> PathBuf {
         PathBuf::from(LAYOUT_FILE)
@@ -214,7 +258,7 @@ impl EditorDockState {
 /// ```
 pub fn create_default_dock_state() -> DockState<EditorTab> {
     // Start with viewport in the center
-    let mut dock_state = DockState::new(vec![EditorTab::Viewport]);
+    let mut dock_state = DockState::new(vec![EditorTab::Viewport(SceneId(0))]);
 
     // Split: Add hierarchy on the left (20% width)
     let [_hierarchy_node, center_node] = dock_state.main_surface_mut().split_left(
@@ -243,9 +287,13 @@ pub fn create_default_dock_state() -> DockState<EditorTab> {
 pub fn create_editor_dock_style(ctx: &egui::Context) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
 
-    // Customize tab bar appearance
-    style.tab_bar.fill_tab_bar = true;
-    style.tab_bar.height = 24.0;
+    // Tabs sized to content (Godot/Unity/Unreal style), not stretched across the bar.
+    style.tab_bar.fill_tab_bar = false;
+    style.tab_bar.height = 28.0;
+
+    // Give tabs a Godot-like minimum width so labels aren't cramped.
+    style.tab.minimum_width = Some(120.0);
+    style.tab.spacing = 2.0;
 
     // Customize tab appearance (egui 0.31+ uses i8 for Margin)
     style.tab.tab_body.inner_margin = egui::Margin::same(4);

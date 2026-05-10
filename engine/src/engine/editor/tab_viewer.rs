@@ -92,6 +92,19 @@ pub struct EditorContext<'a> {
     pub undock_request: &'a mut Option<EditorTab>,
     /// The screen rect of the main dock area, used for drag-to-undock detection.
     pub dock_area_rect: egui::Rect,
+    /// Display name of the active scene, shown on the Viewport tab.
+    pub current_scene_name: &'a str,
+    /// Whether the active scene has unsaved changes (drives `* ` prefix on tab title).
+    pub active_dirty: bool,
+    /// Currently-active scene id.
+    pub active_scene_id: super::scene_tab::SceneId,
+    /// Read-only view of dormant scenes (for tab title lookup of inactive scenes).
+    pub dormant_scenes: &'a [super::scene_tab::DormantScene],
+    /// Output: scene id whose viewport tab the user closed (handled after DockArea::show).
+    pub close_scene_request: &'a mut Option<super::scene_tab::SceneId>,
+    /// Ordered list of viewport tab display names in the leaf that contains the active
+    /// viewport, used to position the "+" New Scene button after the last tab.
+    pub viewport_tab_labels: &'a [String],
 }
 
 /// Tab viewer that renders each panel type
@@ -104,7 +117,27 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
-            EditorTab::Viewport => "".into(),
+            EditorTab::Viewport(id) => {
+                let (name, dirty) = if *id == self.editor.active_scene_id {
+                    let n = if self.editor.current_scene_name.is_empty() {
+                        "Untitled Scene"
+                    } else {
+                        self.editor.current_scene_name
+                    };
+                    (n.to_string(), self.editor.active_dirty)
+                } else if let Some(d) = self.editor.dormant_scenes.iter().find(|d| d.id == *id) {
+                    let n = if d.display_name.is_empty() {
+                        "Untitled Scene"
+                    } else {
+                        d.display_name.as_str()
+                    };
+                    (n.to_string(), d.dirty)
+                } else {
+                    ("(missing scene)".to_string(), false)
+                };
+                let prefix = if dirty { "* " } else { "" };
+                format!("{}{}", prefix, name).into()
+            }
             _ => tab.title_string().into(),
         }
     }
@@ -115,7 +148,17 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
-            EditorTab::Viewport => self.render_viewport(ui),
+            EditorTab::Viewport(id) => {
+                if *id == self.editor.active_scene_id {
+                    self.render_viewport(ui);
+                } else {
+                    // Inactive viewport tabs render a placeholder; the world is parked.
+                    // Clicking this tab triggers an active-scene swap (see app.rs).
+                    ui.centered_and_justified(|ui| {
+                        ui.label(egui::RichText::new("Switching scene...").weak());
+                    });
+                }
+            }
             EditorTab::Hierarchy => self.render_hierarchy(ui),
             EditorTab::Inspector => self.render_inspector(ui),
             EditorTab::AssetBrowser => self.render_asset_browser(ui),
@@ -135,8 +178,10 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
         _surface: egui_dock::SurfaceIndex,
         _node: egui_dock::NodeIndex,
     ) {
-        // Viewport cannot be undocked
-        if *tab != EditorTab::Viewport && ui.button("Open in New Window").clicked() {
+        // Viewport tabs cannot be undocked
+        if !matches!(tab, EditorTab::Viewport(_))
+            && ui.button("Open in New Window").clicked()
+        {
             *self.editor.undock_request = Some(tab.clone());
             ui.close();
         }
@@ -149,6 +194,11 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     fn on_close(&mut self, tab: &mut Self::Tab) -> OnCloseResponse {
         // Clean up editor state when per-file tabs are closed
         match tab {
+            EditorTab::Viewport(id) => {
+                // Defer the close to app.rs — it needs to handle dormant scene cleanup
+                // and possibly prompt before discarding unsaved changes.
+                *self.editor.close_scene_request = Some(*id);
+            }
             EditorTab::MeshEditor(key) => {
                 if let Some(data) = self.editor.mesh_editors.get_mut(key) {
                     data.open = false;
@@ -170,7 +220,7 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
     }
 
     fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
-        if *tab == EditorTab::Viewport {
+        if matches!(tab, EditorTab::Viewport(_)) {
             return;
         }
 
@@ -209,73 +259,143 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
 }
 
 impl<'a> EditorTabViewer<'a> {
-    /// Render play/pause/stop icons centered on the viewport's tab bar header.
-    /// Uses a floating egui::Area positioned over the tab bar strip.
-    fn render_play_controls_on_tab_bar(
+    /// Render a Godot-style "+" (New Scene) button on the viewport's tab bar,
+    /// positioned right after the last viewport tab (LEFT side, not right).
+    fn render_new_scene_button_on_tab_bar(
         &mut self,
         ctx: &egui::Context,
         viewport_content_rect: egui::Rect,
     ) {
-        use super::menu_bar::render_play_controls;
+        use super::menu_bar::MenuAction;
 
-        let icon_size = 18.0_f32;
-        let icon_spacing = 4.0_f32;
-        let icon_count = 3.0_f32;
-        let cluster_w = icon_count * icon_size + (icon_count - 1.0) * icon_spacing;
-        let pill_pad_x = 6.0_f32;
-        let pill_pad_y = 3.0_f32;
-        let pill_w = cluster_w + pill_pad_x * 2.0;
-        let pill_h = icon_size + pill_pad_y * 2.0;
+        // Match egui_dock's tab-width formula in widgets/dock_area/show/leaf.rs:
+        //   text_width      = galley.x + 2 * x_spacing            (x_spacing = 8.0)
+        //   close_btn_size  = min(TAB_CLOSE_BUTTON_SIZE, tab_bar.height)  (= 24, capped at 28)
+        //   tab_width       = max(minimum_width, text_width + close_btn_size)
+        const TAB_MIN_WIDTH: f32 = 120.0;
+        const TAB_X_SPACING: f32 = 8.0;
+        const TAB_CLOSE_BTN_SIZE: f32 = 24.0;
+        const TAB_INTER_SPACING: f32 = 2.0;
+        const TAB_BAR_HEIGHT: f32 = 28.0;
+        const TAB_BODY_INNER_MARGIN_TOP: f32 = 4.0;
 
-        let tab_bar_height = 24.0;
-        let tab_bar_top = viewport_content_rect.top() - tab_bar_height;
-        let bar_center_x = viewport_content_rect.center().x;
-        let pill_top = tab_bar_top + (tab_bar_height - pill_h) / 2.0;
+        // Use the same FontId egui_dock uses for tab labels (TextStyle::Button) so our
+        // galley measurements match the actual rendered tab widths exactly.
+        let button_font_id = ctx
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .cloned()
+            .unwrap_or_else(|| egui::FontId::proportional(12.5));
 
-        let pill_bg = Color32::from_rgba_premultiplied(50, 50, 50, 200);
+        let close_btn = TAB_CLOSE_BTN_SIZE.min(TAB_BAR_HEIGHT);
+        let mut total_tabs_width = 0.0_f32;
+        let labels = self.editor.viewport_tab_labels;
+        for (i, label) in labels.iter().enumerate() {
+            let display = if label.is_empty() { "Untitled Scene" } else { label.as_str() };
+            let galley = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(display.to_string(), button_font_id.clone(), Color32::WHITE)
+            });
+            let text_width = galley.size().x + 2.0 * TAB_X_SPACING;
+            let tab_w = (text_width + close_btn).max(TAB_MIN_WIDTH);
+            total_tabs_width += tab_w;
+            if i + 1 < labels.len() {
+                total_tabs_width += TAB_INTER_SPACING;
+            }
+        }
+        if labels.is_empty() {
+            total_tabs_width = TAB_MIN_WIDTH;
+        }
 
-        egui::Area::new(egui::Id::new("play_controls_tab_bar"))
-            .fixed_pos(egui::pos2(bar_center_x - pill_w / 2.0, pill_top))
+        // Tab bar sits ABOVE viewport_content_rect, offset by inner_margin + tab_bar_height.
+        let tab_bar_top = viewport_content_rect.top() - TAB_BODY_INNER_MARGIN_TOP - TAB_BAR_HEIGHT;
+        let icon_size = 16.0_f32;
+        let icon_top = tab_bar_top + (TAB_BAR_HEIGHT - icon_size) / 2.0;
+        // 10 px padding between the last tab and the "+" icon.
+        let icon_left = viewport_content_rect.left() + total_tabs_width + 10.0;
+
+        // Resolve the loaded SVG texture for the Add icon.
+        let texture_id = self
+            .editor
+            .icon_manager
+            .and_then(|m| m.get(super::icons::ToolbarIcon::Add))
+            .map(|t| t.id());
+
+        egui::Area::new(egui::Id::new("viewport_new_scene_button"))
+            .fixed_pos(egui::pos2(icon_left, icon_top))
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
-                let (pill_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(pill_w, pill_h), egui::Sense::hover());
-
-                ui.painter().rect_filled(pill_rect, pill_h / 2.0, pill_bg);
-
-                let icons_rect = pill_rect.shrink2(egui::vec2(pill_pad_x, pill_pad_y));
-                let mut child_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(icons_rect)
-                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                );
-                child_ui.spacing_mut().item_spacing.x = icon_spacing;
-                render_play_controls(
-                    &mut child_ui,
-                    self.editor.play_mode,
-                    self.editor.icon_manager,
-                    self.editor.toolbar_action,
-                );
+                // Frameless image button: only the icon itself highlights on hover/click,
+                // never a surrounding box. Idle is dim grey, hover/active is full white.
+                if let Some(tex) = texture_id {
+                    // First reserve the rect so we can paint our own tinted image based on
+                    // hover state (egui's ImageButton tint is fixed per call).
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(icon_size, icon_size),
+                        egui::Sense::click(),
+                    );
+                    let tint = if response.is_pointer_button_down_on() {
+                        Color32::from_gray(220)
+                    } else if response.hovered() {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(170)
+                    };
+                    egui::Image::new(egui::load::SizedTexture::new(
+                        tex,
+                        egui::vec2(icon_size, icon_size),
+                    ))
+                    .tint(tint)
+                    .paint_at(ui, rect);
+                    let response = response.on_hover_text("New Scene");
+                    if response.clicked() {
+                        *self.editor.toolbar_action = MenuAction::NewScene;
+                    }
+                } else {
+                    // Fallback: plain "+" glyph if the icon failed to load.
+                    let response = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("+")
+                                .size(16.0)
+                                .color(Color32::from_gray(170)),
+                        )
+                        .frame(false),
+                    );
+                    if response.clicked() {
+                        *self.editor.toolbar_action = MenuAction::NewScene;
+                    }
+                }
             });
     }
+
 
     /// Render the 3D viewport with the rendered scene texture
     fn render_viewport(&mut self, ui: &mut Ui) {
         // Get available size for the viewport (full panel area now, no toolbar taking space)
         let available_size = ui.available_size();
 
-        // Track the desired viewport size (for texture resizing)
-        let new_width = (available_size.x.max(1.0)) as u32;
-        let new_height = (available_size.y.max(1.0)) as u32;
+        // Track the desired viewport size (for texture resizing).
+        // IMPORTANT: render to PHYSICAL pixels, not logical. `available_size` is in
+        // logical units (egui's DPI-independent space). If we size the framebuffer in
+        // logical units and then egui paints it onto a physical-pixel surface
+        // (logical * pixels_per_point), the result is bilinearly upscaled and produces
+        // visible banding/sampling artifacts on meshes and shadows during resize.
+        //
+        // We `floor` (not round) here to match egui's own rounding when it converts
+        // logical rects to physical pixel rects in its rasterizer, eliminating
+        // off-by-one sub-pixel mismatches that would otherwise produce edge artifacts.
+        let ppp = ui.ctx().pixels_per_point();
+        let new_width = (available_size.x.max(1.0) * ppp).floor() as u32;
+        let new_height = (available_size.y.max(1.0) * ppp).floor() as u32;
         *self.editor.viewport_size = (new_width, new_height);
 
         // If we have a viewport texture, display it
         // Use the response rect for gizmo positioning (not available_rect_before_wrap)
         let mut viewport_rect = ui.available_rect_before_wrap();
 
-        // Render play controls centered on the tab bar (above viewport content)
-        self.render_play_controls_on_tab_bar(ui.ctx(), viewport_rect);
+        // Render the "+" New Scene button just after the last viewport tab.
+        self.render_new_scene_button_on_tab_bar(ui.ctx(), viewport_rect);
 
         // Render Unreal-style toolbar as floating overlay FIRST
         // This ensures it gets input priority over the viewport image below
@@ -289,11 +409,18 @@ impl<'a> EditorTabViewer<'a> {
         );
 
         if let Some(texture_id) = self.editor.viewport_texture_id {
-            // Display the rendered scene texture filling the available space
+            // Display the rendered scene texture filling the available space.
+            // Use the texture's EXACT physical size converted back to logical units so
+            // the egui Image quad matches the texture pixel-for-pixel. This guarantees
+            // 1:1 sampling — no scaling, no banding/blurring during/after resize.
+            let display_size_logical = egui::vec2(
+                new_width as f32 / ppp,
+                new_height as f32 / ppp,
+            );
             let response = ui.add(
                 egui::Image::new(egui::load::SizedTexture::new(
                     texture_id,
-                    egui::vec2(available_size.x, available_size.y),
+                    display_size_logical,
                 ))
                 .sense(egui::Sense::click_and_drag()),
             );

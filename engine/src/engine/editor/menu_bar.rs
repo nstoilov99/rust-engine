@@ -16,6 +16,8 @@ use egui::{Color32, Vec2};
 pub enum MenuAction {
     /// No action
     None,
+    /// Create a fresh empty scene
+    NewScene,
     /// Save the current scene
     SaveScene,
     /// Exit the application
@@ -127,7 +129,11 @@ pub(super) fn play_icon_button(
     clicked
 }
 
-/// Render the play/pause/stop icon cluster
+/// Render the play/pause/stop icon cluster.
+///
+/// Note: this is invoked inside a `right_to_left` layout, so widgets are added
+/// in reverse visual order. We render Stop → Pause → Play here, which the parent
+/// layout places as Play | Pause | Stop visually (left-to-right).
 pub(super) fn render_play_controls(
     ui: &mut egui::Ui,
     play_mode: PlayMode,
@@ -136,6 +142,26 @@ pub(super) fn render_play_controls(
 ) {
     match play_mode {
         PlayMode::Edit => {
+            // Stop (rightmost in render order = leftmost visually? no — right_to_left
+            // places first call at rightmost, so visual order is Play | Pause | Stop.)
+            play_icon_button(
+                ui,
+                ToolbarIcon::Stop,
+                "⏹",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Stop (F5) - not playing",
+                icon_manager,
+            );
+            play_icon_button(
+                ui,
+                ToolbarIcon::Pause,
+                "⏸",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Pause (F6) - not playing",
+                icon_manager,
+            );
             if play_icon_button(
                 ui,
                 ToolbarIcon::Play,
@@ -147,46 +173,8 @@ pub(super) fn render_play_controls(
             ) {
                 *action = MenuAction::Play;
             }
-            play_icon_button(
-                ui,
-                ToolbarIcon::Pause,
-                "⏸",
-                play_colors::DISABLED,
-                play_colors::DISABLED,
-                "Pause (F6) - not playing",
-                icon_manager,
-            );
-            play_icon_button(
-                ui,
-                ToolbarIcon::Stop,
-                "⏹",
-                play_colors::DISABLED,
-                play_colors::DISABLED,
-                "Stop (F5) - not playing",
-                icon_manager,
-            );
         }
         PlayMode::Playing => {
-            play_icon_button(
-                ui,
-                ToolbarIcon::Play,
-                "▶",
-                play_colors::DISABLED,
-                play_colors::DISABLED,
-                "Already playing",
-                icon_manager,
-            );
-            if play_icon_button(
-                ui,
-                ToolbarIcon::Pause,
-                "⏸",
-                play_colors::PAUSE,
-                play_colors::PAUSE_HOVER,
-                "Pause (F6)",
-                icon_manager,
-            ) {
-                *action = MenuAction::Pause;
-            }
             if play_icon_button(
                 ui,
                 ToolbarIcon::Stop,
@@ -198,18 +186,38 @@ pub(super) fn render_play_controls(
             ) {
                 *action = MenuAction::Stop;
             }
+            if play_icon_button(
+                ui,
+                ToolbarIcon::Pause,
+                "⏸",
+                play_colors::PAUSE,
+                play_colors::PAUSE_HOVER,
+                "Pause (F6)",
+                icon_manager,
+            ) {
+                *action = MenuAction::Pause;
+            }
+            play_icon_button(
+                ui,
+                ToolbarIcon::Play,
+                "▶",
+                play_colors::DISABLED,
+                play_colors::DISABLED,
+                "Already playing",
+                icon_manager,
+            );
         }
         PlayMode::Paused => {
             if play_icon_button(
                 ui,
-                ToolbarIcon::SkipForward,
-                "⏭",
-                play_colors::RESUME,
-                play_colors::RESUME_HOVER,
-                "Resume (F6)",
+                ToolbarIcon::Stop,
+                "⏹",
+                play_colors::STOP,
+                play_colors::STOP_HOVER,
+                "Stop (F5)",
                 icon_manager,
             ) {
-                *action = MenuAction::Resume;
+                *action = MenuAction::Stop;
             }
             play_icon_button(
                 ui,
@@ -222,14 +230,14 @@ pub(super) fn render_play_controls(
             );
             if play_icon_button(
                 ui,
-                ToolbarIcon::Stop,
-                "⏹",
-                play_colors::STOP,
-                play_colors::STOP_HOVER,
-                "Stop (F5)",
+                ToolbarIcon::SkipForward,
+                "⏭",
+                play_colors::RESUME,
+                play_colors::RESUME_HOVER,
+                "Resume (F6)",
                 icon_manager,
             ) {
-                *action = MenuAction::Stop;
+                *action = MenuAction::Resume;
             }
         }
     }
@@ -246,6 +254,7 @@ pub fn render_menu_bar(
     build_dialog: &mut BuildDialog,
     console_messages: &mut ConsoleLog,
     show_benchmark_tools: bool,
+    icon_manager: Option<&IconManager>,
 ) -> MenuAction {
     let mut action = MenuAction::None;
 
@@ -424,8 +433,9 @@ pub fn render_menu_bar(
                     ui.label(egui::RichText::new("Panels").strong());
                     ui.separator();
 
+                    // Viewport tabs are managed via the "+" button on the viewport tab bar
+                    // and the per-tab close button, so they're not toggled here.
                     let panels = [
-                        (EditorTab::Viewport, "Viewport"),
                         (EditorTab::Hierarchy, "Hierarchy"),
                         (EditorTab::Inspector, "Inspector"),
                         (EditorTab::AssetBrowser, "Assets"),
@@ -490,12 +500,21 @@ pub fn render_menu_bar(
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Rust Game Engine").weak());
-                    ui.label(
-                        egui::RichText::new("Tutorial 21: Inspector Panel")
-                            .weak()
-                            .small(),
-                    );
                 });
+
+                // Right-aligned play/pause/stop cluster (Godot-style)
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.add_space(4.0);
+                        // The cluster's render order is left-to-right (Play/Pause/Stop)
+                        // but right_to_left layout reverses children. Re-wrap with l-to-r.
+                        ui.scope(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            render_play_controls(ui, play_mode, icon_manager, &mut action);
+                        });
+                    },
+                );
             });
         });
 

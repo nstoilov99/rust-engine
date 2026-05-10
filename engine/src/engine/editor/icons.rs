@@ -29,6 +29,8 @@ pub enum ToolbarIcon {
     Pause,
     Stop,
     SkipForward,
+    // Misc
+    Add,
 }
 
 /// Asset browser icon identifiers
@@ -98,6 +100,7 @@ impl ToolbarIcon {
             ToolbarIcon::Pause => "pause-fill",
             ToolbarIcon::Stop => "stop-fill",
             ToolbarIcon::SkipForward => "skip-forward-fill",
+            ToolbarIcon::Add => "add",
         }
     }
 
@@ -118,6 +121,7 @@ impl ToolbarIcon {
             ToolbarIcon::Pause => "Pause (F6)",
             ToolbarIcon::Stop => "Stop (F5)",
             ToolbarIcon::SkipForward => "Resume (F6)",
+            ToolbarIcon::Add => "New Scene",
         }
     }
 }
@@ -165,16 +169,30 @@ impl IconManager {
             ToolbarIcon::Pause,
             ToolbarIcon::Stop,
             ToolbarIcon::SkipForward,
+            ToolbarIcon::Add,
         ];
 
         for icon in icons {
-            let filename = format!("{}.png", icon.filename());
-            let path = icons_dir.join(&filename);
+            let stem = icon.filename();
+            let png_path = icons_dir.join(format!("{}.png", stem));
+            let svg_path = icons_dir.join(format!("{}.svg", stem));
 
-            if let Some(texture) = self.load_png_icon(ctx, &path, icon.filename()) {
-                self.textures.insert(icon, texture);
-            } else {
-                eprintln!("Warning: Failed to load icon: {}", path.display());
+            let texture = self
+                .load_png_icon(ctx, &png_path, stem)
+                .or_else(|| self.load_svg_icon(ctx, &svg_path, stem));
+
+            match texture {
+                Some(tex) => {
+                    self.textures.insert(icon, tex);
+                }
+                None => {
+                    eprintln!(
+                        "Warning: Failed to load toolbar icon `{}` (tried {} and {})",
+                        stem,
+                        png_path.display(),
+                        svg_path.display(),
+                    );
+                }
             }
         }
     }
@@ -369,6 +387,7 @@ pub fn icon_button(
                 ToolbarIcon::Pause => "⏸",
                 ToolbarIcon::Stop => "⏹",
                 ToolbarIcon::SkipForward => "⏭",
+                ToolbarIcon::Add => "+",
             };
             ui.painter().text(
                 rect.center(),
