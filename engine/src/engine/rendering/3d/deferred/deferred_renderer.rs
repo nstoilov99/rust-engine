@@ -198,6 +198,12 @@ impl DeferredRenderer {
             descriptor_set_allocator.clone(),
         )?;
 
+        // Final layout = ShaderReadOnlyOptimal: the editor's egui pass samples this
+        // image in a separate command-buffer submission, and Vulkano cannot
+        // auto-track resource state across submissions. Declaring the final layout
+        // here lets the render pass's implicit end-of-pass transition leave the
+        // image in the layout egui needs — avoiding stale/torn samples that show
+        // up as vertical-band / scrambled-tile artifacts during viewport resize.
         let composite_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
@@ -206,6 +212,7 @@ impl DeferredRenderer {
                     samples: 1,
                     load_op: Clear,
                     store_op: Store,
+                    final_layout: vulkano::image::ImageLayout::ShaderReadOnlyOptimal,
                 }
             },
             pass: {
@@ -246,14 +253,20 @@ impl DeferredRenderer {
                 device.clone(),
                 RenderPassCreateInfo {
                     attachments: vec![
-                        // Attachment 0: color (composite output)
+                        // Attachment 0: color (composite output).
+                        // initial/final layouts are ShaderReadOnlyOptimal because the
+                        // composite pass (which always runs before this one) leaves
+                        // the image in that layout, and we want to leave it there for
+                        // egui's sampler in the next submission. The render pass
+                        // implicitly transitions ShaderReadOnlyOptimal ->
+                        // ColorAttachmentOptimal for the duration of this pass.
                         AttachmentDescription {
                             format: Format::B8G8R8A8_SRGB,
                             samples: SampleCount::Sample1,
                             load_op: AttachmentLoadOp::Load,
                             store_op: AttachmentStoreOp::Store,
-                            initial_layout: ImageLayout::ColorAttachmentOptimal,
-                            final_layout: ImageLayout::ColorAttachmentOptimal,
+                            initial_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            final_layout: ImageLayout::ShaderReadOnlyOptimal,
                             ..Default::default()
                         },
                         // Attachment 1: depth (G-buffer depth, read-only for depth testing)
