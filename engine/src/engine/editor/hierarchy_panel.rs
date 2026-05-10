@@ -502,10 +502,24 @@ impl HierarchyPanel {
             let indent = depth as f32 * INDENT;
             ui.add_space(indent);
 
-            if has_children {
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(INDENT, INDENT), egui::Sense::click());
+            // Always allocate the same-size box for the chevron column —
+            // when this row has no children the box stays empty. Using
+            // `allocate_exact_size` for both branches (instead of
+            // `add_space` for the no-children case) keeps every row's icon
+            // at the same x: `add_space` skips `item_spacing.x` while
+            // `allocate_exact_size` adds it, which was the source of the
+            // 8 px shift between rows that have a chevron and rows that
+            // don't.
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(INDENT, INDENT),
+                if has_children {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                },
+            );
 
+            if has_children {
                 let center = rect.center();
                 let sz = 3.5;
 
@@ -557,7 +571,7 @@ impl HierarchyPanel {
                     if tail_bottom > tail_top {
                         ui.painter().line_segment(
                             [pos2(center.x, tail_top), pos2(center.x, tail_bottom)],
-                            Stroke::new(1.5, Color32::from_gray(200)),
+                            Stroke::new(1.0, Color32::from_gray(180)),
                         );
                     }
                 }
@@ -569,8 +583,6 @@ impl HierarchyPanel {
                         self.expanded.insert(entity_id);
                     }
                 }
-            } else {
-                ui.add_space(INDENT);
             }
 
             // Entity icon: SVG when available, otherwise a faint dot fallback.
@@ -793,7 +805,7 @@ impl HierarchyPanel {
         let row_middle = 0.5 * (row_rect.top() + row_rect.bottom());
         let left = row_rect.left();
 
-        let stroke = Stroke::new(1.5, Color32::from_gray(200));
+        let stroke = Stroke::new(1.0, Color32::from_gray(180));
         let selected_depth = chain_indices.len().saturating_sub(1);
 
         // The selection trunk at column `c` runs from `chain[c]`'s chevron
@@ -831,7 +843,12 @@ impl HierarchyPanel {
         // Parent column = depth - 1: the L/T for this row.
         let parent_col = depth - 1;
         let x_parent = left + COL_PAD + parent_col as f32 * INDENT;
-        let x_hook_end = left + COL_PAD + depth as f32 * INDENT;
+        // Hook stops at the chevron-column's *left edge* (not its centre)
+        // so the line never runs through the stroked chevron caret. For
+        // rows without a chevron the destination is the same — the
+        // chevron-area is reserved as a placeholder, the hook visually
+        // points at where the icon will be once it clears the box.
+        let x_hook_end = left + depth as f32 * INDENT;
 
         // Top-to-middle vertical.
         if trunk_top(parent_col) {
