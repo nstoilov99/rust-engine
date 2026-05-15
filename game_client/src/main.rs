@@ -162,7 +162,7 @@ impl ApplicationHandler for GameApp {
 
         // Main window events
         let Some(app) = &mut self.app else { return };
-        let Some(window) = &self.window else { return };
+        let Some(_window) = &self.window else { return };
 
         match &event {
             WindowEvent::CloseRequested => {
@@ -173,12 +173,7 @@ impl ApplicationHandler for GameApp {
                 return;
             }
             WindowEvent::RedrawRequested => {
-                if self.is_minimized {
-                    return;
-                }
-                if let Err(e) = app.render(window) {
-                    eprintln!("Render error: {}", e);
-                }
+                // Render directly from `about_to_wait` instead — see comment there.
                 return;
             }
             WindowEvent::Resized(new_size) => {
@@ -228,7 +223,13 @@ impl ApplicationHandler for GameApp {
 
         app.begin_frame();
         app.update();
-        window.request_redraw();
+        // Render here directly — going via request_redraw → DWM gates to
+        // vblank on Windows (cap ≈ refresh-1 with G-Sync). Bypasses that.
+        let render_result = app.render(window);
+        app.end_frame();
+        if let Err(e) = render_result {
+            eprintln!("Render error: {}", e);
+        }
 
         // --- Secondary window lifecycle ---
 
@@ -670,7 +671,7 @@ impl ApplicationHandler for GameApp {
         event: WindowEvent,
     ) {
         let Some(app) = &mut self.app else { return };
-        let Some(window) = &self.window else { return };
+        let Some(_window) = &self.window else { return };
 
         match &event {
             WindowEvent::CloseRequested => {
@@ -680,12 +681,7 @@ impl ApplicationHandler for GameApp {
                 return;
             }
             WindowEvent::RedrawRequested => {
-                if self.is_minimized {
-                    return;
-                }
-                if let Err(e) = app.render(window) {
-                    eprintln!("Render error: {}", e);
-                }
+                // Render directly from `about_to_wait` instead — see comment there.
                 return;
             }
             WindowEvent::Resized(new_size) => {
@@ -719,7 +715,13 @@ impl ApplicationHandler for GameApp {
 
         app.begin_frame();
         app.update();
-        window.request_redraw();
+        // Render here directly — going via request_redraw → DWM gates to
+        // vblank on Windows (cap ≈ refresh-1 with G-Sync). Bypasses that.
+        let render_result = app.render(window);
+        app.end_frame();
+        if let Err(e) = render_result {
+            eprintln!("Render error: {}", e);
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {

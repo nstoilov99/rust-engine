@@ -685,13 +685,16 @@ impl App {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
         tracy_client::Client::running().map(|c| c.frame_mark());
-        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
-            im.new_frame();
-        }
         if let Some(gp) = self.core.game_world.resource_mut::<GamepadState>() {
             gp.update();
         }
         self.core.game_world.begin_frame();
+    }
+
+    pub fn end_frame(&mut self) {
+        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+            im.clear_transient_state();
+        }
     }
 
     pub fn update(&mut self) {
