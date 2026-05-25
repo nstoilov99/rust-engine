@@ -1,4 +1,38 @@
 //! Editor systems and UI panels
+//!
+//! ## Step 0 Notes — Integration Points
+//!
+//! * `game_client/src/app.rs` — main editor application; `EditorServices` constructed
+//!   in `App::new` (line ~198) alongside `EditorApp`. `EditorApp` holds viewport,
+//!   console, scene, ui, play sub-structures.
+//! * `tab_viewer.rs:29` — `EditorContext<'a>` is a borrowed-references struct passed
+//!   to `EditorTabViewer` for panel rendering. Modified to carry
+//!   `services: &'a mut EditorServices`.
+//! * `secondary_window.rs` — multi-window support; secondary windows will receive
+//!   `&mut EditorServices` in a future step.
+//! * `dock_layout.rs:12` — `LAYOUT_FILE = "editor_layout.ron"`. Step 11 reuses this
+//!   constant; no parallel filename.
+//! * `commands.rs` — existing undo/redo `Command` trait + `CommandHistory`. The new
+//!   module is `command_palette/`, not `commands/`.
+//! * `icons.rs` — existing `IconManager` + `ToolbarIcon` + `AssetBrowserIcon`. Step 1
+//!   extends this into a full `IconRegistry`.
+
+pub mod hierarchy_icons;
+pub mod icon_classes;
+pub mod services;
+pub mod theme;
+pub mod widgets;
+pub mod command_palette;
+pub mod dialogs;
+pub mod toasts;
+pub mod status_bar;
+pub mod dirty_state;
+pub mod layout;
+pub mod preview;
+#[cfg(feature = "editor-debug")]
+pub mod icon_inspector;
+#[cfg(feature = "editor-debug")]
+pub mod showcase;
 
 pub mod asset_browser;
 pub mod build_dialog;
@@ -19,6 +53,7 @@ pub mod play_mode;
 pub mod profiler;
 pub mod secondary_window;
 mod selection;
+pub mod scene_tab;
 mod tab_viewer;
 pub mod viewport;
 mod viewport_texture;
@@ -42,6 +77,8 @@ pub use menu_bar::*;
 pub use profiler::ProfilerPanel;
 pub use secondary_window::{PendingWindowRequest, SecondaryWindow, SecondaryWindowKind};
 pub use selection::*;
+pub use services::EditorServices;
+pub use scene_tab::{DormantScene, SaveAsDialog, SceneId, SceneRegistry};
 pub use tab_viewer::*;
 pub use input_action_editor::{InputActionEditor, InputActionEditorState};
 pub use input_context_editor::{InputContextEditor, InputContextEditorState};

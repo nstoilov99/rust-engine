@@ -29,6 +29,8 @@ pub enum ToolbarIcon {
     Pause,
     Stop,
     SkipForward,
+    // Misc
+    Add,
 }
 
 /// Asset browser icon identifiers
@@ -46,6 +48,10 @@ pub enum AssetBrowserIcon {
     // Arrow icons for expand/collapse
     ArrowDown,
     ArrowRight,
+    // Toolbar toggles
+    FolderBrowser,
+    GridView,
+    ListView,
 }
 
 impl AssetBrowserIcon {
@@ -61,6 +67,9 @@ impl AssetBrowserIcon {
             AssetBrowserIcon::FileCode => "code-file",
             AssetBrowserIcon::ArrowDown => "arrow-down",
             AssetBrowserIcon::ArrowRight => "arrow-right",
+            AssetBrowserIcon::FolderBrowser => "folder-browser",
+            AssetBrowserIcon::GridView => "grid-view",
+            AssetBrowserIcon::ListView => "list-view",
         }
     }
 
@@ -76,6 +85,9 @@ impl AssetBrowserIcon {
             AssetBrowserIcon::FileCode,
             AssetBrowserIcon::ArrowDown,
             AssetBrowserIcon::ArrowRight,
+            AssetBrowserIcon::FolderBrowser,
+            AssetBrowserIcon::GridView,
+            AssetBrowserIcon::ListView,
         ]
     }
 }
@@ -98,6 +110,7 @@ impl ToolbarIcon {
             ToolbarIcon::Pause => "pause-fill",
             ToolbarIcon::Stop => "stop-fill",
             ToolbarIcon::SkipForward => "skip-forward-fill",
+            ToolbarIcon::Add => "add",
         }
     }
 
@@ -118,6 +131,7 @@ impl ToolbarIcon {
             ToolbarIcon::Pause => "Pause (F6)",
             ToolbarIcon::Stop => "Stop (F5)",
             ToolbarIcon::SkipForward => "Resume (F6)",
+            ToolbarIcon::Add => "New Scene",
         }
     }
 }
@@ -165,37 +179,107 @@ impl IconManager {
             ToolbarIcon::Pause,
             ToolbarIcon::Stop,
             ToolbarIcon::SkipForward,
+            ToolbarIcon::Add,
         ];
 
         for icon in icons {
-            let filename = format!("{}.png", icon.filename());
-            let path = icons_dir.join(&filename);
+            let stem = icon.filename();
+            let png_path = icons_dir.join(format!("{}.png", stem));
+            let svg_path = icons_dir.join(format!("{}.svg", stem));
 
-            if let Some(texture) = self.load_png_icon(ctx, &path, icon.filename()) {
-                self.textures.insert(icon, texture);
-            } else {
-                eprintln!("Warning: Failed to load icon: {}", path.display());
+            let texture = self
+                .load_png_icon(ctx, &png_path, stem)
+                .or_else(|| self.load_svg_icon(ctx, &svg_path, stem));
+
+            match texture {
+                Some(tex) => {
+                    self.textures.insert(icon, tex);
+                }
+                None => {
+                    eprintln!(
+                        "Warning: Failed to load toolbar icon `{}` (tried {} and {})",
+                        stem,
+                        png_path.display(),
+                        svg_path.display(),
+                    );
+                }
             }
         }
     }
 
-    /// Load asset browser icons from the assets directory
+    /// Load asset browser icons from the assets directory.
+    ///
+    /// For each icon, tries `<stem>.png` first, then falls back to
+    /// `<stem>.svg` — the project is moving to SVG sources for editor
+    /// chrome (e.g. `folder.svg`, `opened-folder.svg`) but legacy PNGs
+    /// still exist for some entries.
     pub fn load_asset_browser_icons(&mut self, ctx: &Context, assets_path: &Path) {
         let icons_dir = assets_path.join("icons");
 
         for icon in AssetBrowserIcon::all() {
-            let filename = format!("{}.png", icon.filename());
-            let path = icons_dir.join(&filename);
+            let stem = icon.filename();
+            let png_path = icons_dir.join(format!("{}.png", stem));
+            let svg_path = icons_dir.join(format!("{}.svg", stem));
 
-            if let Some(texture) = self.load_png_icon(ctx, &path, icon.filename()) {
-                self.asset_icons.insert(*icon, texture);
-            } else {
-                eprintln!(
-                    "Warning: Failed to load asset browser icon: {}",
-                    path.display()
-                );
+            let texture = self
+                .load_png_icon(ctx, &png_path, stem)
+                .or_else(|| self.load_svg_icon(ctx, &svg_path, stem));
+
+            match texture {
+                Some(tex) => {
+                    self.asset_icons.insert(*icon, tex);
+                }
+                None => {
+                    eprintln!(
+                        "Warning: Failed to load asset browser icon `{}` (tried {} and {})",
+                        stem,
+                        png_path.display(),
+                        svg_path.display(),
+                    );
+                }
             }
         }
+    }
+
+    /// Rasterize an SVG file into a tinted egui texture. Mirrors the PNG
+    /// loader so a single icon can fall back from `.png` → `.svg` without
+    /// the call site caring which format was used.
+    fn load_svg_icon(&self, ctx: &Context, path: &Path, name: &str) -> Option<TextureHandle> {
+        // Same rasterisation size used by the hierarchy panel's SVG loader
+        // (32 px) — gives crisp output at the typical 16 px display size
+        // even on HiDPI without bloating the texture cache.
+        const RASTER_PX: u32 = 32;
+
+        let svg_bytes = std::fs::read(path).ok()?;
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(&svg_bytes, &opt).ok()?;
+        let svg_size = tree.size();
+        let scale = (RASTER_PX as f32 / svg_size.width().max(1.0))
+            .min(RASTER_PX as f32 / svg_size.height().max(1.0));
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(RASTER_PX, RASTER_PX)?;
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+        // Apply tint identical to the PNG path so the colour theming behaves
+        // the same regardless of source format.
+        let raw = pixmap.data();
+        let tinted: Vec<u8> = raw
+            .chunks(4)
+            .flat_map(|p| {
+                let r = (p[0] as f32 * self.tint_color.r() as f32 / 255.0) as u8;
+                let g = (p[1] as f32 * self.tint_color.g() as f32 / 255.0) as u8;
+                let b = (p[2] as f32 * self.tint_color.b() as f32 / 255.0) as u8;
+                let a = p[3];
+                [r, g, b, a]
+            })
+            .collect();
+
+        let color_image = ColorImage::from_rgba_unmultiplied(
+            [RASTER_PX as usize, RASTER_PX as usize],
+            &tinted,
+        );
+        Some(ctx.load_texture(name, color_image, TextureOptions::LINEAR))
     }
 
     /// Load a single PNG icon and return a texture handle
@@ -256,6 +340,57 @@ impl IconManager {
     }
 }
 
+/// Render a compact toggle button for an asset browser icon.
+///
+/// Falls back to the provided unicode glyph when the icon failed to load
+/// so the toolbar stays usable even if the SVG/PNG is missing.
+pub fn asset_icon_toggle(
+    ui: &mut egui::Ui,
+    icon_manager: Option<&IconManager>,
+    icon: AssetBrowserIcon,
+    selected: bool,
+    fallback_glyph: &str,
+    tooltip: &str,
+) -> egui::Response {
+    let texture_id = icon_manager
+        .and_then(|m| m.get_asset_icon(icon))
+        .map(|t| t.id());
+
+    let response = if let Some(tex) = texture_id {
+        let size = egui::vec2(16.0, 16.0);
+        let (rect, response) =
+            ui.allocate_exact_size(size + egui::vec2(4.0, 4.0), egui::Sense::click());
+
+        if ui.is_rect_visible(rect) {
+            let visuals = if selected {
+                ui.visuals().widgets.active
+            } else if response.hovered() {
+                ui.visuals().widgets.hovered
+            } else {
+                ui.visuals().widgets.inactive
+            };
+            ui.painter().rect_filled(rect, 2.0, visuals.bg_fill);
+
+            let tint = if selected {
+                Color32::WHITE
+            } else if response.hovered() {
+                Color32::from_gray(230)
+            } else {
+                Color32::from_gray(180)
+            };
+            let image_rect = egui::Rect::from_center_size(rect.center(), size);
+            egui::Image::new(egui::load::SizedTexture::new(tex, size))
+                .tint(tint)
+                .paint_at(ui, image_rect);
+        }
+        response
+    } else {
+        ui.selectable_label(selected, fallback_glyph)
+    };
+
+    response.on_hover_text(tooltip)
+}
+
 /// Render an icon button with optional selection state
 pub fn icon_button(
     ui: &mut egui::Ui,
@@ -313,6 +448,7 @@ pub fn icon_button(
                 ToolbarIcon::Pause => "⏸",
                 ToolbarIcon::Stop => "⏹",
                 ToolbarIcon::SkipForward => "⏭",
+                ToolbarIcon::Add => "+",
             };
             ui.painter().text(
                 rect.center(),

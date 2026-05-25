@@ -1,14 +1,20 @@
 use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
+    PrimaryCommandBufferAbstract,
+};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
-use vulkano::device::Device;
+use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::sync::GpuFuture;
 use vulkano::pipeline::graphics::{
     color_blend::{ColorBlendAttachmentState, ColorBlendState},
     input_assembly::InputAssemblyState,
@@ -80,6 +86,8 @@ impl SsaoPass {
         device: Arc<Device>,
         allocator: Arc<StandardMemoryAllocator>,
         _descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+        queue: Arc<Queue>,
         width: u32,
         height: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -108,7 +116,11 @@ impl SsaoPass {
             kernel_data,
         )?;
 
-        let noise_texture = Self::create_noise_texture(allocator.clone())?;
+        let noise_texture = Self::create_noise_texture(
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?;
 
         let ssao_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -366,9 +378,11 @@ impl SsaoPass {
 
     fn create_noise_texture(
         allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+        queue: Arc<Queue>,
     ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
         let image = Image::new(
-            allocator,
+            allocator.clone(),
             ImageCreateInfo {
                 image_type: ImageType::Dim2d,
                 format: Format::R8G8_UNORM,
@@ -381,6 +395,46 @@ impl SsaoPass {
                 ..Default::default()
             },
         )?;
+
+        // 4x4 random RG pairs uploaded once; shader remaps to [-1, 1]. Seed offset
+        // avoids the hash producing (0,0) at i=0 (which would zero out random_vec).
+        let mut data = [0u8; 32];
+        for i in 0..16 {
+            let mut h = ((i + 1) as u32).wrapping_mul(0x9E37_79B9);
+            h ^= h >> 16;
+            h = h.wrapping_mul(0x85EB_CA6B);
+            h ^= h >> 13;
+            h = h.wrapping_mul(0xC2B2_AE35);
+            h ^= h >> 16;
+            data[i * 2] = (h & 0xFF) as u8;
+            data[i * 2 + 1] = ((h >> 8) & 0xFF) as u8;
+        }
+        let staging = Buffer::from_iter(
+            allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            data,
+        )?;
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator,
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+        builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+            staging,
+            image.clone(),
+        ))?;
+        builder
+            .build()?
+            .execute(queue)?
+            .then_signal_fence_and_flush()?
+            .wait(None)?;
 
         ImageView::new_default(image).map_err(|e| e.into())
     }

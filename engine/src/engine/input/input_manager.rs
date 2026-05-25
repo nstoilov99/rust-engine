@@ -46,6 +46,11 @@ impl InputManager {
 
     pub fn new_frame(&mut self) {
         crate::profile_scope!("input_processing");
+        self.clear_transient_state();
+    }
+
+    /// Clear per-frame input state after all systems/UI have consumed it.
+    pub fn clear_transient_state(&mut self) {
         self.keys_just_pressed.clear();
         self.keys_just_released.clear();
         self.mouse_delta = (0.0, 0.0);

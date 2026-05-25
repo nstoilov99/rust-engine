@@ -6,9 +6,16 @@
 use crate::engine::assets::AssetId;
 use crate::engine::editor::asset_browser::registry::FolderNode;
 use crate::engine::editor::icons::{AssetBrowserIcon, IconManager};
-use egui::{Color32, RichText, Ui};
+use egui::{pos2, Color32, RichText, Stroke, Ui};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+/// Width of the chevron column. Matches the hierarchy panel for visual
+/// consistency.
+const CHEVRON_SIZE: f32 = 16.0;
+/// Folder icon size — slightly bigger than the chevron so it reads as the
+/// row's primary glyph.
+const FOLDER_ICON_SIZE: f32 = 16.0;
 
 /// Context menu action for folders
 #[derive(Debug, Clone)]
@@ -218,19 +225,22 @@ impl FolderTreeView {
         let mut is_drop_target = false;
 
         // Icon sizes for folder tree
-        let arrow_size = egui::vec2(10.0, 10.0); // Arrow icons
-        let folder_icon_size = egui::vec2(16.0, 16.0); // Folder icons
+        let arrow_size = egui::vec2(CHEVRON_SIZE, CHEVRON_SIZE);
+        let folder_icon_size = egui::vec2(FOLDER_ICON_SIZE, FOLDER_ICON_SIZE);
 
         // Render the row content inside horizontal layout
         // Return arrow_clicked from closure to avoid mutable capture issues
         let row_response = ui.horizontal(|ui| {
             ui.add_space(indent);
 
-            // Expand/collapse arrow - capture click state to return
+            // Always allocate the chevron-column box, whether or not this
+            // folder has children. Using allocate_exact_size for both
+            // branches keeps every row's folder icon at the same x — the
+            // same alignment fix the hierarchy panel needed (`add_space`
+            // skips item_spacing, `allocate_exact_size` doesn't).
             let arrow_clicked = if has_children {
-                render_arrow_icon(ui, is_expanded, icon_manager, arrow_size)
+                render_chevron_caret(ui, is_expanded, arrow_size)
             } else {
-                // Allocate invisible placeholder same size as arrow for proper alignment
                 ui.allocate_exact_size(arrow_size, egui::Sense::hover());
                 false
             };
@@ -578,41 +588,42 @@ fn render_folder_icon(
     ui.label(fallback);
 }
 
-/// Render an expand/collapse arrow icon (PNG or Unicode fallback)
-/// Returns true if clicked
-fn render_arrow_icon(
-    ui: &mut Ui,
-    is_expanded: bool,
-    icon_manager: Option<&IconManager>,
-    size: egui::Vec2,
-) -> bool {
-    let icon_type = if is_expanded {
-        AssetBrowserIcon::ArrowDown
-    } else {
-        AssetBrowserIcon::ArrowRight
-    };
-
-    if let Some(manager) = icon_manager {
-        if let Some(texture) = manager.get_asset_icon(icon_type) {
-            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-            if ui.is_rect_visible(rect) {
-                ui.painter().image(
-                    texture.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::from_gray(200),
-                );
-            }
-            return response.clicked();
-        }
+/// Render a caret-style expand/collapse chevron — `>` collapsed, `v`
+/// expanded. Stroked instead of filled so it visually matches the
+/// hierarchy panel's tree carets, and so that any future tree guides
+/// reading through it stay legible.
+///
+/// Returns `true` when clicked.
+fn render_chevron_caret(ui: &mut Ui, is_expanded: bool, size: egui::Vec2) -> bool {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response.clicked();
     }
 
-    // Fallback to Unicode button
-    let arrow = if is_expanded { "\u{25BC}" } else { "\u{25B6}" }; // ▼ or ▶
-    let arrow_response = ui.add(
-        egui::Button::new(RichText::new(arrow).size(10.0))
-            .frame(false)
-            .min_size(size),
-    );
-    arrow_response.clicked()
+    let center = rect.center();
+    let s = (size.x.min(size.y) * 0.22).max(3.0);
+
+    let color = if response.hovered() {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(190)
+    };
+    let stroke = Stroke::new(1.5, color);
+
+    let points = if is_expanded {
+        vec![
+            pos2(center.x - s, center.y - s * 0.45),
+            pos2(center.x, center.y + s * 0.55),
+            pos2(center.x + s, center.y - s * 0.45),
+        ]
+    } else {
+        vec![
+            pos2(center.x - s * 0.45, center.y - s),
+            pos2(center.x + s * 0.55, center.y),
+            pos2(center.x - s * 0.45, center.y + s),
+        ]
+    };
+    ui.painter().add(egui::Shape::line(points, stroke));
+
+    response.clicked()
 }

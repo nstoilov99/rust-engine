@@ -6,14 +6,14 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 24.0,
+                            y: 26.0,
                         ),
                         max: (
                             x: 2560.0,
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.46067768,
+                    fraction: 0.6503906,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -21,29 +21,29 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 24.0,
+                            y: 26.0,
                         ),
                         max: (
-                            x: 1178.0,
+                            x: 1664.0,
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.53420085,
+                    fraction: 0.50111634,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
                 Vertical((
                     rect: (
                         min: (
-                            x: 1180.0,
-                            y: 24.0,
+                            x: 1666.0,
+                            y: 26.0,
                         ),
                         max: (
                             x: 2560.0,
                             y: 1369.0,
                         ),
                     ),
-                    fraction: 0.21449906,
+                    fraction: 0.5,
                     fully_collapsed: false,
                     collapsed_leaf_count: 0,
                 )),
@@ -51,25 +51,25 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 24.0,
+                            y: 26.0,
                         ),
                         max: (
-                            x: 1178.0,
-                            y: 742.0,
+                            x: 1664.0,
+                            y: 698.0,
                         ),
                     ),
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 48.0,
+                            y: 54.0,
                         ),
                         max: (
-                            x: 1178.0,
-                            y: 742.0,
+                            x: 1664.0,
+                            y: 698.0,
                         ),
                     ),
                     tabs: [
-                        Viewport,
+                        Viewport((0)),
                     ],
                     active: (0),
                     scroll: 0.0,
@@ -79,51 +79,51 @@
                     rect: (
                         min: (
                             x: 0.0,
-                            y: 744.0,
+                            y: 700.0,
                         ),
                         max: (
-                            x: 1178.0,
+                            x: 1664.0,
                             y: 1369.0,
                         ),
                     ),
                     viewport: (
                         min: (
                             x: 0.0,
-                            y: 768.0,
+                            y: 728.0,
                         ),
                         max: (
-                            x: 1178.0,
+                            x: 1664.0,
                             y: 1369.0,
                         ),
                     ),
                     tabs: [
+                        Console,
                         Profiler,
                         AssetBrowser,
-                        Console,
                     ],
-                    active: (1),
+                    active: (2),
                     scroll: 0.0,
                     collapsed: false,
                 )),
                 Leaf((
                     rect: (
                         min: (
-                            x: 1180.0,
-                            y: 24.0,
+                            x: 1666.0,
+                            y: 26.0,
                         ),
                         max: (
                             x: 2560.0,
-                            y: 312.0,
+                            y: 697.0,
                         ),
                     ),
                     viewport: (
                         min: (
-                            x: 1180.0,
-                            y: 48.0,
+                            x: 1666.0,
+                            y: 54.0,
                         ),
                         max: (
                             x: 2560.0,
-                            y: 312.0,
+                            y: 697.0,
                         ),
                     ),
                     tabs: [
@@ -136,8 +136,8 @@
                 Leaf((
                     rect: (
                         min: (
-                            x: 1180.0,
-                            y: 314.0,
+                            x: 1666.0,
+                            y: 699.0,
                         ),
                         max: (
                             x: 2560.0,
@@ -146,8 +146,8 @@
                     ),
                     viewport: (
                         min: (
-                            x: 1180.0,
-                            y: 338.0,
+                            x: 1666.0,
+                            y: 727.0,
                         ),
                         max: (
                             x: 2560.0,
@@ -162,11 +162,10 @@
                     collapsed: false,
                 )),
             ],
-            focused_node: Some((6)),
+            focused_node: Some((3)),
             collapsed: false,
             collapsed_leaf_count: 0,
         )),
-        Empty,
     ],
     focused_surface: Some((0)),
     translations: (

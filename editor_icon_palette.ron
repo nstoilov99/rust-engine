@@ -1,0 +1,37 @@
+(
+    category: [
+        (Animation, (230, 107, 184, 255)),
+        (Audio, (98, 195, 112, 255)),
+        (Cameras, (91, 155, 213, 255)),
+        (Geometry, (168, 176, 186, 255)),
+        (Lights, (255, 200, 87, 255)),
+        (Materials, (164, 122, 232, 255)),
+        (Physics, (157, 204, 77, 255)),
+        (Scripting, (79, 193, 182, 255)),
+        (Ui, (240, 140, 126, 255)),
+        (Vfx, (224, 120, 86, 255)),
+    ],
+    severity: [
+        (Error, (229, 107, 107, 255)),
+        (Info, (110, 168, 232, 255)),
+        (Success, (110, 203, 124, 255)),
+        (Warning, (230, 192, 79, 255)),
+    ],
+    chrome: [
+        (Accent, (79, 163, 232, 255)),
+        (Active, (255, 255, 255, 255)),
+        (Default, (192, 196, 204, 255)),
+        (Disabled, (96, 100, 108, 255)),
+        (Hovered, (230, 232, 236, 255)),
+    ],
+    overrides: [
+        (VisibilityOff, Default, (196, 121, 206, 255)),
+    ],
+    tint_modes: [
+        (VisibilityOff, Tinted),
+    ],
+    panel_overrides: [
+        ("hierarchy", "camera", Default, (255, 255, 255, 255)),
+        ("hierarchy", "object", Default, (205, 118, 118, 255)),
+    ],
+)

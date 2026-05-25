@@ -23,7 +23,7 @@ pub use thumbnail_renderer::GpuThumbnailContext;
 pub use views::{FolderTreeView, GridView, ListView};
 
 use crate::engine::assets::{AssetId, AssetMetadata, AssetType};
-use crate::engine::editor::icons::IconManager;
+use crate::engine::editor::icons::{asset_icon_toggle, AssetBrowserIcon, IconManager};
 use egui::{RichText, Ui};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -180,7 +180,7 @@ impl AssetBrowserPanel {
         }
 
         // Top toolbar
-        self.render_toolbar(ui);
+        self.render_toolbar(ui, icon_manager);
 
         ui.separator();
 
@@ -334,13 +334,18 @@ impl AssetBrowserPanel {
         }
     }
 
-    fn render_toolbar(&mut self, ui: &mut Ui) {
+    fn render_toolbar(&mut self, ui: &mut Ui, icon_manager: Option<&IconManager>) {
         ui.horizontal(|ui| {
             // Folder toggle
-            if ui
-                .selectable_label(self.show_folders, "\u{1F4C1}")
-                .on_hover_text("Toggle folders")
-                .clicked()
+            if asset_icon_toggle(
+                ui,
+                icon_manager,
+                AssetBrowserIcon::FolderBrowser,
+                self.show_folders,
+                "\u{1F4C1}",
+                "Toggle folders",
+            )
+            .clicked()
             {
                 self.show_folders = !self.show_folders;
             }
@@ -393,17 +398,27 @@ impl AssetBrowserPanel {
             ui.separator();
 
             // View mode toggle
-            if ui
-                .selectable_label(self.view_mode == ViewMode::Grid, "\u{25A6}") // Grid icon
-                .on_hover_text("Grid view")
-                .clicked()
+            if asset_icon_toggle(
+                ui,
+                icon_manager,
+                AssetBrowserIcon::GridView,
+                self.view_mode == ViewMode::Grid,
+                "\u{25A6}",
+                "Grid view",
+            )
+            .clicked()
             {
                 self.view_mode = ViewMode::Grid;
             }
-            if ui
-                .selectable_label(self.view_mode == ViewMode::List, "\u{2630}") // List icon
-                .on_hover_text("List view")
-                .clicked()
+            if asset_icon_toggle(
+                ui,
+                icon_manager,
+                AssetBrowserIcon::ListView,
+                self.view_mode == ViewMode::List,
+                "\u{2630}",
+                "List view",
+            )
+            .clicked()
             {
                 self.view_mode = ViewMode::List;
             }

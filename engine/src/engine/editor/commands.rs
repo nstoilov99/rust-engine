@@ -24,6 +24,8 @@ pub struct CommandHistory {
     undo_stack: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
     max_history: usize,
+    /// `true` when there are unsaved modifications since the last `mark_saved` call.
+    dirty: bool,
 }
 
 impl CommandHistory {
@@ -32,6 +34,7 @@ impl CommandHistory {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_history,
+            dirty: false,
         }
     }
 
@@ -45,6 +48,7 @@ impl CommandHistory {
         if self.undo_stack.len() > self.max_history {
             self.undo_stack.remove(0);
         }
+        self.dirty = true;
     }
 
     /// Undo the last command
@@ -53,6 +57,7 @@ impl CommandHistory {
             let desc = command.description().to_string();
             command.undo(world);
             self.redo_stack.push(command);
+            self.dirty = true;
             Some(desc)
         } else {
             None
@@ -65,10 +70,26 @@ impl CommandHistory {
             let desc = command.description().to_string();
             command.execute(world);
             self.undo_stack.push(command);
+            self.dirty = true;
             Some(desc)
         } else {
             None
         }
+    }
+
+    /// Whether the scene has unsaved modifications.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark the history as saved (clears the dirty flag).
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Set the dirty flag externally (for non-command edits like hierarchy drag-reorder).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn can_undo(&self) -> bool {
@@ -90,6 +111,7 @@ impl CommandHistory {
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.dirty = false;
     }
 }
 
