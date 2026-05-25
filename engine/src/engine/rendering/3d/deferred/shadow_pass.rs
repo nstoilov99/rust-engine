@@ -9,7 +9,7 @@ use vulkano::pipeline::graphics::{
     depth_stencil::{CompareOp, DepthState, DepthStencilState},
     input_assembly::InputAssemblyState,
     multisample::MultisampleState,
-    rasterization::RasterizationState,
+    rasterization::{DepthBiasState, RasterizationState},
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
     viewport::ViewportState,
     GraphicsPipelineCreateInfo,
@@ -92,7 +92,16 @@ impl ShadowPass {
                 vertex_input_state: Some(vertex_input_state),
                 input_assembly_state: Some(InputAssemblyState::default()),
                 viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
+                // Hardware depth bias to prevent shadow acne — slope_factor scales
+                // with surface angle, constant_factor handles precision noise.
+                rasterization_state: Some(RasterizationState {
+                    depth_bias: Some(DepthBiasState {
+                        constant_factor: 2.0,
+                        clamp: 0.0,
+                        slope_factor: 2.5,
+                    }),
+                    ..Default::default()
+                }),
                 multisample_state: Some(MultisampleState::default()),
                 depth_stencil_state: Some(DepthStencilState {
                     depth: Some(DepthState {

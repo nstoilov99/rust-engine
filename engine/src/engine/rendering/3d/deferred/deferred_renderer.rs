@@ -198,6 +198,8 @@ impl DeferredRenderer {
             descriptor_set_allocator.clone(),
         )?;
 
+        // final_layout = ShaderReadOnlyOptimal so the editor's egui pass (separate
+        // submission, no auto layout tracking across CBs) samples in the right layout.
         let composite_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
@@ -206,6 +208,7 @@ impl DeferredRenderer {
                     samples: 1,
                     load_op: Clear,
                     store_op: Store,
+                    final_layout: vulkano::image::ImageLayout::ShaderReadOnlyOptimal,
                 }
             },
             pass: {
@@ -246,14 +249,15 @@ impl DeferredRenderer {
                 device.clone(),
                 RenderPassCreateInfo {
                     attachments: vec![
-                        // Attachment 0: color (composite output)
+                        // Color (composite output): ShaderReadOnlyOptimal in/out to
+                        // match composite's final_layout and egui's sample expectation.
                         AttachmentDescription {
                             format: Format::B8G8R8A8_SRGB,
                             samples: SampleCount::Sample1,
                             load_op: AttachmentLoadOp::Load,
                             store_op: AttachmentStoreOp::Store,
-                            initial_layout: ImageLayout::ColorAttachmentOptimal,
-                            final_layout: ImageLayout::ColorAttachmentOptimal,
+                            initial_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            final_layout: ImageLayout::ShaderReadOnlyOptimal,
                             ..Default::default()
                         },
                         // Attachment 1: depth (G-buffer depth, read-only for depth testing)
@@ -309,6 +313,8 @@ impl DeferredRenderer {
             device.clone(),
             allocator.clone(),
             descriptor_set_allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
             width,
             height,
         )?;
@@ -1721,7 +1727,9 @@ impl Default for PostProcessingSettings {
             bloom_enabled: true,
             bloom_intensity: 0.04,
             bloom_threshold: 1.0,
-            ssao_enabled: true,
+            // Disabled by default: current blur/noise produces visible
+            // tile-aligned banding. Re-enable once blur kernel is widened.
+            ssao_enabled: false,
             ssao_radius: 0.5,
             ssao_intensity: 1.0,
             // Manual default avoids the "darker when close" snap from the

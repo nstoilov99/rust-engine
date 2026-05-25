@@ -24,7 +24,11 @@ void main() {
     vec3 world_normal = normalize(texture(g_normal, frag_uv).rgb);
 
     vec2 noise_scale = params.screen_size / 4.0;
-    vec3 random_vec = vec3(texture(noise_texture, frag_uv * noise_scale).rg, 0.0);
+    // Remap [0,1] -> [-1,1] so random_vec covers all quadrants — otherwise the
+    // Gram-Schmidt tangent below collapses to a near-fixed direction, producing
+    // tile-aligned bands in shadowed areas.
+    vec2 rg = texture(noise_texture, frag_uv * noise_scale).rg * 2.0 - 1.0;
+    vec3 random_vec = vec3(rg, 0.0);
 
     // Construct TBN from world normal + noise rotation
     vec3 tangent = normalize(random_vec - world_normal * dot(random_vec, world_normal));

@@ -12,7 +12,7 @@ use vulkano::pipeline::graphics::{
     depth_stencil::{CompareOp, DepthState, DepthStencilState},
     input_assembly::{InputAssemblyState, PrimitiveTopology},
     multisample::MultisampleState,
-    rasterization::{CullMode, RasterizationState},
+    rasterization::{CullMode, DepthBiasState, RasterizationState},
     vertex_input::VertexInputState,
     viewport::ViewportState,
     GraphicsPipelineCreateInfo,
@@ -44,7 +44,7 @@ pub struct GridPushConstants {
     pub view_proj: [[f32; 4]; 4],
     /// Camera position (xyz) and grid extent (w)
     pub camera_pos: [f32; 4],
-    /// Grid parameters: grid_size1, grid_size2, fade_start, fade_end
+    /// Grid parameters: base_spacing, unused, fade_start, fade_end
     pub grid_params: [f32; 4],
 }
 
@@ -57,8 +57,8 @@ impl GridPushConstants {
             view_proj: view_proj.to_cols_array_2d(),
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, grid_extent],
             grid_params: [
-                1.0,                 // grid_size1: fine grid (1 unit)
-                10.0,                // grid_size2: coarse grid (10 units)
+                1.0,                 // base spacing (1 unit) — LOD picks 1/10/100m
+                0.0,                 // reserved
                 fade_distance * 0.5, // fade_start
                 fade_distance,       // fade_end
             ],
@@ -110,7 +110,15 @@ impl GridPass {
                 }),
                 viewport_state: Some(ViewportState::default()),
                 rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None, // See from both sides
+                    cull_mode: CullMode::None,
+                    // Push grid fragments slightly behind coplanar geometry
+                    // so a floor mesh sitting on Z=0 reliably wins the depth
+                    // test instead of flickering against the infinite grid.
+                    depth_bias: Some(DepthBiasState {
+                        constant_factor: 1.0,
+                        clamp: 0.0,
+                        slope_factor: 1.0,
+                    }),
                     ..Default::default()
                 }),
                 multisample_state: Some(MultisampleState::default()),

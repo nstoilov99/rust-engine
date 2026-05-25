@@ -239,6 +239,8 @@ pub enum SecondaryWindowKind {
     InputSettings,
     InputAction,
     InputContext,
+    #[cfg(feature = "editor-debug")]
+    IconInspector,
 }
 
 impl SecondaryWindowKind {
@@ -274,6 +276,8 @@ impl SecondaryWindowKind {
                     .unwrap_or_else(|| key.to_string());
                 format!("IC \u{2014} {}", name)
             }
+            #[cfg(feature = "editor-debug")]
+            SecondaryWindowKind::IconInspector => "Icon Inspector".to_string(),
         }
     }
 
@@ -289,6 +293,8 @@ impl SecondaryWindowKind {
             SecondaryWindowKind::InputSettings => (600, 500),
             SecondaryWindowKind::InputAction => (600, 500),
             SecondaryWindowKind::InputContext => (600, 500),
+            #[cfg(feature = "editor-debug")]
+            SecondaryWindowKind::IconInspector => (640, 800),
         }
     }
 
@@ -304,6 +310,9 @@ impl SecondaryWindowKind {
             SecondaryWindowKind::InputSettings => EditorTab::InputSettings,
             SecondaryWindowKind::InputAction => EditorTab::InputActionEditor(key.to_string()),
             SecondaryWindowKind::InputContext => EditorTab::InputContextEditor(key.to_string()),
+            // IconInspector is not a dockable tab — return Console as a harmless fallback.
+            #[cfg(feature = "editor-debug")]
+            SecondaryWindowKind::IconInspector => EditorTab::Console,
         }
     }
 }

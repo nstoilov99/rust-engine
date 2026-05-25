@@ -24,12 +24,13 @@ use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
     create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
-    CommandHistory, ConsoleCommandSystem, ConsoleLog, EditorCamera, EditorContext, EditorDockState,
-    EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
-    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
-    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
-    PendingWindowRequest, ProfilerPanel, RenameTarget, SecondaryWindowKind, Selection,
-    ViewportSettings, ViewportTexture, WindowConfig,
+    CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene, EditorCamera, EditorContext,
+    EditorDockState, EditorServices, EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext,
+    HierarchyPanel, IconManager, ImportDialogAction, ImportDialogState, ImportPreview,
+    InputActionEditor, InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter,
+    LogMessage, MenuAction, PendingWindowRequest, ProfilerPanel, RenameTarget, SaveAsDialog,
+    SceneId, SceneRegistry, SecondaryWindowKind, Selection, ViewportSettings, ViewportTexture,
+    WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
 use rust_engine::engine::physics::PhysicsWorld;
@@ -137,6 +138,10 @@ pub struct ConsoleState {
 }
 
 /// Scene editing panels and undo history.
+///
+/// The fields `hierarchy_panel`, `selection`, `command_history`, `current_scene_*`,
+/// and `active_dirty` describe the *active* scene. Inactive scene state lives in
+/// [`registry.dormant`](SceneRegistry).
 pub struct SceneEditorState {
     pub hierarchy_panel: HierarchyPanel,
     pub inspector_panel: InspectorPanel,
@@ -145,6 +150,10 @@ pub struct SceneEditorState {
     pub asset_browser: AssetBrowserPanel,
     pub current_scene_relative: String,
     pub current_scene_name: String,
+    /// Whether the active scene has unsaved changes.
+    pub active_dirty: bool,
+    /// Multi-scene registry (active id + dormant tabs).
+    pub registry: SceneRegistry,
     /// Model import dialog state (shown when model files are dropped).
     pub import_dialog: Option<ImportDialogState>,
     /// Open mesh editors keyed by content-relative mesh path.
@@ -153,6 +162,8 @@ pub struct SceneEditorState {
     pub input_action_editor: InputActionEditor,
     /// Open mapping context editors (one per .mappingcontext.ron file).
     pub input_context_editor: InputContextEditor,
+    /// Active "Save As" dialog state (shown when saving an untitled scene).
+    pub save_as_dialog: Option<SaveAsDialog>,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -165,6 +176,10 @@ pub struct EditorUIState {
     pub icons_loaded: bool,
     pub profiler_panel: ProfilerPanel,
     pub input_settings_panel: InputSettingsPanel,
+    #[cfg(feature = "editor-debug")]
+    pub icon_inspector: rust_engine::engine::editor::icon_inspector::IconInspectorWindow,
+    #[cfg(feature = "editor-debug")]
+    pub showcase: rust_engine::engine::editor::showcase::ShowcaseWindow,
 }
 
 /// Play-mode snapshots and build dialog.
@@ -178,6 +193,7 @@ pub struct PlayModeState {
 
 /// Editor-specific state, decomposed into semantic sub-structures.
 pub struct EditorApp {
+    pub services: EditorServices,
     pub viewport: ViewportState,
     pub console: ConsoleState,
     pub scene: SceneEditorState,
@@ -192,6 +208,18 @@ pub struct App {
     pub editor: EditorApp,
     runtime_flags: EditorRuntimeFlags,
     pub pending_window_requests: Vec<PendingWindowRequest>,
+}
+
+/// Find the scene id of the currently-focused viewport tab in the dock, if any.
+fn focused_viewport_id(dock_state: &EditorDockState) -> Option<SceneId> {
+    let (surface, node) = dock_state.dock_state.focused_leaf()?;
+    if let egui_dock::Node::Leaf(leaf) = &dock_state.dock_state[surface][node] {
+        let active = leaf.active.0.min(leaf.tabs.len().saturating_sub(1));
+        if let Some(EditorTab::Viewport(id)) = leaf.tabs.get(active) {
+            return Some(*id);
+        }
+    }
+    None
 }
 
 impl App {
@@ -449,6 +477,7 @@ impl App {
         }
 
         let editor = EditorApp {
+            services: EditorServices::new(),
             viewport: ViewportState {
                 texture: viewport_texture,
                 texture_id: None,
@@ -482,10 +511,13 @@ impl App {
                 asset_browser,
                 current_scene_relative: MAIN_SCENE_RELATIVE.to_string(),
                 current_scene_name: "Main Scene".to_string(),
+                active_dirty: false,
+                registry: SceneRegistry::new(SceneId(0)),
                 import_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
+                save_as_dialog: None,
             },
             ui: EditorUIState {
                 gui,
@@ -496,6 +528,10 @@ impl App {
                 icons_loaded: false,
                 profiler_panel,
                 input_settings_panel: InputSettingsPanel::new(),
+                #[cfg(feature = "editor-debug")]
+                icon_inspector: Default::default(),
+                #[cfg(feature = "editor-debug")]
+                showcase: Default::default(),
             },
             play: PlayModeState {
                 snapshot: None,
@@ -649,13 +685,16 @@ impl App {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
         tracy_client::Client::running().map(|c| c.frame_mark());
-        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
-            im.new_frame();
-        }
         if let Some(gp) = self.core.game_world.resource_mut::<GamepadState>() {
             gp.update();
         }
         self.core.game_world.begin_frame();
+    }
+
+    pub fn end_frame(&mut self) {
+        if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
+            im.clear_transient_state();
+        }
     }
 
     pub fn update(&mut self) {
@@ -1324,6 +1363,13 @@ impl App {
                 .ui
                 .icon_manager
                 .load_asset_browser_icons(self.editor.ui.gui.context(), engine_path);
+            // Load editor icon registry and install theme + icons into egui context
+            self.editor
+                .services
+                .load_icons(self.editor.ui.gui.context());
+            self.editor
+                .services
+                .install_into_context(self.editor.ui.gui.context());
             self.editor.ui.icons_loaded = true;
         }
 
@@ -1495,6 +1541,59 @@ impl App {
             .resource::<InputSubsystem>()
             .map(|s| s.action_set.clone());
 
+        let services = &mut self.editor.services;
+        // Derive dirty flag from the active command history each frame so it stays in sync.
+        // Done BEFORE we take the mutable borrow of command_history below.
+        self.editor.scene.active_dirty = self.editor.scene.command_history.is_dirty();
+        let active_dirty = self.editor.scene.active_dirty;
+        let active_scene_id = self.editor.scene.registry.active_id;
+        let current_scene_name = self.editor.scene.current_scene_name.clone();
+
+        // Pre-compute viewport tab labels in the leaf hosting the active viewport,
+        // in dock-leaf order. The tab_viewer uses this to position the "+" button after
+        // the last tab. Must be done BEFORE taking the &mut borrow of dock_state.
+        let viewport_tab_labels: Vec<String> = {
+            let mut labels = Vec::new();
+            for (_, node) in self.editor.ui.dock_state.dock_state.iter_all_nodes() {
+                if let egui_dock::Node::Leaf(leaf) = node {
+                    let has_active = leaf.tabs.iter().any(|t| {
+                        matches!(t, EditorTab::Viewport(id) if *id == active_scene_id)
+                    });
+                    if has_active {
+                        for t in leaf.tabs.iter() {
+                            if let EditorTab::Viewport(id) = t {
+                                let name = if *id == active_scene_id {
+                                    if current_scene_name.is_empty() {
+                                        "Untitled Scene".to_string()
+                                    } else {
+                                        current_scene_name.clone()
+                                    }
+                                } else if let Some(d) = self
+                                    .editor
+                                    .scene
+                                    .registry
+                                    .dormant
+                                    .iter()
+                                    .find(|d| d.id == *id)
+                                {
+                                    if d.display_name.is_empty() {
+                                        "Untitled Scene".to_string()
+                                    } else {
+                                        d.display_name.clone()
+                                    }
+                                } else {
+                                    "(missing)".to_string()
+                                };
+                                labels.push(name);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            labels
+        };
+
         let show_profiler = &mut self.editor.ui.show_profiler;
         let hierarchy_panel = &mut self.editor.scene.hierarchy_panel;
         let inspector_panel = &mut self.editor.scene.inspector_panel;
@@ -1528,6 +1627,7 @@ impl App {
         };
 
         let asset_browser = &mut self.editor.scene.asset_browser;
+        let save_as_dialog = &mut self.editor.scene.save_as_dialog;
         let mesh_editors = &mut self.editor.scene.mesh_editors;
         let ia_open_actions = &mut self.editor.scene.input_action_editor.open_actions;
         let ic_open_contexts = &mut self.editor.scene.input_context_editor.open_contexts;
@@ -1536,10 +1636,15 @@ impl App {
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
 
+        #[cfg(feature = "editor-debug")]
+        let showcase = &mut self.editor.ui.showcase;
+
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
         let mut import_action = ImportDialogAction::None;
         let mut undock_request: Option<EditorTab> = None;
+        let mut close_scene_request: Option<SceneId> = None;
+        let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
 
         let gui_result =
             self
@@ -1555,9 +1660,11 @@ impl App {
                         build_dialog,
                         console_messages,
                         self.runtime_flags.benchmark_tools_enabled,
+                        icon_manager,
                     );
 
                     let editor_ctx = EditorContext {
+                        services,
                         world,
                         selection,
                         hierarchy_panel,
@@ -1592,13 +1699,28 @@ impl App {
                         ic_available_actions,
                         undock_request: &mut undock_request,
                         dock_area_rect: ctx.available_rect(),
+                        current_scene_name: &current_scene_name,
+                        active_dirty,
+                        active_scene_id,
+                        dormant_scenes: dormant_scenes_snapshot,
+                        close_scene_request: &mut close_scene_request,
+                        viewport_tab_labels: &viewport_tab_labels,
                     };
 
                     let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
 
                     DockArea::new(&mut dock_state.dock_state)
                         .style(create_editor_dock_style(ctx))
+                        .show_leaf_close_all_buttons(false)
+                        .show_leaf_collapse_buttons(false)
                         .show(ctx, &mut tab_viewer);
+
+                    // Debug windows (editor-debug feature)
+                    // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
+                    #[cfg(feature = "editor-debug")]
+                    {
+                        showcase.show(ctx);
+                    }
 
                     // Show file drop overlay when hovering external files
                     if is_hovering_files {
@@ -1631,6 +1753,34 @@ impl App {
                     // Render import dialog if active
                     if let Some(ref mut dialog_state) = import_dialog {
                         import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(ctx, dialog_state);
+                    }
+
+                    // Render Save As dialog if active
+                    let mut save_as_close = false;
+                    if let Some(dlg) = save_as_dialog.as_mut() {
+                        egui::Window::new("Save Scene As")
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                            .show(ctx, |ui| {
+                                ui.label("Filename (saved to content/scenes/<name>.scene.ron):");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dlg.filename)
+                                        .desired_width(300.0),
+                                );
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Save").clicked() {
+                                        dlg.commit = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        save_as_close = true;
+                                    }
+                                });
+                            });
+                        if save_as_close {
+                            *save_as_dialog = None;
+                        }
                     }
                 });
 
@@ -1698,12 +1848,40 @@ impl App {
             self.undock_tab(tab);
         }
 
+        // Process Save As dialog commit
+        let save_as_commit = self
+            .editor
+            .scene
+            .save_as_dialog
+            .as_ref()
+            .map(|d| (d.commit, d.filename.clone()));
+        if let Some((true, filename)) = save_as_commit {
+            self.editor.scene.save_as_dialog = None;
+            self.commit_save_as(&filename);
+        }
+
+        // Process viewport tab close requests (deferred from on_close).
+        if let Some(scene_id) = close_scene_request {
+            self.close_scene_tab(scene_id);
+        }
+
+        // Detect tab switch: if the dock's currently-focused viewport tab is not the
+        // active scene id, perform a swap.
+        if let Some(focused_scene_id) = focused_viewport_id(&self.editor.ui.dock_state) {
+            if focused_scene_id != self.editor.scene.registry.active_id {
+                self.switch_to_scene(focused_scene_id);
+            }
+        }
+
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
         }
 
         match menu_action {
             MenuAction::None => {}
+            MenuAction::NewScene => {
+                let _ = self.create_new_scene();
+            }
             MenuAction::SaveScene => self.save_active_scene(),
             MenuAction::Exit => {
                 self.save_layout_on_exit();
@@ -1753,6 +1931,29 @@ impl App {
             MenuAction::Resume => self.resume_play_mode(),
             MenuAction::Stop => self.stop_play_mode(),
             MenuAction::RebuildShaders => self.rebuild_all_shaders(),
+            #[cfg(feature = "editor-debug")]
+            MenuAction::ToggleIconInspector => {
+                let is_open = self.editor.ui.icon_inspector.open;
+                if is_open {
+                    // Close: setting open=false will cause the secondary window to be removed by retain logic
+                    self.editor.ui.icon_inspector.open = false;
+                } else {
+                    self.editor.ui.icon_inspector.open = true;
+                    let kind = SecondaryWindowKind::IconInspector;
+                    let (width, height) = kind.default_size();
+                    self.pending_window_requests.push(PendingWindowRequest {
+                        editor_key: "__icon_inspector__".to_string(),
+                        kind,
+                        title: kind.window_title(""),
+                        width,
+                        height,
+                    });
+                }
+            }
+            #[cfg(feature = "editor-debug")]
+            MenuAction::ToggleShowcase => {
+                self.editor.ui.showcase.open = !self.editor.ui.showcase.open;
+            }
         }
 
         // Process OS file drops (files dragged from Windows Explorer / file manager)
@@ -1790,11 +1991,40 @@ impl App {
                                 continue;
                             }
 
-                            let relative = meta_path.to_string_lossy();
+                            let relative = meta_path.to_string_lossy().to_string();
 
-                            self.core.game_world.reset_transients(false);
+                            // If this scene is already the active tab, nothing to do.
+                            if relative == self.editor.scene.current_scene_relative {
+                                continue;
+                            }
+                            // If it's open in another tab, just focus that tab.
+                            if let Some(existing_id) = self
+                                .editor
+                                .scene
+                                .registry
+                                .find_dormant_by_path(&relative)
+                            {
+                                self.switch_to_scene(existing_id);
+                                continue;
+                            }
+
+                            // Open in a new tab: park current, allocate id, load fresh.
+                            let new_id = self.editor.scene.registry.allocate_id();
+                            let parked = self.park_active_scene();
+                            self.editor.scene.registry.park(parked);
+
+                            self.core.game_world = self.fresh_scene_world();
+                            self.editor.scene.registry.active_id = new_id;
+                            self.editor.scene.current_scene_relative = relative.clone();
+                            self.editor.scene.current_scene_name = String::new();
+                            self.editor.scene.active_dirty = false;
                             self.editor.scene.selection.clear();
-                            self.core.game_world.resources_mut().insert(PhysicsWorld::new());
+                            self.editor.scene.command_history.clear();
+                            self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
+                            self.editor
+                                .ui
+                                .dock_state
+                                .open_viewport_tab(new_id);
 
                             match load_scene(self.core.game_world.hecs_mut(), &relative) {
                                 Ok((scene_name, root_entities)) => {
@@ -1802,7 +2032,6 @@ impl App {
                                         .scene
                                         .hierarchy_panel
                                         .set_root_order(root_entities);
-                                    self.editor.scene.current_scene_relative = relative.to_string();
                                     self.editor.scene.current_scene_name = scene_name.clone();
                                     {
                                         self.core.game_world.resources_mut().remove::<TransformCache>();
@@ -2464,6 +2693,26 @@ impl App {
         packet.texture_binds = gui_result.texture_binds;
         packet.viewport_texture_id = self.editor.viewport.texture_id;
 
+        // CRITICAL: re-sync the viewport dimensions and view_projection with the size
+        // the egui layout just produced (it ran *after* the initial packet build above
+        // and updated `viewport.size` to the current available rect). Without this,
+        // the 3D scene is rendered at the previous frame's size while egui paints the
+        // texture into the new-size rect, producing visible scaling artifacts on every
+        // resize step (banding/blocky stripes on meshes and shadows during fast drag).
+        let (vp_w_now, vp_h_now) = self.editor.viewport.size;
+        if vp_w_now > 0 && vp_h_now > 0 {
+            self.editor
+                .viewport
+                .camera
+                .set_viewport_size(vp_w_now as f32, vp_h_now as f32);
+            self.core
+                .renderer
+                .camera_3d
+                .set_viewport_size(vp_w_now as f32, vp_h_now as f32);
+            packet.viewport_dimensions = Some([vp_w_now, vp_h_now]);
+            packet.view_proj = self.editor.viewport.camera.view_projection_matrix();
+        }
+
         if let Some(ref rt) = self.core.render_thread {
             if let Err(e) = rt.send(packet) {
                 log::error!("editor: failed to send frame packet: {}", e);
@@ -2473,9 +2722,186 @@ impl App {
         Ok(())
     }
 
+    /// Build a fresh `GameWorld` populated with the standard scene-local resources.
+    /// Shared globals (asset_manager Arc, input action set) are sourced from the active world.
+    fn fresh_scene_world(&self) -> GameWorld {
+        let mut world = GameWorld::new();
+        world
+            .resources_mut()
+            .insert(self.core.asset_manager.clone());
+        world.resources_mut().insert(PhysicsWorld::new());
+        world.resources_mut().insert(TransformCache::new());
+        world.resources_mut().insert(AudioReloadQueue::new());
+        if let Some(audio_engine) = AudioEngine::new() {
+            world.resources_mut().insert(audio_engine);
+        }
+        world.resources_mut().insert(InputManager::new());
+        let action_set = enhanced_serialization::load_action_set(
+            &enhanced_serialization::default_action_set_path(),
+        )
+        .or_else(|| {
+            serialization::load_action_map(&serialization::default_bindings_path())
+                .map(|legacy| enhanced_serialization::migrate_legacy_action_map(&legacy))
+        })
+        .unwrap_or_else(default_action_set);
+        let mut subsystem = InputSubsystem::new(action_set);
+        subsystem.add_context("global");
+        world.resources_mut().insert(subsystem);
+        world.resources_mut().insert(ActionState::new());
+        world
+            .resources_mut()
+            .insert(rust_engine::engine::ecs::events::Events::<InputEvent>::new());
+        if let Some(gamepad_state) = GamepadState::try_new() {
+            world.resources_mut().insert(gamepad_state);
+        }
+        world
+    }
+
+    /// Move the currently-active scene's state into a [`DormantScene`] record
+    /// (preserving its id) and return it.
+    fn park_active_scene(&mut self) -> DormantScene {
+        let id = self.editor.scene.registry.active_id;
+        let mut parked_world = GameWorld::new(); // placeholder; will be swapped out
+        std::mem::swap(&mut parked_world, &mut self.core.game_world);
+        let mut parked_selection = Selection::new();
+        std::mem::swap(&mut parked_selection, &mut self.editor.scene.selection);
+        let mut parked_history = CommandHistory::new(100);
+        std::mem::swap(&mut parked_history, &mut self.editor.scene.command_history);
+        let parked_hierarchy = self.editor.scene.hierarchy_panel.root_order().to_vec();
+        DormantScene {
+            id,
+            relative_path: std::mem::take(&mut self.editor.scene.current_scene_relative),
+            display_name: std::mem::take(&mut self.editor.scene.current_scene_name),
+            dirty: std::mem::replace(&mut self.editor.scene.active_dirty, false),
+            world: parked_world,
+            selection: parked_selection,
+            command_history: parked_history,
+            hierarchy_root_order: parked_hierarchy,
+        }
+    }
+
+    /// Restore a [`DormantScene`] into the live active slots, replacing the current
+    /// active scene contents (which should have been parked first).
+    fn restore_dormant_scene(&mut self, mut dormant: DormantScene) {
+        self.editor.scene.registry.active_id = dormant.id;
+        self.editor.scene.current_scene_relative = std::mem::take(&mut dormant.relative_path);
+        self.editor.scene.current_scene_name = std::mem::take(&mut dormant.display_name);
+        self.editor.scene.active_dirty = dormant.dirty;
+        std::mem::swap(&mut dormant.world, &mut self.core.game_world);
+        std::mem::swap(&mut dormant.selection, &mut self.editor.scene.selection);
+        std::mem::swap(&mut dormant.command_history, &mut self.editor.scene.command_history);
+        self.editor
+            .scene
+            .hierarchy_panel
+            .set_root_order(dormant.hierarchy_root_order);
+    }
+
+    /// Create a new empty scene as a fresh tab and make it active.
+    /// Returns the new scene id (and pushes a viewport tab into the dock).
+    fn create_new_scene(&mut self) -> Option<SceneId> {
+        if self.play_mode() != PlayMode::Edit {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Stop play mode before creating a new scene".to_string(),
+            ));
+            return None;
+        }
+
+        let new_id = self.editor.scene.registry.allocate_id();
+
+        // Park the current active state into the registry.
+        let parked = self.park_active_scene();
+        self.editor.scene.registry.park(parked);
+
+        // Place a fresh world and reset editor state for the new scene.
+        self.core.game_world = self.fresh_scene_world();
+        self.editor.scene.registry.active_id = new_id;
+        self.editor.scene.current_scene_relative = String::new();
+        self.editor.scene.current_scene_name = "Untitled Scene".to_string();
+        self.editor.scene.active_dirty = false;
+        self.editor.scene.selection.clear();
+        self.editor.scene.command_history.clear();
+        self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
+
+        // Push a new viewport tab into the existing viewport leaf and focus it.
+        self.editor
+            .ui
+            .dock_state
+            .open_viewport_tab(new_id);
+
+        self.editor
+            .console
+            .messages
+            .push(LogMessage::info("New scene created".to_string()));
+        Some(new_id)
+    }
+
+    /// Switch the active scene to `target_id`. No-op if it is already active.
+    fn switch_to_scene(&mut self, target_id: SceneId) {
+        if self.editor.scene.registry.active_id == target_id {
+            return;
+        }
+        let Some(target) = self.editor.scene.registry.take_dormant(target_id) else {
+            log::warn!("switch_to_scene: target {} not found in dormant", target_id.0);
+            return;
+        };
+        let parked = self.park_active_scene();
+        self.editor.scene.registry.park(parked);
+        self.restore_dormant_scene(target);
+    }
+
+    /// Close (and drop) a scene tab. If it's the active tab and other tabs exist,
+    /// switches to one of the others first. Refuses to close the last scene tab.
+    ///
+    /// `on_close` already removed the dock tab by the time we get here, so the
+    /// remaining-viewport-tabs count of 0 means we just closed the only one.
+    fn close_scene_tab(&mut self, id: SceneId) {
+        let remaining_viewport_tabs: usize = self
+            .editor
+            .ui
+            .dock_state
+            .dock_state
+            .iter_all_nodes()
+            .filter_map(|(_, node)| match node {
+                egui_dock::Node::Leaf(leaf) => Some(leaf),
+                _ => None,
+            })
+            .flat_map(|leaf| leaf.tabs.iter())
+            .filter(|t| matches!(t, EditorTab::Viewport(_)))
+            .count();
+
+        if remaining_viewport_tabs == 0 {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Cannot close the last scene tab".to_string(),
+            ));
+            // Re-add the tab since egui_dock has already removed it.
+            self.editor.ui.dock_state.open_viewport_tab(id);
+            return;
+        }
+
+        if id == self.editor.scene.registry.active_id {
+            // Pick any other dormant id as the new active.
+            let next_active = self.editor.scene.registry.dormant.first().map(|d| d.id);
+            if let Some(next_id) = next_active {
+                self.switch_to_scene(next_id);
+            }
+        }
+
+        // Now `id` should be in dormant; drop it.
+        self.editor.scene.registry.drop_dormant(id);
+    }
+
     fn save_active_scene(&mut self) {
         if self.play_mode() != PlayMode::Edit {
             log::warn!("Cannot save scene during play mode");
+            return;
+        }
+
+        // Untitled scene: open the Save As dialog instead of saving silently.
+        if self.editor.scene.current_scene_relative.is_empty() {
+            if self.editor.scene.save_as_dialog.is_none() {
+                let initial = self.editor.scene.current_scene_name.clone();
+                self.editor.scene.save_as_dialog = Some(SaveAsDialog::new(&initial));
+            }
             return;
         }
 
@@ -2491,6 +2917,8 @@ impl App {
         ) {
             Ok(_) => {
                 println!("Scene saved to {}", scene_path.display());
+                self.editor.scene.active_dirty = false;
+                self.editor.scene.command_history.mark_saved();
                 self.editor
                     .console
                     .messages
@@ -2501,6 +2929,54 @@ impl App {
                 self.editor.console.messages.push(LogMessage::error(format!(
                     "Failed to save scene '{}': {}",
                     scene_relative, error
+                )));
+            }
+        }
+    }
+
+    /// Commit the Save As dialog: persist the active scene to the chosen filename
+    /// and update the active scene's path/name accordingly.
+    fn commit_save_as(&mut self, filename: &str) {
+        let trimmed = filename.trim();
+        if trimmed.is_empty() {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Save As: filename cannot be empty".to_string(),
+            ));
+            return;
+        }
+        let relative = format!("scenes/{}.scene.ron", trimmed);
+        let scene_path = asset_source::resolve(&relative);
+        // Use the trimmed filename as the display name if the scene is untitled.
+        let display_name = if self.editor.scene.current_scene_name.is_empty()
+            || self.editor.scene.current_scene_name == "Untitled Scene"
+        {
+            trimmed.to_string()
+        } else {
+            self.editor.scene.current_scene_name.clone()
+        };
+
+        match save_scene(
+            self.core.game_world.hecs(),
+            &scene_path.to_string_lossy(),
+            &display_name,
+            self.editor.scene.hierarchy_panel.root_order(),
+        ) {
+            Ok(_) => {
+                println!("Scene saved to {}", scene_path.display());
+                self.editor.scene.current_scene_relative = relative.clone();
+                self.editor.scene.current_scene_name = display_name;
+                self.editor.scene.active_dirty = false;
+                self.editor.scene.command_history.mark_saved();
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("Saved scene: {}", relative)));
+            }
+            Err(error) => {
+                eprintln!("Save failed: {}", error);
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to save scene '{}': {}",
+                    relative, error
                 )));
             }
         }

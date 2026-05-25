@@ -1,0 +1,118 @@
+//! Editor theme system — design tokens, palette, typography, density, shadows.
+//!
+//! The canonical theme instance lives in `EditorServices`. A clone (via `Arc`)
+//! is also stored in `egui::Context::data()` so widgets can read it via
+//! `ui.theme()` without needing a `&EditorServices` parameter.
+
+pub mod apply;
+pub mod density;
+pub mod palette;
+pub mod shadows;
+pub mod typography;
+
+pub use density::{Density, SpacingTokens};
+pub use palette::{ContrastIssue, Palette, SemanticColors};
+pub use shadows::{ShadowSpec, ShadowTokens};
+pub use typography::Typography;
+
+/// State color kinds for semantic UI indicators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateKind {
+    Disabled,
+    Mixed,
+    Overridden,
+    Error,
+    Warning,
+    Success,
+    Info,
+}
+
+/// Central theme struct — holds all design tokens.
+#[derive(Clone, Debug)]
+pub struct EditorTheme {
+    pub palette: Palette,
+    pub typography: Typography,
+    pub spacing: SpacingTokens,
+    pub shadows: ShadowTokens,
+    pub density: Density,
+}
+
+impl EditorTheme {
+    /// Build the default dark theme at the given density.
+    pub fn dark_default() -> Self {
+        Self {
+            palette: Palette::dark_default(),
+            typography: Typography::comfortable(),
+            spacing: SpacingTokens::comfortable(),
+            shadows: ShadowTokens::dark_default(),
+            density: Density::Comfortable,
+        }
+    }
+
+    /// Returns a new theme with the specified density applied.
+    /// Typography and spacing are scaled relative to the Comfortable baseline.
+    pub fn with_density(&self, density: Density) -> Self {
+        Self {
+            palette: self.palette.clone(),
+            typography: Typography::comfortable().scaled(density.font_factor()),
+            spacing: SpacingTokens::comfortable().scaled(density.spacing_factor()),
+            shadows: self.shadows.clone(),
+            density,
+        }
+    }
+
+    /// Minimal fallback theme for pre-Step-1 compatibility.
+    /// Used by `UiExt::theme()` when the real theme hasn't been installed yet.
+    pub fn fallback() -> Self {
+        Self::dark_default()
+    }
+
+    /// Verify WCAG AA compliance. Delegates to `Palette::verify_wcag_aa()`.
+    pub fn verify_wcag_aa(&self) -> Vec<ContrastIssue> {
+        self.palette.verify_wcag_aa()
+    }
+
+    /// Map a `StateKind` to its corresponding semantic color.
+    pub fn state_color(&self, kind: StateKind) -> egui::Color32 {
+        match kind {
+            StateKind::Disabled => self.palette.text_disabled,
+            StateKind::Mixed => self.palette.semantic.mixed,
+            StateKind::Overridden => self.palette.semantic.overridden,
+            StateKind::Error => self.palette.semantic.error,
+            StateKind::Warning => self.palette.semantic.warning,
+            StateKind::Success => self.palette.semantic.success,
+            StateKind::Info => self.palette.semantic.info,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dark_default_passes_wcag() {
+        let theme = EditorTheme::dark_default();
+        let issues = theme.verify_wcag_aa();
+        assert!(
+            issues.is_empty(),
+            "WCAG AA failures:\n{}",
+            issues.iter().map(|i| format!("  {i}")).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    #[test]
+    fn density_toggle_changes_spacing() {
+        let base = EditorTheme::dark_default();
+        let compact = base.with_density(Density::Compact);
+        assert!(compact.spacing.item_spacing_x < base.spacing.item_spacing_x);
+        assert!(compact.typography.body < base.typography.body);
+    }
+
+    #[test]
+    fn state_color_returns_semantic() {
+        let theme = EditorTheme::dark_default();
+        assert_eq!(theme.state_color(StateKind::Error), theme.palette.semantic.error);
+        assert_eq!(theme.state_color(StateKind::Success), theme.palette.semantic.success);
+    }
+}
