@@ -48,6 +48,10 @@ pub enum AssetBrowserIcon {
     // Arrow icons for expand/collapse
     ArrowDown,
     ArrowRight,
+    // Toolbar toggles
+    FolderBrowser,
+    GridView,
+    ListView,
 }
 
 impl AssetBrowserIcon {
@@ -63,6 +67,9 @@ impl AssetBrowserIcon {
             AssetBrowserIcon::FileCode => "code-file",
             AssetBrowserIcon::ArrowDown => "arrow-down",
             AssetBrowserIcon::ArrowRight => "arrow-right",
+            AssetBrowserIcon::FolderBrowser => "folder-browser",
+            AssetBrowserIcon::GridView => "grid-view",
+            AssetBrowserIcon::ListView => "list-view",
         }
     }
 
@@ -78,6 +85,9 @@ impl AssetBrowserIcon {
             AssetBrowserIcon::FileCode,
             AssetBrowserIcon::ArrowDown,
             AssetBrowserIcon::ArrowRight,
+            AssetBrowserIcon::FolderBrowser,
+            AssetBrowserIcon::GridView,
+            AssetBrowserIcon::ListView,
         ]
     }
 }
@@ -328,6 +338,57 @@ impl IconManager {
     pub fn set_tint_color(&mut self, color: Color32) {
         self.tint_color = color;
     }
+}
+
+/// Render a compact toggle button for an asset browser icon.
+///
+/// Falls back to the provided unicode glyph when the icon failed to load
+/// so the toolbar stays usable even if the SVG/PNG is missing.
+pub fn asset_icon_toggle(
+    ui: &mut egui::Ui,
+    icon_manager: Option<&IconManager>,
+    icon: AssetBrowserIcon,
+    selected: bool,
+    fallback_glyph: &str,
+    tooltip: &str,
+) -> egui::Response {
+    let texture_id = icon_manager
+        .and_then(|m| m.get_asset_icon(icon))
+        .map(|t| t.id());
+
+    let response = if let Some(tex) = texture_id {
+        let size = egui::vec2(16.0, 16.0);
+        let (rect, response) =
+            ui.allocate_exact_size(size + egui::vec2(4.0, 4.0), egui::Sense::click());
+
+        if ui.is_rect_visible(rect) {
+            let visuals = if selected {
+                ui.visuals().widgets.active
+            } else if response.hovered() {
+                ui.visuals().widgets.hovered
+            } else {
+                ui.visuals().widgets.inactive
+            };
+            ui.painter().rect_filled(rect, 2.0, visuals.bg_fill);
+
+            let tint = if selected {
+                Color32::WHITE
+            } else if response.hovered() {
+                Color32::from_gray(230)
+            } else {
+                Color32::from_gray(180)
+            };
+            let image_rect = egui::Rect::from_center_size(rect.center(), size);
+            egui::Image::new(egui::load::SizedTexture::new(tex, size))
+                .tint(tint)
+                .paint_at(ui, image_rect);
+        }
+        response
+    } else {
+        ui.selectable_label(selected, fallback_glyph)
+    };
+
+    response.on_hover_text(tooltip)
 }
 
 /// Render an icon button with optional selection state
