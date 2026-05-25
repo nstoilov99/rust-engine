@@ -27,6 +27,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 #[cfg(feature = "editor")]
 use rust_engine::engine::editor::{SecondaryWindow, SecondaryWindowKind};
 #[cfg(feature = "editor")]
+use rust_engine::engine::editor::secondary_window_session::{SecondaryWindowSession, SecondaryWindowState};
+#[cfg(feature = "editor")]
 use rust_engine::engine::input::action::{GamepadAxisType, GamepadButton, InputSource};
 #[cfg(feature = "editor")]
 use rust_engine::engine::input::GamepadState;
@@ -58,6 +60,37 @@ impl GameApp {
             should_exit: false,
             is_minimized: false,
             secondary_windows: HashMap::new(),
+        }
+    }
+
+    /// Persist the set of currently-open secondary windows so they can be
+    /// restored on next launch.
+    fn save_secondary_window_session(&self) {
+        let states: Vec<SecondaryWindowState> = self
+            .secondary_windows
+            .values()
+            .map(|sec| {
+                let size = sec.window.inner_size();
+                let pos = sec.window.outer_position().unwrap_or_default();
+                SecondaryWindowState {
+                    kind: sec.kind.as_session_string().to_string(),
+                    editor_key: sec.editor_key.clone(),
+                    x: pos.x,
+                    y: pos.y,
+                    width: size.width,
+                    height: size.height,
+                    maximized: sec.window.is_maximized(),
+                }
+            })
+            .collect();
+
+        let session = SecondaryWindowSession {
+            version: 1,
+            windows: states,
+        };
+
+        if let Err(e) = session.save_to_default() {
+            eprintln!("Warning: Failed to save secondary window session: {}", e);
         }
     }
 }
@@ -97,9 +130,31 @@ impl ApplicationHandler for GameApp {
         };
 
         match App::new(window.clone(), self.runtime_flags, &plugin::ClientGamePlugin) {
-            Ok(app) => {
+            Ok(mut app) => {
                 app.print_controls();
                 println!("Engine ready!\n");
+
+                // Restore secondary windows from the previous session.
+                let session = SecondaryWindowSession::load_or_default();
+                for state in &session.windows {
+                    if let Some(kind) = SecondaryWindowKind::from_session_string(&state.kind) {
+                        let (default_w, default_h) = kind.default_size();
+                        app.pending_window_requests.push(
+                            rust_engine::engine::editor::PendingWindowRequest {
+                                editor_key: state.editor_key.clone(),
+                                kind,
+                                title: kind.window_title(&state.editor_key),
+                                width: default_w,
+                                height: default_h,
+                                restored_position: Some([state.x, state.y]),
+                                restored_size: Some([state.width, state.height]),
+                                start_maximized: state.maximized,
+                                focus_existing_if_open: true,
+                            },
+                        );
+                    }
+                }
+
                 self.app = Some(app);
             }
             Err(e) => {
@@ -143,7 +198,9 @@ impl ApplicationHandler for GameApp {
                             SecondaryWindowKind::IconInspector => {
                                 app.editor.ui.icon_inspector.open = false;
                             }
-                            // Built-in panels: closing the window just closes it, no state cleanup needed
+                            // Asset editor windows + built-in panels: no per-editor state
+                            // cleanup needed — state outlives the window in EditorServices
+                            // maps (for asset editors) or has no persistent state (for panels).
                             _ => {}
                         }
                     }
@@ -167,6 +224,7 @@ impl ApplicationHandler for GameApp {
         match &event {
             WindowEvent::CloseRequested => {
                 app.save_layout_on_exit();
+                self.save_secondary_window_session();
                 println!("Closing...");
                 self.should_exit = true;
                 event_loop.exit();
@@ -239,16 +297,37 @@ impl ApplicationHandler for GameApp {
             let device = app.core.renderer.gpu.device.clone();
             let queue = app.core.renderer.gpu.queue.clone();
             for req in pending {
-                // Skip if a window for this key+kind already exists
-                let already_exists = secondary_windows.values().any(|s| s.editor_key == req.editor_key && s.kind == req.kind);
+                // Focus existing window if one is already open for this key+kind
+                // (Option B — O(n) scan; acceptable for typical editor sessions with <50 windows)
+                if req.focus_existing_if_open {
+                    let existing = secondary_windows.values().find(|s| {
+                        s.kind == req.kind && normalize_editor_key(&s.editor_key) == normalize_editor_key(&req.editor_key)
+                    });
+                    if let Some(existing) = existing {
+                        existing.window.focus_window();
+                        existing.window.set_minimized(false);
+                        continue;
+                    }
+                }
+                // Also skip duplicates even when focus_existing_if_open is false (session restore)
+                let already_exists = secondary_windows.values().any(|s| {
+                    s.kind == req.kind && normalize_editor_key(&s.editor_key) == normalize_editor_key(&req.editor_key)
+                });
                 if already_exists {
                     continue;
                 }
-                let win_attrs = WindowAttributes::default()
+                let size = req.restored_size.unwrap_or([req.width, req.height]);
+                let mut win_attrs = WindowAttributes::default()
                     .with_title(&req.title)
-                    .with_inner_size(LogicalSize::new(req.width, req.height));
+                    .with_inner_size(LogicalSize::new(size[0], size[1]));
+                if let Some([x, y]) = req.restored_position {
+                    win_attrs = win_attrs.with_position(LogicalPosition::new(x, y));
+                }
                 match event_loop.create_window(win_attrs) {
                     Ok(win) => {
+                        if req.start_maximized {
+                            win.set_maximized(true);
+                        }
                         let win = Arc::new(win);
                         let win_id = win.id();
                         match SecondaryWindow::new(
@@ -411,6 +490,17 @@ impl ApplicationHandler for GameApp {
         #[cfg(feature = "editor-debug")]
         let icon_registry = &mut app.editor.services.icons;
 
+        // Asset editor state maps (extracted from services for split borrows)
+        let mat_editors = &mut app.editor.services.material_editors;
+        let matinst_editors = &mut app.editor.services.material_instance_editors;
+        let tex_editors = &mut app.editor.services.texture_editors;
+        let audio_editors = &mut app.editor.services.audio_editors;
+        let audio_first_open = &mut app.editor.services.audio_first_open_shown;
+        let animclip_editors = &mut app.editor.services.animation_clip_editors;
+        let animgraph_editors = &mut app.editor.services.animation_graph_editors;
+        let matgraph_editors = &mut app.editor.services.material_graph_editors;
+        let prefab_editors = &mut app.editor.services.prefab_editors;
+
         let mut dock_requests: Vec<(String, SecondaryWindowKind)> = Vec::new();
 
         for sec in secondary_windows.values_mut() {
@@ -550,6 +640,174 @@ impl ApplicationHandler for GameApp {
                         log::error!("Console window render error: {}", e);
                     }
                 }
+                SecondaryWindowKind::Material => {
+                    let editor_key = sec.editor_key.clone();
+                    if !mat_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        match rust_engine::engine::editor::asset_editors::material::MaterialEditorState::open(full_path) {
+                            Ok(s) => { mat_editors.insert(editor_key.clone(), s); }
+                            Err(e) => { log::error!("Failed to open material editor for {}: {}", editor_key, e); }
+                        }
+                    }
+                    if let Some(state) = mat_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::material::show_material_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("Material editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::MaterialInstance => {
+                    let editor_key = sec.editor_key.clone();
+                    if !matinst_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        match rust_engine::engine::editor::asset_editors::material_instance::MaterialInstanceEditorState::open(full_path) {
+                            Ok(s) => { matinst_editors.insert(editor_key.clone(), s); }
+                            Err(e) => { log::error!("Failed to open material instance editor for {}: {}", editor_key, e); }
+                        }
+                    }
+                    if let Some(state) = matinst_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::material_instance::show_material_instance_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("Material instance editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::Texture => {
+                    let editor_key = sec.editor_key.clone();
+                    if !tex_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        tex_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::texture::TextureEditorState::open(full_path),
+                        );
+                    }
+                    if let Some(state) = tex_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::texture::show_texture_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("Texture editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::Audio => {
+                    let editor_key = sec.editor_key.clone();
+                    if !audio_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        audio_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::audio::AudioEditorState::open(full_path),
+                        );
+                        if !*audio_first_open {
+                            *audio_first_open = true;
+                            log::info!("Audio assets now open in the Audio editor. Use the Play button to preview.");
+                        }
+                    }
+                    if let Some(state) = audio_editors.get_mut(&editor_key) {
+                        // Audio play/stop is deferred — we can't access game_world here
+                        // (it's borrowed via `world`). Show the editor without live playback status.
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                // Pass false for is_playing; live status requires AudioEngine access
+                                // which is not available in this borrow scope.
+                                let _action = rust_engine::engine::editor::asset_editors::audio::show_audio_editor(ui, state, false);
+                            });
+                        }) {
+                            log::error!("Audio editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::AnimationClip => {
+                    let editor_key = sec.editor_key.clone();
+                    if !animclip_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        animclip_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::animation_clip::AnimationClipEditorState::open(full_path),
+                        );
+                    }
+                    if let Some(state) = animclip_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::animation_clip::show_animation_clip_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("AnimationClip editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::AnimationGraph => {
+                    let editor_key = sec.editor_key.clone();
+                    if !animgraph_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        animgraph_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::animation_graph::AnimationGraphEditorState::open(full_path),
+                        );
+                    }
+                    if let Some(state) = animgraph_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::animation_graph::show_animation_graph_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("AnimationGraph editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::MaterialGraph => {
+                    let editor_key = sec.editor_key.clone();
+                    if !matgraph_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        matgraph_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::material_graph::MaterialGraphEditorState::open(full_path),
+                        );
+                    }
+                    if let Some(state) = matgraph_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::material_graph::show_material_graph_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("MaterialGraph editor window render error: {}", e);
+                        }
+                    }
+                }
+                SecondaryWindowKind::Prefab => {
+                    let editor_key = sec.editor_key.clone();
+                    if !prefab_editors.contains_key(&editor_key) {
+                        let full_path = std::path::Path::new("content").join(&editor_key);
+                        prefab_editors.insert(
+                            editor_key.clone(),
+                            rust_engine::engine::editor::asset_editors::prefab::PrefabEditorState::open(full_path),
+                        );
+                    }
+                    if let Some(state) = prefab_editors.get_mut(&editor_key) {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                rust_engine::engine::editor::asset_editors::prefab::show_prefab_editor(ui, state);
+                            });
+                        }) {
+                            log::error!("Prefab editor window render error: {}", e);
+                        }
+                    }
+                }
                 #[cfg(feature = "editor-debug")]
                 SecondaryWindowKind::IconInspector => {
                     if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
@@ -597,6 +855,7 @@ impl ApplicationHandler for GameApp {
         if let Some(app) = &self.app {
             app.save_layout_on_exit();
         }
+        self.save_secondary_window_session();
         println!("Application exiting");
     }
 }
@@ -731,6 +990,12 @@ impl ApplicationHandler for GameApp {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         println!("Application exiting");
     }
+}
+
+/// Normalize an editor key for comparison: lowercase + forward slashes.
+#[cfg(feature = "editor")]
+fn normalize_editor_key(key: &str) -> String {
+    key.to_lowercase().replace('\\', "/")
 }
 
 /// Render a "Dock to Editor" button at the top of a secondary window.

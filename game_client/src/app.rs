@@ -629,6 +629,10 @@ impl App {
                 title,
                 width,
                 height,
+                restored_position: None,
+                restored_size: None,
+                start_maximized: false,
+                focus_existing_if_open: true,
             });
         }
     }
@@ -1947,6 +1951,10 @@ impl App {
                         title: kind.window_title(""),
                         width,
                         height,
+                        restored_position: None,
+                        restored_size: None,
+                        start_maximized: false,
+                        focus_existing_if_open: true,
                     });
                 }
             }
@@ -2056,23 +2064,6 @@ impl App {
                                     eprintln!("Failed to load scene: {}", e);
                                 }
                             }
-                        } else if asset_type == AssetType::Audio {
-                            // Play audio preview on dedicated preview track
-                            let relative = meta_path.to_string_lossy().to_string();
-                            let load_result = self.core.asset_manager.audio.load(&relative);
-                            match load_result {
-                                Ok(handle) => {
-                                    let data = handle.get().clone();
-                                    if let Some(engine) = self.core.game_world.resource_mut::<rust_engine::engine::audio::AudioEngine>() {
-                                        if let Err(e) = engine.play_preview(data) {
-                                            log::warn!("Audio preview failed: {e}");
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to load audio for preview: {e}");
-                                }
-                            }
                         } else if asset_type == AssetType::Mesh {
                             // Open mesh editor tab
                             let relative = meta_path.to_string_lossy().to_string();
@@ -2123,12 +2114,33 @@ impl App {
                                 );
                                 self.open_mesh_as_tab(relative);
                             }
-                        } else if asset_type == AssetType::InputAction {
-                            let full_path = std::path::Path::new("content").join(&meta_path);
-                            self.open_input_action_as_tab(full_path);
-                        } else if asset_type == AssetType::InputMappingContext {
-                            let full_path = std::path::Path::new("content").join(&meta_path);
-                            self.open_input_context_as_tab(full_path);
+                        } else {
+                            // All other asset types: route through the centralized matcher.
+                            // This covers InputAction, InputMappingContext, Material,
+                            // MaterialInstance, Texture, Audio, AnimationClip, and future types.
+                            use rust_engine::engine::editor::asset_open_routing::window_kind_for_extension;
+                            if let Some((kind, _key)) = window_kind_for_extension(&meta_path) {
+                                match kind {
+                                    // InputAction/InputContext need state init before window opens
+                                    SecondaryWindowKind::InputAction => {
+                                        let full_path = std::path::Path::new("content").join(&meta_path);
+                                        self.open_input_action_as_tab(full_path);
+                                    }
+                                    SecondaryWindowKind::InputContext => {
+                                        let full_path = std::path::Path::new("content").join(&meta_path);
+                                        self.open_input_context_as_tab(full_path);
+                                    }
+                                    // Everything else: open as secondary window via centralized routing
+                                    _ => {
+                                        rust_engine::engine::editor::asset_open_routing::route_asset_open(
+                                            &meta_path,
+                                            &mut self.pending_window_requests,
+                                        );
+                                    }
+                                }
+                            } else {
+                                log::info!("No editor registered for {}", meta_path.display());
+                            }
                         }
                     }
                 }

@@ -25,6 +25,14 @@ pub struct PendingWindowRequest {
     pub title: String,
     pub width: u32,
     pub height: u32,
+    /// Restored window position from session persistence (None = OS default).
+    pub restored_position: Option<[i32; 2]>,
+    /// Restored window size from session persistence (None = use width/height).
+    pub restored_size: Option<[u32; 2]>,
+    /// Whether to start the window maximized.
+    pub start_maximized: bool,
+    /// If true, focus an existing window for this editor_key+kind instead of creating a duplicate.
+    pub focus_existing_if_open: bool,
 }
 
 /// A secondary OS window with its own rendering infrastructure.
@@ -228,7 +236,7 @@ impl SecondaryWindow {
 }
 
 /// Kind of secondary window that can be opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecondaryWindowKind {
     Mesh,
     Hierarchy,
@@ -239,6 +247,14 @@ pub enum SecondaryWindowKind {
     InputSettings,
     InputAction,
     InputContext,
+    Material,
+    MaterialInstance,
+    Texture,
+    AnimationClip,
+    AnimationGraph,
+    MaterialGraph,
+    Audio,
+    Prefab,
     #[cfg(feature = "editor-debug")]
     IconInspector,
 }
@@ -276,6 +292,64 @@ impl SecondaryWindowKind {
                     .unwrap_or_else(|| key.to_string());
                 format!("IC \u{2014} {}", name)
             }
+            SecondaryWindowKind::Material => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .and_then(|s| std::path::Path::new(s).file_stem())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("Material \u{2014} {}", name)
+            }
+            SecondaryWindowKind::MaterialInstance => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .and_then(|s| std::path::Path::new(s).file_stem())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("MatInst \u{2014} {}", name)
+            }
+            SecondaryWindowKind::Texture => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("Texture \u{2014} {}", name)
+            }
+            SecondaryWindowKind::AnimationClip => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("Clip \u{2014} {}", name)
+            }
+            SecondaryWindowKind::AnimationGraph => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("AnimGraph \u{2014} {}", name)
+            }
+            SecondaryWindowKind::MaterialGraph => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("MatGraph \u{2014} {}", name)
+            }
+            SecondaryWindowKind::Audio => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("Audio \u{2014} {}", name)
+            }
+            SecondaryWindowKind::Prefab => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.to_string());
+                format!("Prefab \u{2014} {}", name)
+            }
             #[cfg(feature = "editor-debug")]
             SecondaryWindowKind::IconInspector => "Icon Inspector".to_string(),
         }
@@ -293,6 +367,14 @@ impl SecondaryWindowKind {
             SecondaryWindowKind::InputSettings => (600, 500),
             SecondaryWindowKind::InputAction => (600, 500),
             SecondaryWindowKind::InputContext => (600, 500),
+            SecondaryWindowKind::Material => (640, 720),
+            SecondaryWindowKind::MaterialInstance => (640, 720),
+            SecondaryWindowKind::Texture => (720, 600),
+            SecondaryWindowKind::AnimationClip => (800, 500),
+            SecondaryWindowKind::AnimationGraph => (900, 600),
+            SecondaryWindowKind::MaterialGraph => (900, 600),
+            SecondaryWindowKind::Audio => (720, 400),
+            SecondaryWindowKind::Prefab => (800, 600),
             #[cfg(feature = "editor-debug")]
             SecondaryWindowKind::IconInspector => (640, 800),
         }
@@ -310,6 +392,14 @@ impl SecondaryWindowKind {
             SecondaryWindowKind::InputSettings => EditorTab::InputSettings,
             SecondaryWindowKind::InputAction => EditorTab::InputActionEditor(key.to_string()),
             SecondaryWindowKind::InputContext => EditorTab::InputContextEditor(key.to_string()),
+            SecondaryWindowKind::Material => EditorTab::MaterialEditor(key.to_string()),
+            SecondaryWindowKind::MaterialInstance => EditorTab::MaterialInstanceEditor(key.to_string()),
+            SecondaryWindowKind::Texture => EditorTab::TextureEditor(key.to_string()),
+            SecondaryWindowKind::AnimationClip => EditorTab::AnimationClipEditor(key.to_string()),
+            SecondaryWindowKind::AnimationGraph => EditorTab::AnimationGraphEditor(key.to_string()),
+            SecondaryWindowKind::MaterialGraph => EditorTab::MaterialGraphEditor(key.to_string()),
+            SecondaryWindowKind::Audio => EditorTab::AudioEditor(key.to_string()),
+            SecondaryWindowKind::Prefab => EditorTab::PrefabEditor(key.to_string()),
             // IconInspector is not a dockable tab — return Console as a harmless fallback.
             #[cfg(feature = "editor-debug")]
             SecondaryWindowKind::IconInspector => EditorTab::Console,
