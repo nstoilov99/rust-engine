@@ -168,6 +168,16 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
             EditorTab::MeshEditor(key) => self.render_mesh_editor_tab(ui, key.clone()),
             EditorTab::InputActionEditor(key) => self.render_input_action_tab(ui, key.clone()),
             EditorTab::InputContextEditor(key) => self.render_input_context_tab(ui, key.clone()),
+            EditorTab::MaterialEditor(_)
+            | EditorTab::MaterialInstanceEditor(_)
+            | EditorTab::TextureEditor(_)
+            | EditorTab::AnimationClipEditor(_)
+            | EditorTab::AnimationGraphEditor(_)
+            | EditorTab::MaterialGraphEditor(_)
+            | EditorTab::AudioEditor(_)
+            | EditorTab::PrefabEditor(_) => {
+                render_asset_editor_placeholder(ui, tab);
+            }
         }
     }
 
@@ -214,6 +224,15 @@ impl<'a> TabViewer for EditorTabViewer<'a> {
                     data.open = false;
                 }
             }
+            // New asset editor tabs: no state cleanup needed on close
+            EditorTab::MaterialEditor(_)
+            | EditorTab::MaterialInstanceEditor(_)
+            | EditorTab::TextureEditor(_)
+            | EditorTab::AnimationClipEditor(_)
+            | EditorTab::AnimationGraphEditor(_)
+            | EditorTab::MaterialGraphEditor(_)
+            | EditorTab::AudioEditor(_)
+            | EditorTab::PrefabEditor(_) => {}
             _ => {}
         }
         OnCloseResponse::Close
@@ -867,4 +886,22 @@ impl<'a> EditorTabViewer<'a> {
             });
         }
     }
+}
+
+/// Render a placeholder for asset editor tabs that haven't been fully implemented yet.
+fn render_asset_editor_placeholder(ui: &mut Ui, tab: &EditorTab) {
+    let message = match tab {
+        EditorTab::MaterialEditor(_) => "Material editor — content lands in Step 3",
+        EditorTab::MaterialInstanceEditor(_) => "MaterialInstance editor — content lands in Step 3",
+        EditorTab::TextureEditor(_) => "Texture editor — content lands in Step 4",
+        EditorTab::AnimationClipEditor(_) => "AnimationClip editor — content lands in Step 4",
+        EditorTab::AnimationGraphEditor(_) => "AnimationGraph editor — content lands in Step 5",
+        EditorTab::MaterialGraphEditor(_) => "MaterialGraph editor — content lands in Step 5",
+        EditorTab::AudioEditor(_) => "Audio editor — content lands in Step 4",
+        EditorTab::PrefabEditor(_) => "Prefab editor — content lands in Step 5",
+        _ => "Editor not yet implemented",
+    };
+    ui.centered_and_justified(|ui| {
+        ui.label(RichText::new(message).weak().italics());
+    });
 }

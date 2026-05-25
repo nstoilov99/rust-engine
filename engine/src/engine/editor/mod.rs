@@ -34,7 +34,10 @@ pub mod icon_inspector;
 #[cfg(feature = "editor-debug")]
 pub mod showcase;
 
+pub mod asset_editors;
+pub mod asset_open_routing;
 pub mod asset_browser;
+pub mod secondary_window_session;
 pub mod build_dialog;
 mod commands;
 mod console;

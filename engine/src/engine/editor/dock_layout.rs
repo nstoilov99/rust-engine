@@ -35,6 +35,22 @@ pub enum EditorTab {
     InputActionEditor(String),
     /// Per-file mapping context editor (keyed by file path)
     InputContextEditor(String),
+    /// Per-file material editor (keyed by content-relative path)
+    MaterialEditor(String),
+    /// Per-file material instance editor (keyed by content-relative path)
+    MaterialInstanceEditor(String),
+    /// Per-file texture editor (keyed by content-relative path)
+    TextureEditor(String),
+    /// Per-file animation clip editor (keyed by content-relative path)
+    AnimationClipEditor(String),
+    /// Per-file animation graph editor (keyed by content-relative path)
+    AnimationGraphEditor(String),
+    /// Per-file material graph editor (keyed by content-relative path)
+    MaterialGraphEditor(String),
+    /// Per-file audio editor (keyed by content-relative path)
+    AudioEditor(String),
+    /// Per-file prefab editor (keyed by content-relative path)
+    PrefabEditor(String),
 }
 
 impl EditorTab {
@@ -71,6 +87,64 @@ impl EditorTab {
                     .unwrap_or_else(|| key.clone());
                 format!("MC \u{2014} {}", name)
             }
+            EditorTab::MaterialEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .and_then(|s| std::path::Path::new(s).file_stem())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Material \u{2014} {}", name)
+            }
+            EditorTab::MaterialInstanceEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .and_then(|s| std::path::Path::new(s).file_stem())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("MatInst \u{2014} {}", name)
+            }
+            EditorTab::TextureEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Texture \u{2014} {}", name)
+            }
+            EditorTab::AnimationClipEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Clip \u{2014} {}", name)
+            }
+            EditorTab::AnimationGraphEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("AnimGraph \u{2014} {}", name)
+            }
+            EditorTab::MaterialGraphEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("MatGraph \u{2014} {}", name)
+            }
+            EditorTab::AudioEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Audio \u{2014} {}", name)
+            }
+            EditorTab::PrefabEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Prefab \u{2014} {}", name)
+            }
         }
     }
 
@@ -92,6 +166,14 @@ impl EditorTab {
             EditorTab::MeshEditor(key) => format!("tab_mesh_{}", key),
             EditorTab::InputActionEditor(key) => format!("tab_ia_{}", key),
             EditorTab::InputContextEditor(key) => format!("tab_mc_{}", key),
+            EditorTab::MaterialEditor(key) => format!("tab_mat_{}", key),
+            EditorTab::MaterialInstanceEditor(key) => format!("tab_matinst_{}", key),
+            EditorTab::TextureEditor(key) => format!("tab_tex_{}", key),
+            EditorTab::AnimationClipEditor(key) => format!("tab_animclip_{}", key),
+            EditorTab::AnimationGraphEditor(key) => format!("tab_animgraph_{}", key),
+            EditorTab::MaterialGraphEditor(key) => format!("tab_matgraph_{}", key),
+            EditorTab::AudioEditor(key) => format!("tab_audio_{}", key),
+            EditorTab::PrefabEditor(key) => format!("tab_prefab_{}", key),
         }
     }
 
@@ -110,6 +192,14 @@ impl EditorTab {
             EditorTab::MeshEditor(key) => Some((K::Mesh, key.clone())),
             EditorTab::InputActionEditor(key) => Some((K::InputAction, key.clone())),
             EditorTab::InputContextEditor(key) => Some((K::InputContext, key.clone())),
+            EditorTab::MaterialEditor(key) => Some((K::Material, key.clone())),
+            EditorTab::MaterialInstanceEditor(key) => Some((K::MaterialInstance, key.clone())),
+            EditorTab::TextureEditor(key) => Some((K::Texture, key.clone())),
+            EditorTab::AnimationClipEditor(key) => Some((K::AnimationClip, key.clone())),
+            EditorTab::AnimationGraphEditor(key) => Some((K::AnimationGraph, key.clone())),
+            EditorTab::MaterialGraphEditor(key) => Some((K::MaterialGraph, key.clone())),
+            EditorTab::AudioEditor(key) => Some((K::Audio, key.clone())),
+            EditorTab::PrefabEditor(key) => Some((K::Prefab, key.clone())),
         }
     }
 }

@@ -4,8 +4,17 @@
 //! belong to any single panel. Constructed once at editor startup in `app.rs`
 //! and threaded through `EditorContext<'a>` to all panels.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::asset_editors::animation_clip::AnimationClipEditorState;
+use super::asset_editors::animation_graph::AnimationGraphEditorState;
+use super::asset_editors::audio::AudioEditorState;
+use super::asset_editors::material::MaterialEditorState;
+use super::asset_editors::material_graph::MaterialGraphEditorState;
+use super::asset_editors::material_instance::MaterialInstanceEditorState;
+use super::asset_editors::prefab::PrefabEditorState;
+use super::asset_editors::texture::TextureEditorState;
 use super::hierarchy_icons::HierarchyIcons;
 use super::theme::EditorTheme;
 use super::widgets::IconRegistry;
@@ -23,6 +32,19 @@ pub struct EditorServices {
     /// `engine/icons/hierarchy/`). Also installed into `egui::Context::data()`
     /// so panels can fetch via `ui.data(...)` without threading a reference.
     pub hierarchy_icons: Arc<HierarchyIcons>,
+
+    // --- Per-editor state maps (keyed by content-relative asset path) ---
+    pub material_editors: HashMap<String, MaterialEditorState>,
+    pub material_instance_editors: HashMap<String, MaterialInstanceEditorState>,
+    pub texture_editors: HashMap<String, TextureEditorState>,
+    pub audio_editors: HashMap<String, AudioEditorState>,
+    pub animation_clip_editors: HashMap<String, AnimationClipEditorState>,
+    pub animation_graph_editors: HashMap<String, AnimationGraphEditorState>,
+    pub material_graph_editors: HashMap<String, MaterialGraphEditorState>,
+    pub prefab_editors: HashMap<String, PrefabEditorState>,
+
+    /// Whether the first-open audio editor toast has been shown this session.
+    pub audio_first_open_shown: bool,
 }
 
 impl EditorServices {
@@ -35,6 +57,15 @@ impl EditorServices {
             theme: Arc::new(EditorTheme::dark_default()),
             icons: Arc::new(IconRegistry::empty()),
             hierarchy_icons: Arc::new(HierarchyIcons::empty()),
+            material_editors: HashMap::new(),
+            material_instance_editors: HashMap::new(),
+            texture_editors: HashMap::new(),
+            audio_editors: HashMap::new(),
+            animation_clip_editors: HashMap::new(),
+            animation_graph_editors: HashMap::new(),
+            material_graph_editors: HashMap::new(),
+            prefab_editors: HashMap::new(),
+            audio_first_open_shown: false,
         }
     }
 
