@@ -17,22 +17,22 @@
 //! * `icons.rs` — existing `IconManager` + `ToolbarIcon` + `AssetBrowserIcon`. Step 1
 //!   extends this into a full `IconRegistry`.
 
-pub mod hierarchy_icons;
-pub mod icon_classes;
-pub mod services;
-pub mod theme;
-pub mod widgets;
 pub mod command_palette;
 pub mod dialogs;
-pub mod toasts;
-pub mod status_bar;
 pub mod dirty_state;
-pub mod layout;
-pub mod preview;
+pub mod hierarchy_icons;
+pub mod icon_classes;
 #[cfg(feature = "editor-debug")]
 pub mod icon_inspector;
+pub mod layout;
+pub mod preview;
+pub mod services;
 #[cfg(feature = "editor-debug")]
 pub mod showcase;
+pub mod status_bar;
+pub mod theme;
+pub mod toasts;
+pub mod widgets;
 
 pub mod asset_browser;
 pub mod build_dialog;
@@ -43,17 +43,17 @@ mod dock_layout;
 mod hierarchy_panel;
 pub mod icons;
 pub mod import_dialog;
-mod inspector_panel;
 mod input_action_editor;
 mod input_context_editor;
 mod input_settings_panel;
+mod inspector_panel;
 mod menu_bar;
 pub mod mesh_editor;
 pub mod play_mode;
 pub mod profiler;
+pub mod scene_tab;
 pub mod secondary_window;
 mod selection;
-pub mod scene_tab;
 mod tab_viewer;
 pub mod viewport;
 mod viewport_texture;
@@ -61,28 +61,36 @@ mod window_config;
 
 pub use asset_browser::{
     AssetBrowserEvent, AssetBrowserPanel, AssetDragPayload, AssetEventQueue, AssetFilter,
-    AssetRegistry, AssetSelection, FolderNode, GridView, GpuThumbnailContext, ListView,
+    AssetRegistry, AssetSelection, FolderNode, GpuThumbnailContext, GridView, ListView,
     RenameTarget, ScanResult, SortCriteria, ThumbnailCache, ViewMode,
 };
 pub use build_dialog::BuildDialog;
-pub use import_dialog::{ImportDialogAction, ImportDialogState, ImportPreview};
+pub use command_palette::{
+    dispatch_action, Command, CommandPalette, CommandRegistry, EditorAction,
+};
 pub use commands::*;
 pub use console::{ConsoleLog, LogFilter, LogLevel, LogMessage};
 pub use console_cmd::ConsoleCommandSystem;
+pub use dialogs::{Dialog, DialogActions, DialogButtons, DialogStack};
+pub use dirty_state::{normalize_asset_key, DirtyAsset, DirtyState};
 pub use dock_layout::*;
 pub use hierarchy_panel::*;
 pub use icons::{icon_button, IconManager, ToolbarIcon};
-pub use inspector_panel::*;
-pub use menu_bar::*;
-pub use profiler::ProfilerPanel;
-pub use secondary_window::{PendingWindowRequest, SecondaryWindow, SecondaryWindowKind};
-pub use selection::*;
-pub use services::EditorServices;
-pub use scene_tab::{DormantScene, SaveAsDialog, SceneId, SceneRegistry};
-pub use tab_viewer::*;
+pub use import_dialog::{ImportDialogAction, ImportDialogState, ImportPreview};
 pub use input_action_editor::{InputActionEditor, InputActionEditorState};
 pub use input_context_editor::{InputContextEditor, InputContextEditorState};
 pub use input_settings_panel::InputSettingsPanel;
+pub use inspector_panel::*;
+pub use menu_bar::*;
+pub use preview::{AssetPreview, AssetPreviewRegistry, PreviewId, PreviewKind};
+pub use profiler::ProfilerPanel;
+pub use scene_tab::{DormantScene, SaveAsDialog, SceneId, SceneRegistry};
+pub use secondary_window::{PendingWindowRequest, SecondaryWindow, SecondaryWindowKind};
+pub use selection::*;
+pub use services::EditorServices;
+pub use status_bar::{render_status_bar, StatusBarState};
+pub use tab_viewer::*;
+pub use toasts::{Toast, ToastKind, ToastStack};
 pub use viewport::*;
 pub use viewport_texture::*;
 pub use window_config::*;

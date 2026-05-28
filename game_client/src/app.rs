@@ -23,9 +23,10 @@ use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
-    create_editor_dock_style, render_menu_bar, AssetBrowserEvent, AssetBrowserPanel, BuildDialog,
-    CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene, EditorCamera, EditorContext,
-    EditorDockState, EditorServices, EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext,
+    create_editor_dock_style, dispatch_action, render_menu_bar, render_status_bar,
+    AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem,
+    ConsoleLog, DormantScene, EditorAction, EditorCamera, EditorContext, EditorDockState,
+    EditorServices, EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext,
     HierarchyPanel, IconManager, ImportDialogAction, ImportDialogState, ImportPreview,
     InputActionEditor, InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter,
     LogMessage, MenuAction, PendingWindowRequest, ProfilerPanel, RenameTarget, SaveAsDialog,
@@ -220,6 +221,20 @@ fn focused_viewport_id(dock_state: &EditorDockState) -> Option<SceneId> {
         }
     }
     None
+}
+
+fn editor_action_to_menu_action(action: &EditorAction) -> Option<MenuAction> {
+    match action {
+        EditorAction::NewScene => Some(MenuAction::NewScene),
+        EditorAction::SaveScene => Some(MenuAction::SaveScene),
+        EditorAction::Quit => Some(MenuAction::Exit),
+        EditorAction::Undo => Some(MenuAction::Undo),
+        EditorAction::Redo => Some(MenuAction::Redo),
+        EditorAction::ResetLayoutToDefault => Some(MenuAction::ResetLayout),
+        EditorAction::TogglePlayMode => Some(MenuAction::Play),
+        EditorAction::ReloadAllShaders => Some(MenuAction::RebuildShaders),
+        _ => None,
+    }
 }
 
 impl App {
@@ -1644,6 +1659,8 @@ impl App {
         let mut import_action = ImportDialogAction::None;
         let mut undock_request: Option<EditorTab> = None;
         let mut close_scene_request: Option<SceneId> = None;
+        let mut dialog_actions = Vec::new();
+        let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
 
         let gui_result =
@@ -1662,6 +1679,17 @@ impl App {
                         self.runtime_flags.benchmark_tools_enabled,
                         icon_manager,
                     );
+
+                    services.status_bar.set_left(if active_dirty {
+                        "Scene has unsaved changes"
+                    } else {
+                        "Ready"
+                    });
+                    services.status_bar.set_right(format!(
+                        "Dirty assets: {}",
+                        services.dirty.dirty_asset_count()
+                    ));
+                    render_status_bar(ctx, &services.status_bar);
 
                     let editor_ctx = EditorContext {
                         services,
@@ -1714,6 +1742,19 @@ impl App {
                         .show_leaf_close_all_buttons(false)
                         .show_leaf_collapse_buttons(false)
                         .show(ctx, &mut tab_viewer);
+
+                    let services = &mut tab_viewer.editor.services;
+                    if ctx.input(|input| {
+                        input.modifiers.ctrl
+                            && input.modifiers.shift
+                            && input.key_pressed(egui::Key::P)
+                    }) {
+                        services.command_palette.open();
+                    }
+                    let registry = services.command_registry.clone();
+                    command_palette_action = services.command_palette.show(ctx, &registry);
+                    dialog_actions = services.dialogs.show(ctx);
+                    services.toasts.show(ctx);
 
                     // Debug windows (editor-debug feature)
                     // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
@@ -1875,6 +1916,29 @@ impl App {
 
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
+        }
+        if menu_action == MenuAction::None {
+            if let Some(action) = command_palette_action.as_ref() {
+                if let Some(mapped) = editor_action_to_menu_action(action) {
+                    menu_action = mapped;
+                }
+            }
+        }
+        if let Some(action) = command_palette_action {
+            if editor_action_to_menu_action(&action).is_none() {
+                dispatch_action(
+                    action,
+                    &mut self.editor.services,
+                    &mut self.core.game_world,
+                );
+            }
+        }
+        for action in dialog_actions {
+            dispatch_action(
+                action,
+                &mut self.editor.services,
+                &mut self.core.game_world,
+            );
         }
 
         match menu_action {

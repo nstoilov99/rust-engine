@@ -6,8 +6,14 @@
 
 use std::sync::Arc;
 
+use super::command_palette::{CommandPalette, CommandRegistry};
+use super::dialogs::DialogStack;
+use super::dirty_state::DirtyState;
 use super::hierarchy_icons::HierarchyIcons;
+use super::preview::AssetPreviewRegistry;
+use super::status_bar::StatusBarState;
 use super::theme::EditorTheme;
+use super::toasts::ToastStack;
 use super::widgets::IconRegistry;
 
 /// Central owner of editor-wide services and state.
@@ -23,6 +29,19 @@ pub struct EditorServices {
     /// `engine/icons/hierarchy/`). Also installed into `egui::Context::data()`
     /// so panels can fetch via `ui.data(...)` without threading a reference.
     pub hierarchy_icons: Arc<HierarchyIcons>,
+    /// Global dirty-state tracker for editor-owned assets.
+    pub dirty: DirtyState,
+    /// Central modal stack for editor confirmation flows.
+    pub dialogs: DialogStack,
+    /// Toast notifications shown over the editor UI.
+    pub toasts: ToastStack,
+    /// Registry for live or deferred asset preview surfaces.
+    pub previews: AssetPreviewRegistry,
+    /// Shared status bar text.
+    pub status_bar: StatusBarState,
+    /// Central command registry and palette UI state.
+    pub command_registry: CommandRegistry,
+    pub command_palette: CommandPalette,
 }
 
 impl EditorServices {
@@ -35,6 +54,13 @@ impl EditorServices {
             theme: Arc::new(EditorTheme::dark_default()),
             icons: Arc::new(IconRegistry::empty()),
             hierarchy_icons: Arc::new(HierarchyIcons::empty()),
+            dirty: DirtyState::new(),
+            dialogs: DialogStack::new(),
+            toasts: ToastStack::new(),
+            previews: AssetPreviewRegistry::new(),
+            status_bar: StatusBarState::new(),
+            command_registry: CommandRegistry::new(),
+            command_palette: CommandPalette::new(),
         }
     }
 
