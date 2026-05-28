@@ -50,10 +50,17 @@ impl InputActionEditor {
         key
     }
 
+    pub fn save_state(
+        state: &mut InputActionEditorState,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        enhanced_serialization::save_input_action(&state.definition, &state.file_path)?;
+        state.dirty = false;
+        Ok(())
+    }
+
     /// Render the input action editor UI into a given Ui area.
     /// Called from the secondary window render loop.
     pub fn show_ui(ui: &mut egui::Ui, state: &mut InputActionEditorState) {
-        let action = &mut state.definition;
         let editor_id = ui.id().with("ia_editor");
 
         // ── Top toolbar ──
@@ -62,23 +69,19 @@ impl InputActionEditor {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     let save_text = if state.dirty {
-                        egui::RichText::new("Save")
-                            .color(egui::Color32::WHITE)
+                        egui::RichText::new("Save").color(egui::Color32::WHITE)
                     } else {
                         egui::RichText::new("Save")
                     };
                     if ui.button(save_text).clicked() {
-                        match enhanced_serialization::save_input_action(action, &state.file_path) {
+                        match Self::save_state(state) {
                             Ok(()) => {
-                                state.dirty = false;
                                 state.status_message =
                                     Some(("Saved".to_string(), ui.input(|i| i.time)));
                             }
                             Err(e) => {
-                                state.status_message = Some((
-                                    format!("Save failed: {e}"),
-                                    ui.input(|i| i.time),
-                                ));
+                                state.status_message =
+                                    Some((format!("Save failed: {e}"), ui.input(|i| i.time)));
                             }
                         }
                     }
@@ -95,9 +98,12 @@ impl InputActionEditor {
                     if let Some((msg, time)) = &state.status_message {
                         let elapsed = ui.input(|i| i.time) - time;
                         if elapsed < 3.0 {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(msg).weak().italics().small());
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(egui::RichText::new(msg).weak().italics().small());
+                                },
+                            );
                         } else {
                             state.status_message = None;
                         }
@@ -120,6 +126,7 @@ impl InputActionEditor {
             });
 
         // ── Central content ──
+        let action = &mut state.definition;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -153,11 +160,7 @@ impl InputActionEditor {
                                     .show_ui(ui, |ui| {
                                         for vt in VALUE_TYPES {
                                             let label = format_value_type(*vt);
-                                            ui.selectable_value(
-                                                &mut action.value_type,
-                                                *vt,
-                                                label,
-                                            );
+                                            ui.selectable_value(&mut action.value_type, *vt, label);
                                         }
                                     });
                                 if action.value_type != before {

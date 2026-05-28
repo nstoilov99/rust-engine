@@ -4,9 +4,7 @@
 //! asset in the asset browser — similar to Unreal Engine's InputMappingContext editor.
 
 use crate::engine::input::action::{InputSource, KeyCode, MouseButton};
-use crate::engine::input::enhanced_action::{
-    EnhancedBinding, MappingContext, MappingContextEntry,
-};
+use crate::engine::input::enhanced_action::{EnhancedBinding, MappingContext, MappingContextEntry};
 use crate::engine::input::enhanced_serialization;
 use crate::engine::input::value::InputValueType;
 use std::collections::HashMap;
@@ -69,6 +67,14 @@ impl InputContextEditor {
         key
     }
 
+    pub fn save_state(
+        state: &mut InputContextEditorState,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        enhanced_serialization::save_mapping_context(&state.context, &state.file_path)?;
+        state.dirty = false;
+        Ok(())
+    }
+
     /// Render the mapping context editor UI into a given Ui area.
     /// Called from the secondary window render loop.
     pub fn show_ui(
@@ -98,7 +104,6 @@ impl InputContextEditor {
             }
         }
 
-        let ctx = &mut state.context;
         let editor_id = ui.id().with("mc_editor");
 
         // ── Top toolbar ──
@@ -112,17 +117,14 @@ impl InputContextEditor {
                         egui::RichText::new("Save")
                     };
                     if ui.button(save_text).clicked() {
-                        match enhanced_serialization::save_mapping_context(ctx, &state.file_path) {
+                        match Self::save_state(state) {
                             Ok(()) => {
-                                state.dirty = false;
                                 state.status_message =
                                     Some(("Saved".to_string(), ui.input(|i| i.time)));
                             }
                             Err(e) => {
-                                state.status_message = Some((
-                                    format!("Save failed: {e}"),
-                                    ui.input(|i| i.time),
-                                ));
+                                state.status_message =
+                                    Some((format!("Save failed: {e}"), ui.input(|i| i.time)));
                             }
                         }
                     }
@@ -208,6 +210,7 @@ impl InputContextEditor {
 
         // ── Central content ──
         let listening = state.listening_binding;
+        let ctx = &mut state.context;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -513,10 +516,7 @@ fn detect_input(ui: &egui::Ui) -> Option<InputSource> {
 /// Detect modifier-only key presses (Shift, Ctrl, Alt, Super/Windows).
 /// egui doesn't emit Key events for modifiers — they're only tracked via `Modifiers`.
 /// Compares current modifiers against the state captured when listening started.
-fn detect_modifier_press(
-    ui: &egui::Ui,
-    start_mods: &egui::Modifiers,
-) -> Option<InputSource> {
+fn detect_modifier_press(ui: &egui::Ui, start_mods: &egui::Modifiers) -> Option<InputSource> {
     ui.input(|input| {
         let current = input.modifiers;
         if current.shift && !start_mods.shift {

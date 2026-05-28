@@ -6,15 +6,15 @@ use glam::{Mat4, Vec3};
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-    RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo,
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
+    SubpassBeginInfo, SubpassContents, SubpassEndInfo,
 };
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::{Device, DeviceOwned, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::DescriptorSet;
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
 use vulkano::pipeline::graphics::depth_stencil::{DepthState, DepthStencilState};
@@ -38,8 +38,8 @@ use crate::engine::assets::mesh_import::{MaterialSlot, MeshImportMeta};
 use crate::engine::rendering::rendering_3d::mesh_manager::MeshManager;
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use crate::engine::rendering::rendering_3d::SkinningBackend;
-use vulkano::pipeline::PipelineBindPoint;
 use egui::{CollapsingHeader, Color32, RichText, ScrollArea, Stroke, Ui};
+use vulkano::pipeline::PipelineBindPoint;
 
 /// GPU mesh data for preview rendering: (vertex_buffer, index_buffer, index_count).
 pub type GpuMeshBuffers = (Subbuffer<[Vertex3D]>, Subbuffer<[u32]>, u32);
@@ -202,7 +202,7 @@ impl MeshPreviewRenderer {
             RenderPassBeginInfo {
                 clear_values: vec![
                     Some([0.16, 0.16, 0.18, 1.0].into()), // dark gray background
-                    Some(1.0f32.into()),                    // depth
+                    Some(1.0f32.into()),                  // depth
                 ],
                 ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
             },
@@ -326,17 +326,18 @@ impl MeshPreviewState {
         let init_h: u32 = 4;
 
         let device = renderer.memory_allocator.device().clone();
-        let texture =
-            ViewportTexture::new(device.clone(), renderer.memory_allocator.clone(), init_w, init_h)?;
+        let texture = ViewportTexture::new(
+            device.clone(),
+            renderer.memory_allocator.clone(),
+            init_w,
+            init_h,
+        )?;
 
         let (depth_image, depth_view) =
             Self::create_depth(renderer.memory_allocator(), init_w, init_h)?;
 
-        let framebuffer = Self::create_framebuffer(
-            renderer.render_pass(),
-            &texture.image_view(),
-            &depth_view,
-        )?;
+        let framebuffer =
+            Self::create_framebuffer(renderer.render_pass(), &texture.image_view(), &depth_view)?;
 
         Ok(Self {
             texture,
@@ -497,7 +498,11 @@ impl MeshEditorPanel {
         ui.horizontal(|ui| {
             ui.heading(RichText::new(&filename).strong());
             if data.dirty {
-                ui.label(RichText::new("*").strong().color(Color32::from_rgb(220, 180, 50)));
+                ui.label(
+                    RichText::new("*")
+                        .strong()
+                        .color(Color32::from_rgb(220, 180, 50)),
+                );
             }
         });
         ui.label(RichText::new(&data.mesh_path).weak().small());
@@ -587,11 +592,7 @@ impl MeshEditorPanel {
                     ui.vertical_centered(|ui| {
                         ui.add_space(available.y / 2.0 - 20.0);
                         ui.label(RichText::new("3D Preview").weak());
-                        ui.label(
-                            RichText::new("Mesh not loaded on GPU")
-                                .weak()
-                                .small(),
-                        );
+                        ui.label(RichText::new("Mesh not loaded on GPU").weak().small());
                     });
                 });
             } else if let Some(tex_id) = preview.texture_id {
@@ -620,7 +621,8 @@ impl MeshEditorPanel {
                     let delta = response.drag_delta();
                     let pan_speed = preview.orbit_distance * 0.002;
 
-                    let forward = (preview.orbit_target - Self::camera_position(preview)).normalize();
+                    let forward =
+                        (preview.orbit_target - Self::camera_position(preview)).normalize();
                     let right = forward.cross(Vec3::Y).normalize();
                     let up = right.cross(forward).normalize();
 
@@ -671,147 +673,142 @@ impl MeshEditorPanel {
     ) -> bool {
         let mut changed = false;
 
-        CollapsingHeader::new(
-            RichText::new(format!("[{}] {}", index, slot.name)).strong(),
-        )
-        .default_open(true)
-        .id_salt(format!("mat_slot_{}", index))
-        .show(ui, |ui| {
-            let thumb_size = 64.0;
-            let slot_height = thumb_size + 8.0;
-            let available_width = ui.available_width();
+        CollapsingHeader::new(RichText::new(format!("[{}] {}", index, slot.name)).strong())
+            .default_open(true)
+            .id_salt(format!("mat_slot_{}", index))
+            .show(ui, |ui| {
+                let thumb_size = 64.0;
+                let slot_height = thumb_size + 8.0;
+                let available_width = ui.available_width();
 
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(available_width, slot_height),
-                egui::Sense::hover(),
-            );
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(available_width, slot_height),
+                    egui::Sense::hover(),
+                );
 
-            // DnD hover
-            let mut is_valid_hover = false;
-            if let Some(hovered_id) = response.dnd_hover_payload::<AssetId>() {
-                if let Some(meta) = asset_browser.registry.get(*hovered_id) {
-                    if meta.asset_type == AssetType::Material {
-                        is_valid_hover = true;
+                // DnD hover
+                let mut is_valid_hover = false;
+                if let Some(hovered_id) = response.dnd_hover_payload::<AssetId>() {
+                    if let Some(meta) = asset_browser.registry.get(*hovered_id) {
+                        if meta.asset_type == AssetType::Material {
+                            is_valid_hover = true;
+                        }
                     }
                 }
-            }
 
-            // DnD drop
-            if let Some(dropped_id) = response.dnd_release_payload::<AssetId>() {
-                if let Some(meta) = asset_browser.registry.get(*dropped_id) {
-                    if meta.asset_type == AssetType::Material {
-                        slot.material_path = meta.path.to_string_lossy().to_string();
-                        changed = true;
+                // DnD drop
+                if let Some(dropped_id) = response.dnd_release_payload::<AssetId>() {
+                    if let Some(meta) = asset_browser.registry.get(*dropped_id) {
+                        if meta.asset_type == AssetType::Material {
+                            slot.material_path = meta.path.to_string_lossy().to_string();
+                            changed = true;
+                        }
                     }
                 }
-            }
 
-            let painter = ui.painter_at(rect);
+                let painter = ui.painter_at(rect);
 
-            // Background
-            let bg_color = if is_valid_hover {
-                Color32::from_rgba_premultiplied(40, 60, 90, 255)
-            } else {
-                Color32::from_gray(35)
-            };
-            painter.rect_filled(rect, 4.0, bg_color);
+                // Background
+                let bg_color = if is_valid_hover {
+                    Color32::from_rgba_premultiplied(40, 60, 90, 255)
+                } else {
+                    Color32::from_gray(35)
+                };
+                painter.rect_filled(rect, 4.0, bg_color);
 
-            // Border
-            let border_color = if is_valid_hover {
-                Color32::from_rgb(100, 180, 255)
-            } else {
-                Color32::from_gray(60)
-            };
-            painter.rect_stroke(
-                rect,
-                4.0,
-                Stroke::new(1.0, border_color),
-                egui::epaint::StrokeKind::Inside,
-            );
-
-            if slot.material_path.is_empty() {
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Drop .material.ron here",
-                    egui::FontId::proportional(12.0),
-                    Color32::from_gray(120),
+                // Border
+                let border_color = if is_valid_hover {
+                    Color32::from_rgb(100, 180, 255)
+                } else {
+                    Color32::from_gray(60)
+                };
+                painter.rect_stroke(
+                    rect,
+                    4.0,
+                    Stroke::new(1.0, border_color),
+                    egui::epaint::StrokeKind::Inside,
                 );
-            } else {
-                // Thumbnail
-                let thumb_rect = egui::Rect::from_min_size(
-                    rect.min + egui::vec2(4.0, 4.0),
-                    egui::vec2(thumb_size, thumb_size),
-                );
-                let asset_id = AssetId::from_path(&slot.material_path);
-                if let Some(meta) = asset_browser.registry.get(asset_id) {
-                    if let Some(tex_id) =
-                        asset_browser.thumbnails.get_texture_id(ui.ctx(), meta)
-                    {
-                        painter.image(
-                            tex_id,
-                            thumb_rect,
-                            egui::Rect::from_min_max(
-                                egui::Pos2::ZERO,
-                                egui::pos2(1.0, 1.0),
-                            ),
-                            Color32::WHITE,
-                        );
+
+                if slot.material_path.is_empty() {
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Drop .material.ron here",
+                        egui::FontId::proportional(12.0),
+                        Color32::from_gray(120),
+                    );
+                } else {
+                    // Thumbnail
+                    let thumb_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(4.0, 4.0),
+                        egui::vec2(thumb_size, thumb_size),
+                    );
+                    let asset_id = AssetId::from_path(&slot.material_path);
+                    if let Some(meta) = asset_browser.registry.get(asset_id) {
+                        if let Some(tex_id) =
+                            asset_browser.thumbnails.get_texture_id(ui.ctx(), meta)
+                        {
+                            painter.image(
+                                tex_id,
+                                thumb_rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        } else {
+                            painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
+                        }
                     } else {
                         painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
                     }
-                } else {
-                    painter.rect_filled(thumb_rect, 2.0, Color32::from_gray(50));
-                }
 
-                // Filename
-                let filename = std::path::Path::new(&slot.material_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| slot.material_path.clone());
-                let text_left = thumb_rect.right() + 8.0;
-                painter.text(
-                    egui::pos2(text_left, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    &filename,
-                    egui::FontId::proportional(12.0),
-                    Color32::from_gray(200),
-                );
+                    // Filename
+                    let filename = std::path::Path::new(&slot.material_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| slot.material_path.clone());
+                    let text_left = thumb_rect.right() + 8.0;
+                    painter.text(
+                        egui::pos2(text_left, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &filename,
+                        egui::FontId::proportional(12.0),
+                        Color32::from_gray(200),
+                    );
 
-                // Clear button
-                let clear_rect = egui::Rect::from_min_size(
-                    egui::pos2(rect.max.x - 22.0, rect.center().y - 8.0),
-                    egui::vec2(16.0, 16.0),
-                );
-                let clear_response = ui.interact(
-                    clear_rect,
-                    ui.id().with(format!("mat_slot_{}_clear", index)),
-                    egui::Sense::click(),
-                );
-                let clear_color = if clear_response.hovered() {
-                    Color32::from_rgb(220, 80, 80)
-                } else {
-                    Color32::from_gray(120)
-                };
-                painter.text(
-                    clear_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "x",
-                    egui::FontId::proportional(12.0),
-                    clear_color,
-                );
-                if clear_response.clicked() {
-                    slot.material_path = String::new();
-                    changed = true;
+                    // Clear button
+                    let clear_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.max.x - 22.0, rect.center().y - 8.0),
+                        egui::vec2(16.0, 16.0),
+                    );
+                    let clear_response = ui.interact(
+                        clear_rect,
+                        ui.id().with(format!("mat_slot_{}_clear", index)),
+                        egui::Sense::click(),
+                    );
+                    let clear_color = if clear_response.hovered() {
+                        Color32::from_rgb(220, 80, 80)
+                    } else {
+                        Color32::from_gray(120)
+                    };
+                    painter.text(
+                        clear_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "x",
+                        egui::FontId::proportional(12.0),
+                        clear_color,
+                    );
+                    if clear_response.clicked() {
+                        slot.material_path = String::new();
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
 
         changed
     }
 
     /// Write updated sidecar back to disk.
-    fn save_sidecar(data: &MeshEditorData) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_sidecar(data: &MeshEditorData) -> Result<(), Box<dyn std::error::Error>> {
         use crate::engine::assets::mesh_import::write_mesh_sidecar;
         let mesh_path = std::path::Path::new("content").join(&data.mesh_path);
         write_mesh_sidecar(&mesh_path, &data.meta)?;

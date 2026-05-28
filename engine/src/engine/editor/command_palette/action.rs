@@ -3,6 +3,7 @@
 //! All editor commands route through `EditorAction` → `dispatch_action`.
 //! This avoids closure-vs-borrow-checker issues by keeping actions as plain data.
 
+use crate::engine::editor::secondary_window::SecondaryWindowKind;
 use crate::engine::editor::theme::Density;
 use crate::engine::rendering::rendering_3d::deferred::deferred_renderer::DebugView;
 
@@ -64,6 +65,16 @@ pub enum EditorAction {
     // --- Engine ---
     ReloadAllShaders,
     OpenSettings,
+
+    // --- Editor window lifecycle ---
+    SaveAndCloseEditor {
+        kind: SecondaryWindowKind,
+        key: String,
+    },
+    DiscardAndCloseEditor {
+        kind: SecondaryWindowKind,
+        key: String,
+    },
 }
 
 /// Central dispatcher. Single big match; handlers have full mutable access

@@ -8,6 +8,8 @@ use egui_dock::DockArea;
 use rust_engine::assets::asset_source;
 use rust_engine::assets::AssetType;
 use rust_engine::assets::{AssetManager, HotReloadWatcher, ReloadEvent};
+use rust_engine::engine::animation::AnimationUpdateSystem;
+use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
 use rust_engine::engine::benchmark::{
     load_or_create_benchmark_scene, BenchmarkConfig, BENCHMARK_SCENE_RELATIVE,
 };
@@ -15,40 +17,41 @@ use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::events::PlayModeChanged;
 use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::ecs::hierarchy::{HierarchyChanged, TransformCache, TransformPropagationSystem};
+use rust_engine::engine::ecs::hierarchy::{
+    despawn_recursive, HierarchyChanged, TransformCache, TransformPropagationSystem,
+};
 use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
-use rust_engine::engine::animation::AnimationUpdateSystem;
-use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
-    create_editor_dock_style, dispatch_action, render_menu_bar, render_status_bar,
-    AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem,
-    ConsoleLog, DormantScene, EditorAction, EditorCamera, EditorContext, EditorDockState,
-    EditorServices, EditorTab, EditorTabViewer, GizmoHandler, GpuThumbnailContext,
-    HierarchyPanel, IconManager, ImportDialogAction, ImportDialogState, ImportPreview,
-    InputActionEditor, InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter,
-    LogMessage, MenuAction, PendingWindowRequest, ProfilerPanel, RenameTarget, SaveAsDialog,
-    SceneId, SceneRegistry, SecondaryWindowKind, Selection, ViewportSettings, ViewportTexture,
-    WindowConfig,
+    create_editor_dock_style, render_menu_bar, render_status_bar, AssetBrowserEvent,
+    AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene,
+    EditorAction, EditorCamera, EditorContext, EditorDockState, EditorServices, EditorTab,
+    EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
+    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
+    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction, PendingWindowRequest,
+    ProfilerPanel, RenameTarget, SaveAsDialog, SceneId, SceneRegistry, SecondaryWindowKind,
+    Selection, ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::gui::Gui;
+use rust_engine::engine::input::action_state::ActionState;
+use rust_engine::engine::input::enhanced_defaults::default_action_set;
+use rust_engine::engine::input::enhanced_serialization;
+use rust_engine::engine::input::event::InputEvent;
+use rust_engine::engine::input::gamepad::GamepadState;
+use rust_engine::engine::input::serialization;
+use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
 use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData, SkinningBackend};
+use rust_engine::engine::rendering::rendering_3d::{
+    DeferredRenderer, MeshRenderData, SkinningBackend,
+};
 use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
-use rust_engine::engine::input::action_state::ActionState;
-use rust_engine::engine::input::gamepad::GamepadState;
-use rust_engine::engine::input::serialization;
-use rust_engine::engine::input::enhanced_defaults::default_action_set;
-use rust_engine::engine::input::enhanced_serialization;
-use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
-use rust_engine::engine::input::event::InputEvent;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
@@ -105,7 +108,8 @@ pub struct CoreApp {
     pub descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
-    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
+    plankton_emitter_buffer:
+        Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
     /// Cache of loaded material descriptor sets, keyed by content-relative .material.ron path.
@@ -158,7 +162,8 @@ pub struct SceneEditorState {
     /// Model import dialog state (shown when model files are dropped).
     pub import_dialog: Option<ImportDialogState>,
     /// Open mesh editors keyed by content-relative mesh path.
-    pub mesh_editors: std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
+    pub mesh_editors:
+        std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
     /// Open input action editors (one per .inputaction.ron file).
     pub input_action_editor: InputActionEditor,
     /// Open mapping context editors (one per .mappingcontext.ron file).
@@ -200,7 +205,8 @@ pub struct EditorApp {
     pub scene: SceneEditorState,
     pub ui: EditorUIState,
     pub play: PlayModeState,
-    pub mesh_preview_renderer: Option<rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer>,
+    pub mesh_preview_renderer:
+        Option<rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer>,
 }
 
 /// Main application combining CoreApp and EditorApp.
@@ -221,20 +227,6 @@ fn focused_viewport_id(dock_state: &EditorDockState) -> Option<SceneId> {
         }
     }
     None
-}
-
-fn editor_action_to_menu_action(action: &EditorAction) -> Option<MenuAction> {
-    match action {
-        EditorAction::NewScene => Some(MenuAction::NewScene),
-        EditorAction::SaveScene => Some(MenuAction::SaveScene),
-        EditorAction::Quit => Some(MenuAction::Exit),
-        EditorAction::Undo => Some(MenuAction::Undo),
-        EditorAction::Redo => Some(MenuAction::Redo),
-        EditorAction::ResetLayoutToDefault => Some(MenuAction::ResetLayout),
-        EditorAction::TogglePlayMode => Some(MenuAction::Play),
-        EditorAction::ReloadAllShaders => Some(MenuAction::RebuildShaders),
-        _ => None,
-    }
 }
 
 impl App {
@@ -288,12 +280,8 @@ impl App {
         if let Some(audio_engine) = AudioEngine::new() {
             game_world.resources_mut().insert(audio_engine);
         }
-        game_world
-            .resources_mut()
-            .insert(AudioReloadQueue::new());
-        game_world
-            .resources_mut()
-            .insert(asset_manager.clone());
+        game_world.resources_mut().insert(AudioReloadQueue::new());
+        game_world.resources_mut().insert(asset_manager.clone());
 
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
@@ -353,8 +341,8 @@ impl App {
         use rust_engine::engine::ecs::components::TransformDirty;
         use rust_engine::engine::ecs::hierarchy::{Children, Parent};
         use rust_engine::engine::physics::{
-            Collider as PhysCollider, PhysicsStepSystem,
-            RigidBody as PhysRigidBody, Velocity as PhysVelocity,
+            Collider as PhysCollider, PhysicsStepSystem, RigidBody as PhysRigidBody,
+            Velocity as PhysVelocity,
         };
 
         let mut schedule = Schedule::new();
@@ -428,19 +416,25 @@ impl App {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Editor,
             initial_dimensions: [800, 600],
-            swapchain_transfer: Some(rust_engine::engine::rendering::render_thread::SwapchainTransfer {
-                surface: renderer.swapchain_state.surface.clone(),
-                swapchain: renderer.swapchain_state.swapchain.clone(),
-                images: renderer.swapchain_state.images.clone(),
-            }),
+            swapchain_transfer: Some(
+                rust_engine::engine::rendering::render_thread::SwapchainTransfer {
+                    surface: renderer.swapchain_state.surface.clone(),
+                    swapchain: renderer.swapchain_state.swapchain.clone(),
+                    images: renderer.swapchain_state.images.clone(),
+                },
+            ),
             viewport_dimensions: Some([800, 600]),
         });
 
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
-            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady { .. }) => {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
+                ..
+            }) => {
                 log::info!("editor: render thread ready");
             }
-            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message }) => {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError {
+                message,
+            }) => {
                 return Err(format!("render thread init failed: {}", message).into());
             }
             Ok(_) => {
@@ -554,19 +548,20 @@ impl App {
                 build_dialog: BuildDialog::new(),
                 cursor_released: false,
             },
-            mesh_preview_renderer: match rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer::new(
-                core.renderer.gpu.device.clone(),
-                core.renderer.gpu.queue.clone(),
-                core.renderer.gpu.memory_allocator.clone(),
-                core.renderer.gpu.command_buffer_allocator.clone(),
-                core.renderer.gpu.descriptor_set_allocator.clone(),
-            ) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    log::error!("Failed to create MeshPreviewRenderer: {}", e);
-                    None
-                }
-            },
+            mesh_preview_renderer:
+                match rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer::new(
+                    core.renderer.gpu.device.clone(),
+                    core.renderer.gpu.queue.clone(),
+                    core.renderer.gpu.memory_allocator.clone(),
+                    core.renderer.gpu.command_buffer_allocator.clone(),
+                    core.renderer.gpu.descriptor_set_allocator.clone(),
+                ) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        log::error!("Failed to create MeshPreviewRenderer: {}", e);
+                        None
+                    }
+                },
         };
 
         Ok(Self {
@@ -624,12 +619,24 @@ impl App {
                     }
                 }
                 EditorTab::InputActionEditor(key) => {
-                    if let Some(data) = self.editor.scene.input_action_editor.open_actions.get_mut(key) {
+                    if let Some(data) = self
+                        .editor
+                        .scene
+                        .input_action_editor
+                        .open_actions
+                        .get_mut(key)
+                    {
                         data.open = true;
                     }
                 }
                 EditorTab::InputContextEditor(key) => {
-                    if let Some(data) = self.editor.scene.input_context_editor.open_contexts.get_mut(key) {
+                    if let Some(data) = self
+                        .editor
+                        .scene
+                        .input_context_editor
+                        .open_contexts
+                        .get_mut(key)
+                    {
                         data.open = true;
                     }
                 }
@@ -661,12 +668,24 @@ impl App {
                 }
             }
             SecondaryWindowKind::InputAction => {
-                if let Some(data) = self.editor.scene.input_action_editor.open_actions.get_mut(editor_key) {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_action_editor
+                    .open_actions
+                    .get_mut(editor_key)
+                {
                     data.open = false;
                 }
             }
             SecondaryWindowKind::InputContext => {
-                if let Some(data) = self.editor.scene.input_context_editor.open_contexts.get_mut(editor_key) {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_context_editor
+                    .open_contexts
+                    .get_mut(editor_key)
+                {
                     data.open = false;
                 }
             }
@@ -684,7 +703,10 @@ impl App {
 
     /// Open a mapping context file as a dock tab (default behavior).
     pub fn open_input_context_as_tab(&mut self, file_path: std::path::PathBuf) {
-        self.editor.scene.input_context_editor.refresh_action_names(std::path::Path::new("content"));
+        self.editor
+            .scene
+            .input_context_editor
+            .refresh_action_names(std::path::Path::new("content"));
         let key = self.editor.scene.input_context_editor.open(file_path);
         let tab = EditorTab::InputContextEditor(key);
         self.editor.ui.dock_state.open_tab(tab);
@@ -709,6 +731,421 @@ impl App {
     pub fn end_frame(&mut self) {
         if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
             im.clear_transient_state();
+        }
+    }
+
+    fn push_action_unavailable(&mut self, action: &str, reason: &str) {
+        self.editor
+            .console
+            .messages
+            .push(LogMessage::warning(format!("{action}: {reason}")));
+        self.editor
+            .services
+            .toasts
+            .warning(format!("{action}: {reason}"));
+    }
+
+    fn toggle_tab(&mut self, tab: EditorTab) {
+        if self.editor.ui.dock_state.is_tab_open(&tab) {
+            self.editor.ui.dock_state.remove_tab(&tab);
+        } else {
+            self.editor.ui.dock_state.open_tab(tab);
+        }
+    }
+
+    fn is_secondary_editor_dirty(&self, kind: SecondaryWindowKind, key: &str) -> bool {
+        let local_dirty = match kind {
+            SecondaryWindowKind::Mesh => self
+                .editor
+                .scene
+                .mesh_editors
+                .get(key)
+                .is_some_and(|data| data.dirty),
+            SecondaryWindowKind::InputAction => self
+                .editor
+                .scene
+                .input_action_editor
+                .open_actions
+                .get(key)
+                .is_some_and(|data| data.dirty),
+            SecondaryWindowKind::InputContext => self
+                .editor
+                .scene
+                .input_context_editor
+                .open_contexts
+                .get(key)
+                .is_some_and(|data| data.dirty),
+            _ => false,
+        };
+
+        local_dirty || self.editor.services.dirty.is_asset_dirty(key)
+    }
+
+    fn set_secondary_editor_open(&mut self, kind: SecondaryWindowKind, key: &str, open: bool) {
+        match kind {
+            SecondaryWindowKind::Mesh => {
+                if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
+                    data.open = open;
+                }
+            }
+            SecondaryWindowKind::InputAction => {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_action_editor
+                    .open_actions
+                    .get_mut(key)
+                {
+                    data.open = open;
+                }
+            }
+            SecondaryWindowKind::InputContext => {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_context_editor
+                    .open_contexts
+                    .get_mut(key)
+                {
+                    data.open = open;
+                }
+            }
+            #[cfg(feature = "editor-debug")]
+            SecondaryWindowKind::IconInspector => {
+                self.editor.ui.icon_inspector.open = open;
+            }
+            _ => {}
+        }
+    }
+
+    fn save_secondary_editor(
+        &mut self,
+        kind: SecondaryWindowKind,
+        key: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match kind {
+            SecondaryWindowKind::Mesh => {
+                if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
+                    rust_engine::engine::editor::mesh_editor::MeshEditorPanel::save_sidecar(data)?;
+                    data.dirty = false;
+                }
+            }
+            SecondaryWindowKind::InputAction => {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_action_editor
+                    .open_actions
+                    .get_mut(key)
+                {
+                    InputActionEditor::save_state(data)?;
+                }
+            }
+            SecondaryWindowKind::InputContext => {
+                if let Some(data) = self
+                    .editor
+                    .scene
+                    .input_context_editor
+                    .open_contexts
+                    .get_mut(key)
+                {
+                    InputContextEditor::save_state(data)?;
+                }
+            }
+            _ if self.editor.services.dirty.is_asset_dirty(key) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("no save handler is registered for '{key}'"),
+                )
+                .into());
+            }
+            _ => {}
+        }
+        self.editor.services.dirty.clear_asset(key);
+        Ok(())
+    }
+
+    pub fn request_secondary_window_close(&mut self, kind: SecondaryWindowKind, key: &str) -> bool {
+        if self.is_secondary_editor_dirty(kind, key) {
+            self.editor.services.dialogs.save_discard_cancel(
+                ("secondary_close", kind, key.to_string()),
+                "Unsaved changes",
+                format!("Save changes to '{}' before closing?", key),
+                EditorAction::SaveAndCloseEditor {
+                    kind,
+                    key: key.to_string(),
+                },
+                EditorAction::DiscardAndCloseEditor {
+                    kind,
+                    key: key.to_string(),
+                },
+            );
+            false
+        } else {
+            self.set_secondary_editor_open(kind, key, false);
+            true
+        }
+    }
+
+    fn handle_editor_action(&mut self, action: EditorAction) {
+        match action {
+            EditorAction::NewScene => {
+                let _ = self.create_new_scene();
+            }
+            EditorAction::OpenScene => {
+                self.editor.ui.dock_state.open_tab(EditorTab::AssetBrowser);
+                self.push_action_unavailable(
+                    "Open Scene",
+                    "use the Asset Browser to open a .scene.ron file",
+                );
+            }
+            EditorAction::SaveScene => self.save_active_scene(),
+            EditorAction::SaveSceneAs(path) => {
+                if let Some(path) = path {
+                    let filename = path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("Untitled");
+                    self.commit_save_as(filename);
+                } else if self.editor.scene.save_as_dialog.is_none() {
+                    let initial = self.editor.scene.current_scene_name.clone();
+                    self.editor.scene.save_as_dialog = Some(SaveAsDialog::new(&initial));
+                }
+            }
+            EditorAction::Quit => {
+                self.save_layout_on_exit();
+                println!("Closing...");
+                std::process::exit(0);
+            }
+            EditorAction::Undo => {
+                if self.play_mode() == PlayMode::Edit {
+                    if let Some(desc) = self
+                        .editor
+                        .scene
+                        .command_history
+                        .undo(self.core.game_world.hecs_mut())
+                    {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::info(format!("Undo: {desc}")));
+                    }
+                }
+            }
+            EditorAction::Redo => {
+                if self.play_mode() == PlayMode::Edit {
+                    if let Some(desc) = self
+                        .editor
+                        .scene
+                        .command_history
+                        .redo(self.core.game_world.hecs_mut())
+                    {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::info(format!("Redo: {desc}")));
+                    }
+                }
+            }
+            EditorAction::Cut => {
+                self.push_action_unavailable("Cut", "entity clipboard is not implemented yet");
+            }
+            EditorAction::Copy => {
+                self.push_action_unavailable("Copy", "entity clipboard is not implemented yet");
+            }
+            EditorAction::Paste => {
+                self.push_action_unavailable("Paste", "entity clipboard is not implemented yet");
+            }
+            EditorAction::Duplicate => {
+                self.push_action_unavailable(
+                    "Duplicate",
+                    "use the Hierarchy context menu until duplicate is command-backed",
+                );
+            }
+            EditorAction::Delete => {
+                let selected: Vec<_> = self.editor.scene.selection.all().copied().collect();
+                if selected.is_empty() {
+                    return;
+                }
+                for entity in selected {
+                    if self.core.game_world.hecs().contains(entity) {
+                        self.editor.scene.selection.remove(entity);
+                        despawn_recursive(self.core.game_world.hecs_mut(), entity);
+                    }
+                }
+                self.editor
+                    .scene
+                    .hierarchy_panel
+                    .sync_root_order(self.core.game_world.hecs());
+                self.editor.scene.command_history.mark_dirty();
+            }
+            EditorAction::ToggleHierarchy => self.toggle_tab(EditorTab::Hierarchy),
+            EditorAction::ToggleInspector => self.toggle_tab(EditorTab::Inspector),
+            EditorAction::ToggleAssetBrowser => self.toggle_tab(EditorTab::AssetBrowser),
+            EditorAction::ToggleConsole => self.toggle_tab(EditorTab::Console),
+            EditorAction::ToggleProfiler => self.toggle_tab(EditorTab::Profiler),
+            EditorAction::ResetLayoutToDefault => {
+                self.editor.ui.dock_state = EditorDockState::new();
+                let _ = self.editor.ui.dock_state.save_to_default();
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info("Layout reset to default".to_string()));
+            }
+            EditorAction::SwitchDensity(density) => {
+                let ctx = self.editor.ui.gui.context().clone();
+                self.editor.services.set_density(density, &ctx);
+            }
+            EditorAction::ToggleDevShowcase => {
+                #[cfg(feature = "editor-debug")]
+                {
+                    self.editor.ui.showcase.open = !self.editor.ui.showcase.open;
+                }
+                #[cfg(not(feature = "editor-debug"))]
+                self.push_action_unavailable(
+                    "Widget Showcase",
+                    "rebuild with the editor-debug feature to enable it",
+                );
+            }
+            EditorAction::SelectAll => {
+                let entities: Vec<_> = self
+                    .core
+                    .game_world
+                    .hecs()
+                    .iter()
+                    .map(|entity_ref| entity_ref.entity())
+                    .collect();
+                for entity in entities {
+                    self.editor.scene.selection.add(entity);
+                }
+            }
+            EditorAction::DeselectAll => self.editor.scene.selection.clear(),
+            EditorAction::FocusSelection => {
+                let Some(entity) = self.editor.scene.selection.primary() else {
+                    return;
+                };
+                if let Ok(transform) = self.core.game_world.hecs().get::<&Transform>(entity) {
+                    let center = glam::Vec3::new(
+                        transform.position.x,
+                        transform.position.y,
+                        transform.position.z,
+                    );
+                    self.editor.viewport.camera.focus_on(center, 2.0);
+                }
+            }
+            EditorAction::FindEntityByName => {
+                self.editor.ui.dock_state.open_tab(EditorTab::Hierarchy);
+                self.push_action_unavailable("Find Entity", "use the Hierarchy search field");
+            }
+            EditorAction::TogglePlayMode => match self.play_mode() {
+                PlayMode::Edit => self.enter_play_mode(),
+                PlayMode::Playing | PlayMode::Paused => self.stop_play_mode(),
+            },
+            EditorAction::StepFrame => {
+                self.push_action_unavailable(
+                    "Step Frame",
+                    "single-frame stepping is not implemented yet",
+                );
+            }
+            EditorAction::RestartFromEditState => {
+                if self.play_mode() != PlayMode::Edit {
+                    self.stop_play_mode();
+                }
+                self.enter_play_mode();
+            }
+            EditorAction::SwitchDebugView(view) => {
+                self.core.current_debug_view = view;
+                self.core.deferred_renderer.set_debug_view(view);
+            }
+            EditorAction::ToggleWireframe => {
+                self.push_action_unavailable(
+                    "Wireframe",
+                    "global wireframe mode is not implemented yet",
+                );
+            }
+            EditorAction::ToggleGrid => {
+                self.editor.viewport.grid_visible = !self.editor.viewport.grid_visible;
+                self.editor.viewport.settings.grid_visible = self.editor.viewport.grid_visible;
+            }
+            EditorAction::ToggleGizmos => {
+                self.push_action_unavailable(
+                    "Gizmos",
+                    "global gizmo visibility is not implemented yet",
+                );
+            }
+            EditorAction::ReimportSelected => {
+                self.editor.scene.asset_browser.request_rescan();
+                self.editor.console.messages.push(LogMessage::info(
+                    "Asset browser rescan requested".to_string(),
+                ));
+            }
+            EditorAction::ShowInExplorer => {
+                if let Some(asset) = self.editor.scene.asset_browser.selected_assets().first() {
+                    let path = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .root_path()
+                        .join(&asset.path);
+                    let _ = std::process::Command::new("explorer")
+                        .arg("/select,")
+                        .arg(path)
+                        .spawn();
+                } else {
+                    self.push_action_unavailable("Show in Explorer", "select an asset first");
+                }
+            }
+            EditorAction::RevealInAssetBrowser => {
+                self.editor.ui.dock_state.open_tab(EditorTab::AssetBrowser);
+            }
+            EditorAction::ReloadAllShaders => self.rebuild_all_shaders(),
+            EditorAction::OpenSettings => {
+                self.editor.ui.dock_state.open_tab(EditorTab::InputSettings)
+            }
+            EditorAction::SaveAndCloseEditor { kind, key } => {
+                match self.save_secondary_editor(kind, &key) {
+                    Ok(()) => self.set_secondary_editor_open(kind, &key, false),
+                    Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to save '{}': {}",
+                        key, error
+                    ))),
+                }
+            }
+            EditorAction::DiscardAndCloseEditor { kind, key } => {
+                match kind {
+                    SecondaryWindowKind::Mesh => {
+                        if let Some(data) = self.editor.scene.mesh_editors.get_mut(&key) {
+                            data.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::InputAction => {
+                        if let Some(data) = self
+                            .editor
+                            .scene
+                            .input_action_editor
+                            .open_actions
+                            .get_mut(&key)
+                        {
+                            data.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::InputContext => {
+                        if let Some(data) = self
+                            .editor
+                            .scene
+                            .input_context_editor
+                            .open_contexts
+                            .get_mut(&key)
+                        {
+                            data.dirty = false;
+                        }
+                    }
+                    _ => {}
+                }
+                self.editor.services.dirty.clear_asset(&key);
+                self.set_secondary_editor_open(kind, &key, false);
+            }
         }
     }
 
@@ -742,12 +1179,7 @@ impl App {
 
         // Collect paths that need resolving
         let mut paths_to_load: Vec<String> = Vec::new();
-        for (_entity, mr) in self
-            .core
-            .game_world
-            .hecs_mut()
-            .query_mut::<&MeshRenderer>()
-        {
+        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
             if !mr.mesh_path.is_empty() {
                 let meshes = self.core.asset_manager.meshes.read();
                 if meshes.first_index_for_path(&mr.mesh_path).is_none() {
@@ -769,12 +1201,7 @@ impl App {
         // This includes newly loaded paths AND any resolved meshes whose
         // material_paths are still empty (e.g. after re-import).
         let mut needs_sidecar: Vec<String> = paths_to_load.clone();
-        for (_entity, mr) in self
-            .core
-            .game_world
-            .hecs_mut()
-            .query_mut::<&MeshRenderer>()
-        {
+        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
             if !mr.mesh_path.is_empty()
                 && !mr.mesh_path.starts_with("__primitive__/")
                 && mr.material_paths.iter().all(|p| p.is_empty())
@@ -788,9 +1215,7 @@ impl App {
         // Load sidecar material slot info
         let mut sidecar_slots: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        if let Some(content_root) =
-            rust_engine::engine::assets::asset_source::content_root_path()
-        {
+        if let Some(content_root) = rust_engine::engine::assets::asset_source::content_root_path() {
             for path in &needs_sidecar {
                 let mesh_fs_path = content_root.join(path);
                 if let Ok(meta) =
@@ -808,7 +1233,8 @@ impl App {
                             if s.material_path.is_empty() {
                                 String::new()
                             } else {
-                                mesh_dir.join(&s.material_path)
+                                mesh_dir
+                                    .join(&s.material_path)
                                     .to_string_lossy()
                                     .replace('\\', "/")
                             }
@@ -850,8 +1276,8 @@ impl App {
         use rust_engine::engine::assets::mesh_import::load_material_ron;
         use rust_engine::engine::ecs::components::MeshRenderer;
         use rust_engine::engine::rendering::rendering_3d::material::{
-            create_default_texture_with_format, PbrMaterial,
-            DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+            create_default_texture_with_format, PbrMaterial, DEFAULT_AO_RGBA,
+            DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
         };
         use vulkano::format::Format;
         use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
@@ -878,7 +1304,12 @@ impl App {
             None => return,
         };
 
-        let geom_layout = self.core.deferred_renderer.geometry_pipeline().layout().clone();
+        let geom_layout = self
+            .core
+            .deferred_renderer
+            .geometry_pipeline()
+            .layout()
+            .clone();
         let allocator = self.core.renderer.gpu.memory_allocator.clone();
         let ds_allocator = self.core.renderer.gpu.descriptor_set_allocator.clone();
         let cmd_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
@@ -915,17 +1346,28 @@ impl App {
 
             // Helper: load a texture relative to the material file's directory,
             // or return a 1×1 fallback.
-            let load_tex = |filename: &str, fallback: [u8; 4], format: Format| -> Result<Arc<vulkano::image::view::ImageView>, Box<dyn std::error::Error>> {
+            let load_tex = |filename: &str,
+                            fallback: [u8; 4],
+                            format: Format|
+             -> Result<
+                Arc<vulkano::image::view::ImageView>,
+                Box<dyn std::error::Error>,
+            > {
                 if filename.is_empty() {
                     return create_default_texture_with_format(
-                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                        allocator.clone(),
+                        cmd_allocator.clone(),
+                        queue.clone(),
+                        fallback,
+                        format,
                     );
                 }
                 // Try to find the texture relative to the material file
                 let tex_path = mat_dir.join(filename);
                 if tex_path.exists() {
                     // Convert to content-relative for TextureManager
-                    let content_relative = tex_path.strip_prefix(&content_root)
+                    let content_relative = tex_path
+                        .strip_prefix(&content_root)
                         .map(|p| p.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| filename.to_string());
                     match self.core.asset_manager.textures.load(&content_relative) {
@@ -933,39 +1375,74 @@ impl App {
                         Err(e) => {
                             log::warn!("Failed to load texture '{}': {}", content_relative, e);
                             create_default_texture_with_format(
-                                allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                                allocator.clone(),
+                                cmd_allocator.clone(),
+                                queue.clone(),
+                                fallback,
+                                format,
                             )
                         }
                     }
                 } else {
                     log::warn!("Material texture not found: {}", tex_path.display());
                     create_default_texture_with_format(
-                        allocator.clone(), cmd_allocator.clone(), queue.clone(), fallback, format,
+                        allocator.clone(),
+                        cmd_allocator.clone(),
+                        queue.clone(),
+                        fallback,
+                        format,
                     )
                 }
             };
 
-            let albedo = match load_tex(&def.albedo_texture, [255, 255, 255, 255], Format::R8G8B8A8_SRGB) {
-                Ok(v) => v, Err(_) => continue,
+            let albedo = match load_tex(
+                &def.albedo_texture,
+                [255, 255, 255, 255],
+                Format::R8G8B8A8_SRGB,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
             };
-            let normal = match load_tex(&def.normal_texture, DEFAULT_NORMAL_RGBA, Format::R8G8B8A8_UNORM) {
-                Ok(v) => v, Err(_) => continue,
+            let normal = match load_tex(
+                &def.normal_texture,
+                DEFAULT_NORMAL_RGBA,
+                Format::R8G8B8A8_UNORM,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
             };
-            let mr = match load_tex(&def.metallic_roughness_texture, DEFAULT_METALLIC_ROUGHNESS_RGBA, Format::R8G8B8A8_UNORM) {
-                Ok(v) => v, Err(_) => continue,
+            let mr = match load_tex(
+                &def.metallic_roughness_texture,
+                DEFAULT_METALLIC_ROUGHNESS_RGBA,
+                Format::R8G8B8A8_UNORM,
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
             };
             let ao = match load_tex(&def.ao_texture, DEFAULT_AO_RGBA, Format::R8G8B8A8_UNORM) {
-                Ok(v) => v, Err(_) => continue,
+                Ok(v) => v,
+                Err(_) => continue,
             };
 
             match PbrMaterial::new(
-                albedo, normal, mr, ao, sampler.clone(),
-                def.base_color_factor, def.metallic_factor, def.roughness_factor, def.emissive_factor,
-                allocator.clone(), ds_allocator.clone(), geom_layout.clone(),
+                albedo,
+                normal,
+                mr,
+                ao,
+                sampler.clone(),
+                def.base_color_factor,
+                def.metallic_factor,
+                def.roughness_factor,
+                def.emissive_factor,
+                allocator.clone(),
+                ds_allocator.clone(),
+                geom_layout.clone(),
             ) {
                 Ok(mat) => {
                     println!("✅ Loaded material: {}", mat_path);
-                    self.core.material_cache.insert(mat_path.clone(), mat.descriptor_set);
+                    self.core
+                        .material_cache
+                        .insert(mat_path.clone(), mat.descriptor_set);
                 }
                 Err(e) => {
                     log::warn!("Failed to create PbrMaterial for '{}': {}", mat_path, e);
@@ -1011,13 +1488,10 @@ impl App {
                 }
                 ReloadEvent::MaterialInstanceChanged { path } => {
                     println!("Material instance changed: {}", path);
-                    self.editor
-                        .console
-                        .messages
-                        .push(LogMessage::info(format!(
-                            "Material instance file changed: {}",
-                            path,
-                        )));
+                    self.editor.console.messages.push(LogMessage::info(format!(
+                        "Material instance file changed: {}",
+                        path,
+                    )));
                     // Full material instance hot-reload requires MaterialManager
                     // integration at the scene level — log for now.
                 }
@@ -1028,12 +1502,9 @@ impl App {
                     let compiler = match ShaderCompiler::new() {
                         Ok(c) => c,
                         Err(e) => {
-                            self.editor
-                                .console
-                                .messages
-                                .push(LogMessage::error(format!(
-                                    "Shader compiler init failed: {e}"
-                                )));
+                            self.editor.console.messages.push(LogMessage::error(format!(
+                                "Shader compiler init failed: {e}"
+                            )));
                             continue;
                         }
                     };
@@ -1049,17 +1520,16 @@ impl App {
                     for result in &results {
                         match &result.outcome {
                             Ok(()) => {
-                                self.editor.console.messages.push(LogMessage::info(
-                                    format!("Hot-reloaded pipeline {:?}", result.id),
-                                ));
+                                self.editor.console.messages.push(LogMessage::info(format!(
+                                    "Hot-reloaded pipeline {:?}",
+                                    result.id
+                                )));
                             }
                             Err(e) => {
-                                self.editor.console.messages.push(LogMessage::error(
-                                    format!(
-                                        "Pipeline {:?} hot-reload failed: {}",
-                                        result.id, e
-                                    ),
-                                ));
+                                self.editor.console.messages.push(LogMessage::error(format!(
+                                    "Pipeline {:?} hot-reload failed: {}",
+                                    result.id, e
+                                )));
                             }
                         }
                     }
@@ -1146,7 +1616,11 @@ impl App {
                     }
 
                     if keycode == Some(KeyCode::KeyS)
-                        && self.core.game_world.resource::<InputManager>().is_some_and(|im| im.is_winit_key_pressed(KeyCode::ControlLeft))
+                        && self
+                            .core
+                            .game_world
+                            .resource::<InputManager>()
+                            .is_some_and(|im| im.is_winit_key_pressed(KeyCode::ControlLeft))
                     {
                         self.save_active_scene();
                     }
@@ -1207,7 +1681,10 @@ impl App {
     /// Vulkan submission, eliminating cross-submission layout/memory issues.
     pub fn build_mesh_preview_cbs(
         &mut self,
-    ) -> Vec<(String, std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>)> {
+    ) -> Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )> {
         // Pre-load meshes that haven't been imported yet.
         {
             let paths_to_load: Vec<String> = {
@@ -1297,13 +1774,8 @@ impl App {
                             if !gpu_meshes.is_empty() {
                                 let aspect = pw as f32 / ph.max(1) as f32;
                                 let vp = preview.compute_view_projection(aspect);
-                                match renderer.render(
-                                    &preview.framebuffer,
-                                    pw,
-                                    ph,
-                                    &gpu_meshes,
-                                    vp,
-                                ) {
+                                match renderer.render(&preview.framebuffer, pw, ph, &gpu_meshes, vp)
+                                {
                                     Ok(cb) => {
                                         result.push((key.clone(), cb));
                                         data.preview_dirty = false;
@@ -1355,7 +1827,12 @@ impl App {
 
         // Register/update mesh preview textures for docked mesh editors
         for (key, data) in self.editor.scene.mesh_editors.iter_mut() {
-            if self.editor.ui.dock_state.is_tab_open(&EditorTab::MeshEditor(key.clone())) {
+            if self
+                .editor
+                .ui
+                .dock_state
+                .is_tab_open(&EditorTab::MeshEditor(key.clone()))
+            {
                 if let Some(ref preview) = data.preview {
                     if !preview.mesh_indices.is_empty() && !data.preview_dirty {
                         let iv = preview.texture.image_view();
@@ -1571,9 +2048,10 @@ impl App {
             let mut labels = Vec::new();
             for (_, node) in self.editor.ui.dock_state.dock_state.iter_all_nodes() {
                 if let egui_dock::Node::Leaf(leaf) = node {
-                    let has_active = leaf.tabs.iter().any(|t| {
-                        matches!(t, EditorTab::Viewport(id) if *id == active_scene_id)
-                    });
+                    let has_active = leaf
+                        .tabs
+                        .iter()
+                        .any(|t| matches!(t, EditorTab::Viewport(id) if *id == active_scene_id));
                     if has_active {
                         for t in leaf.tabs.iter() {
                             if let EditorTab::Viewport(id) = t {
@@ -1646,7 +2124,12 @@ impl App {
         let mesh_editors = &mut self.editor.scene.mesh_editors;
         let ia_open_actions = &mut self.editor.scene.input_action_editor.open_actions;
         let ic_open_contexts = &mut self.editor.scene.input_context_editor.open_contexts;
-        let ic_available_actions = self.editor.scene.input_context_editor.available_actions.as_slice();
+        let ic_available_actions = self
+            .editor
+            .scene
+            .input_context_editor
+            .available_actions
+            .as_slice();
         let build_dialog = &mut self.editor.play.build_dialog;
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
@@ -1663,167 +2146,160 @@ impl App {
         let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
 
-        let gui_result =
-            self
-                .editor
-                .ui
-                .gui
-                .layout(Some(prev_viewport_rect), |ctx| {
-                    menu_action = render_menu_bar(
-                        ctx,
-                        dock_state,
-                        command_history,
-                        current_play_mode,
-                        build_dialog,
-                        console_messages,
-                        self.runtime_flags.benchmark_tools_enabled,
-                        icon_manager,
-                    );
+        let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
+            menu_action = render_menu_bar(
+                ctx,
+                dock_state,
+                command_history,
+                current_play_mode,
+                build_dialog,
+                console_messages,
+                self.runtime_flags.benchmark_tools_enabled,
+                icon_manager,
+            );
 
-                    services.status_bar.set_left(if active_dirty {
-                        "Scene has unsaved changes"
-                    } else {
-                        "Ready"
+            services.status_bar.set_left(if active_dirty {
+                "Scene has unsaved changes"
+            } else {
+                "Ready"
+            });
+            services.status_bar.set_right(format!(
+                "Dirty assets: {}",
+                services.dirty.dirty_asset_count()
+            ));
+            render_status_bar(ctx, &services.status_bar);
+
+            let editor_ctx = EditorContext {
+                services,
+                world,
+                selection,
+                hierarchy_panel,
+                inspector_panel,
+                command_history,
+                show_profiler,
+                console_messages,
+                log_filter,
+                viewport_texture_id,
+                viewport_size,
+                profiler_panel,
+                console_command_system,
+                console_input,
+                show_stat_fps,
+                fps,
+                delta_ms,
+                editor_camera,
+                gizmo_handler,
+                grid_visible,
+                viewport_hovered,
+                viewport_rect: &mut new_viewport_rect,
+                viewport_settings,
+                icon_manager,
+                asset_browser,
+                input_settings_panel,
+                action_set_snapshot: action_set_snapshot.as_ref(),
+                play_mode: current_play_mode,
+                toolbar_action: &mut toolbar_action,
+                mesh_editors,
+                ia_open_actions,
+                ic_open_contexts,
+                ic_available_actions,
+                undock_request: &mut undock_request,
+                dock_area_rect: ctx.available_rect(),
+                current_scene_name: &current_scene_name,
+                active_dirty,
+                active_scene_id,
+                dormant_scenes: dormant_scenes_snapshot,
+                close_scene_request: &mut close_scene_request,
+                viewport_tab_labels: &viewport_tab_labels,
+            };
+
+            let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
+
+            DockArea::new(&mut dock_state.dock_state)
+                .style(create_editor_dock_style(ctx))
+                .show_leaf_close_all_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show(ctx, &mut tab_viewer);
+
+            let services = &mut tab_viewer.editor.services;
+            if ctx.input(|input| {
+                input.modifiers.ctrl && input.modifiers.shift && input.key_pressed(egui::Key::P)
+            }) {
+                services.command_palette.open();
+            }
+            let registry = services.command_registry.clone();
+            command_palette_action = services.command_palette.show(ctx, &registry);
+            dialog_actions = services.dialogs.show(ctx);
+            services.toasts.show(ctx);
+
+            // Debug windows (editor-debug feature)
+            // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
+            #[cfg(feature = "editor-debug")]
+            {
+                showcase.show(ctx);
+            }
+
+            // Show file drop overlay when hovering external files
+            if is_hovering_files {
+                #[allow(deprecated)]
+                let screen = ctx.screen_rect();
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("file_drop_overlay"),
+                ));
+                painter.rect_filled(
+                    screen,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(30, 80, 180, 100),
+                );
+                painter.rect_stroke(
+                    screen.shrink(4.0),
+                    8.0,
+                    egui::Stroke::new(3.0, egui::Color32::from_rgb(100, 160, 255)),
+                    egui::StrokeKind::Outside,
+                );
+                painter.text(
+                    screen.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Drop files to import into current folder",
+                    egui::FontId::proportional(24.0),
+                    egui::Color32::WHITE,
+                );
+            }
+
+            // Render import dialog if active
+            if let Some(ref mut dialog_state) = import_dialog {
+                import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(
+                    ctx,
+                    dialog_state,
+                );
+            }
+
+            // Render Save As dialog if active
+            let mut save_as_close = false;
+            if let Some(dlg) = save_as_dialog.as_mut() {
+                egui::Window::new("Save Scene As")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Filename (saved to content/scenes/<name>.scene.ron):");
+                        ui.add(egui::TextEdit::singleline(&mut dlg.filename).desired_width(300.0));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                dlg.commit = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                save_as_close = true;
+                            }
+                        });
                     });
-                    services.status_bar.set_right(format!(
-                        "Dirty assets: {}",
-                        services.dirty.dirty_asset_count()
-                    ));
-                    render_status_bar(ctx, &services.status_bar);
-
-                    let editor_ctx = EditorContext {
-                        services,
-                        world,
-                        selection,
-                        hierarchy_panel,
-                        inspector_panel,
-                        command_history,
-                        show_profiler,
-                        console_messages,
-                        log_filter,
-                        viewport_texture_id,
-                        viewport_size,
-                        profiler_panel,
-                        console_command_system,
-                        console_input,
-                        show_stat_fps,
-                        fps,
-                        delta_ms,
-                        editor_camera,
-                        gizmo_handler,
-                        grid_visible,
-                        viewport_hovered,
-                        viewport_rect: &mut new_viewport_rect,
-                        viewport_settings,
-                        icon_manager,
-                        asset_browser,
-                        input_settings_panel,
-                        action_set_snapshot: action_set_snapshot.as_ref(),
-                        play_mode: current_play_mode,
-                        toolbar_action: &mut toolbar_action,
-                        mesh_editors,
-                        ia_open_actions,
-                        ic_open_contexts,
-                        ic_available_actions,
-                        undock_request: &mut undock_request,
-                        dock_area_rect: ctx.available_rect(),
-                        current_scene_name: &current_scene_name,
-                        active_dirty,
-                        active_scene_id,
-                        dormant_scenes: dormant_scenes_snapshot,
-                        close_scene_request: &mut close_scene_request,
-                        viewport_tab_labels: &viewport_tab_labels,
-                    };
-
-                    let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
-
-                    DockArea::new(&mut dock_state.dock_state)
-                        .style(create_editor_dock_style(ctx))
-                        .show_leaf_close_all_buttons(false)
-                        .show_leaf_collapse_buttons(false)
-                        .show(ctx, &mut tab_viewer);
-
-                    let services = &mut tab_viewer.editor.services;
-                    if ctx.input(|input| {
-                        input.modifiers.ctrl
-                            && input.modifiers.shift
-                            && input.key_pressed(egui::Key::P)
-                    }) {
-                        services.command_palette.open();
-                    }
-                    let registry = services.command_registry.clone();
-                    command_palette_action = services.command_palette.show(ctx, &registry);
-                    dialog_actions = services.dialogs.show(ctx);
-                    services.toasts.show(ctx);
-
-                    // Debug windows (editor-debug feature)
-                    // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
-                    #[cfg(feature = "editor-debug")]
-                    {
-                        showcase.show(ctx);
-                    }
-
-                    // Show file drop overlay when hovering external files
-                    if is_hovering_files {
-                        #[allow(deprecated)]
-                        let screen = ctx.screen_rect();
-                        let painter = ctx.layer_painter(egui::LayerId::new(
-                            egui::Order::Foreground,
-                            egui::Id::new("file_drop_overlay"),
-                        ));
-                        painter.rect_filled(
-                            screen,
-                            0.0,
-                            egui::Color32::from_rgba_unmultiplied(30, 80, 180, 100),
-                        );
-                        painter.rect_stroke(
-                            screen.shrink(4.0),
-                            8.0,
-                            egui::Stroke::new(3.0, egui::Color32::from_rgb(100, 160, 255)),
-                            egui::StrokeKind::Outside,
-                        );
-                        painter.text(
-                            screen.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Drop files to import into current folder",
-                            egui::FontId::proportional(24.0),
-                            egui::Color32::WHITE,
-                        );
-                    }
-
-                    // Render import dialog if active
-                    if let Some(ref mut dialog_state) = import_dialog {
-                        import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(ctx, dialog_state);
-                    }
-
-                    // Render Save As dialog if active
-                    let mut save_as_close = false;
-                    if let Some(dlg) = save_as_dialog.as_mut() {
-                        egui::Window::new("Save Scene As")
-                            .collapsible(false)
-                            .resizable(false)
-                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                            .show(ctx, |ui| {
-                                ui.label("Filename (saved to content/scenes/<name>.scene.ron):");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut dlg.filename)
-                                        .desired_width(300.0),
-                                );
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Save").clicked() {
-                                        dlg.commit = true;
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        save_as_close = true;
-                                    }
-                                });
-                            });
-                        if save_as_close {
-                            *save_as_dialog = None;
-                        }
-                    }
-                });
+                if save_as_close {
+                    *save_as_dialog = None;
+                }
+            }
+        });
 
         self.editor.viewport.rect = new_viewport_rect;
 
@@ -1844,20 +2320,12 @@ impl App {
                         dialog.preview_attempted = true;
                         if let Some(source) = dialog.current_file().cloned() {
                             // Attempt a quick parse to get stats
-                            match rust_engine::assets::load_model(
-                                &source.to_string_lossy(),
-                            ) {
+                            match rust_engine::assets::load_model(&source.to_string_lossy()) {
                                 Ok(model) => {
-                                    let total_verts: u32 = model
-                                        .meshes
-                                        .iter()
-                                        .map(|m| m.vertices.len() as u32)
-                                        .sum();
-                                    let total_idx: u32 = model
-                                        .meshes
-                                        .iter()
-                                        .map(|m| m.indices.len() as u32)
-                                        .sum();
+                                    let total_verts: u32 =
+                                        model.meshes.iter().map(|m| m.vertices.len() as u32).sum();
+                                    let total_idx: u32 =
+                                        model.meshes.iter().map(|m| m.indices.len() as u32).sum();
                                     dialog.preview = Some(ImportPreview {
                                         mesh_count: model.meshes.len(),
                                         total_vertices: total_verts,
@@ -1917,28 +2385,11 @@ impl App {
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
         }
-        if menu_action == MenuAction::None {
-            if let Some(action) = command_palette_action.as_ref() {
-                if let Some(mapped) = editor_action_to_menu_action(action) {
-                    menu_action = mapped;
-                }
-            }
-        }
         if let Some(action) = command_palette_action {
-            if editor_action_to_menu_action(&action).is_none() {
-                dispatch_action(
-                    action,
-                    &mut self.editor.services,
-                    &mut self.core.game_world,
-                );
-            }
+            self.handle_editor_action(action);
         }
         for action in dialog_actions {
-            dispatch_action(
-                action,
-                &mut self.editor.services,
-                &mut self.core.game_world,
-            );
+            self.handle_editor_action(action);
         }
 
         match menu_action {
@@ -2032,9 +2483,13 @@ impl App {
             match event {
                 AssetBrowserEvent::AssetOpened { id } => {
                     // Extract metadata fields before mutating self
-                    let meta_info = self.editor.scene.asset_browser.registry.get(id).map(|m| {
-                        (m.asset_type, m.path.clone(), m.display_name.clone())
-                    });
+                    let meta_info = self
+                        .editor
+                        .scene
+                        .asset_browser
+                        .registry
+                        .get(id)
+                        .map(|m| (m.asset_type, m.path.clone(), m.display_name.clone()));
                     if let Some((asset_type, meta_path, display_name)) = meta_info {
                         if asset_type == AssetType::Scene {
                             if self.play_mode() != PlayMode::Edit {
@@ -2044,8 +2499,7 @@ impl App {
                                 continue;
                             }
 
-                            if meta_path.as_path()
-                                == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
+                            if meta_path.as_path() == std::path::Path::new(BENCHMARK_SCENE_RELATIVE)
                                 && !self.runtime_flags.benchmark_tools_enabled
                             {
                                 self.editor.console.messages.push(LogMessage::warning(
@@ -2062,11 +2516,8 @@ impl App {
                                 continue;
                             }
                             // If it's open in another tab, just focus that tab.
-                            if let Some(existing_id) = self
-                                .editor
-                                .scene
-                                .registry
-                                .find_dormant_by_path(&relative)
+                            if let Some(existing_id) =
+                                self.editor.scene.registry.find_dormant_by_path(&relative)
                             {
                                 self.switch_to_scene(existing_id);
                                 continue;
@@ -2085,10 +2536,7 @@ impl App {
                             self.editor.scene.selection.clear();
                             self.editor.scene.command_history.clear();
                             self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
-                            self.editor
-                                .ui
-                                .dock_state
-                                .open_viewport_tab(new_id);
+                            self.editor.ui.dock_state.open_viewport_tab(new_id);
 
                             match load_scene(self.core.game_world.hecs_mut(), &relative) {
                                 Ok((scene_name, root_entities)) => {
@@ -2098,7 +2546,10 @@ impl App {
                                         .set_root_order(root_entities);
                                     self.editor.scene.current_scene_name = scene_name.clone();
                                     {
-                                        self.core.game_world.resources_mut().remove::<TransformCache>();
+                                        self.core
+                                            .game_world
+                                            .resources_mut()
+                                            .remove::<TransformCache>();
                                         let mut tc = TransformCache::new();
                                         tc.propagate(self.core.game_world.hecs_mut());
                                         self.core.game_world.resources_mut().insert(tc);
@@ -2127,7 +2578,11 @@ impl App {
                             match load_result {
                                 Ok(handle) => {
                                     let data = handle.get().clone();
-                                    if let Some(engine) = self.core.game_world.resource_mut::<rust_engine::engine::audio::AudioEngine>() {
+                                    if let Some(engine) = self
+                                        .core
+                                        .game_world
+                                        .resource_mut::<rust_engine::engine::audio::AudioEngine>(
+                                    ) {
                                         if let Err(e) = engine.play_preview(data) {
                                             log::warn!("Audio preview failed: {e}");
                                         }
@@ -2676,7 +3131,10 @@ impl App {
                         }
                     }
                 }
-                AssetBrowserEvent::CreateAsset { asset_type, parent_path } => {
+                AssetBrowserEvent::CreateAsset {
+                    asset_type,
+                    parent_path,
+                } => {
                     let full_parent = self
                         .editor
                         .scene
@@ -2694,7 +3152,8 @@ impl App {
                                 new_name = format!("{}_{}.inputaction.ron", base_name, counter);
                                 counter += 1;
                             }
-                            let action_name = new_name.trim_end_matches(".inputaction.ron").to_string();
+                            let action_name =
+                                new_name.trim_end_matches(".inputaction.ron").to_string();
                             let action = rust_engine::engine::input::enhanced_action::InputActionDefinition::new(
                                 &action_name,
                                 rust_engine::engine::input::value::InputValueType::Digital,
@@ -2703,13 +3162,15 @@ impl App {
                             match enhanced_serialization::save_input_action(&action, &file_path) {
                                 Ok(()) => {
                                     self.editor.console.messages.push(LogMessage::info(format!(
-                                        "Created input action: {}", action_name
+                                        "Created input action: {}",
+                                        action_name
                                     )));
                                     self.editor.scene.asset_browser.request_rescan();
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
-                                        "Failed to create input action: {}", e
+                                        "Failed to create input action: {}",
+                                        e
                                     )));
                                 }
                             }
@@ -2722,21 +3183,28 @@ impl App {
                                 new_name = format!("{}_{}.mappingcontext.ron", base_name, counter);
                                 counter += 1;
                             }
-                            let ctx_name = new_name.trim_end_matches(".mappingcontext.ron").to_string();
-                            let mapping_ctx = rust_engine::engine::input::enhanced_action::MappingContext::new(
-                                &ctx_name, 0,
-                            );
+                            let ctx_name =
+                                new_name.trim_end_matches(".mappingcontext.ron").to_string();
+                            let mapping_ctx =
+                                rust_engine::engine::input::enhanced_action::MappingContext::new(
+                                    &ctx_name, 0,
+                                );
                             let file_path = full_parent.join(&new_name);
-                            match enhanced_serialization::save_mapping_context(&mapping_ctx, &file_path) {
+                            match enhanced_serialization::save_mapping_context(
+                                &mapping_ctx,
+                                &file_path,
+                            ) {
                                 Ok(()) => {
                                     self.editor.console.messages.push(LogMessage::info(format!(
-                                        "Created mapping context: {}", ctx_name
+                                        "Created mapping context: {}",
+                                        ctx_name
                                     )));
                                     self.editor.scene.asset_browser.request_rescan();
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
-                                        "Failed to create mapping context: {}", e
+                                        "Failed to create mapping context: {}",
+                                        e
                                     )));
                                 }
                             }
@@ -2853,7 +3321,10 @@ impl App {
         self.editor.scene.active_dirty = dormant.dirty;
         std::mem::swap(&mut dormant.world, &mut self.core.game_world);
         std::mem::swap(&mut dormant.selection, &mut self.editor.scene.selection);
-        std::mem::swap(&mut dormant.command_history, &mut self.editor.scene.command_history);
+        std::mem::swap(
+            &mut dormant.command_history,
+            &mut self.editor.scene.command_history,
+        );
         self.editor
             .scene
             .hierarchy_panel
@@ -2887,10 +3358,7 @@ impl App {
         self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
 
         // Push a new viewport tab into the existing viewport leaf and focus it.
-        self.editor
-            .ui
-            .dock_state
-            .open_viewport_tab(new_id);
+        self.editor.ui.dock_state.open_viewport_tab(new_id);
 
         self.editor
             .console
@@ -2905,7 +3373,10 @@ impl App {
             return;
         }
         let Some(target) = self.editor.scene.registry.take_dormant(target_id) else {
-            log::warn!("switch_to_scene: target {} not found in dormant", target_id.0);
+            log::warn!(
+                "switch_to_scene: target {} not found in dormant",
+                target_id.0
+            );
             return;
         };
         let parked = self.park_active_scene();
@@ -3101,12 +3572,9 @@ impl App {
             // Textures
             "png", "jpg", "jpeg", "tga", "bmp", "dds",
             // Native mesh (already processed)
-            "mesh",
-            // Audio
-            "wav", "ogg", "mp3", "flac",
-            // Shaders
-            "glsl", "vert", "frag", "comp", "spv",
-            // Scene/Material/Prefab definitions
+            "mesh", // Audio
+            "wav", "ogg", "mp3", "flac", // Shaders
+            "glsl", "vert", "frag", "comp", "spv", // Scene/Material/Prefab definitions
             "ron",
         ];
 
@@ -3118,10 +3586,13 @@ impl App {
         for source_path in &files {
             // Validate that the file exists and is a file (not directory)
             if !source_path.is_file() {
-                self.editor.console.messages.push(LogMessage::warning(format!(
-                    "Skipped '{}': not a file",
-                    source_path.display()
-                )));
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::warning(format!(
+                        "Skipped '{}': not a file",
+                        source_path.display()
+                    )));
                 skipped_count += 1;
                 continue;
             }
@@ -3134,14 +3605,17 @@ impl App {
                 .to_ascii_lowercase();
 
             if !supported_extensions.contains(&ext.as_str()) {
-                self.editor.console.messages.push(LogMessage::warning(format!(
-                    "Skipped '{}': unsupported file type (.{})",
-                    source_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    ext
-                )));
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::warning(format!(
+                        "Skipped '{}': unsupported file type (.{})",
+                        source_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        ext
+                    )));
                 skipped_count += 1;
                 continue;
             }
@@ -3168,8 +3642,16 @@ impl App {
                     .unwrap_or("");
                 let mut counter = 1;
                 loop {
-                    let new_name = format!("{} ({}){}", stem, counter,
-                        if extension.is_empty() { String::new() } else { format!(".{}", extension) });
+                    let new_name = format!(
+                        "{} ({}){}",
+                        stem,
+                        counter,
+                        if extension.is_empty() {
+                            String::new()
+                        } else {
+                            format!(".{}", extension)
+                        }
+                    );
                     dest_path = target_dir.join(&new_name);
                     if !dest_path.exists() {
                         break;
@@ -3211,13 +3693,12 @@ impl App {
                             p.join(format!("{}.mtl", stem.to_string_lossy()))
                         }) {
                             if mtl_path.is_file() {
-                                let mtl_dest = target_dir
-                                    .join(mtl_path.file_name().unwrap_or_default());
+                                let mtl_dest =
+                                    target_dir.join(mtl_path.file_name().unwrap_or_default());
                                 if let Err(e) = std::fs::copy(&mtl_path, &mtl_dest) {
-                                    self.editor.console.messages.push(LogMessage::warning(format!(
-                                        "Could not copy companion .mtl file: {}",
-                                        e
-                                    )));
+                                    self.editor.console.messages.push(LogMessage::warning(
+                                        format!("Could not copy companion .mtl file: {}", e),
+                                    ));
                                 } else {
                                     self.editor.console.messages.push(LogMessage::info(format!(
                                         "Imported companion '{}'",
@@ -3299,17 +3780,16 @@ impl App {
             }
 
             // Also copy the source file alongside the .mesh for re-import
-            let source_dest = target_dir.join(
-                source_path
-                    .file_name()
-                    .unwrap_or_default(),
-            );
+            let source_dest = target_dir.join(source_path.file_name().unwrap_or_default());
             if !source_dest.exists() {
                 if let Err(e) = std::fs::copy(source_path, &source_dest) {
-                    self.editor.console.messages.push(LogMessage::warning(format!(
-                        "Could not copy source file: {}",
-                        e
-                    )));
+                    self.editor
+                        .console
+                        .messages
+                        .push(LogMessage::warning(format!(
+                            "Could not copy source file: {}",
+                            e
+                        )));
                 }
             }
 
@@ -3342,10 +3822,7 @@ impl App {
                     }
 
                     if result.material_count > 0 {
-                        msg.push_str(&format!(
-                            ", {} material(s)",
-                            result.material_count
-                        ));
+                        msg.push_str(&format!(", {} material(s)", result.material_count));
                     }
 
                     if result.anim_written {
@@ -3434,7 +3911,10 @@ impl App {
         self.editor.scene.current_scene_relative = BENCHMARK_SCENE_RELATIVE.to_string();
         self.editor.scene.current_scene_name = "Benchmark Scene".to_string();
         {
-            self.core.game_world.resources_mut().remove::<TransformCache>();
+            self.core
+                .game_world
+                .resources_mut()
+                .remove::<TransformCache>();
             let mut tc = TransformCache::new();
             tc.propagate(self.core.game_world.hecs_mut());
             self.core.game_world.resources_mut().insert(tc);
@@ -3482,10 +3962,9 @@ impl App {
         let compiler = match ShaderCompiler::new() {
             Ok(c) => c,
             Err(e) => {
-                self.editor
-                    .console
-                    .messages
-                    .push(LogMessage::error(format!("Shader compiler init failed: {e}")));
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Shader compiler init failed: {e}"
+                )));
                 return;
             }
         };
@@ -3806,7 +4285,12 @@ impl App {
 
     fn handle_frame_input(&mut self, gui_result: &rust_engine::engine::gui::GuiLayoutResult) {
         // Temporarily remove InputManager to avoid borrow conflicts with game_world
-        let Some(mut input_manager) = self.core.game_world.resources_mut().remove::<InputManager>() else {
+        let Some(mut input_manager) = self
+            .core
+            .game_world
+            .resources_mut()
+            .remove::<InputManager>()
+        else {
             return;
         };
 
@@ -3877,8 +4361,7 @@ impl App {
         let camera_dragging = !is_playing && self.editor.viewport.camera.is_active_drag();
 
         if camera_dragging && !self.editor.viewport.cursor_locked {
-            self.editor.viewport.drag_start_cursor_pos =
-                Some(input_manager.mouse_position());
+            self.editor.viewport.drag_start_cursor_pos = Some(input_manager.mouse_position());
             if self
                 .core
                 .window

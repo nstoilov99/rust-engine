@@ -121,11 +121,7 @@ impl SecondaryWindow {
 
         // Recreate swapchain if needed (window resized, suboptimal, etc.)
         if self.recreate_swapchain {
-            match recreate_swapchain(
-                device.clone(),
-                self.surface.clone(),
-                self.swapchain.clone(),
-            ) {
+            match recreate_swapchain(device.clone(), self.surface.clone(), self.swapchain.clone()) {
                 Ok((new_swapchain, new_images)) => {
                     if new_images.is_empty() {
                         self.is_minimized = true;
@@ -205,10 +201,7 @@ impl SecondaryWindow {
         let future = future
             .then_swapchain_present(
                 queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
             )
             .then_signal_fence_and_flush();
 
@@ -228,7 +221,7 @@ impl SecondaryWindow {
 }
 
 /// Kind of secondary window that can be opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecondaryWindowKind {
     Mesh,
     Hierarchy,

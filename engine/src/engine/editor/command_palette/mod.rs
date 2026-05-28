@@ -88,16 +88,60 @@ impl CommandRegistry {
 
     fn register_defaults(&mut self) {
         use crate::engine::editor::theme::Density;
+        use crate::engine::rendering::rendering_3d::deferred::deferred_renderer::DebugView;
 
-        let defaults = [
+        let defaults = vec![
+            Command::new("file.new_scene", "File: New Scene", EditorAction::NewScene)
+                .with_keywords(["create", "empty"]),
+            Command::new(
+                "file.open_scene",
+                "File: Open Scene",
+                EditorAction::OpenScene,
+            )
+            .with_keywords(["load", "scene"]),
             Command::new(
                 "file.save_scene",
                 "File: Save Scene",
                 EditorAction::SaveScene,
             ),
-            Command::new("file.new_scene", "File: New Scene", EditorAction::NewScene),
-            Command::new("edit.undo", "Edit: Undo", EditorAction::Undo),
-            Command::new("edit.redo", "Edit: Redo", EditorAction::Redo),
+            Command::new(
+                "file.save_scene_as",
+                "File: Save Scene As",
+                EditorAction::SaveSceneAs(None),
+            ),
+            Command::new("file.quit", "File: Quit", EditorAction::Quit),
+            Command::new("edit.undo", "Edit: Undo", EditorAction::Undo).with_keywords(["history"]),
+            Command::new("edit.redo", "Edit: Redo", EditorAction::Redo).with_keywords(["history"]),
+            Command::new("edit.cut", "Edit: Cut", EditorAction::Cut),
+            Command::new("edit.copy", "Edit: Copy", EditorAction::Copy),
+            Command::new("edit.paste", "Edit: Paste", EditorAction::Paste),
+            Command::new("edit.duplicate", "Edit: Duplicate", EditorAction::Duplicate),
+            Command::new("edit.delete", "Edit: Delete", EditorAction::Delete),
+            Command::new(
+                "view.toggle_hierarchy",
+                "View: Toggle Hierarchy",
+                EditorAction::ToggleHierarchy,
+            ),
+            Command::new(
+                "view.toggle_inspector",
+                "View: Toggle Inspector",
+                EditorAction::ToggleInspector,
+            ),
+            Command::new(
+                "view.toggle_asset_browser",
+                "View: Toggle Asset Browser",
+                EditorAction::ToggleAssetBrowser,
+            ),
+            Command::new(
+                "view.toggle_console",
+                "View: Toggle Console",
+                EditorAction::ToggleConsole,
+            ),
+            Command::new(
+                "view.toggle_profiler",
+                "View: Toggle Profiler",
+                EditorAction::ToggleProfiler,
+            ),
             Command::new(
                 "view.reset_layout",
                 "View: Reset Layout",
@@ -114,9 +158,114 @@ impl CommandRegistry {
                 EditorAction::SwitchDensity(Density::Comfortable),
             ),
             Command::new(
+                "view.widget_showcase",
+                "View: Widget Showcase",
+                EditorAction::ToggleDevShowcase,
+            ),
+            Command::new(
+                "selection.select_all",
+                "Selection: Select All",
+                EditorAction::SelectAll,
+            ),
+            Command::new(
+                "selection.deselect_all",
+                "Selection: Deselect All",
+                EditorAction::DeselectAll,
+            ),
+            Command::new(
+                "selection.focus",
+                "Selection: Focus Selection",
+                EditorAction::FocusSelection,
+            ),
+            Command::new(
+                "selection.find_entity",
+                "Selection: Find Entity by Name",
+                EditorAction::FindEntityByName,
+            ),
+            Command::new(
+                "play.toggle",
+                "Play: Toggle Play Mode",
+                EditorAction::TogglePlayMode,
+            ),
+            Command::new(
+                "play.step_frame",
+                "Play: Step Frame",
+                EditorAction::StepFrame,
+            ),
+            Command::new(
+                "play.restart",
+                "Play: Restart From Edit State",
+                EditorAction::RestartFromEditState,
+            ),
+            Command::new(
+                "render.debug_none",
+                "Render: Debug View None",
+                EditorAction::SwitchDebugView(DebugView::None),
+            ),
+            Command::new(
+                "render.debug_position",
+                "Render: Debug View Position",
+                EditorAction::SwitchDebugView(DebugView::Position),
+            ),
+            Command::new(
+                "render.debug_normal",
+                "Render: Debug View Normal",
+                EditorAction::SwitchDebugView(DebugView::Normal),
+            ),
+            Command::new(
+                "render.debug_albedo",
+                "Render: Debug View Albedo",
+                EditorAction::SwitchDebugView(DebugView::Albedo),
+            ),
+            Command::new(
+                "render.debug_material",
+                "Render: Debug View Material",
+                EditorAction::SwitchDebugView(DebugView::Material),
+            ),
+            Command::new(
+                "render.debug_depth",
+                "Render: Debug View Depth",
+                EditorAction::SwitchDebugView(DebugView::Depth),
+            ),
+            Command::new(
+                "render.toggle_wireframe",
+                "Render: Toggle Wireframe",
+                EditorAction::ToggleWireframe,
+            ),
+            Command::new(
+                "render.toggle_grid",
+                "Render: Toggle Grid",
+                EditorAction::ToggleGrid,
+            ),
+            Command::new(
+                "render.toggle_gizmos",
+                "Render: Toggle Gizmos",
+                EditorAction::ToggleGizmos,
+            ),
+            Command::new(
+                "asset.reimport_selected",
+                "Asset: Reimport Selected",
+                EditorAction::ReimportSelected,
+            ),
+            Command::new(
+                "asset.show_in_explorer",
+                "Asset: Show in Explorer",
+                EditorAction::ShowInExplorer,
+            ),
+            Command::new(
+                "asset.reveal_in_browser",
+                "Asset: Reveal in Asset Browser",
+                EditorAction::RevealInAssetBrowser,
+            ),
+            Command::new(
                 "engine.reload_shaders",
                 "Engine: Reload All Shaders",
                 EditorAction::ReloadAllShaders,
+            ),
+            Command::new(
+                "engine.open_settings",
+                "Engine: Open Settings",
+                EditorAction::OpenSettings,
             ),
         ];
 

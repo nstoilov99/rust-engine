@@ -8,12 +8,18 @@ mod app;
 mod benchmark_runner;
 mod game_setup;
 mod input_handler;
-mod render_loop;
 mod plugin;
+mod render_loop;
 mod systems;
 
 #[cfg(feature = "editor")]
 use app::{App, EditorRuntimeFlags};
+#[cfg(feature = "editor")]
+use rust_engine::engine::editor::{SecondaryWindow, SecondaryWindowKind};
+#[cfg(feature = "editor")]
+use rust_engine::engine::input::action::{GamepadAxisType, GamepadButton, InputSource};
+#[cfg(feature = "editor")]
+use rust_engine::engine::input::GamepadState;
 use rust_engine::engine::utils::WindowConfig;
 #[cfg(feature = "editor")]
 use std::collections::HashMap;
@@ -24,12 +30,6 @@ use winit::dpi::LogicalPosition;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-#[cfg(feature = "editor")]
-use rust_engine::engine::editor::{SecondaryWindow, SecondaryWindowKind};
-#[cfg(feature = "editor")]
-use rust_engine::engine::input::action::{GamepadAxisType, GamepadButton, InputSource};
-#[cfg(feature = "editor")]
-use rust_engine::engine::input::GamepadState;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 // ============================================================================
@@ -96,7 +96,11 @@ impl ApplicationHandler for GameApp {
             }
         };
 
-        match App::new(window.clone(), self.runtime_flags, &plugin::ClientGamePlugin) {
+        match App::new(
+            window.clone(),
+            self.runtime_flags,
+            &plugin::ClientGamePlugin,
+        ) {
             Ok(app) => {
                 app.print_controls();
                 println!("Engine ready!\n");
@@ -121,32 +125,17 @@ impl ApplicationHandler for GameApp {
         // Route secondary window events
         if self.secondary_windows.contains_key(&window_id) {
             if matches!(&event, WindowEvent::CloseRequested) {
-                if let Some(sec) = self.secondary_windows.remove(&window_id) {
+                let should_remove = if let Some(sec) = self.secondary_windows.get(&window_id) {
                     if let Some(ref mut app) = self.app {
-                        match sec.kind {
-                            SecondaryWindowKind::Mesh => {
-                                if let Some(data) = app.editor.scene.mesh_editors.get_mut(&sec.editor_key) {
-                                    data.open = false;
-                                }
-                            }
-                            SecondaryWindowKind::InputAction => {
-                                if let Some(data) = app.editor.scene.input_action_editor.open_actions.get_mut(&sec.editor_key) {
-                                    data.open = false;
-                                }
-                            }
-                            SecondaryWindowKind::InputContext => {
-                                if let Some(data) = app.editor.scene.input_context_editor.open_contexts.get_mut(&sec.editor_key) {
-                                    data.open = false;
-                                }
-                            }
-                            #[cfg(feature = "editor-debug")]
-                            SecondaryWindowKind::IconInspector => {
-                                app.editor.ui.icon_inspector.open = false;
-                            }
-                            // Built-in panels: closing the window just closes it, no state cleanup needed
-                            _ => {}
-                        }
+                        app.request_secondary_window_close(sec.kind, &sec.editor_key)
+                    } else {
+                        true
                     }
+                } else {
+                    true
+                };
+                if should_remove {
+                    self.secondary_windows.remove(&window_id);
                 }
             } else if let Some(sec) = self.secondary_windows.get_mut(&window_id) {
                 match &event {
@@ -198,7 +187,11 @@ impl ApplicationHandler for GameApp {
         let Some(app) = &mut self.app else { return };
 
         if let DeviceEvent::MouseMotion { delta } = event {
-            if let Some(im) = app.core.game_world.resource_mut::<rust_engine::InputManager>() {
+            if let Some(im) = app
+                .core
+                .game_world
+                .resource_mut::<rust_engine::InputManager>()
+            {
                 im.handle_raw_mouse_motion(delta.0, delta.1);
             }
         }
@@ -219,7 +212,9 @@ impl ApplicationHandler for GameApp {
         }
 
         let Some(app) = app_opt.as_mut() else { return };
-        let Some(window) = window_opt.as_ref() else { return };
+        let Some(window) = window_opt.as_ref() else {
+            return;
+        };
 
         app.begin_frame();
         app.update();
@@ -240,7 +235,9 @@ impl ApplicationHandler for GameApp {
             let queue = app.core.renderer.gpu.queue.clone();
             for req in pending {
                 // Skip if a window for this key+kind already exists
-                let already_exists = secondary_windows.values().any(|s| s.editor_key == req.editor_key && s.kind == req.kind);
+                let already_exists = secondary_windows
+                    .values()
+                    .any(|s| s.editor_key == req.editor_key && s.kind == req.kind);
                 if already_exists {
                     continue;
                 }
@@ -273,8 +270,16 @@ impl ApplicationHandler for GameApp {
         // Must run BEFORE the is_empty() early-return, otherwise closed entries
         // persist forever once all secondary windows are gone.
         app.editor.scene.mesh_editors.retain(|_, data| data.open);
-        app.editor.scene.input_action_editor.open_actions.retain(|_, data| data.open);
-        app.editor.scene.input_context_editor.open_contexts.retain(|_, data| data.open);
+        app.editor
+            .scene
+            .input_action_editor
+            .open_actions
+            .retain(|_, data| data.open);
+        app.editor
+            .scene
+            .input_context_editor
+            .open_contexts
+            .retain(|_, data| data.open);
 
         if secondary_windows.is_empty() {
             return;
@@ -283,19 +288,28 @@ impl ApplicationHandler for GameApp {
         // 2. Remove secondary windows for closed/missing editor data.
         secondary_windows.retain(|_, sec| {
             match sec.kind {
-                SecondaryWindowKind::Mesh => {
-                    app.editor.scene.mesh_editors.get(&sec.editor_key).is_some_and(|d| d.open)
-                }
-                SecondaryWindowKind::InputAction => {
-                    app.editor.scene.input_action_editor.open_actions.get(&sec.editor_key).is_some_and(|d| d.open)
-                }
-                SecondaryWindowKind::InputContext => {
-                    app.editor.scene.input_context_editor.open_contexts.get(&sec.editor_key).is_some_and(|d| d.open)
-                }
+                SecondaryWindowKind::Mesh => app
+                    .editor
+                    .scene
+                    .mesh_editors
+                    .get(&sec.editor_key)
+                    .is_some_and(|d| d.open),
+                SecondaryWindowKind::InputAction => app
+                    .editor
+                    .scene
+                    .input_action_editor
+                    .open_actions
+                    .get(&sec.editor_key)
+                    .is_some_and(|d| d.open),
+                SecondaryWindowKind::InputContext => app
+                    .editor
+                    .scene
+                    .input_context_editor
+                    .open_contexts
+                    .get(&sec.editor_key)
+                    .is_some_and(|d| d.open),
                 #[cfg(feature = "editor-debug")]
-                SecondaryWindowKind::IconInspector => {
-                    app.editor.ui.icon_inspector.open
-                }
+                SecondaryWindowKind::IconInspector => app.editor.ui.icon_inspector.open,
                 // Built-in panels: keep alive (removed only when docked back or closed)
                 _ => !sec.dock_requested,
             }
@@ -350,7 +364,13 @@ impl ApplicationHandler for GameApp {
                 });
 
             if let Some(source) = gamepad_source {
-                for data in app.editor.scene.input_context_editor.open_contexts.values_mut() {
+                for data in app
+                    .editor
+                    .scene
+                    .input_context_editor
+                    .open_contexts
+                    .values_mut()
+                {
                     if data.listening_binding.is_some() {
                         data.pending_external_input = Some(source);
                         break;
@@ -364,10 +384,14 @@ impl ApplicationHandler for GameApp {
 
         // 5. Render each secondary window.
         // Snapshot values before mutable borrows.
-        let action_set_snapshot = app.core.game_world
+        let action_set_snapshot = app
+            .core
+            .game_world
             .resource::<rust_engine::engine::input::subsystem::InputSubsystem>()
             .map(|s| s.action_set.clone());
-        let play_mode = app.core.game_world
+        let play_mode = app
+            .core
+            .game_world
             .resource::<rust_engine::engine::ecs::resources::PlayMode>()
             .copied()
             .unwrap_or(rust_engine::engine::ecs::resources::PlayMode::Edit);
@@ -388,67 +412,71 @@ impl ApplicationHandler for GameApp {
         if icon_inspector_active {
             let main_ctx = app.editor.ui.gui.context().clone();
             main_ctx.data_mut(|d| {
-                d.remove::<std::sync::Arc<rust_engine::engine::editor::widgets::IconRegistry>>(egui::Id::NULL);
+                d.remove::<std::sync::Arc<rust_engine::engine::editor::widgets::IconRegistry>>(
+                    egui::Id::NULL,
+                );
             });
         }
 
         // Collect dock requests from secondary windows
         let dock_requests: Vec<(String, SecondaryWindowKind)> = {
-        let mesh_editors = &mut app.editor.scene.mesh_editors;
-        let asset_browser = &mut app.editor.scene.asset_browser;
-        let ia_editor = &mut app.editor.scene.input_action_editor;
-        let ic_editor = &mut app.editor.scene.input_context_editor;
-        let profiler_panel = &mut app.editor.ui.profiler_panel;
-        let input_settings_panel = &mut app.editor.ui.input_settings_panel;
-        let hierarchy_panel = &mut app.editor.scene.hierarchy_panel;
-        let inspector_panel = &mut app.editor.scene.inspector_panel;
-        let selection = &mut app.editor.scene.selection;
-        let console_messages = &mut app.editor.console.messages;
-        let log_filter = &mut app.editor.console.log_filter;
-        let world = app.core.game_world.hecs_mut();
-        #[cfg(feature = "editor-debug")]
-        let icon_inspector = &mut app.editor.ui.icon_inspector;
-        #[cfg(feature = "editor-debug")]
-        let icon_registry = &mut app.editor.services.icons;
+            let mesh_editors = &mut app.editor.scene.mesh_editors;
+            let asset_browser = &mut app.editor.scene.asset_browser;
+            let ia_editor = &mut app.editor.scene.input_action_editor;
+            let ic_editor = &mut app.editor.scene.input_context_editor;
+            let profiler_panel = &mut app.editor.ui.profiler_panel;
+            let input_settings_panel = &mut app.editor.ui.input_settings_panel;
+            let hierarchy_panel = &mut app.editor.scene.hierarchy_panel;
+            let inspector_panel = &mut app.editor.scene.inspector_panel;
+            let selection = &mut app.editor.scene.selection;
+            let console_messages = &mut app.editor.console.messages;
+            let log_filter = &mut app.editor.console.log_filter;
+            let world = app.core.game_world.hecs_mut();
+            #[cfg(feature = "editor-debug")]
+            let icon_inspector = &mut app.editor.ui.icon_inspector;
+            #[cfg(feature = "editor-debug")]
+            let icon_registry = &mut app.editor.services.icons;
 
-        let mut dock_requests: Vec<(String, SecondaryWindowKind)> = Vec::new();
+            let mut dock_requests: Vec<(String, SecondaryWindowKind)> = Vec::new();
 
-        for sec in secondary_windows.values_mut() {
-            let dock_requested = std::cell::Cell::new(false);
-            let sec_key = sec.editor_key.clone();
-            let sec_kind = sec.kind;
+            for sec in secondary_windows.values_mut() {
+                let dock_requested = std::cell::Cell::new(false);
+                let sec_key = sec.editor_key.clone();
+                let sec_kind = sec.kind;
 
-            match sec.kind {
-                SecondaryWindowKind::Mesh => {
-                    if let Some(data) = mesh_editors.get_mut(&sec.editor_key) {
-                        let preview_cb = preview_cbs
-                            .iter()
-                            .find(|(k, _)| k == &sec.editor_key)
-                            .map(|(_, cb)| cb.clone());
+                match sec.kind {
+                    SecondaryWindowKind::Mesh => {
+                        if let Some(data) = mesh_editors.get_mut(&sec.editor_key) {
+                            let preview_cb = preview_cbs
+                                .iter()
+                                .find(|(k, _)| k == &sec.editor_key)
+                                .map(|(_, cb)| cb.clone());
 
-                        // Register/update preview texture with this window's Gui.
-                        if let Some(ref preview) = data.preview {
-                            if !preview.mesh_indices.is_empty() {
-                                let iv = preview.texture.image_view();
-                                let size = (preview.texture.width(), preview.texture.height());
-                                if sec.preview_texture_id.is_none() {
-                                    if !data.preview_dirty {
-                                        sec.preview_texture_id =
-                                            Some(sec.gui.register_native_texture(iv));
+                            // Register/update preview texture with this window's Gui.
+                            if let Some(ref preview) = data.preview {
+                                if !preview.mesh_indices.is_empty() {
+                                    let iv = preview.texture.image_view();
+                                    let size = (preview.texture.width(), preview.texture.height());
+                                    if sec.preview_texture_id.is_none() {
+                                        if !data.preview_dirty {
+                                            sec.preview_texture_id =
+                                                Some(sec.gui.register_native_texture(iv));
+                                            sec.preview_texture_size = size;
+                                        }
+                                    } else if size != sec.preview_texture_size {
+                                        if let Some(tid) = sec.preview_texture_id {
+                                            sec.gui.update_native_texture(tid, iv);
+                                        }
                                         sec.preview_texture_size = size;
                                     }
-                                } else if size != sec.preview_texture_size {
-                                    if let Some(tid) = sec.preview_texture_id {
-                                        sec.gui.update_native_texture(tid, iv);
-                                    }
-                                    sec.preview_texture_size = size;
+                                    data.preview.as_mut().unwrap().texture_id =
+                                        sec.preview_texture_id;
                                 }
-                                data.preview.as_mut().unwrap().texture_id = sec.preview_texture_id;
                             }
-                        }
 
-                        if let Err(e) = sec.render(device.clone(), queue.clone(), preview_cb, |ctx| {
-                            egui::CentralPanel::default().show(ctx, |ui| {
+                            if let Err(e) =
+                                sec.render(device.clone(), queue.clone(), preview_cb, |ctx| {
+                                    egui::CentralPanel::default().show(ctx, |ui| {
                                 render_dock_button(ui, &dock_requested);
                                 rust_engine::engine::editor::mesh_editor::MeshEditorPanel::show(
                                     ui,
@@ -456,117 +484,128 @@ impl ApplicationHandler for GameApp {
                                     asset_browser,
                                 );
                             });
-                        }) {
-                            log::error!("Mesh editor window render error: {}", e);
+                                })
+                            {
+                                log::error!("Mesh editor window render error: {}", e);
+                            }
                         }
                     }
-                }
-                SecondaryWindowKind::InputAction => {
-                    if let Some(data) = ia_editor.open_actions.get_mut(&sec.editor_key) {
+                    SecondaryWindowKind::InputAction => {
+                        if let Some(data) = ia_editor.open_actions.get_mut(&sec.editor_key) {
+                            if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                                egui::CentralPanel::default().show(ctx, |ui| {
+                                    render_dock_button(ui, &dock_requested);
+                                    rust_engine::engine::editor::InputActionEditor::show_ui(
+                                        ui, data,
+                                    );
+                                });
+                            }) {
+                                log::error!("Input action editor window render error: {}", e);
+                            }
+                        }
+                    }
+                    SecondaryWindowKind::InputContext => {
+                        if let Some(data) = ic_editor.open_contexts.get_mut(&sec.editor_key) {
+                            let available = &ic_editor.available_actions;
+                            if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                                egui::CentralPanel::default().show(ctx, |ui| {
+                                    render_dock_button(ui, &dock_requested);
+                                    rust_engine::engine::editor::InputContextEditor::show_ui(
+                                        ui, data, available,
+                                    );
+                                });
+                            }) {
+                                log::error!("Mapping context editor window render error: {}", e);
+                            }
+                        }
+                    }
+                    SecondaryWindowKind::Profiler => {
                         if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 render_dock_button(ui, &dock_requested);
-                                rust_engine::engine::editor::InputActionEditor::show_ui(ui, data);
+                                profiler_panel.show_contents(ui);
                             });
                         }) {
-                            log::error!("Input action editor window render error: {}", e);
+                            log::error!("Profiler window render error: {}", e);
                         }
                     }
-                }
-                SecondaryWindowKind::InputContext => {
-                    if let Some(data) = ic_editor.open_contexts.get_mut(&sec.editor_key) {
-                        let available = &ic_editor.available_actions;
+                    SecondaryWindowKind::AssetBrowser => {
+                        // Pass None for icon_manager — icons are TextureHandles bound to the
+                        // main window's egui Context and invalid in secondary windows.
+                        // The asset browser falls back to text labels gracefully.
                         if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 render_dock_button(ui, &dock_requested);
-                                rust_engine::engine::editor::InputContextEditor::show_ui(ui, data, available);
+                                asset_browser.show(ui, None);
                             });
                         }) {
-                            log::error!("Mapping context editor window render error: {}", e);
+                            log::error!("Asset browser window render error: {}", e);
+                        }
+                    }
+                    SecondaryWindowKind::InputSettings => {
+                        let snapshot_ref = action_set_snapshot.as_ref();
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                input_settings_panel.show_contents(ui, snapshot_ref);
+                            });
+                        }) {
+                            log::error!("Input settings window render error: {}", e);
+                        }
+                    }
+                    SecondaryWindowKind::Hierarchy => {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                hierarchy_panel.show_contents(ui, world, selection, play_mode);
+                            });
+                        }) {
+                            log::error!("Hierarchy window render error: {}", e);
+                        }
+                    }
+                    SecondaryWindowKind::Inspector => {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                inspector_panel.show_contents(
+                                    ui,
+                                    world,
+                                    selection,
+                                    play_mode,
+                                    asset_browser,
+                                );
+                            });
+                        }) {
+                            log::error!("Inspector window render error: {}", e);
+                        }
+                    }
+                    SecondaryWindowKind::Console => {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                render_dock_button(ui, &dock_requested);
+                                render_console_panel(ui, console_messages, log_filter);
+                            });
+                        }) {
+                            log::error!("Console window render error: {}", e);
+                        }
+                    }
+                    #[cfg(feature = "editor-debug")]
+                    SecondaryWindowKind::IconInspector => {
+                        if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
+                            icon_inspector.show(ctx, icon_registry);
+                        }) {
+                            log::error!("Icon Inspector window render error: {}", e);
                         }
                     }
                 }
-                SecondaryWindowKind::Profiler => {
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            profiler_panel.show_contents(ui);
-                        });
-                    }) {
-                        log::error!("Profiler window render error: {}", e);
-                    }
-                }
-                SecondaryWindowKind::AssetBrowser => {
-                    // Pass None for icon_manager — icons are TextureHandles bound to the
-                    // main window's egui Context and invalid in secondary windows.
-                    // The asset browser falls back to text labels gracefully.
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            asset_browser.show(ui, None);
-                        });
-                    }) {
-                        log::error!("Asset browser window render error: {}", e);
-                    }
-                }
-                SecondaryWindowKind::InputSettings => {
-                    let snapshot_ref = action_set_snapshot.as_ref();
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            input_settings_panel.show_contents(ui, snapshot_ref);
-                        });
-                    }) {
-                        log::error!("Input settings window render error: {}", e);
-                    }
-                }
-                SecondaryWindowKind::Hierarchy => {
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            hierarchy_panel.show_contents(ui, world, selection, play_mode);
-                        });
-                    }) {
-                        log::error!("Hierarchy window render error: {}", e);
-                    }
-                }
-                SecondaryWindowKind::Inspector => {
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            inspector_panel.show_contents(ui, world, selection, play_mode, asset_browser);
-                        });
-                    }) {
-                        log::error!("Inspector window render error: {}", e);
-                    }
-                }
-                SecondaryWindowKind::Console => {
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            render_dock_button(ui, &dock_requested);
-                            render_console_panel(ui, console_messages, log_filter);
-                        });
-                    }) {
-                        log::error!("Console window render error: {}", e);
-                    }
-                }
-                #[cfg(feature = "editor-debug")]
-                SecondaryWindowKind::IconInspector => {
-                    if let Err(e) = sec.render(device.clone(), queue.clone(), None, |ctx| {
-                        icon_inspector.show(ctx, icon_registry);
-                    }) {
-                        log::error!("Icon Inspector window render error: {}", e);
-                    }
+
+                if dock_requested.get() {
+                    sec.dock_requested = true;
+                    dock_requests.push((sec_key, sec_kind));
                 }
             }
 
-            if dock_requested.get() {
-                sec.dock_requested = true;
-                dock_requests.push((sec_key, sec_kind));
-            }
-        }
-
-        dock_requests
+            dock_requests
         }; // end borrow scope — all &mut refs to app fields are released
 
         // Process dock requests (re-dock secondary windows as tabs)
@@ -776,8 +815,13 @@ fn render_console_panel(
         if ui
             .add(
                 egui::Button::new(
-                    egui::RichText::new(format!("Errors ({})", error_count))
-                        .color(if filter.show_error { LogLevel::Error.color() } else { egui::Color32::GRAY }),
+                    egui::RichText::new(format!("Errors ({})", error_count)).color(
+                        if filter.show_error {
+                            LogLevel::Error.color()
+                        } else {
+                            egui::Color32::GRAY
+                        },
+                    ),
                 )
                 .fill(error_fill)
                 .corner_radius(3.0),
@@ -795,8 +839,13 @@ fn render_console_panel(
         if ui
             .add(
                 egui::Button::new(
-                    egui::RichText::new(format!("Warnings ({})", warn_count))
-                        .color(if filter.show_warning { LogLevel::Warning.color() } else { egui::Color32::GRAY }),
+                    egui::RichText::new(format!("Warnings ({})", warn_count)).color(
+                        if filter.show_warning {
+                            LogLevel::Warning.color()
+                        } else {
+                            egui::Color32::GRAY
+                        },
+                    ),
                 )
                 .fill(warn_fill)
                 .corner_radius(3.0),
@@ -813,10 +862,13 @@ fn render_console_panel(
         };
         if ui
             .add(
-                egui::Button::new(
-                    egui::RichText::new(format!("Info ({})", info_count))
-                        .color(if filter.show_info { LogLevel::Info.color() } else { egui::Color32::GRAY }),
-                )
+                egui::Button::new(egui::RichText::new(format!("Info ({})", info_count)).color(
+                    if filter.show_info {
+                        LogLevel::Info.color()
+                    } else {
+                        egui::Color32::GRAY
+                    },
+                ))
                 .fill(info_fill)
                 .corner_radius(3.0),
             )
