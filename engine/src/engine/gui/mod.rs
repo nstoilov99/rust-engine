@@ -5,6 +5,9 @@
 
 mod renderer;
 
+#[cfg(feature = "crusty")]
+pub mod crusty;
+
 pub use renderer::EguiRenderer;
 
 use egui::Context;

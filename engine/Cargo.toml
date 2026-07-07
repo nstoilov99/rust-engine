@@ -10,6 +10,8 @@ path = "src/lib.rs"
 [features]
 default = []
 editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
+# crusty-gui backend for the editor UI (Phase 16 egui replacement, WIP)
+crusty = ["dep:crusty-gui"]
 editor-debug = ["editor"]
 tracy = ["tracy-client"]
 
@@ -65,6 +67,9 @@ typetag = "0.2"
 
 # Immediate Mode GUI (editor only)
 egui = { version = "0.33.3", optional = true }
+
+# crusty-gui — in-house GUI library replacing egui (Phase 16, path dep during development)
+crusty-gui = { path = "../../crusty-gui", default-features = false, features = ["winit-window", "vulkano-renderer"], optional = true }
 
 # Physics Engine (Rapier 3D)
 rapier3d = "0.25"
