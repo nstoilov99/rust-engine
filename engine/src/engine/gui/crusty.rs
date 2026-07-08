@@ -1,18 +1,20 @@
 //! crusty-gui integration mirroring the egui [`Gui`](super::Gui) seam.
 //!
 //! Phase 16 of the crusty-gui roadmap: the editor UI migrates from egui to
-//! our in-house library panel by panel. This struct is the crusty-gui
-//! counterpart of `Gui` — same split between a CPU-only [`layout`] pass
-//! (main thread) and a [`render`] pass that records a command buffer for
-//! the frame graph (render thread), same winit event translation entry
-//! point, same native-texture registration for the viewport.
-//!
-//! [`layout`]: CrustyGui::layout
-//! [`render`]: CrustyGui::render
+//! our in-house library panel by panel. The egui split is mirrored across
+//! threads: [`CrustyGui`] lives on the main thread (event translation +
+//! CPU-only layout, like `Gui::layout`), [`CrustyRenderer`] lives on the
+//! render thread (records a command buffer targeting the swapchain image,
+//! like the render thread's `EguiRenderer`). The paint list crosses in the
+//! `FramePacket`; the glyph shaper/atlas is shared between both halves
+//! behind a mutex (layout shapes text on the main thread, the renderer
+//! flushes queued glyph uploads while recording).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use crusty_gui::backend::TargetRenderer;
 use crusty_gui::context::{Context, CursorIcon, Ui};
@@ -34,6 +36,10 @@ use vulkano::image::Image;
 use vulkano::image::view::ImageView;
 use winit::event::WindowEvent;
 
+/// Glyph shaper/atlas shared between the main-thread layout pass and the
+/// render-thread record pass.
+pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
+
 /// Result of the CPU-only layout pass — the crusty-gui analogue of
 /// [`GuiLayoutResult`](super::GuiLayoutResult). The paint list crosses to
 /// the render thread; the flags gate game input on the main thread.
@@ -47,12 +53,10 @@ pub struct CrustyLayoutResult {
     pub repaint_after: Option<Duration>,
 }
 
-/// crusty-gui equivalent of [`Gui`](super::Gui): owns the UI context, the
-/// glyph shaper/atlas and the presentation-less renderer.
+/// Main-thread half: UI context, input translation and layout.
 pub struct CrustyGui {
     ctx: Context,
-    text: TextRenderer,
-    renderer: TargetRenderer,
+    text: SharedTextRenderer,
     screen_size: [f32; 2],
 
     pointer_pos: Option<Pos2>,
@@ -66,24 +70,10 @@ pub struct CrustyGui {
 }
 
 impl CrustyGui {
-    /// `format` must match the images later passed to [`render`](Self::render).
-    pub fn new(
-        device: Arc<Device>,
-        queue: Arc<Queue>,
-        format: Format,
-        screen_size: [f32; 2],
-    ) -> Self {
-        let cmd_alloc = Arc::new(StandardCommandBufferAllocator::new(
-            device.clone(),
-            StandardCommandBufferAllocatorCreateInfo::default(),
-        ));
-        let text = TextRenderer::new(device.clone(), [1024, 1024]);
-        let renderer = TargetRenderer::new(device, queue, cmd_alloc, format);
-
+    pub fn new(device: Arc<Device>, screen_size: [f32; 2]) -> Self {
         Self {
             ctx: Context::new(),
-            text,
-            renderer,
+            text: Arc::new(Mutex::new(TextRenderer::new(device, [1024, 1024]))),
             screen_size,
             pointer_pos: None,
             modifiers: Modifiers::empty(),
@@ -93,6 +83,11 @@ impl CrustyGui {
             dropped_files: Vec::new(),
             hovered_file_count: 0,
         }
+    }
+
+    /// Handle for the render thread's [`CrustyRenderer`].
+    pub fn text_handle(&self) -> SharedTextRenderer {
+        self.text.clone()
     }
 
     /// Translate a winit event into queued UI input. Returns true when the
@@ -151,7 +146,10 @@ impl CrustyGui {
         };
 
         self.ctx.begin_frame(input);
-        self.ctx.run_root(&mut self.text, screen_rect, ui_fn);
+        {
+            let mut text = self.text.lock();
+            self.ctx.run_root(&mut text, screen_rect, ui_fn);
+        }
         let output = self.ctx.end_frame();
 
         CrustyLayoutResult {
@@ -164,12 +162,59 @@ impl CrustyGui {
         }
     }
 
+    /// Call when the window resizes. Zero sizes (minimized) are ignored.
+    pub fn set_screen_size(&mut self, width: f32, height: f32) {
+        if width > 0.0 && height > 0.0 {
+            self.screen_size = [width, height];
+        }
+    }
+
+    /// Drain files dropped from the OS this frame.
+    pub fn take_dropped_files(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.dropped_files)
+    }
+
+    /// True while the OS hovers files over the window (before drop).
+    pub fn is_hovering_external_files(&self) -> bool {
+        self.hovered_file_count > 0
+    }
+
+    /// Direct access to the UI context (style, memory, repaint requests).
+    pub fn context_mut(&mut self) -> &mut Context {
+        &mut self.ctx
+    }
+}
+
+/// Render-thread half: records the UI paint list into the swapchain image.
+pub struct CrustyRenderer {
+    renderer: TargetRenderer,
+    text: SharedTextRenderer,
+}
+
+impl CrustyRenderer {
+    /// `format` must match the images later passed to [`render`](Self::render).
+    pub fn new(
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+        format: Format,
+        text: SharedTextRenderer,
+    ) -> Self {
+        let cmd_alloc = Arc::new(StandardCommandBufferAllocator::new(
+            device.clone(),
+            StandardCommandBufferAllocatorCreateInfo::default(),
+        ));
+        Self {
+            renderer: TargetRenderer::new(device, queue, cmd_alloc, format),
+            text,
+        }
+    }
+
     /// Record the UI paint list into `target` (typically the swapchain
-    /// image, after the scene) and return the command buffer for the frame
-    /// graph. `backdrop` is what glass panels blur (the scene image);
-    /// `clear` clears the target first instead of compositing.
+    /// image, after the scene / egui pass) and return the command buffer.
+    /// `backdrop` is what glass panels blur; `clear` clears the target
+    /// first instead of compositing over it.
     ///
-    /// Returns `None` when the target has a zero extent (minimized).
+    /// Returns `Ok(None)` when the target has a zero extent (minimized).
     pub fn render(
         &mut self,
         target: Arc<Image>,
@@ -178,9 +223,10 @@ impl CrustyGui {
         clear: Option<[f32; 4]>,
     ) -> Result<Option<Arc<PrimaryAutoCommandBuffer>>, Box<dyn std::error::Error>> {
         let view = ImageView::new_default(target)?;
+        let mut text = self.text.lock();
         Ok(self
             .renderer
-            .render(&mut self.text, view, paint, backdrop, clear))
+            .render(&mut text, view, paint, backdrop, clear))
     }
 
     /// Register an engine image view (viewport render target, thumbnail) so
@@ -199,31 +245,9 @@ impl CrustyGui {
         self.renderer.registry_mut().remove(id);
     }
 
-    /// Call when the window resizes. Zero sizes (minimized) are ignored.
-    pub fn set_screen_size(&mut self, width: f32, height: f32) {
-        if width > 0.0 && height > 0.0 {
-            self.screen_size = [width, height];
-        }
-    }
-
     /// Call on swapchain recreation so cached framebuffers don't pin the
     /// old images.
     pub fn clear_framebuffer_cache(&mut self) {
         self.renderer.clear_target_cache();
-    }
-
-    /// Drain files dropped from the OS this frame.
-    pub fn take_dropped_files(&mut self) -> Vec<PathBuf> {
-        std::mem::take(&mut self.dropped_files)
-    }
-
-    /// True while the OS hovers files over the window (before drop).
-    pub fn is_hovering_external_files(&self) -> bool {
-        self.hovered_file_count > 0
-    }
-
-    /// Direct access to the UI context (style, memory, repaint requests).
-    pub fn context_mut(&mut self) -> &mut Context {
-        &mut self.ctx
     }
 }

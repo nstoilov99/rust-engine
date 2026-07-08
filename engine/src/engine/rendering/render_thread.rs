@@ -32,6 +32,10 @@ pub struct RenderThreadConfig {
     pub swapchain_transfer: Option<SwapchainTransfer>,
     #[cfg(feature = "editor")]
     pub viewport_dimensions: Option<[u32; 2]>,
+    /// Glyph shaper/atlas shared with the main thread's `CrustyGui`
+    /// (Phase 16). `None` disables the crusty render pass.
+    #[cfg(feature = "crusty")]
+    pub crusty_text: Option<crate::engine::gui::crusty::SharedTextRenderer>,
 }
 
 /// Handle to the render thread, held by the main thread.
@@ -133,12 +137,14 @@ impl RenderThread {
             }
         };
 
+        #[cfg(any(feature = "editor", feature = "crusty"))]
+        let sc_format = sc_swapchain
+            .as_ref()
+            .map(|sc| sc.image_format())
+            .unwrap_or(vulkano::format::Format::B8G8R8A8_SRGB);
+
         #[cfg(feature = "editor")]
         let mut egui_renderer = {
-            let sc_format = sc_swapchain
-                .as_ref()
-                .map(|sc| sc.image_format())
-                .unwrap_or(vulkano::format::Format::B8G8R8A8_SRGB);
             match crate::engine::gui::EguiRenderer::new(
                 gpu.device.clone(),
                 gpu.queue.clone(),
@@ -154,6 +160,17 @@ impl RenderThread {
                 }
             }
         };
+
+        #[cfg(feature = "crusty")]
+        let mut crusty_renderer = config.crusty_text.clone().map(|text| {
+            log::info!("render_thread: CrustyRenderer created");
+            crate::engine::gui::crusty::CrustyRenderer::new(
+                gpu.device.clone(),
+                gpu.queue.clone(),
+                sc_format,
+                text,
+            )
+        });
 
         let ready_event = RenderEvent::RenderThreadReady {
             #[cfg(feature = "editor")]
@@ -207,6 +224,10 @@ impl RenderThread {
                         sc_swapchain = Some(new_sc);
                         sc_images = Some(new_imgs);
                         deferred_renderer.clear_framebuffer_cache();
+                        #[cfg(feature = "crusty")]
+                        if let Some(ref mut cr) = crusty_renderer {
+                            cr.clear_framebuffer_cache();
+                        }
                         needs_recreate = false;
 
                         if dims[0] > 0 && dims[1] > 0 {
@@ -340,6 +361,9 @@ impl RenderThread {
                         None
                     };
 
+                    #[cfg(feature = "crusty")]
+                    let crusty_target = target_image.clone();
+
                     let egui_cb = if let (Some(ref mut egui_r), Some(primitives), Some(deltas)) = (
                         &mut egui_renderer,
                         packet.egui_primitives,
@@ -364,88 +388,85 @@ impl RenderThread {
                         None
                     };
 
-                    // Chain and submit whatever command buffers we have
-                    let submit_result = match (deferred_cb, egui_cb) {
-                        (Some(d_cb), Some(e_cb)) => {
-                            let future = acquire_future
-                                .then_execute(gpu.queue.clone(), d_cb)
-                                .and_then(|f| f.then_execute(gpu.queue.clone(), e_cb));
-                            match future {
-                                Ok(f) => {
-                                    if let Err(e) = f.flush() {
-                                        log::error!("render_thread: editor flush failed: {:?}", e);
-                                        unsafe { f.signal_finished() };
-                                        None
-                                    } else {
-                                        unsafe { f.signal_finished() };
-                                        let present = f
-                                            .then_swapchain_present(
-                                                gpu.queue.clone(),
-                                                SwapchainPresentInfo::swapchain_image_index(
-                                                    swapchain_ref.clone(),
-                                                    image_index,
-                                                ),
-                                            )
-                                            .then_signal_fence_and_flush();
-                                        match present {
-                                            Ok(fence) => Some(fence.boxed()),
-                                            Err(Validated::Error(VulkanError::OutOfDate)) => {
-                                                needs_recreate = true;
-                                                None
-                                            }
-                                            Err(e) => {
-                                                log::error!("render_thread: editor present error: {:?}", e);
-                                                None
-                                            }
-                                        }
-                                    }
-                                }
+                    // crusty-gui pass, composited over the egui output (Phase 16
+                    // migration — panels move over one at a time).
+                    #[cfg(feature = "crusty")]
+                    let crusty_cb = if let (Some(ref mut crusty_r), Some(paint)) =
+                        (&mut crusty_renderer, packet.crusty_paint.as_deref())
+                    {
+                        crate::profile_scope!("record_crusty");
+                        match crusty_r.render(crusty_target, paint, None, None) {
+                            Ok(cb) => cb,
+                            Err(e) => {
+                                log::error!("render_thread: crusty render error: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Chain and submit whatever command buffers we have.
+                    // Deferred-only frames (no UI pass) don't present.
+                    let mut ui_cbs: Vec<
+                        Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+                    > = Vec::new();
+                    if let Some(cb) = egui_cb {
+                        ui_cbs.push(cb);
+                    }
+                    #[cfg(feature = "crusty")]
+                    if let Some(cb) = crusty_cb {
+                        ui_cbs.push(cb);
+                    }
+
+                    let submit_result = if ui_cbs.is_empty() {
+                        log::trace!("render_thread: editor frame with no UI command buffers");
+                        None
+                    } else {
+                        let mut cbs = deferred_cb.into_iter().collect::<Vec<_>>();
+                        cbs.extend(ui_cbs);
+
+                        let mut future: Option<Box<dyn GpuFuture>> =
+                            Some(acquire_future.boxed());
+                        for cb in cbs {
+                            match future.take().unwrap().then_execute(gpu.queue.clone(), cb) {
+                                Ok(f) => future = Some(f.boxed()),
                                 Err(e) => {
                                     log::error!("render_thread: editor execute error: {:?}", e);
-                                    None
+                                    break;
                                 }
                             }
                         }
-                        (None, Some(e_cb)) => {
-                            let future = acquire_future.then_execute(gpu.queue.clone(), e_cb);
-                            match future {
-                                Ok(f) => {
-                                    if let Err(e) = f.flush() {
-                                        log::error!("render_thread: egui-only flush failed: {:?}", e);
-                                        unsafe { f.signal_finished() };
+
+                        if let Some(future) = future {
+                            if let Err(e) = future.flush() {
+                                log::error!("render_thread: editor flush failed: {:?}", e);
+                                unsafe { future.signal_finished() };
+                                None
+                            } else {
+                                unsafe { future.signal_finished() };
+                                let present = future
+                                    .then_swapchain_present(
+                                        gpu.queue.clone(),
+                                        SwapchainPresentInfo::swapchain_image_index(
+                                            swapchain_ref.clone(),
+                                            image_index,
+                                        ),
+                                    )
+                                    .then_signal_fence_and_flush();
+                                match present {
+                                    Ok(fence) => Some(fence.boxed()),
+                                    Err(Validated::Error(VulkanError::OutOfDate)) => {
+                                        needs_recreate = true;
                                         None
-                                    } else {
-                                        unsafe { f.signal_finished() };
-                                        let present = f
-                                            .then_swapchain_present(
-                                                gpu.queue.clone(),
-                                                SwapchainPresentInfo::swapchain_image_index(
-                                                    swapchain_ref.clone(),
-                                                    image_index,
-                                                ),
-                                            )
-                                            .then_signal_fence_and_flush();
-                                        match present {
-                                            Ok(fence) => Some(fence.boxed()),
-                                            Err(Validated::Error(VulkanError::OutOfDate)) => {
-                                                needs_recreate = true;
-                                                None
-                                            }
-                                            Err(e) => {
-                                                log::error!("render_thread: present error: {:?}", e);
-                                                None
-                                            }
-                                        }
+                                    }
+                                    Err(e) => {
+                                        log::error!("render_thread: editor present error: {:?}", e);
+                                        None
                                     }
                                 }
-                                Err(e) => {
-                                    log::error!("render_thread: execute error: {:?}", e);
-                                    None
-                                }
                             }
-                        }
-                        _ => {
-                            log::trace!("render_thread: editor frame with no command buffers");
+                        } else {
                             None
                         }
                     };

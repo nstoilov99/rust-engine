@@ -215,6 +215,10 @@ pub struct App {
     pub editor: EditorApp,
     runtime_flags: EditorRuntimeFlags,
     pub pending_window_requests: Vec<PendingWindowRequest>,
+    /// Main-thread half of the crusty-gui integration (Phase 16 egui
+    /// replacement — panels migrate over one at a time).
+    #[cfg(feature = "crusty")]
+    pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -252,6 +256,15 @@ impl App {
             swapchain_format,
             &window,
         )?;
+
+        #[cfg(feature = "crusty")]
+        let crusty_gui = {
+            let size = window.inner_size();
+            rust_engine::engine::gui::crusty::CrustyGui::new(
+                renderer.gpu.device.clone(),
+                [size.width as f32, size.height as f32],
+            )
+        };
 
         let (asset_manager, hot_reload, reload_rx) = game_setup::setup_asset_system(&renderer)?;
 
@@ -424,6 +437,8 @@ impl App {
                 },
             ),
             viewport_dimensions: Some([800, 600]),
+            #[cfg(feature = "crusty")]
+            crusty_text: Some(crusty_gui.text_handle()),
         });
 
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
@@ -569,6 +584,8 @@ impl App {
             editor,
             runtime_flags,
             pending_window_requests: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_gui,
         })
     }
 
@@ -1540,6 +1557,8 @@ impl App {
 
     pub fn handle_window_event(&mut self, event: &WindowEvent, _event_loop: &ActiveEventLoop) {
         self.editor.ui.gui.handle_event(event);
+        #[cfg(feature = "crusty")]
+        self.crusty_gui.handle_event(event);
 
         match event {
             WindowEvent::Resized(new_size) => {
@@ -1547,6 +1566,9 @@ impl App {
                 self.editor
                     .ui
                     .gui
+                    .set_screen_size(new_size.width as f32, new_size.height as f32);
+                #[cfg(feature = "crusty")]
+                self.crusty_gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
             WindowEvent::KeyboardInput {
@@ -3224,6 +3246,19 @@ impl App {
         packet.egui_texture_deltas = Some(gui_result.textures_delta);
         packet.texture_binds = gui_result.texture_binds;
         packet.viewport_texture_id = self.editor.viewport.texture_id;
+
+        // crusty-gui layout pass (Phase 16) — composited over the egui UI.
+        #[cfg(feature = "crusty")]
+        {
+            let crusty_result = self.crusty_gui.layout(|ui| {
+                ui.add_space(40.0);
+                ui.label("crusty-gui: Phase 16 wiring OK");
+                if ui.button("crusty test").clicked {
+                    log::info!("crusty-gui: test button clicked");
+                }
+            });
+            packet.crusty_paint = Some(crusty_result.paint);
+        }
 
         // CRITICAL: re-sync the viewport dimensions and view_projection with the size
         // the egui layout just produced (it ran *after* the initial packet build above

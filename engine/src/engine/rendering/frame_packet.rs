@@ -107,6 +107,11 @@ pub struct FramePacket {
     #[cfg(feature = "editor")]
     pub egui_texture_deltas: Option<egui::TexturesDelta>,
 
+    /// crusty-gui paint list, composited after the egui pass (Phase 16
+    /// migration — panels move here one at a time).
+    #[cfg(feature = "crusty")]
+    pub crusty_paint: Option<Vec<crusty_gui::paint::PaintCmd>>,
+
     // Render config
     pub render_mode: RenderMode,
     pub window_dimensions: [u32; 2],
@@ -174,6 +179,8 @@ impl FramePacket {
             egui_primitives: None,
             #[cfg(feature = "editor")]
             egui_texture_deltas: None,
+            #[cfg(feature = "crusty")]
+            crusty_paint: None,
             render_mode: RenderMode::Standalone,
             window_dimensions,
             #[cfg(feature = "editor")]
@@ -214,6 +221,8 @@ impl FramePacket {
             plankton_emitters,
             egui_primitives: None,
             egui_texture_deltas: None,
+            #[cfg(feature = "crusty")]
+            crusty_paint: None,
             render_mode: RenderMode::Editor,
             window_dimensions,
             viewport_dimensions,

@@ -233,6 +233,8 @@ impl StandaloneApp {
             }),
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
+            #[cfg(feature = "crusty")]
+            crusty_text: None,
         });
 
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
