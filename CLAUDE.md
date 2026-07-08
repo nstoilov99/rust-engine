@@ -7,7 +7,7 @@
 | **Coordinate System** | Z-up (X=Forward/Red, Y=Right/Green, Z=Up/Blue) |
 | **Renderer** | Vulkano 0.35, Deferred Pipeline |
 | **ECS** | Custom (wrapping hecs 0.10) |
-| **GUI** | egui 0.33 with custom Vulkano integration |
+| **GUI** | egui 0.33, migrating to in-house `crusty-gui` (Phase 16, feature `crusty`) |
 | **Physics** | Rapier 3D 0.25 |
 | **Serialization** | RON (Rusty Object Notation) |
 
@@ -75,11 +75,39 @@ src/engine/
 └── camera/      # Camera systems
 ```
 
+## Features and run commands
+
+```bash
+cargo run -p game_client --features editor          # editor (egui)
+cargo run -p game_client --features editor,crusty   # editor + crusty-gui overlay (Phase 16)
+cargo run -p game_client                            # standalone game
+```
+
+Feature `crusty` implies `editor` and pulls `crusty-gui` as a path dep from
+`../crusty-gui`.
+
+## Threading model (rendering)
+
+Main thread does game logic, ECS and UI layout (CPU-only); the render thread
+records command buffers and presents. The only data crossing is `FramePacket`
+(bounded(2) crossbeam channel) — all fields owned, no shared mutable state,
+except the crusty `SharedTextRenderer` mutex (layout shapes text on main,
+renderer flushes glyph uploads on record).
+
+## GUI migration (Phase 16)
+
+The editor UI migrates from egui to `../crusty-gui` panel by panel (roadmap in
+`../crusty-gui/ROADMAP.md`). Seam: `engine/src/engine/gui/crusty.rs`
+(`CrustyGui` main thread / `CrustyRenderer` render thread). egui stays as
+fallback until all panels are ported. Don't fork panel logic between the two
+UIs — both call the same state structs and systems.
+
+Note: no logger is installed in `game_client` — `log::` output is invisible;
+use `println!` for temporary diagnostics (and remove before commit).
+
 ## Current Development Focus
 
-- Task 23: Asset Browser (Complete)
-- Task 23.5: Advanced ECS Architecture (Complete)
-- Task 24: Play Mode vs Edit Mode (Next)
+- Phase 16: egui → crusty-gui editor migration (in progress, Console panel next)
 - Task 25: Build Pipeline and Export (Planned)
 
 ## Patched Dependencies
