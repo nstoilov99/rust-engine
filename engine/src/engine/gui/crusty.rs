@@ -19,10 +19,13 @@ use parking_lot::Mutex;
 use crusty_gui::backend::TargetRenderer;
 use crusty_gui::context::{Context, CursorIcon, Ui};
 use crusty_gui::input::{Event, Modifiers, RawInput};
-use crusty_gui::math::{Pos2, Rect, Vec2};
+use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureFilter, TextureId};
 use crusty_gui::shell::input as shell_input;
+use crusty_gui::style::Style;
 use crusty_gui::text::TextRenderer;
+
+use crate::engine::editor::theme::EditorTheme;
 
 pub use crusty_gui::shell::winit_cursor;
 
@@ -39,6 +42,52 @@ use winit::event::WindowEvent;
 /// Glyph shaper/atlas shared between the main-thread layout pass and the
 /// render-thread record pass.
 pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
+
+/// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`] so
+/// ported panels visually match their egui counterparts. egui runs at
+/// pixels_per_point 1.15 while crusty runs at 1.0, so point-sized tokens
+/// (fonts, spacing) are pre-scaled here.
+pub fn style_from_theme(theme: &EditorTheme) -> Style {
+    const PPP: f32 = 1.15;
+    let c = |c32: egui::Color32| Color::from_srgb_u8(c32.r(), c32.g(), c32.b(), c32.a());
+
+    let p = &theme.palette;
+    let sp = &theme.spacing;
+    let ty = &theme.typography;
+
+    let mut style = Style::editor_dark();
+
+    style.palette.surface = c(p.field_bg);
+    style.palette.surface_hover = c(p.surface[3]);
+    style.palette.surface_active = c(p.surface[4]);
+    style.palette.accent = c(p.accent);
+    style.palette.accent_glow = c(p.accent).with_alpha(0.25);
+    style.palette.text = c(p.text_primary);
+    style.palette.text_dim = c(p.text_secondary);
+    style.palette.stroke = c(p.stroke);
+    style.palette.stroke_hover = c(p.accent);
+    style.palette.success = c(p.semantic.success);
+
+    style.spacing.item = sp.item_spacing_y * PPP;
+    style.spacing.padding = sp.window_margin * PPP;
+    style.spacing.button_padding =
+        Vec2::new(sp.button_padding_x * PPP, sp.button_padding_y * PPP);
+    style.spacing.box_label_gap = 6.0 * PPP;
+
+    style.fonts.body = ty.body * PPP;
+    style.fonts.title = ty.heading * PPP;
+    style.fonts.small = ty.caption * PPP;
+
+    style.rounding.panel = Rounding::same(6.0);
+    style.rounding.widget = Rounding::same(3.0);
+    style.rounding.small = Rounding::same(2.0);
+
+    style.sizes.checkbox *= PPP;
+    style.sizes.radio *= PPP;
+    style.sizes.slider_height *= PPP;
+
+    style
+}
 
 /// Result of the CPU-only layout pass — the crusty-gui analogue of
 /// [`GuiLayoutResult`](super::GuiLayoutResult). The paint list crosses to
@@ -71,8 +120,10 @@ pub struct CrustyGui {
 
 impl CrustyGui {
     pub fn new(device: Arc<Device>, screen_size: [f32; 2]) -> Self {
+        let mut ctx = Context::new();
+        ctx.style = style_from_theme(&EditorTheme::dark_default());
         Self {
-            ctx: Context::new(),
+            ctx,
             text: Arc::new(Mutex::new(TextRenderer::new(device, [1024, 1024]))),
             screen_size,
             pointer_pos: None,
@@ -177,6 +228,12 @@ impl CrustyGui {
     /// True while the OS hovers files over the window (before drop).
     pub fn is_hovering_external_files(&self) -> bool {
         self.hovered_file_count > 0
+    }
+
+    /// Re-derive the crusty style from the engine theme (call after theme
+    /// or density changes so both UIs stay in sync).
+    pub fn apply_theme(&mut self, theme: &EditorTheme) {
+        self.ctx.style = style_from_theme(theme);
     }
 
     /// Direct access to the UI context (style, memory, repaint requests).

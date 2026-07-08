@@ -1012,6 +1012,8 @@ impl App {
             EditorAction::SwitchDensity(density) => {
                 let ctx = self.editor.ui.gui.context().clone();
                 self.editor.services.set_density(density, &ctx);
+                #[cfg(feature = "crusty")]
+                self.crusty_gui.apply_theme(&self.editor.services.theme);
             }
             EditorAction::ToggleDevShowcase => {
                 #[cfg(feature = "editor-debug")]
