@@ -243,7 +243,6 @@ impl InspectorPanel {
     /// Render panel header
     fn render_header(&self, ui: &mut Ui, selection: &Selection, read_only: bool) {
         ui.horizontal(|ui| {
-            ui.heading("Inspector");
             if read_only {
                 ui.label(RichText::new("(Playing)").weak().italics().small());
             } else if selection.count() > 1 {

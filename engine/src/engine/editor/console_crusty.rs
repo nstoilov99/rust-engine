@@ -68,11 +68,9 @@ pub fn console_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: ConsolePa
     ui.run_at(rect, Direction::TopDown, Id::new("engine_console_panel"), opts, |ui| {
         let (info_n, warn_n, err_n) = ctx.messages.counts();
 
-        // Header: heading + filter toggles with live counts, mirroring the
-        // egui version's custom-styled buttons.
+        // Header: filter toggles with live counts, mirroring the egui
+        // version's custom-styled buttons.
         ui.horizontal(|ui| {
-            Label::new("Console").size(style.fonts.title).show(ui);
-            ui.separator();
             filter_button(
                 ui,
                 &mut ctx.filter.show_error,

@@ -174,7 +174,6 @@ impl HierarchyPanel {
 
     fn render_header(&mut self, ui: &mut Ui, world: &mut World, read_only: bool) {
         ui.horizontal(|ui| {
-            ui.heading("Hierarchy");
             if read_only {
                 ui.label(RichText::new("(Playing)").weak().italics().small());
             }

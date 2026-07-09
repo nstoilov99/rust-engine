@@ -685,9 +685,6 @@ impl<'a> EditorTabViewer<'a> {
 
         // Header with filter toggles (custom styled buttons instead of selectable_label)
         ui.horizontal(|ui| {
-            ui.heading("Console");
-            ui.separator();
-
             // Error filter button - dark red when active
             let error_fill = if self.editor.log_filter.show_error {
                 Color32::from_rgba_unmultiplied(100, 50, 50, 180)
