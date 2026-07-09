@@ -44,11 +44,11 @@ use winit::event::WindowEvent;
 pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
 
 /// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`] so
-/// ported panels visually match their egui counterparts. egui runs at
-/// pixels_per_point 1.15 while crusty runs at 1.0, so point-sized tokens
-/// (fonts, spacing) are pre-scaled here.
+/// ported panels visually match their egui counterparts. egui's effective
+/// pixels_per_point is 1.0 at runtime (the 1.15 init in `Gui` is
+/// overwritten by `full_output.pixels_per_point` each frame), so theme
+/// point values map 1:1 to crusty's physical pixels — no pre-scaling.
 pub fn style_from_theme(theme: &EditorTheme) -> Style {
-    const PPP: f32 = 1.15;
     let c = |c32: egui::Color32| Color::from_srgb_u8(c32.r(), c32.g(), c32.b(), c32.a());
 
     let p = &theme.palette;
@@ -68,23 +68,19 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.palette.stroke_hover = c(p.accent);
     style.palette.success = c(p.semantic.success);
 
-    style.spacing.item = sp.item_spacing_y * PPP;
-    style.spacing.padding = sp.window_margin * PPP;
-    style.spacing.button_padding =
-        Vec2::new(sp.button_padding_x * PPP, sp.button_padding_y * PPP);
-    style.spacing.box_label_gap = 6.0 * PPP;
+    style.spacing.item = sp.item_spacing_y;
+    style.spacing.padding = sp.window_margin;
+    style.spacing.button_padding = Vec2::new(sp.button_padding_x, sp.button_padding_y);
+    style.spacing.box_label_gap = 6.0;
 
-    style.fonts.body = ty.body * PPP;
-    style.fonts.title = ty.heading * PPP;
-    style.fonts.small = ty.caption * PPP;
+    style.fonts.body = ty.body;
+    // egui's `ui.heading` maps TextStyle::Heading to `heading_large`.
+    style.fonts.title = ty.heading_large;
+    style.fonts.small = ty.caption;
 
     style.rounding.panel = Rounding::same(6.0);
     style.rounding.widget = Rounding::same(3.0);
     style.rounding.small = Rounding::same(2.0);
-
-    style.sizes.checkbox *= PPP;
-    style.sizes.radio *= PPP;
-    style.sizes.slider_height *= PPP;
 
     style
 }
@@ -122,9 +118,19 @@ impl CrustyGui {
     pub fn new(device: Arc<Device>, screen_size: [f32; 2]) -> Self {
         let mut ctx = Context::new();
         ctx.style = style_from_theme(&EditorTheme::dark_default());
+        let mut text = TextRenderer::new(device, [1024, 1024]);
+        // Shape with the same font egui uses (its bundled default,
+        // Ubuntu-Light) so ported panels match the egui ones glyph-for-glyph
+        // instead of falling back to the OS default font.
+        let fonts = egui::FontDefinitions::default();
+        if let Some(data) = fonts.font_data.get("Ubuntu-Light") {
+            if let Some(family) = text.load_font(data.font.to_vec()) {
+                text.set_default_family(family);
+            }
+        }
         Self {
             ctx,
-            text: Arc::new(Mutex::new(TextRenderer::new(device, [1024, 1024]))),
+            text: Arc::new(Mutex::new(text)),
             screen_size,
             pointer_pos: None,
             modifiers: Modifiers::empty(),
