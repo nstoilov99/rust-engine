@@ -61,7 +61,9 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.palette.surface_hover = c(p.surface[3]);
     style.palette.surface_active = c(p.surface[4]);
     style.palette.accent = c(p.accent);
-    style.palette.accent_glow = c(p.accent).with_alpha(0.25);
+    // Zero alpha disables crusty's hover glow — egui hover is a plain 1px
+    // accent stroke, no shadow.
+    style.palette.accent_glow = c(p.accent).with_alpha(0.0);
     style.palette.text = c(p.text_primary);
     style.palette.text_dim = c(p.text_secondary);
     style.palette.stroke = c(p.stroke);
