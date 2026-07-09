@@ -4,8 +4,8 @@
 
 use super::{
     asset_browser::AssetBrowserPanel,
-    console::{ConsoleLog, LogFilter, LogLevel, LogMessage},
-    console_cmd::{CommandContext, ConsoleCommandSystem},
+    console::{ConsoleLog, LogFilter},
+    console_cmd::ConsoleCommandSystem,
     dock_layout::EditorTab,
     icons::IconManager,
     input_action_editor::{InputActionEditor, InputActionEditorState},
@@ -18,6 +18,11 @@ use super::{
         GizmoInteractionResult, ToolMode, ViewportSettings,
     },
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
+};
+#[cfg(not(feature = "crusty"))]
+use super::{
+    console::{LogLevel, LogMessage},
+    console_cmd::CommandContext,
 };
 use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
@@ -105,6 +110,11 @@ pub struct EditorContext<'a> {
     /// Ordered list of viewport tab display names in the leaf that contains the active
     /// viewport, used to position the "+" New Scene button after the last tab.
     pub viewport_tab_labels: &'a [String],
+    /// Output: the Console tab's content rect in egui points when it was
+    /// visible this frame. The crusty-gui layout pass renders the ported
+    /// console panel into this rect instead of the egui version.
+    #[cfg(feature = "crusty")]
+    pub crusty_console_rect: &'a mut Option<egui::Rect>,
 }
 
 /// Tab viewer that renders each panel type
@@ -655,7 +665,21 @@ impl<'a> EditorTabViewer<'a> {
         self.editor.asset_browser.show(ui, self.editor.icon_manager);
     }
 
-    /// Render the console panel
+    /// Render the console panel.
+    ///
+    /// With the `crusty` feature the panel is ported to crusty-gui: the
+    /// egui tab only records its content rect (the crusty layout pass in
+    /// `game_client` draws the console there) and claims the space so the
+    /// dock still sizes the tab normally.
+    #[cfg(feature = "crusty")]
+    fn render_console(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        *self.editor.crusty_console_rect = Some(rect);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
+    /// Render the console panel (egui fallback).
+    #[cfg(not(feature = "crusty"))]
     fn render_console(&mut self, ui: &mut Ui) {
         let (info_count, warn_count, error_count) = self.editor.console_messages.counts();
 

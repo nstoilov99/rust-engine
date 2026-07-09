@@ -38,6 +38,8 @@ pub mod asset_browser;
 pub mod build_dialog;
 mod commands;
 mod console;
+#[cfg(feature = "crusty")]
+pub mod console_crusty;
 pub mod console_cmd;
 mod dock_layout;
 mod hierarchy_panel;

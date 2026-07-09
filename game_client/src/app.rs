@@ -2169,6 +2169,10 @@ impl App {
         let mut dialog_actions = Vec::new();
         let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
+        // Output: Console tab content rect (egui points) — the crusty-gui
+        // pass renders the ported console panel there after this layout.
+        #[cfg(feature = "crusty")]
+        let mut crusty_console_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2235,6 +2239,8 @@ impl App {
                 dormant_scenes: dormant_scenes_snapshot,
                 close_scene_request: &mut close_scene_request,
                 viewport_tab_labels: &viewport_tab_labels,
+                #[cfg(feature = "crusty")]
+                crusty_console_rect: &mut crusty_console_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3240,6 +3246,42 @@ impl App {
             }
         }
 
+        // crusty-gui layout pass (Phase 16) — composited over the egui UI.
+        // Runs before `handle_frame_input` so its wants_* flags can be OR-ed
+        // into the egui result (game input must not fire while a crusty
+        // panel has the pointer/keyboard).
+        #[cfg(feature = "crusty")]
+        let (crusty_result, gui_result) = {
+            use rust_engine::engine::editor::console_crusty::{
+                console_panel, ConsolePanelCtx,
+            };
+            let ppp = self.editor.ui.gui.pixels_per_point();
+            let console = &mut self.editor.console;
+            let world = self.core.game_world.hecs_mut();
+            let show_stat_fps = &mut self.editor.ui.show_stat_fps;
+            let crusty_result = self.crusty_gui.layout(|ui| {
+                if let Some(rect) = crusty_console_rect {
+                    console_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        ConsolePanelCtx {
+                            messages: &mut console.messages,
+                            filter: &mut console.log_filter,
+                            command_system: &mut console.command_system,
+                            input: &mut console.input,
+                            world,
+                            show_stat_fps,
+                        },
+                    );
+                }
+            });
+            let mut gui_result = gui_result;
+            gui_result.wants_keyboard |= crusty_result.wants_keyboard;
+            gui_result.wants_pointer |= crusty_result.wants_pointer;
+            (crusty_result, gui_result)
+        };
+
         self.handle_frame_input(&gui_result);
 
         // Attach egui layout data to frame packet and send to render thread
@@ -3248,17 +3290,8 @@ impl App {
         packet.egui_texture_deltas = Some(gui_result.textures_delta);
         packet.texture_binds = gui_result.texture_binds;
         packet.viewport_texture_id = self.editor.viewport.texture_id;
-
-        // crusty-gui layout pass (Phase 16) — composited over the egui UI.
         #[cfg(feature = "crusty")]
         {
-            let crusty_result = self.crusty_gui.layout(|ui| {
-                ui.add_space(40.0);
-                ui.label("crusty-gui: Phase 16 wiring OK");
-                if ui.button("crusty test").clicked {
-                    log::info!("crusty-gui: test button clicked");
-                }
-            });
             packet.crusty_paint = Some(crusty_result.paint);
         }
 

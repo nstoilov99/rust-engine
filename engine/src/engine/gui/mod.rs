@@ -115,6 +115,12 @@ impl Gui {
         })
     }
 
+    /// Current egui scale (points -> physical pixels). Ported crusty-gui
+    /// panels use this to map egui rects into crusty's pixel space.
+    pub fn pixels_per_point(&self) -> f32 {
+        self.pixels_per_point
+    }
+
     /// Layout-only pass: runs egui, tessellates, and returns primitives + deltas.
     /// No GPU commands are recorded. Call this when rendering is handled by the render thread.
     pub fn layout(
