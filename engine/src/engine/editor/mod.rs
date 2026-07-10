@@ -40,6 +40,8 @@ mod commands;
 mod console;
 #[cfg(feature = "crusty")]
 pub mod console_crusty;
+#[cfg(all(feature = "crusty", windows))]
+pub mod desktop_sampler;
 pub mod console_cmd;
 mod dock_layout;
 #[cfg(feature = "crusty")]

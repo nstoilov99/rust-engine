@@ -3290,6 +3290,7 @@ impl App {
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
             let hierarchy = &mut self.editor.scene.hierarchy_panel;
             let inspector = &mut self.editor.scene.inspector_panel;
+            inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
@@ -3336,6 +3337,7 @@ impl App {
                             selection: &*sel,
                             play_mode: current_play_mode,
                             asset_browser,
+                            icons,
                         },
                     );
                 }

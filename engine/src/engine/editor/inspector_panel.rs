@@ -136,6 +136,12 @@ pub struct InspectorPanel {
     /// Unreal-style saved color swatches shared by all inspector color pickers.
     #[cfg(feature = "crusty")]
     pub(crate) crusty_swatches: Vec<crusty_gui::math::Color>,
+    /// Desktop eyedropper bridge shared by all inspector color pickers;
+    /// the app loop fills its pixel patch while armed.
+    #[cfg(feature = "crusty")]
+    pub crusty_eyedropper: crusty_gui::widgets::EyedropperState,
+    #[cfg(all(feature = "crusty", windows))]
+    desktop_sampler: super::desktop_sampler::DesktopSampler,
 }
 
 impl Default for InspectorPanel {
@@ -155,7 +161,21 @@ impl InspectorPanel {
             presence_entity: None,
             #[cfg(feature = "crusty")]
             crusty_swatches: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_eyedropper: crusty_gui::widgets::EyedropperState::default(),
+            #[cfg(all(feature = "crusty", windows))]
+            desktop_sampler: Default::default(),
         }
+    }
+
+    /// Drive the desktop eyedropper while armed: sample the pixels around
+    /// the global cursor and detect pick/cancel clicks (which winit can't
+    /// see outside the window). Call once per frame before the crusty
+    /// layout pass.
+    #[cfg(feature = "crusty")]
+    pub fn drive_eyedropper(&mut self) {
+        #[cfg(windows)]
+        self.desktop_sampler.update(&mut self.crusty_eyedropper);
     }
 
     /// Check if a component matches the search filter

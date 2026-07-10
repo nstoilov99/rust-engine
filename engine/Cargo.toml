@@ -12,7 +12,7 @@ default = []
 editor = ["dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
 # crusty-gui backend for the editor UI (Phase 16 egui replacement, WIP).
 # Implies `editor`: the crusty seam lives in the editor-gated gui module.
-crusty = ["editor", "dep:crusty-gui"]
+crusty = ["editor", "dep:crusty-gui", "dep:windows-sys"]
 editor-debug = ["editor"]
 tracy = ["tracy-client"]
 
@@ -105,3 +105,12 @@ arc-swap = "1"
 
 # Shared gameplay types
 game_shared = { path = "../game_shared" }
+
+# Desktop-wide color sampling for the crusty eyedropper (editor only)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

@@ -318,17 +318,20 @@ impl CrustyRenderer {
         use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 
         let mut map = std::collections::HashMap::new();
-        let entries = match std::fs::read_dir(icons_dir()) {
-            Ok(e) => e,
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        match std::fs::read_dir(icons_dir()) {
+            Ok(e) => paths.extend(e.flatten().map(|entry| entry.path())),
             Err(e) => {
                 log::warn!("crusty: hierarchy icons dir unreadable ({}): {e}", icons_dir().display());
-                return map;
             }
-        };
+        }
+        // Extra editor icons living one level up from the hierarchy set.
+        if let Some(parent) = icons_dir().parent() {
+            paths.push(parent.join("color-picker.svg"));
+        }
         let px = icon_raster_px();
 
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for path in paths {
             if path.extension().and_then(|e| e.to_str()) != Some("svg") {
                 continue;
             }

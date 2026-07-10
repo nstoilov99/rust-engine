@@ -14,9 +14,10 @@
 use crusty_gui::context::Ui;
 use crusty_gui::id::Id;
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
+use crusty_gui::paint::TextureId;
 use crusty_gui::widgets::{
-    Button, Checkbox, CollapsingHeader, ColorPicker, ComboBox, DragValue, Label, ScrollArea,
-    SelectableValue, Slider, TextEdit,
+    Button, Checkbox, CollapsingHeader, ColorPicker, ComboBox, DragValue, EyedropperState, Label,
+    ScrollArea, SelectableValue, Slider, TextEdit,
 };
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
@@ -69,6 +70,17 @@ pub struct InspectorPanelCtx<'a> {
     pub selection: &'a Selection,
     pub play_mode: PlayMode,
     pub asset_browser: &'a mut AssetBrowserPanel,
+    /// GPU-uploaded icon set (same map as the hierarchy panel); the color
+    /// pickers use the `color-picker` stem for the eyedropper button.
+    pub icons: &'a std::collections::HashMap<String, TextureId>,
+}
+
+/// Shared color-picker context threaded to every color row: the saved
+/// swatches, the desktop eyedropper bridge and the pipette icon.
+struct Picker<'a> {
+    swatches: &'a mut Vec<Color>,
+    eye: &'a mut EyedropperState,
+    icon: Option<TextureId>,
 }
 
 /// Deferred component removals (mirrors the egui panel's `ComponentAction`).
@@ -107,7 +119,9 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Inspect
                 selection,
                 play_mode,
                 asset_browser,
+                icons,
             } = ctx;
+            let picker_icon = icons.get("color-picker").copied();
             let read_only = play_mode != PlayMode::Edit;
 
             render_header(ui, selection, read_only);
@@ -151,7 +165,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Inspect
                             .show(ui);
                         return;
                     }
-                    render_components(ui, panel, world, entity, asset_browser);
+                    render_components(ui, panel, world, entity, asset_browser, picker_icon);
                     ui.separator();
                     render_add_component(ui, panel, world, entity);
                 });
@@ -501,14 +515,18 @@ fn color_row(
     id_source: &str,
     label: &str,
     rgb: &mut [f32; 3],
-    swatches: &mut Vec<Color>,
+    picker: &mut Picker,
 ) -> bool {
     property_row(ui, label, |ui| {
         let mut c = Color::rgb(rgb[0], rgb[1], rgb[2]);
-        ColorPicker::new(id_source, &mut c)
+        let mut cp = ColorPicker::new(id_source, &mut c)
             .alpha(false)
-            .swatches(swatches)
-            .show(ui);
+            .swatches(picker.swatches)
+            .eyedropper(picker.eye);
+        if let Some(icon) = picker.icon {
+            cp = cp.eyedropper_icon(icon);
+        }
+        cp.show(ui);
         let changed = c.r != rgb[0] || c.g != rgb[1] || c.b != rgb[2];
         if changed {
             *rgb = [c.r, c.g, c.b];
@@ -634,9 +652,19 @@ fn render_components(
     world: &mut World,
     entity: Entity,
     asset_browser: &mut AssetBrowserPanel,
+    picker_icon: Option<TextureId>,
 ) {
     let mut action: Option<ComponentAction> = None;
     let p = panel.cached_presence;
+    macro_rules! picker {
+        () => {
+            &mut Picker {
+                swatches: &mut panel.crusty_swatches,
+                eye: &mut panel.crusty_eyedropper,
+                icon: picker_icon,
+            }
+        };
+    }
 
     if panel.matches_filter("name") && p.has(ComponentPresence::NAME) {
         edit_name(ui, world, entity);
@@ -651,7 +679,7 @@ fn render_components(
     }
     if (panel.matches_filter("camera") || panel.matches_filter("fov"))
         && p.has(ComponentPresence::CAMERA)
-        && edit_camera(ui, world, entity, &mut panel.crusty_swatches)
+        && edit_camera(ui, world, entity, picker!())
     {
         action = Some(ComponentAction::RemoveCamera);
     }
@@ -667,13 +695,13 @@ fn render_components(
         || panel.matches_filter("light")
         || panel.matches_filter("sun"))
         && p.has(ComponentPresence::DIR_LIGHT)
-        && edit_directional_light(ui, world, entity, &mut panel.crusty_swatches)
+        && edit_directional_light(ui, world, entity, picker!())
     {
         action = Some(ComponentAction::RemoveDirectionalLight);
     }
     if (panel.matches_filter("point") || panel.matches_filter("light"))
         && p.has(ComponentPresence::POINT_LIGHT)
-        && edit_point_light(ui, world, entity, &mut panel.crusty_swatches)
+        && edit_point_light(ui, world, entity, picker!())
     {
         action = Some(ComponentAction::RemovePointLight);
     }
@@ -726,7 +754,7 @@ fn render_components(
         || panel.matches_filter("vfx")
         || panel.matches_filter("particle"))
         && p.has(ComponentPresence::PARTICLE_EFFECT)
-        && edit_particle_effect(ui, world, entity, &mut panel.crusty_swatches)
+        && edit_particle_effect(ui, world, entity, picker!())
     {
         action = Some(ComponentAction::RemoveParticleEffect);
     }
@@ -871,7 +899,7 @@ fn edit_camera(
     ui: &mut Ui,
     world: &mut World,
     entity: Entity,
-    swatches: &mut Vec<Color>,
+    picker: &mut Picker,
 ) -> bool {
     let Ok(mut camera) = world.get::<&mut Camera>(entity) else {
         return false;
@@ -936,7 +964,7 @@ fn edit_camera(
         drag_row(ui, "Near", &mut camera.near, 0.01, 0.001..=near_max, "");
         drag_row(ui, "Far", &mut camera.far, 1.0, far_min..=100000.0, "");
 
-        color_row(ui, "cam_clear_color", "Clear Color", &mut camera.clear_color, swatches);
+        color_row(ui, "cam_clear_color", "Clear Color", &mut camera.clear_color, picker);
 
         let mut priority = camera.priority as f32;
         property_row(ui, "Priority", |ui| {
@@ -1005,7 +1033,7 @@ fn edit_directional_light(
     ui: &mut Ui,
     world: &mut World,
     entity: Entity,
-    swatches: &mut Vec<Color>,
+    picker: &mut Picker,
 ) -> bool {
     let Ok(mut light) = world.get::<&mut DirectionalLight>(entity) else {
         return false;
@@ -1042,7 +1070,7 @@ fn edit_directional_light(
         }
 
         let mut color = [light.color.x, light.color.y, light.color.z];
-        if color_row(ui, "dir_light_color", "Color", &mut color, swatches) {
+        if color_row(ui, "dir_light_color", "Color", &mut color, picker) {
             light.color = glm::vec3(color[0], color[1], color[2]);
         }
 
@@ -1062,7 +1090,7 @@ fn edit_point_light(
     ui: &mut Ui,
     world: &mut World,
     entity: Entity,
-    swatches: &mut Vec<Color>,
+    picker: &mut Picker,
 ) -> bool {
     let Ok(mut light) = world.get::<&mut PointLight>(entity) else {
         return false;
@@ -1076,7 +1104,7 @@ fn edit_point_light(
         }
 
         let mut color = [light.color.x, light.color.y, light.color.z];
-        if color_row(ui, "point_light_color", "Color", &mut color, swatches) {
+        if color_row(ui, "point_light_color", "Color", &mut color, picker) {
             light.color = glm::vec3(color[0], color[1], color[2]);
         }
 
@@ -1407,7 +1435,7 @@ fn edit_particle_effect(
     ui: &mut Ui,
     world: &mut World,
     entity: Entity,
-    swatches: &mut Vec<Color>,
+    picker: &mut Picker,
 ) -> bool {
     let Ok(mut effect) = world.get::<&mut ParticleEffect>(entity) else {
         return false;
@@ -1598,9 +1626,14 @@ fn edit_particle_effect(
                                     let mut c = Color::from_srgb_u8(
                                         before[0], before[1], before[2], before[3],
                                     );
-                                    ColorPicker::new(format!("{salt}_{idx}"), &mut c)
-                                        .swatches(swatches)
-                                        .show(ui);
+                                    let mut cp =
+                                        ColorPicker::new(format!("{salt}_{idx}"), &mut c)
+                                            .swatches(picker.swatches)
+                                            .eyedropper(picker.eye);
+                                    if let Some(icon) = picker.icon {
+                                        cp = cp.eyedropper_icon(icon);
+                                    }
+                                    cp.show(ui);
                                     let after = c.to_srgb_u8();
                                     if after != before {
                                         *chan = [
