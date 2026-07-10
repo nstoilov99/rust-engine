@@ -50,6 +50,8 @@ pub mod import_dialog;
 mod input_action_editor;
 mod input_context_editor;
 mod input_settings_panel;
+#[cfg(feature = "crusty")]
+pub mod inspector_crusty;
 mod inspector_panel;
 mod menu_bar;
 pub mod mesh_editor;

@@ -119,6 +119,10 @@ pub struct EditorContext<'a> {
     /// visible this frame (same mechanism as `crusty_console_rect`).
     #[cfg(feature = "crusty")]
     pub crusty_hierarchy_rect: &'a mut Option<egui::Rect>,
+    /// Output: the Inspector tab's content rect in egui points when it was
+    /// visible this frame (same mechanism as `crusty_console_rect`).
+    #[cfg(feature = "crusty")]
+    pub crusty_inspector_rect: &'a mut Option<egui::Rect>,
 }
 
 /// Tab viewer that renders each panel type
@@ -666,7 +670,20 @@ impl<'a> EditorTabViewer<'a> {
         );
     }
 
-    /// Render the inspector panel
+    /// Render the inspector panel (crusty port).
+    ///
+    /// The egui tab only records its content rect (the crusty layout pass
+    /// in `game_client` draws the inspector there) and claims the space so
+    /// the dock still sizes the tab normally.
+    #[cfg(feature = "crusty")]
+    fn render_inspector(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        *self.editor.crusty_inspector_rect = Some(rect);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
+    /// Render the inspector panel (egui fallback).
+    #[cfg(not(feature = "crusty"))]
     fn render_inspector(&mut self, ui: &mut Ui) {
         self.editor.inspector_panel.show_contents(
             ui,

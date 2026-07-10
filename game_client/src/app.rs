@@ -2190,6 +2190,8 @@ impl App {
         let mut crusty_console_rect: Option<egui::Rect> = None;
         #[cfg(feature = "crusty")]
         let mut crusty_hierarchy_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_inspector_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2260,6 +2262,8 @@ impl App {
                 crusty_console_rect: &mut crusty_console_rect,
                 #[cfg(feature = "crusty")]
                 crusty_hierarchy_rect: &mut crusty_hierarchy_rect,
+                #[cfg(feature = "crusty")]
+                crusty_inspector_rect: &mut crusty_inspector_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3277,11 +3281,16 @@ impl App {
             use rust_engine::engine::editor::hierarchy_crusty::{
                 hierarchy_panel, HierarchyPanelCtx,
             };
+            use rust_engine::engine::editor::inspector_crusty::{
+                inspector_panel, InspectorPanelCtx,
+            };
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
             let hierarchy = &mut self.editor.scene.hierarchy_panel;
+            let inspector = &mut self.editor.scene.inspector_panel;
+            let asset_browser = &mut self.editor.scene.asset_browser;
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
@@ -3313,6 +3322,20 @@ impl App {
                             play_mode: current_play_mode,
                             icons,
                             registry: &icon_registry,
+                        },
+                    );
+                }
+                if let Some(rect) = crusty_inspector_rect {
+                    inspector_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        InspectorPanelCtx {
+                            panel: inspector,
+                            world: &mut *world,
+                            selection: &*sel,
+                            play_mode: current_play_mode,
+                            asset_browser,
                         },
                     );
                 }

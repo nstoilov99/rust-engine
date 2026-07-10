@@ -52,26 +52,26 @@ enum ComponentAction {
 /// Bitflags for which inspectable components an entity has.
 /// Computed once per selection change / component mutation, not per frame.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct ComponentPresence {
+pub(crate) struct ComponentPresence {
     bits: u16,
 }
 
 impl ComponentPresence {
-    const NAME: u16 = 1 << 0;
-    const TRANSFORM: u16 = 1 << 1;
-    const CAMERA: u16 = 1 << 2;
-    const MESH_RENDERER: u16 = 1 << 3;
-    const DIR_LIGHT: u16 = 1 << 4;
-    const POINT_LIGHT: u16 = 1 << 5;
-    const RIGID_BODY: u16 = 1 << 6;
-    const COLLIDER: u16 = 1 << 7;
-    const SKELETON: u16 = 1 << 8;
-    const ANIM_PLAYER: u16 = 1 << 9;
-    const AUDIO_EMITTER: u16 = 1 << 10;
-    const AUDIO_LISTENER: u16 = 1 << 11;
-    const PARTICLE_EFFECT: u16 = 1 << 12;
+    pub(crate) const NAME: u16 = 1 << 0;
+    pub(crate) const TRANSFORM: u16 = 1 << 1;
+    pub(crate) const CAMERA: u16 = 1 << 2;
+    pub(crate) const MESH_RENDERER: u16 = 1 << 3;
+    pub(crate) const DIR_LIGHT: u16 = 1 << 4;
+    pub(crate) const POINT_LIGHT: u16 = 1 << 5;
+    pub(crate) const RIGID_BODY: u16 = 1 << 6;
+    pub(crate) const COLLIDER: u16 = 1 << 7;
+    pub(crate) const SKELETON: u16 = 1 << 8;
+    pub(crate) const ANIM_PLAYER: u16 = 1 << 9;
+    pub(crate) const AUDIO_EMITTER: u16 = 1 << 10;
+    pub(crate) const AUDIO_LISTENER: u16 = 1 << 11;
+    pub(crate) const PARTICLE_EFFECT: u16 = 1 << 12;
 
-    fn probe(world: &World, entity: Entity) -> Self {
+    pub(crate) fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
         if world.get::<&Name>(entity).is_ok() {
             bits |= Self::NAME;
@@ -115,7 +115,7 @@ impl ComponentPresence {
         Self { bits }
     }
 
-    fn has(self, flag: u16) -> bool {
+    pub(crate) fn has(self, flag: u16) -> bool {
         self.bits & flag != 0
     }
 }
@@ -123,16 +123,19 @@ impl ComponentPresence {
 /// Inspector Panel state
 pub struct InspectorPanel {
     /// Cache for euler angles (quaternion -> euler conversion).
-    euler_cache: HashMap<u64, (glm::Quat, [f32; 3])>,
+    pub(crate) euler_cache: HashMap<u64, (glm::Quat, [f32; 3])>,
     /// Last known entity for euler cache invalidation
-    last_entity: Option<Entity>,
+    pub(crate) last_entity: Option<Entity>,
     _collapsed_components: HashSet<String>,
     /// Search/filter text for components
-    search_filter: String,
+    pub(crate) search_filter: String,
     /// Cached component presence mask (recomputed on selection change or mutation).
-    cached_presence: ComponentPresence,
+    pub(crate) cached_presence: ComponentPresence,
     /// The entity for which `cached_presence` was computed.
-    presence_entity: Option<Entity>,
+    pub(crate) presence_entity: Option<Entity>,
+    /// Unreal-style saved color swatches shared by all inspector color pickers.
+    #[cfg(feature = "crusty")]
+    pub(crate) crusty_swatches: Vec<crusty_gui::math::Color>,
 }
 
 impl Default for InspectorPanel {
@@ -150,11 +153,13 @@ impl InspectorPanel {
             search_filter: String::new(),
             cached_presence: ComponentPresence::default(),
             presence_entity: None,
+            #[cfg(feature = "crusty")]
+            crusty_swatches: Vec::new(),
         }
     }
 
     /// Check if a component matches the search filter
-    fn matches_filter(&self, component_name: &str) -> bool {
+    pub(crate) fn matches_filter(&self, component_name: &str) -> bool {
         self.search_filter.is_empty()
             || component_name
                 .to_lowercase()
@@ -2639,7 +2644,7 @@ impl InspectorPanel {
 /// Guards against NaN values that can occur from numerical edge cases
 /// in the quaternion-to-euler conversion (e.g., gimbal lock regions).
 /// Normalizes the quaternion first to prevent denormalization drift.
-fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
+pub(crate) fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
     // Normalize quaternion to prevent NaN from denormalized quats
     let q_norm = glm::quat_normalize(q);
     let euler = glm::quat_euler_angles(&q_norm);
@@ -2662,7 +2667,7 @@ fn quaternion_to_euler_degrees(q: &glm::Quat) -> [f32; 3] {
     ]
 }
 
-fn clean_display_degrees(value: f32) -> f32 {
+pub(crate) fn clean_display_degrees(value: f32) -> f32 {
     if value.abs() < 0.000_1 {
         0.0
     } else {
@@ -2671,7 +2676,7 @@ fn clean_display_degrees(value: f32) -> f32 {
 }
 
 /// Convert Euler angles (degrees) to quaternion
-fn euler_degrees_to_quaternion(euler: &[f32; 3]) -> glm::Quat {
+pub(crate) fn euler_degrees_to_quaternion(euler: &[f32; 3]) -> glm::Quat {
     let rad_x = euler[0].to_radians();
     let rad_y = euler[1].to_radians();
     let rad_z = euler[2].to_radians();
@@ -2687,7 +2692,7 @@ fn euler_degrees_to_quaternion(euler: &[f32; 3]) -> glm::Quat {
 
 /// Check if two quaternions represent approximately the same rotation.
 /// Accounts for q and -q representing the same rotation.
-fn quaternions_approximately_equal(a: &glm::Quat, b: &glm::Quat) -> bool {
+pub(crate) fn quaternions_approximately_equal(a: &glm::Quat, b: &glm::Quat) -> bool {
     let dot = (a.coords.x * b.coords.x
         + a.coords.y * b.coords.y
         + a.coords.z * b.coords.z
