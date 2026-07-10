@@ -42,6 +42,8 @@ mod console;
 pub mod console_crusty;
 pub mod console_cmd;
 mod dock_layout;
+#[cfg(feature = "crusty")]
+pub mod hierarchy_crusty;
 mod hierarchy_panel;
 pub mod icons;
 pub mod import_dialog;

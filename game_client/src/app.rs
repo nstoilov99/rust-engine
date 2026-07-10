@@ -219,6 +219,11 @@ pub struct App {
     /// replacement — panels migrate over one at a time).
     #[cfg(feature = "crusty")]
     pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
+    /// Hierarchy icon textures uploaded by the render thread at startup
+    /// (SVG stem → crusty TextureId).
+    #[cfg(feature = "crusty")]
+    pub crusty_icons:
+        std::collections::HashMap<String, rust_engine::engine::gui::crusty::TextureId>,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -441,11 +446,19 @@ impl App {
             crusty_text: Some(crusty_gui.text_handle()),
         });
 
+        #[cfg(feature = "crusty")]
+        let mut crusty_icons = std::collections::HashMap::new();
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
+                #[cfg(feature = "crusty")]
+                crusty_icons: icons,
                 ..
             }) => {
                 log::info!("editor: render thread ready");
+                #[cfg(feature = "crusty")]
+                {
+                    crusty_icons = icons;
+                }
             }
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError {
                 message,
@@ -586,6 +599,8 @@ impl App {
             pending_window_requests: Vec::new(),
             #[cfg(feature = "crusty")]
             crusty_gui,
+            #[cfg(feature = "crusty")]
+            crusty_icons,
         })
     }
 
@@ -2173,6 +2188,8 @@ impl App {
         // pass renders the ported console panel there after this layout.
         #[cfg(feature = "crusty")]
         let mut crusty_console_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_hierarchy_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2241,6 +2258,8 @@ impl App {
                 viewport_tab_labels: &viewport_tab_labels,
                 #[cfg(feature = "crusty")]
                 crusty_console_rect: &mut crusty_console_rect,
+                #[cfg(feature = "crusty")]
+                crusty_hierarchy_rect: &mut crusty_hierarchy_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3255,10 +3274,17 @@ impl App {
             use rust_engine::engine::editor::console_crusty::{
                 console_panel, ConsolePanelCtx,
             };
+            use rust_engine::engine::editor::hierarchy_crusty::{
+                hierarchy_panel, HierarchyPanelCtx,
+            };
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
+            let hierarchy = &mut self.editor.scene.hierarchy_panel;
+            let sel = &mut self.editor.scene.selection;
+            let icons = &self.crusty_icons;
+            let icon_registry = self.editor.services.icons.clone();
             let crusty_result = self.crusty_gui.layout(|ui| {
                 if let Some(rect) = crusty_console_rect {
                     console_panel(
@@ -3270,8 +3296,23 @@ impl App {
                             filter: &mut console.log_filter,
                             command_system: &mut console.command_system,
                             input: &mut console.input,
-                            world,
+                            world: &mut *world,
                             show_stat_fps,
+                        },
+                    );
+                }
+                if let Some(rect) = crusty_hierarchy_rect {
+                    hierarchy_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        HierarchyPanelCtx {
+                            panel: hierarchy,
+                            world: &mut *world,
+                            selection: sel,
+                            play_mode: current_play_mode,
+                            icons,
+                            registry: &icon_registry,
                         },
                     );
                 }

@@ -115,6 +115,10 @@ pub struct EditorContext<'a> {
     /// console panel into this rect instead of the egui version.
     #[cfg(feature = "crusty")]
     pub crusty_console_rect: &'a mut Option<egui::Rect>,
+    /// Output: the Hierarchy tab's content rect in egui points when it was
+    /// visible this frame (same mechanism as `crusty_console_rect`).
+    #[cfg(feature = "crusty")]
+    pub crusty_hierarchy_rect: &'a mut Option<egui::Rect>,
 }
 
 /// Tab viewer that renders each panel type
@@ -639,7 +643,20 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// Render the hierarchy panel
+    /// Render the hierarchy panel (crusty port).
+    ///
+    /// The egui tab only records its content rect (the crusty layout pass
+    /// in `game_client` draws the hierarchy there) and claims the space so
+    /// the dock still sizes the tab normally.
+    #[cfg(feature = "crusty")]
+    fn render_hierarchy(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        *self.editor.crusty_hierarchy_rect = Some(rect);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
+    /// Render the hierarchy panel (egui fallback).
+    #[cfg(not(feature = "crusty"))]
     fn render_hierarchy(&mut self, ui: &mut Ui) {
         self.editor.hierarchy_panel.show_contents(
             ui,

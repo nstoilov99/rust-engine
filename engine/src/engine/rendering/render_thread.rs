@@ -172,9 +172,23 @@ impl RenderThread {
             )
         });
 
+        #[cfg(feature = "crusty")]
+        let crusty_icons = crusty_renderer
+            .as_mut()
+            .map(|r| {
+                r.load_hierarchy_icons(
+                    gpu.queue.clone(),
+                    gpu.memory_allocator.clone(),
+                    gpu.command_buffer_allocator.clone(),
+                )
+            })
+            .unwrap_or_default();
+
         let ready_event = RenderEvent::RenderThreadReady {
             #[cfg(feature = "editor")]
             viewport_texture: viewport_texture.as_ref().map(|vt| vt.image_view()),
+            #[cfg(feature = "crusty")]
+            crusty_icons,
         };
         if response.send(ready_event).is_err() {
             return;

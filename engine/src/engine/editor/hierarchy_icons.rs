@@ -93,6 +93,23 @@ pub fn load_svg_texture(
     path: &Path,
     name: &str,
 ) -> Result<egui::TextureHandle, String> {
+    let rgba = rasterize_svg_rgba(path)?;
+
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        [ICON_RASTER_PX as usize, ICON_RASTER_PX as usize],
+        &rgba,
+    );
+
+    Ok(ctx.load_texture(
+        format!("hierarchy_icon_{name}"),
+        color_image,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+/// Rasterize one SVG to raw RGBA bytes at [`icon_raster_px`] square. Shared
+/// by the egui texture path above and the crusty-gui GPU upload.
+pub fn rasterize_svg_rgba(path: &Path) -> Result<Vec<u8>, String> {
     use resvg::tiny_skia;
     use resvg::usvg;
 
@@ -115,14 +132,15 @@ pub fn load_svg_texture(
         .ok_or_else(|| "tiny_skia::Pixmap allocation failed".to_string())?;
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [ICON_RASTER_PX as usize, ICON_RASTER_PX as usize],
-        pixmap.data(),
-    );
+    Ok(pixmap.take())
+}
 
-    Ok(ctx.load_texture(
-        format!("hierarchy_icon_{name}"),
-        color_image,
-        egui::TextureOptions::LINEAR,
-    ))
+/// The square pixel size [`rasterize_svg_rgba`] renders at.
+pub fn icon_raster_px() -> u32 {
+    ICON_RASTER_PX
+}
+
+/// Directory the hierarchy icon SVGs are discovered in.
+pub fn icons_dir() -> &'static Path {
+    Path::new(HIERARCHY_ICONS_DIR)
 }

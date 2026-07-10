@@ -20,7 +20,8 @@ use crusty_gui::backend::TargetRenderer;
 use crusty_gui::context::{Context, CursorIcon, Ui};
 use crusty_gui::input::{Event, Modifiers, RawInput};
 use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
-use crusty_gui::paint::{PaintCmd, TextureFilter, TextureId};
+use crusty_gui::paint::{PaintCmd, TextureFilter};
+pub use crusty_gui::paint::TextureId;
 use crusty_gui::shell::input as shell_input;
 use crusty_gui::style::Style;
 use crusty_gui::text::TextRenderer;
@@ -298,6 +299,89 @@ impl CrustyRenderer {
     /// the UI can draw it with the `Image` widget.
     pub fn register_native_texture(&mut self, view: Arc<ImageView>) -> TextureId {
         self.renderer.registry_mut().register(view, TextureFilter::Linear)
+    }
+
+    /// Rasterize the hierarchy panel's SVG icon set, upload each to a GPU
+    /// image and register it, returning `file stem → TextureId`. Called
+    /// once at render-thread startup; the map crosses to the main thread in
+    /// `RenderEvent::RenderThreadReady` so the crusty layout pass can draw
+    /// the icons. Missing dir / broken SVGs are logged and skipped — the
+    /// panel falls back to a dot glyph for absent stems.
+    pub fn load_hierarchy_icons(
+        &mut self,
+        queue: Arc<Queue>,
+        memory_allocator: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    ) -> std::collections::HashMap<String, TextureId> {
+        use crate::engine::editor::hierarchy_icons::{icon_raster_px, icons_dir, rasterize_svg_rgba};
+        use vulkano::image::{ImageCreateInfo, ImageType, ImageUsage};
+        use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+
+        let mut map = std::collections::HashMap::new();
+        let entries = match std::fs::read_dir(icons_dir()) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("crusty: hierarchy icons dir unreadable ({}): {e}", icons_dir().display());
+                return map;
+            }
+        };
+        let px = icon_raster_px();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("svg") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+            else {
+                continue;
+            };
+            let rgba = match rasterize_svg_rgba(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("crusty: failed to rasterize {}: {e}", path.display());
+                    continue;
+                }
+            };
+            let image = match Image::new(
+                memory_allocator.clone(),
+                ImageCreateInfo {
+                    image_type: ImageType::Dim2d,
+                    format: Format::R8G8B8A8_SRGB,
+                    extent: [px, px, 1],
+                    usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                    ..Default::default()
+                },
+            ) {
+                Ok(i) => i,
+                Err(e) => {
+                    log::warn!("crusty: icon image alloc failed for {stem}: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = crate::engine::assets::texture::upload_texture_data(
+                command_buffer_allocator.clone(),
+                queue.clone(),
+                memory_allocator.clone(),
+                image.clone(),
+                &rgba,
+            ) {
+                log::warn!("crusty: icon upload failed for {stem}: {e}");
+                continue;
+            }
+            match ImageView::new_default(image) {
+                Ok(view) => {
+                    let id = self.register_native_texture(view);
+                    map.insert(stem, id);
+                }
+                Err(e) => log::warn!("crusty: icon view failed for {stem}: {e}"),
+            }
+        }
+        map
     }
 
     /// Point an existing texture id at a new image view (viewport resize).

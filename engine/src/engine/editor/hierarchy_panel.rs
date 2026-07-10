@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 /// Drop mode for drag-and-drop operations
 /// Determined by mouse Y position within the row
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum DropMode {
+pub(crate) enum DropMode {
     /// Insert above target (top 25% of row) - makes sibling before target
     InsertAbove,
     /// Make child of target (middle 50% of row) - makes child of target
@@ -30,22 +30,22 @@ enum DropMode {
 }
 
 /// One visible row in the flattened hierarchy list.
-struct VisibleRow {
-    entity: Entity,
-    depth: usize,
-    name: String,
-    has_children: bool,
-    is_expanded: bool,
+pub(crate) struct VisibleRow {
+    pub(crate) entity: Entity,
+    pub(crate) depth: usize,
+    pub(crate) name: String,
+    pub(crate) has_children: bool,
+    pub(crate) is_expanded: bool,
     /// File stem of the SVG to render for this entity (e.g. `"camera"`,
     /// `"sun"`, `"object"`). Resolved against `HierarchyIcons` at draw time.
     /// Easily extended: pick the stem in `entity_icon_stem` and add the SVG.
-    icon_stem: &'static str,
+    pub(crate) icon_stem: &'static str,
     /// Tint applied when the SVG is rendered. White by default — set it
     /// only when an entity kind needs a brand colour.
-    icon_tint: Color32,
+    pub(crate) icon_tint: Color32,
     /// Editor visibility flag, mirrored into the row so render code can
     /// dim the entry without re-querying. True == shown.
-    is_visible: bool,
+    pub(crate) is_visible: bool,
     /// Per-ancestor (and self) "is this the last sibling at its depth?" flags.
     /// Index `d` covers the chain element at depth `d`; index `depth` is the
     /// row itself. Used to render Godot-style L / T tree connectors:
@@ -54,48 +54,52 @@ struct VisibleRow {
     ///     siblings still to come).
     ///   - parent column `depth - 1` draws an L when `chain_is_last[depth]`
     ///     is true, a T otherwise.
-    chain_is_last: SmallVec<[bool; 16]>,
+    pub(crate) chain_is_last: SmallVec<[bool; 16]>,
     /// Full ancestor chain — entities from root down to `self` inclusive.
     /// Length == `depth + 1`. Used to compute which guide columns at this
     /// row are on the path to the selected entity (so the whole path can be
     /// highlighted, not only the selected row's own hook).
-    entity_chain: SmallVec<[Entity; 16]>,
+    pub(crate) entity_chain: SmallVec<[Entity; 16]>,
 }
 
-const ROW_HEIGHT: f32 = 22.0;
+pub(crate) const ROW_HEIGHT: f32 = 22.0;
 /// Horizontal spacing used for both indentation and tree-guide column centers.
-const INDENT: f32 = 16.0;
+pub(crate) const INDENT: f32 = 16.0;
 /// Distance from the row's content left edge to column 0's center.
-const COL_PAD: f32 = 8.0;
+pub(crate) const COL_PAD: f32 = 8.0;
 /// Pixel size icons are drawn at inside the row.
-const ICON_SIZE: f32 = 16.0;
+pub(crate) const ICON_SIZE: f32 = 16.0;
 /// Width reserved on the right edge for the visibility eye column. Keeps the
 /// icon away from the panel's right resize edge so clicking it never grabs
 /// the dock separator.
-const VISIBILITY_COL_WIDTH: f32 = 22.0;
+pub(crate) const VISIBILITY_COL_WIDTH: f32 = 22.0;
 
 /// Scene Hierarchy Panel state
 pub struct HierarchyPanel {
     /// Search/filter text
-    search_text: String,
+    pub(crate) search_text: String,
     /// Entity being renamed (if any)
-    renaming_entity: Option<Entity>,
+    pub(crate) renaming_entity: Option<Entity>,
     /// Text buffer for renaming
-    rename_buffer: String,
+    pub(crate) rename_buffer: String,
     /// Drag source entity
-    drag_source: Option<Entity>,
+    pub(crate) drag_source: Option<Entity>,
     /// Show only matching entities when filtering
-    filter_active: bool,
+    pub(crate) filter_active: bool,
     /// Expanded state for entities (by entity id)
-    expanded: HashSet<u64>,
+    pub(crate) expanded: HashSet<u64>,
     /// Explicit ordering of root entities
     root_order: Vec<Entity>,
     /// Entity being hovered during drag (for auto-expand)
-    drag_hover_entity: Option<Entity>,
+    pub(crate) drag_hover_entity: Option<Entity>,
     /// When drag hover started (for auto-expand delay)
-    drag_hover_start: Option<Instant>,
+    pub(crate) drag_hover_start: Option<Instant>,
     /// Reusable buffer for flat visible rows (avoids per-frame allocation).
-    flat_rows: Vec<VisibleRow>,
+    pub(crate) flat_rows: Vec<VisibleRow>,
+    /// One-shot flag: the rename editor should grab keyboard focus on its
+    /// next frame. Set by `start_rename`, consumed by the crusty port
+    /// (egui re-requests focus every frame instead).
+    pub(crate) rename_needs_focus: bool,
 }
 
 impl Default for HierarchyPanel {
@@ -117,6 +121,7 @@ impl HierarchyPanel {
             drag_hover_entity: None,
             drag_hover_start: None,
             flat_rows: Vec::new(),
+            rename_needs_focus: false,
         }
     }
 
@@ -215,7 +220,7 @@ impl HierarchyPanel {
         }
     }
 
-    fn move_root(&mut self, entity: Entity, new_index: usize) {
+    pub(crate) fn move_root(&mut self, entity: Entity, new_index: usize) {
         if let Some(current) = self.root_order.iter().position(|&e| e == entity) {
             self.root_order.remove(current);
             let clamped = new_index.min(self.root_order.len());
@@ -227,7 +232,7 @@ impl HierarchyPanel {
 
     /// Build a flat visible-row list by walking the hierarchy top-down.
     /// Respects expand/collapse and filter state.
-    fn build_visible_rows(&mut self, world: &World) {
+    pub(crate) fn build_visible_rows(&mut self, world: &World) {
         self.flat_rows.clear();
 
         let roots: Vec<Entity> = self.root_order.clone();
@@ -908,7 +913,7 @@ impl HierarchyPanel {
     ///   1. Dropping `engine/icons/hierarchy/<your_name>.svg`,
     ///   2. Adding a branch here returning `("your_name", tint)`.
     /// No registry edit needed — the icon set is auto-discovered at startup.
-    fn entity_icon_stem(world: &World, entity: Entity) -> (&'static str, Color32) {
+    pub(crate) fn entity_icon_stem(world: &World, entity: Entity) -> (&'static str, Color32) {
         if world.get::<&Camera>(entity).is_ok() {
             return ("camera", Color32::WHITE);
         }
@@ -995,29 +1000,34 @@ impl HierarchyPanel {
         });
 
         if response.clicked() && !read_only {
-            let new_visible = !is_visible;
-            // Scope the mutable component borrow so it's dropped before
-            // `insert_one` (which needs a mutable borrow of the world itself).
-            let updated = {
-                if let Ok(mut existing) = world.get::<&mut EditorVisibility>(entity) {
-                    existing.visible = new_visible;
-                    true
-                } else {
-                    false
-                }
-            };
-            if !updated {
-                let _ = world.insert_one(
-                    entity,
-                    EditorVisibility {
-                        visible: new_visible,
-                    },
-                );
-            }
+            Self::set_visibility(world, entity, !is_visible);
         }
     }
 
-    fn matches_filter(&self, name: &str, world: &World, entity: Entity) -> bool {
+    /// Set (or insert) the `EditorVisibility` component. Shared by the egui
+    /// and crusty eye toggles.
+    pub(crate) fn set_visibility(world: &mut World, entity: Entity, new_visible: bool) {
+        // Scope the mutable component borrow so it's dropped before
+        // `insert_one` (which needs a mutable borrow of the world itself).
+        let updated = {
+            if let Ok(mut existing) = world.get::<&mut EditorVisibility>(entity) {
+                existing.visible = new_visible;
+                true
+            } else {
+                false
+            }
+        };
+        if !updated {
+            let _ = world.insert_one(
+                entity,
+                EditorVisibility {
+                    visible: new_visible,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn matches_filter(&self, name: &str, world: &World, entity: Entity) -> bool {
         let search_lower = self.search_text.to_lowercase();
         if name.to_lowercase().contains(&search_lower) {
             return true;
@@ -1036,7 +1046,7 @@ impl HierarchyPanel {
         false
     }
 
-    fn create_empty_entity(&self, world: &mut World) {
+    pub(crate) fn create_empty_entity(&self, world: &mut World) {
         let count = world.iter().count();
         world.spawn((
             Transform::default(),
@@ -1045,15 +1055,16 @@ impl HierarchyPanel {
         ));
     }
 
-    fn start_rename(&mut self, world: &World, entity: Entity) {
+    pub(crate) fn start_rename(&mut self, world: &World, entity: Entity) {
         self.renaming_entity = Some(entity);
+        self.rename_needs_focus = true;
         self.rename_buffer = world
             .get::<&Name>(entity)
             .map(|n| n.0.clone())
             .unwrap_or_default();
     }
 
-    fn commit_rename(&mut self, world: &mut World, entity: Entity) {
+    pub(crate) fn commit_rename(&mut self, world: &mut World, entity: Entity) {
         if !self.rename_buffer.is_empty() {
             let has_name = world.get::<&Name>(entity).is_ok();
             if has_name {
@@ -1103,7 +1114,7 @@ impl HierarchyPanel {
         }
     }
 
-    fn duplicate_entity(&self, world: &mut World, entity: Entity) {
+    pub(crate) fn duplicate_entity(&self, world: &mut World, entity: Entity) {
         let name = world
             .get::<&Name>(entity)
             .map(|n| format!("{} (Copy)", n.0))
@@ -1115,15 +1126,17 @@ impl HierarchyPanel {
         world.spawn((transform, Name::new(name), EntityGuid::new()));
     }
 
-    fn delete_entity(&self, world: &mut World, selection: &mut Selection, entity: Entity) {
+    pub(crate) fn delete_entity(&self, world: &mut World, selection: &mut Selection, entity: Entity) {
         selection.remove(entity);
         despawn_recursive(world, entity);
     }
 
-    fn calculate_drop_mode(&self, mouse_y: f32, rect: &egui::Rect) -> DropMode {
-        let row_height = rect.height();
-        let top_zone = rect.top() + row_height * 0.25;
-        let bottom_zone = rect.bottom() - row_height * 0.25;
+    /// Classify a pointer y against a row spanning `top..bottom`. Takes raw
+    /// coordinates (not an egui rect) so the crusty port can share it.
+    pub(crate) fn calculate_drop_mode(&self, mouse_y: f32, top: f32, bottom: f32) -> DropMode {
+        let row_height = bottom - top;
+        let top_zone = top + row_height * 0.25;
+        let bottom_zone = bottom - row_height * 0.25;
 
         if mouse_y < top_zone {
             DropMode::InsertAbove
@@ -1134,7 +1147,7 @@ impl HierarchyPanel {
         }
     }
 
-    fn is_valid_drop(&self, world: &World, source: Entity, target: Entity, mode: DropMode) -> bool {
+    pub(crate) fn is_valid_drop(&self, world: &World, source: Entity, target: Entity, mode: DropMode) -> bool {
         if source == target {
             return false;
         }
@@ -1173,7 +1186,8 @@ impl HierarchyPanel {
 
             if is_hovered {
                 let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
-                let drop_mode = self.calculate_drop_mode(mouse_y, &response.rect);
+                let drop_mode =
+                    self.calculate_drop_mode(mouse_y, response.rect.top(), response.rect.bottom());
                 let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
 
                 if is_valid {
@@ -1231,7 +1245,11 @@ impl HierarchyPanel {
 
                 if is_hovered {
                     let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
-                    let drop_mode = self.calculate_drop_mode(mouse_y, &response.rect);
+                    let drop_mode = self.calculate_drop_mode(
+                        mouse_y,
+                        response.rect.top(),
+                        response.rect.bottom(),
+                    );
                     let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
 
                     if is_valid {
@@ -1259,7 +1277,7 @@ impl HierarchyPanel {
         ));
     }
 
-    fn perform_drop(
+    pub(crate) fn perform_drop(
         &mut self,
         world: &mut World,
         source: Entity,
@@ -1278,7 +1296,7 @@ impl HierarchyPanel {
         }
     }
 
-    fn perform_sibling_drop(
+    pub(crate) fn perform_sibling_drop(
         &mut self,
         world: &mut World,
         source: Entity,

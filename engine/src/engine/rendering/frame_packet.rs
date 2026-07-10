@@ -136,6 +136,11 @@ pub enum RenderEvent {
     RenderThreadReady {
         #[cfg(feature = "editor")]
         viewport_texture: Option<Arc<ImageView>>,
+        /// Hierarchy icon set uploaded by the render thread: SVG file stem
+        /// → crusty texture id, for the crusty layout pass on the main
+        /// thread. Empty when the crusty renderer is disabled.
+        #[cfg(feature = "crusty")]
+        crusty_icons: std::collections::HashMap<String, crusty_gui::paint::TextureId>,
     },
     SwapchainRecreated {
         dimensions: [u32; 2],
