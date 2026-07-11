@@ -3,12 +3,12 @@
 //! Provides an in-engine profiler UI built on puffin for data collection
 //! and egui for visualization.
 
-mod budget;
+pub(crate) mod budget;
 mod collector;
-mod data;
+pub(crate) mod data;
 mod flamegraph;
 mod frame_history;
-mod scope_colors;
+pub(crate) mod scope_colors;
 mod table_view;
 mod toolbar;
 pub mod tracy;

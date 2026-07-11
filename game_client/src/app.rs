@@ -2202,6 +2202,8 @@ impl App {
         let mut crusty_inspector_rect: Option<egui::Rect> = None;
         #[cfg(feature = "crusty")]
         let mut crusty_asset_browser_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_profiler_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2276,6 +2278,8 @@ impl App {
                 crusty_inspector_rect: &mut crusty_inspector_rect,
                 #[cfg(feature = "crusty")]
                 crusty_asset_browser_rect: &mut crusty_asset_browser_rect,
+                #[cfg(feature = "crusty")]
+                crusty_profiler_rect: &mut crusty_profiler_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3299,6 +3303,7 @@ impl App {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
             };
+            use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
@@ -3307,6 +3312,7 @@ impl App {
             let inspector = &mut self.editor.scene.inspector_panel;
             inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
+            let profiler = &mut self.editor.ui.profiler_panel;
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
@@ -3366,6 +3372,9 @@ impl App {
                             icons,
                         },
                     );
+                }
+                if let Some(rect) = crusty_profiler_rect {
+                    profiler_panel(ui, rect, ppp, profiler);
                 }
             });
             let mut gui_result = gui_result;

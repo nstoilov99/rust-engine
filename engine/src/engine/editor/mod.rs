@@ -61,6 +61,8 @@ mod menu_bar;
 pub mod mesh_editor;
 pub mod play_mode;
 pub mod profiler;
+#[cfg(feature = "crusty")]
+pub mod profiler_crusty;
 pub mod scene_tab;
 pub mod secondary_window;
 mod selection;

@@ -1,18 +1,18 @@
 use super::data::{ProfileFrame, ProfilerState};
 use egui::{Color32, RichText, Ui};
 
-struct BudgetCategory {
-    name: &'static str,
-    budget_ms: f64,
-    scopes: &'static [&'static str],
+pub(crate) struct BudgetCategory {
+    pub(crate) name: &'static str,
+    pub(crate) budget_ms: f64,
+    pub(crate) scopes: &'static [&'static str],
 }
 
-struct FrameBudget {
-    total_budget_ms: f64,
-    categories: &'static [BudgetCategory],
+pub(crate) struct FrameBudget {
+    pub(crate) total_budget_ms: f64,
+    pub(crate) categories: &'static [BudgetCategory],
 }
 
-const FRAME_BUDGET: FrameBudget = FrameBudget {
+pub(crate) const FRAME_BUDGET: FrameBudget = FrameBudget {
     total_budget_ms: 16.67,
     categories: &[
         BudgetCategory {
@@ -158,7 +158,7 @@ pub fn render(ui: &mut Ui, state: &mut ProfilerState) {
         });
 }
 
-fn scope_total_ms(frame: &ProfileFrame, names: &[&str]) -> f64 {
+pub(crate) fn scope_total_ms(frame: &ProfileFrame, names: &[&str]) -> f64 {
     frame
         .threads
         .iter()
