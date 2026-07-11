@@ -96,6 +96,10 @@ pub struct CrustyLayoutResult {
     pub screen_size: [f32; 2],
     pub wants_keyboard: bool,
     pub wants_pointer: bool,
+    /// Pointer is held by a crusty floating layer / pressed widget / drag.
+    /// While set, pointer events must be withheld from egui too, or clicks
+    /// on floating crusty popups leak into the dock beneath them.
+    pub owns_pointer: bool,
     pub cursor_icon: CursorIcon,
     /// `Some(ZERO)` = animating, repaint now; `None` = idle until input.
     pub repaint_after: Option<Duration>,
@@ -217,6 +221,7 @@ impl CrustyGui {
             screen_size: self.screen_size,
             wants_keyboard: output.wants_keyboard,
             wants_pointer: output.wants_pointer,
+            owns_pointer: output.owns_pointer,
             cursor_icon: output.cursor_icon,
             repaint_after: output.repaint_after,
         }

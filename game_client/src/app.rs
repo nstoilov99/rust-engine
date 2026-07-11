@@ -224,6 +224,12 @@ pub struct App {
     #[cfg(feature = "crusty")]
     pub crusty_icons:
         std::collections::HashMap<String, rust_engine::engine::gui::crusty::TextureId>,
+    /// Last frame's "crusty exclusively holds the pointer" flag (floating
+    /// popup hover, pressed widget, or drag). While set, pointer events are
+    /// withheld from egui so clicks on crusty popups don't drag dock tabs
+    /// or the viewport camera beneath them.
+    #[cfg(feature = "crusty")]
+    crusty_owns_pointer: bool,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -601,6 +607,8 @@ impl App {
             crusty_gui,
             #[cfg(feature = "crusty")]
             crusty_icons,
+            #[cfg(feature = "crusty")]
+            crusty_owns_pointer: false,
         })
     }
 
@@ -1573,7 +1581,22 @@ impl App {
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent, _event_loop: &ActiveEventLoop) {
-        self.editor.ui.gui.handle_event(event);
+        // While a crusty floating popup holds the pointer, withhold pointer
+        // events from egui — otherwise clicks/drags on the popup fall through
+        // and start dragging dock tabs or the viewport camera beneath it.
+        #[cfg(feature = "crusty")]
+        let egui_gets_event = !(self.crusty_owns_pointer
+            && matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+            ));
+        #[cfg(not(feature = "crusty"))]
+        let egui_gets_event = true;
+        if egui_gets_event {
+            self.editor.ui.gui.handle_event(event);
+        }
         #[cfg(feature = "crusty")]
         self.crusty_gui.handle_event(event);
 
@@ -3380,6 +3403,10 @@ impl App {
             let mut gui_result = gui_result;
             gui_result.wants_keyboard |= crusty_result.wants_keyboard;
             gui_result.wants_pointer |= crusty_result.wants_pointer;
+            // Egui keeps the pointer if it's mid-drag (e.g. a tab drag that
+            // passes over a crusty popup); otherwise crusty popups shield it.
+            self.crusty_owns_pointer =
+                crusty_result.owns_pointer && !gui_result.is_using_pointer;
             (crusty_result, gui_result)
         };
 

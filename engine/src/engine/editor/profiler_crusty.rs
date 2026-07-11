@@ -1578,6 +1578,7 @@ fn settings_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) 
         .default_size(Vec2::new(width, 470.0 * s))
         .resizable(false)
         .collapsible(false)
+        .auto_size(true)
         .show(ui, |ui| {
             popup_heading(ui, s, "Frame History");
             section(ui, s, "history", |ui| {
@@ -1781,6 +1782,7 @@ fn info_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
         .default_size(Vec2::new(width, 360.0 * s))
         .resizable(false)
         .collapsible(false)
+        .auto_size(true)
         .show(ui, |ui| {
             popup_heading(ui, s, "Keyboard Shortcuts");
             section(ui, s, "keys", |ui| {
@@ -1834,6 +1836,7 @@ fn tracy_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
         .default_size(Vec2::new(width, 330.0 * s))
         .resizable(false)
         .collapsible(false)
+        .auto_size(true)
         .show(ui, |ui| {
             popup_heading(ui, s, "Status");
             section(ui, s, "status", |ui| {
