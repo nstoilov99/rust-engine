@@ -35,6 +35,8 @@ pub mod toasts;
 pub mod widgets;
 
 pub mod asset_browser;
+#[cfg(feature = "crusty")]
+pub mod asset_browser_crusty;
 pub mod build_dialog;
 mod commands;
 mod console;

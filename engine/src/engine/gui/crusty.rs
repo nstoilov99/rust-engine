@@ -301,6 +301,45 @@ impl CrustyRenderer {
         self.renderer.registry_mut().register(view, TextureFilter::Linear)
     }
 
+    /// Upload raw RGBA8 pixels to a new GPU image and register it for UI
+    /// drawing (asset-browser thumbnails, icons).
+    pub fn upload_rgba_texture(
+        &mut self,
+        queue: Arc<Queue>,
+        memory_allocator: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<TextureId, Box<dyn std::error::Error>> {
+        use vulkano::image::{ImageCreateInfo, ImageType, ImageUsage};
+        use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+
+        let image = Image::new(
+            memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: Format::R8G8B8A8_SRGB,
+                extent: [width, height, 1],
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )?;
+        crate::engine::assets::texture::upload_texture_data(
+            command_buffer_allocator,
+            queue,
+            memory_allocator,
+            image.clone(),
+            rgba,
+        )?;
+        let view = ImageView::new_default(image)?;
+        Ok(self.register_native_texture(view))
+    }
+
     /// Rasterize the hierarchy panel's SVG icon set, upload each to a GPU
     /// image and register it, returning `file stem → TextureId`. Called
     /// once at render-thread startup; the map crosses to the main thread in
@@ -314,8 +353,6 @@ impl CrustyRenderer {
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     ) -> std::collections::HashMap<String, TextureId> {
         use crate::engine::editor::hierarchy_icons::{icon_raster_px, icons_dir, rasterize_svg_rgba};
-        use vulkano::image::{ImageCreateInfo, ImageType, ImageUsage};
-        use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 
         let mut map = std::collections::HashMap::new();
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
@@ -327,61 +364,68 @@ impl CrustyRenderer {
         }
         // Extra editor icons living one level up from the hierarchy set.
         if let Some(parent) = icons_dir().parent() {
-            paths.push(parent.join("color-picker.svg"));
+            for name in [
+                "color-picker.svg",
+                "folder.svg",
+                "opened-folder.svg",
+                "folder-browser.svg",
+                "grid-view.svg",
+                "list-view.svg",
+                "add.svg",
+                "file-mesh.png",
+                "image-file.png",
+                "file-document.png",
+                "code-file.png",
+            ] {
+                paths.push(parent.join(name));
+            }
         }
         let px = icon_raster_px();
 
         for path in paths {
-            if path.extension().and_then(|e| e.to_str()) != Some("svg") {
-                continue;
-            }
+            let ext = path.extension().and_then(|e| e.to_str());
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
             else {
                 continue;
             };
-            let rgba = match rasterize_svg_rgba(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!("crusty: failed to rasterize {}: {e}", path.display());
-                    continue;
-                }
-            };
-            let image = match Image::new(
-                memory_allocator.clone(),
-                ImageCreateInfo {
-                    image_type: ImageType::Dim2d,
-                    format: Format::R8G8B8A8_SRGB,
-                    extent: [px, px, 1],
-                    usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-                    ..Default::default()
+            let (rgba, w, h) = match ext {
+                Some("svg") => match rasterize_svg_rgba(&path) {
+                    Ok(d) => (d, px, px),
+                    Err(e) => {
+                        log::warn!("crusty: failed to rasterize {}: {e}", path.display());
+                        continue;
+                    }
                 },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-                    ..Default::default()
-                },
-            ) {
-                Ok(i) => i,
-                Err(e) => {
-                    log::warn!("crusty: icon image alloc failed for {stem}: {e}");
-                    continue;
+                Some("png") => {
+                    match std::fs::read(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
+                    {
+                        Ok(img) => {
+                            let img = img.to_rgba8();
+                            let (w, h) = img.dimensions();
+                            (img.into_raw(), w, h)
+                        }
+                        Err(e) => {
+                            log::warn!("crusty: failed to load {}: {e}", path.display());
+                            continue;
+                        }
+                    }
                 }
+                _ => continue,
             };
-            if let Err(e) = crate::engine::assets::texture::upload_texture_data(
-                command_buffer_allocator.clone(),
+            match self.upload_rgba_texture(
                 queue.clone(),
                 memory_allocator.clone(),
-                image.clone(),
+                command_buffer_allocator.clone(),
                 &rgba,
+                w,
+                h,
             ) {
-                log::warn!("crusty: icon upload failed for {stem}: {e}");
-                continue;
-            }
-            match ImageView::new_default(image) {
-                Ok(view) => {
-                    let id = self.register_native_texture(view);
+                Ok(id) => {
                     map.insert(stem, id);
                 }
-                Err(e) => log::warn!("crusty: icon view failed for {stem}: {e}"),
+                Err(e) => log::warn!("crusty: icon upload failed for {stem}: {e}"),
             }
         }
         map

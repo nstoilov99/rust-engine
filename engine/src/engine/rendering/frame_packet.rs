@@ -112,6 +112,12 @@ pub struct FramePacket {
     #[cfg(feature = "crusty")]
     pub crusty_paint: Option<Vec<crusty_gui::paint::PaintCmd>>,
 
+    /// Thumbnail pixels the render thread should upload + register as
+    /// crusty textures; ids come back via
+    /// [`RenderEvent::CrustyTexturesRegistered`].
+    #[cfg(feature = "crusty")]
+    pub crusty_texture_uploads: Vec<CrustyTextureUpload>,
+
     // Render config
     pub render_mode: RenderMode,
     pub window_dimensions: [u32; 2],
@@ -129,6 +135,16 @@ pub struct FramePacket {
     /// thread can update its EguiRenderer cache after a viewport resize.
     #[cfg(feature = "editor")]
     pub viewport_texture_id: Option<egui::TextureId>,
+}
+
+/// RGBA8 pixels for a texture the render thread uploads to the GPU and
+/// registers with the crusty renderer (asset-browser thumbnails).
+#[cfg(feature = "crusty")]
+pub struct CrustyTextureUpload {
+    pub id: crate::engine::assets::AssetId,
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Events sent from the render thread back to the main thread.
@@ -153,6 +169,11 @@ pub enum RenderEvent {
     RenderError {
         message: String,
     },
+    /// Asset id → crusty texture id for uploads the render thread finished.
+    #[cfg(feature = "crusty")]
+    CrustyTexturesRegistered(
+        Vec<(crate::engine::assets::AssetId, crusty_gui::paint::TextureId)>,
+    ),
 }
 
 impl FramePacket {
@@ -186,6 +207,8 @@ impl FramePacket {
             egui_texture_deltas: None,
             #[cfg(feature = "crusty")]
             crusty_paint: None,
+            #[cfg(feature = "crusty")]
+            crusty_texture_uploads: Vec::new(),
             render_mode: RenderMode::Standalone,
             window_dimensions,
             #[cfg(feature = "editor")]
@@ -228,6 +251,8 @@ impl FramePacket {
             egui_texture_deltas: None,
             #[cfg(feature = "crusty")]
             crusty_paint: None,
+            #[cfg(feature = "crusty")]
+            crusty_texture_uploads: Vec::new(),
             render_mode: RenderMode::Editor,
             window_dimensions,
             viewport_dimensions,

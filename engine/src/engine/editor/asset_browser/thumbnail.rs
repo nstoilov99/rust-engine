@@ -53,6 +53,13 @@ pub struct ThumbnailCache {
     placeholder: Option<TextureHandle>,
     error_placeholder: Option<TextureHandle>,
     _type_icons: HashMap<AssetType, TextureHandle>,
+    /// Registered crusty texture ids (Phase 16 asset browser).
+    #[cfg(feature = "crusty")]
+    crusty_ids: HashMap<AssetId, crusty_gui::paint::TextureId>,
+    /// Generated thumbnails sent to the render thread for upload, whose
+    /// texture ids haven't come back yet.
+    #[cfg(feature = "crusty")]
+    crusty_uploading: std::collections::HashSet<AssetId>,
 }
 
 impl ThumbnailCache {
@@ -76,6 +83,10 @@ impl ThumbnailCache {
             placeholder: None,
             error_placeholder: None,
             _type_icons: HashMap::new(),
+            #[cfg(feature = "crusty")]
+            crusty_ids: HashMap::new(),
+            #[cfg(feature = "crusty")]
+            crusty_uploading: std::collections::HashSet::new(),
         }
     }
 
@@ -195,16 +206,82 @@ impl ThumbnailCache {
         }
     }
 
+    /// Crusty texture id for an asset's thumbnail, requesting generation on
+    /// first sight. `None` while generating/uploading — the panel draws its
+    /// own placeholder. Poll [`Self::poll_crusty`] each frame to drive it.
+    #[cfg(feature = "crusty")]
+    pub fn crusty_texture_id(
+        &mut self,
+        asset: &AssetMetadata,
+    ) -> Option<crusty_gui::paint::TextureId> {
+        if let Some(id) = self.crusty_ids.get(&asset.id) {
+            return Some(*id);
+        }
+        if !self.pending.contains(&asset.id) && !self.crusty_uploading.contains(&asset.id) {
+            self.request_thumbnail(asset);
+        }
+        None
+    }
+
+    /// Drain finished worker results into upload commands for the frame
+    /// packet. The render thread uploads + registers them and answers with
+    /// `RenderEvent::CrustyTexturesRegistered`, which feeds
+    /// [`Self::apply_crusty_registered`].
+    #[cfg(feature = "crusty")]
+    pub fn poll_crusty(
+        &mut self,
+    ) -> Vec<crate::engine::rendering::frame_packet::CrustyTextureUpload> {
+        let mut out = Vec::new();
+        while let Ok(result) = self.result_rx.try_recv() {
+            self.pending.remove(&result.id);
+            if let Some(img) = result.image_data {
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                self.crusty_uploading.insert(result.id);
+                out.push(crate::engine::rendering::frame_packet::CrustyTextureUpload {
+                    id: result.id,
+                    rgba,
+                    width: img.size[0] as u32,
+                    height: img.size[1] as u32,
+                });
+            }
+        }
+        out
+    }
+
+    /// Record texture ids the render thread registered for earlier uploads.
+    #[cfg(feature = "crusty")]
+    pub fn apply_crusty_registered(
+        &mut self,
+        registered: Vec<(AssetId, crusty_gui::paint::TextureId)>,
+    ) {
+        for (id, tex) in registered {
+            self.crusty_uploading.remove(&id);
+            self.crusty_ids.insert(id, tex);
+        }
+    }
+
     /// Invalidate a thumbnail (e.g., after file modification)
     pub fn invalidate(&mut self, id: AssetId) {
         self.cache.remove(&id);
         self.pending.remove(&id);
+        #[cfg(feature = "crusty")]
+        {
+            // The old GPU texture stays registered (no cross-thread remove
+            // path yet) — a stale id is dropped, not reused.
+            self.crusty_ids.remove(&id);
+            self.crusty_uploading.remove(&id);
+        }
     }
 
     /// Clear all cached thumbnails
     pub fn clear(&mut self) {
         self.cache.clear();
         self.pending.clear();
+        #[cfg(feature = "crusty")]
+        {
+            self.crusty_ids.clear();
+            self.crusty_uploading.clear();
+        }
     }
 
     /// Get cache statistics

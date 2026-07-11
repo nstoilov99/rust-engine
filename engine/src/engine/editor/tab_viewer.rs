@@ -123,6 +123,10 @@ pub struct EditorContext<'a> {
     /// visible this frame (same mechanism as `crusty_console_rect`).
     #[cfg(feature = "crusty")]
     pub crusty_inspector_rect: &'a mut Option<egui::Rect>,
+    /// Output: the Asset Browser tab's content rect in egui points when it was
+    /// visible this frame (same mechanism as `crusty_console_rect`).
+    #[cfg(feature = "crusty")]
+    pub crusty_asset_browser_rect: &'a mut Option<egui::Rect>,
 }
 
 /// Tab viewer that renders each panel type
@@ -694,7 +698,20 @@ impl<'a> EditorTabViewer<'a> {
         );
     }
 
+    /// Render the asset browser panel.
+    ///
+    /// With the `crusty` feature the panel is ported to crusty-gui: the
+    /// egui tab only records its content rect (same mechanism as the
+    /// console) and claims the space so the dock sizes the tab normally.
+    #[cfg(feature = "crusty")]
+    fn render_asset_browser(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        *self.editor.crusty_asset_browser_rect = Some(rect);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
     /// Render the asset browser panel
+    #[cfg(not(feature = "crusty"))]
     fn render_asset_browser(&mut self, ui: &mut Ui) {
         self.editor.asset_browser.show(ui, self.editor.icon_manager);
     }

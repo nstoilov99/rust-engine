@@ -164,20 +164,21 @@ impl AssetBrowserPanel {
         self.needs_rescan = true;
     }
 
+    /// Run a pending rescan, if one was requested.
+    pub(crate) fn process_rescan(&mut self) {
+        if self.needs_rescan {
+            self.needs_rescan = false;
+            let _ = self.registry.scan_directory();
+        }
+    }
+
     /// Render the asset browser panel contents
     /// `icon_manager` is optional - if provided, PNG icons will be used
     pub fn show(&mut self, ui: &mut Ui, icon_manager: Option<&IconManager>) {
         // Poll for completed thumbnails
         self.thumbnails.poll(ui.ctx());
 
-        // Handle rescan if needed
-        if self.needs_rescan {
-            self.needs_rescan = false;
-            let result = self.registry.scan_directory();
-            if result.added > 0 || result.updated > 0 || result.removed > 0 {
-                // Log scan results
-            }
-        }
+        self.process_rescan();
 
         // Top toolbar
         self.render_toolbar(ui, icon_manager);
@@ -826,7 +827,7 @@ impl AssetBrowserPanel {
         }
     }
 
-    fn build_filter(&self) -> AssetFilter {
+    pub(crate) fn build_filter(&self) -> AssetFilter {
         AssetFilter {
             search_text: if self.search_text.is_empty() {
                 None

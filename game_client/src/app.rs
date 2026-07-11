@@ -1850,6 +1850,14 @@ impl App {
                     rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
                         log::error!("editor: render thread error: {}", message);
                     }
+                    #[cfg(feature = "crusty")]
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::CrustyTexturesRegistered(regs) => {
+                        self.editor
+                            .scene
+                            .asset_browser
+                            .thumbnails
+                            .apply_crusty_registered(regs);
+                    }
                     _ => {}
                 }
             }
@@ -2192,6 +2200,8 @@ impl App {
         let mut crusty_hierarchy_rect: Option<egui::Rect> = None;
         #[cfg(feature = "crusty")]
         let mut crusty_inspector_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_asset_browser_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2264,6 +2274,8 @@ impl App {
                 crusty_hierarchy_rect: &mut crusty_hierarchy_rect,
                 #[cfg(feature = "crusty")]
                 crusty_inspector_rect: &mut crusty_inspector_rect,
+                #[cfg(feature = "crusty")]
+                crusty_asset_browser_rect: &mut crusty_asset_browser_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3284,6 +3296,9 @@ impl App {
             use rust_engine::engine::editor::inspector_crusty::{
                 inspector_panel, InspectorPanelCtx,
             };
+            use rust_engine::engine::editor::asset_browser_crusty::{
+                asset_browser_panel, AssetBrowserPanelCtx,
+            };
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
@@ -3336,7 +3351,18 @@ impl App {
                             world: &mut *world,
                             selection: &*sel,
                             play_mode: current_play_mode,
-                            asset_browser,
+                            asset_browser: &mut *asset_browser,
+                            icons,
+                        },
+                    );
+                }
+                if let Some(rect) = crusty_asset_browser_rect {
+                    asset_browser_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        AssetBrowserPanelCtx {
+                            panel: &mut *asset_browser,
                             icons,
                         },
                     );
@@ -3359,6 +3385,12 @@ impl App {
         #[cfg(feature = "crusty")]
         {
             packet.crusty_paint = Some(crusty_result.paint);
+            packet.crusty_texture_uploads = self
+                .editor
+                .scene
+                .asset_browser
+                .thumbnails
+                .poll_crusty();
         }
 
         // CRITICAL: re-sync the viewport dimensions and view_projection with the size

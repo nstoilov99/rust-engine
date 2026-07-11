@@ -208,6 +208,34 @@ impl RenderThread {
 
             log::trace!("render_thread: received frame {}", packet.frame_number);
 
+            // Upload requested crusty textures (thumbnails) before any early
+            // `continue` below can drop the packet — the main-thread cache
+            // marks them in-flight and waits for the registered event.
+            #[cfg(feature = "crusty")]
+            if let Some(ref mut cr) = crusty_renderer {
+                if !packet.crusty_texture_uploads.is_empty() {
+                    let mut registered = Vec::new();
+                    for up in &packet.crusty_texture_uploads {
+                        match cr.upload_rgba_texture(
+                            gpu.queue.clone(),
+                            gpu.memory_allocator.clone(),
+                            gpu.command_buffer_allocator.clone(),
+                            &up.rgba,
+                            up.width,
+                            up.height,
+                        ) {
+                            Ok(id) => registered.push((up.id, id)),
+                            Err(e) => {
+                                log::warn!("render_thread: crusty texture upload failed: {e}")
+                            }
+                        }
+                    }
+                    if !registered.is_empty() {
+                        let _ = response.send(RenderEvent::CrustyTexturesRegistered(registered));
+                    }
+                }
+            }
+
             if !has_swapchain {
                 continue;
             }
