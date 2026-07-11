@@ -102,10 +102,10 @@ impl ToolbarIcon {
             ToolbarIcon::Scale => "scale",
             ToolbarIcon::World => "world",
             ToolbarIcon::Local => "local",
-            ToolbarIcon::GridSnap => "grid_snap",
-            ToolbarIcon::RotationSnap => "rotation_snap",
-            ToolbarIcon::ScaleSnap => "scale_snap",
-            ToolbarIcon::CameraSpeed => "camera_speed",
+            ToolbarIcon::GridSnap => "grid-snap",
+            ToolbarIcon::RotationSnap => "rotation-snap",
+            ToolbarIcon::ScaleSnap => "scale-snap",
+            ToolbarIcon::CameraSpeed => "camera-speed",
             ToolbarIcon::Play => "play-fill",
             ToolbarIcon::Pause => "pause-fill",
             ToolbarIcon::Stop => "stop-fill",
@@ -188,8 +188,8 @@ impl IconManager {
             let svg_path = icons_dir.join(format!("{}.svg", stem));
 
             let texture = self
-                .load_png_icon(ctx, &png_path, stem)
-                .or_else(|| self.load_svg_icon(ctx, &svg_path, stem));
+                .load_svg_icon(ctx, &svg_path, stem)
+                .or_else(|| self.load_png_icon(ctx, &png_path, stem));
 
             match texture {
                 Some(tex) => {
@@ -209,8 +209,8 @@ impl IconManager {
 
     /// Load asset browser icons from the assets directory.
     ///
-    /// For each icon, tries `<stem>.png` first, then falls back to
-    /// `<stem>.svg` — the project is moving to SVG sources for editor
+    /// For each icon, tries `<stem>.svg` first, then falls back to
+    /// `<stem>.png` — the project is moving to SVG sources for editor
     /// chrome (e.g. `folder.svg`, `opened-folder.svg`) but legacy PNGs
     /// still exist for some entries.
     pub fn load_asset_browser_icons(&mut self, ctx: &Context, assets_path: &Path) {
@@ -222,8 +222,8 @@ impl IconManager {
             let svg_path = icons_dir.join(format!("{}.svg", stem));
 
             let texture = self
-                .load_png_icon(ctx, &png_path, stem)
-                .or_else(|| self.load_svg_icon(ctx, &svg_path, stem));
+                .load_svg_icon(ctx, &svg_path, stem)
+                .or_else(|| self.load_png_icon(ctx, &png_path, stem));
 
             match texture {
                 Some(tex) => {
