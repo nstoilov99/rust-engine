@@ -709,6 +709,8 @@ dependencies = [
  "log",
  "naga",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "smallvec",
  "swash",
  "vulkano",

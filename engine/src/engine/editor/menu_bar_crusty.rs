@@ -15,12 +15,13 @@ use crusty_gui::widgets::{show_tooltip_for, Button, ComboBox, Label, SelectableV
 
 use super::build_dialog::{BuildDialog, BuildProfile, BuildState};
 use super::console::ConsoleLog;
+use super::dock_crusty::CrustyDockLayout;
 use super::menu_bar::MenuAction;
-use super::{CommandHistory, EditorDockState, EditorTab};
+use super::{CommandHistory, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
 
 pub struct MenuBarCtx<'a> {
-    pub dock_state: &'a mut EditorDockState,
+    pub dock_state: &'a mut CrustyDockLayout,
     pub command_history: &'a CommandHistory,
     pub play_mode: PlayMode,
     pub build_dialog: &'a mut BuildDialog,

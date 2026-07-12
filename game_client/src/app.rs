@@ -4,6 +4,7 @@
 //! The App struct composes both, with EditorApp only present in editor builds.
 
 use super::{game_setup, input_handler, render_loop};
+#[cfg(not(feature = "crusty"))]
 use egui_dock::DockArea;
 use rust_engine::assets::asset_source;
 use rust_engine::assets::AssetType;
@@ -25,9 +26,9 @@ use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 #[cfg(not(feature = "crusty"))]
-use rust_engine::engine::editor::{render_menu_bar, render_status_bar};
+use rust_engine::engine::editor::{create_editor_dock_style, render_menu_bar, render_status_bar};
 use rust_engine::engine::editor::{
-    create_editor_dock_style, AssetBrowserEvent,
+    AssetBrowserEvent,
     AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene,
     EditorAction, EditorCamera, EditorContext, EditorDockState, EditorServices, EditorTab,
     EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
@@ -178,6 +179,10 @@ pub struct SceneEditorState {
 pub struct EditorUIState {
     pub gui: Gui,
     pub dock_state: EditorDockState,
+    /// Crusty dock layout (Phase 16 egui_dock replacement) — drives the
+    /// panel layout when the `crusty` feature is on.
+    #[cfg(feature = "crusty")]
+    pub crusty_dock: rust_engine::engine::editor::dock_crusty::CrustyDockLayout,
     pub show_stat_fps: bool,
     pub show_profiler: bool,
     pub icon_manager: IconManager,
@@ -241,9 +246,14 @@ pub struct App {
     /// and applied at the start of the next frame's match.
     #[cfg(feature = "crusty")]
     crusty_menu_action: MenuAction,
+    /// A tab torn off the crusty dock, following the cursor as an in-window
+    /// ghost until re-docked (Stage 3 turns this into an OS window).
+    #[cfg(feature = "crusty")]
+    crusty_dock_drag: Option<String>,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
+#[cfg(not(feature = "crusty"))]
 fn focused_viewport_id(dock_state: &EditorDockState) -> Option<SceneId> {
     let (surface, node) = dock_state.dock_state.focused_leaf()?;
     if let egui_dock::Node::Leaf(leaf) = &dock_state.dock_state[surface][node] {
@@ -581,6 +591,9 @@ impl App {
             ui: EditorUIState {
                 gui,
                 dock_state: EditorDockState::load_or_default(),
+                #[cfg(feature = "crusty")]
+                crusty_dock:
+                    rust_engine::engine::editor::dock_crusty::CrustyDockLayout::load_or_default(),
                 show_stat_fps: false,
                 show_profiler: false,
                 icon_manager: IconManager::new(20, egui::Color32::WHITE),
@@ -629,6 +642,8 @@ impl App {
             crusty_owns_pointer: false,
             #[cfg(feature = "crusty")]
             crusty_menu_action: MenuAction::None,
+            #[cfg(feature = "crusty")]
+            crusty_dock_drag: None,
         })
     }
 
@@ -637,7 +652,12 @@ impl App {
     }
 
     pub fn save_layout_on_exit(&self) {
+        #[cfg(not(feature = "crusty"))]
         if let Err(e) = self.editor.ui.dock_state.save_to_default() {
+            eprintln!("Warning: Failed to save layout on exit: {}", e);
+        }
+        #[cfg(feature = "crusty")]
+        if let Err(e) = self.editor.ui.crusty_dock.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
         }
 
@@ -2185,6 +2205,7 @@ impl App {
         let world = self.core.game_world.hecs_mut();
         let selection = &mut self.editor.scene.selection;
         let command_history = &mut self.editor.scene.command_history;
+        #[cfg(not(feature = "crusty"))]
         let dock_state = &mut self.editor.ui.dock_state;
         let console_messages = &mut self.editor.console.messages;
         let log_filter = &mut self.editor.console.log_filter;
@@ -2359,6 +2380,9 @@ impl App {
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
 
+            // Under `crusty` the dock itself is rendered by crusty-gui (see
+            // the crusty pass below); egui only reserves the strips.
+            #[cfg(not(feature = "crusty"))]
             DockArea::new(&mut dock_state.dock_state)
                 .style(create_editor_dock_style(ctx))
                 .show_leaf_close_all_buttons(false)
@@ -2528,7 +2552,11 @@ impl App {
 
         // Detect tab switch: if the dock's currently-focused viewport tab is not the
         // active scene id, perform a swap.
-        if let Some(focused_scene_id) = focused_viewport_id(&self.editor.ui.dock_state) {
+        #[cfg(not(feature = "crusty"))]
+        let focused_scene = focused_viewport_id(&self.editor.ui.dock_state);
+        #[cfg(feature = "crusty")]
+        let focused_scene = self.editor.ui.crusty_dock.focused_viewport_id();
+        if let Some(focused_scene_id) = focused_scene {
             if focused_scene_id != self.editor.scene.registry.active_id {
                 self.switch_to_scene(focused_scene_id);
             }
@@ -2585,16 +2613,35 @@ impl App {
                     }
                 }
             }
-            MenuAction::SaveLayout => match self.editor.ui.dock_state.save_to_default() {
-                Ok(()) => println!(
-                    "Layout saved to {}",
-                    EditorDockState::default_layout_path().display()
-                ),
-                Err(e) => eprintln!("Failed to save layout: {}", e),
-            },
+            MenuAction::SaveLayout => {
+                #[cfg(not(feature = "crusty"))]
+                match self.editor.ui.dock_state.save_to_default() {
+                    Ok(()) => println!(
+                        "Layout saved to {}",
+                        EditorDockState::default_layout_path().display()
+                    ),
+                    Err(e) => eprintln!("Failed to save layout: {}", e),
+                }
+                #[cfg(feature = "crusty")]
+                match self.editor.ui.crusty_dock.save_to_default() {
+                    Ok(()) => println!(
+                        "Layout saved to {}",
+                        rust_engine::engine::editor::dock_crusty::CrustyDockLayout::default_layout_path().display()
+                    ),
+                    Err(e) => eprintln!("Failed to save layout: {}", e),
+                }
+            }
             MenuAction::ResetLayout => {
-                self.editor.ui.dock_state = EditorDockState::new();
-                let _ = self.editor.ui.dock_state.save_to_default();
+                #[cfg(not(feature = "crusty"))]
+                {
+                    self.editor.ui.dock_state = EditorDockState::new();
+                    let _ = self.editor.ui.dock_state.save_to_default();
+                }
+                #[cfg(feature = "crusty")]
+                {
+                    self.editor.ui.crusty_dock.reset();
+                    let _ = self.editor.ui.crusty_dock.save_to_default();
+                }
                 println!("Layout reset to default");
             }
             MenuAction::LoadBenchmarkScene => self.load_benchmark_scene(),
@@ -3379,10 +3426,13 @@ impl App {
         // into the egui result (game input must not fire while a crusty
         // panel has the pointer/keyboard).
         #[cfg(feature = "crusty")]
+        let mut crusty_close_tab: Option<String> = None;
+        #[cfg(feature = "crusty")]
         let (crusty_result, gui_result) = {
             use rust_engine::engine::editor::console_crusty::{
                 console_panel, ConsolePanelCtx,
             };
+            use rust_engine::engine::editor::dock_crusty;
             use rust_engine::engine::editor::hierarchy_crusty::{
                 hierarchy_panel, HierarchyPanelCtx,
             };
@@ -3414,7 +3464,15 @@ impl App {
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
-            let dock_state = &mut self.editor.ui.dock_state;
+            let titles = dock_crusty::tab_titles(
+                &self.editor.ui.crusty_dock.tree,
+                active_scene_id,
+                &current_scene_name,
+                &self.editor.scene.registry.dormant,
+                self.crusty_dock_drag.as_deref(),
+            );
+            let crusty_dock = &mut self.editor.ui.crusty_dock;
+            let dock_drag = &mut self.crusty_dock_drag;
             let build_dialog = &mut self.editor.play.build_dialog;
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
             let status_bar_state = &self.editor.services.status_bar;
@@ -3426,7 +3484,7 @@ impl App {
                     crusty_menu_bar_rect,
                     ppp,
                     MenuBarCtx {
-                        dock_state,
+                        dock_state: crusty_dock,
                         command_history: &*vp_command_history,
                         play_mode: current_play_mode,
                         build_dialog,
@@ -3436,90 +3494,141 @@ impl App {
                     },
                 );
                 status_bar_panel(ui, crusty_status_bar_rect, ppp, status_bar_state);
-                if let Some(rect) = crusty_console_rect {
-                    console_panel(
-                        ui,
-                        rect,
-                        ppp,
-                        ConsolePanelCtx {
-                            messages: &mut console.messages,
-                            filter: &mut console.log_filter,
-                            command_system: &mut console.command_system,
-                            input: &mut console.input,
-                            world: &mut *world,
-                            show_stat_fps: &mut *show_stat_fps,
-                        },
-                    );
+
+                // Dock: everything between the menu and status strips.
+                let dock_rect = dock_crusty::rect_px(
+                    egui::Rect::from_min_max(
+                        egui::pos2(crusty_screen_rect.min.x, crusty_menu_bar_rect.max.y),
+                        egui::pos2(crusty_screen_rect.max.x, crusty_status_bar_rect.min.y),
+                    ),
+                    ppp,
+                );
+                let ext = dock_drag
+                    .as_ref()
+                    .map(|tab| dock_crusty::ghost_drag(ui, tab));
+                let drag_released = ext.as_ref().is_some_and(|e| e.released);
+                let resp =
+                    dock_crusty::DockArea::new(&mut crusty_dock.tree, &mut crusty_dock.state)
+                        .titles(&titles)
+                        .show_close_buttons(true)
+                        .min_tab_width(120.0 * ppp)
+                        .tab_bar_height(28.0 * ppp)
+                        .external_drag(ext)
+                        .show_in(ui, dock_rect, |ui, tab| {
+                            let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
+                            match dock_crusty::parse_tab(tab) {
+                                Some(EditorTab::Console) => console_panel(
+                                    ui,
+                                    rect,
+                                    ppp,
+                                    ConsolePanelCtx {
+                                        messages: &mut console.messages,
+                                        filter: &mut console.log_filter,
+                                        command_system: &mut console.command_system,
+                                        input: &mut console.input,
+                                        world: &mut *world,
+                                        show_stat_fps: &mut *show_stat_fps,
+                                    },
+                                ),
+                                Some(EditorTab::Hierarchy) => hierarchy_panel(
+                                    ui,
+                                    rect,
+                                    ppp,
+                                    HierarchyPanelCtx {
+                                        panel: hierarchy,
+                                        world: &mut *world,
+                                        selection: sel,
+                                        play_mode: current_play_mode,
+                                        icons,
+                                        registry: &icon_registry,
+                                    },
+                                ),
+                                Some(EditorTab::Inspector) => inspector_panel(
+                                    ui,
+                                    rect,
+                                    ppp,
+                                    InspectorPanelCtx {
+                                        panel: inspector,
+                                        world: &mut *world,
+                                        selection: &*sel,
+                                        play_mode: current_play_mode,
+                                        asset_browser: &mut *asset_browser,
+                                        icons,
+                                    },
+                                ),
+                                Some(EditorTab::AssetBrowser) => asset_browser_panel(
+                                    ui,
+                                    rect,
+                                    ppp,
+                                    AssetBrowserPanelCtx {
+                                        panel: &mut *asset_browser,
+                                        icons,
+                                    },
+                                ),
+                                Some(EditorTab::Profiler) => {
+                                    profiler_panel(ui, rect, ppp, profiler)
+                                }
+                                Some(EditorTab::Viewport(id)) if id == active_scene_id => {
+                                    viewport_panel(
+                                        ui,
+                                        rect,
+                                        ppp,
+                                        ViewportPanelCtx {
+                                            texture: crusty_viewport_texture,
+                                            viewport_size: &mut vp.size,
+                                            viewport_rect: &mut vp.rect,
+                                            viewport_hovered: &mut vp.hovered,
+                                            settings: &mut vp.settings,
+                                            gizmo: &mut vp.gizmo_handler,
+                                            grid_visible: &mut vp.grid_visible,
+                                            camera: &vp.camera,
+                                            selected: sel.primary(),
+                                            world: &mut *world,
+                                            command_history: vp_command_history,
+                                            play_mode: current_play_mode,
+                                            icons,
+                                            show_stat_fps: *show_stat_fps,
+                                            fps,
+                                            delta_ms,
+                                        },
+                                    )
+                                }
+                                Some(EditorTab::Viewport(_)) => dock_crusty::placeholder_panel(
+                                    ui,
+                                    "Activating scene...",
+                                ),
+                                _ => dock_crusty::placeholder_panel(
+                                    ui,
+                                    "This panel is not yet ported to crusty-gui.",
+                                ),
+                            }
+                        });
+
+                // "+" new-scene button after the viewport tab strip (same
+                // deferred path as the crusty menu's New Scene).
+                if let Some(slot) = resp
+                    .tab_bar_slots
+                    .iter()
+                    .find(|s| s.anchor.starts_with("viewport:"))
+                {
+                    if dock_crusty::new_tab_button(ui, slot) {
+                        crusty_menu_action = MenuAction::NewScene;
+                    }
                 }
-                if let Some(rect) = crusty_hierarchy_rect {
-                    hierarchy_panel(
-                        ui,
-                        rect,
-                        ppp,
-                        HierarchyPanelCtx {
-                            panel: hierarchy,
-                            world: &mut *world,
-                            selection: sel,
-                            play_mode: current_play_mode,
-                            icons,
-                            registry: &icon_registry,
-                        },
-                    );
+
+                // Tear-off: carry the tab as a cursor ghost until it re-docks;
+                // if dropped nowhere, put it back so it's never lost.
+                if let Some(det) = resp.detached {
+                    *dock_drag = Some(det.tab);
+                } else if resp.docked {
+                    *dock_drag = None;
+                } else if drag_released {
+                    if let Some(tab) = dock_drag.take() {
+                        crusty_dock.tree.add_tab(tab);
+                    }
                 }
-                if let Some(rect) = crusty_inspector_rect {
-                    inspector_panel(
-                        ui,
-                        rect,
-                        ppp,
-                        InspectorPanelCtx {
-                            panel: inspector,
-                            world: &mut *world,
-                            selection: &*sel,
-                            play_mode: current_play_mode,
-                            asset_browser: &mut *asset_browser,
-                            icons,
-                        },
-                    );
-                }
-                if let Some(rect) = crusty_asset_browser_rect {
-                    asset_browser_panel(
-                        ui,
-                        rect,
-                        ppp,
-                        AssetBrowserPanelCtx {
-                            panel: &mut *asset_browser,
-                            icons,
-                        },
-                    );
-                }
-                if let Some(rect) = crusty_profiler_rect {
-                    profiler_panel(ui, rect, ppp, profiler);
-                }
-                if let Some(rect) = crusty_viewport_rect {
-                    viewport_panel(
-                        ui,
-                        rect,
-                        ppp,
-                        ViewportPanelCtx {
-                            texture: crusty_viewport_texture,
-                            viewport_size: &mut vp.size,
-                            viewport_rect: &mut vp.rect,
-                            viewport_hovered: &mut vp.hovered,
-                            settings: &mut vp.settings,
-                            gizmo: &mut vp.gizmo_handler,
-                            grid_visible: &mut vp.grid_visible,
-                            camera: &vp.camera,
-                            selected: sel.primary(),
-                            world: &mut *world,
-                            command_history: vp_command_history,
-                            play_mode: current_play_mode,
-                            icons,
-                            show_stat_fps: *show_stat_fps,
-                            fps,
-                            delta_ms,
-                        },
-                    );
-                }
+                crusty_close_tab = resp.close_requested;
+
                 // Last so they draw above the panels (menus/tooltips live in
                 // the overlay list and stay on top regardless).
                 toasts_panel(ui, crusty_screen_rect, ppp, live_toasts);
@@ -3532,8 +3641,17 @@ impl App {
             // passes over a crusty popup); otherwise crusty popups shield it.
             self.crusty_owns_pointer =
                 crusty_result.owns_pointer && !gui_result.is_using_pointer;
+            // Block the editor camera while crusty holds the pointer (dock
+            // tab drag, popup) — the camera gate reads `is_using_pointer`.
+            gui_result.is_using_pointer |= crusty_result.owns_pointer;
             (crusty_result, gui_result)
         };
+
+        // Commit (or veto) a crusty dock tab-close request.
+        #[cfg(feature = "crusty")]
+        if let Some(tab) = crusty_close_tab.take() {
+            self.handle_crusty_tab_close(&tab);
+        }
 
         self.handle_frame_input(&gui_result);
 
@@ -3687,7 +3805,10 @@ impl App {
         self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
 
         // Push a new viewport tab into the existing viewport leaf and focus it.
+        #[cfg(not(feature = "crusty"))]
         self.editor.ui.dock_state.open_viewport_tab(new_id);
+        #[cfg(feature = "crusty")]
+        self.editor.ui.crusty_dock.open_viewport_tab(new_id);
 
         self.editor
             .console
@@ -3752,6 +3873,33 @@ impl App {
 
         // Now `id` should be in dormant; drop it.
         self.editor.scene.registry.drop_dormant(id);
+    }
+
+    /// Handle a crusty dock ×-close click. Unlike egui_dock, the tree is not
+    /// mutated yet — this is the veto point: the last scene tab is refused,
+    /// anything else is committed via `close_tab`.
+    #[cfg(feature = "crusty")]
+    fn handle_crusty_tab_close(&mut self, tab: &str) {
+        use rust_engine::engine::editor::dock_crusty;
+        if let Some(EditorTab::Viewport(id)) = dock_crusty::parse_tab(tab) {
+            let mut all = Vec::new();
+            self.editor.ui.crusty_dock.tree.collect_tabs(&mut all);
+            if all.iter().filter(|t| t.starts_with("viewport:")).count() <= 1 {
+                self.editor.console.messages.push(LogMessage::warning(
+                    "Cannot close the last scene tab".to_string(),
+                ));
+                return;
+            }
+            self.editor.ui.crusty_dock.tree.close_tab(tab);
+            if id == self.editor.scene.registry.active_id {
+                if let Some(next_id) = self.editor.scene.registry.dormant.first().map(|d| d.id) {
+                    self.switch_to_scene(next_id);
+                }
+            }
+            self.editor.scene.registry.drop_dormant(id);
+        } else {
+            self.editor.ui.crusty_dock.tree.close_tab(tab);
+        }
     }
 
     fn save_active_scene(&mut self) {
@@ -4688,7 +4836,6 @@ impl App {
         }
 
         let camera_dragging = !is_playing && self.editor.viewport.camera.is_active_drag();
-
         if camera_dragging && !self.editor.viewport.cursor_locked {
             self.editor.viewport.drag_start_cursor_pos = Some(input_manager.mouse_position());
             if self

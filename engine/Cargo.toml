@@ -70,7 +70,7 @@ typetag = "0.2"
 egui = { version = "0.33.3", optional = true }
 
 # crusty-gui — in-house GUI library replacing egui (Phase 16, path dep during development)
-crusty-gui = { path = "../../crusty-gui", default-features = false, features = ["winit-window", "vulkano-renderer"], optional = true }
+crusty-gui = { path = "../../crusty-gui", default-features = false, features = ["winit-window", "vulkano-renderer", "serde"], optional = true }
 
 # Physics Engine (Rapier 3D)
 rapier3d = "0.25"
