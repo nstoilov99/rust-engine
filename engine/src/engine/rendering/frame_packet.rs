@@ -157,6 +157,11 @@ pub enum RenderEvent {
         /// thread. Empty when the crusty renderer is disabled.
         #[cfg(feature = "crusty")]
         crusty_icons: std::collections::HashMap<String, crusty_gui::paint::TextureId>,
+        /// Crusty texture id the render thread registered for the viewport
+        /// render target. Stays valid across resizes (the render thread
+        /// re-points it at the new image view).
+        #[cfg(feature = "crusty")]
+        crusty_viewport_texture: Option<crusty_gui::paint::TextureId>,
     },
     SwapchainRecreated {
         dimensions: [u32; 2],

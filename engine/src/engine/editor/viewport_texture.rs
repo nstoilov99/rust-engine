@@ -5,11 +5,16 @@
 //! that can then be displayed inside an egui panel.
 
 use std::sync::Arc;
-use vulkano::device::Device;
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, PrimaryCommandBufferAbstract,
+};
+use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
+use vulkano::sync::GpuFuture;
 
 /// Manages a render target texture for the viewport
 pub struct ViewportTexture {
@@ -61,7 +66,8 @@ impl ViewportTexture {
                 extent: [width, height, 1],
                 usage: ImageUsage::COLOR_ATTACHMENT
                     | ImageUsage::SAMPLED
-                    | ImageUsage::TRANSFER_SRC,
+                    | ImageUsage::TRANSFER_SRC
+                    | ImageUsage::TRANSFER_DST,
                 ..Default::default()
             },
             AllocationCreateInfo::default(),
@@ -97,6 +103,28 @@ impl ViewportTexture {
         self.height = new_height;
 
         Ok(true)
+    }
+
+    /// Clear the image synchronously so its layout is initialized before any
+    /// UI pass samples it. A recorded-but-unsubmitted frame would otherwise
+    /// leave the image Undefined while later command buffers expect General.
+    pub fn clear(
+        &self,
+        queue: Arc<Queue>,
+        cb_allocator: Arc<StandardCommandBufferAllocator>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = AutoCommandBufferBuilder::primary(
+            cb_allocator,
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+        builder.clear_color_image(ClearColorImageInfo::image(self.image.clone()))?;
+        builder
+            .build()?
+            .execute(queue)?
+            .then_signal_fence_and_flush()?
+            .wait(None)?;
+        Ok(())
     }
 
     /// Get the image for use as a render target

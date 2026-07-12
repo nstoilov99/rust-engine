@@ -68,6 +68,8 @@ pub mod secondary_window;
 mod selection;
 mod tab_viewer;
 pub mod viewport;
+#[cfg(feature = "crusty")]
+pub mod viewport_crusty;
 mod viewport_texture;
 mod window_config;
 

@@ -128,6 +128,11 @@ impl RenderThread {
             ) {
                 Ok(vt) => {
                     log::info!("render_thread: viewport texture created ({}x{})", vp_dims[0], vp_dims[1]);
+                    if let Err(e) =
+                        vt.clear(gpu.queue.clone(), gpu.command_buffer_allocator.clone())
+                    {
+                        log::warn!("render_thread: viewport texture clear failed: {}", e);
+                    }
                     Some(vt)
                 }
                 Err(e) => {
@@ -184,11 +189,22 @@ impl RenderThread {
             })
             .unwrap_or_default();
 
+        // Crusty draws the viewport image through its own texture registry;
+        // register once, re-point the id on every resize below.
+        #[cfg(feature = "crusty")]
+        let crusty_viewport_texture = crusty_renderer.as_mut().and_then(|r| {
+            viewport_texture
+                .as_ref()
+                .map(|vt| r.register_native_texture(vt.image_view()))
+        });
+
         let ready_event = RenderEvent::RenderThreadReady {
             #[cfg(feature = "editor")]
             viewport_texture: viewport_texture.as_ref().map(|vt| vt.image_view()),
             #[cfg(feature = "crusty")]
             crusty_icons,
+            #[cfg(feature = "crusty")]
+            crusty_viewport_texture,
         };
         if response.send(ready_event).is_err() {
             return;
@@ -328,6 +344,11 @@ impl RenderThread {
                                 vp_w,
                                 vp_h
                             );
+                            if let Err(e) =
+                                vt.clear(gpu.queue.clone(), gpu.command_buffer_allocator.clone())
+                            {
+                                log::warn!("render_thread: viewport texture clear failed: {}", e);
+                            }
                             if let Err(e) = deferred_renderer.resize(vp_w, vp_h) {
                                 log::error!("render_thread: deferred resize failed: {}", e);
                             }
@@ -335,6 +356,12 @@ impl RenderThread {
                                 if let Some(tex_id) = packet.viewport_texture_id {
                                     egui_r.update_native_texture(tex_id, vt.image_view());
                                 }
+                            }
+                            #[cfg(feature = "crusty")]
+                            if let (Some(cr), Some(id)) =
+                                (crusty_renderer.as_mut(), crusty_viewport_texture)
+                            {
+                                cr.update_native_texture(id, vt.image_view());
                             }
                             let _ = response.send(RenderEvent::ViewportTextureChanged {
                                 texture_id: packet

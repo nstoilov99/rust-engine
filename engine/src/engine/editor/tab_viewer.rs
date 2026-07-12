@@ -13,17 +13,18 @@ use super::{
     menu_bar::MenuAction,
     profiler::ProfilerPanel,
     services::EditorServices,
-    viewport::{
-        render_viewport_toolbar_overlay, CameraControlMode, EditorCamera, GizmoHandler,
-        GizmoInteractionResult, ToolMode, ViewportSettings,
-    },
+    viewport::{EditorCamera, GizmoHandler, ViewportSettings},
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
 };
 #[cfg(not(feature = "crusty"))]
 use super::{
     console::{LogLevel, LogMessage},
     console_cmd::CommandContext,
+    viewport::{
+        render_viewport_toolbar_overlay, CameraControlMode, GizmoInteractionResult, ToolMode,
+    },
 };
+#[cfg(not(feature = "crusty"))]
 use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
 use egui::{Color32, RichText, Ui};
@@ -131,6 +132,10 @@ pub struct EditorContext<'a> {
     /// visible this frame (same mechanism as `crusty_console_rect`).
     #[cfg(feature = "crusty")]
     pub crusty_profiler_rect: &'a mut Option<egui::Rect>,
+    /// Output: the active Viewport tab's content rect in egui points when it
+    /// was visible this frame (same mechanism as `crusty_console_rect`).
+    #[cfg(feature = "crusty")]
+    pub crusty_viewport_rect: &'a mut Option<egui::Rect>,
 }
 
 /// Tab viewer that renders each panel type
@@ -396,7 +401,21 @@ impl<'a> EditorTabViewer<'a> {
     }
 
 
-    /// Render the 3D viewport with the rendered scene texture
+    /// With the `crusty` feature the viewport is ported to crusty-gui: the
+    /// egui tab only records its content rect (the crusty layout pass in
+    /// `game_client` draws the toolbar + scene image there) and claims the
+    /// space so the dock still sizes the tab normally. The "+" New Scene
+    /// button stays here because it sits on the egui tab bar.
+    #[cfg(feature = "crusty")]
+    fn render_viewport(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        self.render_new_scene_button_on_tab_bar(ui.ctx(), rect);
+        *self.editor.crusty_viewport_rect = Some(rect);
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
+    /// Render the 3D viewport with the rendered scene texture (egui fallback)
+    #[cfg(not(feature = "crusty"))]
     fn render_viewport(&mut self, ui: &mut Ui) {
         // Get available size for the viewport (full panel area now, no toolbar taking space)
         let available_size = ui.available_size();

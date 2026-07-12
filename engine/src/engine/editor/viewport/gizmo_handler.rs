@@ -9,7 +9,10 @@ use nalgebra_glm as glm;
 use transform_gizmo_egui::{
     mint::{Quaternion, RowMatrix4, Vector3, Vector4},
     EnumSet, Gizmo, GizmoConfig, GizmoExt, GizmoMode as TGMode, GizmoOrientation as TGOrientation,
+    GizmoResult,
 };
+
+type TGTransform = transform_gizmo_egui::math::Transform;
 
 use crate::engine::ecs::components::Transform;
 
@@ -98,6 +101,87 @@ impl GizmoHandler {
         selected_entity: Option<Entity>,
         world: &World,
     ) -> GizmoInteractionResult {
+        let pointer_released = ui.input(|i| !i.pointer.any_down());
+        self.update_impl(
+            view_matrix,
+            projection_matrix,
+            viewport_rect,
+            selected_entity,
+            world,
+            pointer_released,
+            |gizmo, targets| gizmo.interact(ui, targets),
+        )
+    }
+
+    /// Crusty twin of [`update`]: identical interaction logic, but the
+    /// pointer comes from crusty input and the draw data is painted via
+    /// `Painter::mesh`. `hovered` = pointer is over the viewport image and
+    /// not captured by a floating crusty layer — the caller decides.
+    #[cfg(feature = "crusty")]
+    pub fn update_crusty(
+        &mut self,
+        ui: &mut crusty_gui::context::Ui,
+        hovered: bool,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+        viewport_rect: egui::Rect,
+        selected_entity: Option<Entity>,
+        world: &World,
+    ) -> GizmoInteractionResult {
+        use transform_gizmo_egui::GizmoInteraction;
+
+        let cursor = ui.ctx().input.pointer_pos.unwrap_or_default();
+        let pointer_pressed = ui.ctx().input.pointer_pressed;
+        let pointer_down = ui.ctx().input.pointer_down;
+        self.update_impl(
+            view_matrix,
+            projection_matrix,
+            viewport_rect,
+            selected_entity,
+            world,
+            !pointer_down,
+            |gizmo, targets| {
+                let result = gizmo.update(
+                    GizmoInteraction {
+                        cursor_pos: (cursor.x, cursor.y),
+                        hovered,
+                        drag_started: pointer_pressed,
+                        dragging: pointer_down,
+                    },
+                    targets,
+                );
+                let draw = gizmo.draw();
+                let vertices = draw
+                    .vertices
+                    .iter()
+                    .zip(&draw.colors)
+                    .map(|(&[x, y], &[r, g, b, a])| {
+                        // GizmoDrawData is premultiplied linear; crusty
+                        // blends straight-alpha linear.
+                        let c = if a > 0.0 {
+                            crusty_gui::math::Color::rgba(r / a, g / a, b / a, a)
+                        } else {
+                            crusty_gui::math::Color::TRANSPARENT
+                        };
+                        (crusty_gui::math::Pos2::new(x, y), c)
+                    })
+                    .collect();
+                ui.painter().mesh(vertices, draw.indices);
+                result
+            },
+        )
+    }
+
+    fn update_impl(
+        &mut self,
+        view_matrix: Mat4,
+        projection_matrix: Mat4,
+        viewport_rect: egui::Rect,
+        selected_entity: Option<Entity>,
+        world: &World,
+        pointer_released: bool,
+        interact: impl FnOnce(&mut Gizmo, &[TGTransform]) -> Option<(GizmoResult, Vec<TGTransform>)>,
+    ) -> GizmoInteractionResult {
         // No entity selected - nothing to do
         let Some(entity) = selected_entity else {
             self.reset_drag_state();
@@ -180,7 +264,7 @@ impl GizmoHandler {
         let gizmo_transform = self.ecs_to_gizmo_transform(&transform);
 
         // Run gizmo interaction
-        let interaction_result = self.gizmo.interact(ui, &[gizmo_transform]);
+        let interaction_result = interact(&mut self.gizmo, &[gizmo_transform]);
 
         // Handle result
         if let Some((_result, new_transforms)) = interaction_result {
@@ -202,19 +286,16 @@ impl GizmoHandler {
             }
         } else {
             // Check if drag just ended
-            if self.is_dragging {
-                let pointer_released = ui.input(|i| !i.pointer.any_down());
-                if pointer_released {
-                    if let (Some(start), Some(drag_entity)) =
-                        (self.drag_start_transform.take(), self.drag_entity.take())
-                    {
-                        self.is_dragging = false;
-                        return GizmoInteractionResult::DragEnded {
-                            entity: drag_entity,
-                            start_transform: start,
-                            end_transform: transform,
-                        };
-                    }
+            if self.is_dragging && pointer_released {
+                if let (Some(start), Some(drag_entity)) =
+                    (self.drag_start_transform.take(), self.drag_entity.take())
+                {
+                    self.is_dragging = false;
+                    return GizmoInteractionResult::DragEnded {
+                        entity: drag_entity,
+                        start_transform: start,
+                        end_transform: transform,
+                    };
                 }
             }
         }

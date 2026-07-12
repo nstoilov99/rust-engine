@@ -224,6 +224,10 @@ pub struct App {
     #[cfg(feature = "crusty")]
     pub crusty_icons:
         std::collections::HashMap<String, rust_engine::engine::gui::crusty::TextureId>,
+    /// Crusty texture id for the viewport render target (registered by the
+    /// render thread at startup; survives resizes).
+    #[cfg(feature = "crusty")]
+    pub crusty_viewport_texture: Option<rust_engine::engine::gui::crusty::TextureId>,
     /// Last frame's "crusty exclusively holds the pointer" flag (floating
     /// popup hover, pressed widget, or drag). While set, pointer events are
     /// withheld from egui so clicks on crusty popups don't drag dock tabs
@@ -454,16 +458,21 @@ impl App {
 
         #[cfg(feature = "crusty")]
         let mut crusty_icons = std::collections::HashMap::new();
+        #[cfg(feature = "crusty")]
+        let mut crusty_viewport_texture = None;
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
                 #[cfg(feature = "crusty")]
                 crusty_icons: icons,
+                #[cfg(feature = "crusty")]
+                crusty_viewport_texture: vp_tex,
                 ..
             }) => {
                 log::info!("editor: render thread ready");
                 #[cfg(feature = "crusty")]
                 {
                     crusty_icons = icons;
+                    crusty_viewport_texture = vp_tex;
                 }
             }
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError {
@@ -607,6 +616,8 @@ impl App {
             crusty_gui,
             #[cfg(feature = "crusty")]
             crusty_icons,
+            #[cfg(feature = "crusty")]
+            crusty_viewport_texture,
             #[cfg(feature = "crusty")]
             crusty_owns_pointer: false,
         })
@@ -2227,6 +2238,8 @@ impl App {
         let mut crusty_asset_browser_rect: Option<egui::Rect> = None;
         #[cfg(feature = "crusty")]
         let mut crusty_profiler_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_viewport_rect: Option<egui::Rect> = None;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
             menu_action = render_menu_bar(
@@ -2303,6 +2316,8 @@ impl App {
                 crusty_asset_browser_rect: &mut crusty_asset_browser_rect,
                 #[cfg(feature = "crusty")]
                 crusty_profiler_rect: &mut crusty_profiler_rect,
+                #[cfg(feature = "crusty")]
+                crusty_viewport_rect: &mut crusty_viewport_rect,
             };
 
             let mut tab_viewer = EditorTabViewer { editor: editor_ctx };
@@ -3327,10 +3342,16 @@ impl App {
                 asset_browser_panel, AssetBrowserPanelCtx,
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
+            use rust_engine::engine::editor::viewport_crusty::{
+                viewport_panel, ViewportPanelCtx,
+            };
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
+            let vp = &mut self.editor.viewport;
+            let vp_command_history = &mut self.editor.scene.command_history;
+            let crusty_viewport_texture = self.crusty_viewport_texture;
             let hierarchy = &mut self.editor.scene.hierarchy_panel;
             let inspector = &mut self.editor.scene.inspector_panel;
             inspector.drive_eyedropper();
@@ -3351,7 +3372,7 @@ impl App {
                             command_system: &mut console.command_system,
                             input: &mut console.input,
                             world: &mut *world,
-                            show_stat_fps,
+                            show_stat_fps: &mut *show_stat_fps,
                         },
                     );
                 }
@@ -3398,6 +3419,31 @@ impl App {
                 }
                 if let Some(rect) = crusty_profiler_rect {
                     profiler_panel(ui, rect, ppp, profiler);
+                }
+                if let Some(rect) = crusty_viewport_rect {
+                    viewport_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        ViewportPanelCtx {
+                            texture: crusty_viewport_texture,
+                            viewport_size: &mut vp.size,
+                            viewport_rect: &mut vp.rect,
+                            viewport_hovered: &mut vp.hovered,
+                            settings: &mut vp.settings,
+                            gizmo: &mut vp.gizmo_handler,
+                            grid_visible: &mut vp.grid_visible,
+                            camera: &vp.camera,
+                            selected: sel.primary(),
+                            world: &mut *world,
+                            command_history: vp_command_history,
+                            play_mode: current_play_mode,
+                            icons,
+                            show_stat_fps: *show_stat_fps,
+                            fps,
+                            delta_ms,
+                        },
+                    );
                 }
             });
             let mut gui_result = gui_result;
