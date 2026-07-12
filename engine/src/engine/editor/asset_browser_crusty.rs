@@ -86,13 +86,14 @@ struct AssetRow {
 
 // egui parity colors (sRGB → linear at the boundary, like all crusty colors).
 fn sel_bg() -> Color {
-    // egui blends translucent fills in gamma space, crusty in linear — the
-    // same (60,120,200,100) reads brighter here. Bake egui's result: gamma
-    // blend t=100/255 of (60,120,200) over the content bg (24,24,28).
-    Color::from_srgb_u8(38, 62, 91, 255)
+    // egui blends translucent fills in gamma space, crusty in linear — bake
+    // the gamma blend: t=100/255 of the accent (245,143,46) over the content
+    // bg (24,24,28).
+    Color::from_srgb_u8(111, 71, 35, 255)
 }
 fn sel_border() -> Color {
-    Color::from_srgb_u8(60, 120, 200, 255)
+    // Theme accent (rusty orange).
+    Color::from_srgb_u8(245, 143, 46, 255)
 }
 fn hover_bg() -> Color {
     Color::from_srgb_u8(100, 100, 100, 50)

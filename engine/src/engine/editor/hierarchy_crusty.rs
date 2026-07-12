@@ -301,8 +301,16 @@ fn render_row(
     // Selection / hover backgrounds — painted first so they sit behind the
     // row's guides, icons and text.
     if is_selected {
+        // Subtle accent-tinted fill; full-strength orange lives only in the
+        // left indicator bar (Unreal-style) so row text stays readable.
         ui.painter()
-            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(60, 90, 140, 160));
+            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(196, 110, 36, 80));
+        let bar = Rect::from_min_max(
+            row_rect.min,
+            Pos2::new(row_rect.min.x + 3.0, row_rect.max.y),
+        );
+        ui.painter()
+            .rect_filled(bar, 1.0, Color::from_srgb_u8(245, 143, 46, 255));
     } else if row_resp.hovered && !dragging && !is_renaming {
         ui.painter()
             .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 255, 255, 24));

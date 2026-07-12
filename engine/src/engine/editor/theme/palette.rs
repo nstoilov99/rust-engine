@@ -52,9 +52,10 @@ impl Palette {
     /// Default dark theme palette, tuned for WCAG AA contrast.
     pub fn dark_default() -> Self {
         Self {
-            // Accent blue — vibrant enough for selection but not eye-searing
-            primary: Color32::from_rgb(66, 133, 244),
-            accent: Color32::from_rgb(66, 133, 244),
+            // Rusty orange (crusty-gui's editor_dark accent) — warm selection
+            // highlight reminiscent of Unreal's.
+            primary: Color32::from_rgb(245, 143, 46),
+            accent: Color32::from_rgb(245, 143, 46),
 
             // Surface stack: darkest to lightest
             // Darker overall — clear separation between each level.
@@ -90,7 +91,7 @@ impl Palette {
                 overridden: Color32::from_rgb(255, 167, 38),
             },
 
-            focus_ring: Color32::from_rgb(100, 165, 255),
+            focus_ring: Color32::from_rgb(255, 178, 102),
             stroke: Color32::from_rgb(55, 57, 63),
         }
     }
