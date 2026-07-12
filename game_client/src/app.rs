@@ -247,9 +247,19 @@ pub struct App {
     #[cfg(feature = "crusty")]
     crusty_menu_action: MenuAction,
     /// A tab torn off the crusty dock, following the cursor as an in-window
-    /// ghost until re-docked (Stage 3 turns this into an OS window).
+    /// ghost until re-docked or dropped (spawning a float window).
     #[cfg(feature = "crusty")]
     crusty_dock_drag: Option<String>,
+    /// Tabs dropped outside any dock target — main.rs turns these into OS
+    /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
+    #[cfg(feature = "crusty")]
+    pending_crusty_floats: Vec<rust_engine::engine::editor::crusty_window::CrustyWindowRequest>,
+    /// Live torn-off panel windows, keyed by winit window id.
+    #[cfg(feature = "crusty")]
+    crusty_floats: std::collections::HashMap<
+        winit::window::WindowId,
+        rust_engine::engine::editor::crusty_window::CrustyFloatWindow,
+    >,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -644,6 +654,10 @@ impl App {
             crusty_menu_action: MenuAction::None,
             #[cfg(feature = "crusty")]
             crusty_dock_drag: None,
+            #[cfg(feature = "crusty")]
+            pending_crusty_floats: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_floats: std::collections::HashMap::new(),
         })
     }
 
@@ -651,10 +665,23 @@ impl App {
         game_setup::print_controls();
     }
 
-    pub fn save_layout_on_exit(&self) {
+    pub fn save_layout_on_exit(&mut self) {
         #[cfg(not(feature = "crusty"))]
         if let Err(e) = self.editor.ui.dock_state.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
+        }
+        // Fold torn-off float windows back into the tree so their panels
+        // reappear docked on next launch (float positions aren't persisted).
+        #[cfg(feature = "crusty")]
+        for fw in self.crusty_floats.values() {
+            let mut tabs = Vec::new();
+            fw.tree.collect_tabs(&mut tabs);
+            for tab in tabs {
+                rust_engine::engine::editor::dock_crusty::redock_tab(
+                    &mut self.editor.ui.crusty_dock.tree,
+                    tab,
+                );
+            }
         }
         #[cfg(feature = "crusty")]
         if let Err(e) = self.editor.ui.crusty_dock.save_to_default() {
@@ -3428,6 +3455,10 @@ impl App {
         #[cfg(feature = "crusty")]
         let mut crusty_close_tab: Option<String> = None;
         #[cfg(feature = "crusty")]
+        let mut crusty_docked = false;
+        #[cfg(feature = "crusty")]
+        let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
+        #[cfg(feature = "crusty")]
         let (crusty_result, gui_result) = {
             use rust_engine::engine::editor::console_crusty::{
                 console_panel, ConsolePanelCtx,
@@ -3449,6 +3480,32 @@ impl App {
             use rust_engine::engine::editor::viewport_crusty::{
                 viewport_panel, ViewportPanelCtx,
             };
+            // A tab dragged out of a float window: the OS window follows the
+            // cursor; feed its position into the main dock as an external
+            // drag so the compass/drop-zones light up for re-docking.
+            let mut float_ext: Option<dock_crusty::ExternalDrag> = None;
+            if let Ok(main_origin) = self.core.window.inner_position() {
+                for (id, fw) in &self.crusty_floats {
+                    if let (Some(drag), Some(screen)) = (&fw.drag_out, fw.drag_screen_pos()) {
+                        float_ext = Some(dock_crusty::ExternalDrag {
+                            tab_id: drag.tab.clone(),
+                            pointer: dock_crusty::Pos2::new(
+                                screen.x - main_origin.x as f32,
+                                screen.y - main_origin.y as f32,
+                            ),
+                            grab: drag.grab,
+                            released: fw.released,
+                            force: false,
+                            ghost: false,
+                        });
+                        crusty_float_drag = Some((*id, fw.released));
+                        break;
+                    }
+                }
+            }
+            for fw in self.crusty_floats.values_mut() {
+                fw.released = false;
+            }
             let ppp = self.editor.ui.gui.pixels_per_point();
             let console = &mut self.editor.console;
             let world = self.core.game_world.hecs_mut();
@@ -3473,6 +3530,7 @@ impl App {
             );
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;
+            let pending_floats = &mut self.pending_crusty_floats;
             let build_dialog = &mut self.editor.play.build_dialog;
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
             let status_bar_state = &self.editor.services.status_bar;
@@ -3503,10 +3561,11 @@ impl App {
                     ),
                     ppp,
                 );
-                let ext = dock_drag
-                    .as_ref()
-                    .map(|tab| dock_crusty::ghost_drag(ui, tab));
-                let drag_released = ext.as_ref().is_some_and(|e| e.released);
+                let ext = float_ext
+                    .take()
+                    .or_else(|| dock_drag.as_ref().map(|tab| dock_crusty::ghost_drag(ui, tab)));
+                let drag_released = ext.as_ref().is_some_and(|e| e.ghost && e.released);
+                let drop_pos = ext.as_ref().filter(|e| e.ghost).map(|e| e.pointer);
                 let resp =
                     dock_crusty::DockArea::new(&mut crusty_dock.tree, &mut crusty_dock.state)
                         .titles(&titles)
@@ -3617,16 +3676,28 @@ impl App {
                 }
 
                 // Tear-off: carry the tab as a cursor ghost until it re-docks;
-                // if dropped nowhere, put it back so it's never lost.
+                // dropped on no dock target → spawn an OS float window there.
                 if let Some(det) = resp.detached {
                     *dock_drag = Some(det.tab);
                 } else if resp.docked {
                     *dock_drag = None;
                 } else if drag_released {
                     if let Some(tab) = dock_drag.take() {
-                        crusty_dock.tree.add_tab(tab);
+                        if tab.starts_with("viewport:") {
+                            // Viewports render only in the main window.
+                            crusty_dock.tree.add_tab(tab);
+                        } else {
+                            pending_floats.push(
+                                rust_engine::engine::editor::crusty_window::CrustyWindowRequest {
+                                    tab,
+                                    main_local: drop_pos
+                                        .unwrap_or(dock_crusty::Pos2::new(120.0, 120.0)),
+                                },
+                            );
+                        }
                     }
                 }
+                crusty_docked = resp.docked;
                 crusty_close_tab = resp.close_requested;
 
                 // Last so they draw above the panels (menus/tooltips live in
@@ -3651,6 +3722,22 @@ impl App {
         #[cfg(feature = "crusty")]
         if let Some(tab) = crusty_close_tab.take() {
             self.handle_crusty_tab_close(&tab);
+        }
+
+        // Resolve a cross-window drag from a float window: docked into the
+        // main tree → drop the tab from the float (an emptied window closes
+        // next frame); released anywhere else → the window stays put.
+        #[cfg(feature = "crusty")]
+        if let Some((id, released)) = crusty_float_drag {
+            if let Some(fw) = self.crusty_floats.get_mut(&id) {
+                if crusty_docked {
+                    if let Some(drag) = fw.drag_out.take() {
+                        fw.tree.close_tab(&drag.tab);
+                    }
+                } else if released {
+                    fw.drag_out = None;
+                }
+            }
         }
 
         self.handle_frame_input(&gui_result);
@@ -3900,6 +3987,203 @@ impl App {
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
         }
+    }
+
+    /// Route a winit event to a torn-off float window. Returns true if the
+    /// window id belongs to a float (event consumed).
+    #[cfg(feature = "crusty")]
+    pub fn crusty_float_event(
+        &mut self,
+        id: winit::window::WindowId,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
+        let Some(fw) = self.crusty_floats.get_mut(&id) else {
+            return false;
+        };
+        fw.handle_event(event);
+        true
+    }
+
+    /// Create OS windows for tabs dropped outside the dock. Window creation
+    /// needs the event loop, so main.rs calls this from `about_to_wait`.
+    #[cfg(feature = "crusty")]
+    pub fn crusty_spawn_floats(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        use rust_engine::engine::editor::crusty_window::{float_window_attrs, CrustyFloatWindow};
+        if self.pending_crusty_floats.is_empty() {
+            return;
+        }
+        let main_origin = self.core.window.inner_position().unwrap_or_default();
+        let device = self.core.renderer.gpu.device.clone();
+        let queue = self.core.renderer.gpu.queue.clone();
+        let memory_allocator = self.core.renderer.gpu.memory_allocator.clone();
+        let command_buffer_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
+        for req in std::mem::take(&mut self.pending_crusty_floats) {
+            let (title, w, h) = float_window_attrs(&req.tab);
+            // Tab strip roughly under the cursor, where the ghost card was.
+            let pos = winit::dpi::PhysicalPosition::new(
+                main_origin.x + req.main_local.x as i32 - 60,
+                main_origin.y + req.main_local.y as i32 - 14,
+            );
+            // Borderless: the dock tab bar doubles as the title bar
+            // (Unreal-style); move/resize/caption buttons are hand-rolled
+            // in CrustyFloatWindow.
+            let attrs = winit::window::Window::default_attributes()
+                .with_title(title)
+                .with_decorations(false)
+                .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+                .with_position(pos);
+            let win = match event_loop.create_window(attrs) {
+                Ok(w) => Arc::new(w),
+                Err(e) => {
+                    eprintln!("Failed to create float window: {e}");
+                    rust_engine::engine::editor::dock_crusty::redock_tab(
+                        &mut self.editor.ui.crusty_dock.tree,
+                        req.tab,
+                    );
+                    continue;
+                }
+            };
+            match CrustyFloatWindow::new(
+                win.clone(),
+                device.clone(),
+                queue.clone(),
+                memory_allocator.clone(),
+                command_buffer_allocator.clone(),
+                req.tab.clone(),
+            ) {
+                Ok(mut fw) => {
+                    fw.gui.apply_theme(&self.editor.services.theme);
+                    self.crusty_floats.insert(win.id(), fw);
+                }
+                Err(e) => {
+                    eprintln!("Failed to init float window: {e}");
+                    rust_engine::engine::editor::dock_crusty::redock_tab(
+                        &mut self.editor.ui.crusty_dock.tree,
+                        req.tab,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Layout + render every float window (main thread, each with its own
+    /// renderer). Emptied or user-closed windows re-dock their tabs into the
+    /// main tree so a panel is never lost.
+    #[cfg(feature = "crusty")]
+    pub fn crusty_float_frames(&mut self) {
+        if self.crusty_floats.is_empty() {
+            return;
+        }
+        use rust_engine::engine::editor::asset_browser_crusty::{
+            asset_browser_panel, AssetBrowserPanelCtx,
+        };
+        use rust_engine::engine::editor::console_crusty::{console_panel, ConsolePanelCtx};
+        use rust_engine::engine::editor::dock_crusty;
+        use rust_engine::engine::editor::hierarchy_crusty::{hierarchy_panel, HierarchyPanelCtx};
+        use rust_engine::engine::editor::inspector_crusty::{inspector_panel, InspectorPanelCtx};
+        use rust_engine::engine::editor::profiler_crusty::profiler_panel;
+
+        let device = self.core.renderer.gpu.device.clone();
+        let queue = self.core.renderer.gpu.queue.clone();
+        let ppp = self.editor.ui.gui.pixels_per_point();
+        let play_mode = self.play_mode();
+        let active_scene_id = self.editor.scene.registry.active_id;
+        let scene_name = self.editor.scene.current_scene_name.clone();
+
+        let Self {
+            crusty_floats,
+            editor,
+            core,
+            ..
+        } = self;
+        let world = core.game_world.hecs_mut();
+        let console = &mut editor.console;
+        let show_stat_fps = &mut editor.ui.show_stat_fps;
+        let hierarchy = &mut editor.scene.hierarchy_panel;
+        let inspector = &mut editor.scene.inspector_panel;
+        let asset_browser = &mut editor.scene.asset_browser;
+        let profiler = &mut editor.ui.profiler_panel;
+        let sel = &mut editor.scene.selection;
+        let icon_registry = editor.services.icons.clone();
+        let dormant = &editor.scene.registry.dormant;
+
+        for fw in crusty_floats.values_mut() {
+            let titles =
+                dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, dormant, None);
+            let res = fw.frame(device.clone(), queue.clone(), &titles, |ui, tab, icons| {
+                let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
+                match dock_crusty::parse_tab(tab) {
+                    Some(EditorTab::Console) => console_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        ConsolePanelCtx {
+                            messages: &mut console.messages,
+                            filter: &mut console.log_filter,
+                            command_system: &mut console.command_system,
+                            input: &mut console.input,
+                            world: &mut *world,
+                            show_stat_fps: &mut *show_stat_fps,
+                        },
+                    ),
+                    Some(EditorTab::Hierarchy) => hierarchy_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        HierarchyPanelCtx {
+                            panel: hierarchy,
+                            world: &mut *world,
+                            selection: sel,
+                            play_mode,
+                            icons,
+                            registry: &icon_registry,
+                        },
+                    ),
+                    Some(EditorTab::Inspector) => inspector_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        InspectorPanelCtx {
+                            panel: inspector,
+                            world: &mut *world,
+                            selection: &*sel,
+                            play_mode,
+                            asset_browser: &mut *asset_browser,
+                            icons,
+                        },
+                    ),
+                    Some(EditorTab::AssetBrowser) => asset_browser_panel(
+                        ui,
+                        rect,
+                        ppp,
+                        AssetBrowserPanelCtx {
+                            panel: &mut *asset_browser,
+                            icons,
+                        },
+                    ),
+                    Some(EditorTab::Profiler) => profiler_panel(ui, rect, ppp, profiler),
+                    _ => dock_crusty::placeholder_panel(
+                        ui,
+                        "This panel is not yet ported to crusty-gui.",
+                    ),
+                }
+            });
+            if let Err(e) = res {
+                eprintln!("crusty float window frame failed: {e}");
+            }
+        }
+
+        crusty_floats.retain(|_, fw| {
+            let mut tabs = Vec::new();
+            fw.tree.collect_tabs(&mut tabs);
+            if fw.close_requested {
+                for tab in tabs {
+                    dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
+                }
+                return false;
+            }
+            !tabs.is_empty()
+        });
     }
 
     fn save_active_scene(&mut self) {

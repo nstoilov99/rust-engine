@@ -10,7 +10,7 @@ use super::scene_tab::{DormantScene, SceneId};
 use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::dock::{DockNode, DockState, Leaf};
 use crusty_gui::id::Id;
-use crusty_gui::math::{Pos2, Rect, Vec2};
+pub use crusty_gui::math::{Pos2, Rect, Vec2};
 use crusty_gui::widgets::{Button, Label};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -267,6 +267,37 @@ pub fn new_tab_button(ui: &mut Ui, slot: &TabBarSlot) -> bool {
 pub fn placeholder_panel(ui: &mut Ui, text: &str) {
     let dim = ui.style().palette.text_dim;
     Label::new(text).color(dim).show(ui);
+}
+
+/// Add `tab` to the least-crowded leaf that hosts no viewport, so panels
+/// returning from float windows don't cover the scene view. Falls back to
+/// `DockNode::add_tab` when every leaf holds a viewport.
+pub fn redock_tab(tree: &mut DockNode, tab: impl Into<crusty_gui::dock::TabId>) {
+    let tab = tab.into();
+    if tree.contains_tab(&tab) {
+        return;
+    }
+    fn smallest_non_viewport(node: &mut DockNode) -> Option<&mut Leaf> {
+        match node {
+            DockNode::Leaf(leaf) => {
+                (!leaf.tabs.iter().any(|t| t.starts_with("viewport:"))).then_some(leaf)
+            }
+            DockNode::Split(s) => match (
+                smallest_non_viewport(&mut s.first),
+                smallest_non_viewport(&mut s.second),
+            ) {
+                (Some(a), Some(b)) => Some(if b.tabs.len() < a.tabs.len() { b } else { a }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+    match smallest_non_viewport(tree) {
+        Some(leaf) => {
+            leaf.tabs.push(tab);
+            leaf.active = leaf.tabs.len() - 1;
+        }
+        None => tree.add_tab(tab),
+    }
 }
 
 /// The first leaf containing a viewport tab.

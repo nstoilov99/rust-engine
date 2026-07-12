@@ -45,6 +45,9 @@ struct GameApp {
     should_exit: bool,
     is_minimized: bool,
     secondary_windows: HashMap<WindowId, SecondaryWindow>,
+    /// When the last frame was pumped — lets window events re-drive frames
+    /// while an OS modal move/resize loop starves `about_to_wait`.
+    last_frame: std::time::Instant,
 }
 
 #[cfg(feature = "editor")]
@@ -58,6 +61,17 @@ impl GameApp {
             should_exit: false,
             is_minimized: false,
             secondary_windows: HashMap::new(),
+            last_frame: std::time::Instant::now(),
+        }
+    }
+
+    /// Pump one frame from a window event if the normal `about_to_wait`
+    /// path is starved (OS modal move/resize loop blocks it on Windows —
+    /// without this the whole engine freezes while a window is dragged
+    /// or resized).
+    fn pump_if_starved(&mut self, event_loop: &ActiveEventLoop) {
+        if self.last_frame.elapsed() >= std::time::Duration::from_millis(8) {
+            self.run_frame(event_loop);
         }
     }
 }
@@ -122,6 +136,23 @@ impl ApplicationHandler for GameApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Route torn-off crusty float window events
+        #[cfg(feature = "crusty")]
+        {
+            let consumed = self
+                .app
+                .as_mut()
+                .is_some_and(|app| app.crusty_float_event(window_id, &event));
+            if consumed {
+                // A float inside an OS move/resize modal loop starves
+                // `about_to_wait`; keep the whole engine rendering from here.
+                if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+                    self.pump_if_starved(event_loop);
+                }
+                return;
+            }
+        }
+
         // Route secondary window events
         if self.secondary_windows.contains_key(&window_id) {
             if matches!(&event, WindowEvent::CloseRequested) {
@@ -149,9 +180,13 @@ impl ApplicationHandler for GameApp {
             return;
         }
 
-        // Main window events
+        // Main window events. Gate on the id: events still queued for a
+        // just-destroyed float/secondary window must not reach the main gui.
         let Some(app) = &mut self.app else { return };
-        let Some(_window) = &self.window else { return };
+        let Some(window) = &self.window else { return };
+        if window_id != window.id() {
+            return;
+        }
 
         match &event {
             WindowEvent::CloseRequested => {
@@ -172,6 +207,12 @@ impl ApplicationHandler for GameApp {
         }
 
         app.handle_window_event(&event, event_loop);
+
+        // Keep rendering while the main window's own OS modal move/resize
+        // loop blocks `about_to_wait`.
+        if matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) && !self.is_minimized {
+            self.pump_if_starved(event_loop);
+        }
 
         if self.should_exit {
             event_loop.exit();
@@ -198,6 +239,29 @@ impl ApplicationHandler for GameApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_frame(event_loop);
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        println!("Application suspended");
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(app) = &mut self.app {
+            app.save_layout_on_exit();
+        }
+        println!("Application exiting");
+    }
+}
+
+#[cfg(feature = "editor")]
+impl GameApp {
+    /// One full engine frame: update + render the main window, crusty float
+    /// windows and secondary windows. Normally driven by `about_to_wait`;
+    /// also pumped from window events during OS modal loops
+    /// (see `pump_if_starved`).
+    fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
+        self.last_frame = std::time::Instant::now();
         // Destructure self to allow split borrows across fields.
         let Self {
             app: ref mut app_opt,
@@ -224,6 +288,13 @@ impl ApplicationHandler for GameApp {
         app.end_frame();
         if let Err(e) = render_result {
             eprintln!("Render error: {}", e);
+        }
+
+        // --- Torn-off crusty float windows (own swapchains, main thread) ---
+        #[cfg(feature = "crusty")]
+        {
+            app.crusty_spawn_floats(event_loop);
+            app.crusty_float_frames();
         }
 
         // --- Secondary window lifecycle ---
@@ -628,16 +699,6 @@ impl ApplicationHandler for GameApp {
         }
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        println!("Application suspended");
-    }
-
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(app) = &self.app {
-            app.save_layout_on_exit();
-        }
-        println!("Application exiting");
-    }
 }
 
 // ============================================================================
