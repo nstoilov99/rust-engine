@@ -70,6 +70,10 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.palette.stroke = c(p.stroke);
     style.palette.stroke_hover = c(p.accent);
     style.palette.success = c(p.semantic.success);
+    // Dock chrome: panel bodies on surface[1] (egui's panel bg), tab strip
+    // on the darker surface[0] so the active tab connects to its body.
+    style.palette.panel = c(p.surface[1]);
+    style.palette.tab_bar = c(p.surface[0]);
 
     style.spacing.item = sp.item_spacing_y;
     style.spacing.padding = sp.window_margin;

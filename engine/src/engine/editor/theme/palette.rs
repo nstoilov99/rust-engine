@@ -76,10 +76,10 @@ impl Palette {
             // Text — AA contrast ratios against surface[0..2]:
             // text_primary (#E8EAED) on surface[0] (#19191C) = ~14.5:1
             // text_primary (#E8EAED) on surface[2] (#292A2E) = ~10.7:1
-            // text_secondary (#9AA0A6) on surface[0] (#19191C) = ~6.2:1
+            // text_secondary (#AAB0B6) on surface[0] (#19191C) = ~7.5:1
             // text_disabled (#747A80) on surface[2] (#292A2E) = ~3.2:1 (meets 3:1 for UI)
             text_primary: Color32::from_rgb(232, 234, 237),
-            text_secondary: Color32::from_rgb(154, 160, 166),
+            text_secondary: Color32::from_rgb(170, 176, 182),
             text_disabled: Color32::from_rgb(116, 122, 128),
 
             semantic: SemanticColors {
