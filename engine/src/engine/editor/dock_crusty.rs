@@ -192,6 +192,7 @@ pub fn tab_titles(
     tree: &DockNode,
     active_id: SceneId,
     active_name: &str,
+    active_dirty: bool,
     dormant: &[DormantScene],
     extra: Option<&str>,
 ) -> HashMap<String, String> {
@@ -204,20 +205,18 @@ pub fn tab_titles(
         .map(|id| {
             let title = match parse_tab(&id) {
                 Some(EditorTab::Viewport(vid)) => {
-                    let name = if vid == active_id {
-                        active_name
+                    let (name, dirty) = if vid == active_id {
+                        (active_name, active_dirty)
                     } else {
                         dormant
                             .iter()
                             .find(|d| d.id == vid)
-                            .map(|d| d.display_name.as_str())
-                            .unwrap_or("(missing)")
+                            .map(|d| (d.display_name.as_str(), d.dirty))
+                            .unwrap_or(("(missing)", false))
                     };
-                    if name.is_empty() {
-                        "Untitled Scene".to_string()
-                    } else {
-                        name.to_string()
-                    }
+                    let name = if name.is_empty() { "Untitled Scene" } else { name };
+                    let prefix = if dirty { "* " } else { "" };
+                    format!("{prefix}{name}")
                 }
                 Some(tab) => tab.title_string(),
                 None => id.clone(),

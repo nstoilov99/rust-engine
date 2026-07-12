@@ -3525,6 +3525,7 @@ impl App {
                 &self.editor.ui.crusty_dock.tree,
                 active_scene_id,
                 &current_scene_name,
+                active_dirty,
                 &self.editor.scene.registry.dormant,
                 self.crusty_dock_drag.as_deref(),
             );
@@ -4109,7 +4110,7 @@ impl App {
 
         for fw in crusty_floats.values_mut() {
             let titles =
-                dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, dormant, None);
+                dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, false, dormant, None);
             let res = fw.frame(device.clone(), queue.clone(), &titles, |ui, tab, icons| {
                 let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
                 match dock_crusty::parse_tab(tab) {
