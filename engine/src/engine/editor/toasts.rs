@@ -75,6 +75,13 @@ impl ToastStack {
         self.toasts.clear();
     }
 
+    /// Drop expired toasts and return the survivors (oldest first).
+    pub fn prune(&mut self) -> &[Toast] {
+        let now = Instant::now();
+        self.toasts.retain(|toast| !toast.expired(now));
+        &self.toasts
+    }
+
     pub fn show(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         self.toasts.retain(|toast| !toast.expired(now));

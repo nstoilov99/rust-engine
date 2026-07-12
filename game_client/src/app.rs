@@ -24,8 +24,10 @@ use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
+#[cfg(not(feature = "crusty"))]
+use rust_engine::engine::editor::{render_menu_bar, render_status_bar};
 use rust_engine::engine::editor::{
-    create_editor_dock_style, render_menu_bar, render_status_bar, AssetBrowserEvent,
+    create_editor_dock_style, AssetBrowserEvent,
     AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene,
     EditorAction, EditorCamera, EditorContext, EditorDockState, EditorServices, EditorTab,
     EditorTabViewer, GizmoHandler, GpuThumbnailContext, HierarchyPanel, IconManager,
@@ -234,6 +236,11 @@ pub struct App {
     /// or the viewport camera beneath them.
     #[cfg(feature = "crusty")]
     crusty_owns_pointer: bool,
+    /// Menu action picked in the crusty menu bar. The crusty layout runs
+    /// *after* this frame's `menu_action` match, so the action is stored here
+    /// and applied at the start of the next frame's match.
+    #[cfg(feature = "crusty")]
+    crusty_menu_action: MenuAction,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -620,6 +627,8 @@ impl App {
             crusty_viewport_texture,
             #[cfg(feature = "crusty")]
             crusty_owns_pointer: false,
+            #[cfg(feature = "crusty")]
+            crusty_menu_action: MenuAction::None,
         })
     }
 
@@ -2211,6 +2220,7 @@ impl App {
             .input_context_editor
             .available_actions
             .as_slice();
+        #[cfg(not(feature = "crusty"))]
         let build_dialog = &mut self.editor.play.build_dialog;
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
@@ -2240,18 +2250,36 @@ impl App {
         let mut crusty_profiler_rect: Option<egui::Rect> = None;
         #[cfg(feature = "crusty")]
         let mut crusty_viewport_rect: Option<egui::Rect> = None;
+        #[cfg(feature = "crusty")]
+        let mut crusty_menu_bar_rect = egui::Rect::NOTHING;
+        #[cfg(feature = "crusty")]
+        let mut crusty_status_bar_rect = egui::Rect::NOTHING;
+        #[cfg(feature = "crusty")]
+        let mut crusty_screen_rect = egui::Rect::NOTHING;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
-            menu_action = render_menu_bar(
-                ctx,
-                dock_state,
-                command_history,
-                current_play_mode,
-                build_dialog,
-                console_messages,
-                self.runtime_flags.benchmark_tools_enabled,
-                icon_manager,
-            );
+            #[cfg(not(feature = "crusty"))]
+            {
+                menu_action = render_menu_bar(
+                    ctx,
+                    dock_state,
+                    command_history,
+                    current_play_mode,
+                    build_dialog,
+                    console_messages,
+                    self.runtime_flags.benchmark_tools_enabled,
+                    icon_manager,
+                );
+            }
+            #[cfg(feature = "crusty")]
+            {
+                // Reserve the strip (same id/height as the egui menu bar so
+                // the dock layout is identical); crusty draws the menus there.
+                let resp = egui::TopBottomPanel::top("menu_bar")
+                    .exact_height(24.0)
+                    .show(ctx, |_| {});
+                crusty_menu_bar_rect = resp.response.rect;
+            }
 
             services.status_bar.set_left(if active_dirty {
                 "Scene has unsaved changes"
@@ -2262,7 +2290,16 @@ impl App {
                 "Dirty assets: {}",
                 services.dirty.dirty_asset_count()
             ));
+            #[cfg(not(feature = "crusty"))]
             render_status_bar(ctx, &services.status_bar);
+            #[cfg(feature = "crusty")]
+            {
+                // Reserve the strip; crusty draws the status text there.
+                let resp = egui::TopBottomPanel::bottom("editor_status_bar")
+                    .exact_height(22.0)
+                    .show(ctx, |_| {});
+                crusty_status_bar_rect = resp.response.rect;
+            }
 
             let editor_ctx = EditorContext {
                 services,
@@ -2337,7 +2374,15 @@ impl App {
             let registry = services.command_registry.clone();
             command_palette_action = services.command_palette.show(ctx, &registry);
             dialog_actions = services.dialogs.show(ctx);
+            #[cfg(not(feature = "crusty"))]
             services.toasts.show(ctx);
+            #[cfg(feature = "crusty")]
+            {
+                #[allow(deprecated)]
+                {
+                    crusty_screen_rect = ctx.screen_rect();
+                }
+            }
 
             // Debug windows (editor-debug feature)
             // Note: Icon Inspector renders in its own secondary OS window (see main.rs).
@@ -2491,6 +2536,12 @@ impl App {
 
         if menu_action == MenuAction::None && toolbar_action != MenuAction::None {
             menu_action = toolbar_action;
+        }
+        // Crusty menu actions are recorded after this match runs (the crusty
+        // layout is at the end of the frame), so apply last frame's here.
+        #[cfg(feature = "crusty")]
+        if menu_action == MenuAction::None {
+            menu_action = std::mem::replace(&mut self.crusty_menu_action, MenuAction::None);
         }
         if let Some(action) = command_palette_action {
             self.handle_editor_action(action);
@@ -3341,7 +3392,10 @@ impl App {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
             };
+            use rust_engine::engine::editor::menu_bar_crusty::{menu_bar_panel, MenuBarCtx};
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
+            use rust_engine::engine::editor::status_bar_crusty::status_bar_panel;
+            use rust_engine::engine::editor::toasts_crusty::toasts_panel;
             use rust_engine::engine::editor::viewport_crusty::{
                 viewport_panel, ViewportPanelCtx,
             };
@@ -3360,7 +3414,28 @@ impl App {
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
+            let dock_state = &mut self.editor.ui.dock_state;
+            let build_dialog = &mut self.editor.play.build_dialog;
+            let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
+            let status_bar_state = &self.editor.services.status_bar;
+            let live_toasts = self.editor.services.toasts.prune();
+            let mut crusty_menu_action = MenuAction::None;
             let crusty_result = self.crusty_gui.layout(|ui| {
+                crusty_menu_action = menu_bar_panel(
+                    ui,
+                    crusty_menu_bar_rect,
+                    ppp,
+                    MenuBarCtx {
+                        dock_state,
+                        command_history: &*vp_command_history,
+                        play_mode: current_play_mode,
+                        build_dialog,
+                        console_messages: &mut console.messages,
+                        show_benchmark_tools: benchmark_tools,
+                        icons,
+                    },
+                );
+                status_bar_panel(ui, crusty_status_bar_rect, ppp, status_bar_state);
                 if let Some(rect) = crusty_console_rect {
                     console_panel(
                         ui,
@@ -3445,7 +3520,11 @@ impl App {
                         },
                     );
                 }
+                // Last so they draw above the panels (menus/tooltips live in
+                // the overlay list and stay on top regardless).
+                toasts_panel(ui, crusty_screen_rect, ppp, live_toasts);
             });
+            self.crusty_menu_action = crusty_menu_action;
             let mut gui_result = gui_result;
             gui_result.wants_keyboard |= crusty_result.wants_keyboard;
             gui_result.wants_pointer |= crusty_result.wants_pointer;

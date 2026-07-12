@@ -392,6 +392,11 @@ impl CrustyRenderer {
                 "image-file.png",
                 "file-document.png",
                 "code-file.png",
+                // Menu bar play controls.
+                "play-fill.png",
+                "pause-fill.png",
+                "stop-fill.png",
+                "skip-forward-fill.png",
             ] {
                 paths.push(parent.join(name));
             }

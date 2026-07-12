@@ -58,6 +58,8 @@ mod input_settings_panel;
 pub mod inspector_crusty;
 mod inspector_panel;
 mod menu_bar;
+#[cfg(feature = "crusty")]
+pub mod menu_bar_crusty;
 pub mod mesh_editor;
 pub mod play_mode;
 pub mod profiler;
@@ -67,6 +69,10 @@ pub mod scene_tab;
 pub mod secondary_window;
 mod selection;
 mod tab_viewer;
+#[cfg(feature = "crusty")]
+pub mod status_bar_crusty;
+#[cfg(feature = "crusty")]
+pub mod toasts_crusty;
 pub mod viewport;
 #[cfg(feature = "crusty")]
 pub mod viewport_crusty;
