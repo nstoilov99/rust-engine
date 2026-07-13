@@ -2286,6 +2286,7 @@ impl App {
         let mut close_scene_request: Option<SceneId> = None;
         #[cfg(not(feature = "crusty"))]
         let mut dialog_actions = Vec::new();
+        #[cfg(not(feature = "crusty"))]
         let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
         // Output: Console tab content rect (egui points) — the crusty-gui
@@ -2426,8 +2427,12 @@ impl App {
             }) {
                 services.command_palette.open();
             }
-            let registry = services.command_registry.clone();
-            command_palette_action = services.command_palette.show(ctx, &registry);
+            // Under `crusty` the palette renders in the crusty pass.
+            #[cfg(not(feature = "crusty"))]
+            {
+                let registry = services.command_registry.clone();
+                command_palette_action = services.command_palette.show(ctx, &registry);
+            }
             // Under `crusty` the dialog stack renders in the crusty pass.
             #[cfg(not(feature = "crusty"))]
             {
@@ -2573,6 +2578,7 @@ impl App {
         if menu_action == MenuAction::None {
             menu_action = std::mem::replace(&mut self.crusty_menu_action, MenuAction::None);
         }
+        #[cfg(not(feature = "crusty"))]
         if let Some(action) = command_palette_action {
             self.handle_editor_action(action);
         }
@@ -3517,6 +3523,8 @@ impl App {
             let status_bar_state = &self.editor.services.status_bar;
             let live_toasts = self.editor.services.toasts.prune();
             let dialog_stack = &mut self.editor.services.dialogs;
+            let command_palette = &mut self.editor.services.command_palette;
+            let command_registry = &self.editor.services.command_registry;
             let import_dialog = &mut self.editor.scene.import_dialog;
             let save_as_dialog = &mut self.editor.scene.save_as_dialog;
             let mut save_as_cancel = false;
@@ -3689,8 +3697,15 @@ impl App {
                 // the overlay list and stay on top regardless).
                 toasts_panel(ui, crusty_screen_rect, ppp, live_toasts);
 
-                use rust_engine::engine::editor::dialogs_crusty;
+                use rust_engine::engine::editor::{command_palette_crusty, dialogs_crusty};
                 crusty_dialog_actions = dialogs_crusty::dialog_stack_panel(ui, dialog_stack);
+                if let Some(action) = command_palette_crusty::command_palette_panel(
+                    ui,
+                    command_palette,
+                    command_registry,
+                ) {
+                    crusty_dialog_actions.push(action);
+                }
                 if let Some(state) = import_dialog.as_mut() {
                     crusty_import_action = dialogs_crusty::import_dialog_panel(ui, state);
                 }

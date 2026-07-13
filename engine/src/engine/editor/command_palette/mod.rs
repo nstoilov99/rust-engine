@@ -278,8 +278,11 @@ impl CommandRegistry {
 #[derive(Debug, Default)]
 pub struct CommandPalette {
     pub open: bool,
-    query: String,
-    selected: usize,
+    pub(crate) query: String,
+    pub(crate) selected: usize,
+    /// True for the first frame after [`open`](Self::open) — the crusty
+    /// panel consumes it to grab keyboard focus exactly once.
+    pub(crate) just_opened: bool,
 }
 
 impl CommandPalette {
@@ -291,6 +294,7 @@ impl CommandPalette {
         self.open = true;
         self.query.clear();
         self.selected = 0;
+        self.just_opened = true;
     }
 
     pub fn close(&mut self) {

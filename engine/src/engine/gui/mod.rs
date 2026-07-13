@@ -541,8 +541,16 @@ impl Gui {
                     }
                 }
 
-                // Translate to egui key
-                if let Some(key) = translate_key(&key_event.logical_key) {
+                // Translate to egui key. Fall back to the physical key so
+                // hotkeys keep working on non-Latin keyboard layouts (e.g.
+                // Cyrillic, where logical P is "п" and translates to None).
+                let key = translate_key(&key_event.logical_key).or_else(|| {
+                    match key_event.physical_key {
+                        PhysicalKey::Code(code) => translate_key_code(code),
+                        _ => None,
+                    }
+                });
+                if let Some(key) = key {
                     self.events.push(egui::Event::Key {
                         key,
                         physical_key: None,
@@ -671,6 +679,51 @@ impl Gui {
     pub fn clear_framebuffer_cache(&mut self) {
         self.renderer.clear_framebuffer_cache();
     }
+}
+
+/// Physical-position fallback for [`translate_key`]: maps letter/digit keys
+/// by their US-QWERTY position, independent of the active keyboard layout.
+fn translate_key_code(code: KeyCode) -> Option<egui::Key> {
+    use egui::Key as E;
+    Some(match code {
+        KeyCode::KeyA => E::A,
+        KeyCode::KeyB => E::B,
+        KeyCode::KeyC => E::C,
+        KeyCode::KeyD => E::D,
+        KeyCode::KeyE => E::E,
+        KeyCode::KeyF => E::F,
+        KeyCode::KeyG => E::G,
+        KeyCode::KeyH => E::H,
+        KeyCode::KeyI => E::I,
+        KeyCode::KeyJ => E::J,
+        KeyCode::KeyK => E::K,
+        KeyCode::KeyL => E::L,
+        KeyCode::KeyM => E::M,
+        KeyCode::KeyN => E::N,
+        KeyCode::KeyO => E::O,
+        KeyCode::KeyP => E::P,
+        KeyCode::KeyQ => E::Q,
+        KeyCode::KeyR => E::R,
+        KeyCode::KeyS => E::S,
+        KeyCode::KeyT => E::T,
+        KeyCode::KeyU => E::U,
+        KeyCode::KeyV => E::V,
+        KeyCode::KeyW => E::W,
+        KeyCode::KeyX => E::X,
+        KeyCode::KeyY => E::Y,
+        KeyCode::KeyZ => E::Z,
+        KeyCode::Digit0 => E::Num0,
+        KeyCode::Digit1 => E::Num1,
+        KeyCode::Digit2 => E::Num2,
+        KeyCode::Digit3 => E::Num3,
+        KeyCode::Digit4 => E::Num4,
+        KeyCode::Digit5 => E::Num5,
+        KeyCode::Digit6 => E::Num6,
+        KeyCode::Digit7 => E::Num7,
+        KeyCode::Digit8 => E::Num8,
+        KeyCode::Digit9 => E::Num9,
+        _ => return None,
+    })
 }
 
 /// Translate winit 0.30 Key to egui Key
