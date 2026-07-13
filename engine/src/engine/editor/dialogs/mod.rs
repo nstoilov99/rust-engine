@@ -125,6 +125,15 @@ impl DialogStack {
         self.dialogs.clear();
     }
 
+    /// The dialog currently on top of the stack (the one being shown).
+    pub fn top(&self) -> Option<&Dialog> {
+        self.dialogs.last()
+    }
+
+    pub fn pop_top(&mut self) {
+        self.dialogs.pop();
+    }
+
     pub fn show(&mut self, ctx: &egui::Context) -> Vec<EditorAction> {
         let Some(dialog) = self.dialogs.last().cloned() else {
             return Vec::new();

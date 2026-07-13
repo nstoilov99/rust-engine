@@ -2258,6 +2258,7 @@ impl App {
         };
 
         let asset_browser = &mut self.editor.scene.asset_browser;
+        #[cfg(not(feature = "crusty"))]
         let save_as_dialog = &mut self.editor.scene.save_as_dialog;
         let mesh_editors = &mut self.editor.scene.mesh_editors;
         let ia_open_actions = &mut self.editor.scene.input_action_editor.open_actions;
@@ -2270,6 +2271,7 @@ impl App {
             .as_slice();
         #[cfg(not(feature = "crusty"))]
         let build_dialog = &mut self.editor.play.build_dialog;
+        #[cfg(not(feature = "crusty"))]
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
 
@@ -2278,9 +2280,11 @@ impl App {
 
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
+        #[cfg(not(feature = "crusty"))]
         let mut import_action = ImportDialogAction::None;
         let mut undock_request: Option<EditorTab> = None;
         let mut close_scene_request: Option<SceneId> = None;
+        #[cfg(not(feature = "crusty"))]
         let mut dialog_actions = Vec::new();
         let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
@@ -2424,7 +2428,11 @@ impl App {
             }
             let registry = services.command_registry.clone();
             command_palette_action = services.command_palette.show(ctx, &registry);
-            dialog_actions = services.dialogs.show(ctx);
+            // Under `crusty` the dialog stack renders in the crusty pass.
+            #[cfg(not(feature = "crusty"))]
+            {
+                dialog_actions = services.dialogs.show(ctx);
+            }
             #[cfg(not(feature = "crusty"))]
             services.toasts.show(ctx);
             #[cfg(feature = "crusty")]
@@ -2443,6 +2451,7 @@ impl App {
             }
 
             // Show file drop overlay when hovering external files
+            #[cfg(not(feature = "crusty"))]
             if is_hovering_files {
                 #[allow(deprecated)]
                 let screen = ctx.screen_rect();
@@ -2471,6 +2480,7 @@ impl App {
             }
 
             // Render import dialog if active
+            #[cfg(not(feature = "crusty"))]
             if let Some(ref mut dialog_state) = import_dialog {
                 import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(
                     ctx,
@@ -2479,7 +2489,9 @@ impl App {
             }
 
             // Render Save As dialog if active
+            #[cfg(not(feature = "crusty"))]
             let mut save_as_close = false;
+            #[cfg(not(feature = "crusty"))]
             if let Some(dlg) = save_as_dialog.as_mut() {
                 egui::Window::new("Save Scene As")
                     .collapsible(false)
@@ -2506,47 +2518,10 @@ impl App {
 
         self.editor.viewport.rect = new_viewport_rect;
 
-        // Handle import dialog result
-        match import_action {
-            ImportDialogAction::Import => {
-                if let Some(dialog) = self.editor.scene.import_dialog.take() {
-                    self.execute_model_import(dialog);
-                }
-            }
-            ImportDialogAction::Cancel => {
-                self.editor.scene.import_dialog = None;
-            }
-            ImportDialogAction::None => {
-                // Try to populate preview if we haven't yet
-                if let Some(ref mut dialog) = self.editor.scene.import_dialog {
-                    if !dialog.preview_attempted {
-                        dialog.preview_attempted = true;
-                        if let Some(source) = dialog.current_file().cloned() {
-                            // Attempt a quick parse to get stats
-                            match rust_engine::assets::load_model(&source.to_string_lossy()) {
-                                Ok(model) => {
-                                    let total_verts: u32 =
-                                        model.meshes.iter().map(|m| m.vertices.len() as u32).sum();
-                                    let total_idx: u32 =
-                                        model.meshes.iter().map(|m| m.indices.len() as u32).sum();
-                                    dialog.preview = Some(ImportPreview {
-                                        mesh_count: model.meshes.len(),
-                                        total_vertices: total_verts,
-                                        total_indices: total_idx,
-                                        material_count: model.materials.len(),
-                                        bone_count: model.bones.len(),
-                                        animation_count: model.animations.len(),
-                                    });
-                                }
-                                Err(e) => {
-                                    eprintln!("Preview parse failed: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Handle import dialog result (crusty renders the dialog later in the
+        // frame and handles its action after the crusty pass).
+        #[cfg(not(feature = "crusty"))]
+        self.handle_import_dialog_action(import_action);
 
         // Apply edited input bindings back to the InputSubsystem
         if let Some(new_set) = self.editor.ui.input_settings_panel.take_pending_apply() {
@@ -2601,6 +2576,7 @@ impl App {
         if let Some(action) = command_palette_action {
             self.handle_editor_action(action);
         }
+        #[cfg(not(feature = "crusty"))]
         for action in dialog_actions {
             self.handle_editor_action(action);
         }
@@ -3459,6 +3435,10 @@ impl App {
         #[cfg(feature = "crusty")]
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
         #[cfg(feature = "crusty")]
+        let mut crusty_dialog_actions = Vec::new();
+        #[cfg(feature = "crusty")]
+        let mut crusty_import_action = ImportDialogAction::None;
+        #[cfg(feature = "crusty")]
         let (crusty_result, gui_result) = {
             use rust_engine::engine::editor::console_crusty::{
                 console_panel, ConsolePanelCtx,
@@ -3536,6 +3516,10 @@ impl App {
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
             let status_bar_state = &self.editor.services.status_bar;
             let live_toasts = self.editor.services.toasts.prune();
+            let dialog_stack = &mut self.editor.services.dialogs;
+            let import_dialog = &mut self.editor.scene.import_dialog;
+            let save_as_dialog = &mut self.editor.scene.save_as_dialog;
+            let mut save_as_cancel = false;
             let mut crusty_menu_action = MenuAction::None;
             let crusty_result = self.crusty_gui.layout(|ui| {
                 crusty_menu_action = menu_bar_panel(
@@ -3704,7 +3688,25 @@ impl App {
                 // Last so they draw above the panels (menus/tooltips live in
                 // the overlay list and stay on top regardless).
                 toasts_panel(ui, crusty_screen_rect, ppp, live_toasts);
+
+                use rust_engine::engine::editor::dialogs_crusty;
+                crusty_dialog_actions = dialogs_crusty::dialog_stack_panel(ui, dialog_stack);
+                if let Some(state) = import_dialog.as_mut() {
+                    crusty_import_action = dialogs_crusty::import_dialog_panel(ui, state);
+                }
+                if let Some(dlg) = save_as_dialog.as_mut() {
+                    save_as_cancel = dialogs_crusty::save_as_dialog_panel(ui, dlg);
+                }
+                if is_hovering_files {
+                    dialogs_crusty::file_drop_overlay(
+                        ui,
+                        dock_crusty::rect_px(crusty_screen_rect, ppp),
+                    );
+                }
             });
+            if save_as_cancel {
+                *save_as_dialog = None;
+            }
             self.crusty_menu_action = crusty_menu_action;
             let mut gui_result = gui_result;
             gui_result.wants_keyboard |= crusty_result.wants_keyboard;
@@ -3738,6 +3740,14 @@ impl App {
                 } else if released {
                     fw.drag_out = None;
                 }
+            }
+        }
+
+        #[cfg(feature = "crusty")]
+        {
+            self.handle_import_dialog_action(crusty_import_action);
+            for action in crusty_dialog_actions {
+                self.handle_editor_action(action);
             }
         }
 
@@ -4498,6 +4508,50 @@ impl App {
 
         if skipped_count > 0 {
             println!("Skipped {} file(s) during import", skipped_count);
+        }
+    }
+
+    /// Apply the import dialog's per-frame result: import, cancel, or lazily
+    /// populate the preview stats while it is open.
+    fn handle_import_dialog_action(&mut self, action: ImportDialogAction) {
+        match action {
+            ImportDialogAction::Import => {
+                if let Some(dialog) = self.editor.scene.import_dialog.take() {
+                    self.execute_model_import(dialog);
+                }
+            }
+            ImportDialogAction::Cancel => {
+                self.editor.scene.import_dialog = None;
+            }
+            ImportDialogAction::None => {
+                if let Some(ref mut dialog) = self.editor.scene.import_dialog {
+                    if !dialog.preview_attempted {
+                        dialog.preview_attempted = true;
+                        if let Some(source) = dialog.current_file().cloned() {
+                            // Attempt a quick parse to get stats
+                            match rust_engine::assets::load_model(&source.to_string_lossy()) {
+                                Ok(model) => {
+                                    let total_verts: u32 =
+                                        model.meshes.iter().map(|m| m.vertices.len() as u32).sum();
+                                    let total_idx: u32 =
+                                        model.meshes.iter().map(|m| m.indices.len() as u32).sum();
+                                    dialog.preview = Some(ImportPreview {
+                                        mesh_count: model.meshes.len(),
+                                        total_vertices: total_verts,
+                                        total_indices: total_idx,
+                                        material_count: model.materials.len(),
+                                        bone_count: model.bones.len(),
+                                        animation_count: model.animations.len(),
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!("Preview parse failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

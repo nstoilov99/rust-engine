@@ -47,6 +47,8 @@ pub mod desktop_sampler;
 pub mod console_cmd;
 mod dock_layout;
 #[cfg(feature = "crusty")]
+pub mod dialogs_crusty;
+#[cfg(feature = "crusty")]
 pub mod dock_crusty;
 #[cfg(feature = "crusty")]
 pub mod crusty_window;
