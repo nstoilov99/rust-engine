@@ -712,10 +712,15 @@ impl EguiRenderer {
                 if let Some(cached) = self.descriptor_set_cache.get(&cmd.texture_id) {
                     cached.clone()
                 } else {
-                    let texture_view = self
-                        .texture_cache
-                        .get(&cmd.texture_id)
-                        .ok_or("Texture not found")?;
+                    // Skip draws whose texture isn't registered with THIS
+                    // renderer (e.g. a main-window texture id reaching a
+                    // secondary window). Erroring here aborts the frame after
+                    // acquire, leaking the swapchain image and freezing the
+                    // window once all images are exhausted.
+                    let Some(texture_view) = self.texture_cache.get(&cmd.texture_id) else {
+                        log::warn!("egui draw skipped: texture {:?} not registered", cmd.texture_id);
+                        continue;
+                    };
 
                     let layout = self
                         .pipeline

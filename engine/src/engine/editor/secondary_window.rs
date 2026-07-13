@@ -79,8 +79,12 @@ impl SecondaryWindow {
 
     /// Update state when the window is resized.
     pub fn handle_resize(&mut self) {
-        self.recreate_swapchain = true;
         let size = self.window.inner_size();
+        // Windows delivers a spurious same-size Resized right after creation;
+        // recreating the swapchain for it breaks presentation (see render()).
+        if [size.width, size.height] != self.swapchain.image_extent() {
+            self.recreate_swapchain = true;
+        }
         self.is_minimized = size.width == 0 || size.height == 0;
         if !self.is_minimized {
             self.gui
@@ -147,6 +151,13 @@ impl SecondaryWindow {
                     self.recreate_swapchain = true;
                     return Ok(());
                 }
+                // No image available yet (presentation engine busy) — skip
+                // this frame. Recreating the swapchain here destroys frames
+                // that were presented but not yet composed, freezing the
+                // window on its first frame.
+                Err(Validated::Error(VulkanError::NotReady)) => {
+                    return Ok(());
+                }
                 Err(e) => {
                     log::warn!("Secondary window acquire failed: {:?}", e);
                     self.recreate_swapchain = true;
@@ -179,26 +190,14 @@ impl SecondaryWindow {
                     .map_err(|e| format!("Preview execute failed: {:?}", e))?,
             );
         }
+        // One chained fence-and-flush including the present. Splitting the
+        // chain with a manual flush + signal_finished() before the present
+        // detaches it from the render semaphores — the presentation engine
+        // then never releases the swapchain images and the window freezes
+        // on its first frame (acquire returns NotReady forever after).
         let future = future
             .then_execute(queue.clone(), gui_result.command_buffer)
-            .map_err(|e| format!("Secondary window execute failed: {:?}", e))?;
-
-        // Flush and mark finished (same pattern as main window to prevent
-        // OneTimeSubmit panic on present failure).
-        if let Err(e) = future.flush() {
-            log::error!("Secondary window flush failed: {:?}", e);
-            // SAFETY: flush attempted — mark finished to prevent CBEF Drop
-            // from re-submitting OneTimeSubmit command buffers.
-            unsafe { future.signal_finished() };
-            queue.with(|mut q| q.wait_idle()).ok();
-            return Ok(());
-        }
-        // SAFETY: flush succeeded — all CBs submitted. Marking finished
-        // prevents inner CBEF drops from re-submitting.
-        unsafe { future.signal_finished() };
-
-        // Present
-        let future = future
+            .map_err(|e| format!("Secondary window execute failed: {:?}", e))?
             .then_swapchain_present(
                 queue.clone(),
                 SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
@@ -208,6 +207,9 @@ impl SecondaryWindow {
         match future {
             Ok(future) => {
                 self.previous_frame_end = Some(future.boxed());
+            }
+            Err(Validated::Error(VulkanError::OutOfDate)) => {
+                self.recreate_swapchain = true;
             }
             Err(e) => {
                 log::warn!("Secondary window present failed: {:?}", e);
