@@ -19,9 +19,9 @@ use egui::Ui;
 /// Editor panel for enhanced input settings.
 #[derive(Default)]
 pub struct InputSettingsPanel {
-    working_copy: Option<InputActionSet>,
-    pending_apply: Option<InputActionSet>,
-    status_message: Option<(String, f64)>,
+    pub(crate) working_copy: Option<InputActionSet>,
+    pub(crate) pending_apply: Option<InputActionSet>,
+    pub(crate) status_message: Option<(String, f64)>,
 }
 
 impl InputSettingsPanel {
@@ -508,7 +508,7 @@ fn render_modifier_list(ui: &mut Ui, modifiers: &mut Vec<InputModifier>, id: &st
         });
 }
 
-fn modifier_label(m: &InputModifier) -> &'static str {
+pub(crate) fn modifier_label(m: &InputModifier) -> &'static str {
     match m {
         InputModifier::Negate { .. } => "Negate",
         InputModifier::Swizzle { .. } => "Swizzle",
@@ -585,7 +585,7 @@ fn render_modifier_params(ui: &mut Ui, modifier: &mut InputModifier, id: &str) {
     }
 }
 
-fn curve_label(c: &CurveType) -> &'static str {
+pub(crate) fn curve_label(c: &CurveType) -> &'static str {
     match c {
         CurveType::Linear => "Linear",
         CurveType::Quadratic => "Quadratic",
@@ -660,7 +660,7 @@ fn render_trigger_list(ui: &mut Ui, triggers: &mut Vec<InputTrigger>, id: &str) 
         });
 }
 
-fn trigger_label(t: &InputTrigger) -> &'static str {
+pub(crate) fn trigger_label(t: &InputTrigger) -> &'static str {
     match t {
         InputTrigger::Down => "Down",
         InputTrigger::Pressed => "Pressed",
@@ -719,7 +719,7 @@ fn render_trigger_params(ui: &mut Ui, trigger: &mut InputTrigger, _id: &str) {
 
 // ── Shared helpers ──
 
-fn format_value_type(vt: InputValueType) -> &'static str {
+pub(crate) fn format_value_type(vt: InputValueType) -> &'static str {
     match vt {
         InputValueType::Digital => "Digital",
         InputValueType::Axis1D => "Axis1D",
@@ -728,7 +728,7 @@ fn format_value_type(vt: InputValueType) -> &'static str {
     }
 }
 
-fn source_type_label(source: &InputSource) -> &'static str {
+pub(crate) fn source_type_label(source: &InputSource) -> &'static str {
     match source {
         InputSource::Key(_) => "Key",
         InputSource::MouseButton(_) => "Mouse Btn",
@@ -781,14 +781,14 @@ fn render_key_combo(ui: &mut Ui, current: &mut KeyCode, id: &str) {
 
 // ── Enum variant tables ──
 
-const VALUE_TYPES: &[InputValueType] = &[
+pub(crate) const VALUE_TYPES: &[InputValueType] = &[
     InputValueType::Digital,
     InputValueType::Axis1D,
     InputValueType::Axis2D,
     InputValueType::Axis3D,
 ];
 
-const SWIZZLE_ORDERS: &[SwizzleOrder] = &[
+pub(crate) const SWIZZLE_ORDERS: &[SwizzleOrder] = &[
     SwizzleOrder::YXZ,
     SwizzleOrder::ZYX,
     SwizzleOrder::XZY,
@@ -796,16 +796,16 @@ const SWIZZLE_ORDERS: &[SwizzleOrder] = &[
     SwizzleOrder::ZXY,
 ];
 
-const MOUSE_BUTTONS: &[MouseButton] = &[
+pub(crate) const MOUSE_BUTTONS: &[MouseButton] = &[
     MouseButton::Left, MouseButton::Right, MouseButton::Middle,
     MouseButton::Back, MouseButton::Forward,
 ];
 
-const MOUSE_AXES: &[MouseAxisType] = &[
+pub(crate) const MOUSE_AXES: &[MouseAxisType] = &[
     MouseAxisType::MoveX, MouseAxisType::MoveY, MouseAxisType::ScrollY,
 ];
 
-const GAMEPAD_BUTTONS: &[GamepadButton] = &[
+pub(crate) const GAMEPAD_BUTTONS: &[GamepadButton] = &[
     GamepadButton::South, GamepadButton::East, GamepadButton::West, GamepadButton::North,
     GamepadButton::LeftBumper, GamepadButton::RightBumper,
     GamepadButton::LeftTrigger, GamepadButton::RightTrigger,
@@ -814,13 +814,13 @@ const GAMEPAD_BUTTONS: &[GamepadButton] = &[
     GamepadButton::DPadUp, GamepadButton::DPadDown, GamepadButton::DPadLeft, GamepadButton::DPadRight,
 ];
 
-const GAMEPAD_AXES: &[GamepadAxisType] = &[
+pub(crate) const GAMEPAD_AXES: &[GamepadAxisType] = &[
     GamepadAxisType::LeftStickX, GamepadAxisType::LeftStickY,
     GamepadAxisType::RightStickX, GamepadAxisType::RightStickY,
     GamepadAxisType::LeftTrigger, GamepadAxisType::RightTrigger,
 ];
 
-const KEY_LETTERS: &[KeyCode] = &[
+pub(crate) const KEY_LETTERS: &[KeyCode] = &[
     KeyCode::KeyA, KeyCode::KeyB, KeyCode::KeyC, KeyCode::KeyD,
     KeyCode::KeyE, KeyCode::KeyF, KeyCode::KeyG, KeyCode::KeyH,
     KeyCode::KeyI, KeyCode::KeyJ, KeyCode::KeyK, KeyCode::KeyL,
@@ -830,33 +830,33 @@ const KEY_LETTERS: &[KeyCode] = &[
     KeyCode::KeyY, KeyCode::KeyZ,
 ];
 
-const KEY_DIGITS: &[KeyCode] = &[
+pub(crate) const KEY_DIGITS: &[KeyCode] = &[
     KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
     KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7,
     KeyCode::Digit8, KeyCode::Digit9,
 ];
 
-const KEY_FUNCTION: &[KeyCode] = &[
+pub(crate) const KEY_FUNCTION: &[KeyCode] = &[
     KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4,
     KeyCode::F5, KeyCode::F6, KeyCode::F7, KeyCode::F8,
     KeyCode::F9, KeyCode::F10, KeyCode::F11, KeyCode::F12,
 ];
 
-const KEY_NAV: &[KeyCode] = &[
+pub(crate) const KEY_NAV: &[KeyCode] = &[
     KeyCode::Escape, KeyCode::Space, KeyCode::Enter, KeyCode::Backspace,
     KeyCode::Tab, KeyCode::Delete, KeyCode::Insert, KeyCode::Home,
     KeyCode::End, KeyCode::PageUp, KeyCode::PageDown,
     KeyCode::ArrowUp, KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight,
 ];
 
-const KEY_MODIFIERS: &[KeyCode] = &[
+pub(crate) const KEY_MODIFIERS: &[KeyCode] = &[
     KeyCode::ShiftLeft, KeyCode::ShiftRight,
     KeyCode::ControlLeft, KeyCode::ControlRight,
     KeyCode::AltLeft, KeyCode::AltRight,
     KeyCode::SuperLeft, KeyCode::SuperRight,
 ];
 
-const KEY_PUNCTUATION: &[KeyCode] = &[
+pub(crate) const KEY_PUNCTUATION: &[KeyCode] = &[
     KeyCode::Comma, KeyCode::Period, KeyCode::Semicolon, KeyCode::Quote,
     KeyCode::BracketLeft, KeyCode::BracketRight, KeyCode::Backslash,
     KeyCode::Slash, KeyCode::Minus, KeyCode::Equal, KeyCode::Backquote,

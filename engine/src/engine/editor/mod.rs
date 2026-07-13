@@ -61,6 +61,8 @@ pub mod icons;
 pub mod import_dialog;
 mod input_action_editor;
 mod input_context_editor;
+#[cfg(feature = "crusty")]
+pub mod input_editors_crusty;
 mod input_settings_panel;
 #[cfg(feature = "crusty")]
 pub mod inspector_crusty;

@@ -805,6 +805,8 @@ impl App {
     pub fn open_input_action_as_tab(&mut self, file_path: std::path::PathBuf) {
         let key = self.editor.scene.input_action_editor.open(file_path);
         let tab = EditorTab::InputActionEditor(key);
+        #[cfg(feature = "crusty")]
+        self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
 
@@ -816,6 +818,8 @@ impl App {
             .refresh_action_names(std::path::Path::new("content"));
         let key = self.editor.scene.input_context_editor.open(file_path);
         let tab = EditorTab::InputContextEditor(key);
+        #[cfg(feature = "crusty")]
+        self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
 
@@ -1210,6 +1214,11 @@ impl App {
             }
             EditorAction::ReloadAllShaders => self.rebuild_all_shaders(),
             EditorAction::OpenSettings => {
+                #[cfg(feature = "crusty")]
+                self.editor
+                    .ui
+                    .crusty_dock
+                    .open_tab(EditorTab::InputSettings);
                 self.editor.ui.dock_state.open_tab(EditorTab::InputSettings)
             }
             EditorAction::SaveAndCloseEditor { kind, key } => {
@@ -3459,6 +3468,9 @@ impl App {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
             };
+            use rust_engine::engine::editor::input_editors_crusty::{
+                input_action_panel, input_context_panel, input_settings_panel,
+            };
             use rust_engine::engine::editor::menu_bar_crusty::{menu_bar_panel, MenuBarCtx};
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::status_bar_panel;
@@ -3504,6 +3516,12 @@ impl App {
             inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
             let profiler = &mut self.editor.ui.profiler_panel;
+            let input_settings = &mut self.editor.ui.input_settings_panel;
+            let action_set = action_set_snapshot.as_ref();
+            let ia_states = &mut self.editor.scene.input_action_editor.open_actions;
+            let input_context_editor = &mut self.editor.scene.input_context_editor;
+            let mc_states = &mut input_context_editor.open_contexts;
+            let mc_actions = input_context_editor.available_actions.as_slice();
             let sel = &mut self.editor.scene.selection;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
@@ -3649,6 +3667,31 @@ impl App {
                                     ui,
                                     "Activating scene...",
                                 ),
+                                Some(EditorTab::InputSettings) => {
+                                    input_settings_panel(ui, rect, ppp, input_settings, action_set)
+                                }
+                                Some(EditorTab::InputActionEditor(key)) => {
+                                    match ia_states.get_mut(&key) {
+                                        Some(state) => {
+                                            input_action_panel(ui, rect, ppp, &key, state)
+                                        }
+                                        None => dock_crusty::placeholder_panel(
+                                            ui,
+                                            "Input action not loaded.",
+                                        ),
+                                    }
+                                }
+                                Some(EditorTab::InputContextEditor(key)) => {
+                                    match mc_states.get_mut(&key) {
+                                        Some(state) => input_context_panel(
+                                            ui, rect, ppp, &key, state, mc_actions,
+                                        ),
+                                        None => dock_crusty::placeholder_panel(
+                                            ui,
+                                            "Mapping context not loaded.",
+                                        ),
+                                    }
+                                }
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -4106,6 +4149,9 @@ impl App {
         use rust_engine::engine::editor::console_crusty::{console_panel, ConsolePanelCtx};
         use rust_engine::engine::editor::dock_crusty;
         use rust_engine::engine::editor::hierarchy_crusty::{hierarchy_panel, HierarchyPanelCtx};
+        use rust_engine::engine::editor::input_editors_crusty::{
+            input_action_panel, input_context_panel, input_settings_panel,
+        };
         use rust_engine::engine::editor::inspector_crusty::{inspector_panel, InspectorPanelCtx};
         use rust_engine::engine::editor::profiler_crusty::profiler_panel;
 
@@ -4122,6 +4168,10 @@ impl App {
             core,
             ..
         } = self;
+        let action_set_snapshot = core
+            .game_world
+            .resource::<InputSubsystem>()
+            .map(|s| s.action_set.clone());
         let world = core.game_world.hecs_mut();
         let console = &mut editor.console;
         let show_stat_fps = &mut editor.ui.show_stat_fps;
@@ -4132,6 +4182,12 @@ impl App {
         let sel = &mut editor.scene.selection;
         let icon_registry = editor.services.icons.clone();
         let dormant = &editor.scene.registry.dormant;
+        let input_settings = &mut editor.ui.input_settings_panel;
+        let action_set = action_set_snapshot.as_ref();
+        let ia_states = &mut editor.scene.input_action_editor.open_actions;
+        let input_context_editor = &mut editor.scene.input_context_editor;
+        let mc_states = &mut input_context_editor.open_contexts;
+        let mc_actions = input_context_editor.available_actions.as_slice();
 
         for fw in crusty_floats.values_mut() {
             let titles =
@@ -4188,6 +4244,19 @@ impl App {
                         },
                     ),
                     Some(EditorTab::Profiler) => profiler_panel(ui, rect, ppp, profiler),
+                    Some(EditorTab::InputSettings) => {
+                        input_settings_panel(ui, rect, ppp, input_settings, action_set)
+                    }
+                    Some(EditorTab::InputActionEditor(key)) => match ia_states.get_mut(&key) {
+                        Some(state) => input_action_panel(ui, rect, ppp, &key, state),
+                        None => dock_crusty::placeholder_panel(ui, "Input action not loaded."),
+                    },
+                    Some(EditorTab::InputContextEditor(key)) => match mc_states.get_mut(&key) {
+                        Some(state) => {
+                            input_context_panel(ui, rect, ppp, &key, state, mc_actions)
+                        }
+                        None => dock_crusty::placeholder_panel(ui, "Mapping context not loaded."),
+                    },
                     _ => dock_crusty::placeholder_panel(
                         ui,
                         "This panel is not yet ported to crusty-gui.",
