@@ -5,7 +5,7 @@
 
 mod renderer;
 
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod crusty;
 
 pub use renderer::EguiRenderer;

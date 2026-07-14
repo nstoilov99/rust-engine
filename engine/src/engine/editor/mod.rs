@@ -35,58 +35,58 @@ pub mod toasts;
 pub mod widgets;
 
 pub mod asset_browser;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod asset_browser_crusty;
 pub mod build_dialog;
 mod commands;
 mod console;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod console_crusty;
-#[cfg(all(feature = "crusty", windows))]
+#[cfg(all(feature = "editor", windows))]
 pub mod desktop_sampler;
 pub mod console_cmd;
 mod dock_layout;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod command_palette_crusty;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod dialogs_crusty;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod dock_crusty;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod crusty_window;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod hierarchy_crusty;
 mod hierarchy_panel;
 pub mod icons;
 pub mod import_dialog;
 mod input_action_editor;
 mod input_context_editor;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod input_editors_crusty;
 mod input_settings_panel;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod inspector_crusty;
 mod inspector_panel;
 mod menu_bar;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod menu_bar_crusty;
 pub mod mesh_editor;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
 pub mod play_mode;
 pub mod profiler;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod profiler_crusty;
 pub mod scene_tab;
 pub mod secondary_window;
 mod selection;
 mod tab_viewer;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod status_bar_crusty;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod toasts_crusty;
 pub mod viewport;
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub mod viewport_crusty;
 mod viewport_texture;
 mod window_config;

@@ -233,7 +233,7 @@ impl StandaloneApp {
             }),
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_text: None,
         });
 

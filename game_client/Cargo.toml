@@ -9,9 +9,10 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Editor UI is crusty-gui. (egui deps linger until the egui deletion completes.)
 editor = ["rust_engine/editor", "dep:egui_dock", "dep:egui"]
-# crusty-gui overlay in the editor (Phase 16 egui replacement, WIP)
-crusty = ["editor", "rust_engine/crusty"]
+# Transitional alias — the crusty backend is now the only editor UI.
+crusty = ["editor"]
 editor-debug = ["editor", "rust_engine/editor-debug"]
 tracy = ["rust_engine/tracy"]
 

@@ -54,18 +54,18 @@ pub struct ThumbnailCache {
     error_placeholder: Option<TextureHandle>,
     _type_icons: HashMap<AssetType, TextureHandle>,
     /// Registered crusty texture ids (Phase 16 asset browser).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_ids: HashMap<AssetId, crusty_gui::paint::TextureId>,
     /// Generated thumbnails sent to the render thread for upload, whose
     /// texture ids haven't come back yet.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_uploading: std::collections::HashSet<AssetId>,
     /// Retained pixel data for material thumbnails, so secondary OS windows
     /// (each with its own texture registry) can upload their own copies.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_rgba: HashMap<AssetId, (Vec<u8>, u32, u32)>,
     /// Assets known to be materials (set on request) — controls rgba retention.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     material_ids: std::collections::HashSet<AssetId>,
 }
 
@@ -90,13 +90,13 @@ impl ThumbnailCache {
             placeholder: None,
             error_placeholder: None,
             _type_icons: HashMap::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_ids: HashMap::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_uploading: std::collections::HashSet::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_rgba: HashMap::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             material_ids: std::collections::HashSet::new(),
         }
     }
@@ -179,7 +179,7 @@ impl ThumbnailCache {
             return;
         }
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if asset.asset_type == AssetType::Material {
             self.material_ids.insert(asset.id);
         }
@@ -225,7 +225,7 @@ impl ThumbnailCache {
     /// Crusty texture id for an asset's thumbnail, requesting generation on
     /// first sight. `None` while generating/uploading — the panel draws its
     /// own placeholder. Poll [`Self::poll_crusty`] each frame to drive it.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_texture_id(
         &mut self,
         asset: &AssetMetadata,
@@ -243,7 +243,7 @@ impl ThumbnailCache {
     /// packet. The render thread uploads + registers them and answers with
     /// `RenderEvent::CrustyTexturesRegistered`, which feeds
     /// [`Self::apply_crusty_registered`].
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn poll_crusty(
         &mut self,
     ) -> Vec<crate::engine::rendering::frame_packet::CrustyTextureUpload> {
@@ -269,19 +269,19 @@ impl ThumbnailCache {
     }
 
     /// Retained pixel data for a material thumbnail (for secondary windows).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_rgba(&self, id: AssetId) -> Option<&(Vec<u8>, u32, u32)> {
         self.crusty_rgba.get(&id)
     }
 
     /// All retained material thumbnails (for secondary-window registration).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_rgba_iter(&self) -> impl Iterator<Item = (AssetId, &(Vec<u8>, u32, u32))> {
         self.crusty_rgba.iter().map(|(k, v)| (*k, v))
     }
 
     /// Record texture ids the render thread registered for earlier uploads.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn apply_crusty_registered(
         &mut self,
         registered: Vec<(AssetId, crusty_gui::paint::TextureId)>,
@@ -296,7 +296,7 @@ impl ThumbnailCache {
     pub fn invalidate(&mut self, id: AssetId) {
         self.cache.remove(&id);
         self.pending.remove(&id);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             // The old GPU texture stays registered (no cross-thread remove
             // path yet) — a stale id is dropped, not reused.
@@ -310,7 +310,7 @@ impl ThumbnailCache {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.pending.clear();
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             self.crusty_ids.clear();
             self.crusty_uploading.clear();

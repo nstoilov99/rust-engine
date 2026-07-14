@@ -137,7 +137,7 @@ impl ApplicationHandler for GameApp {
         event: WindowEvent,
     ) {
         // Route torn-off crusty float window events
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             let consumed = self
                 .app
@@ -287,7 +287,7 @@ impl GameApp {
         // crusty tabs ship theirs with this frame's packet. Each key's CB
         // has exactly one consumer: egui secondary window, crusty float
         // window, or the frame packet (docked crusty tab).
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let preview_cbs = {
             let mut kept = Vec::new();
             for (key, cb) in app.build_mesh_preview_cbs() {
@@ -304,7 +304,7 @@ impl GameApp {
             }
             kept
         };
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let preview_cbs = app.build_mesh_preview_cbs();
 
         // Render here directly — going via request_redraw → DWM gates to
@@ -316,7 +316,7 @@ impl GameApp {
         }
 
         // --- Torn-off crusty float windows (own swapchains, main thread) ---
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             app.crusty_spawn_floats(event_loop);
             app.crusty_float_frames();

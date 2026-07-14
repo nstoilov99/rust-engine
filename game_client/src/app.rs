@@ -4,7 +4,7 @@
 //! The App struct composes both, with EditorApp only present in editor builds.
 
 use super::{game_setup, input_handler, render_loop};
-#[cfg(not(feature = "crusty"))]
+#[cfg(not(feature = "editor"))]
 use egui_dock::DockArea;
 use rust_engine::assets::asset_source;
 use rust_engine::assets::AssetType;
@@ -25,7 +25,7 @@ use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
-#[cfg(not(feature = "crusty"))]
+#[cfg(not(feature = "editor"))]
 use rust_engine::engine::editor::{create_editor_dock_style, render_menu_bar, render_status_bar};
 use rust_engine::engine::editor::{
     AssetBrowserEvent,
@@ -181,7 +181,7 @@ pub struct EditorUIState {
     pub dock_state: EditorDockState,
     /// Crusty dock layout (Phase 16 egui_dock replacement) — drives the
     /// panel layout when the `crusty` feature is on.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_dock: rust_engine::engine::editor::dock_crusty::CrustyDockLayout,
     pub show_stat_fps: bool,
     pub show_profiler: bool,
@@ -224,38 +224,38 @@ pub struct App {
     pub pending_window_requests: Vec<PendingWindowRequest>,
     /// Main-thread half of the crusty-gui integration (Phase 16 egui
     /// replacement — panels migrate over one at a time).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
     /// Hierarchy icon textures uploaded by the render thread at startup
     /// (SVG stem → crusty TextureId).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_icons:
         std::collections::HashMap<String, rust_engine::engine::gui::crusty::TextureId>,
     /// Crusty texture id for the viewport render target (registered by the
     /// render thread at startup; survives resizes).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_viewport_texture: Option<rust_engine::engine::gui::crusty::TextureId>,
     /// Last frame's "crusty exclusively holds the pointer" flag (floating
     /// popup hover, pressed widget, or drag). While set, pointer events are
     /// withheld from egui so clicks on crusty popups don't drag dock tabs
     /// or the viewport camera beneath them.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_owns_pointer: bool,
     /// Menu action picked in the crusty menu bar. The crusty layout runs
     /// *after* this frame's `menu_action` match, so the action is stored here
     /// and applied at the start of the next frame's match.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_menu_action: MenuAction,
     /// A tab torn off the crusty dock, following the cursor as an in-window
     /// ghost until re-docked or dropped (spawning a float window).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_dock_drag: Option<String>,
     /// Tabs dropped outside any dock target — main.rs turns these into OS
     /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pending_crusty_floats: Vec<rust_engine::engine::editor::crusty_window::CrustyWindowRequest>,
     /// Live torn-off panel windows, keyed by winit window id.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_floats: std::collections::HashMap<
         winit::window::WindowId,
         rust_engine::engine::editor::crusty_window::CrustyFloatWindow,
@@ -263,18 +263,18 @@ pub struct App {
     /// Mesh-preview render targets registered with the render thread's
     /// crusty renderer, keyed by mesh editor key. `id` is None while the
     /// registration round-trips via `RenderEvent::CrustyNativeRegistered`.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     crusty_mesh_textures: std::collections::HashMap<String, CrustyMeshTexture>,
     /// Preview CBs for mesh tabs docked in the main crusty dock — sent to
     /// the render thread in the frame packet (executed before the GUI pass).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_docked_preview_cbs: Vec<(
         String,
         std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     )>,
     /// Preview CBs for mesh tabs hosted in crusty float windows — chained
     /// into each float's own submission in `crusty_float_frames`.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_float_preview_cbs: Vec<(
         String,
         std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
@@ -284,14 +284,14 @@ pub struct App {
 /// A mesh-preview texture registered (or pending) with the render thread's
 /// crusty renderer. The `view` pointer detects render-target recreation on
 /// resize so the id can be re-pointed via `crusty_native_updates`.
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 struct CrustyMeshTexture {
     id: Option<rust_engine::engine::gui::crusty::TextureId>,
     view: std::sync::Arc<vulkano::image::view::ImageView>,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
-#[cfg(not(feature = "crusty"))]
+#[cfg(not(feature = "editor"))]
 fn focused_viewport_id(dock_state: &EditorDockState) -> Option<SceneId> {
     let (surface, node) = dock_state.dock_state.focused_leaf()?;
     if let egui_dock::Node::Leaf(leaf) = &dock_state.dock_state[surface][node] {
@@ -327,7 +327,7 @@ impl App {
             &window,
         )?;
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let crusty_gui = {
             let size = window.inner_size();
             rust_engine::engine::gui::crusty::CrustyGui::new(
@@ -507,24 +507,24 @@ impl App {
                 },
             ),
             viewport_dimensions: Some([800, 600]),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_text: Some(crusty_gui.text_handle()),
         });
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_icons = std::collections::HashMap::new();
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_viewport_texture = None;
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_icons: icons,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_viewport_texture: vp_tex,
                 ..
             }) => {
                 log::info!("editor: render thread ready");
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 {
                     crusty_icons = icons;
                     crusty_viewport_texture = vp_tex;
@@ -629,7 +629,7 @@ impl App {
             ui: EditorUIState {
                 gui,
                 dock_state: EditorDockState::load_or_default(),
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_dock:
                     rust_engine::engine::editor::dock_crusty::CrustyDockLayout::load_or_default(),
                 show_stat_fps: false,
@@ -670,27 +670,27 @@ impl App {
             editor,
             runtime_flags,
             pending_window_requests: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_gui,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_icons,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_viewport_texture,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_owns_pointer: false,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_menu_action: MenuAction::None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_dock_drag: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             pending_crusty_floats: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_floats: std::collections::HashMap::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_mesh_textures: std::collections::HashMap::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_docked_preview_cbs: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_float_preview_cbs: Vec::new(),
         })
     }
@@ -700,13 +700,13 @@ impl App {
     }
 
     pub fn save_layout_on_exit(&mut self) {
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         if let Err(e) = self.editor.ui.dock_state.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
         }
         // Fold torn-off float windows back into the tree so their panels
         // reappear docked on next launch (float positions aren't persisted).
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         for fw in self.crusty_floats.values() {
             let mut tabs = Vec::new();
             fw.tree.collect_tabs(&mut tabs);
@@ -717,7 +717,7 @@ impl App {
                 );
             }
         }
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if let Err(e) = self.editor.ui.crusty_dock.save_to_default() {
             eprintln!("Warning: Failed to save layout on exit: {}", e);
         }
@@ -749,7 +749,7 @@ impl App {
     /// Undock a tab from the dock area to a secondary OS window.
     pub fn undock_tab(&mut self, tab: EditorTab) {
         // Mesh editors float as crusty windows — no egui secondary window.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if let EditorTab::MeshEditor(key) = &tab {
             if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
                 data.open = true;
@@ -857,7 +857,7 @@ impl App {
     pub fn open_input_action_as_tab(&mut self, file_path: std::path::PathBuf) {
         let key = self.editor.scene.input_action_editor.open(file_path);
         let tab = EditorTab::InputActionEditor(key);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
@@ -870,7 +870,7 @@ impl App {
             .refresh_action_names(std::path::Path::new("content"));
         let key = self.editor.scene.input_context_editor.open(file_path);
         let tab = EditorTab::InputContextEditor(key);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
@@ -878,7 +878,7 @@ impl App {
     /// Open a mesh file as a dock tab (default behavior).
     pub fn open_mesh_as_tab(&mut self, mesh_key: String) {
         let tab = EditorTab::MeshEditor(mesh_key);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
@@ -1160,7 +1160,7 @@ impl App {
             EditorAction::SwitchDensity(density) => {
                 let ctx = self.editor.ui.gui.context().clone();
                 self.editor.services.set_density(density, &ctx);
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 self.crusty_gui.apply_theme(&self.editor.services.theme);
             }
             EditorAction::ToggleDevShowcase => {
@@ -1268,7 +1268,7 @@ impl App {
             }
             EditorAction::ReloadAllShaders => self.rebuild_all_shaders(),
             EditorAction::OpenSettings => {
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 self.editor
                     .ui
                     .crusty_dock
@@ -1714,7 +1714,7 @@ impl App {
         // While a crusty floating popup holds the pointer, withhold pointer
         // events from egui — otherwise clicks/drags on the popup fall through
         // and start dragging dock tabs or the viewport camera beneath it.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let egui_gets_event = !(self.crusty_owns_pointer
             && matches!(
                 event,
@@ -1722,12 +1722,12 @@ impl App {
                     | WindowEvent::MouseInput { .. }
                     | WindowEvent::MouseWheel { .. }
             ));
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let egui_gets_event = true;
         if egui_gets_event {
             self.editor.ui.gui.handle_event(event);
         }
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         self.crusty_gui.handle_event(event);
 
         match event {
@@ -1737,7 +1737,7 @@ impl App {
                     .ui
                     .gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 self.crusty_gui
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
@@ -2022,7 +2022,7 @@ impl App {
                     rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
                         log::error!("editor: render thread error: {}", message);
                     }
-                    #[cfg(feature = "crusty")]
+                    #[cfg(feature = "editor")]
                     rust_engine::engine::rendering::frame_packet::RenderEvent::CrustyTexturesRegistered(regs) => {
                         self.editor
                             .scene
@@ -2030,7 +2030,7 @@ impl App {
                             .thumbnails
                             .apply_crusty_registered(regs);
                     }
-                    #[cfg(feature = "crusty")]
+                    #[cfg(feature = "editor")]
                     rust_engine::engine::rendering::frame_packet::RenderEvent::CrustyNativeRegistered(regs) => {
                         for (key, tid) in regs {
                             if let Some(k) = key.strip_prefix("mesh_preview:") {
@@ -2324,7 +2324,7 @@ impl App {
         let world = self.core.game_world.hecs_mut();
         let selection = &mut self.editor.scene.selection;
         let command_history = &mut self.editor.scene.command_history;
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let dock_state = &mut self.editor.ui.dock_state;
         let console_messages = &mut self.editor.console.messages;
         let log_filter = &mut self.editor.console.log_filter;
@@ -2350,7 +2350,7 @@ impl App {
         };
 
         let asset_browser = &mut self.editor.scene.asset_browser;
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let save_as_dialog = &mut self.editor.scene.save_as_dialog;
         let mesh_editors = &mut self.editor.scene.mesh_editors;
         let ia_open_actions = &mut self.editor.scene.input_action_editor.open_actions;
@@ -2361,9 +2361,9 @@ impl App {
             .input_context_editor
             .available_actions
             .as_slice();
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let build_dialog = &mut self.editor.play.build_dialog;
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let import_dialog = &mut self.editor.scene.import_dialog;
         let is_hovering_files = self.editor.ui.gui.is_hovering_external_files();
 
@@ -2372,38 +2372,38 @@ impl App {
 
         let mut menu_action = MenuAction::None;
         let mut toolbar_action = MenuAction::None;
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let mut import_action = ImportDialogAction::None;
         let mut undock_request: Option<EditorTab> = None;
         let mut close_scene_request: Option<SceneId> = None;
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let mut dialog_actions = Vec::new();
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let mut command_palette_action = None;
         let dormant_scenes_snapshot: &[DormantScene] = &self.editor.scene.registry.dormant;
         // Output: Console tab content rect (egui points) — the crusty-gui
         // pass renders the ported console panel there after this layout.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_console_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_hierarchy_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_inspector_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_asset_browser_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_profiler_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_viewport_rect: Option<egui::Rect> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_menu_bar_rect = egui::Rect::NOTHING;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_status_bar_rect = egui::Rect::NOTHING;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_screen_rect = egui::Rect::NOTHING;
 
         let gui_result = self.editor.ui.gui.layout(Some(prev_viewport_rect), |ctx| {
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             {
                 menu_action = render_menu_bar(
                     ctx,
@@ -2416,7 +2416,7 @@ impl App {
                     icon_manager,
                 );
             }
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             {
                 // Reserve the strip (same id/height as the egui menu bar so
                 // the dock layout is identical); crusty draws the menus there.
@@ -2435,9 +2435,9 @@ impl App {
                 "Dirty assets: {}",
                 services.dirty.dirty_asset_count()
             ));
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             render_status_bar(ctx, &services.status_bar);
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             {
                 // Reserve the strip; crusty draws the status text there.
                 let resp = egui::TopBottomPanel::bottom("editor_status_bar")
@@ -2488,17 +2488,17 @@ impl App {
                 dormant_scenes: dormant_scenes_snapshot,
                 close_scene_request: &mut close_scene_request,
                 viewport_tab_labels: &viewport_tab_labels,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_console_rect: &mut crusty_console_rect,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_hierarchy_rect: &mut crusty_hierarchy_rect,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_inspector_rect: &mut crusty_inspector_rect,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_asset_browser_rect: &mut crusty_asset_browser_rect,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_profiler_rect: &mut crusty_profiler_rect,
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 crusty_viewport_rect: &mut crusty_viewport_rect,
             };
 
@@ -2506,7 +2506,7 @@ impl App {
 
             // Under `crusty` the dock itself is rendered by crusty-gui (see
             // the crusty pass below); egui only reserves the strips.
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             DockArea::new(&mut dock_state.dock_state)
                 .style(create_editor_dock_style(ctx))
                 .show_leaf_close_all_buttons(false)
@@ -2520,19 +2520,19 @@ impl App {
                 services.command_palette.open();
             }
             // Under `crusty` the palette renders in the crusty pass.
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             {
                 let registry = services.command_registry.clone();
                 command_palette_action = services.command_palette.show(ctx, &registry);
             }
             // Under `crusty` the dialog stack renders in the crusty pass.
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             {
                 dialog_actions = services.dialogs.show(ctx);
             }
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             services.toasts.show(ctx);
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             {
                 #[allow(deprecated)]
                 {
@@ -2548,7 +2548,7 @@ impl App {
             }
 
             // Show file drop overlay when hovering external files
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             if is_hovering_files {
                 #[allow(deprecated)]
                 let screen = ctx.screen_rect();
@@ -2577,7 +2577,7 @@ impl App {
             }
 
             // Render import dialog if active
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             if let Some(ref mut dialog_state) = import_dialog {
                 import_action = rust_engine::engine::editor::import_dialog::render_import_dialog(
                     ctx,
@@ -2586,9 +2586,9 @@ impl App {
             }
 
             // Render Save As dialog if active
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             let mut save_as_close = false;
-            #[cfg(not(feature = "crusty"))]
+            #[cfg(not(feature = "editor"))]
             if let Some(dlg) = save_as_dialog.as_mut() {
                 egui::Window::new("Save Scene As")
                     .collapsible(false)
@@ -2617,7 +2617,7 @@ impl App {
 
         // Handle import dialog result (crusty renders the dialog later in the
         // frame and handles its action after the crusty pass).
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         self.handle_import_dialog_action(import_action);
 
         // Apply edited input bindings back to the InputSubsystem
@@ -2651,9 +2651,9 @@ impl App {
 
         // Detect tab switch: if the dock's currently-focused viewport tab is not the
         // active scene id, perform a swap.
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         let focused_scene = focused_viewport_id(&self.editor.ui.dock_state);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let focused_scene = self.editor.ui.crusty_dock.focused_viewport_id();
         if let Some(focused_scene_id) = focused_scene {
             if focused_scene_id != self.editor.scene.registry.active_id {
@@ -2666,15 +2666,15 @@ impl App {
         }
         // Crusty menu actions are recorded after this match runs (the crusty
         // layout is at the end of the frame), so apply last frame's here.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if menu_action == MenuAction::None {
             menu_action = std::mem::replace(&mut self.crusty_menu_action, MenuAction::None);
         }
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         if let Some(action) = command_palette_action {
             self.handle_editor_action(action);
         }
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         for action in dialog_actions {
             self.handle_editor_action(action);
         }
@@ -2715,7 +2715,7 @@ impl App {
                 }
             }
             MenuAction::SaveLayout => {
-                #[cfg(not(feature = "crusty"))]
+                #[cfg(not(feature = "editor"))]
                 match self.editor.ui.dock_state.save_to_default() {
                     Ok(()) => println!(
                         "Layout saved to {}",
@@ -2723,7 +2723,7 @@ impl App {
                     ),
                     Err(e) => eprintln!("Failed to save layout: {}", e),
                 }
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 match self.editor.ui.crusty_dock.save_to_default() {
                     Ok(()) => println!(
                         "Layout saved to {}",
@@ -2733,12 +2733,12 @@ impl App {
                 }
             }
             MenuAction::ResetLayout => {
-                #[cfg(not(feature = "crusty"))]
+                #[cfg(not(feature = "editor"))]
                 {
                     self.editor.ui.dock_state = EditorDockState::new();
                     let _ = self.editor.ui.dock_state.save_to_default();
                 }
-                #[cfg(feature = "crusty")]
+                #[cfg(feature = "editor")]
                 {
                     self.editor.ui.crusty_dock.reset();
                     let _ = self.editor.ui.crusty_dock.save_to_default();
@@ -2950,10 +2950,10 @@ impl App {
                             } else {
                                 // Already open: surface the docked tab. A tab
                                 // living in a float OS window stays there.
-                                #[cfg(feature = "crusty")]
+                                #[cfg(feature = "editor")]
                                 let in_float = self
                                     .crusty_float_hosts_tab(&format!("mesh:{relative}"));
-                                #[cfg(not(feature = "crusty"))]
+                                #[cfg(not(feature = "editor"))]
                                 let in_float = false;
                                 if !in_float {
                                     self.open_mesh_as_tab(relative);
@@ -3537,17 +3537,17 @@ impl App {
         // Runs before `handle_frame_input` so its wants_* flags can be OR-ed
         // into the egui result (game input must not fire while a crusty
         // panel has the pointer/keyboard).
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_close_tab: Option<String> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_docked = false;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_dialog_actions = Vec::new();
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_import_action = ImportDialogAction::None;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let (crusty_result, gui_result) = {
             use rust_engine::engine::editor::console_crusty::{
                 console_panel, ConsolePanelCtx,
@@ -3901,7 +3901,7 @@ impl App {
         };
 
         // Commit (or veto) a crusty dock tab-close request.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if let Some(tab) = crusty_close_tab.take() {
             self.handle_crusty_tab_close(&tab);
         }
@@ -3909,7 +3909,7 @@ impl App {
         // Resolve a cross-window drag from a float window: docked into the
         // main tree → drop the tab from the float (an emptied window closes
         // next frame); released anywhere else → the window stays put.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         if let Some((id, released)) = crusty_float_drag {
             if let Some(fw) = self.crusty_floats.get_mut(&id) {
                 if crusty_docked {
@@ -3922,7 +3922,7 @@ impl App {
             }
         }
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             self.handle_import_dialog_action(crusty_import_action);
             for action in crusty_dialog_actions {
@@ -3938,7 +3938,7 @@ impl App {
         packet.egui_texture_deltas = Some(gui_result.textures_delta);
         packet.texture_binds = gui_result.texture_binds;
         packet.viewport_texture_id = self.editor.viewport.texture_id;
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         {
             packet.crusty_paint = Some(crusty_result.paint);
             packet.crusty_texture_uploads = self
@@ -4137,9 +4137,9 @@ impl App {
         self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
 
         // Push a new viewport tab into the existing viewport leaf and focus it.
-        #[cfg(not(feature = "crusty"))]
+        #[cfg(not(feature = "editor"))]
         self.editor.ui.dock_state.open_viewport_tab(new_id);
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         self.editor.ui.crusty_dock.open_viewport_tab(new_id);
 
         self.editor
@@ -4210,7 +4210,7 @@ impl App {
     /// Handle a crusty dock ×-close click. Unlike egui_dock, the tree is not
     /// mutated yet — this is the veto point: the last scene tab is refused,
     /// anything else is committed via `close_tab`.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn handle_crusty_tab_close(&mut self, tab: &str) {
         use rust_engine::engine::editor::dock_crusty;
         if let Some(EditorTab::Viewport(id)) = dock_crusty::parse_tab(tab) {
@@ -4243,7 +4243,7 @@ impl App {
 
     /// Route a winit event to a torn-off float window. Returns true if the
     /// window id belongs to a float (event consumed).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_float_event(
         &mut self,
         id: winit::window::WindowId,
@@ -4257,7 +4257,7 @@ impl App {
     }
 
     /// Whether any crusty float window hosts the given dock tab id.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_float_hosts_tab(&self, tab: &str) -> bool {
         self.crusty_floats
             .values()
@@ -4266,7 +4266,7 @@ impl App {
 
     /// Create OS windows for tabs dropped outside the dock. Window creation
     /// needs the event loop, so main.rs calls this from `about_to_wait`.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_spawn_floats(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         use rust_engine::engine::editor::crusty_window::{float_window_attrs, CrustyFloatWindow};
         if self.pending_crusty_floats.is_empty() {
@@ -4329,7 +4329,7 @@ impl App {
     /// Layout + render every float window (main thread, each with its own
     /// renderer). Emptied or user-closed windows re-dock their tabs into the
     /// main tree so a panel is never lost.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn crusty_float_frames(&mut self) {
         if self.crusty_floats.is_empty() {
             return;

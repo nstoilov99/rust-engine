@@ -109,36 +109,36 @@ pub struct FramePacket {
 
     /// crusty-gui paint list, composited after the egui pass (Phase 16
     /// migration — panels move here one at a time).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_paint: Option<Vec<crusty_gui::paint::PaintCmd>>,
 
     /// Thumbnail pixels the render thread should upload + register as
     /// crusty textures; ids come back via
     /// [`RenderEvent::CrustyTexturesRegistered`].
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_texture_uploads: Vec<CrustyTextureUpload>,
 
     /// Pre-recorded command buffers (mesh-editor previews) the render
     /// thread executes before the GUI pass, so the preview textures are
     /// rendered and layout-transitioned within the same submission that
     /// samples them.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_preview_cbs: Vec<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>>,
 
     /// Image views to register as crusty native textures, keyed by an
     /// arbitrary string; ids come back via
     /// [`RenderEvent::CrustyNativeRegistered`].
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_native_registrations: Vec<(String, Arc<ImageView>)>,
 
     /// Re-point an already-registered crusty native texture at a new image
     /// view (preview texture resized).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_native_updates: Vec<(crusty_gui::paint::TextureId, Arc<ImageView>)>,
 
     /// Crusty native textures to drop (mesh editor closed) so the registry
     /// doesn't pin dead render targets.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_native_removals: Vec<crusty_gui::paint::TextureId>,
 
     // Render config
@@ -162,7 +162,7 @@ pub struct FramePacket {
 
 /// RGBA8 pixels for a texture the render thread uploads to the GPU and
 /// registers with the crusty renderer (asset-browser thumbnails).
-#[cfg(feature = "crusty")]
+#[cfg(feature = "editor")]
 pub struct CrustyTextureUpload {
     pub id: crate::engine::assets::AssetId,
     pub rgba: Vec<u8>,
@@ -178,12 +178,12 @@ pub enum RenderEvent {
         /// Hierarchy icon set uploaded by the render thread: SVG file stem
         /// → crusty texture id, for the crusty layout pass on the main
         /// thread. Empty when the crusty renderer is disabled.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         crusty_icons: std::collections::HashMap<String, crusty_gui::paint::TextureId>,
         /// Crusty texture id the render thread registered for the viewport
         /// render target. Stays valid across resizes (the render thread
         /// re-points it at the new image view).
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         crusty_viewport_texture: Option<crusty_gui::paint::TextureId>,
     },
     SwapchainRecreated {
@@ -198,13 +198,13 @@ pub enum RenderEvent {
         message: String,
     },
     /// Asset id → crusty texture id for uploads the render thread finished.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     CrustyTexturesRegistered(
         Vec<(crate::engine::assets::AssetId, crusty_gui::paint::TextureId)>,
     ),
     /// Key → crusty texture id for native image views the render thread
     /// registered from [`FramePacket::crusty_native_registrations`].
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     CrustyNativeRegistered(Vec<(String, crusty_gui::paint::TextureId)>),
 }
 
@@ -237,17 +237,17 @@ impl FramePacket {
             egui_primitives: None,
             #[cfg(feature = "editor")]
             egui_texture_deltas: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_paint: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_texture_uploads: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_preview_cbs: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_registrations: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_updates: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_removals: Vec::new(),
             render_mode: RenderMode::Standalone,
             window_dimensions,
@@ -289,17 +289,17 @@ impl FramePacket {
             plankton_emitters,
             egui_primitives: None,
             egui_texture_deltas: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_paint: None,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_texture_uploads: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_preview_cbs: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_registrations: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_updates: Vec::new(),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_native_removals: Vec::new(),
             render_mode: RenderMode::Editor,
             window_dimensions,

@@ -34,7 +34,7 @@ pub struct RenderThreadConfig {
     pub viewport_dimensions: Option<[u32; 2]>,
     /// Glyph shaper/atlas shared with the main thread's `CrustyGui`
     /// (Phase 16). `None` disables the crusty render pass.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_text: Option<crate::engine::gui::crusty::SharedTextRenderer>,
 }
 
@@ -142,7 +142,7 @@ impl RenderThread {
             }
         };
 
-        #[cfg(any(feature = "editor", feature = "crusty"))]
+        #[cfg(feature = "editor")]
         let sc_format = sc_swapchain
             .as_ref()
             .map(|sc| sc.image_format())
@@ -166,7 +166,7 @@ impl RenderThread {
             }
         };
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let mut crusty_renderer = config.crusty_text.clone().map(|text| {
             log::info!("render_thread: CrustyRenderer created");
             crate::engine::gui::crusty::CrustyRenderer::new(
@@ -177,7 +177,7 @@ impl RenderThread {
             )
         });
 
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let crusty_icons = crusty_renderer
             .as_mut()
             .map(|r| {
@@ -191,7 +191,7 @@ impl RenderThread {
 
         // Crusty draws the viewport image through its own texture registry;
         // register once, re-point the id on every resize below.
-        #[cfg(feature = "crusty")]
+        #[cfg(feature = "editor")]
         let crusty_viewport_texture = crusty_renderer.as_mut().and_then(|r| {
             viewport_texture
                 .as_ref()
@@ -201,9 +201,9 @@ impl RenderThread {
         let ready_event = RenderEvent::RenderThreadReady {
             #[cfg(feature = "editor")]
             viewport_texture: viewport_texture.as_ref().map(|vt| vt.image_view()),
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_icons,
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             crusty_viewport_texture,
         };
         if response.send(ready_event).is_err() {
@@ -227,7 +227,7 @@ impl RenderThread {
             // Upload requested crusty textures (thumbnails) before any early
             // `continue` below can drop the packet — the main-thread cache
             // marks them in-flight and waits for the registered event.
-            #[cfg(feature = "crusty")]
+            #[cfg(feature = "editor")]
             if let Some(ref mut cr) = crusty_renderer {
                 if !packet.crusty_texture_uploads.is_empty() {
                     let mut registered = Vec::new();
@@ -296,7 +296,7 @@ impl RenderThread {
                         sc_swapchain = Some(new_sc);
                         sc_images = Some(new_imgs);
                         deferred_renderer.clear_framebuffer_cache();
-                        #[cfg(feature = "crusty")]
+                        #[cfg(feature = "editor")]
                         if let Some(ref mut cr) = crusty_renderer {
                             cr.clear_framebuffer_cache();
                         }
@@ -371,7 +371,7 @@ impl RenderThread {
                                     egui_r.update_native_texture(tex_id, vt.image_view());
                                 }
                             }
-                            #[cfg(feature = "crusty")]
+                            #[cfg(feature = "editor")]
                             if let (Some(cr), Some(id)) =
                                 (crusty_renderer.as_mut(), crusty_viewport_texture)
                             {
@@ -444,7 +444,7 @@ impl RenderThread {
                         None
                     };
 
-                    #[cfg(feature = "crusty")]
+                    #[cfg(feature = "editor")]
                     let crusty_target = target_image.clone();
 
                     let egui_cb = if let (Some(ref mut egui_r), Some(primitives), Some(deltas)) = (
@@ -473,7 +473,7 @@ impl RenderThread {
 
                     // crusty-gui pass, composited over the egui output (Phase 16
                     // migration — panels move over one at a time).
-                    #[cfg(feature = "crusty")]
+                    #[cfg(feature = "editor")]
                     let crusty_cb = if let (Some(ref mut crusty_r), Some(paint)) =
                         (&mut crusty_renderer, packet.crusty_paint.as_deref())
                     {
@@ -497,7 +497,7 @@ impl RenderThread {
                     if let Some(cb) = egui_cb {
                         ui_cbs.push(cb);
                     }
-                    #[cfg(feature = "crusty")]
+                    #[cfg(feature = "editor")]
                     if let Some(cb) = crusty_cb {
                         ui_cbs.push(cb);
                     }
@@ -509,7 +509,7 @@ impl RenderThread {
                         let mut cbs = deferred_cb.into_iter().collect::<Vec<_>>();
                         // Mesh-editor preview passes must execute before the
                         // GUI pass that samples their render targets.
-                        #[cfg(feature = "crusty")]
+                        #[cfg(feature = "editor")]
                         cbs.extend(packet.crusty_preview_cbs.iter().cloned());
                         cbs.extend(ui_cbs);
 

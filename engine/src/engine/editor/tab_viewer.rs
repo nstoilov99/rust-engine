@@ -16,7 +16,7 @@ use super::{
     viewport::{EditorCamera, GizmoHandler, ViewportSettings},
     CommandHistory, HierarchyPanel, InspectorPanel, Selection,
 };
-#[cfg(not(feature = "crusty"))]
+#[cfg(not(feature = "editor"))]
 use super::{
     console::{LogLevel, LogMessage},
     console_cmd::CommandContext,
@@ -24,7 +24,7 @@ use super::{
         render_viewport_toolbar_overlay, CameraControlMode, GizmoInteractionResult, ToolMode,
     },
 };
-#[cfg(not(feature = "crusty"))]
+#[cfg(not(feature = "editor"))]
 use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
 use egui::{Color32, RichText, Ui};
@@ -114,27 +114,27 @@ pub struct EditorContext<'a> {
     /// Output: the Console tab's content rect in egui points when it was
     /// visible this frame. The crusty-gui layout pass renders the ported
     /// console panel into this rect instead of the egui version.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_console_rect: &'a mut Option<egui::Rect>,
     /// Output: the Hierarchy tab's content rect in egui points when it was
     /// visible this frame (same mechanism as `crusty_console_rect`).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_hierarchy_rect: &'a mut Option<egui::Rect>,
     /// Output: the Inspector tab's content rect in egui points when it was
     /// visible this frame (same mechanism as `crusty_console_rect`).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_inspector_rect: &'a mut Option<egui::Rect>,
     /// Output: the Asset Browser tab's content rect in egui points when it was
     /// visible this frame (same mechanism as `crusty_console_rect`).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_asset_browser_rect: &'a mut Option<egui::Rect>,
     /// Output: the Profiler tab's content rect in egui points when it was
     /// visible this frame (same mechanism as `crusty_console_rect`).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_profiler_rect: &'a mut Option<egui::Rect>,
     /// Output: the active Viewport tab's content rect in egui points when it
     /// was visible this frame (same mechanism as `crusty_console_rect`).
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub crusty_viewport_rect: &'a mut Option<egui::Rect>,
 }
 
@@ -406,7 +406,7 @@ impl<'a> EditorTabViewer<'a> {
     /// `game_client` draws the toolbar + scene image there) and claims the
     /// space so the dock still sizes the tab normally. The "+" New Scene
     /// button stays here because it sits on the egui tab bar.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_viewport(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         self.render_new_scene_button_on_tab_bar(ui.ctx(), rect);
@@ -415,7 +415,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the 3D viewport with the rendered scene texture (egui fallback)
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_viewport(&mut self, ui: &mut Ui) {
         // Get available size for the viewport (full panel area now, no toolbar taking space)
         let available_size = ui.available_size();
@@ -679,7 +679,7 @@ impl<'a> EditorTabViewer<'a> {
     /// The egui tab only records its content rect (the crusty layout pass
     /// in `game_client` draws the hierarchy there) and claims the space so
     /// the dock still sizes the tab normally.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_hierarchy(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         *self.editor.crusty_hierarchy_rect = Some(rect);
@@ -687,7 +687,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the hierarchy panel (egui fallback).
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_hierarchy(&mut self, ui: &mut Ui) {
         self.editor.hierarchy_panel.show_contents(
             ui,
@@ -702,7 +702,7 @@ impl<'a> EditorTabViewer<'a> {
     /// The egui tab only records its content rect (the crusty layout pass
     /// in `game_client` draws the inspector there) and claims the space so
     /// the dock still sizes the tab normally.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_inspector(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         *self.editor.crusty_inspector_rect = Some(rect);
@@ -710,7 +710,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the inspector panel (egui fallback).
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_inspector(&mut self, ui: &mut Ui) {
         self.editor.inspector_panel.show_contents(
             ui,
@@ -726,7 +726,7 @@ impl<'a> EditorTabViewer<'a> {
     /// With the `crusty` feature the panel is ported to crusty-gui: the
     /// egui tab only records its content rect (same mechanism as the
     /// console) and claims the space so the dock sizes the tab normally.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_asset_browser(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         *self.editor.crusty_asset_browser_rect = Some(rect);
@@ -734,7 +734,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the asset browser panel
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_asset_browser(&mut self, ui: &mut Ui) {
         self.editor.asset_browser.show(ui, self.editor.icon_manager);
     }
@@ -745,7 +745,7 @@ impl<'a> EditorTabViewer<'a> {
     /// egui tab only records its content rect (the crusty layout pass in
     /// `game_client` draws the console there) and claims the space so the
     /// dock still sizes the tab normally.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_console(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         *self.editor.crusty_console_rect = Some(rect);
@@ -753,7 +753,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the console panel (egui fallback).
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_console(&mut self, ui: &mut Ui) {
         let (info_count, warn_count, error_count) = self.editor.console_messages.counts();
 
@@ -923,7 +923,7 @@ impl<'a> EditorTabViewer<'a> {
     /// With the `crusty` feature the panel is ported to crusty-gui: the
     /// egui tab only records its content rect (same mechanism as the
     /// console) and claims the space so the dock sizes the tab normally.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     fn render_profiler(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         *self.editor.crusty_profiler_rect = Some(rect);
@@ -931,7 +931,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// Render the profiler panel (egui fallback).
-    #[cfg(not(feature = "crusty"))]
+    #[cfg(not(feature = "editor"))]
     fn render_profiler(&mut self, ui: &mut Ui) {
         self.editor.profiler_panel.show_contents(ui);
     }

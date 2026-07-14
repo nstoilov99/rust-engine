@@ -117,7 +117,7 @@ impl GizmoHandler {
     /// pointer comes from crusty input and the draw data is painted via
     /// `Painter::mesh`. `hovered` = pointer is over the viewport image and
     /// not captured by a floating crusty layer — the caller decides.
-    #[cfg(feature = "crusty")]
+    #[cfg(feature = "editor")]
     pub fn update_crusty(
         &mut self,
         ui: &mut crusty_gui::context::Ui,
