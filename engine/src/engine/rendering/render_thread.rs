@@ -250,6 +250,20 @@ impl RenderThread {
                         let _ = response.send(RenderEvent::CrustyTexturesRegistered(registered));
                     }
                 }
+                if !packet.crusty_native_registrations.is_empty() {
+                    let registered: Vec<_> = packet
+                        .crusty_native_registrations
+                        .iter()
+                        .map(|(key, view)| (key.clone(), cr.register_native_texture(view.clone())))
+                        .collect();
+                    let _ = response.send(RenderEvent::CrustyNativeRegistered(registered));
+                }
+                for (id, view) in &packet.crusty_native_updates {
+                    cr.update_native_texture(*id, view.clone());
+                }
+                for id in &packet.crusty_native_removals {
+                    cr.remove_native_texture(*id);
+                }
             }
 
             if !has_swapchain {
@@ -493,6 +507,10 @@ impl RenderThread {
                         None
                     } else {
                         let mut cbs = deferred_cb.into_iter().collect::<Vec<_>>();
+                        // Mesh-editor preview passes must execute before the
+                        // GUI pass that samples their render targets.
+                        #[cfg(feature = "crusty")]
+                        cbs.extend(packet.crusty_preview_cbs.iter().cloned());
                         cbs.extend(ui_cbs);
 
                         let mut future: Option<Box<dyn GpuFuture>> =
@@ -507,6 +525,8 @@ impl RenderThread {
                             }
                         }
 
+                        let _submit_guard =
+                            crate::engine::rendering::common::gpu_context::lock_queue_submit();
                         if let Some(future) = future {
                             if let Err(e) = future.flush() {
                                 log::error!("render_thread: editor flush failed: {:?}", e);
@@ -571,6 +591,8 @@ impl RenderThread {
                     }
                 };
 
+                let _submit_guard =
+                    crate::engine::rendering::common::gpu_context::lock_queue_submit();
                 let future = acquire_future
                     .then_execute(gpu.queue.clone(), deferred_cb)
                     .map(|f| {

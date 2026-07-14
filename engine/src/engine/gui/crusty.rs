@@ -401,6 +401,13 @@ impl CrustyRenderer {
                 "pause-fill.png",
                 "stop-fill.png",
                 "skip-forward-fill.png",
+                // Mesh editor material slots.
+                "save-check.svg",
+                "save-changes.svg",
+                "trash.svg",
+                "undo.svg",
+                "tree-view.svg",
+                "add-circle.svg",
             ] {
                 paths.push(parent.join(name));
             }

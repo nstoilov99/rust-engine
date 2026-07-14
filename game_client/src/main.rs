@@ -282,6 +282,31 @@ impl GameApp {
 
         app.begin_frame();
         app.update();
+
+        // Build mesh-preview command buffers before rendering so docked
+        // crusty tabs ship theirs with this frame's packet. Each key's CB
+        // has exactly one consumer: egui secondary window, crusty float
+        // window, or the frame packet (docked crusty tab).
+        #[cfg(feature = "crusty")]
+        let preview_cbs = {
+            let mut kept = Vec::new();
+            for (key, cb) in app.build_mesh_preview_cbs() {
+                let has_egui_window = secondary_windows
+                    .values()
+                    .any(|s| s.kind == SecondaryWindowKind::Mesh && s.editor_key == key);
+                if has_egui_window {
+                    kept.push((key, cb));
+                } else if app.crusty_float_hosts_tab(&format!("mesh:{key}")) {
+                    app.crusty_float_preview_cbs.push((key, cb));
+                } else {
+                    app.crusty_docked_preview_cbs.push((key, cb));
+                }
+            }
+            kept
+        };
+        #[cfg(not(feature = "crusty"))]
+        let preview_cbs = app.build_mesh_preview_cbs();
+
         // Render here directly — going via request_redraw → DWM gates to
         // vblank on Windows (cap ≈ refresh-1 with G-Sync). Bypasses that.
         let render_result = app.render(window);
@@ -450,10 +475,7 @@ impl GameApp {
             }
         }
 
-        // 4. Build mesh-preview command buffers (lazy-init, resize, render).
-        let preview_cbs = app.build_mesh_preview_cbs();
-
-        // 5. Render each secondary window.
+        // 4. Render each secondary window (preview_cbs built before app.render).
         // Snapshot values before mutable borrows.
         let action_set_snapshot = app
             .core

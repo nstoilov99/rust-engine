@@ -371,10 +371,14 @@ impl ThumbnailRenderer {
         let command_buffer = builder.build()?;
 
         // Submit and wait
-        command_buffer
-            .execute(self.queue.clone())?
-            .then_signal_fence_and_flush()?
-            .wait(None)?;
+        let fence = {
+            let _submit_guard =
+                crate::engine::rendering::common::gpu_context::lock_queue_submit();
+            command_buffer
+                .execute(self.queue.clone())?
+                .then_signal_fence_and_flush()?
+        };
+        fence.wait(None)?;
 
         // Read back pixels
         let data = self.readback_buffer.read()?;

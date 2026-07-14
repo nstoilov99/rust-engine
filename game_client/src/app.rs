@@ -260,6 +260,34 @@ pub struct App {
         winit::window::WindowId,
         rust_engine::engine::editor::crusty_window::CrustyFloatWindow,
     >,
+    /// Mesh-preview render targets registered with the render thread's
+    /// crusty renderer, keyed by mesh editor key. `id` is None while the
+    /// registration round-trips via `RenderEvent::CrustyNativeRegistered`.
+    #[cfg(feature = "crusty")]
+    crusty_mesh_textures: std::collections::HashMap<String, CrustyMeshTexture>,
+    /// Preview CBs for mesh tabs docked in the main crusty dock — sent to
+    /// the render thread in the frame packet (executed before the GUI pass).
+    #[cfg(feature = "crusty")]
+    pub crusty_docked_preview_cbs: Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )>,
+    /// Preview CBs for mesh tabs hosted in crusty float windows — chained
+    /// into each float's own submission in `crusty_float_frames`.
+    #[cfg(feature = "crusty")]
+    pub crusty_float_preview_cbs: Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )>,
+}
+
+/// A mesh-preview texture registered (or pending) with the render thread's
+/// crusty renderer. The `view` pointer detects render-target recreation on
+/// resize so the id can be re-pointed via `crusty_native_updates`.
+#[cfg(feature = "crusty")]
+struct CrustyMeshTexture {
+    id: Option<rust_engine::engine::gui::crusty::TextureId>,
+    view: std::sync::Arc<vulkano::image::view::ImageView>,
 }
 
 /// Find the scene id of the currently-focused viewport tab in the dock, if any.
@@ -631,7 +659,7 @@ impl App {
                 ) {
                     Ok(r) => Some(r),
                     Err(e) => {
-                        log::error!("Failed to create MeshPreviewRenderer: {}", e);
+                        eprintln!("Failed to create MeshPreviewRenderer: {}", e);
                         None
                     }
                 },
@@ -658,6 +686,12 @@ impl App {
             pending_crusty_floats: Vec::new(),
             #[cfg(feature = "crusty")]
             crusty_floats: std::collections::HashMap::new(),
+            #[cfg(feature = "crusty")]
+            crusty_mesh_textures: std::collections::HashMap::new(),
+            #[cfg(feature = "crusty")]
+            crusty_docked_preview_cbs: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_float_preview_cbs: Vec::new(),
         })
     }
 
@@ -714,6 +748,24 @@ impl App {
 
     /// Undock a tab from the dock area to a secondary OS window.
     pub fn undock_tab(&mut self, tab: EditorTab) {
+        // Mesh editors float as crusty windows — no egui secondary window.
+        #[cfg(feature = "crusty")]
+        if let EditorTab::MeshEditor(key) = &tab {
+            if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
+                data.open = true;
+            }
+            self.editor.ui.crusty_dock.remove_tab(&tab);
+            self.editor.ui.dock_state.remove_tab(&tab);
+            self.pending_crusty_floats.push(
+                rust_engine::engine::editor::crusty_window::CrustyWindowRequest {
+                    tab: rust_engine::engine::editor::dock_crusty::tab_id(&tab),
+                    main_local: rust_engine::engine::editor::dock_crusty::Pos2::new(
+                        160.0, 160.0,
+                    ),
+                },
+            );
+            return;
+        }
         if let Some((kind, editor_key)) = tab.to_window_kind() {
             // Remove from dock
             self.editor.ui.dock_state.remove_tab(&tab);
@@ -826,6 +878,8 @@ impl App {
     /// Open a mesh file as a dock tab (default behavior).
     pub fn open_mesh_as_tab(&mut self, mesh_key: String) {
         let tab = EditorTab::MeshEditor(mesh_key);
+        #[cfg(feature = "crusty")]
+        self.editor.ui.crusty_dock.open_tab(tab.clone());
         self.editor.ui.dock_state.open_tab(tab);
     }
 
@@ -1864,9 +1918,20 @@ impl App {
                             &meshes,
                             &data.mesh_path,
                         ) {
-                            Ok(state) => data.preview = Some(state),
+                            Ok(state) => {
+                                // Initialize the image layout (General) before any
+                                // GUI pass can sample it — a fresh image is in
+                                // Undefined layout, which is a validation panic.
+                                if let Err(e) = state.texture.clear(
+                                    self.core.renderer.gpu.queue.clone(),
+                                    self.core.renderer.gpu.command_buffer_allocator.clone(),
+                                ) {
+                                    eprintln!("Mesh preview clear failed: {}", e);
+                                }
+                                data.preview = Some(state);
+                            }
                             Err(e) => {
-                                log::error!("Failed to create mesh preview: {}", e);
+                                eprintln!("Failed to create mesh preview: {}", e);
                             }
                         }
                     }
@@ -1882,6 +1947,14 @@ impl App {
                         if let Some(ref renderer) = self.editor.mesh_preview_renderer {
                             if let Ok(true) = preview.resize(renderer, pw, ph) {
                                 data.preview_dirty = true;
+                                // Same layout-init as at creation: the resized
+                                // image must never be sampled while Undefined.
+                                if let Err(e) = preview.texture.clear(
+                                    self.core.renderer.gpu.queue.clone(),
+                                    self.core.renderer.gpu.command_buffer_allocator.clone(),
+                                ) {
+                                    eprintln!("Mesh preview clear failed: {}", e);
+                                }
                             }
                         }
                     }
@@ -1919,7 +1992,7 @@ impl App {
                                         data.preview_dirty = false;
                                     }
                                     Err(e) => {
-                                        log::error!("Mesh preview render error: {}", e);
+                                        eprintln!("Mesh preview render error: {}", e);
                                     }
                                 }
                             }
@@ -1956,6 +2029,16 @@ impl App {
                             .asset_browser
                             .thumbnails
                             .apply_crusty_registered(regs);
+                    }
+                    #[cfg(feature = "crusty")]
+                    rust_engine::engine::rendering::frame_packet::RenderEvent::CrustyNativeRegistered(regs) => {
+                        for (key, tid) in regs {
+                            if let Some(k) = key.strip_prefix("mesh_preview:") {
+                                if let Some(entry) = self.crusty_mesh_textures.get_mut(k) {
+                                    entry.id = Some(tid);
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -2864,6 +2947,17 @@ impl App {
                                     },
                                 );
                                 self.open_mesh_as_tab(relative);
+                            } else {
+                                // Already open: surface the docked tab. A tab
+                                // living in a float OS window stays there.
+                                #[cfg(feature = "crusty")]
+                                let in_float = self
+                                    .crusty_float_hosts_tab(&format!("mesh:{relative}"));
+                                #[cfg(not(feature = "crusty"))]
+                                let in_float = false;
+                                if !in_float {
+                                    self.open_mesh_as_tab(relative);
+                                }
                             }
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
@@ -3472,6 +3566,9 @@ impl App {
                 input_action_panel, input_context_panel, input_settings_panel,
             };
             use rust_engine::engine::editor::menu_bar_crusty::{menu_bar_panel, MenuBarCtx};
+            use rust_engine::engine::editor::mesh_editor_crusty::{
+                mesh_editor_panel, MeshEditorPanelCtx,
+            };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::status_bar_panel;
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
@@ -3523,6 +3620,8 @@ impl App {
             let mc_states = &mut input_context_editor.open_contexts;
             let mc_actions = input_context_editor.available_actions.as_slice();
             let sel = &mut self.editor.scene.selection;
+            let mesh_editors = &mut self.editor.scene.mesh_editors;
+            let mesh_textures = &self.crusty_mesh_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
             let titles = dock_crusty::tab_titles(
@@ -3692,6 +3791,28 @@ impl App {
                                         ),
                                     }
                                 }
+                                Some(EditorTab::MeshEditor(key)) => {
+                                    match mesh_editors.get_mut(&key) {
+                                        Some(data) => mesh_editor_panel(
+                                            ui,
+                                            rect,
+                                            ppp,
+                                            MeshEditorPanelCtx {
+                                                data,
+                                                texture: mesh_textures
+                                                    .get(&key)
+                                                    .and_then(|e| e.id),
+                                                asset_browser: &mut *asset_browser,
+                                                icons,
+                                                float_thumbs: None,
+                                            },
+                                        ),
+                                        None => dock_crusty::placeholder_panel(
+                                            ui,
+                                            "Mesh not loaded.",
+                                        ),
+                                    }
+                                }
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -3826,6 +3947,61 @@ impl App {
                 .asset_browser
                 .thumbnails
                 .poll_crusty();
+
+            // Mesh-preview render targets: register new ones with the render
+            // thread's crusty renderer, re-point ids after a resize recreated
+            // the target, and drop entries for closed editors.
+            let mesh_editors = &self.editor.scene.mesh_editors;
+            self.crusty_mesh_textures.retain(|k, entry| {
+                if mesh_editors.contains_key(k) {
+                    return true;
+                }
+                if let Some(id) = entry.id {
+                    packet.crusty_native_removals.push(id);
+                }
+                false
+            });
+            for (key, data) in mesh_editors.iter() {
+                let Some(ref preview) = data.preview else { continue };
+                if preview.mesh_indices.is_empty() {
+                    continue;
+                }
+                // Only (re)bind a view in a frame whose packet also carries
+                // this key's preview render CB: a freshly created/resized
+                // target is in Undefined layout, and the render thread
+                // sampling it without the CB chained in the same submission
+                // is a validation panic (e.g. while the CB is routed to a
+                // float window during a tab tear-off).
+                let has_cb = self
+                    .crusty_docked_preview_cbs
+                    .iter()
+                    .any(|(k, _)| k == key);
+                if !has_cb {
+                    continue;
+                }
+                let view = preview.texture.image_view();
+                match self.crusty_mesh_textures.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        packet
+                            .crusty_native_registrations
+                            .push((format!("mesh_preview:{key}"), view.clone()));
+                        e.insert(CrustyMeshTexture { id: None, view });
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let entry = e.get_mut();
+                        if !std::sync::Arc::ptr_eq(&entry.view, &view) {
+                            if let Some(id) = entry.id {
+                                packet.crusty_native_updates.push((id, view.clone()));
+                                entry.view = view;
+                            }
+                        }
+                    }
+                }
+            }
+            packet.crusty_preview_cbs = std::mem::take(&mut self.crusty_docked_preview_cbs)
+                .into_iter()
+                .map(|(_, cb)| cb)
+                .collect();
         }
 
         // CRITICAL: re-sync the viewport dimensions and view_projection with the size
@@ -4055,6 +4231,13 @@ impl App {
             self.editor.scene.registry.drop_dormant(id);
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
+            if let Some(key) = tab.strip_prefix("mesh:") {
+                // Closing the tab closes the editor (`open = false` is culled
+                // by the per-frame retain in run_frame, allowing reopen).
+                if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
+                    data.open = false;
+                }
+            }
         }
     }
 
@@ -4071,6 +4254,14 @@ impl App {
         };
         fw.handle_event(event);
         true
+    }
+
+    /// Whether any crusty float window hosts the given dock tab id.
+    #[cfg(feature = "crusty")]
+    pub fn crusty_float_hosts_tab(&self, tab: &str) -> bool {
+        self.crusty_floats
+            .values()
+            .any(|fw| fw.tree.contains_tab(tab))
     }
 
     /// Create OS windows for tabs dropped outside the dock. Window creation
@@ -4153,10 +4344,15 @@ impl App {
             input_action_panel, input_context_panel, input_settings_panel,
         };
         use rust_engine::engine::editor::inspector_crusty::{inspector_panel, InspectorPanelCtx};
+        use rust_engine::engine::editor::mesh_editor_crusty::{
+            mesh_editor_panel, MeshEditorPanelCtx,
+        };
         use rust_engine::engine::editor::profiler_crusty::profiler_panel;
 
         let device = self.core.renderer.gpu.device.clone();
         let queue = self.core.renderer.gpu.queue.clone();
+        let memory_allocator = self.core.renderer.gpu.memory_allocator.clone();
+        let command_buffer_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
         let ppp = self.editor.ui.gui.pixels_per_point();
         let play_mode = self.play_mode();
         let active_scene_id = self.editor.scene.registry.active_id;
@@ -4164,10 +4360,12 @@ impl App {
 
         let Self {
             crusty_floats,
+            crusty_float_preview_cbs,
             editor,
             core,
             ..
         } = self;
+        let mut float_cbs = std::mem::take(crusty_float_preview_cbs);
         let action_set_snapshot = core
             .game_world
             .resource::<InputSubsystem>()
@@ -4188,11 +4386,62 @@ impl App {
         let input_context_editor = &mut editor.scene.input_context_editor;
         let mc_states = &mut input_context_editor.open_contexts;
         let mc_actions = input_context_editor.available_actions.as_slice();
+        let mesh_editors = &mut editor.scene.mesh_editors;
 
         for fw in crusty_floats.values_mut() {
+            let mut tabs = Vec::new();
+            fw.tree.collect_tabs(&mut tabs);
+
+            // Mesh previews hosted here: drop stale textures, register this
+            // window's registry-local ids, claim this window's preview CBs.
+            fw.prune_mesh_textures(|k| tabs.iter().any(|t| t == &format!("mesh:{k}")));
+            let mut cbs = Vec::new();
+            let mut cb_keys = Vec::new();
+            float_cbs.retain(|(k, cb)| {
+                if tabs.iter().any(|t| t == &format!("mesh:{k}")) {
+                    cbs.push(cb.clone());
+                    cb_keys.push(k.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            let mut mesh_tex = std::collections::HashMap::new();
+            for tab in &tabs {
+                let Some(key) = tab.strip_prefix("mesh:") else {
+                    continue;
+                };
+                if let Some(preview) = mesh_editors.get(key).and_then(|d| d.preview.as_ref()) {
+                    if !preview.mesh_indices.is_empty() {
+                        let has_cb = cb_keys.iter().any(|k| k == key);
+                        if let Some(id) =
+                            fw.ensure_mesh_texture(key, preview.texture.image_view(), has_cb)
+                        {
+                            mesh_tex.insert(key.to_string(), id);
+                        }
+                    }
+                }
+            }
+
+            // Material thumbnails: upload the shared cache's retained pixels
+            // into this window's own registry (ids are registry-local).
+            if tabs.iter().any(|t| t.starts_with("mesh:")) {
+                for (aid, (rgba, w, h)) in asset_browser.thumbnails.crusty_rgba_iter() {
+                    fw.register_thumb(
+                        queue.clone(),
+                        memory_allocator.clone(),
+                        command_buffer_allocator.clone(),
+                        aid,
+                        rgba,
+                        *w,
+                        *h,
+                    );
+                }
+            }
+
             let titles =
                 dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, false, dormant, None);
-            let res = fw.frame(device.clone(), queue.clone(), &titles, |ui, tab, icons| {
+            let res = fw.frame(device.clone(), queue.clone(), &titles, cbs, |ui, tab, icons, thumbs| {
                 let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
                 match dock_crusty::parse_tab(tab) {
                     Some(EditorTab::Console) => console_panel(
@@ -4257,6 +4506,21 @@ impl App {
                         }
                         None => dock_crusty::placeholder_panel(ui, "Mapping context not loaded."),
                     },
+                    Some(EditorTab::MeshEditor(key)) => match mesh_editors.get_mut(&key) {
+                        Some(data) => mesh_editor_panel(
+                            ui,
+                            rect,
+                            ppp,
+                            MeshEditorPanelCtx {
+                                data,
+                                texture: mesh_tex.get(&key).copied(),
+                                asset_browser: &mut *asset_browser,
+                                icons,
+                                float_thumbs: Some(thumbs),
+                            },
+                        ),
+                        None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
+                    },
                     _ => dock_crusty::placeholder_panel(
                         ui,
                         "This panel is not yet ported to crusty-gui.",
@@ -4273,7 +4537,15 @@ impl App {
             fw.tree.collect_tabs(&mut tabs);
             if fw.close_requested {
                 for tab in tabs {
-                    dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
+                    if let Some(key) = tab.strip_prefix("mesh:") {
+                        // Asset editors close with their window (`open = false`
+                        // is culled by the per-frame retain in run_frame).
+                        if let Some(data) = mesh_editors.get_mut(key) {
+                            data.open = false;
+                        }
+                    } else {
+                        dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
+                    }
                 }
                 return false;
             }

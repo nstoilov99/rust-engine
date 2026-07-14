@@ -60,6 +60,13 @@ pub struct ThumbnailCache {
     /// texture ids haven't come back yet.
     #[cfg(feature = "crusty")]
     crusty_uploading: std::collections::HashSet<AssetId>,
+    /// Retained pixel data for material thumbnails, so secondary OS windows
+    /// (each with its own texture registry) can upload their own copies.
+    #[cfg(feature = "crusty")]
+    crusty_rgba: HashMap<AssetId, (Vec<u8>, u32, u32)>,
+    /// Assets known to be materials (set on request) — controls rgba retention.
+    #[cfg(feature = "crusty")]
+    material_ids: std::collections::HashSet<AssetId>,
 }
 
 impl ThumbnailCache {
@@ -87,6 +94,10 @@ impl ThumbnailCache {
             crusty_ids: HashMap::new(),
             #[cfg(feature = "crusty")]
             crusty_uploading: std::collections::HashSet::new(),
+            #[cfg(feature = "crusty")]
+            crusty_rgba: HashMap::new(),
+            #[cfg(feature = "crusty")]
+            material_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -168,6 +179,11 @@ impl ThumbnailCache {
             return;
         }
 
+        #[cfg(feature = "crusty")]
+        if asset.asset_type == AssetType::Material {
+            self.material_ids.insert(asset.id);
+        }
+
         if let Some(tx) = &self.request_tx {
             let request = ThumbnailRequest {
                 id: asset.id,
@@ -236,16 +252,32 @@ impl ThumbnailCache {
             self.pending.remove(&result.id);
             if let Some(img) = result.image_data {
                 let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                let (w, h) = (img.size[0] as u32, img.size[1] as u32);
+                if self.material_ids.contains(&result.id) {
+                    self.crusty_rgba.insert(result.id, (rgba.clone(), w, h));
+                }
                 self.crusty_uploading.insert(result.id);
                 out.push(crate::engine::rendering::frame_packet::CrustyTextureUpload {
                     id: result.id,
                     rgba,
-                    width: img.size[0] as u32,
-                    height: img.size[1] as u32,
+                    width: w,
+                    height: h,
                 });
             }
         }
         out
+    }
+
+    /// Retained pixel data for a material thumbnail (for secondary windows).
+    #[cfg(feature = "crusty")]
+    pub fn crusty_rgba(&self, id: AssetId) -> Option<&(Vec<u8>, u32, u32)> {
+        self.crusty_rgba.get(&id)
+    }
+
+    /// All retained material thumbnails (for secondary-window registration).
+    #[cfg(feature = "crusty")]
+    pub fn crusty_rgba_iter(&self) -> impl Iterator<Item = (AssetId, &(Vec<u8>, u32, u32))> {
+        self.crusty_rgba.iter().map(|(k, v)| (*k, v))
     }
 
     /// Record texture ids the render thread registered for earlier uploads.
@@ -270,6 +302,7 @@ impl ThumbnailCache {
             // path yet) — a stale id is dropped, not reused.
             self.crusty_ids.remove(&id);
             self.crusty_uploading.remove(&id);
+            self.crusty_rgba.remove(&id);
         }
     }
 
@@ -281,6 +314,7 @@ impl ThumbnailCache {
         {
             self.crusty_ids.clear();
             self.crusty_uploading.clear();
+            self.crusty_rgba.clear();
         }
     }
 

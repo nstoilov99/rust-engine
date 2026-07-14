@@ -8,16 +8,20 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crusty_gui::context::Ui;
 use crusty_gui::dock::{DockNode, DockState};
 use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
 use crusty_gui::paint::{PaintCmd, RectShape, Stroke, TextureId};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::device::{Device, Queue};
+use vulkano::image::view::ImageView;
 use vulkano::image::Image;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::swapchain::{self, Surface, Swapchain, SwapchainPresentInfo};
+use vulkano::sync::future::FenceSignalFuture;
 use vulkano::sync::GpuFuture;
 use vulkano::{Validated, VulkanError};
 use winit::dpi::PhysicalPosition;
@@ -53,11 +57,17 @@ pub struct CrustyFloatWindow {
     swapchain: Arc<Swapchain>,
     images: Vec<Arc<Image>>,
     recreate_swapchain: bool,
-    previous_frame_end: Option<Box<dyn GpuFuture>>,
+    previous_frame_end: Option<FenceSignalFuture<Box<dyn GpuFuture>>>,
     pub gui: CrustyGui,
     renderer: CrustyRenderer,
     /// This window's own icon uploads (TextureIds are registry-local).
     pub icons: HashMap<String, TextureId>,
+    /// Mesh-preview render targets registered with this window's own
+    /// renderer (ids are registry-local). Key = mesh editor key.
+    pub mesh_textures: HashMap<String, (TextureId, Arc<ImageView>)>,
+    /// Material thumbnails uploaded into this window's registry (the main
+    /// window's thumbnail ids are invalid here).
+    pub thumb_ids: HashMap<crate::engine::assets::AssetId, TextureId>,
     pub tree: DockNode,
     pub state: DockState,
     pub close_requested: bool,
@@ -117,6 +127,8 @@ impl CrustyFloatWindow {
             gui,
             renderer,
             icons,
+            mesh_textures: HashMap::new(),
+            thumb_ids: HashMap::new(),
             tree: DockNode::leaf(tab),
             state: DockState::default(),
             close_requested: false,
@@ -228,15 +240,101 @@ impl CrustyFloatWindow {
         ))
     }
 
+    /// Register or re-point a mesh-preview render target with this window's
+    /// private texture registry. Returns the registry-local id.
+    ///
+    /// `has_cb` = this window executes the key's preview render CB this
+    /// frame. A view is only (re)bound when that CB is chained in the same
+    /// submission — a freshly created/resized target is still in Undefined
+    /// layout, and sampling it without its render CB is a validation panic.
+    /// Without the CB we keep sampling the previous view (valid layout).
+    pub fn ensure_mesh_texture(
+        &mut self,
+        key: &str,
+        view: Arc<ImageView>,
+        has_cb: bool,
+    ) -> Option<TextureId> {
+        match self.mesh_textures.get_mut(key) {
+            Some((id, stored)) => {
+                if !Arc::ptr_eq(stored, &view) && has_cb {
+                    self.renderer.update_native_texture(*id, view.clone());
+                    *stored = view;
+                }
+                Some(*id)
+            }
+            None if has_cb => {
+                let id = self.renderer.register_native_texture(view.clone());
+                self.mesh_textures.insert(key.to_string(), (id, view));
+                Some(id)
+            }
+            None => None,
+        }
+    }
+
+    /// Upload a material thumbnail into this window's registry (no-op if the
+    /// asset is already registered). Pixel data comes from the shared
+    /// `ThumbnailCache`'s retained rgba.
+    pub fn register_thumb(
+        &mut self,
+        queue: Arc<Queue>,
+        memory_allocator: Arc<StandardMemoryAllocator>,
+        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+        id: crate::engine::assets::AssetId,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        if self.thumb_ids.contains_key(&id) {
+            return;
+        }
+        match self.renderer.upload_rgba_texture(
+            queue,
+            memory_allocator,
+            command_buffer_allocator,
+            rgba,
+            width,
+            height,
+        ) {
+            Ok(tex) => {
+                self.thumb_ids.insert(id, tex);
+            }
+            Err(e) => log::warn!("crusty float: thumbnail upload failed: {e}"),
+        }
+    }
+
+    /// Drop mesh-preview textures whose editor key no longer passes `keep`
+    /// (tab re-docked or closed), releasing the registry slots.
+    pub fn prune_mesh_textures(&mut self, keep: impl Fn(&str) -> bool) {
+        let dead: Vec<String> = self
+            .mesh_textures
+            .keys()
+            .filter(|k| !keep(k))
+            .cloned()
+            .collect();
+        for k in dead {
+            if let Some((id, _)) = self.mesh_textures.remove(&k) {
+                self.renderer.remove_native_texture(id);
+            }
+        }
+    }
+
     /// Layout + render one frame. `panel_fn` draws a tab body exactly like
     /// the main dock's closure; it receives this window's own `icons` map
     /// (TextureIds are registry-local, the main window's ids don't apply).
+    /// `preview_cbs` are pre-recorded mesh-preview renders executed before
+    /// the GUI pass so the sampled textures are ready in the same submission.
     pub fn frame(
         &mut self,
         device: Arc<Device>,
         queue: Arc<Queue>,
         titles: &HashMap<String, String>,
-        mut panel_fn: impl FnMut(&mut crusty_gui::context::Ui, &str, &HashMap<String, TextureId>),
+        preview_cbs: Vec<Arc<PrimaryAutoCommandBuffer>>,
+        mut panel_fn: impl FnMut(
+            &mut crusty_gui::context::Ui,
+            &str,
+            &HashMap<String, TextureId>,
+            &HashMap<crate::engine::assets::AssetId, TextureId>,
+        ),
     ) -> Result<(), Box<dyn std::error::Error>> {
         let size = self.window.inner_size();
         let mut tabs = Vec::new();
@@ -270,6 +368,7 @@ impl CrustyFloatWindow {
             tree,
             state,
             icons,
+            thumb_ids,
             ..
         } = self;
         let rect = Rect::from_min_size(
@@ -286,7 +385,7 @@ impl CrustyFloatWindow {
                 .show_close_buttons(true)
                 .min_tab_width(120.0)
                 .tab_bar_height(CAPTION_H)
-                .show_in(ui, rect, |ui, tab| panel_fn(ui, tab, icons));
+                .show_in(ui, rect, |ui, tab| panel_fn(ui, tab, icons, thumb_ids));
             detached = resp.detached;
             close_tab = resp.close_requested;
             let tabs_end_x = resp.tab_bar_slots.first().map_or(rect.min.x, |s| s.end_x);
@@ -317,10 +416,15 @@ impl CrustyFloatWindow {
         if caption.drag && self.drag_out.is_none() {
             let _ = self.window.drag_window();
         }
-
         // ── Render (same submit/present pattern as SecondaryWindow).
-        if let Some(mut prev) = self.previous_frame_end.take() {
-            prev.cleanup_finished();
+        // At most one float frame in flight: frames here are pumped from
+        // OS modal move/resize loops, where an unbounded backlog of pending
+        // presents on the shared queue can wedge a later flush for good.
+        if let Some(prev) = self.previous_frame_end.take() {
+            if prev.wait(Some(Duration::from_secs(1))).is_err() {
+                self.previous_frame_end = Some(prev);
+                return Ok(());
+            }
         }
         if self.recreate_swapchain {
             match recreate_swapchain(device.clone(), self.surface.clone(), self.swapchain.clone())
@@ -340,19 +444,21 @@ impl CrustyFloatWindow {
             }
         }
 
-        let (image_index, suboptimal, acquire_future) =
-            match swapchain::acquire_next_image(self.swapchain.clone(), None) {
-                Ok(r) => r,
-                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => {
-                    log::warn!("crusty float window acquire failed: {e:?}");
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-            };
+        let (image_index, suboptimal, acquire_future) = match swapchain::acquire_next_image(
+            self.swapchain.clone(),
+            Some(Duration::from_millis(500)),
+        ) {
+            Ok(r) => r,
+            Err(Validated::Error(VulkanError::OutOfDate | VulkanError::Timeout)) => {
+                self.recreate_swapchain = true;
+                return Ok(());
+            }
+            Err(e) => {
+                log::warn!("crusty float window acquire failed: {e:?}");
+                self.recreate_swapchain = true;
+                return Ok(());
+            }
+        };
         if suboptimal {
             self.recreate_swapchain = true;
         }
@@ -366,9 +472,18 @@ impl CrustyFloatWindow {
             return Ok(());
         };
 
-        let future = acquire_future
+        let mut pre: Box<dyn GpuFuture> = acquire_future.boxed();
+        for pcb in preview_cbs {
+            pre = pre
+                .then_execute(queue.clone(), pcb)
+                .map_err(|e| format!("crusty float preview execute failed: {e:?}"))?
+                .boxed();
+        }
+        let future = pre
             .then_execute(queue.clone(), cb)
             .map_err(|e| format!("crusty float window execute failed: {e:?}"))?;
+        let _submit_guard =
+            crate::engine::rendering::common::gpu_context::lock_queue_submit();
         if let Err(e) = future.flush() {
             log::error!("crusty float window flush failed: {e:?}");
             // SAFETY: flush attempted — mark finished so the CBEF drop can't
@@ -388,9 +503,10 @@ impl CrustyFloatWindow {
                     image_index,
                 ),
             )
+            .boxed()
             .then_signal_fence_and_flush();
         match present {
-            Ok(f) => self.previous_frame_end = Some(f.boxed()),
+            Ok(f) => self.previous_frame_end = Some(f),
             Err(e) => {
                 log::warn!("crusty float window present failed: {e:?}");
                 self.recreate_swapchain = true;

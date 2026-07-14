@@ -195,6 +195,8 @@ impl SecondaryWindow {
         // detaches it from the render semaphores — the presentation engine
         // then never releases the swapchain images and the window freezes
         // on its first frame (acquire returns NotReady forever after).
+        let _submit_guard =
+            crate::engine::rendering::common::gpu_context::lock_queue_submit();
         let future = future
             .then_execute(queue.clone(), gui_result.command_buffer)
             .map_err(|e| format!("Secondary window execute failed: {:?}", e))?

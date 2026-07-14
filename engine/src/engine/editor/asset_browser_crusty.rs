@@ -30,10 +30,10 @@ use super::asset_browser::{
 use crate::engine::assets::{AssetId, AssetType};
 
 /// dnd payload carried while an asset card / row is dragged.
-struct DragAsset {
-    id: AssetId,
-    asset_type: AssetType,
-    path: PathBuf,
+pub(crate) struct DragAsset {
+    pub(crate) id: AssetId,
+    pub(crate) asset_type: AssetType,
+    pub(crate) path: PathBuf,
 }
 
 /// dnd payload carried while a folder-tree row is dragged.

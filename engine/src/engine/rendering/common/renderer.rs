@@ -419,6 +419,7 @@ impl Renderer {
         command_buffer: Arc<impl vulkano::command_buffer::PrimaryCommandBufferAbstract + 'static>,
         image_index: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let _submit_guard = super::gpu_context::lock_queue_submit();
         let future = acquire_future
             .then_execute(self.gpu.queue.clone(), command_buffer)?
             .then_swapchain_present(
@@ -547,16 +548,19 @@ impl Renderer {
         // 5. Build and submit
         let command_buffer = builder.build()?;
 
-        let future = acquire_future
-            .then_execute(self.gpu.queue.clone(), command_buffer)?
-            .then_swapchain_present(
-                self.gpu.queue.clone(),
-                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain_state.swapchain.clone(),
-                    image_index,
-                ),
-            )
-            .then_signal_fence_and_flush()?;
+        let future = {
+            let _submit_guard = super::gpu_context::lock_queue_submit();
+            acquire_future
+                .then_execute(self.gpu.queue.clone(), command_buffer)?
+                .then_swapchain_present(
+                    self.gpu.queue.clone(),
+                    vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(
+                        self.swapchain_state.swapchain.clone(),
+                        image_index,
+                    ),
+                )
+                .then_signal_fence_and_flush()?
+        };
 
         future.wait(None)?;
 

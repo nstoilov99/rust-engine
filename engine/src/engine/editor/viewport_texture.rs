@@ -119,11 +119,15 @@ impl ViewportTexture {
             CommandBufferUsage::OneTimeSubmit,
         )?;
         builder.clear_color_image(ClearColorImageInfo::image(self.image.clone()))?;
-        builder
-            .build()?
-            .execute(queue)?
-            .then_signal_fence_and_flush()?
-            .wait(None)?;
+        let fence = {
+            let _submit_guard =
+                crate::engine::rendering::common::gpu_context::lock_queue_submit();
+            builder
+                .build()?
+                .execute(queue)?
+                .then_signal_fence_and_flush()?
+        };
+        fence.wait(None)?;
         Ok(())
     }
 

@@ -118,6 +118,29 @@ pub struct FramePacket {
     #[cfg(feature = "crusty")]
     pub crusty_texture_uploads: Vec<CrustyTextureUpload>,
 
+    /// Pre-recorded command buffers (mesh-editor previews) the render
+    /// thread executes before the GUI pass, so the preview textures are
+    /// rendered and layout-transitioned within the same submission that
+    /// samples them.
+    #[cfg(feature = "crusty")]
+    pub crusty_preview_cbs: Vec<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>>,
+
+    /// Image views to register as crusty native textures, keyed by an
+    /// arbitrary string; ids come back via
+    /// [`RenderEvent::CrustyNativeRegistered`].
+    #[cfg(feature = "crusty")]
+    pub crusty_native_registrations: Vec<(String, Arc<ImageView>)>,
+
+    /// Re-point an already-registered crusty native texture at a new image
+    /// view (preview texture resized).
+    #[cfg(feature = "crusty")]
+    pub crusty_native_updates: Vec<(crusty_gui::paint::TextureId, Arc<ImageView>)>,
+
+    /// Crusty native textures to drop (mesh editor closed) so the registry
+    /// doesn't pin dead render targets.
+    #[cfg(feature = "crusty")]
+    pub crusty_native_removals: Vec<crusty_gui::paint::TextureId>,
+
     // Render config
     pub render_mode: RenderMode,
     pub window_dimensions: [u32; 2],
@@ -179,6 +202,10 @@ pub enum RenderEvent {
     CrustyTexturesRegistered(
         Vec<(crate::engine::assets::AssetId, crusty_gui::paint::TextureId)>,
     ),
+    /// Key → crusty texture id for native image views the render thread
+    /// registered from [`FramePacket::crusty_native_registrations`].
+    #[cfg(feature = "crusty")]
+    CrustyNativeRegistered(Vec<(String, crusty_gui::paint::TextureId)>),
 }
 
 impl FramePacket {
@@ -214,6 +241,14 @@ impl FramePacket {
             crusty_paint: None,
             #[cfg(feature = "crusty")]
             crusty_texture_uploads: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_preview_cbs: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_registrations: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_updates: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_removals: Vec::new(),
             render_mode: RenderMode::Standalone,
             window_dimensions,
             #[cfg(feature = "editor")]
@@ -258,6 +293,14 @@ impl FramePacket {
             crusty_paint: None,
             #[cfg(feature = "crusty")]
             crusty_texture_uploads: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_preview_cbs: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_registrations: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_updates: Vec::new(),
+            #[cfg(feature = "crusty")]
+            crusty_native_removals: Vec::new(),
             render_mode: RenderMode::Editor,
             window_dimensions,
             viewport_dimensions,

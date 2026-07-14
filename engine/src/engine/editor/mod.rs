@@ -71,6 +71,8 @@ mod menu_bar;
 #[cfg(feature = "crusty")]
 pub mod menu_bar_crusty;
 pub mod mesh_editor;
+#[cfg(feature = "crusty")]
+pub mod mesh_editor_crusty;
 pub mod play_mode;
 pub mod profiler;
 #[cfg(feature = "crusty")]
