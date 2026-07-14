@@ -1,13 +1,8 @@
-//! Asset Browser panel rendered with crusty-gui (Phase 16 port).
+//! Asset Browser panel rendered with crusty-gui.
 //!
-//! Reads/writes the exact same `AssetBrowserPanel` state (registry,
-//! selection, events, rename/delete/drag state) as the egui version in
-//! `asset_browser/`; with the `crusty` feature enabled the egui tab only
-//! records its content rect and this panel draws there.
-//!
-//! Deliberate improvements over the egui original: list-view headers
-//! actually sort (egui's only toggled the arrow), Enter confirms the
-//! delete dialog, and Escape also cancels an in-flight drag.
+//! Uses [`AssetBrowserPanel`] (registry, selection, events, rename/delete/
+//! drag state) from `asset_browser/`. List-view headers actually sort,
+//! Enter confirms the delete dialog, Escape cancels an in-flight drag.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -42,8 +37,7 @@ struct DragFolder {
     name: String,
 }
 
-/// List-view sort state, kept in crusty memory (the egui panel's headers
-/// only toggled the arrow without sorting — fixed here).
+/// List-view sort state, kept in crusty memory.
 #[derive(Clone, Copy)]
 struct ListSortState {
     col: u8, // 0 = Name, 1 = Type, 2 = Size, 3 = Modified
@@ -59,8 +53,7 @@ struct RenameFocusKey(u64);
 #[derive(Clone)]
 struct RenameBuffer(String);
 
-/// Borrowed asset-browser state — the same struct the egui tab viewer uses,
-/// so both UIs stay in lockstep.
+/// Borrowed asset-browser state.
 pub struct AssetBrowserPanelCtx<'a> {
     pub panel: &'a mut AssetBrowserPanel,
     /// GPU-uploaded editor icon set keyed by file stem
@@ -68,9 +61,8 @@ pub struct AssetBrowserPanelCtx<'a> {
     pub icons: &'a HashMap<String, TextureId>,
 }
 
-/// Owned per-frame snapshot of one visible asset, so rendering can mutate
-/// the panel freely (the egui views use deferred response structs for the
-/// same reason).
+/// Owned per-frame snapshot of one visible asset so rendering can mutate
+/// the panel freely.
 struct AssetRow {
     id: AssetId,
     name: String,
@@ -84,11 +76,11 @@ struct AssetRow {
     thumb: Option<TextureId>,
 }
 
-// egui parity colors (sRGB → linear at the boundary, like all crusty colors).
+// Reference-matched colors (sRGB → linear at the boundary).
 fn sel_bg() -> Color {
-    // egui blends translucent fills in gamma space, crusty in linear — bake
-    // the gamma blend: t=100/255 of the accent (245,143,46) over the content
-    // bg (24,24,28).
+    // Historical selection tint: t=100/255 of the accent (245,143,46) over
+    // the content bg (24,24,28), baked to a solid sRGB value (the source
+    // reference blended in gamma space, so no linear-blend equivalent).
     Color::from_srgb_u8(111, 71, 35, 255)
 }
 fn sel_border() -> Color {
@@ -136,8 +128,8 @@ fn type_icon_stem(t: AssetType) -> &'static str {
     }
 }
 
-/// Rough y-m-d from the unix epoch — same approximation the egui list view
-/// uses, kept identical for parity.
+/// Rough y-m-d from the unix epoch — cheap approximation used by the list
+/// view; not calendar-accurate.
 fn format_date(t: SystemTime) -> String {
     let secs = t
         .duration_since(std::time::UNIX_EPOCH)
@@ -168,14 +160,9 @@ fn truncate_to_width(ui: &mut Ui, text: &str, size: f32, max_w: f32) -> String {
     out
 }
 
-/// Draw the asset browser into the dock tab's content rect. `tab_rect` is
-/// in egui points; `ppp` (egui pixels_per_point) maps it into crusty's
-/// physical-pixel space.
-pub fn asset_browser_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: AssetBrowserPanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Draw the asset browser into the dock tab's content rect (physical pixels).
+pub fn asset_browser_panel(ui: &mut Ui, tab_rect: Rect, ctx: AssetBrowserPanelCtx) {
+    let rect = tab_rect;
     let opts = UiOptions {
         padding: Vec2::new(0.0, 0.0),
         spacing: 0.0,
@@ -252,7 +239,7 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Ass
             ui.separator();
             ui.add_space((panel_top + 74.0 - ui.cursor().y).max(0.0));
 
-            // egui paints the folder/grid area on the inner-panel fill
+            // paint the folder/grid area on the inner-panel fill
             // (surface[1]); only the toolbar/breadcrumb strips keep tab fill.
             ui.painter().rect_filled(
                 Rect::from_min_max(Pos2::new(rect.min.x, panel_top + 74.0), rect.max),
@@ -267,7 +254,7 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Ass
             if panel.show_folders {
                 let cell = std::cell::RefCell::new(&mut *panel);
                 Splitter::horizontal("asset_browser_split")
-                    // egui SidePanel default_width(180.0)
+                    // Side panel default width 180.0
                     .default_ratio((180.0 / rect.width().max(1.0)).clamp(0.1, 0.5))
                     .min_sizes(120.0, 200.0)
                     .show(
@@ -470,7 +457,7 @@ fn icon_toggle(
         style.palette.surface_active,
     );
     let resp = if let Some(&tex) = icons.get(stem) {
-        // egui parity: bg chip (idle too), white→gray icon tint.
+        // Bg chip (idle too), white → gray icon tint.
         let rect = ui.allocate(Vec2::splat(20.0));
         let resp = ui.interact(Id::new("ab_icon_toggle").with(stem), rect);
         let bg = if active {
@@ -527,7 +514,7 @@ fn render_toolbar(
     let row_center_y = row.min.y + 11.0;
 
     ui.horizontal(|ui| {
-        // egui toolbar item_spacing.x is 8.0 (crusty default gap is tighter).
+        // Reference toolbar item_spacing.x is 8.0 (crusty default gap is tighter).
         ui.set_spacing(8.0);
         ui.add_space(6.0);
         if icon_toggle(
@@ -672,7 +659,7 @@ fn crumb(ui: &mut Ui, id: Id, text: &str, selected: bool) -> bool {
     let rect = ui.allocate(Vec2::new(sz.x + 12.0, 20.0));
     let resp = ui.interact(id, rect);
     if selected {
-        // egui selectable_label: selection fill = accent × 0.35, accent text.
+        // Selectable-label style: selection fill = accent × 0.35, accent text.
         let fill = Color::rgba(accent.r * 0.35, accent.g * 0.35, accent.b * 0.35, 1.0);
         ui.painter().rect_filled(rect, 3.0, fill);
     } else if resp.hovered {
@@ -870,7 +857,7 @@ fn render_folder_node(
         let center_y = row_rect.center().y;
         let row_id = Id::new("ab_folder_row").with(hash_key(&node.path));
 
-        // Interaction rect excludes the chevron column, like the egui tree.
+        // Interaction rect excludes the chevron column, like the historical tree.
         let body_rect = Rect::from_min_max(
             Pos2::new(left + indent + FOLDER_INDENT, row_rect.min.y),
             row_rect.max,
@@ -878,7 +865,7 @@ fn render_folder_node(
         let resp = ui.interact(row_id, body_rect);
 
         // Highlights hug the row content (chevron → label end) like the
-        // egui tree, not the full pane width.
+        // historical tree, not the full pane width.
         let body_font = ui.style().fonts.body;
         let name_w = ui.painter().measure_text(&node.name, body_font, None).x;
         let hl_rect = Rect::from_min_max(
@@ -1152,8 +1139,8 @@ fn handle_asset_click(ui: &Ui, panel: &mut AssetBrowserPanel, id: AssetId, visib
     panel.events.push(AssetBrowserEvent::AssetSelected { id });
 }
 
-/// Context menu shared by grid cards and list rows. "Copy Path" from the
-/// egui menu is omitted — crusty has no clipboard API yet.
+/// Context menu shared by grid cards and list rows. "Copy Path" is omitted —
+/// crusty has no clipboard API yet.
 fn asset_context_menu(ui: &mut Ui, panel: &mut AssetBrowserPanel, row: &AssetRow, rect: Rect) {
     let mut open = false;
     let mut rename = false;
@@ -1801,7 +1788,7 @@ fn render_delete_confirmation(ui: &mut Ui, panel: &mut AssetBrowserPanel) {
 // ─── drag payload sync ──────────────────────────────────────────────────
 
 /// Mirror the crusty dnd state into `panel.drag_payload` so external
-/// consumers (viewport drop) see the same state as under egui.
+/// consumers (viewport drop) see the same state.
 fn sync_drag_payload(ui: &Ui, panel: &mut AssetBrowserPanel) {
     if let Some(d) = ui.ctx().dnd.peek::<DragAsset>() {
         panel.drag_payload = Some(DragPayload::Asset(AssetDragPayload {

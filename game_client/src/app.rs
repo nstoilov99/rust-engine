@@ -129,7 +129,7 @@ pub struct ViewportState {
     pub gizmo_handler: GizmoHandler,
     pub grid_visible: bool,
     pub hovered: bool,
-    pub rect: egui::Rect,
+    pub rect: rust_engine::engine::editor::dock_crusty::Rect,
     pub cursor_locked: bool,
     pub drag_start_cursor_pos: Option<(f32, f32)>,
     pub settings: ViewportSettings,
@@ -553,7 +553,9 @@ impl App {
                 gizmo_handler: GizmoHandler::new(),
                 grid_visible: true,
                 hovered: false,
-                rect: egui::Rect::NOTHING,
+                // ZERO stands in for "not yet laid out"; the viewport panel
+                // overwrites this on its first frame.
+                rect: rust_engine::engine::editor::dock_crusty::Rect::ZERO,
                 cursor_locked: false,
                 drag_start_cursor_pos: None,
                 settings: ViewportSettings::default(),
@@ -936,7 +938,7 @@ impl App {
             EditorAction::ToggleDevShowcase => {
                 self.push_action_unavailable(
                     "Widget Showcase",
-                    "the egui-only showcase window is not available in crusty builds",
+                    "the showcase window is not available in this build",
                 );
             }
             EditorAction::SelectAll => {
@@ -1611,8 +1613,8 @@ impl App {
     /// Build mesh-preview command buffers for all active mesh editors.
     ///
     /// Must be called **before** the secondary-window render loop so each
-    /// CB can be chained with its window's acquire → egui → present chain.
-    /// This keeps the preview render and the egui sample in the **same**
+    /// CB can be chained with its window's acquire → UI → present chain.
+    /// This keeps the preview render and the UI sample in the **same**
     /// Vulkan submission, eliminating cross-submission layout/memory issues.
     pub fn build_mesh_preview_cbs(
         &mut self,
@@ -1705,10 +1707,10 @@ impl App {
                     // Always render the preview when we have mesh data and a
                     // valid size.  The CB must be in the submission chain every
                     // frame (matching the main viewport pattern) so vulkano's
-                    // AutoCommandBufferBuilder in the egui CB correctly tracks
+                    // AutoCommandBufferBuilder in the UI CB correctly tracks
                     // the image layout transition and inserts a proper barrier
                     // with memory-visibility flags.  Rendering only when dirty
-                    // leaves frames without a preview CB, and the egui builder
+                    // leaves frames without a preview CB, and the UI builder
                     // then inserts an Undefined→ShaderReadOnlyOptimal barrier
                     // that can discard content (white square).
                     if !preview.mesh_indices.is_empty() && pw > 0 && ph > 0 {
@@ -1970,22 +1972,19 @@ impl App {
             ));
         }
 
-        // Compute layout rects for the crusty pass in egui points (crusty
-        // panel fns still take egui::Rect; the type migration is a later
-        // milestone). ppp comes from the winit scale factor since the
-        // egui pixels_per_point source is gone with the egui layout pass.
-        let ppp = self.core.window.scale_factor() as f32;
+        // Compute layout rects for the crusty pass in physical pixels
+        // (crusty runs at pixels_per_point = 1.0, so the values below are the
+        // exact screen coordinates the panels draw to).
+        use rust_engine::engine::editor::dock_crusty::{Pos2 as CPos2, Rect as CRect};
         let size = self.core.window.inner_size();
-        let screen_w = size.width as f32 / ppp;
-        let screen_h = size.height as f32 / ppp;
+        let screen_w = size.width as f32;
+        let screen_h = size.height as f32;
         let crusty_screen_rect =
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(screen_w, screen_h));
+            CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, screen_h));
         let crusty_menu_bar_rect =
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(screen_w, 24.0));
-        let crusty_status_bar_rect = egui::Rect::from_min_max(
-            egui::pos2(0.0, screen_h - 22.0),
-            egui::pos2(screen_w, screen_h),
-        );
+            CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, 24.0));
+        let crusty_status_bar_rect =
+            CRect::from_min_max(CPos2::new(0.0, screen_h - 22.0), CPos2::new(screen_w, screen_h));
 
         let is_hovering_files = self.crusty_gui.is_hovering_external_files();
 
@@ -2093,18 +2092,18 @@ impl App {
             MenuAction::RebuildShaders => self.rebuild_all_shaders(),
             #[cfg(feature = "editor-debug")]
             MenuAction::ToggleIconInspector => {
-                // Icon Inspector was an egui secondary-window tool; removed
-                // along with the egui runtime.
+                // Icon Inspector was a secondary-window tool tied to the old
+                // UI runtime; removed along with that runtime.
                 self.push_action_unavailable(
                     "Icon Inspector",
-                    "the egui-only inspector window is not available in crusty builds",
+                    "the inspector window is not available in this build",
                 );
             }
             #[cfg(feature = "editor-debug")]
             MenuAction::ToggleShowcase => {
                 self.push_action_unavailable(
                     "Widget Showcase",
-                    "the egui-only showcase window is not available in crusty builds",
+                    "the showcase window is not available in this build",
                 );
             }
         }
@@ -2926,7 +2925,6 @@ impl App {
             for fw in self.crusty_floats.values_mut() {
                 fw.released = false;
             }
-            let ppp = self.core.window.scale_factor() as f32;
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -2987,7 +2985,6 @@ impl App {
                 crusty_menu_action = menu_bar_panel(
                     ui,
                     crusty_menu_bar_rect,
-                    ppp,
                     MenuBarCtx {
                         dock_state: crusty_dock,
                         command_history: &*vp_command_history,
@@ -2998,15 +2995,12 @@ impl App {
                         icons,
                     },
                 );
-                status_bar_panel(ui, crusty_status_bar_rect, ppp, status_bar_state);
+                status_bar_panel(ui, crusty_status_bar_rect, status_bar_state);
 
                 // Dock: everything between the menu and status strips.
-                let dock_rect = dock_crusty::rect_px(
-                    egui::Rect::from_min_max(
-                        egui::pos2(crusty_screen_rect.min.x, crusty_menu_bar_rect.max.y),
-                        egui::pos2(crusty_screen_rect.max.x, crusty_status_bar_rect.min.y),
-                    ),
-                    ppp,
+                let dock_rect = CRect::from_min_max(
+                    CPos2::new(crusty_screen_rect.min.x, crusty_menu_bar_rect.max.y),
+                    CPos2::new(crusty_screen_rect.max.x, crusty_status_bar_rect.min.y),
                 );
                 let ext = float_ext
                     .take()
@@ -3017,16 +3011,15 @@ impl App {
                     dock_crusty::DockArea::new(&mut crusty_dock.tree, &mut crusty_dock.state)
                         .titles(&titles)
                         .show_close_buttons(true)
-                        .min_tab_width(120.0 * ppp)
-                        .tab_bar_height(28.0 * ppp)
+                        .min_tab_width(120.0)
+                        .tab_bar_height(28.0)
                         .external_drag(ext)
                         .show_in(ui, dock_rect, |ui, tab| {
-                            let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
+                            let rect = ui.clip_rect();
                             match dock_crusty::parse_tab(tab) {
                                 Some(EditorTab::Console) => console_panel(
                                     ui,
                                     rect,
-                                    ppp,
                                     ConsolePanelCtx {
                                         messages: &mut console.messages,
                                         filter: &mut console.log_filter,
@@ -3039,7 +3032,6 @@ impl App {
                                 Some(EditorTab::Hierarchy) => hierarchy_panel(
                                     ui,
                                     rect,
-                                    ppp,
                                     HierarchyPanelCtx {
                                         panel: hierarchy,
                                         world: &mut *world,
@@ -3052,7 +3044,6 @@ impl App {
                                 Some(EditorTab::Inspector) => inspector_panel(
                                     ui,
                                     rect,
-                                    ppp,
                                     InspectorPanelCtx {
                                         panel: inspector,
                                         world: &mut *world,
@@ -3065,20 +3056,18 @@ impl App {
                                 Some(EditorTab::AssetBrowser) => asset_browser_panel(
                                     ui,
                                     rect,
-                                    ppp,
                                     AssetBrowserPanelCtx {
                                         panel: &mut *asset_browser,
                                         icons,
                                     },
                                 ),
                                 Some(EditorTab::Profiler) => {
-                                    profiler_panel(ui, rect, ppp, profiler)
+                                    profiler_panel(ui, rect, profiler)
                                 }
                                 Some(EditorTab::Viewport(id)) if id == active_scene_id => {
                                     viewport_panel(
                                         ui,
                                         rect,
-                                        ppp,
                                         ViewportPanelCtx {
                                             texture: crusty_viewport_texture,
                                             viewport_size: &mut vp.size,
@@ -3104,12 +3093,12 @@ impl App {
                                     "Activating scene...",
                                 ),
                                 Some(EditorTab::InputSettings) => {
-                                    input_settings_panel(ui, rect, ppp, input_settings, action_set)
+                                    input_settings_panel(ui, rect, input_settings, action_set)
                                 }
                                 Some(EditorTab::InputActionEditor(key)) => {
                                     match ia_states.get_mut(&key) {
                                         Some(state) => {
-                                            input_action_panel(ui, rect, ppp, &key, state)
+                                            input_action_panel(ui, rect, &key, state)
                                         }
                                         None => dock_crusty::placeholder_panel(
                                             ui,
@@ -3120,7 +3109,7 @@ impl App {
                                 Some(EditorTab::InputContextEditor(key)) => {
                                     match mc_states.get_mut(&key) {
                                         Some(state) => input_context_panel(
-                                            ui, rect, ppp, &key, state, mc_actions,
+                                            ui, rect, &key, state, mc_actions,
                                         ),
                                         None => dock_crusty::placeholder_panel(
                                             ui,
@@ -3133,7 +3122,6 @@ impl App {
                                         Some(data) => mesh_editor_panel(
                                             ui,
                                             rect,
-                                            ppp,
                                             MeshEditorPanelCtx {
                                                 data,
                                                 texture: mesh_textures
@@ -3196,7 +3184,7 @@ impl App {
 
                 // Last so they draw above the panels (menus/tooltips live in
                 // the overlay list and stay on top regardless).
-                toasts_panel(ui, crusty_screen_rect, ppp, live_toasts);
+                toasts_panel(ui, crusty_screen_rect, live_toasts);
 
                 use rust_engine::engine::editor::{command_palette_crusty, dialogs_crusty};
                 crusty_dialog_actions = dialogs_crusty::dialog_stack_panel(ui, dialog_stack);
@@ -3214,10 +3202,7 @@ impl App {
                     save_as_cancel = dialogs_crusty::save_as_dialog_panel(ui, dlg);
                 }
                 if is_hovering_files {
-                    dialogs_crusty::file_drop_overlay(
-                        ui,
-                        dock_crusty::rect_px(crusty_screen_rect, ppp),
-                    );
+                    dialogs_crusty::file_drop_overlay(ui, crusty_screen_rect);
                 }
             });
             if save_as_cancel {
@@ -3322,11 +3307,12 @@ impl App {
         }
 
         // CRITICAL: re-sync the viewport dimensions and view_projection with the size
-        // the egui layout just produced (it ran *after* the initial packet build above
+        // the UI layout just produced (it ran *after* the initial packet build above
         // and updated `viewport.size` to the current available rect). Without this,
-        // the 3D scene is rendered at the previous frame's size while egui paints the
-        // texture into the new-size rect, producing visible scaling artifacts on every
-        // resize step (banding/blocky stripes on meshes and shadows during fast drag).
+        // the 3D scene is rendered at the previous frame's size while the UI paints
+        // the texture into the new-size rect, producing visible scaling artifacts
+        // on every resize step (banding/blocky stripes on meshes and shadows during
+        // fast drag).
         let (vp_w_now, vp_h_now) = self.editor.viewport.size;
         if vp_w_now > 0 && vp_h_now > 0 {
             self.editor
@@ -3513,9 +3499,9 @@ impl App {
         self.editor.scene.registry.drop_dormant(id);
     }
 
-    /// Handle a crusty dock ×-close click. Unlike egui_dock, the tree is not
-    /// mutated yet — this is the veto point: the last scene tab is refused,
-    /// anything else is committed via `close_tab`.
+    /// Handle a crusty dock ×-close click. The tree is not mutated yet —
+    /// this is the veto point: the last scene tab is refused, anything else
+    /// is committed via `close_tab`.
     #[cfg(feature = "editor")]
     fn handle_crusty_tab_close(&mut self, tab: &str) {
         use rust_engine::engine::editor::dock_crusty;
@@ -3659,7 +3645,6 @@ impl App {
         let queue = self.core.renderer.gpu.queue.clone();
         let memory_allocator = self.core.renderer.gpu.memory_allocator.clone();
         let command_buffer_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
-        let ppp = self.core.window.scale_factor() as f32;
         let play_mode = self.play_mode();
         let active_scene_id = self.editor.scene.registry.active_id;
         let scene_name = self.editor.scene.current_scene_name.clone();
@@ -3748,12 +3733,11 @@ impl App {
             let titles =
                 dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, false, dormant, None);
             let res = fw.frame(device.clone(), queue.clone(), &titles, cbs, |ui, tab, icons, thumbs| {
-                let rect = dock_crusty::rect_pts(ui.clip_rect(), ppp);
+                let rect = ui.clip_rect();
                 match dock_crusty::parse_tab(tab) {
                     Some(EditorTab::Console) => console_panel(
                         ui,
                         rect,
-                        ppp,
                         ConsolePanelCtx {
                             messages: &mut console.messages,
                             filter: &mut console.log_filter,
@@ -3766,7 +3750,6 @@ impl App {
                     Some(EditorTab::Hierarchy) => hierarchy_panel(
                         ui,
                         rect,
-                        ppp,
                         HierarchyPanelCtx {
                             panel: hierarchy,
                             world: &mut *world,
@@ -3779,7 +3762,6 @@ impl App {
                     Some(EditorTab::Inspector) => inspector_panel(
                         ui,
                         rect,
-                        ppp,
                         InspectorPanelCtx {
                             panel: inspector,
                             world: &mut *world,
@@ -3792,23 +3774,22 @@ impl App {
                     Some(EditorTab::AssetBrowser) => asset_browser_panel(
                         ui,
                         rect,
-                        ppp,
                         AssetBrowserPanelCtx {
                             panel: &mut *asset_browser,
                             icons,
                         },
                     ),
-                    Some(EditorTab::Profiler) => profiler_panel(ui, rect, ppp, profiler),
+                    Some(EditorTab::Profiler) => profiler_panel(ui, rect, profiler),
                     Some(EditorTab::InputSettings) => {
-                        input_settings_panel(ui, rect, ppp, input_settings, action_set)
+                        input_settings_panel(ui, rect, input_settings, action_set)
                     }
                     Some(EditorTab::InputActionEditor(key)) => match ia_states.get_mut(&key) {
-                        Some(state) => input_action_panel(ui, rect, ppp, &key, state),
+                        Some(state) => input_action_panel(ui, rect, &key, state),
                         None => dock_crusty::placeholder_panel(ui, "Input action not loaded."),
                     },
                     Some(EditorTab::InputContextEditor(key)) => match mc_states.get_mut(&key) {
                         Some(state) => {
-                            input_context_panel(ui, rect, ppp, &key, state, mc_actions)
+                            input_context_panel(ui, rect, &key, state, mc_actions)
                         }
                         None => dock_crusty::placeholder_panel(ui, "Mapping context not loaded."),
                     },
@@ -3816,7 +3797,6 @@ impl App {
                         Some(data) => mesh_editor_panel(
                             ui,
                             rect,
-                            ppp,
                             MeshEditorPanelCtx {
                                 data,
                                 texture: mesh_tex.get(&key).copied(),

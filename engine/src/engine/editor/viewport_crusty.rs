@@ -1,8 +1,8 @@
-//! Viewport panel rendered with crusty-gui (Phase 16 port).
+//! Viewport panel rendered with crusty-gui.
 //!
-//! Reads/writes the same viewport state as the egui version. One
-//! user-approved deviation: the toolbar is a dedicated strip *above* the
-//! scene image instead of a floating overlay, so nothing covers the render.
+//! One user-approved deviation from the historical reference: the toolbar
+//! is a dedicated strip *above* the scene image instead of a floating
+//! overlay, so nothing covers the render.
 
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
 use hecs::{Entity, World};
 
-// ── colors (egui toolbar palette, premultiplied → straight alpha) ───────────
+// ── colors (toolbar palette, premultiplied → straight alpha) ───────────────
 
 fn gray(v: u8) -> Color {
     Color::from_srgb_u8(v, v, v, 255)
@@ -49,15 +49,14 @@ const BUTTON_W: f32 = 26.0;
 const BUTTON_H: f32 = 24.0;
 const ICON_PX: f32 = 16.0; // uniform icon size, centered with padding
 
-/// Everything the viewport panel reads/writes — same state as the egui
-/// version (no logic forks).
+/// Everything the viewport panel reads/writes.
 pub struct ViewportPanelCtx<'a> {
     /// Crusty texture id of the viewport render target (None until ready).
     pub texture: Option<TextureId>,
     /// Output: desired render size in physical pixels (drives texture resize).
     pub viewport_size: &'a mut (u32, u32),
-    /// Output: image rect in egui logical points (camera input gating).
-    pub viewport_rect: &'a mut egui::Rect,
+    /// Output: image rect in screen-space pixels (camera input gating).
+    pub viewport_rect: &'a mut Rect,
     /// Output: pointer is over the scene image.
     pub viewport_hovered: &'a mut bool,
     pub settings: &'a mut ViewportSettings,
@@ -75,18 +74,15 @@ pub struct ViewportPanelCtx<'a> {
     pub delta_ms: f32,
 }
 
-/// Render the viewport panel into `tab_rect` (egui points).
-pub fn viewport_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: ViewportPanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Render the viewport panel into `tab_rect` (physical pixels).
+pub fn viewport_panel(ui: &mut Ui, tab_rect: Rect, ctx: ViewportPanelCtx) {
+    let rect = tab_rect;
     let opts = UiOptions {
         padding: Vec2::ZERO,
         spacing: 0.0,
     };
     ui.run_at(rect, Direction::TopDown, Id::new("engine_viewport_panel"), opts, |ui| {
-        panel_body(ui, rect, ppp, ctx);
+        panel_body(ui, rect, 1.0, ctx);
     });
 }
 
@@ -116,11 +112,8 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
         placeholder(ui, image_rect, s);
     }
 
-    // Camera input gating reads this rect in egui logical points.
-    *ctx.viewport_rect = egui::Rect::from_min_max(
-        egui::pos2(image_rect.min.x / s, image_rect.min.y / s),
-        egui::pos2(image_rect.max.x / s, image_rect.max.y / s),
-    );
+    // Camera input gating reads this rect in physical pixels.
+    *ctx.viewport_rect = image_rect;
     let hovered = ui.contains_pointer(image_rect);
     *ctx.viewport_hovered = hovered;
 
@@ -151,7 +144,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
         }
     }
 
-    // ── gizmo (same sync + result handling as the egui path)
+    // ── gizmo (sync + result handling)
     ctx.gizmo.mode = ctx.settings.tool_mode;
     ctx.gizmo.orientation = ctx.settings.gizmo_orientation;
     ctx.gizmo.snap_translate = ctx.settings.snap_translate;
@@ -164,16 +157,12 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
         if let Some(entity) = ctx.selected {
             let view = ctx.camera.view_matrix();
             let proj = ctx.camera.projection_matrix_for_gizmo();
-            let gizmo_rect = egui::Rect::from_min_max(
-                egui::pos2(image_rect.min.x, image_rect.min.y),
-                egui::pos2(image_rect.max.x, image_rect.max.y),
-            );
             let result = ctx.gizmo.update_crusty(
                 ui,
                 hovered,
                 view,
                 proj,
-                gizmo_rect,
+                image_rect,
                 Some(entity),
                 ctx.world,
             );
@@ -684,7 +673,7 @@ fn camera_speed_button(
                 .show(ui);
         });
 
-        // Logarithmic slider (matches the egui version's feel).
+        // Logarithmic slider.
         let slider_rect = ui.allocate(Vec2::new(ui.available().width(), 16.0 * s));
         let resp = ui.interact(Id::new("vp_camera_speed_slider"), slider_rect);
         let track = Rect::from_min_max(

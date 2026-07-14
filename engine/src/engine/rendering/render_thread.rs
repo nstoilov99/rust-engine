@@ -372,7 +372,7 @@ impl RenderThread {
             if is_editor {
                 #[cfg(feature = "editor")]
                 {
-                    // Editor mode: render deferred to viewport texture, then egui to swapchain
+                    // Editor mode: render deferred to viewport texture, then the UI to swapchain
                     let deferred_cb = if let Some(ref vt) = viewport_texture {
                         crate::profile_scope!("record_deferred");
                         let render_target = RenderTarget::Texture {
@@ -401,7 +401,7 @@ impl RenderThread {
                     };
 
                     // crusty-gui pass composits over the deferred output — the
-                    // editor's sole UI pass now that egui is out.
+                    // editor's sole UI pass now that the old runtime is out.
                     let crusty_cb = if let (Some(ref mut crusty_r), Some(paint)) =
                         (&mut crusty_renderer, packet.crusty_paint.as_deref())
                     {

@@ -91,11 +91,16 @@ impl GizmoHandler {
         hovered: bool,
         view_matrix: Mat4,
         projection_matrix: Mat4,
-        viewport_rect: egui::Rect,
+        viewport_rect: crusty_gui::math::Rect,
         selected_entity: Option<Entity>,
         world: &World,
     ) -> GizmoInteractionResult {
         use transform_gizmo::GizmoInteraction;
+
+        // transform-gizmo's `GizmoConfig::viewport` takes an `emath::Rect`
+        // (re-exported as `transform_gizmo::math::Rect`); convert once here
+        // so the rest of the editor works in crusty screen-space coords.
+        let viewport_rect = crusty_to_emath_rect(viewport_rect);
 
         let cursor = ui.ctx().input.pointer_pos.unwrap_or_default();
         let pointer_pressed = ui.ctx().input.pointer_pressed;
@@ -143,7 +148,7 @@ impl GizmoHandler {
         &mut self,
         view_matrix: Mat4,
         projection_matrix: Mat4,
-        viewport_rect: egui::Rect,
+        viewport_rect: transform_gizmo::math::Rect,
         selected_entity: Option<Entity>,
         world: &World,
         pointer_released: bool,
@@ -433,6 +438,16 @@ fn adapt_view_matrix_for_zup(view_yup: Mat4) -> Mat4 {
     );
 
     view_yup * zup_to_yup
+}
+
+/// Convert a crusty screen-space [`Rect`](crusty_gui::math::Rect) into the
+/// [`emath::Rect`] that `transform-gizmo`'s config takes.
+#[cfg(feature = "editor")]
+fn crusty_to_emath_rect(r: crusty_gui::math::Rect) -> transform_gizmo::math::Rect {
+    transform_gizmo::math::Rect::from_min_max(
+        transform_gizmo::math::Pos2::new(r.min.x, r.min.y),
+        transform_gizmo::math::Pos2::new(r.max.x, r.max.y),
+    )
 }
 
 /// Convert glam Mat4 (column-major) to mint RowMatrix4<f64> (row-major)

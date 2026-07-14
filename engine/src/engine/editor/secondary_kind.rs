@@ -1,6 +1,6 @@
 //! Editor tab / editor-window kind tag.
 //!
-//! Formerly lived in `secondary_window.rs` (deleted along with the egui
+//! Formerly lived in `secondary_window.rs` (deleted along with the old
 //! secondary-OS-window system). The enum survives because `EditorAction`
 //! and per-editor save/dirty state key off it.
 //!

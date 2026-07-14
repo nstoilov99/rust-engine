@@ -1,8 +1,6 @@
 //! Console log system with color-coded messages and filtering
 
-// `egui::Color32` is retained on live crusty signatures (`LogLevel::color`) as
-// part of the shared editor colour type; the type migration is deferred.
-use egui::Color32;
+use crusty_gui::math::Color;
 use std::collections::VecDeque;
 
 pub const MAX_CONSOLE_MESSAGES: usize = 2000;
@@ -17,11 +15,11 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// Get the color for this log level
-    pub fn color(&self) -> Color32 {
+    pub fn color(&self) -> Color {
         match self {
-            LogLevel::Info => Color32::from_gray(200),
-            LogLevel::Warning => Color32::from_rgb(255, 200, 100),
-            LogLevel::Error => Color32::from_rgb(255, 100, 100),
+            LogLevel::Info => Color::from_srgb_u8(200, 200, 200, 255),
+            LogLevel::Warning => Color::from_srgb_u8(255, 200, 100, 255),
+            LogLevel::Error => Color::from_srgb_u8(255, 100, 100, 255),
         }
     }
 

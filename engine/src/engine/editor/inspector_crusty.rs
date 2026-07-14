@@ -1,15 +1,12 @@
-//! Inspector panel rendered with crusty-gui (Phase 16 port).
+//! Inspector panel rendered with crusty-gui.
 //!
-//! Reads/writes the same `InspectorPanel` state and world components as the
-//! egui version in `inspector_panel.rs`; with the `crusty` feature enabled
-//! the egui tab only records its content rect and this panel draws there.
-//!
-//! Intentional deviations from the egui reference (user-approved):
+//! Reads/writes [`InspectorPanel`] state (see `inspector_panel.rs`) and
+//! world components. Intentional deviations from the historical reference
+//! (user-approved):
 //! - Sliders use crusty-gui's slider design.
 //! - Color fields use crusty-gui's `ColorPicker` (Unreal/Unity/Godot style
-//!   popup with cached swatches) instead of egui's color button.
-//! - Asset slots are searchable dropdowns (no drag-and-drop / thumbnails —
-//!   egui DnD payloads can't cross into the crusty pass).
+//!   popup with cached swatches).
+//! - Asset slots are searchable dropdowns (no drag-and-drop / thumbnails).
 
 use crusty_gui::context::Ui;
 use crusty_gui::id::Id;
@@ -60,10 +57,10 @@ const PROP_LABEL_W: f32 = 90.0;
 const VEC3_LABEL_W: f32 = 52.0;
 const VEC3_RESET_W: f32 = 20.0;
 const VEC3_INPUT_W: f32 = 92.0;
-// Matches the egui reference numeric-field height and 26px row pitch.
+// Numeric-field height and 26px row pitch.
 const FIELD_H: f32 = 22.0;
 
-/// Borrowed inspector state — the same structs the egui tab viewer uses.
+/// Borrowed inspector state.
 pub struct InspectorPanelCtx<'a> {
     pub panel: &'a mut InspectorPanel,
     pub world: &'a mut World,
@@ -83,7 +80,7 @@ struct Picker<'a> {
     icon: Option<TextureId>,
 }
 
-/// Deferred component removals (mirrors the egui panel's `ComponentAction`).
+/// Deferred component removals.
 enum ComponentAction {
     RemoveCamera,
     RemoveMeshRenderer,
@@ -96,13 +93,9 @@ enum ComponentAction {
     RemoveParticleEffect,
 }
 
-/// Draw the inspector into the dock tab's content rect. `tab_rect` is in
-/// egui points; `ppp` maps it into crusty's physical-pixel space.
-pub fn inspector_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: InspectorPanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Draw the inspector into the dock tab's content rect (physical pixels).
+pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
+    let rect = tab_rect;
     let opts = crusty_gui::context::UiOptions {
         padding: Vec2::new(0.0, 4.0),
         spacing: 4.0,
@@ -134,7 +127,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Inspect
                 return;
             };
 
-            // Invalidate caches if entity changed (same scheme as egui).
+            // Invalidate caches if entity changed.
             if panel.last_entity != Some(entity) {
                 panel.euler_cache.clear();
                 panel.last_entity = Some(entity);
@@ -370,7 +363,7 @@ fn component_section(
         1.0,
         style.palette.stroke,
     );
-    // Gap between sections, outside the accent stripe (egui reference has ~5px).
+    // Gap between sections, outside the accent stripe (~5px).
     ui.add_space(5.0);
 
     remove
@@ -454,7 +447,7 @@ fn vec3_row(
 }
 
 /// Property row with a crusty slider + linked drag field (user-approved
-/// replacement for egui's inline slider design).
+/// crusty-native slider design).
 fn slider_row(
     ui: &mut Ui,
     label: &str,
@@ -469,7 +462,7 @@ fn slider_row(
         Slider::new(value, range.clone()).width(slider_w).show(ui);
         ui.add_space(6.0);
         DragValue::new(value)
-            // egui slider gradient: value change per dragged pixel.
+            // Slider gradient: value change per dragged pixel.
             .speed(span / slider_w)
             .range(range)
             .suffix(suffix)
@@ -535,8 +528,8 @@ fn color_row(
     })
 }
 
-/// Searchable asset dropdown (replaces the egui thumbnail slot; DnD from the
-/// egui asset browser can't reach the crusty pass, so selection is
+/// Searchable asset dropdown (no thumbnails; DnD from the
+/// asset browser is out of scope here, so selection is
 /// popup-only).
 fn asset_slot_row(
     ui: &mut Ui,
@@ -798,7 +791,7 @@ fn edit_name(ui: &mut Ui, world: &mut World, entity: Entity) {
         component_section(ui, "Name", CAT_CORE, false, |ui| {
             property_row(ui, "Name:", |ui| {
                 let field_bg = ui.style().palette.surface;
-                // egui's spacing.text_edit_width
+                // text_edit_width
                 let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
                 TextEdit::new(&mut name.0)
                     .width(w)

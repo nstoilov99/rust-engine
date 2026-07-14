@@ -1,14 +1,11 @@
-//! crusty-gui integration mirroring the egui [`Gui`](super::Gui) seam.
+//! crusty-gui integration seam for the editor.
 //!
-//! Phase 16 of the crusty-gui roadmap: the editor UI migrates from egui to
-//! our in-house library panel by panel. The egui split is mirrored across
-//! threads: [`CrustyGui`] lives on the main thread (event translation +
-//! CPU-only layout, like `Gui::layout`), [`CrustyRenderer`] lives on the
-//! render thread (records a command buffer targeting the swapchain image,
-//! like the render thread's `EguiRenderer`). The paint list crosses in the
-//! `FramePacket`; the glyph shaper/atlas is shared between both halves
-//! behind a mutex (layout shapes text on the main thread, the renderer
-//! flushes queued glyph uploads while recording).
+//! Split across threads: [`CrustyGui`] lives on the main thread (event
+//! translation + CPU-only layout), [`CrustyRenderer`] lives on the render
+//! thread (records a command buffer targeting the swapchain image). The
+//! paint list crosses in the `FramePacket`; the glyph shaper/atlas is shared
+//! between both halves behind a mutex (layout shapes text on the main
+//! thread, the renderer flushes queued glyph uploads while recording).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +17,7 @@ use crusty_gui::backend::TargetRenderer;
 use crusty_gui::context::{Context, CursorIcon, Ui};
 use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
-use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
+use crusty_gui::math::{Pos2, Rect, Rounding, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureFilter};
 pub use crusty_gui::paint::TextureId;
 use crusty_gui::shell::input as shell_input;
@@ -45,36 +42,32 @@ use winit::event::WindowEvent;
 /// render-thread record pass.
 pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
 
-/// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`] so
-/// ported panels visually match their egui counterparts. egui's effective
-/// pixels_per_point is 1.0 at runtime (the 1.15 init in `Gui` is
-/// overwritten by `full_output.pixels_per_point` each frame), so theme
-/// point values map 1:1 to crusty's physical pixels — no pre-scaling.
+/// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`]. The
+/// runtime pixels_per_point is 1.0, so theme point values map 1:1 to
+/// crusty's physical pixels — no pre-scaling.
 pub fn style_from_theme(theme: &EditorTheme) -> Style {
-    let c = |c32: egui::Color32| Color::from_srgb_u8(c32.r(), c32.g(), c32.b(), c32.a());
-
     let p = &theme.palette;
     let sp = &theme.spacing;
     let ty = &theme.typography;
 
     let mut style = Style::editor_dark();
 
-    style.palette.surface = c(p.field_bg);
-    style.palette.surface_hover = c(p.surface[3]);
-    style.palette.surface_active = c(p.surface[4]);
-    style.palette.accent = c(p.accent);
-    // Zero alpha disables crusty's hover glow — egui hover is a plain 1px
-    // accent stroke, no shadow.
-    style.palette.accent_glow = c(p.accent).with_alpha(0.0);
-    style.palette.text = c(p.text_primary);
-    style.palette.text_dim = c(p.text_secondary);
-    style.palette.stroke = c(p.stroke);
-    style.palette.stroke_hover = c(p.accent);
-    style.palette.success = c(p.semantic.success);
-    // Dock chrome: panel bodies on surface[1] (egui's panel bg), tab strip
-    // on the darker surface[0] so the active tab connects to its body.
-    style.palette.panel = c(p.surface[1]);
-    style.palette.tab_bar = c(p.surface[0]);
+    style.palette.surface = p.field_bg;
+    style.palette.surface_hover = p.surface[3];
+    style.palette.surface_active = p.surface[4];
+    style.palette.accent = p.accent;
+    // Zero alpha disables crusty's hover glow — the reference hover is a
+    // plain 1px accent stroke, no shadow.
+    style.palette.accent_glow = p.accent.with_alpha(0.0);
+    style.palette.text = p.text_primary;
+    style.palette.text_dim = p.text_secondary;
+    style.palette.stroke = p.stroke;
+    style.palette.stroke_hover = p.accent;
+    style.palette.success = p.semantic.success;
+    // Dock chrome: panel bodies on surface[1], tab strip on the darker
+    // surface[0] so the active tab connects to its body.
+    style.palette.panel = p.surface[1];
+    style.palette.tab_bar = p.surface[0];
 
     style.spacing.item = sp.item_spacing_y;
     style.spacing.padding = sp.window_margin;
@@ -82,7 +75,7 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.spacing.box_label_gap = 6.0;
 
     style.fonts.body = ty.body;
-    // egui's `ui.heading` maps TextStyle::Heading to `heading_large`.
+    // `ui.heading` maps to `heading_large`.
     style.fonts.title = ty.heading_large;
     style.fonts.small = ty.caption;
 
@@ -102,7 +95,7 @@ pub struct CrustyLayoutResult {
     pub wants_keyboard: bool,
     pub wants_pointer: bool,
     /// Pointer is held by a crusty floating layer / pressed widget / drag.
-    /// While set, pointer events must be withheld from egui too, or clicks
+    /// While set, pointer events must be withheld from the game input too, or clicks
     /// on floating crusty popups leak into the dock beneath them.
     pub owns_pointer: bool,
     pub cursor_icon: CursorIcon,
@@ -130,16 +123,9 @@ impl CrustyGui {
     pub fn new(device: Arc<Device>, screen_size: [f32; 2]) -> Self {
         let mut ctx = Context::new();
         ctx.style = style_from_theme(&EditorTheme::dark_default());
-        let mut text = TextRenderer::new(device, [1024, 1024]);
-        // Shape with the same font egui uses (its bundled default,
-        // Ubuntu-Light) so ported panels match the egui ones glyph-for-glyph
-        // instead of falling back to the OS default font.
-        let fonts = egui::FontDefinitions::default();
-        if let Some(data) = fonts.font_data.get("Ubuntu-Light") {
-            if let Some(family) = text.load_font(data.font.to_vec()) {
-                text.set_default_family(family);
-            }
-        }
+        let text = TextRenderer::new(device, [1024, 1024]);
+        // TextRenderer falls back to the OS default font. (The previously
+        // bundled Ubuntu-Light shortcut is gone with the old runtime.)
         Self {
             ctx,
             text: Arc::new(Mutex::new(text)),
@@ -286,7 +272,7 @@ impl CrustyRenderer {
     }
 
     /// Record the UI paint list into `target` (typically the swapchain
-    /// image, after the scene / egui pass) and return the command buffer.
+    /// image, after the scene pass) and return the command buffer.
     /// `backdrop` is what glass panels blur; `clear` clears the target
     /// first instead of compositing over it.
     ///

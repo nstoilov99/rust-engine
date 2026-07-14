@@ -2,7 +2,7 @@
 //!
 //! Shown when model files (FBX, OBJ, glTF) are dropped onto the editor.
 //! Follows the same `Option<DialogState>` pattern as `DeleteConfirmation`.
-//! The egui rendering fn was removed; the crusty analog lives in
+//! The old rendering fn was removed; the crusty analog lives in
 //! `dialogs_crusty::import_dialog_panel`.
 
 use crate::engine::assets::mesh_import::MeshImportSettings;

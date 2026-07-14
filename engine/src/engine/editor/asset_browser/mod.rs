@@ -1,9 +1,9 @@
 //! Asset Browser Panel state.
 //!
-//! The egui rendering fns (`show`, `render_toolbar`, `render_folder_tree`,
+//! The old rendering fns (`show`, `render_toolbar`, `render_folder_tree`,
 //! `render_content`, `render_breadcrumb`, `render_delete_confirmation`,
 //! `handle_view_response`, `handle_keyboard`) and the `views` submodule
-//! (`FolderTreeView`, `GridView`, `ListView`) were removed as part of the egui
+//! (`FolderTreeView`, `GridView`, `ListView`) were removed as part of the UI
 //! teardown. The crusty analog lives in `asset_browser_crusty`. This module
 //! now only exports the panel state + supporting types.
 

@@ -1,6 +1,6 @@
 //! Scene hierarchy panel state.
 //!
-//! The egui rendering fns (`show`, `show_contents`, `render_header`,
+//! The old rendering fns (`show`, `show_contents`, `render_header`,
 //! `render_search`, `render_tree`, `render_row`, `draw_tree_guides`,
 //! `render_visibility_toggle`, `render_context_menu`, `handle_drag_drop`,
 //! `draw_insertion_line`, `render_drag_ghost`, `handle_keyboard_shortcuts`)
@@ -12,9 +12,7 @@ use crate::engine::ecs::{
     Camera, Children, DirectionalLight, EditorVisibility, EntityGuid, MeshRenderer, Name, Parent,
     PointLight, Transform,
 };
-// `egui::Color32` is retained per the "keep egui types on live crusty signatures"
-// rule — `entity_icon_stem` returns a tint that the crusty renderer consumes.
-use egui::Color32;
+use crusty_gui::math::Color;
 use hecs::{Entity, World};
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -46,7 +44,7 @@ pub(crate) struct VisibleRow {
     pub(crate) icon_stem: &'static str,
     /// Tint applied when the SVG is rendered. White by default — set it
     /// only when an entity kind needs a brand colour.
-    pub(crate) icon_tint: Color32,
+    pub(crate) icon_tint: Color,
     /// Editor visibility flag, mirrored into the row so render code can
     /// dim the entry without re-querying. True == shown.
     pub(crate) is_visible: bool,
@@ -103,8 +101,7 @@ pub struct HierarchyPanel {
     /// Reusable buffer for flat visible rows (avoids per-frame allocation).
     pub(crate) flat_rows: Vec<VisibleRow>,
     /// One-shot flag: the rename editor should grab keyboard focus on its
-    /// next frame. Set by `start_rename`, consumed by the crusty port
-    /// (egui re-requests focus every frame instead).
+    /// next frame. Set by `start_rename`, consumed by the crusty port.
     pub(crate) rename_needs_focus: bool,
 }
 
@@ -262,20 +259,19 @@ impl HierarchyPanel {
     ///   1. Dropping `engine/icons/hierarchy/<your_name>.svg`,
     ///   2. Adding a branch here returning `("your_name", tint)`.
     /// No registry edit needed — the icon set is auto-discovered at startup.
-    pub(crate) fn entity_icon_stem(world: &World, entity: Entity) -> (&'static str, Color32) {
+    pub(crate) fn entity_icon_stem(world: &World, entity: Entity) -> (&'static str, Color) {
         if world.get::<&Camera>(entity).is_ok() {
-            return ("camera", Color32::WHITE);
+            return ("camera", Color::WHITE);
         }
         if world.get::<&DirectionalLight>(entity).is_ok() || world.get::<&PointLight>(entity).is_ok() {
-            return ("sun", Color32::WHITE);
+            return ("sun", Color::WHITE);
         }
         // Default for everything else (groups, meshes, generics) — covers
         // entries with `Children`, `MeshRenderer`, or no special component.
         let _ = (world.get::<&MeshRenderer>(entity), world.get::<&Children>(entity));
-        ("object", Color32::WHITE)
+        ("object", Color::WHITE)
     }
-    /// Set (or insert) the `EditorVisibility` component. Shared by the egui
-    /// and crusty eye toggles.
+    /// Set (or insert) the `EditorVisibility` component.
     pub(crate) fn set_visibility(world: &mut World, entity: Entity, new_visible: bool) {
         // Scope the mutable component borrow so it's dropped before
         // `insert_one` (which needs a mutable borrow of the world itself).
@@ -371,7 +367,7 @@ impl HierarchyPanel {
     }
 
     /// Classify a pointer y against a row spanning `top..bottom`. Takes raw
-    /// coordinates (not an egui rect) so the crusty port can share it.
+    /// coordinates so the crusty port can share it.
     pub(crate) fn calculate_drop_mode(&self, mouse_y: f32, top: f32, bottom: f32) -> DropMode {
         let row_height = bottom - top;
         let top_zone = top + row_height * 0.25;

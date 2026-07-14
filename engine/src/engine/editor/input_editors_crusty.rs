@@ -1,7 +1,7 @@
 //! Input settings / input action / mapping context editors rendered with
 //! crusty-gui (Phase 16 port).
 //!
-//! Reads/writes the same state structs as the egui versions
+//! Reads/writes the input editor state structs from `input_action_editor` / `input_context_editor` / `input_settings_panel`
 //! (`InputSettingsPanel`, `InputActionEditorState`, `InputContextEditorState`);
 //! shared labels/variant tables come from `input_settings_panel`.
 
@@ -67,7 +67,7 @@ fn small_red_button(ui: &mut Ui, text: &str) -> bool {
     Button::new(text).size(small).text_color(red()).show(ui).clicked
 }
 
-/// Stroke-framed group (egui `ui.group` analogue): full available width,
+/// Stroke-framed group: full available width,
 /// content padded, 1px stroke around the used height.
 fn group<R>(ui: &mut Ui, id_src: &str, f: impl FnOnce(&mut Ui) -> R) -> R {
     let style = ui.style();
@@ -81,14 +81,14 @@ fn group<R>(ui: &mut Ui, id_src: &str, f: impl FnOnce(&mut Ui) -> R) -> R {
     };
     let id = ui.alloc_id(("input_group", id_src));
     let (r, used) = ui.run_at(inner, Direction::TopDown, id, opts, f);
-    // Fit the frame to the content (egui group behavior), not the full width.
+    // Fit the frame to the content, not the full width.
     let bg = Rect::from_min_max(top, Pos2::new(used.max.x + pad, used.max.y + pad));
     ui.painter().rect_stroke(bg, 4.0, 1.0, style.palette.stroke);
     ui.allocate(Vec2::new(bg.width(), bg.height()));
     r
 }
 
-/// Indented block (egui `ui.indent` analogue).
+/// Indented block.
 fn indent<R>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> R) -> R {
     ui.horizontal(|ui| {
         ui.add_space(16.0);
@@ -102,7 +102,7 @@ fn combo_item(ui: &mut Ui, selected: bool, label: &str) -> bool {
     SelectableValue::new(&mut sel, true, label).show(ui).clicked
 }
 
-/// Debug-formatted enum combo (egui `render_enum_combo` analogue).
+/// Debug-formatted enum combo.
 fn enum_combo<T: Copy + PartialEq + std::fmt::Debug>(
     ui: &mut Ui,
     id: String,
@@ -162,7 +162,7 @@ fn key_group(ui: &mut Ui, title: &str, keys: &[KeyCode], current: &mut KeyCode) 
     }
 }
 
-/// Key-code combo with grouped sections (egui `render_key_combo` analogue).
+/// Key-code combo with grouped sections.
 /// Tall content scrolls via the ComboBox popup height cap.
 fn key_combo(ui: &mut Ui, id: String, current: &mut KeyCode) {
     ComboBox::new(id)
@@ -218,12 +218,11 @@ fn drag_u32(ui: &mut Ui, v: &mut u32, prefix: &str) {
 /// Draw the Input Settings panel into the dock tab's content rect.
 pub fn input_settings_panel(
     ui: &mut Ui,
-    tab_rect: egui::Rect,
-    ppp: f32,
+    tab_rect: Rect,
     panel: &mut InputSettingsPanel,
     resource_set: Option<&InputActionSet>,
 ) {
-    let rect = super::dock_crusty::rect_px(tab_rect, ppp);
+    let rect = tab_rect;
     let style = ui.style();
     let opts = UiOptions {
         padding: Vec2::new(6.0, 4.0),
@@ -837,12 +836,11 @@ fn file_path_bar(ui: &mut Ui, path: &std::path::Path) {
 /// namespaces widget ids so several open action tabs don't collide.
 pub fn input_action_panel(
     ui: &mut Ui,
-    tab_rect: egui::Rect,
-    ppp: f32,
+    tab_rect: Rect,
     key: &str,
     state: &mut InputActionEditorState,
 ) {
-    let rect = super::dock_crusty::rect_px(tab_rect, ppp);
+    let rect = tab_rect;
     let style = ui.style();
     let opts = UiOptions {
         padding: Vec2::new(6.0, 4.0),
@@ -972,13 +970,12 @@ pub fn input_action_panel(
 /// Draw one mapping context editor into the dock tab's content rect.
 pub fn input_context_panel(
     ui: &mut Ui,
-    tab_rect: egui::Rect,
-    ppp: f32,
+    tab_rect: Rect,
     key: &str,
     state: &mut InputContextEditorState,
     available_actions: &[String],
 ) {
-    let rect = super::dock_crusty::rect_px(tab_rect, ppp);
+    let rect = tab_rect;
     let style = ui.style();
     let opts = UiOptions {
         padding: Vec2::new(6.0, 4.0),
@@ -1253,8 +1250,7 @@ pub fn input_context_panel(
             state.dirty = dirty;
             if let Some(lb) = start_listen {
                 state.listening_binding = Some(lb);
-                state.listen_start_modifiers =
-                    crusty_mods_to_egui(ui.ctx().input.modifiers);
+                state.listen_start_modifiers = ui.ctx().input.modifiers;
             }
 
             file_path_bar(ui, &state.file_path);
@@ -1329,7 +1325,7 @@ fn listening_overlay(ui: &mut Ui, panel_rect: Rect, listening: &mut Option<(usiz
     }
 }
 
-// ── Input detection (crusty analogues of the egui helpers) ─────────────────
+// ── Input detection ─────────────────────────────────────────────────────────
 
 /// Scan this frame's crusty input for a key or mouse button press.
 fn detect_input(ui: &Ui) -> Option<InputSource> {
@@ -1351,35 +1347,23 @@ fn detect_input(ui: &Ui) -> Option<InputSource> {
 }
 
 /// Detect modifier-only presses (crusty maps modifier keys to `Key::Unknown`,
-/// so — like egui — they only show up in the modifier flags). Compares against
-/// the state captured when listening started.
-fn detect_modifier_press(ui: &Ui, start: &egui::Modifiers) -> Option<InputSource> {
+/// so they only show up in the modifier flags). Compares against the state
+/// captured when listening started.
+fn detect_modifier_press(ui: &Ui, start: &CModifiers) -> Option<InputSource> {
     let m = ui.ctx().input.modifiers;
-    if m.contains(CModifiers::SHIFT) && !start.shift {
+    if m.contains(CModifiers::SHIFT) && !start.contains(CModifiers::SHIFT) {
         return Some(InputSource::Key(KeyCode::ShiftLeft));
     }
-    if m.contains(CModifiers::CTRL) && !start.ctrl {
+    if m.contains(CModifiers::CTRL) && !start.contains(CModifiers::CTRL) {
         return Some(InputSource::Key(KeyCode::ControlLeft));
     }
-    if m.contains(CModifiers::ALT) && !start.alt {
+    if m.contains(CModifiers::ALT) && !start.contains(CModifiers::ALT) {
         return Some(InputSource::Key(KeyCode::AltLeft));
     }
-    if m.contains(CModifiers::META) && !start.command {
+    if m.contains(CModifiers::META) && !start.contains(CModifiers::META) {
         return Some(InputSource::Key(KeyCode::SuperLeft));
     }
     None
-}
-
-/// crusty modifiers → egui modifiers (the state struct stores the egui type
-/// while both UIs coexist).
-fn crusty_mods_to_egui(m: CModifiers) -> egui::Modifiers {
-    egui::Modifiers {
-        alt: m.contains(CModifiers::ALT),
-        ctrl: m.contains(CModifiers::CTRL),
-        shift: m.contains(CModifiers::SHIFT),
-        mac_cmd: false,
-        command: m.contains(CModifiers::META),
-    }
 }
 
 fn crusty_key_to_keycode(key: CKey) -> Option<KeyCode> {

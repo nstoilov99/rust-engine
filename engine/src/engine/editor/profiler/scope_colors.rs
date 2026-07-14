@@ -1,10 +1,30 @@
-//! Scope color mapping based on duration
+//! Scope color mapping based on duration.
 //!
-//! Maps scope durations to colors for visual representation in the profiler.
+//! Duration → colour for the flamegraph and frame bars. The arithmetic stays
+//! in sRGB u8 component space (lerp / darken / lighten / dim on `[u8; 4]`) so
+//! the user-approved bar colours don't shift: linear-space lerps between the
+//! same sRGB endpoints would produce visibly different midpoint hues. Only
+//! the *edges* of this module convert to the linear-space crusty [`Color`]
+//! that the paint layer wants.
 
-use egui::Color32;
+use crusty_gui::math::Color;
 
 use super::data::ProfilerSettings;
+
+/// Internal representation: sRGB u8 components. All arithmetic below is
+/// component-wise on these tuples; conversion to [`Color`] happens only at
+/// the `pub fn` boundary.
+type Srgba = [u8; 4];
+
+const fn srgb(r: u8, g: u8, b: u8) -> Srgba {
+    [r, g, b, 255]
+}
+
+/// Convert an sRGB-component tuple to the linear-space runtime [`Color`].
+#[inline]
+fn to_color(c: Srgba) -> Color {
+    Color::from_srgb_u8(c[0], c[1], c[2], c[3])
+}
 
 /// Get the color for a scope based on its duration
 /// Uses the pink→salmon→orange→red→dark-red palette from Figma:
@@ -14,18 +34,22 @@ use super::data::ProfilerSettings;
 /// - #FF8252 - Slow (orange)
 /// - #FF5252 - Critical (red)
 /// - #700000 - Blocking/clogging engine (very dark red)
-pub fn scope_color(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
+pub fn scope_color(duration_ms: f64, settings: &ProfilerSettings) -> Color {
+    to_color(scope_color_srgb(duration_ms, settings))
+}
+
+fn scope_color_srgb(duration_ms: f64, settings: &ProfilerSettings) -> Srgba {
     if duration_ms < settings.fast_threshold_ms as f64 {
         // Fast - light pink
-        Color32::from_rgb(0xFF, 0xC4, 0xD3) // #FFC4D3
+        srgb(0xFF, 0xC4, 0xD3) // #FFC4D3
     } else if duration_ms < settings.warning_threshold_ms as f64 {
         // Normal to Warning - lerp light pink → salmon
         let t = ((duration_ms - settings.fast_threshold_ms as f64)
             / (settings.warning_threshold_ms - settings.fast_threshold_ms) as f64)
             .clamp(0.0, 1.0) as f32;
-        lerp_color(
-            Color32::from_rgb(0xFF, 0xA1, 0xDC), // #FFA1DC pink
-            Color32::from_rgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
+        lerp_srgb(
+            srgb(0xFF, 0xA1, 0xDC), // #FFA1DC pink
+            srgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
             t,
         )
     } else if duration_ms < settings.slow_threshold_ms as f64 {
@@ -33,9 +57,9 @@ pub fn scope_color(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
         let t = ((duration_ms - settings.warning_threshold_ms as f64)
             / (settings.slow_threshold_ms - settings.warning_threshold_ms) as f64)
             .clamp(0.0, 1.0) as f32;
-        lerp_color(
-            Color32::from_rgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
-            Color32::from_rgb(0xFF, 0x82, 0x52), // #FF8252 orange
+        lerp_srgb(
+            srgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
+            srgb(0xFF, 0x82, 0x52), // #FF8252 orange
             t,
         )
     } else if duration_ms < settings.slow_threshold_ms as f64 * 2.0 {
@@ -43,20 +67,20 @@ pub fn scope_color(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
         let t = ((duration_ms - settings.slow_threshold_ms as f64)
             / settings.slow_threshold_ms as f64)
             .clamp(0.0, 1.0) as f32;
-        lerp_color(
-            Color32::from_rgb(0xFF, 0x82, 0x52), // #FF8252 orange
-            Color32::from_rgb(0xFF, 0x52, 0x52), // #FF5252 red
+        lerp_srgb(
+            srgb(0xFF, 0x82, 0x52), // #FF8252 orange
+            srgb(0xFF, 0x52, 0x52), // #FF5252 red
             t,
         )
     } else {
         // Blocking/clogging - very dark red (engine is stalling)
-        Color32::from_rgb(0x70, 0x00, 0x00) // #700000
+        srgb(0x70, 0x00, 0x00) // #700000
     }
 }
 
 /// Get color for frame bar based on duration (deprecated, use frame_bar_color_fps)
 #[allow(dead_code)]
-pub fn frame_bar_color(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
+pub fn frame_bar_color(duration_ms: f64, settings: &ProfilerSettings) -> Color {
     scope_color(duration_ms, settings)
 }
 
@@ -65,82 +89,85 @@ pub fn frame_bar_color(duration_ms: f64, settings: &ProfilerSettings) -> Color32
 /// - Green: >60 FPS (<16.67ms) - good performance
 /// - Yellow: 30-60 FPS (16.67-33.33ms) - acceptable
 /// - Red: <30 FPS (>33.33ms) - poor performance
-#[allow(dead_code)]
-pub fn frame_bar_color_fps(duration_ms: f64) -> Color32 {
+pub fn frame_bar_color_fps(duration_ms: f64) -> Color {
     let fps = 1000.0 / duration_ms;
-    if fps > 60.0 {
-        // Green - good performance (>60 FPS)
-        Color32::from_rgb(80, 200, 80)
+    let c = if fps > 60.0 {
+        srgb(80, 200, 80)
     } else if fps >= 30.0 {
-        // Yellow - acceptable (30-60 FPS)
-        Color32::from_rgb(220, 180, 60)
+        srgb(220, 180, 60)
     } else {
-        // Red - poor performance (<30 FPS)
-        Color32::from_rgb(220, 80, 80)
-    }
+        srgb(220, 80, 80)
+    };
+    to_color(c)
 }
 
 /// Get color for frame bar based on duration using settings thresholds
-/// Uses solid colors (no gradient) - unified with scope colors:
-/// - Green: fast (< fast_threshold_ms)
-/// - Yellow: warning (< warning_threshold_ms)
-/// - Orange: slow (< slow_threshold_ms)
-/// - Red: critical (>= slow_threshold_ms)
 #[allow(dead_code)]
-pub fn frame_bar_color_settings(duration_ms: f64, settings: &ProfilerSettings) -> Color32 {
-    if duration_ms < settings.fast_threshold_ms as f64 {
-        // Green - excellent performance
-        Color32::from_rgb(80, 200, 80)
+pub fn frame_bar_color_settings(duration_ms: f64, settings: &ProfilerSettings) -> Color {
+    let c = if duration_ms < settings.fast_threshold_ms as f64 {
+        srgb(80, 200, 80)
     } else if duration_ms < settings.warning_threshold_ms as f64 {
-        // Yellow - acceptable
-        Color32::from_rgb(220, 180, 60)
+        srgb(220, 180, 60)
     } else if duration_ms < settings.slow_threshold_ms as f64 {
-        // Orange - slow
-        Color32::from_rgb(220, 120, 60)
+        srgb(220, 120, 60)
     } else {
-        // Red - critical
-        Color32::from_rgb(220, 80, 80)
-    }
+        srgb(220, 80, 80)
+    };
+    to_color(c)
 }
 
-/// Lerp between two colors
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+/// Lerp two sRGB u8 tuples component-wise. Deliberately NOT a linear-space
+/// lerp — user-approved bar colours require the historical sRGB behaviour.
+fn lerp_srgb(a: Srgba, b: Srgba, t: f32) -> Srgba {
     let t = t.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
-        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
-        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
-    )
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8,
+        255,
+    ]
 }
 
-/// Get a slightly darker version of a color (for hover effect)
-pub fn darken(color: Color32, amount: f32) -> Color32 {
+/// Slightly darker version of a colour (hover effect).
+///
+/// Takes a linear-space [`Color`], performs the darken multiplication in sRGB
+/// u8 component space (`round(c * (1 - amount))`) to match the historical
+/// user-approved appearance, then converts back.
+pub fn darken(color: Color, amount: f32) -> Color {
+    let [r, g, b, a] = color.to_srgb_u8();
     let factor = 1.0 - amount.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (color.r() as f32 * factor) as u8,
-        (color.g() as f32 * factor) as u8,
-        (color.b() as f32 * factor) as u8,
+    Color::from_srgb_u8(
+        (r as f32 * factor) as u8,
+        (g as f32 * factor) as u8,
+        (b as f32 * factor) as u8,
+        a,
     )
 }
 
-/// Get a slightly lighter version of a color (for selection effect)
-pub fn lighten(color: Color32, amount: f32) -> Color32 {
+/// Slightly lighter version (selection effect); sRGB u8 arithmetic — see
+/// [`darken`] for rationale.
+pub fn lighten(color: Color, amount: f32) -> Color {
+    let [r, g, b, a] = color.to_srgb_u8();
     let factor = amount.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (color.r() as f32 + (255.0 - color.r() as f32) * factor) as u8,
-        (color.g() as f32 + (255.0 - color.g() as f32) * factor) as u8,
-        (color.b() as f32 + (255.0 - color.b() as f32) * factor) as u8,
+    Color::from_srgb_u8(
+        (r as f32 + (255.0 - r as f32) * factor) as u8,
+        (g as f32 + (255.0 - g as f32) * factor) as u8,
+        (b as f32 + (255.0 - b as f32) * factor) as u8,
+        a,
     )
 }
 
-/// Dim a color toward gray (for non-matching filter)
-pub fn dim_color(color: Color32, amount: f32) -> Color32 {
+/// Dim toward gray (for non-matching filter); sRGB u8 arithmetic — see
+/// [`darken`] for rationale.
+pub fn dim_color(color: Color, amount: f32) -> Color {
+    let [r, g, b, a] = color.to_srgb_u8();
     let gray = 40.0; // Target dim gray
     let factor = amount.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (color.r() as f32 * (1.0 - factor) + gray * factor) as u8,
-        (color.g() as f32 * (1.0 - factor) + gray * factor) as u8,
-        (color.b() as f32 * (1.0 - factor) + gray * factor) as u8,
+    Color::from_srgb_u8(
+        (r as f32 * (1.0 - factor) + gray * factor) as u8,
+        (g as f32 * (1.0 - factor) + gray * factor) as u8,
+        (b as f32 * (1.0 - factor) + gray * factor) as u8,
+        a,
     )
 }
 
@@ -152,12 +179,12 @@ mod tests {
     fn test_scope_colors() {
         let settings = ProfilerSettings::default();
 
-        // Fast should be green-ish
-        let fast = scope_color(0.5, &settings);
-        assert!(fast.g() > fast.r()); // More green than red
+        // Fast should be pink-ish (r > g)
+        let fast = scope_color_srgb(0.5, &settings);
+        assert!(fast[0] > fast[1]); // More red than green
 
-        // Critical should be red-ish
-        let critical = scope_color(20.0, &settings);
-        assert!(critical.r() > critical.g()); // More red than green
+        // Critical should be very dark red
+        let critical = scope_color_srgb(20.0, &settings);
+        assert!(critical[0] > critical[1]);
     }
 }

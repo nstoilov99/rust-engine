@@ -1,23 +1,16 @@
-//! Status bar rendered with crusty-gui (Phase 16 port).
-//!
-//! Reads the same `StatusBarState` as the egui version in `status_bar.rs`;
-//! with the `crusty` feature enabled the egui bottom panel only reserves the
-//! strip (and paints the panel background) and this draws the text there.
+//! Status bar rendered with crusty-gui.
 
 use crusty_gui::context::Ui;
 use crusty_gui::math::{Color, Pos2, Rect};
 
 use super::status_bar::StatusBarState;
 
-pub fn status_bar_panel(ui: &mut Ui, bar_rect: egui::Rect, ppp: f32, state: &StatusBarState) {
-    let rect = Rect::from_min_max(
-        Pos2::new(bar_rect.min.x * ppp, bar_rect.min.y * ppp),
-        Pos2::new(bar_rect.max.x * ppp, bar_rect.max.y * ppp),
-    );
+pub fn status_bar_panel(ui: &mut Ui, bar_rect: Rect, state: &StatusBarState) {
+    let rect = bar_rect;
     let font = ui.style().fonts.body;
-    // egui's `weak` text color on the dark theme.
+    // Weak text color on the dark theme.
     let weak = Color::from_srgb_u8(140, 140, 140, 255);
-    let pad = 8.0 * ppp;
+    let pad = 8.0;
 
     let left_size = ui.text_mut().measure(&state.left_text, font, None);
     let y = rect.min.y + (rect.height() - left_size.y) * 0.5;

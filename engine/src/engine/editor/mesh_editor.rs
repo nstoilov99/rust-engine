@@ -80,12 +80,12 @@ impl MeshPreviewRenderer {
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Use the single_pass_renderpass! macro which defaults final_layout
-        // to ColorAttachmentOptimal.  The preview CB and egui CB are chained
-        // in the same submission (secondary_window.rs), so vulkano's
-        // AutoCommandBufferBuilder detects the layout mismatch
-        // (ColorAttachmentOptimal → ShaderReadOnlyOptimal) and inserts a
-        // pipeline barrier with COLOR_ATTACHMENT_WRITE → SHADER_READ access
-        // flags — guaranteeing memory visibility for the egui fragment shader.
+        // to ColorAttachmentOptimal. The preview CB and the UI CB are chained
+        // in the same submission, so vulkano's AutoCommandBufferBuilder
+        // detects the layout mismatch (ColorAttachmentOptimal →
+        // ShaderReadOnlyOptimal) and inserts a pipeline barrier with
+        // COLOR_ATTACHMENT_WRITE → SHADER_READ access flags — guaranteeing
+        // memory visibility for the UI fragment shader.
         let render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
@@ -256,7 +256,6 @@ impl MeshPreviewRenderer {
 
 pub struct MeshPreviewState {
     pub texture: ViewportTexture,
-    pub texture_id: Option<egui::TextureId>,
     pub depth_image: Arc<Image>,
     pub depth_view: Arc<ImageView>,
     pub framebuffer: Arc<Framebuffer>,
@@ -337,7 +336,6 @@ impl MeshPreviewState {
 
         Ok(Self {
             texture,
-            texture_id: None,
             depth_image,
             depth_view,
             framebuffer,
@@ -458,7 +456,7 @@ pub struct MeshEditorPanel;
 impl MeshEditorPanel {
     /// Write updated sidecar back to disk.
     ///
-    /// The egui `show`/`show_details_panel`/`show_toolbar`/`show_preview_panel`/
+    /// The old `show`/`show_details_panel`/`show_toolbar`/`show_preview_panel`/
     /// `render_material_slot` fns were removed; the crusty analog lives in
     /// `mesh_editor_crusty`.
     pub fn save_sidecar(data: &MeshEditorData) -> Result<(), Box<dyn std::error::Error>> {

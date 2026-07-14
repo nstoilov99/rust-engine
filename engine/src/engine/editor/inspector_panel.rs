@@ -1,10 +1,10 @@
 //! Inspector Panel state.
 //!
-//! The egui rendering fns (`show`, `show_contents`, `render_header`,
+//! The old rendering fns (`show`, `show_contents`, `render_header`,
 //! `render_empty_state`, `render_entity_info`, `component_section`,
 //! `render_components`, `edit_*`, `render_add_component`, plus the local
 //! `ComponentCategory` / `ComponentAction` enums) were removed as part of the
-//! egui teardown; the crusty analog lives in `inspector_crusty`.
+//! UI teardown; the crusty analog lives in `inspector_crusty`.
 
 use crate::engine::animation::{AnimationPlayer, SkeletonInstance};
 use crate::engine::audio::{AudioEmitter, AudioListener};

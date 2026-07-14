@@ -107,10 +107,10 @@ impl EditorCamera {
         proj
     }
 
-    /// Creates projection matrix for egui gizmo (no Y-flip)
+    /// Creates projection matrix for the transform gizmo (no Y-flip).
     ///
-    /// The gizmo library uses OpenGL/egui conventions where Y increases upward.
-    /// Use this for gizmo rendering, NOT for Vulkan rendering.
+    /// The gizmo library uses OpenGL-style conventions where Y increases
+    /// upward. Use this for gizmo rendering, NOT for Vulkan rendering.
     pub fn projection_matrix_for_gizmo(&self) -> Mat4 {
         // Standard perspective projection without Vulkan Y-flip
         Mat4::perspective_rh(self.fov, self.aspect_ratio, self.near, self.far)

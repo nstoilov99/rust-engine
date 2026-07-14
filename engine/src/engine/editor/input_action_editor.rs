@@ -2,7 +2,7 @@
 //!
 //! Opens in a separate OS window when a user double-clicks an input action
 //! asset in the asset browser — similar to Unreal Engine's InputAction editor.
-//! The egui `show_ui` rendering fn was removed; the crusty analog lives in
+//! The old `show_ui` rendering fn was removed; the crusty analog lives in
 //! `input_editors_crusty::input_action_editor_panel`.
 
 use crate::engine::input::enhanced_action::InputActionDefinition;

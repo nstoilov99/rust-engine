@@ -1,9 +1,9 @@
 //! Editor systems and UI panels
 //!
-//! Post-egui: the runtime is crusty-gui. Legacy panel state (hierarchy,
+//! The runtime is crusty-gui. Legacy panel state (hierarchy,
 //! inspector, mesh_editor, input_*, console, asset_browser, dock_layout,
 //! profiler, viewport) still lives here and is drawn by the `*_crusty`
-//! sibling modules. Retired egui widgets/renders were removed as part of
+//! sibling modules. Retired legacy widgets/renders were removed as part of
 //! the editor teardown; see the crusty modules below.
 
 pub mod command_palette;

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use egui::Color32;
+use crusty_gui::math::Color;
 use serde::{Deserialize, Serialize};
 
 /// Filename used when saving the palette to the workspace root.
@@ -142,15 +142,15 @@ pub enum TintMode {
 #[derive(Clone, Debug)]
 pub struct IconPalette {
     /// Category colors for Typed icons.
-    pub category: HashMap<TypeCategory, Color32>,
+    pub category: HashMap<TypeCategory, Color>,
     /// Severity colors for Severity icons.
-    pub severity: HashMap<Severity, Color32>,
+    pub severity: HashMap<Severity, Color>,
     /// Chrome state colors for Chrome icons.
-    pub chrome: HashMap<ChromeState, Color32>,
+    pub chrome: HashMap<ChromeState, Color>,
     /// Per-icon, per-state tint overrides. Only applies to `TintMode::Tinted`
     /// icons. The lookup chain in `IconRegistry::tint` is:
     /// `(kind, state)` → `(kind, Default)` → class default.
-    pub overrides: HashMap<(super::widgets::IconKind, ChromeState), Color32>,
+    pub overrides: HashMap<(super::widgets::IconKind, ChromeState), Color>,
     /// Per-icon tint mode overrides.
     pub tint_modes: HashMap<super::widgets::IconKind, TintMode>,
     /// Per-panel-icon, per-state tint overrides. Keyed by
@@ -162,41 +162,46 @@ pub struct IconPalette {
     /// Lookup chain (see `IconRegistry::panel_icon_tint`):
     /// `(panel, stem, state)` → `(panel, stem, Default)` → no tint
     /// (falls through to whatever colour the caller defaults to —
-    /// usually `Color32::WHITE` so the SVG paints as authored).
-    pub panel_overrides: HashMap<(String, String, ChromeState), Color32>,
+    /// usually white so the SVG paints as authored).
+    pub panel_overrides: HashMap<(String, String, ChromeState), Color>,
     /// Per-panel-icon size (px) override. Absent → caller's default.
     /// Lets a single SVG (e.g. `hierarchy/visibility`) render larger or
     /// smaller than its neighbours without forking the SVG.
     pub panel_sizes: HashMap<(String, String), f32>,
 }
 
+#[inline]
+fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::from_srgb_u8(r, g, b, 255)
+}
+
 impl IconPalette {
     /// Default dark theme icon palette.
     pub fn default_dark() -> Self {
         let mut category = HashMap::new();
-        category.insert(TypeCategory::Geometry, Color32::from_rgb(0xA8, 0xB0, 0xBA));
-        category.insert(TypeCategory::Lights, Color32::from_rgb(0xFF, 0xC8, 0x57));
-        category.insert(TypeCategory::Cameras, Color32::from_rgb(0x5B, 0x9B, 0xD5));
-        category.insert(TypeCategory::Vfx, Color32::from_rgb(0xE0, 0x78, 0x56));
-        category.insert(TypeCategory::Audio, Color32::from_rgb(0x62, 0xC3, 0x70));
-        category.insert(TypeCategory::Animation, Color32::from_rgb(0xE6, 0x6B, 0xB8));
-        category.insert(TypeCategory::Materials, Color32::from_rgb(0xA4, 0x7A, 0xE8));
-        category.insert(TypeCategory::Scripting, Color32::from_rgb(0x4F, 0xC1, 0xB6));
-        category.insert(TypeCategory::Physics, Color32::from_rgb(0x9D, 0xCC, 0x4D));
-        category.insert(TypeCategory::Ui, Color32::from_rgb(0xF0, 0x8C, 0x7E));
+        category.insert(TypeCategory::Geometry, rgb(0xA8, 0xB0, 0xBA));
+        category.insert(TypeCategory::Lights, rgb(0xFF, 0xC8, 0x57));
+        category.insert(TypeCategory::Cameras, rgb(0x5B, 0x9B, 0xD5));
+        category.insert(TypeCategory::Vfx, rgb(0xE0, 0x78, 0x56));
+        category.insert(TypeCategory::Audio, rgb(0x62, 0xC3, 0x70));
+        category.insert(TypeCategory::Animation, rgb(0xE6, 0x6B, 0xB8));
+        category.insert(TypeCategory::Materials, rgb(0xA4, 0x7A, 0xE8));
+        category.insert(TypeCategory::Scripting, rgb(0x4F, 0xC1, 0xB6));
+        category.insert(TypeCategory::Physics, rgb(0x9D, 0xCC, 0x4D));
+        category.insert(TypeCategory::Ui, rgb(0xF0, 0x8C, 0x7E));
 
         let mut severity = HashMap::new();
-        severity.insert(Severity::Error, Color32::from_rgb(0xE5, 0x6B, 0x6B));
-        severity.insert(Severity::Warning, Color32::from_rgb(0xE6, 0xC0, 0x4F));
-        severity.insert(Severity::Success, Color32::from_rgb(0x6E, 0xCB, 0x7C));
-        severity.insert(Severity::Info, Color32::from_rgb(0x6E, 0xA8, 0xE8));
+        severity.insert(Severity::Error, rgb(0xE5, 0x6B, 0x6B));
+        severity.insert(Severity::Warning, rgb(0xE6, 0xC0, 0x4F));
+        severity.insert(Severity::Success, rgb(0x6E, 0xCB, 0x7C));
+        severity.insert(Severity::Info, rgb(0x6E, 0xA8, 0xE8));
 
         let mut chrome = HashMap::new();
-        chrome.insert(ChromeState::Default, Color32::from_rgb(0xC0, 0xC4, 0xCC));
-        chrome.insert(ChromeState::Hovered, Color32::from_rgb(0xE6, 0xE8, 0xEC));
-        chrome.insert(ChromeState::Active, Color32::WHITE);
-        chrome.insert(ChromeState::Disabled, Color32::from_rgb(0x60, 0x64, 0x6C));
-        chrome.insert(ChromeState::Accent, Color32::from_rgb(0x4F, 0xA3, 0xE8));
+        chrome.insert(ChromeState::Default, rgb(0xC0, 0xC4, 0xCC));
+        chrome.insert(ChromeState::Hovered, rgb(0xE6, 0xE8, 0xEC));
+        chrome.insert(ChromeState::Active, Color::WHITE);
+        chrome.insert(ChromeState::Disabled, rgb(0x60, 0x64, 0x6C));
+        chrome.insert(ChromeState::Accent, rgb(0x4F, 0xA3, 0xE8));
 
         Self {
             category,
@@ -248,9 +253,10 @@ impl IconPalette {
 
 // ─── On-disk representation ──────────────────────────────────────────────────
 //
-// `Color32` and the rest of egui aren't pulled in with the `serde` feature, so
-// we map to a serde-friendly shape with `[u8; 4]` colors and convert back and
-// forth. Keeps the on-disk file readable and version-tolerant.
+// Colors persist as `[u8; 4]` sRGB tuples so the on-disk file stays
+// human-readable and matches the historical palette values (which were
+// authored as sRGB u8 triples). `Color::from_srgb_u8` / `to_srgb_u8` roundtrip
+// the linear-space runtime representation.
 
 #[derive(Serialize, Deserialize)]
 struct PaletteFile {
@@ -271,12 +277,12 @@ struct PaletteFile {
     panel_sizes: Vec<(String, String, f32)>,
 }
 
-fn color_to_rgba(c: Color32) -> [u8; 4] {
-    [c.r(), c.g(), c.b(), c.a()]
+fn color_to_rgba(c: Color) -> [u8; 4] {
+    c.to_srgb_u8()
 }
 
-fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
-    Color32::from_rgba_unmultiplied(r, g, b, a)
+fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color {
+    Color::from_srgb_u8(r, g, b, a)
 }
 
 impl From<&IconPalette> for PaletteFile {
@@ -400,7 +406,7 @@ mod tests {
                 crate::engine::editor::widgets::IconKind::Folder,
                 ChromeState::Default,
             ),
-            Color32::RED,
+            Color::from_srgb_u8(255, 0, 0, 255),
         );
         palette
             .tint_modes

@@ -1,9 +1,7 @@
-//! Hierarchy panel rendered with crusty-gui (Phase 16 port).
+//! Hierarchy panel rendered with crusty-gui.
 //!
-//! Reads/writes the exact same `HierarchyPanel` state (and the same shared
-//! helpers: row building, drop validation, rename/duplicate/delete) as the
-//! egui version in `hierarchy_panel.rs`; with the `crusty` feature enabled
-//! the egui tab only records its content rect and this panel draws there.
+//! Reads/writes the [`HierarchyPanel`] state (shared row building, drop
+//! validation, rename/duplicate/delete helpers live in `hierarchy_panel.rs`).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -29,8 +27,7 @@ use crate::engine::ecs::{EntityGuid, Name, Transform};
 /// dnd payload carried while a hierarchy row is dragged.
 struct DragEntity(Entity);
 
-/// Borrowed hierarchy state — the same structs the egui tab viewer uses,
-/// so both UIs stay in lockstep.
+/// Borrowed hierarchy state (shared with `hierarchy_panel.rs`).
 pub struct HierarchyPanelCtx<'a> {
     pub panel: &'a mut HierarchyPanel,
     pub world: &'a mut World,
@@ -39,13 +36,8 @@ pub struct HierarchyPanelCtx<'a> {
     /// GPU-uploaded hierarchy icon set keyed by SVG file stem
     /// (`RenderEvent::RenderThreadReady::crusty_icons`).
     pub icons: &'a HashMap<String, TextureId>,
-    /// Icon palette (per-state tint / size overrides from the Icon
-    /// Inspector) — the same registry the egui panel resolves against.
+    /// Icon palette (per-state tint / size overrides from the Icon Inspector).
     pub registry: &'a IconRegistry,
-}
-
-fn color32(c: egui::Color32) -> Color {
-    Color::from_srgb_u8(c.r(), c.g(), c.b(), c.a())
 }
 
 fn gray(v: u8) -> Color {
@@ -54,16 +46,11 @@ fn gray(v: u8) -> Color {
 
 const YELLOW: Color = Color::rgb(1.0, 1.0, 0.0);
 
-/// Draw the hierarchy into the dock tab's content rect. `tab_rect` is in
-/// egui points; `ppp` (egui pixels_per_point) maps it into crusty's
-/// physical-pixel space.
-pub fn hierarchy_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: HierarchyPanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Draw the hierarchy into the dock tab's content rect (physical pixels).
+pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
+    let rect = tab_rect;
     // Zero item spacing: the header / separators / search stack is placed
-    // at explicit offsets (measured off the egui reference) via add_space.
+    // at explicit offsets via add_space.
     let opts = UiOptions {
         padding: Vec2::new(0.0, 0.0),
         spacing: 0.0,
@@ -86,7 +73,7 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Hierarc
             let read_only = play_mode != PlayMode::Edit;
 
             // Escape: cancel rename / drag, else clear selection (mirrors
-            // the egui panel's top-of-frame handling).
+            // the panel top-of-frame handling).
             if ui.ctx().input.key_pressed(Key::Escape) {
                 if panel.renaming_entity.is_some() {
                     panel.renaming_entity = None;
@@ -97,7 +84,7 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Hierarc
                 }
             }
 
-            // Vertical rhythm from the egui reference: separator lines at
+            // Vertical rhythm: separator lines at
             // +29 / +65 from the panel top, search field top at +38, first
             // tree row at +73.
             render_header(ui, panel, world, read_only);
@@ -116,11 +103,11 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: Hierarc
 fn render_header(ui: &mut Ui, panel: &mut HierarchyPanel, world: &mut World, read_only: bool) {
     let row_top = ui.cursor();
     ui.horizontal_aligned(Align::Max, |ui| {
-        // Dark chip like the egui reference (fill 14,14,17, 20px square).
+        // Dark chip (fill 14,14,17, 20px square).
         let resp = Button::new("+")
             .fill(Color::from_srgb_u8(14, 14, 17, 255))
-            // 23x22 pins the rect to the egui button's apparent size
-            // (egui's centered 1px stroke adds a row/col on each side).
+            // 23x22 pins the rect to the historical button apparent size
+            // (a centered 1px stroke adds a row/col on each side).
             .exact_size(Vec2::new(23.0, 22.0))
             .show(ui);
         if resp.hovered {
@@ -173,7 +160,7 @@ fn render_tree(
     let total_rows = panel.flat_rows.len();
 
     // Selected entity's ancestor chain → indices into `flat_rows`, so tree
-    // guides can be range-tested per row (same scheme as the egui panel).
+    // guides can be range-tested per row (same scheme as the historical panel).
     let chain_indices: Vec<usize> = if let Some(primary) = selection.primary() {
         let chain = panel
             .flat_rows
@@ -200,7 +187,7 @@ fn render_tree(
         .auto_shrink(false)
         .inset(0.0)
         // Rows are contiguous so consecutive tree-guide segments meet with
-        // no visible gap (egui sets item_spacing.y = 0 for the same reason).
+        // no visible gap (item_spacing.y = 0 for the same reason).
         .spacing(0.0)
         .show(ui, |ui| {
             if total_rows == 0 {
@@ -252,7 +239,7 @@ struct RowData {
     has_children: bool,
     is_expanded: bool,
     icon_stem: &'static str,
-    icon_tint: egui::Color32,
+    icon_tint: Color,
     is_visible: bool,
 }
 
@@ -384,8 +371,8 @@ fn render_row(
     }
 
     // Entity icon: SVG texture when uploaded, faint dot fallback otherwise.
-    // x layout matches the egui row: chevron box + 8px item spacing.
-    // Tint / size resolve through the IconRegistry exactly like the egui
+    // x layout: chevron box + 8px item spacing.
+    // Tint / size resolve through the IconRegistry (same as the icon
     // panel (per-state palette override → Default override → row default),
     // with hidden entities dimmed via the same gamma factor.
     let row_state = if is_selected {
@@ -394,11 +381,13 @@ fn render_row(
         ChromeState::Default
     };
     let resolved_tint = registry.panel_icon_tint("hierarchy", icon_stem, row_state, icon_tint);
-    let icon_draw_tint = color32(if is_visible {
+    // Hidden rows dim by an alpha multiplier (mirrors the historical
+    // `Color32::gamma_multiply(0.45)` behaviour closely enough for tint use).
+    let icon_draw_tint = if is_visible {
         resolved_tint
     } else {
-        resolved_tint.gamma_multiply(0.45)
-    });
+        resolved_tint.with_alpha(resolved_tint.a * 0.45)
+    };
     let icon_size = registry
         .panel_icon_size("hierarchy", icon_stem)
         .unwrap_or(ICON_SIZE)
@@ -421,7 +410,7 @@ fn render_row(
             .circle_filled(icon_rect.center(), icon_size * 0.18, icon_draw_tint);
     }
 
-    // Label / rename editor. Label x matches egui: icon + 8px spacing + 4px.
+    // Label / rename editor. Label x layout: icon + 8px spacing + 4px.
     let label_x = icon_rect.max.x + 12.0;
     if is_renaming {
         let edit_right = (label_x + 108.0).min(row_rect.max.x - VISIBILITY_COL_WIDTH);
@@ -454,7 +443,7 @@ fn render_row(
         }
     } else {
         let style = ui.style();
-        // Default row text is the theme's secondary color (egui's default
+        // Default row text is the theme's secondary color (theme's default
         // label color), not the bright primary.
         let color = if !is_visible {
             gray(120)
@@ -570,7 +559,7 @@ fn handle_drag_drop(
                 .rect_stroke(row_rect, 2.0, 2.0, Color::from_srgb_u8(200, 60, 60, 255));
         }
 
-        // Valid-drop tint over everything, like the egui version.
+        // Valid-drop tint over everything, across the full row.
         if source != entity && can_set_parent(world, source, entity) {
             ui.painter()
                 .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 200, 0, 60));

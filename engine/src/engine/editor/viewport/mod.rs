@@ -5,7 +5,7 @@
 //! - GizmoHandler: Transform gizmo integration
 //! - Settings: Persisted viewport settings
 //!
-//! The egui toolbar (`toolbar.rs`) was removed; `viewport_crusty` has its own.
+//! The old toolbar (`toolbar.rs`) was removed; `viewport_crusty` has its own.
 
 mod camera_controller;
 mod gizmo_handler;

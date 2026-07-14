@@ -1,20 +1,15 @@
-//! Console panel rendered with crusty-gui (Phase 16 port).
-//!
-//! Reads/writes the exact same state as the egui version in
-//! `tab_viewer::render_console`; with the `crusty` feature enabled the
-//! egui tab only records its content rect and this panel draws there.
+//! Console panel rendered with crusty-gui.
 
 use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
-use crusty_gui::math::{Color, Pos2, Rect, Vec2};
+use crusty_gui::math::{Color, Rect, Vec2};
 use crusty_gui::widgets::{Button, Label, ScrollArea, TextEdit};
 use hecs::World;
 
 use super::console::{ConsoleLog, LogFilter, LogLevel, LogMessage};
 use super::console_cmd::{CommandContext, ConsoleCommandSystem};
 
-/// Borrowed console + command state — the same fields the egui tab viewer
-/// uses, so both UIs stay in lockstep.
+/// Borrowed console + command state.
 pub struct ConsolePanelCtx<'a> {
     pub messages: &'a mut ConsoleLog,
     pub filter: &'a mut LogFilter,
@@ -24,13 +19,8 @@ pub struct ConsolePanelCtx<'a> {
     pub show_stat_fps: &'a mut bool,
 }
 
-fn level_color(level: LogLevel) -> Color {
-    let c = level.color();
-    Color::from_srgb_u8(c.r(), c.g(), c.b(), c.a())
-}
-
-/// Filter toggle button matching the egui console header: `active_fill`
-/// when the filter is on, dark gray otherwise; label tinted by log level.
+/// Filter toggle button for the console header: `active_fill` when the
+/// filter is on, dark gray otherwise; label tinted by log level.
 fn filter_button(
     ui: &mut Ui,
     show: &mut bool,
@@ -41,7 +31,7 @@ fn filter_button(
     let inactive_fill = Color::from_srgb_u8(45, 45, 45, 255);
     let inactive_text = Color::from_srgb_u8(160, 160, 160, 255);
     let (fill, text) = if *show {
-        (active_fill, level_color(level))
+        (active_fill, level.color())
     } else {
         (inactive_fill, inactive_text)
     };
@@ -50,26 +40,20 @@ fn filter_button(
     }
 }
 
-/// Draw the console into the dock tab's content rect. `tab_rect` is in
-/// egui points; `ppp` (egui pixels_per_point) maps it into crusty's
-/// physical-pixel space.
-pub fn console_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: ConsolePanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Draw the console into the dock tab's content rect (physical pixels).
+pub fn console_panel(ui: &mut Ui, tab_rect: Rect, ctx: ConsolePanelCtx) {
+    let rect = tab_rect;
     let style = ui.style();
-    // Tight padding to match the egui tab, which draws at its content rect
-    // with only item spacing as inset.
+    // Tight padding — the tab draws at its content rect with only item
+    // spacing as inset.
     let opts = UiOptions {
-        padding: Vec2::new(4.0 * ppp, 2.0 * ppp),
+        padding: Vec2::new(4.0, 2.0),
         spacing: style.spacing.item,
     };
     ui.run_at(rect, Direction::TopDown, Id::new("engine_console_panel"), opts, |ui| {
         let (info_n, warn_n, err_n) = ctx.messages.counts();
 
-        // Header: filter toggles with live counts, mirroring the egui
-        // version's custom-styled buttons.
+        // Header: filter toggles with live counts.
         ui.horizontal(|ui| {
             filter_button(
                 ui,
@@ -109,7 +93,7 @@ pub fn console_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: ConsolePa
                 for msg in ctx.messages.iter() {
                     if ctx.filter.should_show(msg) {
                         Label::new(format!("{} {}", msg.level.prefix(), msg.text))
-                            .color(level_color(msg.level))
+                            .color(msg.level.color())
                             .show(ui);
                         shown += 1;
                     }

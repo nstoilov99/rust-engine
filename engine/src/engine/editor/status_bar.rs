@@ -1,6 +1,6 @@
 //! Editor status bar state.
 //!
-//! The egui `render_status_bar` fn was removed; the crusty analog lives in
+//! The old `render_status_bar` fn was removed; the crusty analog lives in
 //! `status_bar_crusty`.
 
 #[derive(Debug, Clone)]

@@ -1,8 +1,8 @@
 //! Hierarchy panel icon set — SVG rasterization helpers used by the crusty
 //! icon uploader on the render thread.
 //!
-//! The egui-facing `HierarchyIcons` texture map and `load_svg_texture`
-//! helper were removed as part of the egui teardown. The crusty renderer
+//! The old `HierarchyIcons` texture map and `load_svg_texture`
+//! helper were removed as part of the UI teardown. The crusty renderer
 //! calls `rasterize_svg_rgba` + `icon_raster_px` + `icons_dir` directly.
 
 use std::path::Path;

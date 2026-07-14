@@ -3,7 +3,7 @@
 //! Holds an editable working copy of the InputActionSet. Changes are applied
 //! back to the InputSubsystem when the user clicks "Apply".
 //!
-//! The egui rendering fns were removed; the crusty analog lives in
+//! The old rendering fns were removed; the crusty analog lives in
 //! `input_editors_crusty`. Small label helpers and enum-variant tables that
 //! the crusty code re-uses are kept here as `pub(crate)` items.
 

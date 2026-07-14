@@ -1,9 +1,9 @@
-//! Editor tab identifier enum shared between the (now-removed) egui dock
+//! Editor tab identifier enum shared between the (now-removed) old dock
 //! layout and the crusty dock layout.
 //!
 //! `EditorTab` is used by `dock_crusty::tab_id` / `parse_tab` and by
 //! `game_client::app` for opening and toggling tabs.
-//! The egui-specific `EditorDockState`, `create_default_dock_state`,
+//! The old `EditorDockState`, `create_default_dock_state`,
 //! `create_editor_dock_style`, and the `editor_layout.ron` LAYOUT_FILE
 //! persistence path were removed; the crusty dock persists separately as
 //! `editor_layout_crusty.ron` (see `dock_crusty`).

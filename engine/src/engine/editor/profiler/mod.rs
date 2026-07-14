@@ -1,8 +1,8 @@
 //! Profiler panel module
 //!
 //! Provides an in-engine profiler UI built on puffin for data collection.
-//! The egui rendering fns (`show_contents`, plus the `flamegraph`, `toolbar`,
-//! `frame_history`, `table_view` submodules) were removed as part of the egui
+//! The old rendering fns (`show_contents`, plus the `flamegraph`, `toolbar`,
+//! `frame_history`, `table_view` submodules) were removed as part of the UI
 //! teardown; the crusty analog lives in `profiler_crusty`. The `budget` and
 //! `scope_colors` submodules stay because the crusty views read them.
 

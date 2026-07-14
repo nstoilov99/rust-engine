@@ -1,7 +1,7 @@
-//! Mesh editor panel rendered with crusty-gui (Phase 16 port).
+//! Mesh editor panel rendered with crusty-gui.
 //!
-//! Reads/writes the same `MeshEditorData` as the egui version in
-//! `mesh_editor.rs`. Material slots follow the Unreal layout: each slot
+//! Reads/writes [`MeshEditorData`] (see `mesh_editor.rs`). Material slots
+//! follow the Unreal layout: each slot
 //! shows a material thumbnail next to a searchable dropdown picker,
 //! accepts drag-and-drop from the asset browser, and has undo (clear to
 //! "None") / trash (remove added slot) actions. Slots can be added with
@@ -32,11 +32,11 @@ use crate::engine::assets::mesh_import::MaterialSlot;
 
 const TOOLBAR_H: f32 = 28.0;
 const DETAILS_W: f32 = 300.0;
-/// Material thumbnail edge in the slot card (matches the egui version).
+/// Material thumbnail edge in the slot card.
 const THUMB: f32 = 64.0;
 /// Bottom save-bar height.
 const SAVE_BAR_H: f32 = 40.0;
-/// srgb(220,180,50) — the egui dirty-star color.
+/// srgb(220,180,50) — the dirty-star color.
 const DIRTY_STAR: Color = Color::rgba(0.715694, 0.456411, 0.031896, 1.0);
 /// srgb(30,31,35) — engine theme `header_bg` (same constant as other ports).
 const HEADER_BG: Color = Color::rgba(0.012983, 0.013702, 0.016807, 1.0);
@@ -45,8 +45,8 @@ fn gray(v: u8) -> Color {
     Color::from_srgb_u8(v, v, v, 255)
 }
 
-/// egui `.weak()` equivalent: text gamma-blended halfway toward the panel
-/// fill (`text_dim` alone is egui's *normal* label color, too bright).
+/// Weak text: gamma-blended halfway toward the panel fill (`text_dim` alone
+/// is the *normal* label color, too bright here).
 fn weak(ui: &Ui) -> Color {
     let t = ui.style().palette.text_dim.to_srgb_u8();
     let p = ui.style().palette.panel.to_srgb_u8();
@@ -58,7 +58,7 @@ fn weak(ui: &Ui) -> Color {
     )
 }
 
-/// Borrowed mesh-editor state — the same struct the egui tab viewer uses.
+/// Borrowed mesh-editor state.
 pub struct MeshEditorPanelCtx<'a> {
     pub data: &'a mut MeshEditorData,
     /// Preview texture id in *this window's* crusty registry (None until
@@ -73,19 +73,16 @@ pub struct MeshEditorPanelCtx<'a> {
     pub float_thumbs: Option<&'a HashMap<AssetId, TextureId>>,
 }
 
-/// Render the mesh editor into `tab_rect` (egui points).
-pub fn mesh_editor_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, ctx: MeshEditorPanelCtx) {
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * ppp, tab_rect.min.y * ppp),
-        Pos2::new(tab_rect.max.x * ppp, tab_rect.max.y * ppp),
-    );
+/// Render the mesh editor into `tab_rect` (physical pixels).
+pub fn mesh_editor_panel(ui: &mut Ui, tab_rect: Rect, ctx: MeshEditorPanelCtx) {
+    let rect = tab_rect;
     let opts = UiOptions {
         padding: Vec2::ZERO,
         spacing: 0.0,
     };
     let panel_id = Id::new("engine_mesh_editor").with(ctx.data.mesh_path.as_str());
     ui.run_at(rect, Direction::TopDown, panel_id, opts, |ui| {
-        let s = ppp;
+        let s = 1.0_f32;
         let MeshEditorPanelCtx {
             data,
             texture,
@@ -913,7 +910,7 @@ fn preview(
         texture: tex,
     });
 
-    // ── orbit controls (same constants as the egui version)
+    // ── orbit controls
     let id = panel_id.with("preview");
     let resp = ui.interact(id, rect);
     let input = &ui.ctx().input;

@@ -1,10 +1,12 @@
 //! Reusable editor widgets and extension traits
 //!
-//! The egui widget submodules (button, toggle_switch, field_row, …) and the
-//! `UiExt` extension trait were removed as part of the egui teardown. The
+//! The old widget submodules (button, toggle_switch, field_row, …) and the
+//! `UiExt` extension trait were removed as part of the UI teardown. The
 //! `IconRegistry` + `IconKind` + palette lookup helpers stay here — the
 //! crusty path uses them for its icon palette (see
 //! `services::EditorServices::load_icons_crusty`).
+
+use crusty_gui::math::Color;
 
 use super::icon_classes::{ChromeState, IconClass, IconPalette, Severity, TintMode, TypeCategory};
 
@@ -364,11 +366,6 @@ impl IconKind {
 /// Each `IconKind` maps to a PNG file when available, with a text fallback for
 /// missing icons. The `IconPalette` controls tint colors at draw time.
 pub struct IconRegistry {
-    /// Kept as-is until the egui type migration removes the field; the crusty
-    /// path never populates or reads it (icon textures live on the crusty
-    /// renderer directly).
-    #[allow(dead_code)]
-    textures: std::collections::HashMap<IconKind, egui::TextureHandle>,
     palette: IconPalette,
 }
 
@@ -376,20 +373,16 @@ impl IconRegistry {
     /// Empty registry — all icons render as text fallback with default palette.
     pub fn empty() -> Self {
         Self {
-            textures: std::collections::HashMap::new(),
             palette: IconPalette::default_dark(),
         }
     }
 
-    /// Empty texture map with the persisted palette applied (crusty path —
+    /// Empty registry with the persisted palette applied (crusty path —
     /// tints come from the palette; textures are drawn via the crusty
     /// renderer's own registry).
     pub fn empty_with_default_palette() -> Self {
         let palette = IconPalette::load_from_default().unwrap_or_else(IconPalette::default_dark);
-        Self {
-            textures: std::collections::HashMap::new(),
-            palette,
-        }
+        Self { palette }
     }
 
     /// Read-only access to the palette.
@@ -421,7 +414,7 @@ impl IconRegistry {
     /// 3. Class default (chrome/category/severity)
     ///
     /// Authored icons skip this path; their `image()` renders without tint.
-    pub fn tint(&self, kind: IconKind, state: ChromeState) -> egui::Color32 {
+    pub fn tint(&self, kind: IconKind, state: ChromeState) -> Color {
         if let Some(&c) = self.palette.overrides.get(&(kind, state)) {
             return c;
         }
@@ -437,20 +430,20 @@ impl IconRegistry {
                 .chrome
                 .get(&state)
                 .copied()
-                .unwrap_or(egui::Color32::from_gray(200)),
+                .unwrap_or(Color::from_srgb_u8(200, 200, 200, 255)),
             IconClass::Typed => kind
                 .category()
                 .and_then(|cat| self.palette.category.get(&cat).copied())
-                .unwrap_or(egui::Color32::from_gray(200)),
+                .unwrap_or(Color::from_srgb_u8(200, 200, 200, 255)),
             IconClass::Severity => kind
                 .severity()
                 .and_then(|sev| self.palette.severity.get(&sev).copied())
-                .unwrap_or(egui::Color32::from_gray(200)),
+                .unwrap_or(Color::from_srgb_u8(200, 200, 200, 255)),
         }
     }
 
     /// Read the per-icon override for a specific state, if one is set.
-    pub fn icon_override(&self, kind: IconKind, state: ChromeState) -> Option<egui::Color32> {
+    pub fn icon_override(&self, kind: IconKind, state: ChromeState) -> Option<Color> {
         self.palette.overrides.get(&(kind, state)).copied()
     }
 
@@ -462,17 +455,17 @@ impl IconRegistry {
     // --- Palette mutation methods (used by the icon inspector) ---
 
     /// Set a category tint color.
-    pub fn set_category_color(&mut self, cat: TypeCategory, color: egui::Color32) {
+    pub fn set_category_color(&mut self, cat: TypeCategory, color: Color) {
         self.palette.category.insert(cat, color);
     }
 
     /// Set a severity tint color.
-    pub fn set_severity_color(&mut self, sev: Severity, color: egui::Color32) {
+    pub fn set_severity_color(&mut self, sev: Severity, color: Color) {
         self.palette.severity.insert(sev, color);
     }
 
     /// Set a chrome state tint color.
-    pub fn set_chrome_color(&mut self, state: ChromeState, color: egui::Color32) {
+    pub fn set_chrome_color(&mut self, state: ChromeState, color: Color) {
         self.palette.chrome.insert(state, color);
     }
 
@@ -481,7 +474,7 @@ impl IconRegistry {
         &mut self,
         kind: IconKind,
         state: ChromeState,
-        color: egui::Color32,
+        color: Color,
     ) {
         self.palette.overrides.insert((kind, state), color);
     }
@@ -505,15 +498,15 @@ impl IconRegistry {
     /// 1. `(panel, stem, state)` per-state override
     /// 2. `(panel, stem, ChromeState::Default)` override (fallback so an icon
     ///    customised only on Default keeps that colour across all states)
-    /// 3. `default_tint` — typically `Color32::WHITE` so the SVG paints as
+    /// 3. `default_tint` — typically `Color::WHITE` so the SVG paints as
     ///    authored.
     pub fn panel_icon_tint(
         &self,
         panel: &str,
         stem: &str,
         state: ChromeState,
-        default_tint: egui::Color32,
-    ) -> egui::Color32 {
+        default_tint: Color,
+    ) -> Color {
         if let Some(&c) = self.palette.panel_overrides.get(&(
             panel.to_string(),
             stem.to_string(),
@@ -539,7 +532,7 @@ impl IconRegistry {
         panel: &str,
         stem: &str,
         state: ChromeState,
-    ) -> Option<egui::Color32> {
+    ) -> Option<Color> {
         self.palette
             .panel_overrides
             .get(&(panel.to_string(), stem.to_string(), state))
@@ -560,7 +553,7 @@ impl IconRegistry {
         panel: &str,
         stem: &str,
         state: ChromeState,
-        color: egui::Color32,
+        color: Color,
     ) {
         self.palette
             .panel_overrides

@@ -198,7 +198,7 @@ impl DeferredRenderer {
             descriptor_set_allocator.clone(),
         )?;
 
-        // final_layout = ShaderReadOnlyOptimal so the editor's egui pass (separate
+        // final_layout = ShaderReadOnlyOptimal so the editor's UI pass (separate
         // submission, no auto layout tracking across CBs) samples in the right layout.
         let composite_render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -250,7 +250,7 @@ impl DeferredRenderer {
                 RenderPassCreateInfo {
                     attachments: vec![
                         // Color (composite output): ShaderReadOnlyOptimal in/out to
-                        // match composite's final_layout and egui's sample expectation.
+                        // match composite's final_layout and the UI's sample expectation.
                         AttachmentDescription {
                             format: Format::B8G8R8A8_SRGB,
                             samples: SampleCount::Sample1,

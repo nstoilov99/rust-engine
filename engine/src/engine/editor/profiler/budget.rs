@@ -1,6 +1,6 @@
 //! Frame-budget category tables and the `scope_total_ms` helper.
 //!
-//! The egui `render` fn was removed; the crusty analog lives in
+//! The old `render` fn was removed; the crusty analog lives in
 //! `profiler_crusty::budget_view_panel` (which reads `FRAME_BUDGET` +
 //! `scope_total_ms` from here).
 

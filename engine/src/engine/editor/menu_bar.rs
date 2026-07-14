@@ -1,6 +1,6 @@
 //! Editor menu-bar action enum.
 //!
-//! The egui menu-bar rendering fns were removed; the crusty analog lives in
+//! The old menu-bar rendering fns were removed; the crusty analog lives in
 //! `menu_bar_crusty`. This file now only exports the `MenuAction` enum shared
 //! between both paths.
 

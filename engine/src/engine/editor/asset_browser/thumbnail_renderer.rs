@@ -246,7 +246,7 @@ impl ThumbnailRenderer {
         &self,
         model: &Model,
         thumbnail_size: u32,
-    ) -> Result<egui::ColorImage, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<super::thumbnail::RgbaImage, Box<dyn std::error::Error + Send + Sync>> {
         if model.meshes.is_empty() {
             return Err("Model has no meshes".into());
         }
@@ -397,7 +397,7 @@ impl ThumbnailRenderer {
         );
 
         let size = [thumbnail_size as usize, thumbnail_size as usize];
-        Ok(egui::ColorImage::from_rgba_unmultiplied(
+        Ok(super::thumbnail::RgbaImage::from_rgba_unmultiplied(
             size,
             resized.as_raw(),
         ))

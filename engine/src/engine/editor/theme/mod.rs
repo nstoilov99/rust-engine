@@ -1,10 +1,8 @@
 //! Editor theme system — design tokens, palette, typography, density, shadows.
 //!
-//! The canonical theme instance lives in `EditorServices`. A clone (via `Arc`)
-//! is also stored in `egui::Context::data()` so widgets can read it via
-//! `ui.theme()` without needing a `&EditorServices` parameter.
+//! The canonical theme instance lives in `EditorServices`. `gui/crusty.rs`
+//! reads the tokens directly to build a crusty-gui [`Style`] each frame.
 
-pub mod apply;
 pub mod density;
 pub mod palette;
 pub mod shadows;
@@ -73,7 +71,7 @@ impl EditorTheme {
     }
 
     /// Map a `StateKind` to its corresponding semantic color.
-    pub fn state_color(&self, kind: StateKind) -> egui::Color32 {
+    pub fn state_color(&self, kind: StateKind) -> crusty_gui::math::Color {
         match kind {
             StateKind::Disabled => self.palette.text_disabled,
             StateKind::Mixed => self.palette.semantic.mixed,

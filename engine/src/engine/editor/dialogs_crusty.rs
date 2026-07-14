@@ -1,7 +1,6 @@
-//! Crusty-gui ports of the editor's modal dialogs (Phase 16): the central
-//! [`DialogStack`], the model import dialog, the Save Scene As dialog and
-//! the file-drop overlay. Mirrors the egui versions in `dialogs/mod.rs`,
-//! `import_dialog.rs` and `game_client/src/app.rs`.
+//! Crusty-gui modal dialogs: the central [`DialogStack`], the model import
+//! dialog, the Save Scene As dialog and the file-drop overlay. Reads state
+//! from `dialogs/mod.rs`, `import_dialog.rs` and `game_client/src/app.rs`.
 
 use super::command_palette::EditorAction;
 use super::dialogs::{DialogButtons, DialogStack};
@@ -37,7 +36,7 @@ fn message_lines(ui: &mut Ui, message: &str) {
 }
 
 /// Show the top dialog of the stack as a centered modal. Clicking a button
-/// pops the dialog and returns its bound actions (same as the egui version).
+/// pops the dialog and returns its bound actions.
 pub fn dialog_stack_panel(ui: &mut Ui, stack: &mut DialogStack) -> Vec<EditorAction> {
     let Some(dialog) = stack.top().cloned() else {
         return Vec::new();

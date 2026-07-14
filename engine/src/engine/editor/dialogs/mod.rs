@@ -1,6 +1,7 @@
 //! Central modal dialog stack for editor workflows.
 
 use crate::engine::editor::command_palette::EditorAction;
+use crusty_gui::id::Id;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogButtons {
@@ -36,7 +37,7 @@ impl DialogActions {
 
 #[derive(Debug, Clone)]
 pub struct Dialog {
-    pub id: egui::Id,
+    pub id: Id,
     pub title: String,
     pub message: String,
     pub buttons: DialogButtons,
@@ -52,7 +53,7 @@ impl Dialog {
         actions: DialogActions,
     ) -> Self {
         Self {
-            id: egui::Id::new(id_source),
+            id: Id::new(id_source),
             title: title.into(),
             message: message.into(),
             buttons,

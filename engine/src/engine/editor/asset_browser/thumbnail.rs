@@ -5,7 +5,6 @@
 //! using an offscreen GPU render pass.
 
 use crate::engine::assets::{AssetId, AssetMetadata, AssetType};
-use egui::{ColorImage, Context, TextureHandle, TextureId, TextureOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -15,6 +14,24 @@ use super::thumbnail_renderer::GpuThumbnailContext;
 
 /// Size of generated thumbnails (square)
 pub const THUMBNAIL_SIZE: u32 = 128;
+
+/// Raw RGBA8 thumbnail image produced by the worker thread and consumed by
+/// the crusty upload path.
+#[derive(Debug, Clone)]
+pub struct RgbaImage {
+    /// `[width, height]` in pixels.
+    pub size: [usize; 2],
+    /// Row-major RGBA8, `size[0] * size[1] * 4` bytes long.
+    pub rgba: Vec<u8>,
+}
+
+impl RgbaImage {
+    /// Wrap a raw RGBA8 pixel buffer. Copies the input.
+    pub fn from_rgba_unmultiplied(size: [usize; 2], rgba: &[u8]) -> Self {
+        debug_assert_eq!(rgba.len(), size[0] * size[1] * 4);
+        Self { size, rgba: rgba.to_vec() }
+    }
+}
 
 /// Request to generate a thumbnail
 #[derive(Debug)]
@@ -27,22 +44,15 @@ struct ThumbnailRequest {
 /// Result of thumbnail generation
 struct ThumbnailResult {
     id: AssetId,
-    image_data: Option<ColorImage>,
+    image_data: Option<RgbaImage>,
 }
 
-/// Entry in the thumbnail cache
-struct ThumbnailEntry {
-    texture: TextureHandle,
-    #[allow(dead_code)]
-    source_hash: u64,
-}
-
-/// Cache for asset thumbnails
+/// Cache for asset thumbnails.
 ///
-/// Manages generation and caching of thumbnails for the asset browser.
+/// Manages generation of thumbnails on a worker thread and hands finished
+/// pixels to the render thread for GPU upload. The crusty texture id is
+/// returned via [`crusty_texture_id`](Self::crusty_texture_id).
 pub struct ThumbnailCache {
-    /// In-memory texture cache
-    cache: HashMap<AssetId, ThumbnailEntry>,
     /// Assets currently being generated
     pending: std::collections::HashSet<AssetId>,
     /// Channel to send requests to worker thread
@@ -50,10 +60,7 @@ pub struct ThumbnailCache {
     /// Channel to receive results from worker thread
     result_rx: mpsc::Receiver<ThumbnailResult>,
     _assets_root: PathBuf,
-    placeholder: Option<TextureHandle>,
-    error_placeholder: Option<TextureHandle>,
-    _type_icons: HashMap<AssetType, TextureHandle>,
-    /// Registered crusty texture ids (Phase 16 asset browser).
+    /// Registered crusty texture ids.
     #[cfg(feature = "editor")]
     crusty_ids: HashMap<AssetId, crusty_gui::paint::TextureId>,
     /// Generated thumbnails sent to the render thread for upload, whose
@@ -82,14 +89,10 @@ impl ThumbnailCache {
         });
 
         Self {
-            cache: HashMap::new(),
             pending: std::collections::HashSet::new(),
             request_tx: Some(request_tx),
             result_rx,
             _assets_root: assets_root,
-            placeholder: None,
-            error_placeholder: None,
-            _type_icons: HashMap::new(),
             #[cfg(feature = "editor")]
             crusty_ids: HashMap::new(),
             #[cfg(feature = "editor")]
@@ -99,78 +102,6 @@ impl ThumbnailCache {
             #[cfg(feature = "editor")]
             material_ids: std::collections::HashSet::new(),
         }
-    }
-
-    /// Initialize placeholder textures
-    fn ensure_placeholders(&mut self, ctx: &Context) {
-        if self.placeholder.is_none() {
-            let placeholder_image = create_placeholder_image(THUMBNAIL_SIZE, [60, 60, 60, 255]);
-            self.placeholder = Some(ctx.load_texture(
-                "thumb_placeholder",
-                placeholder_image,
-                TextureOptions::default(),
-            ));
-        }
-
-        if self.error_placeholder.is_none() {
-            let error_image = create_placeholder_image(THUMBNAIL_SIZE, [80, 40, 40, 255]);
-            self.error_placeholder =
-                Some(ctx.load_texture("thumb_error", error_image, TextureOptions::default()));
-        }
-    }
-
-    /// Get or request thumbnail for an asset
-    ///
-    /// Returns the texture ID if available, or requests generation and returns placeholder.
-    pub fn get_texture_id(&mut self, ctx: &Context, asset: &AssetMetadata) -> Option<TextureId> {
-        self.ensure_placeholders(ctx);
-
-        // Check cache
-        if let Some(entry) = self.cache.get(&asset.id) {
-            return Some(entry.texture.id());
-        }
-
-        // Check if already pending
-        if self.pending.contains(&asset.id) {
-            return self.placeholder.as_ref().map(|t| t.id());
-        }
-
-        // Request thumbnail generation
-        self.request_thumbnail(asset);
-
-        // Return placeholder while generating
-        self.placeholder.as_ref().map(|t| t.id())
-    }
-
-    /// Get or request thumbnail for a built-in primitive mesh (Cube, Sphere, Plane).
-    ///
-    /// Uses deterministic `AssetId` derived from the primitive path so thumbnails
-    /// are generated once and cached for the session lifetime.
-    pub fn get_primitive_texture_id(&mut self, ctx: &Context, prim_path: &str) -> Option<TextureId> {
-        self.ensure_placeholders(ctx);
-
-        let id = AssetId::from_path(prim_path);
-
-        if let Some(entry) = self.cache.get(&id) {
-            return Some(entry.texture.id());
-        }
-
-        if self.pending.contains(&id) {
-            return self.placeholder.as_ref().map(|t| t.id());
-        }
-
-        if let Some(tx) = &self.request_tx {
-            let request = ThumbnailRequest {
-                id,
-                path: PathBuf::from(prim_path),
-                asset_type: AssetType::Mesh,
-            };
-            if tx.send(request).is_ok() {
-                self.pending.insert(id);
-            }
-        }
-
-        self.placeholder.as_ref().map(|t| t.id())
     }
 
     /// Request thumbnail generation
@@ -193,31 +124,6 @@ impl ThumbnailCache {
 
             if tx.send(request).is_ok() {
                 self.pending.insert(asset.id);
-            }
-        }
-    }
-
-    /// Poll for completed thumbnails
-    ///
-    /// Call this each frame to process completed thumbnail generations.
-    pub fn poll(&mut self, ctx: &Context) {
-        while let Ok(result) = self.result_rx.try_recv() {
-            self.pending.remove(&result.id);
-
-            if let Some(image_data) = result.image_data {
-                let texture = ctx.load_texture(
-                    format!("thumb_{}", result.id.0),
-                    image_data,
-                    TextureOptions::default(),
-                );
-
-                self.cache.insert(
-                    result.id,
-                    ThumbnailEntry {
-                        texture,
-                        source_hash: 0,
-                    },
-                );
             }
         }
     }
@@ -251,8 +157,8 @@ impl ThumbnailCache {
         while let Ok(result) = self.result_rx.try_recv() {
             self.pending.remove(&result.id);
             if let Some(img) = result.image_data {
-                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
                 let (w, h) = (img.size[0] as u32, img.size[1] as u32);
+                let rgba = img.rgba;
                 if self.material_ids.contains(&result.id) {
                     self.crusty_rgba.insert(result.id, (rgba.clone(), w, h));
                 }
@@ -294,7 +200,6 @@ impl ThumbnailCache {
 
     /// Invalidate a thumbnail (e.g., after file modification)
     pub fn invalidate(&mut self, id: AssetId) {
-        self.cache.remove(&id);
         self.pending.remove(&id);
         #[cfg(feature = "editor")]
         {
@@ -308,7 +213,6 @@ impl ThumbnailCache {
 
     /// Clear all cached thumbnails
     pub fn clear(&mut self) {
-        self.cache.clear();
         self.pending.clear();
         #[cfg(feature = "editor")]
         {
@@ -321,7 +225,7 @@ impl ThumbnailCache {
     /// Get cache statistics
     pub fn stats(&self) -> ThumbnailCacheStats {
         ThumbnailCacheStats {
-            cached: self.cache.len(),
+            cached: 0,
             pending: self.pending.len(),
         }
     }
@@ -459,7 +363,7 @@ fn generate_texture_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
 
             let rgba = thumb.to_rgba8();
             let size = [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize];
-            let image_data = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            let image_data = RgbaImage::from_rgba_unmultiplied(size, rgba.as_raw());
 
             ThumbnailResult {
                 id,
@@ -822,7 +726,7 @@ fn generate_material_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
                     let size = [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize];
                     return ThumbnailResult {
                         id,
-                        image_data: Some(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())),
+                        image_data: Some(RgbaImage::from_rgba_unmultiplied(size, rgba.as_raw())),
                     };
                 }
             }
@@ -844,39 +748,39 @@ fn generate_material_thumbnail(id: AssetId, path: &Path) -> ThumbnailResult {
 }
 
 /// Create a placeholder image
-fn create_placeholder_image(size: u32, color: [u8; 4]) -> ColorImage {
+fn create_placeholder_image(size: u32, color: [u8; 4]) -> RgbaImage {
     let pixel_count = (size * size) as usize;
     let mut rgba_data = Vec::with_capacity(pixel_count * 4);
     for _ in 0..pixel_count {
         rgba_data.extend_from_slice(&color);
     }
 
-    ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba_data)
+    RgbaImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba_data)
 }
 
 /// Create a model icon placeholder image (fallback when GPU rendering unavailable)
-fn create_model_icon_image() -> ColorImage {
+fn create_model_icon_image() -> RgbaImage {
     let size = THUMBNAIL_SIZE as usize;
-    let mut pixels = vec![egui::Color32::from_gray(40); size * size];
+    let bg: [u8; 4] = [40, 40, 40, 255];
+    let fg: [u8; 4] = [100, 150, 220, 255];
+    let mut rgba_data = Vec::with_capacity(size * size * 4);
+    for _ in 0..(size * size) {
+        rgba_data.extend_from_slice(&bg);
+    }
 
     let center = size / 2;
     let cube_size = size / 3;
-    let color = egui::Color32::from_rgb(100, 150, 220);
+    let put = |data: &mut Vec<u8>, x: usize, y: usize, c: [u8; 4]| {
+        let i = (y * size + x) * 4;
+        data[i..i + 4].copy_from_slice(&c);
+    };
 
     for i in 0..cube_size {
-        pixels[(center - cube_size / 2) * size + center - cube_size / 2 + i] = color;
-        pixels[(center + cube_size / 2) * size + center - cube_size / 2 + i] = color;
-        pixels[(center - cube_size / 2 + i) * size + center - cube_size / 2] = color;
-        pixels[(center - cube_size / 2 + i) * size + center + cube_size / 2] = color;
+        put(&mut rgba_data, center - cube_size / 2 + i, center - cube_size / 2, fg);
+        put(&mut rgba_data, center - cube_size / 2 + i, center + cube_size / 2, fg);
+        put(&mut rgba_data, center - cube_size / 2, center - cube_size / 2 + i, fg);
+        put(&mut rgba_data, center + cube_size / 2, center - cube_size / 2 + i, fg);
     }
 
-    let mut rgba_data = Vec::with_capacity(pixels.len() * 4);
-    for pixel in &pixels {
-        rgba_data.push(pixel.r());
-        rgba_data.push(pixel.g());
-        rgba_data.push(pixel.b());
-        rgba_data.push(pixel.a());
-    }
-
-    ColorImage::from_rgba_unmultiplied([size, size], &rgba_data)
+    RgbaImage::from_rgba_unmultiplied([size, size], &rgba_data)
 }

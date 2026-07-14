@@ -1,9 +1,4 @@
-//! Menu bar rendered with crusty-gui (Phase 16 port).
-//!
-//! Reads/writes the same state as `menu_bar::render_menu_bar` (dock state,
-//! command history, build dialog, play mode) and returns the same
-//! `MenuAction`s; with the `crusty` feature enabled the egui top panel only
-//! reserves the strip and this draws the menus there.
+//! Menu bar rendered with crusty-gui.
 
 use std::collections::HashMap;
 
@@ -56,19 +51,17 @@ mod play_colors {
     }
 }
 
-pub fn menu_bar_panel(ui: &mut Ui, bar_rect: egui::Rect, ppp: f32, ctx: MenuBarCtx) -> MenuAction {
+pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuAction {
     let mut action = MenuAction::None;
-    let s = ppp;
+    // Historical scale factor; 1.0 under the pure-crusty path (pixel-space
+    // rects). Kept so the constants below stay in the same units.
+    let s = 1.0_f32;
 
-    // Same per-frame build polling the egui menu bar does (crusty redraws
-    // every frame, so no repaint request is needed).
+    // Per-frame build message poll.
     let build_msgs = ctx.build_dialog.poll();
     ctx.console_messages.extend(build_msgs);
 
-    let rect = Rect::from_min_max(
-        Pos2::new(bar_rect.min.x * s, bar_rect.min.y * s),
-        Pos2::new(bar_rect.max.x * s, bar_rect.max.y * s),
-    );
+    let rect = bar_rect;
 
     let MenuBarCtx {
         dock_state,

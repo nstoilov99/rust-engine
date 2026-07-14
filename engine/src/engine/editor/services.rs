@@ -4,9 +4,9 @@
 //! belong to any single panel. Constructed once at editor startup in `app.rs`
 //! and threaded through `EditorContext<'a>` to all panels.
 //!
-//! The egui-only helpers (`load_icons`, `install_into_context`, `set_density`
-//! taking `&egui::Context`) and the `AssetPreviewRegistry`/`HierarchyIcons`
-//! sub-services were removed as part of the egui teardown. The crusty path
+//! The old helpers (`load_icons`, `install_into_context`, `set_density`
+//! taking a UI context reference) and the `AssetPreviewRegistry`/`HierarchyIcons`
+//! sub-services were removed as part of the UI teardown. The crusty path
 //! uploads its own textures on the render thread (see
 //! `rendering::render_thread::load_hierarchy_icons`) and calls
 //! `load_icons_crusty` here to get the persisted palette.
@@ -55,13 +55,13 @@ impl EditorServices {
         }
     }
 
-    /// Load palette-only icon state (no egui textures) for the crusty path.
+    /// Load palette-only icon state (no GPU textures here) for the crusty path.
     /// Crusty draws its own textures via the render thread's registry.
     pub fn load_icons_crusty(&mut self) {
         self.icons = Arc::new(IconRegistry::empty_with_default_palette());
     }
 
-    /// Switch density (crusty path — no egui context needed).
+    /// Switch density (crusty path — no UI context needed).
     pub fn set_density_crusty(&mut self, density: super::theme::Density) {
         self.theme = Arc::new(self.theme.with_density(density));
     }

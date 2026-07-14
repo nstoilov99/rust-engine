@@ -1,8 +1,8 @@
 //! Viewport Texture for Render-to-Texture
 //!
 //! Creates a Vulkan image that can be used as both a render target (COLOR_ATTACHMENT)
-//! and sampled in egui (SAMPLED). This enables rendering the 3D scene to a texture
-//! that can then be displayed inside an egui panel.
+//! and sampled in the UI (SAMPLED). This enables rendering the 3D scene to a texture
+//! that can then be displayed inside a UI panel.
 
 use std::sync::Arc;
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -57,7 +57,7 @@ impl ViewportTexture {
         height: u32,
         format: Format,
     ) -> Result<(Arc<Image>, Arc<ImageView>), Box<dyn std::error::Error>> {
-        // Create image with both COLOR_ATTACHMENT (for rendering) and SAMPLED (for egui)
+        // Create image with both COLOR_ATTACHMENT (for rendering) and SAMPLED (for the UI)
         let image = Image::new(
             allocator.clone(),
             ImageCreateInfo {

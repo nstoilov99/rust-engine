@@ -22,7 +22,7 @@ pub mod utils;
 // Entity Component System
 pub mod ecs;
 
-// GUI (egui integration, editor only)
+// GUI (crusty-gui integration, editor only)
 #[cfg(feature = "editor")]
 pub mod gui;
 

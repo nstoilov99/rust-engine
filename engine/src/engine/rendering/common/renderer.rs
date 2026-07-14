@@ -19,7 +19,6 @@ use crate::rendering::rendering_2d::pipeline_2d::{
 use crate::rendering::rendering_3d::pipeline_3d::{
     create_lit_mesh_pipeline, mesh_vs, LightingUniformData,
 };
-// use egui_winit_vulkano::Gui; // No compatible version for Vulkano 0.34
 use glam::Mat4;
 use hecs::World;
 use smallvec::smallvec;

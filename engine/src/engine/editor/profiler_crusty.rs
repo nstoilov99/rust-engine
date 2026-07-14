@@ -1,10 +1,8 @@
-//! Profiler panel rendered with crusty-gui (Phase 16 port).
+//! Profiler panel rendered with crusty-gui.
 //!
-//! Reads/writes the same `ProfilerState` as the egui version. The toolbar,
-//! frame history and flamegraph follow the egui reference; the Table and
-//! Budget views are redesigned (user-approved deviation). Settings/Info/
-//! Tracy popups are real floating windows, fixing the egui z-order bug
-//! where they rendered below the viewport toolbar.
+//! Toolbar, frame history and flamegraph follow the reference design; Table
+//! and Budget views are redesigned (user-approved deviation). Settings /
+//! Info / Tracy popups are real floating windows.
 
 use crusty_gui::context::{Align, Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
@@ -25,10 +23,6 @@ use super::profiler::{budget, ProfilerPanel};
 
 // ── color helpers ───────────────────────────────────────────────────────────
 
-fn c32(c: egui::Color32) -> Color {
-    Color::from_srgb_u8(c.r(), c.g(), c.b(), c.a())
-}
-
 fn gray(v: u8) -> Color {
     Color::from_srgb_u8(v, v, v, 255)
 }
@@ -37,17 +31,18 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_srgb_u8(r, g, b, 255)
 }
 
+#[allow(dead_code)]
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
     Color::from_srgb_u8(r, g, b, a)
 }
 
 /// Solid frame color by FPS thresholds (green >60, yellow 30–60, red <30).
 fn fps_color(duration_ms: f64) -> Color {
-    c32(frame_bar_color_fps(duration_ms))
+    frame_bar_color_fps(duration_ms)
 }
 
-/// egui `widgets.inactive.bg_fill` — plain toolbar buttons (crusty's default
-/// surface is much darker than the egui reference).
+/// Plain toolbar button fill (matches the historical reference palette; the
+/// default crusty surface is much darker).
 fn btn_fill() -> Color {
     gray(60)
 }
@@ -101,15 +96,14 @@ struct ToolbarAnchors {
     tracy: Pos2,
 }
 
-/// Draw the profiler into the dock tab's content rect. `tab_rect` is in
-/// egui points; `ppp` maps it into crusty's physical-pixel space.
-pub fn profiler_panel(ui: &mut Ui, tab_rect: egui::Rect, ppp: f32, panel: &mut ProfilerPanel) {
+/// Draw the profiler into the dock tab's content rect (physical pixels).
+pub fn profiler_panel(ui: &mut Ui, tab_rect: Rect, panel: &mut ProfilerPanel) {
     panel.update();
-    let s = ppp;
-    let rect = Rect::from_min_max(
-        Pos2::new(tab_rect.min.x * s, tab_rect.min.y * s),
-        Pos2::new(tab_rect.max.x * s, tab_rect.max.y * s),
-    );
+    // Historical scale factor; kept at 1.0 for the pure-crusty path where
+    // `pixels_per_point == 1.0`. Internal code still multiplies by `s` so its
+    // pixel constants line up with the historical points-based reference.
+    let s = 1.0_f32;
+    let rect = tab_rect;
     let style = ui.style();
     let opts = UiOptions {
         padding: Vec2::new(4.0 * s, 2.0 * s),
@@ -206,7 +200,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
         } else if state.tracy_state.is_enabled() {
             ("Tracy \u{25CB}", rgb(100, 80, 30), gray(220))
         } else {
-            // Disabled look (egui uses a non-interactive dimmed button).
+            // Disabled look (non-interactive dimmed button).
             ("Tracy", gray(30), gray(110))
         };
         let r = Button::new(tlabel).fill(tfill).text_color(ttext).show(ui);
@@ -249,7 +243,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
     });
 
     // Right cluster: Info + Settings, right-anchored deterministically
-    // (egui hid these at narrow widths; here they are always visible).
+    // (always visible at any width).
     let total = info_w + settings_w + spacing;
     let rrect = Rect::from_min_size(
         Pos2::new(right_edge - total, row_top.y),
@@ -437,11 +431,11 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             let base = frame_bar_color_fps(*dur);
             let selected = state.selected_frame_index == Some(*orig);
             let color = if selected {
-                c32(lighten(base, 0.3))
+                lighten(base, 0.3)
             } else if hover {
-                c32(lighten(base, 0.15))
+                lighten(base, 0.15)
             } else {
-                c32(base)
+                base
             };
             p.rect_filled(bar, Rounding::same(1.0 * s), color);
             if selected {
@@ -555,12 +549,12 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 // ── view row ────────────────────────────────────────────────────────────────
 
 /// Selection fill: accent over the backdrop, strong enough to read as a
-/// solid chip (egui's 0.55 tint was barely visible on our darker theme).
+/// solid chip (a 0.55 tint would be barely visible on our darker theme).
 fn selection_fill(accent: Color) -> Color {
     Color::rgba(accent.r, accent.g, accent.b, 0.8)
 }
 
-/// egui `Button::selected` equivalent: a regular button that switches to the
+/// Selected-button variant: a regular button that switches to the
 /// accent selection fill when active. Returns true on click.
 fn toggle_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label: &str) -> bool {
     let clicked = if *value == option {
@@ -579,7 +573,7 @@ fn toggle_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label
     clicked
 }
 
-/// egui `selectable_value` equivalent: frameless text chip. Crusty's
+/// Frameless text chip (selectable-value analogue). Crusty's
 /// `SelectableValue` fills the row width (it is a popup-list row) and
 /// `Button` always draws a border, so this paints directly.
 fn select_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label: &str) -> bool {
@@ -821,7 +815,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 
     let width = (content.width() - left_margin).max(1.0);
     // Scope timestamps are absolute; normalize to the earliest scope start
-    // across threads and auto-fit to the actual span (egui parity).
+    // across threads and auto-fit to the actual span.
     let (t0_ns, t1_ns) = frame
         .threads
         .iter()
@@ -1172,8 +1166,8 @@ fn draw_scope(
                 rect,
             });
         }
-        p.rect_filled(rect, Rounding::same(3.0 * fg.s), c32(c));
-        p.rect_stroke(rect, Rounding::same(3.0 * fg.s), 1.0, c32(darken(c, 0.3)));
+        p.rect_filled(rect, Rounding::same(3.0 * fg.s), c);
+        p.rect_stroke(rect, Rounding::same(3.0 * fg.s), 1.0, darken(c, 0.3));
 
         if w > 40.0 * fg.s {
             let label = if w > 150.0 * fg.s {
@@ -1190,7 +1184,10 @@ fn draw_scope(
                     scope.name.to_string()
                 }
             };
-            let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+            // sRGB u8 luminance for contrast (matches the historical
+            // reference — computed in gamma space, not linear).
+            let [cr, cg, cb, _] = c.to_srgb_u8();
+            let lum = 0.299 * cr as f32 + 0.587 * cg as f32 + 0.114 * cb as f32;
             let tc = if lum > 140.0 { gray(30) } else { gray(250) };
             let clip = rect.intersect(fg.content);
             p.paint_mut().push(PaintCmd::PushClip(clip));

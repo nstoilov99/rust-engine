@@ -2,14 +2,13 @@
 //!
 //! Opens in a separate OS window when a user double-clicks a mapping context
 //! asset in the asset browser — similar to Unreal Engine's InputMappingContext editor.
-//! The egui `show_ui` rendering fn was removed; the crusty analog lives in
-//! `input_editors_crusty::input_context_editor_panel`. The
-//! `listen_start_modifiers: egui::Modifiers` field is preserved on the state
-//! struct because the crusty path still uses it (type migration is deferred).
+//! The old `show_ui` rendering fn was removed; the crusty analog lives in
+//! `input_editors_crusty::input_context_editor_panel`.
 
 use crate::engine::input::action::InputSource;
 use crate::engine::input::enhanced_action::MappingContext;
 use crate::engine::input::enhanced_serialization;
+use crusty_gui::input::Modifiers;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -23,7 +22,7 @@ pub struct InputContextEditorState {
     /// When set, the editor is listening for input on this (entry_idx, binding_idx).
     pub listening_binding: Option<(usize, usize)>,
     /// Modifier state captured when listening started, to detect new modifier-key presses.
-    pub listen_start_modifiers: egui::Modifiers,
+    pub listen_start_modifiers: Modifiers,
     /// Input detected from external sources (gamepad). Set by the main loop.
     pub pending_external_input: Option<InputSource>,
 }
@@ -62,7 +61,7 @@ impl InputContextEditor {
                     open: true,
                     status_message: None,
                     listening_binding: None,
-                    listen_start_modifiers: egui::Modifiers::NONE,
+                    listen_start_modifiers: Modifiers::empty(),
                     pending_external_input: None,
                 },
             );

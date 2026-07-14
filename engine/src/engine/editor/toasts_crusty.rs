@@ -1,8 +1,7 @@
-//! Toast notifications rendered with crusty-gui (Phase 16 port).
+//! Toast notifications rendered with crusty-gui.
 //!
-//! Reads the same `ToastStack` as the egui version in `toasts.rs` (the caller
-//! prunes expired toasts via `ToastStack::prune` and hands us the slice).
-//! Anchored top-right like the egui `Area`, latest five, newest on top.
+//! Anchored top-right; latest five, newest on top. The caller prunes expired
+//! toasts via `ToastStack::prune` and hands us the slice.
 
 use crusty_gui::context::Ui;
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
@@ -22,17 +21,17 @@ fn kind_style(kind: ToastKind) -> (&'static str, Color) {
     }
 }
 
-pub fn toasts_panel(ui: &mut Ui, screen_rect: egui::Rect, ppp: f32, toasts: &[Toast]) {
+pub fn toasts_panel(ui: &mut Ui, screen_rect: Rect, toasts: &[Toast]) {
     if toasts.is_empty() {
         return;
     }
     let font = ui.style().fonts.body;
     let text_color = ui.style().palette.text;
     let fill = Color::from_srgb_u8(28, 30, 34, 235);
-    let s = ppp;
+    let s = 1.0_f32;
 
-    let right = screen_rect.max.x * s - 16.0 * s;
-    let mut y = screen_rect.min.y * s + 40.0 * s;
+    let right = screen_rect.max.x - 16.0;
+    let mut y = screen_rect.min.y + 40.0;
 
     for toast in toasts.iter().rev().take(5) {
         let (label, color) = kind_style(toast.kind);

@@ -1,9 +1,8 @@
-//! Crusty-gui dock layout for the editor (Phase 16 egui_dock replacement).
+//! Crusty-gui dock layout for the editor.
 //!
-//! Mirrors [`EditorDockState`](super::dock_layout::EditorDockState) on top of
-//! crusty-gui's `DockNode`/`DockState`: stable string tab ids map 1:1 to
-//! [`EditorTab`], the layout persists as RON, and the default tree matches
-//! the egui default (Hierarchy | Viewport+bottom | Inspector).
+//! Sits on top of crusty-gui's `DockNode`/`DockState`: stable string tab ids
+//! map 1:1 to [`EditorTab`], the layout persists as RON, and the default tree
+//! is `Hierarchy | Viewport+bottom | Inspector`.
 
 use super::dock_layout::EditorTab;
 use super::scene_tab::{DormantScene, SceneId};
@@ -19,8 +18,7 @@ use std::path::{Path, PathBuf};
 
 pub use crusty_gui::dock::{DockArea, DockResponse, ExternalDrag, TabBarSlot};
 
-/// Layout file name stored in the current directory. Separate from the egui
-/// layout file so the two UIs don't clobber each other while both exist.
+/// Layout file name stored in the current directory.
 const LAYOUT_FILE: &str = "editor_layout_crusty.ron";
 
 /// Stable string id for a tab, used as the crusty dock `TabId`.
@@ -75,8 +73,8 @@ impl Default for CrustyDockLayout {
 }
 
 impl CrustyDockLayout {
-    /// Default layout, matching the egui default:
-    /// Hierarchy (20%) | Viewport over Console/Profiler (75/25) | Inspector.
+    /// Default layout: Hierarchy (20%) | Viewport over Console/Profiler
+    /// (75/25) | Inspector.
     pub fn new() -> Self {
         let center = DockNode::split_v(
             0.75,
@@ -169,25 +167,9 @@ impl CrustyDockLayout {
     }
 }
 
-/// egui-points rect → crusty physical-pixel rect.
-pub fn rect_px(r: egui::Rect, ppp: f32) -> Rect {
-    Rect::from_min_max(
-        Pos2::new(r.min.x * ppp, r.min.y * ppp),
-        Pos2::new(r.max.x * ppp, r.max.y * ppp),
-    )
-}
-
-/// crusty physical-pixel rect → egui-points rect.
-pub fn rect_pts(r: Rect, ppp: f32) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(r.min.x / ppp, r.min.y / ppp),
-        egui::pos2(r.max.x / ppp, r.max.y / ppp),
-    )
-}
-
 /// Display titles for every tab in the tree; viewport tabs show their scene
-/// name (like the egui tab titles did). `extra` covers a tab currently torn
-/// off the tree (ghost drag) so its card still shows the display title.
+/// name. `extra` covers a tab currently torn off the tree (ghost drag) so its
+/// card still shows the display title.
 pub fn tab_titles(
     tree: &DockNode,
     active_id: SceneId,
@@ -240,8 +222,8 @@ pub fn ghost_drag(ui: &Ui, tab_id: &str) -> ExternalDrag {
     }
 }
 
-/// "+" new-scene button drawn after the last tab of `slot`'s bar (mirrors the
-/// egui viewport tab strip button). Returns true on click.
+/// "+" new-scene button drawn after the last tab of `slot`'s bar. Returns
+/// true on click.
 pub fn new_tab_button(ui: &mut Ui, slot: &TabBarSlot) -> bool {
     let s = slot.bar_rect.height() - 8.0;
     let rect = Rect::from_min_size(

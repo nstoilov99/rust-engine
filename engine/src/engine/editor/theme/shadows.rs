@@ -3,7 +3,7 @@
 //! Defines elevation levels for floating surfaces. Step 12 adds the
 //! 9-slice shadow rendering; this module just holds the token values.
 
-use egui::{Color32, Vec2};
+use crusty_gui::math::{Color, Vec2};
 
 /// Shadow specification for a given elevation level.
 #[derive(Clone, Debug)]
@@ -13,7 +13,7 @@ pub struct ShadowSpec {
     /// Spread radius (conceptual — used by the 9-slice renderer in Step 12)
     pub spread: f32,
     /// Shadow color (typically semi-transparent black)
-    pub color: Color32,
+    pub color: Color,
 }
 
 /// Shadow tokens for two elevation levels.
@@ -32,12 +32,12 @@ impl ShadowTokens {
             low: ShadowSpec {
                 offset: Vec2::new(0.0, 2.0),
                 spread: 8.0,
-                color: Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+                color: Color::from_srgb_u8(0, 0, 0, 80),
             },
             high: ShadowSpec {
                 offset: Vec2::new(0.0, 4.0),
                 spread: 16.0,
-                color: Color32::from_rgba_unmultiplied(0, 0, 0, 120),
+                color: Color::from_srgb_u8(0, 0, 0, 120),
             },
         }
     }
