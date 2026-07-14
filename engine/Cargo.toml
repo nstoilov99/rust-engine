@@ -11,7 +11,7 @@ path = "src/lib.rs"
 default = []
 # Editor UI is crusty-gui. (egui deps linger here only until the egui
 # deletion completes — see ROADMAP Phase 16 in ../crusty-gui.)
-editor = ["dep:crusty-gui", "dep:windows-sys", "dep:egui", "dep:egui_dock", "dep:transform-gizmo-egui", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
+editor = ["dep:crusty-gui", "dep:windows-sys", "dep:egui", "dep:egui_dock", "dep:transform-gizmo", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
 # Transitional alias — the crusty backend is now the only editor UI.
 crusty = ["editor"]
 editor-debug = ["editor"]
@@ -85,8 +85,9 @@ tracy-client = { version = "0.17", optional = true, default-features = false, fe
 # Docking layout system for egui (editor only)
 egui_dock = { version = "0.18", features = ["serde"], optional = true }
 
-# Transform gizmo for viewport manipulation (editor only)
-transform-gizmo-egui = { version = "0.8", optional = true }
+# Transform gizmo for viewport manipulation (editor only; patched to the
+# Z-up fork in the workspace root)
+transform-gizmo = { version = "0.8", optional = true }
 mint = "0.5"
 
 # Clipboard support (editor only)

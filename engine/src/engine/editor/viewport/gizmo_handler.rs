@@ -1,4 +1,4 @@
-//! Transform gizmo integration using transform-gizmo-egui
+//! Transform gizmo integration using transform-gizmo
 //!
 //! Uses a forked version of transform-gizmo that natively supports Z-up coordinates.
 //! No coordinate conversion is needed - transforms are passed directly.
@@ -6,13 +6,13 @@
 use glam::{Mat4, Vec3, Vec4};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
-use transform_gizmo_egui::{
+use transform_gizmo::{
     mint::{Quaternion, RowMatrix4, Vector3, Vector4},
-    EnumSet, Gizmo, GizmoConfig, GizmoExt, GizmoMode as TGMode, GizmoOrientation as TGOrientation,
+    EnumSet, Gizmo, GizmoConfig, GizmoMode as TGMode, GizmoOrientation as TGOrientation,
     GizmoResult,
 };
 
-type TGTransform = transform_gizmo_egui::math::Transform;
+type TGTransform = transform_gizmo::math::Transform;
 
 use crate::engine::ecs::components::Transform;
 
@@ -35,7 +35,7 @@ pub enum GizmoInteractionResult {
     },
 }
 
-/// Gizmo handler wrapping transform-gizmo-egui
+/// Gizmo handler wrapping transform-gizmo
 pub struct GizmoHandler {
     gizmo: Gizmo,
     /// Current manipulation mode
@@ -80,43 +80,10 @@ impl GizmoHandler {
         self.is_dragging
     }
 
-    /// Update and render the gizmo
-    ///
-    /// # Arguments
-    /// * `ui` - egui UI context
-    /// * `view_matrix` - Camera view matrix (Z-up)
-    /// * `projection_matrix` - Camera projection matrix
-    /// * `viewport_rect` - Viewport rectangle in screen space
-    /// * `selected_entity` - Currently selected entity (if any)
-    /// * `world` - ECS world for reading/writing transforms
-    ///
-    /// # Returns
-    /// Result indicating if transform changed or drag ended
-    pub fn update(
-        &mut self,
-        ui: &mut egui::Ui,
-        view_matrix: Mat4,
-        projection_matrix: Mat4,
-        viewport_rect: egui::Rect,
-        selected_entity: Option<Entity>,
-        world: &World,
-    ) -> GizmoInteractionResult {
-        let pointer_released = ui.input(|i| !i.pointer.any_down());
-        self.update_impl(
-            view_matrix,
-            projection_matrix,
-            viewport_rect,
-            selected_entity,
-            world,
-            pointer_released,
-            |gizmo, targets| gizmo.interact(ui, targets),
-        )
-    }
-
-    /// Crusty twin of [`update`]: identical interaction logic, but the
-    /// pointer comes from crusty input and the draw data is painted via
-    /// `Painter::mesh`. `hovered` = pointer is over the viewport image and
-    /// not captured by a floating crusty layer — the caller decides.
+    /// Update, interact with and paint the gizmo. The pointer comes from
+    /// crusty input and the draw data is painted via `Painter::mesh`.
+    /// `hovered` = pointer is over the viewport image and not captured by
+    /// a floating crusty layer — the caller decides.
     #[cfg(feature = "editor")]
     pub fn update_crusty(
         &mut self,
@@ -128,7 +95,7 @@ impl GizmoHandler {
         selected_entity: Option<Entity>,
         world: &World,
     ) -> GizmoInteractionResult {
-        use transform_gizmo_egui::GizmoInteraction;
+        use transform_gizmo::GizmoInteraction;
 
         let cursor = ui.ctx().input.pointer_pos.unwrap_or_default();
         let pointer_pressed = ui.ctx().input.pointer_pressed;
@@ -354,8 +321,8 @@ impl GizmoHandler {
 
     /// Convert ECS Transform (Z-up) to gizmo transform
     /// Direct pass-through since the forked gizmo uses Z-up natively
-    fn ecs_to_gizmo_transform(&self, t: &Transform) -> transform_gizmo_egui::math::Transform {
-        transform_gizmo_egui::math::Transform {
+    fn ecs_to_gizmo_transform(&self, t: &Transform) -> transform_gizmo::math::Transform {
+        transform_gizmo::math::Transform {
             translation: Vector3 {
                 x: t.position.x as f64,
                 y: t.position.y as f64,
@@ -382,7 +349,7 @@ impl GizmoHandler {
     /// Only updates the component(s) that match the current gizmo mode.
     fn gizmo_to_ecs_transform(
         &mut self,
-        gizmo_transform: &transform_gizmo_egui::math::Transform,
+        gizmo_transform: &transform_gizmo::math::Transform,
         original: &Transform,
     ) -> Transform {
         match self.mode {

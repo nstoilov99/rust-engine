@@ -3195,7 +3195,7 @@ dependencies = [
  "tobj",
  "tokio",
  "tracy-client",
- "transform-gizmo-egui",
+ "transform-gizmo",
  "typetag",
  "ufbx",
  "uuid",
@@ -4072,14 +4072,6 @@ dependencies = [
  "epaint",
  "glam 0.29.3",
  "mint",
-]
-
-[[package]]
-name = "transform-gizmo-egui"
-version = "0.8.0"
-dependencies = [
- "egui",
- "transform-gizmo",
 ]
 
 [[package]]
