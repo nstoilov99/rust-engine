@@ -9,10 +9,9 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Editor UI is crusty-gui. (egui deps linger here only until the egui
-# deletion completes — see ROADMAP Phase 16 in ../crusty-gui.)
-editor = ["dep:crusty-gui", "dep:windows-sys", "dep:egui", "dep:egui_dock", "dep:transform-gizmo", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
-# Transitional alias — the crusty backend is now the only editor UI.
+# Editor UI is crusty-gui.
+editor = ["dep:crusty-gui", "dep:windows-sys", "dep:transform-gizmo", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
+# Alias kept for muscle memory — crusty-gui is the only editor UI.
 crusty = ["editor"]
 editor-debug = ["editor"]
 tracy = ["tracy-client"]
@@ -67,10 +66,7 @@ tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "sync"], option
 ron = "0.8"
 typetag = "0.2"
 
-# Immediate Mode GUI (editor only)
-egui = { version = "0.33.3", optional = true }
-
-# crusty-gui — in-house GUI library replacing egui (Phase 16, path dep during development)
+# crusty-gui — in-house GUI library (path dep during development)
 crusty-gui = { path = "../../crusty-gui", default-features = false, features = ["winit-window", "vulkano-renderer", "serde"], optional = true }
 
 # Physics Engine (Rapier 3D)
@@ -81,9 +77,6 @@ puffin = "0.19"
 
 # Tracy profiler integration (optional - build with --features tracy)
 tracy-client = { version = "0.17", optional = true, default-features = false, features = ["enable", "manual-lifetime"] }
-
-# Docking layout system for egui (editor only)
-egui_dock = { version = "0.18", features = ["serde"], optional = true }
 
 # Transform gizmo for viewport manipulation (editor only; patched to the
 # Z-up fork in the workspace root)
