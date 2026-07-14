@@ -70,6 +70,14 @@ impl EditorServices {
         self.hierarchy_icons = Arc::new(HierarchyIcons::load(ctx));
     }
 
+    /// Load palette-only icon state (no egui textures) for the crusty path.
+    /// Crusty draws its own textures via the render thread's registry.
+    pub fn load_icons_crusty(&mut self) {
+        self.icons = Arc::new(IconRegistry::empty_with_default_palette());
+        // hierarchy_icons stays empty — crusty renders hierarchy icons via
+        // the render-thread-uploaded `crusty_icons` map.
+    }
+
     /// Apply the theme to egui's style/visuals and push the current theme +
     /// icons into `egui::Context::data()` so widgets can read via extension traits.
     ///
@@ -90,6 +98,11 @@ impl EditorServices {
     pub fn set_density(&mut self, density: super::theme::Density, ctx: &egui::Context) {
         self.theme = Arc::new(self.theme.with_density(density));
         self.install_into_context(ctx);
+    }
+
+    /// Switch density without touching egui context (crusty path).
+    pub fn set_density_crusty(&mut self, density: super::theme::Density) {
+        self.theme = Arc::new(self.theme.with_density(density));
     }
 }
 

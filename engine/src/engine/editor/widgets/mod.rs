@@ -391,6 +391,17 @@ impl IconRegistry {
         }
     }
 
+    /// Empty texture map with the persisted palette applied (crusty path —
+    /// tints come from the palette; textures are drawn via the crusty
+    /// renderer's own registry).
+    pub fn empty_with_default_palette() -> Self {
+        let palette = IconPalette::load_from_default().unwrap_or_else(IconPalette::default_dark);
+        Self {
+            textures: std::collections::HashMap::new(),
+            palette,
+        }
+    }
+
     /// Load icons from the engine icons directory. If a saved palette file
     /// exists at `IconPalette::default_path()`, it is loaded; otherwise the
     /// hardcoded `default_dark` palette is used.

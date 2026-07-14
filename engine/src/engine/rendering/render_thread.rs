@@ -149,24 +149,6 @@ impl RenderThread {
             .unwrap_or(vulkano::format::Format::B8G8R8A8_SRGB);
 
         #[cfg(feature = "editor")]
-        let mut egui_renderer = {
-            match crate::engine::gui::EguiRenderer::new(
-                gpu.device.clone(),
-                gpu.queue.clone(),
-                sc_format,
-            ) {
-                Ok(r) => {
-                    log::info!("render_thread: EguiRenderer created successfully");
-                    Some(r)
-                }
-                Err(e) => {
-                    log::warn!("render_thread: EguiRenderer creation failed: {}", e);
-                    None
-                }
-            }
-        };
-
-        #[cfg(feature = "editor")]
         let mut crusty_renderer = config.crusty_text.clone().map(|text| {
             log::info!("render_thread: CrustyRenderer created");
             crate::engine::gui::crusty::CrustyRenderer::new(
@@ -366,44 +348,18 @@ impl RenderThread {
                             if let Err(e) = deferred_renderer.resize(vp_w, vp_h) {
                                 log::error!("render_thread: deferred resize failed: {}", e);
                             }
-                            if let Some(ref mut egui_r) = egui_renderer {
-                                if let Some(tex_id) = packet.viewport_texture_id {
-                                    egui_r.update_native_texture(tex_id, vt.image_view());
-                                }
-                            }
                             #[cfg(feature = "editor")]
                             if let (Some(cr), Some(id)) =
                                 (crusty_renderer.as_mut(), crusty_viewport_texture)
                             {
                                 cr.update_native_texture(id, vt.image_view());
                             }
-                            let _ = response.send(RenderEvent::ViewportTextureChanged {
-                                texture_id: packet
-                                    .viewport_texture_id
-                                    .unwrap_or(egui::TextureId::default()),
-                                image_view: vt.image_view(),
-                            });
                         }
                         Ok(false) => {}
                         Err(e) => {
                             log::error!("render_thread: viewport resize failed: {}", e);
                         }
                     }
-                }
-            }
-
-            // Process texture bind commands (editor only)
-            #[cfg(feature = "editor")]
-            if let Some(ref mut egui_r) = egui_renderer {
-                for bind in &packet.texture_binds {
-                    egui_r.update_native_texture(bind.texture_id, bind.image_view.clone());
-                }
-                // Ensure the viewport texture in EguiRenderer points to the render
-                // thread's actual image (not the main thread's placeholder).
-                if let (Some(tex_id), Some(ref vt)) =
-                    (packet.viewport_texture_id, &viewport_texture)
-                {
-                    egui_r.update_native_texture(tex_id, vt.image_view());
                 }
             }
 
@@ -444,41 +400,13 @@ impl RenderThread {
                         None
                     };
 
-                    #[cfg(feature = "editor")]
-                    let crusty_target = target_image.clone();
-
-                    let egui_cb = if let (Some(ref mut egui_r), Some(primitives), Some(deltas)) = (
-                        &mut egui_renderer,
-                        packet.egui_primitives,
-                        packet.egui_texture_deltas,
-                    ) {
-                        crate::profile_scope!("record_egui");
-                        let screen_rect = egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(
-                                packet.window_dimensions[0] as f32,
-                                packet.window_dimensions[1] as f32,
-                            ),
-                        );
-                        match egui_r.render(target_image, primitives, deltas, screen_rect) {
-                            Ok(cb) => Some(cb),
-                            Err(e) => {
-                                log::error!("render_thread: egui render error: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    // crusty-gui pass, composited over the egui output (Phase 16
-                    // migration — panels move over one at a time).
-                    #[cfg(feature = "editor")]
+                    // crusty-gui pass composits over the deferred output — the
+                    // editor's sole UI pass now that egui is out.
                     let crusty_cb = if let (Some(ref mut crusty_r), Some(paint)) =
                         (&mut crusty_renderer, packet.crusty_paint.as_deref())
                     {
                         crate::profile_scope!("record_crusty");
-                        match crusty_r.render(crusty_target, paint, None, None) {
+                        match crusty_r.render(target_image, paint, None, None) {
                             Ok(cb) => cb,
                             Err(e) => {
                                 log::error!("render_thread: crusty render error: {}", e);
@@ -494,10 +422,6 @@ impl RenderThread {
                     let mut ui_cbs: Vec<
                         Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
                     > = Vec::new();
-                    if let Some(cb) = egui_cb {
-                        ui_cbs.push(cb);
-                    }
-                    #[cfg(feature = "editor")]
                     if let Some(cb) = crusty_cb {
                         ui_cbs.push(cb);
                     }
@@ -744,6 +668,8 @@ mod tests {
             swapchain_transfer: None,
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
+            #[cfg(feature = "editor")]
+            crusty_text: None,
         })
     }
 

@@ -78,9 +78,8 @@ pub mod profiler;
 #[cfg(feature = "editor")]
 pub mod profiler_crusty;
 pub mod scene_tab;
-pub mod secondary_window;
+pub mod secondary_kind;
 mod selection;
-mod tab_viewer;
 #[cfg(feature = "editor")]
 pub mod status_bar_crusty;
 #[cfg(feature = "editor")]
@@ -117,11 +116,10 @@ pub use menu_bar::*;
 pub use preview::{AssetPreview, AssetPreviewRegistry, PreviewId, PreviewKind};
 pub use profiler::ProfilerPanel;
 pub use scene_tab::{DormantScene, SaveAsDialog, SceneId, SceneRegistry};
-pub use secondary_window::{PendingWindowRequest, SecondaryWindow, SecondaryWindowKind};
+pub use secondary_kind::SecondaryWindowKind;
 pub use selection::*;
 pub use services::EditorServices;
 pub use status_bar::{render_status_bar, StatusBarState};
-pub use tab_viewer::*;
 pub use toasts::{Toast, ToastKind, ToastStack};
 pub use viewport::*;
 pub use viewport_texture::*;

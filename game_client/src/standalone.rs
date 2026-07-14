@@ -1,6 +1,6 @@
 //! Standalone game application (no editor UI)
 //!
-//! Runs the game with direct swapchain rendering, no egui, no editor panels.
+//! Runs the game with direct swapchain rendering, no UI, no editor panels.
 
 use super::{game_setup, render_loop};
 use rust_engine::assets::AssetManager;

@@ -18,7 +18,8 @@ use parking_lot::Mutex;
 
 use crusty_gui::backend::TargetRenderer;
 use crusty_gui::context::{Context, CursorIcon, Ui};
-use crusty_gui::input::{Event, Modifiers, RawInput};
+use crusty_gui::input::{Event, RawInput};
+pub use crusty_gui::input::{Key, Modifiers, Shortcut};
 use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureFilter};
 pub use crusty_gui::paint::TextureId;

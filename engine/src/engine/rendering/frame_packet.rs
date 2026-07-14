@@ -1,7 +1,7 @@
 //! Frame packet types for cross-thread render data transfer.
 //!
 //! `FramePacket` is the sole data interface between the main thread
-//! (game logic, ECS, egui layout) and the render thread (command
+//! (game logic, ECS, crusty-gui layout) and the render thread (command
 //! recording, GPU submission). All fields are owned/cloned — no
 //! shared mutable state crosses the boundary.
 
@@ -21,13 +21,6 @@ pub enum RenderMode {
     Standalone,
     #[cfg(feature = "editor")]
     Editor,
-}
-
-/// A command to bind or update an egui texture slot on the render thread.
-#[cfg(feature = "editor")]
-pub struct TextureBindCommand {
-    pub texture_id: egui::TextureId,
-    pub image_view: Arc<ImageView>,
 }
 
 /// Emission parameters for a single plankton emitter frame.
@@ -101,14 +94,7 @@ pub struct FramePacket {
     pub post_processing: PostProcessingSettings,
     pub plankton_emitters: Vec<PlanktonEmitterFrameData>,
 
-    // egui data (None until Step 7 wires up the egui split)
-    #[cfg(feature = "editor")]
-    pub egui_primitives: Option<Vec<egui::ClippedPrimitive>>,
-    #[cfg(feature = "editor")]
-    pub egui_texture_deltas: Option<egui::TexturesDelta>,
-
-    /// crusty-gui paint list, composited after the egui pass (Phase 16
-    /// migration — panels move here one at a time).
+    /// crusty-gui paint list — the editor's sole UI pass.
     #[cfg(feature = "editor")]
     pub crusty_paint: Option<Vec<crusty_gui::paint::PaintCmd>>,
 
@@ -149,15 +135,6 @@ pub struct FramePacket {
 
     // Frame metadata
     pub frame_number: u64,
-
-    // Texture bind commands (for egui texture slot protocol)
-    #[cfg(feature = "editor")]
-    pub texture_binds: Vec<TextureBindCommand>,
-
-    /// The egui TextureId assigned to the viewport texture, so the render
-    /// thread can update its EguiRenderer cache after a viewport resize.
-    #[cfg(feature = "editor")]
-    pub viewport_texture_id: Option<egui::TextureId>,
 }
 
 /// RGBA8 pixels for a texture the render thread uploads to the GPU and
@@ -188,11 +165,6 @@ pub enum RenderEvent {
     },
     SwapchainRecreated {
         dimensions: [u32; 2],
-    },
-    #[cfg(feature = "editor")]
-    ViewportTextureChanged {
-        texture_id: egui::TextureId,
-        image_view: Arc<ImageView>,
     },
     RenderError {
         message: String,
@@ -234,10 +206,6 @@ impl FramePacket {
             post_processing: PostProcessingSettings::default(),
             plankton_emitters,
             #[cfg(feature = "editor")]
-            egui_primitives: None,
-            #[cfg(feature = "editor")]
-            egui_texture_deltas: None,
-            #[cfg(feature = "editor")]
             crusty_paint: None,
             #[cfg(feature = "editor")]
             crusty_texture_uploads: Vec::new(),
@@ -254,10 +222,6 @@ impl FramePacket {
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
             frame_number,
-            #[cfg(feature = "editor")]
-            texture_binds: Vec::new(),
-            #[cfg(feature = "editor")]
-            viewport_texture_id: None,
         }
     }
 
@@ -287,26 +251,16 @@ impl FramePacket {
             debug_draw,
             post_processing: PostProcessingSettings::default(),
             plankton_emitters,
-            egui_primitives: None,
-            egui_texture_deltas: None,
-            #[cfg(feature = "editor")]
             crusty_paint: None,
-            #[cfg(feature = "editor")]
             crusty_texture_uploads: Vec::new(),
-            #[cfg(feature = "editor")]
             crusty_preview_cbs: Vec::new(),
-            #[cfg(feature = "editor")]
             crusty_native_registrations: Vec::new(),
-            #[cfg(feature = "editor")]
             crusty_native_updates: Vec::new(),
-            #[cfg(feature = "editor")]
             crusty_native_removals: Vec::new(),
             render_mode: RenderMode::Editor,
             window_dimensions,
             viewport_dimensions,
             frame_number,
-            texture_binds: Vec::new(),
-            viewport_texture_id: None,
         }
     }
 }
