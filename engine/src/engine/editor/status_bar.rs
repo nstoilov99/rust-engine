@@ -1,4 +1,7 @@
-//! Editor status bar helpers.
+//! Editor status bar state.
+//!
+//! The egui `render_status_bar` fn was removed; the crusty analog lives in
+//! `status_bar_crusty`.
 
 #[derive(Debug, Clone)]
 pub struct StatusBarState {
@@ -27,19 +30,4 @@ impl StatusBarState {
     pub fn set_right(&mut self, text: impl Into<String>) {
         self.right_text = text.into();
     }
-}
-
-pub fn render_status_bar(ctx: &egui::Context, state: &StatusBarState) {
-    egui::TopBottomPanel::bottom("editor_status_bar")
-        .exact_height(22.0)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(state.left_text.as_str()).weak());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !state.right_text.is_empty() {
-                        ui.label(egui::RichText::new(state.right_text.as_str()).weak());
-                    }
-                });
-            });
-        });
 }

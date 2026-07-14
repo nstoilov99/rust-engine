@@ -1,6 +1,8 @@
 //! Console log system with color-coded messages and filtering
 
-use egui::{Color32, RichText};
+// `egui::Color32` is retained on live crusty signatures (`LogLevel::color`) as
+// part of the shared editor colour type; the type migration is deferred.
+use egui::Color32;
 use std::collections::VecDeque;
 
 pub const MAX_CONSOLE_MESSAGES: usize = 2000;
@@ -62,10 +64,6 @@ impl LogMessage {
         }
     }
 
-    /// Format the message with level prefix and color
-    pub fn rich_text(&self) -> RichText {
-        RichText::new(format!("{} {}", self.level.prefix(), self.text)).color(self.level.color())
-    }
 }
 
 /// Capped console log with incrementally maintained per-level counts.

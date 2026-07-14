@@ -1,16 +1,15 @@
 //! Profiler panel module
 //!
-//! Provides an in-engine profiler UI built on puffin for data collection
-//! and egui for visualization.
+//! Provides an in-engine profiler UI built on puffin for data collection.
+//! The egui rendering fns (`show_contents`, plus the `flamegraph`, `toolbar`,
+//! `frame_history`, `table_view` submodules) were removed as part of the egui
+//! teardown; the crusty analog lives in `profiler_crusty`. The `budget` and
+//! `scope_colors` submodules stay because the crusty views read them.
 
 pub(crate) mod budget;
 mod collector;
 pub(crate) mod data;
-mod flamegraph;
-mod frame_history;
 pub(crate) mod scope_colors;
-mod table_view;
-mod toolbar;
 pub mod tracy;
 
 use crate::engine::rendering::{RenderCounters, ResourceCounters};
@@ -18,7 +17,6 @@ pub use data::{
     ProfileFrame, ProfileScope, ProfileThread, ProfilerSettings, ProfilerState, ProfilerView,
 };
 
-use egui::{RichText, Ui};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -72,74 +70,6 @@ impl ProfilerPanel {
         while let Ok(frame) = rx.try_recv() {
             self.state.push_frame(frame);
         }
-    }
-
-    /// Render the profiler panel contents
-    /// This is the main entry point called from EditorTabViewer
-    pub fn show_contents(&mut self, ui: &mut Ui) {
-        crate::profile_scope!("profiler_ui");
-
-        // Poll for new frames
-        self.update();
-
-        // Check if profiling is enabled
-        if !puffin::are_scopes_on() {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(20.0);
-                    ui.label(RichText::new("Profiling is disabled").size(16.0));
-                    ui.add_space(10.0);
-                    ui.label("Press F12 to enable profiling");
-                    ui.add_space(10.0);
-                    if ui.button("Enable Profiling").clicked() {
-                        puffin::set_scopes_on(true);
-                    }
-                });
-            });
-            return;
-        }
-
-        // Render toolbar
-        toolbar::render(ui, &mut self.state);
-        ui.separator();
-
-        // Render frame history bar chart
-        frame_history::render(ui, &mut self.state);
-        ui.separator();
-
-        // View toggle
-        ui.horizontal(|ui| {
-            ui.label("View:");
-            ui.selectable_value(
-                &mut self.state.current_view,
-                ProfilerView::Flamegraph,
-                "Flamegraph",
-            );
-            ui.selectable_value(&mut self.state.current_view, ProfilerView::Table, "Table");
-            ui.selectable_value(&mut self.state.current_view, ProfilerView::Budget, "Budget");
-
-            // Filter (shared between views)
-            ui.separator();
-            ui.label("Filter:");
-            ui.add(egui::TextEdit::singleline(&mut self.state.filter_text).desired_width(150.0));
-            if ui.small_button("x").clicked() {
-                self.state.filter_text.clear();
-            }
-        });
-
-        ui.separator();
-
-        // Render main view
-        match self.state.current_view {
-            ProfilerView::Flamegraph => flamegraph::render(ui, &mut self.state),
-            ProfilerView::Table => table_view::render(ui, &mut self.state),
-            ProfilerView::Budget => budget::render(ui, &mut self.state),
-        }
-
-        // Render popups
-        toolbar::render_settings_popup(ui, &mut self.state);
-        toolbar::render_info_popup(ui, &mut self.state);
-        toolbar::render_tracy_popup(ui, &mut self.state);
     }
 
     pub fn set_runtime_counters(

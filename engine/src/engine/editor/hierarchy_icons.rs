@@ -1,18 +1,10 @@
-//! Hierarchy panel icon set — SVG, auto-discovered.
+//! Hierarchy panel icon set — SVG rasterization helpers used by the crusty
+//! icon uploader on the render thread.
 //!
-//! Drop any `*.svg` into `engine/icons/hierarchy/` and it becomes available
-//! to the hierarchy panel keyed by its file stem. The hierarchy panel chooses
-//! which stem to show per entity (e.g. `camera`, `sun`, `object`); adding new
-//! icons does **not** require code changes here — only at the call site if
-//! you want a new entity kind to use it.
-//!
-//! SVGs are rasterized once at startup at a fixed size; the renderer simply
-//! samples the resulting `TextureHandle` like any other icon. The file lives
-//! alongside `widgets::IconRegistry` rather than inside it because the
-//! hierarchy is the only consumer for now and we want this set to evolve
-//! independently of the global icon palette / `IconKind` enum.
+//! The egui-facing `HierarchyIcons` texture map and `load_svg_texture`
+//! helper were removed as part of the egui teardown. The crusty renderer
+//! calls `rasterize_svg_rgba` + `icon_raster_px` + `icons_dir` directly.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Pixel size each SVG is rasterized at. Big enough to look crisp on HiDPI
@@ -22,93 +14,7 @@ const ICON_RASTER_PX: u32 = 32;
 /// Subdirectory (relative to working dir) the loader scans.
 const HIERARCHY_ICONS_DIR: &str = "engine/icons/hierarchy";
 
-/// Lookup table of hierarchy icon textures, keyed by SVG file stem
-/// (e.g. `"camera"`, `"sun"`, `"object"`, `"visibility"`).
-pub struct HierarchyIcons {
-    textures: HashMap<String, egui::TextureHandle>,
-}
-
-impl HierarchyIcons {
-    /// Empty placeholder used before icons are loaded (see
-    /// `EditorServices::load_icons`).
-    pub fn empty() -> Self {
-        Self {
-            textures: HashMap::new(),
-        }
-    }
-
-    /// Load every `*.svg` under `engine/icons/hierarchy/`. Missing folder /
-    /// unparseable files are logged once and skipped — the panel falls back
-    /// to a text glyph in those cases.
-    pub fn load(ctx: &egui::Context) -> Self {
-        let mut textures = HashMap::new();
-
-        let dir = Path::new(HIERARCHY_ICONS_DIR);
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                log::warn!("Hierarchy icons dir missing or unreadable ({}): {}", dir.display(), e);
-                return Self { textures };
-            }
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("svg") {
-                continue;
-            }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-
-            match load_svg_texture(ctx, &path, &stem) {
-                Ok(tex) => {
-                    textures.insert(stem, tex);
-                }
-                Err(e) => log::warn!("Failed to load hierarchy SVG {}: {}", path.display(), e),
-            }
-        }
-
-        Self { textures }
-    }
-
-    /// Look up an icon by file stem.
-    pub fn get(&self, name: &str) -> Option<&egui::TextureHandle> {
-        self.textures.get(name)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.textures.is_empty()
-    }
-}
-
-/// Rasterize one SVG to a `TextureHandle` in the given egui context.
-///
-/// Public so the Icon Inspector (which lives in a separate egui context inside
-/// its own window) can populate its preview using the same code path. The
-/// `name` argument is used as the texture's debug label only.
-pub fn load_svg_texture(
-    ctx: &egui::Context,
-    path: &Path,
-    name: &str,
-) -> Result<egui::TextureHandle, String> {
-    let rgba = rasterize_svg_rgba(path)?;
-
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [ICON_RASTER_PX as usize, ICON_RASTER_PX as usize],
-        &rgba,
-    );
-
-    Ok(ctx.load_texture(
-        format!("hierarchy_icon_{name}"),
-        color_image,
-        egui::TextureOptions::LINEAR,
-    ))
-}
-
-/// Rasterize one SVG to raw RGBA bytes at [`icon_raster_px`] square. Shared
-/// by the egui texture path above and the crusty-gui GPU upload.
+/// Rasterize one SVG to raw RGBA bytes at [`icon_raster_px`] square.
 pub fn rasterize_svg_rgba(path: &Path) -> Result<Vec<u8>, String> {
     use resvg::tiny_skia;
     use resvg::usvg;

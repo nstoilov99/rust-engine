@@ -21,8 +21,6 @@ pub mod pipeline;
 pub mod subsystem;
 pub mod trigger;
 pub mod value;
-#[cfg(feature = "editor")]
-pub mod debug_overlay;
 
 // Legacy re-exports (backward compat)
 pub use action_map::ActionMap;

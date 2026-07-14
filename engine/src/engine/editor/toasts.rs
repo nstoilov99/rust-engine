@@ -82,44 +82,4 @@ impl ToastStack {
         &self.toasts
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) {
-        let now = Instant::now();
-        self.toasts.retain(|toast| !toast.expired(now));
-        if self.toasts.is_empty() {
-            return;
-        }
-
-        ctx.request_repaint_after(Duration::from_millis(250));
-
-        egui::Area::new(egui::Id::new("editor_toast_stack"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 40.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(360.0);
-                    for toast in self.toasts.iter().rev().take(5) {
-                        let (label, color) = match toast.kind {
-                            ToastKind::Info => ("Info", egui::Color32::from_rgb(90, 150, 220)),
-                            ToastKind::Success => ("Saved", egui::Color32::from_rgb(80, 180, 110)),
-                            ToastKind::Warning => {
-                                ("Warning", egui::Color32::from_rgb(220, 170, 70))
-                            }
-                            ToastKind::Error => ("Error", egui::Color32::from_rgb(220, 90, 90)),
-                        };
-
-                        egui::Frame::popup(ui.style())
-                            .fill(egui::Color32::from_rgba_unmultiplied(28, 30, 34, 235))
-                            .stroke(egui::Stroke::new(1.0, color))
-                            .corner_radius(4.0)
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.colored_label(color, label);
-                                    ui.label(toast.message.as_str());
-                                });
-                            });
-                        ui.add_space(6.0);
-                    }
-                });
-            });
-    }
 }

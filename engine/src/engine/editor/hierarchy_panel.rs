@@ -1,21 +1,24 @@
-//! Scene Hierarchy Panel - tree view of all entities
+//! Scene hierarchy panel state.
+//!
+//! The egui rendering fns (`show`, `show_contents`, `render_header`,
+//! `render_search`, `render_tree`, `render_row`, `draw_tree_guides`,
+//! `render_visibility_toggle`, `render_context_menu`, `handle_drag_drop`,
+//! `draw_insertion_line`, `render_drag_ghost`, `handle_keyboard_shortcuts`)
+//! were removed; the crusty analog lives in `hierarchy_crusty`.
 
-use super::hierarchy_icons::HierarchyIcons;
-use super::icon_classes::ChromeState;
-use super::widgets::IconRegistry;
 use super::Selection;
-use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
     hierarchy::{can_set_parent, despawn_recursive, get_root_entities, remove_parent, set_parent},
     Camera, Children, DirectionalLight, EditorVisibility, EntityGuid, MeshRenderer, Name, Parent,
     PointLight, Transform,
 };
-use egui::{pos2, Color32, Context, RichText, ScrollArea, SidePanel, Stroke, TextEdit, Ui};
+// `egui::Color32` is retained per the "keep egui types on live crusty signatures"
+// rule — `entity_icon_stem` returns a tint that the crusty renderer consumes.
+use egui::Color32;
 use hecs::{Entity, World};
 use smallvec::SmallVec;
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Drop mode for drag-and-drop operations
 /// Determined by mouse Y position within the row
@@ -30,6 +33,7 @@ pub(crate) enum DropMode {
 }
 
 /// One visible row in the flattened hierarchy list.
+#[allow(dead_code)]
 pub(crate) struct VisibleRow {
     pub(crate) entity: Entity,
     pub(crate) depth: usize,
@@ -82,7 +86,9 @@ pub struct HierarchyPanel {
     pub(crate) renaming_entity: Option<Entity>,
     /// Text buffer for renaming
     pub(crate) rename_buffer: String,
-    /// Drag source entity
+    /// Drag source entity (only written by the crusty tree; kept for future
+    /// use by shared drop-mode helpers).
+    #[allow(dead_code)]
     pub(crate) drag_source: Option<Entity>,
     /// Show only matching entities when filtering
     pub(crate) filter_active: bool,
@@ -135,81 +141,7 @@ impl HierarchyPanel {
         self.root_order = order;
     }
 
-    /// Render the hierarchy panel as a side panel
-    pub fn show(
-        &mut self,
-        ctx: &Context,
-        world: &mut World,
-        selection: &mut Selection,
-        play_mode: PlayMode,
-    ) {
-        SidePanel::left("hierarchy_panel")
-            .resizable(true)
-            .default_width(250.0)
-            .min_width(150.0)
-            .show(ctx, |ui| {
-                self.show_contents(ui, world, selection, play_mode);
-            });
-    }
-
-    /// Render just the contents (for use inside dock tabs)
-    pub fn show_contents(
-        &mut self,
-        ui: &mut Ui,
-        world: &mut World,
-        selection: &mut Selection,
-        play_mode: PlayMode,
-    ) {
-        let read_only = play_mode != PlayMode::Edit;
-
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.renaming_entity.is_some() {
-                self.renaming_entity = None;
-            } else if !selection.is_empty() {
-                selection.clear();
-            }
-        }
-
-        self.render_header(ui, world, read_only);
-        ui.separator();
-        self.render_search(ui);
-        ui.separator();
-        self.render_tree(ui, world, selection, read_only);
-    }
-
-    fn render_header(&mut self, ui: &mut Ui, world: &mut World, read_only: bool) {
-        ui.horizontal(|ui| {
-            if read_only {
-                ui.label(RichText::new("(Playing)").weak().italics().small());
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled_ui(!read_only, |ui| {
-                    if ui.button("+").on_hover_text("Add Entity").clicked() {
-                        self.create_empty_entity(world);
-                    }
-                });
-            });
-        });
-    }
-
-    fn render_search(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Search:");
-            let response = ui.add(
-                TextEdit::singleline(&mut self.search_text)
-                    .hint_text("Filter entities...")
-                    .desired_width(ui.available_width()),
-            );
-            self.filter_active = !self.search_text.is_empty();
-
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.search_text.clear();
-                self.filter_active = false;
-            }
-        });
-    }
-
-    /// Sync root_order with world state.
+    /// Sync `root_order` with the world's actual root entities.
     pub fn sync_root_order(&mut self, world: &World) {
         let current_roots: HashSet<Entity> = get_root_entities(world).into_iter().collect();
         self.root_order.retain(|e| current_roots.contains(e));
@@ -324,589 +256,6 @@ impl HierarchyPanel {
             }
         }
     }
-
-    // ─── render tree with virtualization ────────────────────────────────
-
-    fn render_tree(
-        &mut self,
-        ui: &mut Ui,
-        world: &mut World,
-        selection: &mut Selection,
-        read_only: bool,
-    ) {
-        self.sync_root_order(world);
-
-        if read_only {
-            self.drag_source = None;
-        }
-        if self.drag_source.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.drag_source = None;
-            self.drag_hover_entity = None;
-            self.drag_hover_start = None;
-        }
-
-        self.build_visible_rows(world);
-
-        let total_rows = self.flat_rows.len();
-
-        // Selected entity's chain → indices in `flat_rows`. Each chain
-        // element is at some `flat_rows` index; we precompute those once so
-        // every row can ask "is the trunk between chain[c-1] and chain[c]
-        // currently passing through me?" with a constant-time index compare.
-        // Empty when nothing is selected.
-        let chain_indices: SmallVec<[usize; 16]> = if let Some(primary) =
-            selection.primary()
-        {
-            let chain = self
-                .flat_rows
-                .iter()
-                .find(|r| r.entity == primary)
-                .map(|r| r.entity_chain.clone())
-                .unwrap_or_default();
-            chain
-                .iter()
-                .map(|&e| {
-                    self.flat_rows
-                        .iter()
-                        .position(|r| r.entity == e)
-                        .unwrap_or(usize::MAX)
-                })
-                .collect()
-        } else {
-            SmallVec::new()
-        };
-
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, ROW_HEIGHT, total_rows, |ui, row_range| {
-                if total_rows == 0 {
-                    ui.label(RichText::new("No entities in scene").weak());
-                    return;
-                }
-
-                // Drop inter-row vertical spacing so tree guides drawn at the
-                // top of one row meet the lines drawn at the bottom of the
-                // previous one with no visible gap.
-                ui.spacing_mut().item_spacing.y = 0.0;
-
-                // Resolve the per-context icon set once per render so the
-                // virtualized loop doesn't re-fetch on every row. None when
-                // we're rendering inside a secondary window whose ctx data
-                // doesn't carry the icons — we fall back to text glyphs.
-                let icons = ui
-                    .data(|d| d.get_temp::<Arc<HierarchyIcons>>(egui::Id::NULL));
-                // Also pick up the icon registry so per-state SVG tint
-                // overrides edited in the Icon Inspector show up live.
-                let registry = ui
-                    .data(|d| d.get_temp::<Arc<IconRegistry>>(egui::Id::NULL));
-
-                for idx in row_range {
-                    if idx >= self.flat_rows.len() {
-                        break;
-                    }
-                    // Extract data we need (flat_rows is borrowed immutably for data,
-                    // but we may mutate self for expand/collapse/drag).
-                    let entity = self.flat_rows[idx].entity;
-                    let depth = self.flat_rows[idx].depth;
-                    let has_children = self.flat_rows[idx].has_children;
-                    let is_expanded = self.flat_rows[idx].is_expanded;
-                    let icon_stem = self.flat_rows[idx].icon_stem;
-                    let icon_tint = self.flat_rows[idx].icon_tint;
-                    let is_visible = self.flat_rows[idx].is_visible;
-                    // Clone the name + chains to avoid borrow conflicts.
-                    let name = self.flat_rows[idx].name.clone();
-                    let chain_is_last = self.flat_rows[idx].chain_is_last.clone();
-                    let entity_chain = self.flat_rows[idx].entity_chain.clone();
-
-                    // entity_chain isn't needed for highlighting now (we use
-                    // index-range checks against chain_indices instead) but
-                    // still has to be cloned out so we can release the
-                    // immutable borrow of self.flat_rows before render_row
-                    // takes &mut self.
-                    drop(entity_chain);
-
-                    self.render_row(
-                        ui,
-                        world,
-                        selection,
-                        entity,
-                        depth,
-                        &name,
-                        has_children,
-                        is_expanded,
-                        icon_stem,
-                        icon_tint,
-                        is_visible,
-                        &chain_is_last,
-                        idx,
-                        &chain_indices,
-                        icons.as_deref(),
-                        registry.as_deref(),
-                        read_only,
-                    );
-                }
-            });
-
-        self.handle_keyboard_shortcuts(ui, world, selection, read_only);
-
-        if !read_only {
-            self.render_drag_ghost(ui, world);
-        }
-
-        if ui.input(|i| i.pointer.any_released()) {
-            self.drag_source = None;
-            self.drag_hover_entity = None;
-            self.drag_hover_start = None;
-        }
-    }
-
-    /// Render a single flattened row.
-    #[allow(clippy::too_many_arguments)]
-    fn render_row(
-        &mut self,
-        ui: &mut Ui,
-        world: &mut World,
-        selection: &mut Selection,
-        entity: Entity,
-        depth: usize,
-        name: &str,
-        has_children: bool,
-        is_expanded: bool,
-        icon_stem: &str,
-        icon_tint: Color32,
-        is_visible: bool,
-        chain_is_last: &[bool],
-        // row_idx: this row's index in flat_rows.
-        // chain_indices: indices of the selected entity's chain elements
-        // in flat_rows (root → selected). Empty when no selection.
-        row_idx: usize,
-        chain_indices: &[usize],
-        icons: Option<&HierarchyIcons>,
-        registry: Option<&IconRegistry>,
-        read_only: bool,
-    ) {
-        let is_selected = selection.is_selected(entity);
-        let is_renaming = self.renaming_entity == Some(entity);
-        let entity_id = entity.id() as u64;
-
-        let is_valid_drop_target = self
-            .drag_source
-            .is_some_and(|source| source != entity && can_set_parent(world, source, entity));
-
-        // Register a row-wide click+drag area BEFORE rendering the row's
-        // contents. egui's hit-testing prefers later-registered widgets, so
-        // by going first this sits underneath the chevron / visibility eye —
-        // they still capture their own clicks, but a click anywhere else on
-        // the row (icon, label, blank space) lands here and selects.
-        let row_id = ui.id().with(("hierarchy_row_click", entity_id));
-        let row_pos = ui.cursor().min;
-        let row_size = egui::vec2(ui.available_width(), ROW_HEIGHT);
-        let row_rect = egui::Rect::from_min_size(row_pos, row_size);
-        let row_click = ui.interact(
-            row_rect,
-            row_id,
-            if read_only {
-                egui::Sense::click()
-            } else {
-                egui::Sense::click_and_drag()
-            },
-        );
-
-        // Selection / hover backgrounds — painted FIRST so they sit behind
-        // the row's icons and text. The horizontal layout below paints over
-        // this on the same egui layer.
-        if is_selected {
-            ui.painter().rect_filled(
-                row_rect,
-                2.0,
-                Color32::from_rgba_unmultiplied(60, 90, 140, 160),
-            );
-        } else if row_click.hovered() && self.drag_source.is_none() && !is_renaming {
-            ui.painter().rect_filled(
-                row_rect,
-                2.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 24),
-            );
-        }
-
-        let _row_response = ui.horizontal(|ui| {
-            Self::draw_tree_guides(
-                ui,
-                depth,
-                chain_is_last,
-                is_selected,
-                row_idx,
-                chain_indices,
-            );
-
-            let indent = depth as f32 * INDENT;
-            ui.add_space(indent);
-
-            // Always allocate the same-size box for the chevron column —
-            // when this row has no children the box stays empty. Using
-            // `allocate_exact_size` for both branches (instead of
-            // `add_space` for the no-children case) keeps every row's icon
-            // at the same x: `add_space` skips `item_spacing.x` while
-            // `allocate_exact_size` adds it, which was the source of the
-            // 8 px shift between rows that have a chevron and rows that
-            // don't.
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(INDENT, INDENT),
-                if has_children {
-                    egui::Sense::click()
-                } else {
-                    egui::Sense::hover()
-                },
-            );
-
-            if has_children {
-                let center = rect.center();
-                let sz = 3.5;
-
-                // The chevron sits on the selection's path only when this
-                // row IS one of the selected entity's ancestors AND the
-                // selection sits deeper still — that's the only case where
-                // the tail beneath the chevron actually carries the chain
-                // down to the next ancestor. Everything else: tail off.
-                let selected_depth = chain_indices.len().saturating_sub(1);
-                let chevron_on_path = !chain_indices.is_empty()
-                    && depth < selected_depth
-                    && chain_indices.get(depth).copied() == Some(row_idx);
-                // Path-only mode: the chevron caret itself stays at its
-                // base colour (it's a control, not a tree line); only the
-                // tail underneath is gated on path membership.
-
-                let chevron_color = if response.hovered() {
-                    Color32::WHITE
-                } else {
-                    Color32::from_gray(190)
-                };
-
-                // Caret-style chevron — two stroked segments forming `>`
-                // (collapsed) or `v` (expanded), matching the references.
-                let chevron_stroke = Stroke::new(1.5, chevron_color);
-                let s = sz;
-                let points = if is_expanded {
-                    vec![
-                        pos2(center.x - s, center.y - s * 0.45),
-                        pos2(center.x, center.y + s * 0.55),
-                        pos2(center.x + s, center.y - s * 0.45),
-                    ]
-                } else {
-                    vec![
-                        pos2(center.x - s * 0.45, center.y - s),
-                        pos2(center.x + s * 0.55, center.y),
-                        pos2(center.x - s * 0.45, center.y + s),
-                    ]
-                };
-                ui.painter().add(egui::Shape::line(points, chevron_stroke));
-
-                // Tail: only drawn when this row is on the selected entity's
-                // path (chevron_on_path) — it's a tree line, and tree lines
-                // exist only when there's a selection to trace.
-                if is_expanded && chevron_on_path {
-                    let row_rect = ui.max_rect();
-                    let tail_top = center.y + s + 2.0;
-                    let tail_bottom = row_rect.bottom() + 1.0;
-                    if tail_bottom > tail_top {
-                        ui.painter().line_segment(
-                            [pos2(center.x, tail_top), pos2(center.x, tail_bottom)],
-                            Stroke::new(1.0, Color32::from_gray(180)),
-                        );
-                    }
-                }
-
-                if response.clicked() {
-                    if is_expanded {
-                        self.expanded.remove(&entity_id);
-                    } else {
-                        self.expanded.insert(entity_id);
-                    }
-                }
-            }
-
-            // Entity icon: SVG when available, otherwise a faint dot fallback.
-            //
-            // Resolved tint walks the chain:
-            //   1. user-set per-state override in the IconPalette (Icon Inspector)
-            //   2. `(hierarchy, stem, Default)` override (icon-wide colour)
-            //   3. `icon_tint` argument — the row-builder default (white).
-            //
-            // Row state mapping: selected → Active, hovered → Hovered, else
-            // Default. Disabled / Accent are reserved for future use.
-            let row_state = if is_selected {
-                ChromeState::Active
-            } else {
-                ChromeState::Default
-            };
-            let resolved_tint = registry
-                .map(|r| r.panel_icon_tint("hierarchy", icon_stem, row_state, icon_tint))
-                .unwrap_or(icon_tint);
-            let icon_draw_tint = if is_visible {
-                resolved_tint
-            } else {
-                // Hidden entities are dimmed so the eye toggle's effect reads
-                // immediately in the row.
-                resolved_tint.gamma_multiply(0.45)
-            };
-            let texture = icons.and_then(|i| i.get(icon_stem));
-            // Per-icon size override from the Icon Inspector (palette).
-            // Clamped to the row's height so a too-large value can't blow out
-            // the layout — for bigger icons the user can lift ROW_HEIGHT, but
-            // rows stay flush by default.
-            let effective_icon_size = registry
-                .and_then(|r| r.panel_icon_size("hierarchy", icon_stem))
-                .unwrap_or(ICON_SIZE)
-                .clamp(8.0, ROW_HEIGHT - 2.0);
-            let (icon_rect, _) = ui.allocate_exact_size(
-                egui::vec2(effective_icon_size, effective_icon_size),
-                egui::Sense::hover(),
-            );
-            if ui.is_rect_visible(icon_rect) {
-                if let Some(tex) = texture {
-                    ui.painter().image(
-                        tex.id(),
-                        icon_rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        icon_draw_tint,
-                    );
-                } else {
-                    // Tiny dot fallback (used inside secondary windows where the
-                    // icon set isn't installed on the local egui context).
-                    ui.painter().circle_filled(
-                        icon_rect.center(),
-                        effective_icon_size * 0.18,
-                        icon_draw_tint,
-                    );
-                }
-            }
-            ui.add_space(4.0);
-
-            if is_renaming {
-                let response =
-                    ui.add(TextEdit::singleline(&mut self.rename_buffer).desired_width(100.0));
-                response.request_focus();
-
-                if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.commit_rename(world, entity);
-                    self.renaming_entity = None;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    self.renaming_entity = None;
-                } else if response.lost_focus() {
-                    self.commit_rename(world, entity);
-                    self.renaming_entity = None;
-                }
-            } else {
-                let label_color = if !is_visible {
-                    Color32::from_gray(120)
-                } else if is_selected {
-                    Color32::WHITE
-                } else {
-                    ui.visuals().text_color()
-                };
-                let label = if is_selected {
-                    RichText::new(name).strong().color(label_color)
-                } else {
-                    RichText::new(name).color(label_color)
-                };
-                // Plain Label — no interact. Clicks fall through to the
-                // row-wide handler so the WHOLE row selects, not just the
-                // text rectangle.
-                ui.label(label);
-            }
-
-            // Right-aligned visibility column. Pinned to the row's right edge
-            // so future per-row indicators (lock, prefab badge, …) can stack
-            // here in the same gutter.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                Self::render_visibility_toggle(
-                    ui,
-                    world,
-                    entity,
-                    is_visible,
-                    icons,
-                    read_only,
-                );
-            });
-        });
-
-        // ─── row-wide interactions ────────────────────────────────────────
-        // Click anywhere on the row that wasn't on the chevron / eye →
-        // select. Double-click → rename. Drag from anywhere → drag-drop.
-        if !is_renaming && row_click.clicked() {
-            if ui.input(|i| i.modifiers.ctrl) {
-                selection.toggle(entity);
-            } else {
-                selection.select(entity);
-            }
-        }
-        if !read_only {
-            if row_click.double_clicked() {
-                self.start_rename(world, entity);
-            }
-            row_click.clone().context_menu(|ui| {
-                self.render_context_menu(ui, world, selection, entity);
-            });
-            self.handle_drag_drop(ui, &row_click, world, entity);
-        }
-
-        // Drop-target visual feedback (yellow tint when a drag is in flight
-        // and this row would be a valid drop). Hover highlight is already
-        // drawn at the start of the row using `row_click.hovered()`.
-        let is_hovered = row_click.hovered();
-        if is_hovered && is_valid_drop_target {
-            ui.painter().rect_filled(
-                row_rect,
-                2.0,
-                Color32::from_rgba_unmultiplied(255, 200, 0, 60),
-            );
-        }
-
-        if self.drag_source.is_some()
-            && is_hovered
-            && has_children
-            && !is_expanded
-            && is_valid_drop_target
-        {
-            if self.drag_hover_entity != Some(entity) {
-                self.drag_hover_entity = Some(entity);
-                self.drag_hover_start = Some(Instant::now());
-            } else if let Some(start) = self.drag_hover_start {
-                if start.elapsed() > Duration::from_millis(500) {
-                    self.expanded.insert(entity_id);
-                    self.drag_hover_entity = None;
-                    self.drag_hover_start = None;
-                }
-            }
-        } else if self.drag_hover_entity == Some(entity) && !is_hovered {
-            self.drag_hover_entity = None;
-            self.drag_hover_start = None;
-        }
-    }
-
-    // ─── helpers ───────────────────────────────────────────────────────
-
-    /// Draw Godot-style tree guides for a row at `depth`.
-    ///
-    /// `chain_is_last` is the row's per-depth "is this chain element the last
-    /// sibling at its level?" array (length = `depth + 1`, root at index 0,
-    /// self at index `depth`). The guide layout is:
-    ///
-    /// ```text
-    ///  passing columns         parent column      icon
-    ///  ───┬─                   ┌──                 │
-    ///  …  │   …  (vertical     │  ─── ●            ▼
-    ///  ───┴─    if !is_last)   └──    (L when last sibling,
-    ///                                  T-with-tail otherwise)
-    /// ```
-    /// Draws **only** the tree path leading to the currently selected
-    /// entity. When nothing is selected, or this row sits outside that
-    /// path's render range, draws nothing. The hierarchy stays clean and
-    /// uncrowded by default; lines appear on demand to trace the focused
-    /// node back up to its root.
-    ///
-    /// `chain_indices` is the list of `flat_rows` indices for the selected
-    /// entity's ancestor chain (root → selected). Each segment of the L
-    /// hook is decided independently — see the inline comments.
-    fn draw_tree_guides(
-        ui: &mut Ui,
-        depth: usize,
-        _chain_is_last: &[bool],
-        _is_selected: bool,
-        row_idx: usize,
-        chain_indices: &[usize],
-    ) {
-        // Roots have no parent column, and with nothing selected we draw
-        // nothing at all.
-        if depth == 0 || chain_indices.is_empty() {
-            return;
-        }
-
-        let row_rect = ui.max_rect();
-        // Extend ±1 px so neighbouring rows' lines overlap (combined with
-        // `item_spacing.y = 0` this guarantees the path reads as one
-        // continuous bracket without sub-pixel gaps).
-        let row_top = row_rect.top() - 1.0;
-        let row_bottom = row_rect.bottom() + 1.0;
-        let row_middle = 0.5 * (row_rect.top() + row_rect.bottom());
-        let left = row_rect.left();
-
-        let stroke = Stroke::new(1.0, Color32::from_gray(180));
-        let selected_depth = chain_indices.len().saturating_sub(1);
-
-        // The selection trunk at column `c` runs from `chain[c]`'s chevron
-        // tail (a row identified by `chain_indices[c]`) down to
-        // `chain[c+1]`'s parent-column hook (`chain_indices[c+1]`).
-        //   - The vertical *above* row middle is alive when
-        //     `chain_indices[c] < row_idx <= chain_indices[c+1]`.
-        //   - The vertical *below* middle is alive when
-        //     `chain_indices[c] <= row_idx < chain_indices[c+1]`.
-        // Strict / non-strict picks the right boundary at the chain
-        // endpoints — the tail draws below middle at `chain[c]`'s row, the
-        // L hook draws above middle at `chain[c+1]`'s row.
-        let trunk_top = |c: usize| -> bool {
-            c + 1 <= selected_depth
-                && chain_indices[c] < row_idx
-                && row_idx <= chain_indices[c + 1]
-        };
-        let trunk_bottom = |c: usize| -> bool {
-            c + 1 <= selected_depth
-                && chain_indices[c] <= row_idx
-                && row_idx < chain_indices[c + 1]
-        };
-
-        // Passing columns 0 .. depth - 1 — full verticals when the trunk
-        // is alive both above and below middle at this row (a non-endpoint
-        // row in the trunk's range).
-        for c in 0..depth.saturating_sub(1) {
-            if trunk_top(c) && trunk_bottom(c) {
-                let x = left + COL_PAD + c as f32 * INDENT;
-                ui.painter()
-                    .line_segment([pos2(x, row_top), pos2(x, row_bottom)], stroke);
-            }
-        }
-
-        // Parent column = depth - 1: the L/T for this row.
-        let parent_col = depth - 1;
-        let x_parent = left + COL_PAD + parent_col as f32 * INDENT;
-        // Hook stops at the chevron-column's *left edge* (not its centre)
-        // so the line never runs through the stroked chevron caret. For
-        // rows without a chevron the destination is the same — the
-        // chevron-area is reserved as a placeholder, the hook visually
-        // points at where the icon will be once it clears the box.
-        let x_hook_end = left + depth as f32 * INDENT;
-
-        // Top-to-middle vertical.
-        if trunk_top(parent_col) {
-            ui.painter().line_segment(
-                [pos2(x_parent, row_top), pos2(x_parent, row_middle)],
-                stroke,
-            );
-        }
-
-        // Horizontal hook — only when this row IS the chain entry at its
-        // depth (i.e., row_idx == chain_indices[depth]). That's the only
-        // place the trunk hooks into an icon.
-        let hook_lit = depth <= selected_depth
-            && chain_indices.get(depth).copied() == Some(row_idx);
-        if hook_lit {
-            ui.painter().line_segment(
-                [pos2(x_parent, row_middle), pos2(x_hook_end, row_middle)],
-                stroke,
-            );
-        }
-
-        // Middle-to-bottom vertical — drawn iff trunk continues past this
-        // row toward `chain[c+1]`. Naturally false at the chain endpoint
-        // (the selected ancestor at this depth), forming the L.
-        if trunk_bottom(parent_col) {
-            ui.painter().line_segment(
-                [pos2(x_parent, row_middle), pos2(x_parent, row_bottom)],
-                stroke,
-            );
-        }
-    }
-
     /// Pick which `engine/icons/hierarchy/<stem>.svg` to render for an entity.
     ///
     /// Add a new entity kind by:
@@ -925,85 +274,6 @@ impl HierarchyPanel {
         let _ = (world.get::<&MeshRenderer>(entity), world.get::<&Children>(entity));
         ("object", Color32::WHITE)
     }
-
-    /// Draw the eye icon at the row's right edge and toggle
-    /// `EditorVisibility` on click. Falls back to a unicode glyph if the SVG
-    /// set isn't available in this egui context.
-    fn render_visibility_toggle(
-        ui: &mut Ui,
-        world: &mut World,
-        entity: Entity,
-        is_visible: bool,
-        icons: Option<&HierarchyIcons>,
-        read_only: bool,
-    ) {
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(VISIBILITY_COL_WIDTH, ROW_HEIGHT - 2.0),
-            egui::Sense::click(),
-        );
-
-        let tint_alpha = if is_visible { 255 } else { 110 };
-        let base_color = if response.hovered() {
-            Color32::WHITE
-        } else {
-            Color32::from_gray(200)
-        };
-        let tint = Color32::from_rgba_unmultiplied(
-            base_color.r(),
-            base_color.g(),
-            base_color.b(),
-            tint_alpha,
-        );
-
-        let icon_rect = egui::Rect::from_center_size(
-            rect.center(),
-            egui::vec2(ICON_SIZE, ICON_SIZE),
-        );
-
-        if ui.is_rect_visible(rect) {
-            if let Some(tex) = icons.and_then(|i| i.get("visibility")) {
-                ui.painter().image(
-                    tex.id(),
-                    icon_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    tint,
-                );
-            } else {
-                let glyph = if is_visible { "\u{25C9}" } else { "\u{25CB}" };
-                ui.painter().text(
-                    icon_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    glyph,
-                    egui::FontId::proportional(ICON_SIZE),
-                    tint,
-                );
-            }
-        }
-
-        if !is_visible {
-            // Faint diagonal slash so a hidden state reads even at a glance,
-            // matching the "eye crossed out" pattern in the references.
-            let slash_color = Color32::from_rgba_unmultiplied(255, 120, 120, 200);
-            ui.painter().line_segment(
-                [
-                    pos2(icon_rect.left() + 1.0, icon_rect.bottom() - 1.0),
-                    pos2(icon_rect.right() - 1.0, icon_rect.top() + 1.0),
-                ],
-                Stroke::new(1.5, slash_color),
-            );
-        }
-
-        response.clone().on_hover_text(if is_visible {
-            "Hide in editor"
-        } else {
-            "Show in editor"
-        });
-
-        if response.clicked() && !read_only {
-            Self::set_visibility(world, entity, !is_visible);
-        }
-    }
-
     /// Set (or insert) the `EditorVisibility` component. Shared by the egui
     /// and crusty eye toggles.
     pub(crate) fn set_visibility(world: &mut World, entity: Entity, new_visible: bool) {
@@ -1078,42 +348,6 @@ impl HierarchyPanel {
         self.renaming_entity = None;
     }
 
-    fn render_context_menu(
-        &mut self,
-        ui: &mut Ui,
-        world: &mut World,
-        selection: &mut Selection,
-        entity: Entity,
-    ) {
-        if ui.button("Add Child").clicked() {
-            let child = world.spawn((
-                Transform::default(),
-                Name::new("New Child"),
-                EntityGuid::new(),
-            ));
-            set_parent(world, child, entity);
-            self.expanded.insert(entity.id() as u64);
-            ui.close();
-        }
-
-        if ui.button("Rename").clicked() {
-            self.start_rename(world, entity);
-            ui.close();
-        }
-
-        if ui.button("Duplicate").clicked() {
-            self.duplicate_entity(world, entity);
-            ui.close();
-        }
-
-        ui.separator();
-
-        if ui.button("Delete").clicked() {
-            self.delete_entity(world, selection, entity);
-            ui.close();
-        }
-    }
-
     pub(crate) fn duplicate_entity(&self, world: &mut World, entity: Entity) {
         let name = world
             .get::<&Name>(entity)
@@ -1126,7 +360,12 @@ impl HierarchyPanel {
         world.spawn((transform, Name::new(name), EntityGuid::new()));
     }
 
-    pub(crate) fn delete_entity(&self, world: &mut World, selection: &mut Selection, entity: Entity) {
+    pub(crate) fn delete_entity(
+        &self,
+        world: &mut World,
+        selection: &mut Selection,
+        entity: Entity,
+    ) {
         selection.remove(entity);
         despawn_recursive(world, entity);
     }
@@ -1147,7 +386,13 @@ impl HierarchyPanel {
         }
     }
 
-    pub(crate) fn is_valid_drop(&self, world: &World, source: Entity, target: Entity, mode: DropMode) -> bool {
+    pub(crate) fn is_valid_drop(
+        &self,
+        world: &World,
+        source: Entity,
+        target: Entity,
+        mode: DropMode,
+    ) -> bool {
         if source == target {
             return false;
         }
@@ -1161,120 +406,6 @@ impl HierarchyPanel {
                 }
             }
         }
-    }
-
-    fn handle_drag_drop(
-        &mut self,
-        ui: &mut Ui,
-        response: &egui::Response,
-        world: &mut World,
-        entity: Entity,
-    ) {
-        if response.dragged() {
-            self.drag_source = Some(entity);
-        }
-
-        if let Some(source) = self.drag_source {
-            if source == entity {
-                return;
-            }
-
-            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-            let is_hovered = pointer_pos
-                .map(|p| response.rect.contains(p))
-                .unwrap_or(false);
-
-            if is_hovered {
-                let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
-                let drop_mode =
-                    self.calculate_drop_mode(mouse_y, response.rect.top(), response.rect.bottom());
-                let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
-
-                if is_valid {
-                    match drop_mode {
-                        DropMode::InsertAbove => {
-                            self.draw_insertion_line(ui, response.rect.top(), &response.rect);
-                        }
-                        DropMode::InsertBelow => {
-                            self.draw_insertion_line(ui, response.rect.bottom(), &response.rect);
-                        }
-                        DropMode::MakeChild => {
-                            ui.painter().rect_filled(
-                                response.rect,
-                                2.0,
-                                Color32::from_rgba_unmultiplied(100, 200, 100, 50),
-                            );
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                2.0,
-                                Stroke::new(2.0, Color32::from_rgb(100, 200, 100)),
-                                egui::epaint::StrokeKind::Outside,
-                            );
-                            let icon_pos =
-                                pos2(response.rect.right() - 16.0, response.rect.center().y);
-                            ui.painter().text(
-                                icon_pos,
-                                egui::Align2::CENTER_CENTER,
-                                "+",
-                                egui::FontId::proportional(14.0),
-                                Color32::from_rgb(100, 200, 100),
-                            );
-                        }
-                    }
-                } else {
-                    ui.painter().rect_stroke(
-                        response.rect,
-                        2.0,
-                        Stroke::new(2.0, Color32::from_rgb(200, 60, 60)),
-                        egui::epaint::StrokeKind::Outside,
-                    );
-                }
-            }
-        }
-
-        if ui.input(|i| i.pointer.any_released()) {
-            if let Some(source) = self.drag_source {
-                if source == entity {
-                    return;
-                }
-
-                let pointer_pos = ui.input(|i| i.pointer.interact_pos());
-                let is_hovered = pointer_pos
-                    .map(|p| response.rect.contains(p))
-                    .unwrap_or(false);
-
-                if is_hovered {
-                    let mouse_y = pointer_pos.map(|p| p.y).unwrap_or(0.0);
-                    let drop_mode = self.calculate_drop_mode(
-                        mouse_y,
-                        response.rect.top(),
-                        response.rect.bottom(),
-                    );
-                    let is_valid = self.is_valid_drop(world, source, entity, drop_mode);
-
-                    if is_valid {
-                        self.perform_drop(world, source, entity, drop_mode);
-                    }
-                }
-            }
-        }
-    }
-
-    fn draw_insertion_line(&self, ui: &mut Ui, line_y: f32, rect: &egui::Rect) {
-        ui.painter()
-            .hline(rect.x_range(), line_y, Stroke::new(2.0, Color32::YELLOW));
-        let arrow_left = rect.left() - 8.0;
-        let arrow_size = 5.0;
-        let arrow_points = vec![
-            pos2(arrow_left, line_y - arrow_size),
-            pos2(arrow_left + arrow_size * 1.5, line_y),
-            pos2(arrow_left, line_y + arrow_size),
-        ];
-        ui.painter().add(egui::Shape::convex_polygon(
-            arrow_points,
-            Color32::YELLOW,
-            Stroke::NONE,
-        ));
     }
 
     pub(crate) fn perform_drop(
@@ -1365,81 +496,4 @@ impl HierarchyPanel {
             }
         }
     }
-
-    fn render_drag_ghost(&self, ui: &mut Ui, world: &World) {
-        if let Some(source) = self.drag_source {
-            if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
-                let name = world
-                    .get::<&Name>(source)
-                    .map(|n| n.0.clone())
-                    .unwrap_or_else(|_| format!("Entity {:?}", source.id()));
-                // Drag ghost is text-only (no SVG sampling on the tooltip
-                // layer); just show the entity name.
-                let ghost_text = name;
-
-                let layer_id =
-                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag_ghost"));
-                let painter = ui.ctx().layer_painter(layer_id);
-
-                let ghost_pos = pointer_pos + egui::vec2(12.0, 0.0);
-                let galley = painter.layout_no_wrap(
-                    ghost_text.clone(),
-                    egui::FontId::default(),
-                    Color32::WHITE,
-                );
-
-                let bg_rect = egui::Rect::from_min_size(
-                    ghost_pos - egui::vec2(4.0, galley.size().y / 2.0 + 4.0),
-                    galley.size() + egui::vec2(8.0, 8.0),
-                );
-
-                painter.rect_filled(
-                    bg_rect,
-                    4.0,
-                    Color32::from_rgba_unmultiplied(30, 30, 30, 220),
-                );
-                painter.rect_stroke(
-                    bg_rect,
-                    4.0,
-                    egui::Stroke::new(1.5, Color32::YELLOW),
-                    egui::epaint::StrokeKind::Outside,
-                );
-                painter.text(
-                    ghost_pos,
-                    egui::Align2::LEFT_CENTER,
-                    ghost_text,
-                    egui::FontId::default(),
-                    Color32::WHITE,
-                );
-            }
-        }
-    }
-
-    fn handle_keyboard_shortcuts(
-        &mut self,
-        ui: &mut Ui,
-        world: &mut World,
-        selection: &mut Selection,
-        read_only: bool,
-    ) {
-        if read_only {
-            return;
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-            if let Some(entity) = selection.primary() {
-                self.delete_entity(world, selection, entity);
-            }
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::F2)) {
-            if let Some(entity) = selection.primary() {
-                self.start_rename(world, entity);
-            }
-        }
-        if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) {
-            if let Some(entity) = selection.primary() {
-                self.duplicate_entity(world, entity);
-            }
-        }
-    }
 }
-

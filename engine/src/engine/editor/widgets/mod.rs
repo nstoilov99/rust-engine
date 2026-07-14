@@ -1,24 +1,10 @@
 //! Reusable editor widgets and extension traits
 //!
-//! Provides the `UiExt` trait for accessing theme and icons from any `egui::Ui`,
-//! plus all custom widgets used by the editor panels.
-
-pub mod button;
-pub mod toggle_switch;
-pub mod field_row;
-pub mod slider_with_input;
-pub mod panel_header;
-pub mod tab_bar;
-pub mod tree_row;
-pub mod asset_slot;
-pub mod search_field;
-pub mod search_popup;
-pub mod empty_state;
-// pub mod color_picker; // Step 13
-
-use std::sync::Arc;
-
-use super::theme::EditorTheme;
+//! The egui widget submodules (button, toggle_switch, field_row, …) and the
+//! `UiExt` extension trait were removed as part of the egui teardown. The
+//! `IconRegistry` + `IconKind` + palette lookup helpers stay here — the
+//! crusty path uses them for its icon palette (see
+//! `services::EditorServices::load_icons_crusty`).
 
 use super::icon_classes::{ChromeState, IconClass, IconPalette, Severity, TintMode, TypeCategory};
 
@@ -378,6 +364,10 @@ impl IconKind {
 /// Each `IconKind` maps to a PNG file when available, with a text fallback for
 /// missing icons. The `IconPalette` controls tint colors at draw time.
 pub struct IconRegistry {
+    /// Kept as-is until the egui type migration removes the field; the crusty
+    /// path never populates or reads it (icon textures live on the crusty
+    /// renderer directly).
+    #[allow(dead_code)]
     textures: std::collections::HashMap<IconKind, egui::TextureHandle>,
     palette: IconPalette,
 }
@@ -400,22 +390,6 @@ impl IconRegistry {
             textures: std::collections::HashMap::new(),
             palette,
         }
-    }
-
-    /// Load icons from the engine icons directory. If a saved palette file
-    /// exists at `IconPalette::default_path()`, it is loaded; otherwise the
-    /// hardcoded `default_dark` palette is used.
-    pub fn load(ctx: &egui::Context) -> Self {
-        let palette = IconPalette::load_from_default().unwrap_or_else(IconPalette::default_dark);
-        Self {
-            textures: load_icon_textures(ctx),
-            palette,
-        }
-    }
-
-    /// Get the texture handle for an icon kind, if loaded.
-    pub fn get(&self, kind: IconKind) -> Option<&egui::TextureHandle> {
-        self.textures.get(&kind)
     }
 
     /// Read-only access to the palette.
@@ -711,176 +685,5 @@ impl IconRegistry {
             IconKind::SeveritySuccess | IconKind::Success => "\u{2713}",
             IconKind::SeverityInfo | IconKind::Info => "i",
         }
-    }
-}
-
-/// Load all editor icon PNGs from disk into the given egui context.
-///
-/// Returned `TextureHandle`s are bound to `ctx` — they cannot be sampled
-/// from a different egui context (e.g. a secondary OS window). Callers that
-/// need icons in a separate context must call this again with that context.
-pub fn load_icon_textures(
-    ctx: &egui::Context,
-) -> std::collections::HashMap<IconKind, egui::TextureHandle> {
-    let mut textures = std::collections::HashMap::new();
-
-    let icons_dir = std::path::Path::new("engine/icons");
-    if !icons_dir.exists() {
-        log::warn!("Icons directory not found: {}", icons_dir.display());
-        return textures;
-    }
-
-    let mappings: &[(IconKind, &str)] = &[
-        (IconKind::Folder, "folder"),
-        (IconKind::File, "file-document"),
-        (IconKind::Image, "image-file"),
-        (IconKind::Mesh, "file-mesh"),
-        (IconKind::Script, "code-file"),
-        (IconKind::Play, "play-fill"),
-        (IconKind::Pause, "pause-fill"),
-        (IconKind::Stop, "stop-fill"),
-        (IconKind::ChevronRight, "arrow-right"),
-        (IconKind::ChevronDown, "arrow-down"),
-    ];
-
-    for (kind, filename) in mappings {
-        let path = icons_dir.join(format!("{filename}.png"));
-        if let Some(texture) = load_png_icon(ctx, &path, filename) {
-            textures.insert(*kind, texture);
-        }
-    }
-
-    textures
-}
-
-/// Load a single PNG icon from disk.
-fn load_png_icon(
-    ctx: &egui::Context,
-    path: &std::path::Path,
-    name: &str,
-) -> Option<egui::TextureHandle> {
-    let data = std::fs::read(path).ok()?;
-    let image = image::load_from_memory(&data).ok()?;
-    let rgba = image.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [width as usize, height as usize],
-        rgba.as_raw(),
-    );
-    Some(ctx.load_texture(
-        format!("editor_icon_{name}"),
-        color_image,
-        egui::TextureOptions::LINEAR,
-    ))
-}
-
-use std::collections::HashSet;
-use std::sync::OnceLock;
-
-/// Emit a warning log message at most once per unique message per session.
-fn log_once_warn(msg: &str) {
-    use std::sync::Mutex;
-    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut guard = seen.lock().unwrap();
-    if guard.insert(msg.to_owned()) {
-        log::warn!("{}", msg);
-    }
-}
-
-/// Extension trait for `egui::Ui` — provides ergonomic access to the
-/// editor theme and icon registry without passing `&EditorServices` everywhere.
-pub trait UiExt {
-    /// Read the current `EditorTheme` from egui context data.
-    fn theme(&self) -> Arc<EditorTheme>;
-
-    /// Render an icon from the `IconRegistry` using default chrome state.
-    fn icon(&mut self, kind: IconKind) -> egui::Response;
-
-    /// Render an icon with explicit chrome state and size.
-    fn icon_tinted(
-        &mut self,
-        kind: IconKind,
-        state: ChromeState,
-        size: f32,
-    ) -> egui::Response;
-}
-
-fn get_registry(ctx: &egui::Context) -> Arc<IconRegistry> {
-    ctx.data(|d| d.get_temp::<Arc<IconRegistry>>(egui::Id::NULL))
-        .unwrap_or_else(|| {
-            log_once_warn("IconRegistry not yet installed; rendering text fallback");
-            Arc::new(IconRegistry::empty())
-        })
-}
-
-/// Render an icon at the given size with a specific tint color.
-fn render_icon_impl(
-    ui: &mut egui::Ui,
-    kind: IconKind,
-    registry: &IconRegistry,
-    tint: egui::Color32,
-    size: f32,
-) -> egui::Response {
-    let size_vec = egui::vec2(size, size);
-
-    if let Some(texture) = registry.get(kind) {
-        let (rect, response) = ui.allocate_exact_size(size_vec, egui::Sense::click());
-        if ui.is_rect_visible(rect) {
-            let draw_tint = match registry.tint_mode(kind) {
-                TintMode::Tinted => tint,
-                TintMode::Authored => egui::Color32::WHITE,
-            };
-            ui.painter().image(
-                texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                draw_tint,
-            );
-        }
-        response
-    } else {
-        // Text fallback for missing icons
-        let text = IconRegistry::fallback_text(kind);
-        let (rect, response) = ui.allocate_exact_size(size_vec, egui::Sense::click());
-        if ui.is_rect_visible(rect) {
-            let font_size = (size * 0.7).max(8.0);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                text,
-                egui::FontId::proportional(font_size),
-                tint,
-            );
-        }
-        response
-    }
-}
-
-impl UiExt for egui::Ui {
-    fn theme(&self) -> Arc<EditorTheme> {
-        self.ctx()
-            .data(|d| d.get_temp::<Arc<EditorTheme>>(egui::Id::NULL))
-            .unwrap_or_else(|| {
-                log_once_warn("EditorTheme not yet installed; returning fallback");
-                Arc::new(EditorTheme::fallback())
-            })
-    }
-
-    fn icon(&mut self, kind: IconKind) -> egui::Response {
-        let registry = get_registry(self.ctx());
-        let tint = registry.tint(kind, ChromeState::Default);
-        render_icon_impl(self, kind, &registry, tint, 16.0)
-    }
-
-    fn icon_tinted(
-        &mut self,
-        kind: IconKind,
-        state: ChromeState,
-        size: f32,
-    ) -> egui::Response {
-        let registry = get_registry(self.ctx());
-        let tint = registry.tint(kind, state);
-        render_icon_impl(self, kind, &registry, tint, size)
     }
 }

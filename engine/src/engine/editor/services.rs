@@ -3,40 +3,36 @@
 //! `EditorServices` is the canonical owner of editor-only state that doesn't
 //! belong to any single panel. Constructed once at editor startup in `app.rs`
 //! and threaded through `EditorContext<'a>` to all panels.
+//!
+//! The egui-only helpers (`load_icons`, `install_into_context`, `set_density`
+//! taking `&egui::Context`) and the `AssetPreviewRegistry`/`HierarchyIcons`
+//! sub-services were removed as part of the egui teardown. The crusty path
+//! uploads its own textures on the render thread (see
+//! `rendering::render_thread::load_hierarchy_icons`) and calls
+//! `load_icons_crusty` here to get the persisted palette.
 
 use std::sync::Arc;
 
 use super::command_palette::{CommandPalette, CommandRegistry};
 use super::dialogs::DialogStack;
 use super::dirty_state::DirtyState;
-use super::hierarchy_icons::HierarchyIcons;
-use super::preview::AssetPreviewRegistry;
 use super::status_bar::StatusBarState;
 use super::theme::EditorTheme;
 use super::toasts::ToastStack;
 use super::widgets::IconRegistry;
 
 /// Central owner of editor-wide services and state.
-///
-/// Fields are added incrementally as Steps 2-14 land their functionality.
 pub struct EditorServices {
-    /// Canonical theme instance. Also installed into `egui::Context::data()`
-    /// via `install_into_context()` so widgets can read via `ui.theme()`.
+    /// Canonical theme instance.
     pub theme: Arc<EditorTheme>,
-    /// Canonical icon registry. Also installed into `egui::Context::data()`.
+    /// Canonical icon registry (palette only in the crusty path).
     pub icons: Arc<IconRegistry>,
-    /// Hierarchy panel icon set (auto-discovered SVGs in
-    /// `engine/icons/hierarchy/`). Also installed into `egui::Context::data()`
-    /// so panels can fetch via `ui.data(...)` without threading a reference.
-    pub hierarchy_icons: Arc<HierarchyIcons>,
     /// Global dirty-state tracker for editor-owned assets.
     pub dirty: DirtyState,
     /// Central modal stack for editor confirmation flows.
     pub dialogs: DialogStack,
     /// Toast notifications shown over the editor UI.
     pub toasts: ToastStack,
-    /// Registry for live or deferred asset preview surfaces.
-    pub previews: AssetPreviewRegistry,
     /// Shared status bar text.
     pub status_bar: StatusBarState,
     /// Central command registry and palette UI state.
@@ -46,61 +42,26 @@ pub struct EditorServices {
 
 impl EditorServices {
     /// Create a new `EditorServices` with the default dark theme.
-    ///
-    /// Icons are not loaded yet — call `load_icons()` after egui context
-    /// is available, then `install_into_context()` to push into egui data.
     pub fn new() -> Self {
         Self {
             theme: Arc::new(EditorTheme::dark_default()),
             icons: Arc::new(IconRegistry::empty()),
-            hierarchy_icons: Arc::new(HierarchyIcons::empty()),
             dirty: DirtyState::new(),
             dialogs: DialogStack::new(),
             toasts: ToastStack::new(),
-            previews: AssetPreviewRegistry::new(),
             status_bar: StatusBarState::new(),
             command_registry: CommandRegistry::new(),
             command_palette: CommandPalette::new(),
         }
     }
 
-    /// Load icons from disk. Must be called after egui context is available.
-    pub fn load_icons(&mut self, ctx: &egui::Context) {
-        self.icons = Arc::new(IconRegistry::load(ctx));
-        self.hierarchy_icons = Arc::new(HierarchyIcons::load(ctx));
-    }
-
     /// Load palette-only icon state (no egui textures) for the crusty path.
     /// Crusty draws its own textures via the render thread's registry.
     pub fn load_icons_crusty(&mut self) {
         self.icons = Arc::new(IconRegistry::empty_with_default_palette());
-        // hierarchy_icons stays empty — crusty renders hierarchy icons via
-        // the render-thread-uploaded `crusty_icons` map.
     }
 
-    /// Apply the theme to egui's style/visuals and push the current theme +
-    /// icons into `egui::Context::data()` so widgets can read via extension traits.
-    ///
-    /// Call after construction, after density changes, and after icon reloads.
-    pub fn install_into_context(&self, ctx: &egui::Context) {
-        // Apply palette, typography, spacing to egui Style/Visuals
-        self.theme.apply_to(ctx);
-
-        // Store Arc clones in egui's temp data for widget access
-        ctx.data_mut(|d| {
-            d.insert_temp::<Arc<EditorTheme>>(egui::Id::NULL, self.theme.clone());
-            d.insert_temp::<Arc<IconRegistry>>(egui::Id::NULL, self.icons.clone());
-            d.insert_temp::<Arc<HierarchyIcons>>(egui::Id::NULL, self.hierarchy_icons.clone());
-        });
-    }
-
-    /// Switch density and re-apply.
-    pub fn set_density(&mut self, density: super::theme::Density, ctx: &egui::Context) {
-        self.theme = Arc::new(self.theme.with_density(density));
-        self.install_into_context(ctx);
-    }
-
-    /// Switch density without touching egui context (crusty path).
+    /// Switch density (crusty path — no egui context needed).
     pub fn set_density_crusty(&mut self, density: super::theme::Density) {
         self.theme = Arc::new(self.theme.with_density(density));
     }
