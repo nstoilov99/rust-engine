@@ -1,0 +1,44 @@
+(
+    tree: Split((
+        direction: Horizontal,
+        ratio: 0.5738281,
+        first: Split((
+            direction: Vertical,
+            ratio: 0.56387,
+            first: Leaf((
+                tabs: [
+                    "viewport:0",
+                    "mesh:Defeated.mesh",
+                ],
+                active: 1,
+            )),
+            second: Leaf((
+                tabs: [
+                    "console",
+                    "assets",
+                    "profiler",
+                ],
+                active: 1,
+            )),
+        )),
+        second: Split((
+            direction: Vertical,
+            ratio: 0.5,
+            first: Leaf((
+                tabs: [
+                    "hierarchy",
+                ],
+                active: 0,
+            )),
+            second: Leaf((
+                tabs: [
+                    "inspector",
+                ],
+                active: 0,
+            )),
+        )),
+    )),
+    state: (
+        focused_tab: Some("mesh:Defeated.mesh"),
+    ),
+)

@@ -7,7 +7,7 @@
 | **Coordinate System** | Z-up (X=Forward/Red, Y=Right/Green, Z=Up/Blue) |
 | **Renderer** | Vulkano 0.35, Deferred Pipeline |
 | **ECS** | Custom (wrapping hecs 0.10) |
-| **GUI** | egui 0.33, migrating to in-house `crusty-gui` (Phase 16, feature `crusty`) |
+| **GUI** | In-house `crusty-gui` (path dep `../crusty-gui`) — egui fully removed |
 | **Physics** | Rapier 3D 0.25 |
 | **Serialization** | RON (Rusty Object Notation) |
 
@@ -70,7 +70,7 @@ src/engine/
 ├── editor/      # Editor panels, viewport, gizmos
 ├── physics/     # Rapier 3D integration
 ├── assets/      # Asset loading and management
-├── gui/         # egui-Vulkano integration
+├── gui/         # crusty-gui integration (main-thread layout / render-thread seam)
 ├── adapters/    # Coordinate conversion (Z-up ↔ Y-up)
 └── camera/      # Camera systems
 ```
@@ -78,13 +78,12 @@ src/engine/
 ## Features and run commands
 
 ```bash
-cargo run -p game_client --features editor          # editor (egui)
-cargo run -p game_client --features editor,crusty   # editor + crusty-gui overlay (Phase 16)
-cargo run -p game_client                            # standalone game
+cargo run -p game_client --features editor   # editor (crusty-gui)
+cargo run -p game_client                     # standalone game
 ```
 
-Feature `crusty` implies `editor` and pulls `crusty-gui` as a path dep from
-`../crusty-gui`.
+`editor` pulls `crusty-gui` as a path dep from `../crusty-gui`. `crusty` is a
+deprecated alias for `editor` (kept for muscle memory).
 
 ## Threading model (rendering)
 
@@ -94,27 +93,84 @@ records command buffers and presents. The only data crossing is `FramePacket`
 except the crusty `SharedTextRenderer` mutex (layout shapes text on main,
 renderer flushes glyph uploads on record).
 
-## GUI migration (Phase 16)
+## GUI (crusty-gui)
 
-The editor UI migrates from egui to `../crusty-gui` panel by panel (roadmap in
-`../crusty-gui/ROADMAP.md`). Seam: `engine/src/engine/gui/crusty.rs`
-(`CrustyGui` main thread / `CrustyRenderer` render thread). egui stays as
-fallback until all panels are ported. Don't fork panel logic between the two
-UIs — both call the same state structs and systems.
+The editor UI is `../crusty-gui` (Phase 16 migration complete — egui is fully
+removed). Seam: `engine/src/engine/gui/crusty.rs` (`CrustyGui` main thread /
+`CrustyRenderer` render thread, `SharedTextRenderer` mutex between them; paint
+list crosses in `FramePacket`). Panels are thin drawing layers — logic stays in
+state structs and systems. Dock layout persists to `editor_layout_crusty.ron`.
 
 Note: no logger is installed in `game_client` — `log::` output is invisible;
 use `println!` for temporary diagnostics (and remove before commit).
 
 ## Current Development Focus
 
-- Phase 16: egui → crusty-gui editor migration (in progress, Console panel next)
+- Phase 16 (egui → crusty-gui migration): **complete** — egui removed
 - Task 25: Build Pipeline and Export (Planned)
 
 ## Patched Dependencies
 
 These crates are forked/patched in `crates/`:
-- `emath` - Fix for DragValue crash (egui issue #7747)
 - `transform-gizmo` - Modified for Z-up coordinate system
+- `emath` - only remains as a dependency of the `transform-gizmo` fork (egui itself is gone)
+
+## Code style
+- Always strive for concise, simple solutions.
+- If a problem can be solved in a simpler way, propose it.
+
+## General preferences
+- If asked to do too much work at once, stop and state that clearly.
+- If computer use is helpful for completing or verifying work (screenshots,
+  visual comparison, driving a running app), shell out to gpt-5.6-Sol via Codex
+  (capture with `../crusty-gui/.claude/skills/port-panel/screenshot.ps1`,
+  compare with `codex exec -i`). Codex is configured via `.codex/config.toml`
+  (model gpt-5.6-sol, workspace-write sandbox).
+
+## Picking the right model for workflows and subagents
+Rankings, higher = better. Cost reflects what the user actually pays (OpenAI is
+near-free due to a deal), not list price. Intelligence is how hard a problem
+you can hand the model unsupervised. Taste covers UI/UX, code quality, API
+design and copy.
+
+| model       | cost |  intelligence   |  taste |
+|-------------|------|-----------------|--------|
+| gpt-5.6-Sol | 9    |  8              | 6      |
+| sonnet-5    | 5    |  5              | 7      |
+| opus-4.8    | 4    |  7              | 8      |
+| fable-5     | 2    |  9              | 9      |
+
+How to apply:
+- These are defaults, not limits. You have standing permission to override them: if a cheaper model's output doesn't meet the bar, rerun or redo the work with a smarter model without asking. Judge the output, not the price tag. Escalating costs less than shipping mediocre work.
+- Cost is a tie-breaker only; when axes conflict for anything that ships, intelligence > taste > cost.
+- Bulk/mechanical work (clear-spec implementation, data analysis, migrations): gpt-5.6-Sol it's effectively free.
+- Reviews of plans/implementation: fable-5 or opus-4.8, optionally gpt-5.6-Sol as an extra independent perspective.
+- Never use Haiku.
+
+## Visual Changes and Computer Use
+- When implementing/fixing visual change shell out gpt-5.6-Sol to take a screenshot of the change and have fable-5 and gpt-5.6-Sol discuss it.
+- Have fable-5 review the result for UI/UX quality, visual hierarchy, consistency, and overall taste.
+- Reconcile the findings and fix material issues before considering the task complete.
+
+## Following Visual References
+- When following a visual reference, aim for approximately 90–95% visual similarity unless pixel-perfect reproduction is explicitly requested.
+- Prioritize:
+   - Correct functionality and usability
+   - Consistency with the product's existing visual language
+   - Good UX and accessibility
+   - The important composition, hierarchy, spacing, typography, and visual cues from the reference
+   - Minor decorative similarity
+- Do not reproduce defects or poor UX from a reference merely for visual fidelity.
+- When intentionally deviating from the reference, preserve its core intent and briefly explain any material UX or consistency improvements.
+
+## Conventions
+- Commit messages: short, imperative. Never add Co-Authored-By.
+- `TargetRenderer` sync contract: its command buffers must execute serially
+  (glyph atlas and blur targets are shared across frames). `CrustyRenderer`
+  upholds this on the render thread.
+- Keep panel code readable; extract helpers when nesting hurts.
+- Changes that need new crusty-gui `backend`/`shell` API are made in
+  `../crusty-gui` first; verify both repos build before commit.
 
 ## PR Guidelines
 - Do not include HTML comments (e.g. <!-- generated-by-cyrus -->)
