@@ -171,6 +171,11 @@ impl MaterialManager {
         self.instances.get(&id)
     }
 
+    /// Remove a material instance (e.g. when its asset file changed on disk).
+    pub fn remove_instance(&mut self, id: MaterialInstanceId) -> Option<MaterialInstance> {
+        self.instances.remove(&id)
+    }
+
     /// Update the per-instance factors and rebuild the UBO + descriptor set.
     #[allow(clippy::too_many_arguments)]
     pub fn update_instance(
@@ -230,15 +235,15 @@ impl Default for MaterialManager {
 }
 
 // ---------------------------------------------------------------------------
-// .matinst.ron serialization format
+// .matinst serialization format (RON contents; legacy `.matinst.ron` accepted)
 // ---------------------------------------------------------------------------
 
-/// On-disk representation of a material instance (`.matinst.ron`).
+/// On-disk representation of a material instance (`.matinst`).
 ///
 /// Example:
 /// ```ron
 /// MaterialInstanceDef(
-///     base_material: "materials/metal.material.ron",
+///     base_material: "materials/metal.material",
 ///     base_color_factor: (1.0, 1.0, 1.0, 1.0),
 ///     metallic_factor: 1.0,
 ///     roughness_factor: 0.5,
@@ -270,14 +275,14 @@ fn default_half() -> f32 {
 }
 
 impl MaterialInstanceDef {
-    /// Load from a `.matinst.ron` file.
+    /// Load from a `.matinst` file.
     pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let def: Self = ron::from_str(&contents)?;
         Ok(def)
     }
 
-    /// Save to a `.matinst.ron` file.
+    /// Save to a `.matinst` file.
     pub fn save(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         let pretty = ron::ser::PrettyConfig::new()
             .depth_limit(3)
@@ -295,14 +300,14 @@ mod tests {
     #[test]
     fn matinst_ron_roundtrip() {
         let def = MaterialInstanceDef {
-            base_material: "materials/metal.material.ron".to_string(),
+            base_material: "materials/metal.material".to_string(),
             base_color_factor: [0.8, 0.2, 0.1, 1.0],
             metallic_factor: 0.9,
             roughness_factor: 0.3,
             emissive_factor: [1.0, 0.5, 0.0],
         };
 
-        let temp = std::env::temp_dir().join("test_matinst_roundtrip.matinst.ron");
+        let temp = std::env::temp_dir().join("test_matinst_roundtrip.matinst");
         def.save(&temp).expect("save");
 
         let loaded = MaterialInstanceDef::load(&temp).expect("load");
@@ -317,7 +322,7 @@ mod tests {
 
     #[test]
     fn matinst_ron_defaults() {
-        let ron_str = r#"MaterialInstanceDef(base_material: "materials/test.material.ron")"#;
+        let ron_str = r#"MaterialInstanceDef(base_material: "materials/test.material")"#;
         let def: MaterialInstanceDef = ron::from_str(ron_str).expect("parse with defaults");
         assert_eq!(def.base_color_factor, [1.0, 1.0, 1.0, 1.0]);
         assert!((def.metallic_factor - 1.0).abs() < 1e-6);

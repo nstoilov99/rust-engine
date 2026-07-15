@@ -49,13 +49,13 @@ pub fn save_action_set(
 
 // ── Per-file serialization (Unreal-style individual assets) ──
 
-/// Load a single InputActionDefinition from a `.inputaction.ron` file.
+/// Load a single InputActionDefinition from a `.inputaction` file.
 pub fn load_input_action(path: &Path) -> Option<InputActionDefinition> {
     let content = std::fs::read_to_string(path).ok()?;
     ron::from_str::<InputActionDefinition>(&content).ok()
 }
 
-/// Save a single InputActionDefinition to a `.inputaction.ron` file.
+/// Save a single InputActionDefinition to a `.inputaction` file.
 pub fn save_input_action(
     action: &InputActionDefinition,
     path: &Path,
@@ -68,13 +68,13 @@ pub fn save_input_action(
     Ok(())
 }
 
-/// Load a single MappingContext from a `.mappingcontext.ron` file.
+/// Load a single MappingContext from a `.mappingcontext` file.
 pub fn load_mapping_context(path: &Path) -> Option<MappingContext> {
     let content = std::fs::read_to_string(path).ok()?;
     ron::from_str::<MappingContext>(&content).ok()
 }
 
-/// Save a single MappingContext to a `.mappingcontext.ron` file.
+/// Save a single MappingContext to a `.mappingcontext` file.
 pub fn save_mapping_context(
     ctx: &MappingContext,
     path: &Path,
@@ -87,8 +87,9 @@ pub fn save_mapping_context(
     Ok(())
 }
 
-/// Scan a directory tree for `.inputaction.ron` and `.mappingcontext.ron` files
-/// and assemble them into a single `InputActionSet`.
+/// Scan a directory tree for `.inputaction` and `.mappingcontext` files
+/// (legacy `.ron`-suffixed variants still accepted) and assemble them into a
+/// single `InputActionSet`.
 pub fn scan_and_assemble(content_dir: &Path) -> Option<InputActionSet> {
     let mut set = InputActionSet::new();
     let mut found_any = false;
@@ -112,13 +113,15 @@ fn scan_dir_recursive(path: &Path, set: &mut InputActionSet, found: &mut bool) {
 
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    if filename.ends_with(".inputaction.ron") {
+    if filename.ends_with(".inputaction") || filename.ends_with(".inputaction.ron") {
+        warn_legacy_ron(filename, path);
         if let Some(action) = load_input_action(path) {
             log::info!("Loaded input action '{}' from {}", action.name, path.display());
             set.add_action(action);
             *found = true;
         }
-    } else if filename.ends_with(".mappingcontext.ron") {
+    } else if filename.ends_with(".mappingcontext") || filename.ends_with(".mappingcontext.ron") {
+        warn_legacy_ron(filename, path);
         if let Some(ctx) = load_mapping_context(path) {
             log::info!("Loaded mapping context '{}' from {}", ctx.name, path.display());
             set.add_context(ctx);
@@ -127,7 +130,16 @@ fn scan_dir_recursive(path: &Path, set: &mut InputActionSet, found: &mut bool) {
     }
 }
 
-/// Collect all action names from `.inputaction.ron` files in a directory tree.
+fn warn_legacy_ron(filename: &str, path: &Path) {
+    if filename.ends_with(".ron") {
+        log::warn!(
+            "Legacy '.ron'-suffixed asset name: {} — rename via tools/migrate_asset_extensions",
+            path.display()
+        );
+    }
+}
+
+/// Collect all action names from `.inputaction` files in a directory tree.
 pub fn scan_action_names(content_dir: &Path) -> Vec<String> {
     let mut names = Vec::new();
     scan_action_names_recursive(content_dir, &mut names);
@@ -146,7 +158,7 @@ fn scan_action_names_recursive(path: &Path, names: &mut Vec<String>) {
     }
 
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if filename.ends_with(".inputaction.ron") {
+    if filename.ends_with(".inputaction") || filename.ends_with(".inputaction.ron") {
         if let Some(action) = load_input_action(path) {
             names.push(action.name);
         }

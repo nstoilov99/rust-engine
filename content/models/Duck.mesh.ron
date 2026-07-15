@@ -12,7 +12,7 @@
     material_slots: [
         (
             name: "blinn3-fx",
-            material_path: "Duck_blinn3-fx.material.ron",
+            material_path: "Duck_blinn3-fx.material",
         ),
     ],
 )

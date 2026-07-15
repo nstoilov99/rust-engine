@@ -76,7 +76,7 @@ pub struct MeshRenderer {
     /// Content-relative path to a `.mesh` asset (e.g. "Defeated.mesh")
     #[serde(default)]
     pub mesh_path: String,
-    /// Per-submesh material paths (content-relative `.material.ron` paths).
+    /// Per-submesh material paths (content-relative `.material` / `.matinst` paths).
     /// Index 0 = first submesh, etc. Empty vec or missing entries = default material.
     #[serde(default)]
     pub material_paths: Vec<String>,

@@ -8,7 +8,8 @@ use crate::engine::scene::load_scene;
 use hecs::World;
 use nalgebra_glm as glm;
 
-pub const BENCHMARK_SCENE_RELATIVE: &str = "scenes/benchmark.scene.ron";
+pub const BENCHMARK_SCENE_RELATIVE: &str = "scenes/benchmark.scene";
+const BENCHMARK_SCENE_LEGACY: &str = "scenes/benchmark.scene.ron";
 
 /// Load the saved benchmark scene if it exists, otherwise spawn the default one.
 pub fn load_or_create_benchmark_scene(
@@ -22,6 +23,13 @@ pub fn load_or_create_benchmark_scene(
 
     let roots = if crate::engine::assets::asset_source::exists(BENCHMARK_SCENE_RELATIVE) {
         let (_, roots) = load_scene(world, BENCHMARK_SCENE_RELATIVE)?;
+        roots
+    } else if crate::engine::assets::asset_source::exists(BENCHMARK_SCENE_LEGACY) {
+        log::warn!(
+            "Loading legacy '{}' — rename via tools/migrate_asset_extensions",
+            BENCHMARK_SCENE_LEGACY
+        );
+        let (_, roots) = load_scene(world, BENCHMARK_SCENE_LEGACY)?;
         roots
     } else {
         spawn_benchmark_scene(world, config, cube_mesh_index)

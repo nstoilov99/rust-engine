@@ -45,8 +45,10 @@ use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{
-    DeferredRenderer, MeshRenderData, SkinningBackend,
+    DeferredRenderer, MaterialInstanceDef, MaterialInstanceId, MaterialManager, MeshRenderData,
+    SkinningBackend,
 };
+use rust_engine::engine::rendering::rendering_3d::material::MaterialBaseId;
 use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
@@ -59,7 +61,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window};
 
 const MIN_VIEWPORT_SIZE_FOR_CAMERA: u32 = 50;
-const MAIN_SCENE_RELATIVE: &str = "scenes/main.scene.ron";
+const MAIN_SCENE_RELATIVE: &str = "scenes/main.scene";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EditorRuntimeFlags {
@@ -110,8 +112,16 @@ pub struct CoreApp {
         Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
-    /// Cache of loaded material descriptor sets, keyed by content-relative .material.ron path.
+    /// Cache of loaded material descriptor sets, keyed by content-relative
+    /// asset path (`.material` and `.matinst`).
     pub material_cache: std::collections::HashMap<String, Arc<DescriptorSet>>,
+    /// Owns material bases/instances for `.matinst` assets; their descriptor
+    /// sets land in `material_cache` keyed by the instance's asset path.
+    pub material_manager: MaterialManager,
+    /// Base-material path → registered base id (textures shared across instances).
+    pub material_base_ids: std::collections::HashMap<String, MaterialBaseId>,
+    /// `.matinst` asset path → live instance id.
+    pub matinst_ids: std::collections::HashMap<String, MaterialInstanceId>,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
 }
@@ -165,9 +175,9 @@ pub struct SceneEditorState {
     /// Open mesh editors keyed by content-relative mesh path.
     pub mesh_editors:
         std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
-    /// Open input action editors (one per .inputaction.ron file).
+    /// Open input action editors (one per .inputaction file).
     pub input_action_editor: InputActionEditor,
-    /// Open mapping context editors (one per .mappingcontext.ron file).
+    /// Open mapping context editors (one per .mappingcontext file).
     pub input_context_editor: InputContextEditor,
     /// Active "Save As" dialog state (shown when saving an untitled scene).
     pub save_as_dialog: Option<SaveAsDialog>,
@@ -526,6 +536,9 @@ impl App {
             frame_number: 0,
             render_thread: Some(render_thread),
             material_cache: std::collections::HashMap::new(),
+            material_manager: MaterialManager::new(),
+            material_base_ids: std::collections::HashMap::new(),
+            matinst_ids: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
         };
@@ -835,7 +848,7 @@ impl App {
                 self.editor.ui.crusty_dock.open_tab(EditorTab::AssetBrowser);
                 self.push_action_unavailable(
                     "Open Scene",
-                    "use the Asset Browser to open a .scene.ron file",
+                    "use the Asset Browser to open a .scene file",
                 );
             }
             EditorAction::SaveScene => self.save_active_scene(),
@@ -1207,7 +1220,7 @@ impl App {
         }
     }
 
-    /// Load `.material.ron` files referenced by MeshRenderers and cache their
+    /// Load `.material` / `.matinst` files referenced by MeshRenderers and cache their
     /// GPU descriptor sets so `prepare_mesh_data` can bind them.
     fn resolve_material_sets(&mut self) {
         use rust_engine::engine::assets::mesh_import::load_material_ron;
@@ -1270,13 +1283,55 @@ impl App {
         };
 
         for mat_path in &uncached {
-            let mat_ron_path = content_root.join(mat_path);
+            // `.matinst` assets resolve through the MaterialManager: the base
+            // material supplies the textures, the instance supplies factors.
+            let norm = mat_path.replace('\\', "/");
+            if norm.ends_with(".material.ron") || norm.ends_with(".matinst.ron") {
+                log::warn!(
+                    "Legacy '.ron'-suffixed material path: {} — rename via tools/migrate_asset_extensions",
+                    mat_path
+                );
+            }
+            let inst_def = if norm.ends_with(".matinst.ron") || norm.ends_with(".matinst") {
+                match MaterialInstanceDef::load(&content_root.join(mat_path)) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        log::warn!("Failed to load material instance '{}': {}", mat_path, e);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            // The file whose textures get loaded: the base material for instances.
+            let base_rel = inst_def
+                .as_ref()
+                .map(|d| d.base_material.clone())
+                .unwrap_or_else(|| mat_path.clone());
+
+            // Instance whose base is already registered: skip texture loading.
+            if let Some(inst) = &inst_def {
+                if let Some(&base_id) = self.core.material_base_ids.get(&base_rel) {
+                    self.cache_material_instance(
+                        mat_path,
+                        base_id,
+                        inst,
+                        &allocator,
+                        &ds_allocator,
+                        &geom_layout,
+                    );
+                    continue;
+                }
+            }
+
+            let mat_ron_path = content_root.join(&base_rel);
             let mat_dir = mat_ron_path.parent().unwrap_or(&content_root);
 
             let def = match load_material_ron(&mat_ron_path) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::warn!("Failed to load material '{}': {}", mat_path, e);
+                    log::warn!("Failed to load material '{}': {}", base_rel, e);
                     continue;
                 }
             };
@@ -1361,6 +1416,23 @@ impl App {
                 Err(_) => continue,
             };
 
+            if let Some(inst) = &inst_def {
+                let base_id = self
+                    .core
+                    .material_manager
+                    .register_base(albedo, normal, mr, ao, sampler.clone());
+                self.core.material_base_ids.insert(base_rel.clone(), base_id);
+                self.cache_material_instance(
+                    mat_path,
+                    base_id,
+                    inst,
+                    &allocator,
+                    &ds_allocator,
+                    &geom_layout,
+                );
+                continue;
+            }
+
             match PbrMaterial::new(
                 albedo,
                 normal,
@@ -1384,6 +1456,42 @@ impl App {
                 Err(e) => {
                     log::warn!("Failed to create PbrMaterial for '{}': {}", mat_path, e);
                 }
+            }
+        }
+    }
+
+    /// Create a `MaterialInstance` from a registered base and cache its
+    /// descriptor set under the instance's asset path.
+    fn cache_material_instance(
+        &mut self,
+        mat_path: &str,
+        base_id: MaterialBaseId,
+        def: &MaterialInstanceDef,
+        allocator: &Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
+        ds_allocator: &Arc<vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator>,
+        geom_layout: &Arc<vulkano::pipeline::PipelineLayout>,
+    ) {
+        match self.core.material_manager.create_instance(
+            base_id,
+            def.base_color_factor,
+            def.metallic_factor,
+            def.roughness_factor,
+            def.emissive_factor,
+            allocator.clone(),
+            ds_allocator.clone(),
+            geom_layout.clone(),
+        ) {
+            Ok(id) => {
+                if let Some(inst) = self.core.material_manager.get_instance(id) {
+                    self.core.matinst_ids.insert(mat_path.to_string(), id);
+                    self.core
+                        .material_cache
+                        .insert(mat_path.to_string(), inst.descriptor_set.clone());
+                    println!("✅ Loaded material instance: {}", mat_path);
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to create material instance '{}': {}", mat_path, e);
             }
         }
     }
@@ -1424,13 +1532,30 @@ impl App {
                     eprintln!("Auto-reload failed for {}: {}", path, error);
                 }
                 ReloadEvent::MaterialInstanceChanged { path } => {
+                    // Evict the instance; resolve_material_sets rebuilds it
+                    // next frame from the changed file. Watcher paths are
+                    // absolute with forward slashes, cache keys are
+                    // content-relative and may use backslashes.
+                    let matches_event =
+                        |key: &str| path.ends_with(&key.replace('\\', "/"));
+                    let stale: Vec<String> = self
+                        .core
+                        .matinst_ids
+                        .keys()
+                        .filter(|k| matches_event(k))
+                        .cloned()
+                        .collect();
+                    for key in &stale {
+                        if let Some(id) = self.core.matinst_ids.remove(key) {
+                            self.core.material_manager.remove_instance(id);
+                        }
+                        self.core.material_cache.remove(key);
+                    }
                     println!("Material instance changed: {}", path);
                     self.editor.console.messages.push(LogMessage::info(format!(
-                        "Material instance file changed: {}",
+                        "Material instance reloaded: {}",
                         path,
                     )));
-                    // Full material instance hot-reload requires MaterialManager
-                    // integration at the scene level — log for now.
                 }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
@@ -2794,14 +2919,14 @@ impl App {
                     match asset_type {
                         AssetType::InputAction => {
                             let base_name = "NewInputAction";
-                            let mut new_name = format!("{}.inputaction.ron", base_name);
+                            let mut new_name = format!("{}.inputaction", base_name);
                             let mut counter = 1;
                             while full_parent.join(&new_name).exists() {
-                                new_name = format!("{}_{}.inputaction.ron", base_name, counter);
+                                new_name = format!("{}_{}.inputaction", base_name, counter);
                                 counter += 1;
                             }
                             let action_name =
-                                new_name.trim_end_matches(".inputaction.ron").to_string();
+                                new_name.trim_end_matches(".inputaction").to_string();
                             let action = rust_engine::engine::input::enhanced_action::InputActionDefinition::new(
                                 &action_name,
                                 rust_engine::engine::input::value::InputValueType::Digital,
@@ -2825,14 +2950,14 @@ impl App {
                         }
                         AssetType::InputMappingContext => {
                             let base_name = "NewMappingContext";
-                            let mut new_name = format!("{}.mappingcontext.ron", base_name);
+                            let mut new_name = format!("{}.mappingcontext", base_name);
                             let mut counter = 1;
                             while full_parent.join(&new_name).exists() {
-                                new_name = format!("{}_{}.mappingcontext.ron", base_name, counter);
+                                new_name = format!("{}_{}.mappingcontext", base_name, counter);
                                 counter += 1;
                             }
                             let ctx_name =
-                                new_name.trim_end_matches(".mappingcontext.ron").to_string();
+                                new_name.trim_end_matches(".mappingcontext").to_string();
                             let mapping_ctx =
                                 rust_engine::engine::input::enhanced_action::MappingContext::new(
                                     &ctx_name, 0,
@@ -3893,7 +4018,7 @@ impl App {
             ));
             return;
         }
-        let relative = format!("scenes/{}.scene.ron", trimmed);
+        let relative = format!("scenes/{}.scene", trimmed);
         let scene_path = asset_source::resolve(&relative);
         // Use the trimmed filename as the display name if the scene is untitled.
         let display_name = if self.editor.scene.current_scene_name.is_empty()
@@ -3988,7 +4113,9 @@ impl App {
             // Native mesh (already processed)
             "mesh", // Audio
             "wav", "ogg", "mp3", "flac", // Shaders
-            "glsl", "vert", "frag", "comp", "spv", // Scene/Material/Prefab definitions
+            "glsl", "vert", "frag", "comp", "spv", // Engine RON assets
+            "scene", "material", "matinst", "prefab", "inputaction", "mappingcontext",
+            // Legacy `.ron`-suffixed assets
             "ron",
         ];
 

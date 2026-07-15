@@ -381,7 +381,7 @@ pub fn load_scene_from_string(
 }
 
 /// Deserialize scene file into ECS world.
-/// `relative` is a content-relative path (e.g. `"scenes/main.scene.ron"`).
+/// `relative` is a content-relative path (e.g. `"scenes/main.scene"`).
 /// Returns (scene_name, root_entities_in_order).
 pub fn load_scene(
     world: &mut World,
@@ -390,6 +390,12 @@ pub fn load_scene(
     use crate::engine::assets::asset_source;
 
     println!("Loading scene from: {}", relative);
+    if relative.ends_with(".scene.ron") {
+        log::warn!(
+            "Legacy '.scene.ron' path: {} — rename via tools/migrate_asset_extensions",
+            relative
+        );
+    }
 
     let ron_string = if asset_source::is_pak() {
         asset_source::read_string(relative)?

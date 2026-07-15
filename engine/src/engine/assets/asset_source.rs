@@ -52,7 +52,7 @@ fn source() -> &'static AssetSource {
 /// Read a content-relative file as raw bytes.
 ///
 /// `relative` uses forward slashes and does NOT start with `content/`.
-/// Example: `"models/Duck.glb"`, `"scenes/main.scene.ron"`.
+/// Example: `"models/Duck.glb"`, `"scenes/main.scene"`.
 pub fn read_bytes(relative: &str) -> Result<Vec<u8>, std::io::Error> {
     match source() {
         AssetSource::Filesystem { content_root } => {

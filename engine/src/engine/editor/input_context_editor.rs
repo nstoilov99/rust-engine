@@ -1,4 +1,4 @@
-//! Dedicated editor for individual `.mappingcontext.ron` files.
+//! Dedicated editor for individual `.mappingcontext` files.
 //!
 //! Opens in a separate OS window when a user double-clicks a mapping context
 //! asset in the asset browser — similar to Unreal Engine's InputMappingContext editor.
@@ -31,7 +31,7 @@ pub struct InputContextEditorState {
 #[derive(Default)]
 pub struct InputContextEditor {
     pub open_contexts: HashMap<String, InputContextEditorState>,
-    /// Action names discovered from .inputaction.ron files in content/.
+    /// Action names discovered from .inputaction files in content/.
     pub available_actions: Vec<String>,
 }
 

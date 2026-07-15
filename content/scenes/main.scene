@@ -169,7 +169,7 @@
                     type: "MeshRenderer",
                     mesh_path: "models\\Duck.mesh",
                     material_paths: [
-                        "models/Duck_blinn3-fx.material.ron",
+                        "models/Duck_blinn3-fx.material",
                     ],
                     mesh_index: 6,
                     material_index: 0,
@@ -197,8 +197,8 @@
                     type: "MeshRenderer",
                     mesh_path: "Defeated.mesh",
                     material_paths: [
-                        "Defeated_Beta_HighLimbsGeoSG3.material.ron",
-                        "Defeated_Beta_Joints_MAT1.material.ron",
+                        "Defeated_Beta_HighLimbsGeoSG3.material",
+                        "Defeated_Beta_Joints_MAT1.material",
                     ],
                     mesh_index: 4,
                     material_index: 0,

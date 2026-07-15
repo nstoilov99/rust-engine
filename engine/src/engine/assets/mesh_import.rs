@@ -76,12 +76,12 @@ impl Default for MeshImportSettings {
     }
 }
 
-/// A material slot in a mesh — maps a submesh to a `.material.ron` asset.
+/// A material slot in a mesh — maps a submesh to a `.material` asset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialSlot {
     /// Display name for this slot (e.g. "Skin", "Eyes").
     pub name: String,
-    /// Content-relative path to the `.material.ron` file (empty = unassigned).
+    /// Content-relative path to the `.material` file (empty = unassigned).
     #[serde(default)]
     pub material_path: String,
 }
@@ -108,13 +108,13 @@ pub struct ImportResult {
     pub bone_count: usize,
     /// Number of animation clips written.
     pub anim_clip_count: usize,
-    /// Number of `.material.ron` files written.
+    /// Number of `.material` files written.
     pub material_count: usize,
 }
 
-/// Standalone material definition, serialized to `.material.ron`.
+/// Standalone material definition, serialized to `.material`.
 ///
-/// Texture fields are relative paths (sibling files next to the `.material.ron`).
+/// Texture fields are relative paths (sibling files next to the `.material`).
 /// Empty string means no texture.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaterialDefinition {
@@ -130,7 +130,7 @@ pub struct MaterialDefinition {
     pub ao_texture: String,
 }
 
-/// Load a `MaterialDefinition` from a `.material.ron` file.
+/// Load a `MaterialDefinition` from a `.material` file.
 pub fn load_material_ron(
     path: &Path,
 ) -> Result<MaterialDefinition, Box<dyn std::error::Error>> {
@@ -192,7 +192,7 @@ pub fn import_model_to_mesh(
         0
     };
 
-    // 6. Export .material.ron files for each material with textures
+    // 6. Export .material files for each material with textures
     let material_count = if settings.import_materials && !model.materials.is_empty() {
         export_materials(output_path, &model.materials)?
     } else {
@@ -212,7 +212,7 @@ pub fn import_model_to_mesh(
                 let safe_name = sanitize_filename(&mat.name);
                 MaterialSlot {
                     name: mat.name.clone(),
-                    material_path: format!("{}_{}.material.ron", stem, safe_name),
+                    material_path: format!("{}_{}.material", stem, safe_name),
                 }
             })
             .collect()
@@ -1038,13 +1038,13 @@ pub fn write_anim_binary(
 }
 
 // ──────────────────────────────────────────────────────────────
-// Material export (source → .material.ron + textures)
+// Material export (source → .material + textures)
 // ──────────────────────────────────────────────────────────────
 
-/// Export each `ImportedMaterial` as a `.material.ron` file plus texture PNGs.
+/// Export each `ImportedMaterial` as a `.material` file plus texture PNGs.
 ///
 /// Files are written next to `mesh_path`:
-///   `Foo.mesh` → `Foo_MatName.material.ron`, `Foo_MatName_albedo.png`, etc.
+///   `Foo.mesh` → `Foo_MatName.material`, `Foo_MatName_albedo.png`, etc.
 ///
 /// Returns the number of materials exported.
 fn export_materials(
@@ -1074,7 +1074,7 @@ fn export_materials(
         )?;
         let ao_file = save_material_texture(parent, &prefix, "ao", &mat.ao)?;
 
-        // Write .material.ron
+        // Write .material (RON contents; extension is the type discriminator)
         let def = MaterialDefinition {
             name: mat.name.clone(),
             base_color_factor: mat.base_color_factor,
@@ -1087,7 +1087,7 @@ fn export_materials(
             ao_texture: ao_file,
         };
 
-        let ron_path = parent.join(format!("{}.material.ron", prefix));
+        let ron_path = parent.join(format!("{}.material", prefix));
         let ron_text = ron::ser::to_string_pretty(&def, ron::ser::PrettyConfig::default())?;
         std::fs::write(&ron_path, ron_text)?;
         count += 1;

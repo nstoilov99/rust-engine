@@ -31,7 +31,7 @@ pub enum ReloadEvent {
     ShaderChanged {
         path: String,
     },
-    /// A material instance definition (.matinst.ron) was modified.
+    /// A material instance definition (.matinst) was modified.
     MaterialInstanceChanged {
         path: String,
     },
@@ -89,7 +89,9 @@ impl HotReloadWatcher {
                                 }
 
                                 // Material instance definitions trigger reload regardless of tracking
-                                if normalized_path.ends_with(".matinst.ron") {
+                                if normalized_path.ends_with(".matinst")
+                                    || normalized_path.ends_with(".matinst.ron")
+                                {
                                     let _ = reload_sender.send(
                                         ReloadEvent::MaterialInstanceChanged {
                                             path: normalized_path.clone(),

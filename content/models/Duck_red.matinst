@@ -1,0 +1,7 @@
+MaterialInstanceDef(
+    base_material: "models/Duck_blinn3-fx.material",
+    base_color_factor: (1.0, 0.15, 0.15, 1.0),
+    metallic_factor: 0.0,
+    roughness_factor: 1.0,
+    emissive_factor: (0.0, 0.0, 0.0),
+)

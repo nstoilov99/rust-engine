@@ -12,11 +12,11 @@
     material_slots: [
         (
             name: "Beta_HighLimbsGeoSG3",
-            material_path: "Defeated_Beta_HighLimbsGeoSG3.material.ron",
+            material_path: "Defeated_Beta_HighLimbsGeoSG3.material",
         ),
         (
             name: "Beta_Joints_MAT1",
-            material_path: "Defeated_Beta_Joints_MAT1.material.ron",
+            material_path: "Defeated_Beta_Joints_MAT1.material",
         ),
     ],
 )

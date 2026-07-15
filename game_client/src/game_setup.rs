@@ -123,7 +123,11 @@ pub fn load_or_create_scene(
     world: &mut World,
     mesh_index: usize,
 ) -> Result<(bool, Vec<Entity>), Box<dyn std::error::Error>> {
-    if rust_engine::assets::asset_source::exists("scenes/main.scene.ron") {
+    if rust_engine::assets::asset_source::exists("scenes/main.scene") {
+        let (_scene_name, root_entities) = load_scene(world, "scenes/main.scene")?;
+        Ok((true, root_entities))
+    } else if rust_engine::assets::asset_source::exists("scenes/main.scene.ron") {
+        log::warn!("Loading legacy 'scenes/main.scene.ron' — rename via tools/migrate_asset_extensions");
         let (_scene_name, root_entities) = load_scene(world, "scenes/main.scene.ron")?;
         Ok((true, root_entities))
     } else {

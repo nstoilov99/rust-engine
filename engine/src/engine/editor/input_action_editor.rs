@@ -1,4 +1,4 @@
-//! Dedicated editor for individual `.inputaction.ron` files.
+//! Dedicated editor for individual `.inputaction` files.
 //!
 //! Opens in a separate OS window when a user double-clicks an input action
 //! asset in the asset browser — similar to Unreal Engine's InputAction editor.

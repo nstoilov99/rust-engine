@@ -4,6 +4,7 @@ members = [
     "game_shared",
     "game_client",
     "tools/pak_tool",
+    "tools/migrate_asset_extensions",
 ]
 resolver = "2"
 

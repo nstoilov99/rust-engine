@@ -100,7 +100,7 @@ pub fn dialog_stack_panel(ui: &mut Ui, stack: &mut DialogStack) -> Vec<EditorAct
 pub fn save_as_dialog_panel(ui: &mut Ui, dlg: &mut SaveAsDialog) -> bool {
     let mut cancel = false;
     dialog_window("Save Scene As", 360.0).show(ui, |ui| {
-        Label::new("Filename (saved to content/scenes/<name>.scene.ron):").show(ui);
+        Label::new("Filename (saved to content/scenes/<name>.scene):").show(ui);
         let out = TextEdit::new(&mut dlg.filename).width(300.0).show_full(ui);
         if out.submitted {
             dlg.commit = true;

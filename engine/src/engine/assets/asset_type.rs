@@ -17,19 +17,19 @@ pub enum AssetType {
     Mesh,
     /// Animation clips (.anim)
     Animation,
-    /// Scene files (*.scene.ron)
+    /// Scene files (*.scene; legacy *.scene.ron)
     Scene,
-    /// Material definitions (*.material.ron)
+    /// Material definitions (*.material / *.matinst; legacy *.ron suffix)
     Material,
     /// Audio files (WAV, OGG, MP3)
     Audio,
     /// Shader files (GLSL, VERT, FRAG, COMP)
     Shader,
-    /// Prefab entity templates (*.prefab.ron)
+    /// Prefab entity templates (*.prefab; legacy *.prefab.ron)
     Prefab,
-    /// Input action definitions (*.inputaction.ron)
+    /// Input action definitions (*.inputaction; legacy *.inputaction.ron)
     InputAction,
-    /// Input mapping context definitions (*.mappingcontext.ron)
+    /// Input mapping context definitions (*.mappingcontext; legacy *.mappingcontext.ron)
     InputMappingContext,
     /// Unknown or unsupported file type
     #[default]
@@ -52,8 +52,15 @@ impl AssetType {
             "wav" | "ogg" | "mp3" | "flac" => AssetType::Audio,
             // Shaders
             "glsl" | "vert" | "frag" | "comp" | "spv" => AssetType::Shader,
-            // RON files - need content inspection for specific type
-            "ron" => AssetType::Unknown, // Will be refined by filename pattern
+            // Engine-owned RON assets: the final dot-segment is the type
+            // discriminator (`foo.test.material` is still a material).
+            "scene" => AssetType::Scene,
+            "material" | "matinst" => AssetType::Material,
+            "prefab" => AssetType::Prefab,
+            "inputaction" => AssetType::InputAction,
+            "mappingcontext" => AssetType::InputMappingContext,
+            // Legacy RON files - refined by filename pattern in from_path
+            "ron" => AssetType::Unknown,
             _ => AssetType::Unknown,
         }
     }
@@ -62,7 +69,8 @@ impl AssetType {
     pub fn from_path(path: &Path) -> Self {
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // Check for RON file patterns first
+        // Legacy multi-segment RON patterns (`<name>.<type>.ron`); deprecated
+        // in favor of `<name>.<type>` — see the migration script in tools/.
         if filename.ends_with(".scene.ron") {
             return AssetType::Scene;
         }
@@ -115,13 +123,13 @@ impl AssetType {
             AssetType::Model => &["gltf", "glb", "obj", "fbx"],
             AssetType::Mesh => &["mesh"],
             AssetType::Animation => &["anim"],
-            AssetType::Scene => &["scene.ron"],
-            AssetType::Material => &["material.ron", "matinst.ron"],
+            AssetType::Scene => &["scene"],
+            AssetType::Material => &["material", "matinst"],
             AssetType::Audio => &["wav", "ogg", "mp3", "flac"],
             AssetType::Shader => &["glsl", "vert", "frag", "comp", "spv"],
-            AssetType::Prefab => &["prefab.ron"],
-            AssetType::InputAction => &["inputaction.ron"],
-            AssetType::InputMappingContext => &["mappingcontext.ron"],
+            AssetType::Prefab => &["prefab"],
+            AssetType::InputAction => &["inputaction"],
+            AssetType::InputMappingContext => &["mappingcontext"],
             AssetType::Unknown => &[],
         }
     }
@@ -188,6 +196,7 @@ mod tests {
             AssetType::from_path(Path::new("assets/textures/diffuse.png")),
             AssetType::Texture
         );
+        // Legacy multi-segment scheme
         assert_eq!(
             AssetType::from_path(Path::new("assets/scenes/main.scene.ron")),
             AssetType::Scene
@@ -195,6 +204,40 @@ mod tests {
         assert_eq!(
             AssetType::from_path(Path::new("assets/materials/metal.material.ron")),
             AssetType::Material
+        );
+        // Single-segment scheme: final dot-segment is the discriminator
+        assert_eq!(
+            AssetType::from_path(Path::new("assets/scenes/main.scene")),
+            AssetType::Scene
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("assets/materials/metal.material")),
+            AssetType::Material
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("assets/materials/foo.test.material")),
+            AssetType::Material
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("assets/materials/red.matinst")),
+            AssetType::Material
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("input/default.inputaction")),
+            AssetType::InputAction
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("input/default.mappingcontext")),
+            AssetType::InputMappingContext
+        );
+        // Mesh sidecars stay hidden; binary meshes classify as Mesh
+        assert_eq!(
+            AssetType::from_path(Path::new("models/duck.mesh.ron")),
+            AssetType::Unknown
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("models/duck.mesh")),
+            AssetType::Mesh
         );
     }
 }
