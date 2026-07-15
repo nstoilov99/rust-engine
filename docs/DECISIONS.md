@@ -521,6 +521,98 @@ Add an **`EntityGuid(uuid::Uuid)`** component to every entity.
 
 ---
 
+## ADR-014: SpacetimeDB as the Networking Stack
+
+**Date**: 2026-07
+
+**Status**: Accepted (pending Net-0 spike validation)
+
+### Context
+
+The engine's goal is an open-world MMO (WoW-like) that also supports small co-op sessions. We need server-authoritative state, persistence, and replication. Options: SpacetimeDB, a custom Rust server with renet/QUIC, or a general framework (e.g. lightyear).
+
+### Decision
+
+Use **SpacetimeDB** as the networking and persistence backend: server logic as Rust WASM reducers, subscription-based replication, WebSocket transport. All gameplay commands go through a **backend-neutral command interface in `game_shared`** so the transport can be swapped.
+
+### Rationale
+
+1. **Built for MMOs**: proven at scale by BitCraft (persistent open world, thousands of concurrent players)
+2. **Database = server**: state, persistence, and transactional logic in one place — eliminates an entire class of sync bugs and a separate persistence layer (absorbs the old "server persistence" task)
+3. **Every reducer is a transaction**: strong consistency for inventory, trading, combat resolution
+4. **Fits the pace**: WoW-style tab-target combat (GCD ~1s, cast times) tolerates TCP/WebSocket latency; this is *not* a twitch shooter engine
+5. **Alternatives**: custom renet/QUIC server gives lower latency and full control but means building persistence, replication, and interest management ourselves — months of work before gameplay
+
+### Consequences
+
+- TCP head-of-line blocking rules out twitch-action gameplay; acceptable for the target genre
+- Module globals can't hold state — all server state lives in tables; server code style differs from client
+- Single-machine bound per module — sharding/zoning strategy must come from the Net-0 spike results
+- The `game_shared` command interface is mandatory discipline: no SpacetimeDB types leak into engine/client code
+- **Fallback** (if the spike fails): custom Rust server with renet/QUIC behind the same command interface
+
+---
+
+## ADR-015: Server-Authoritative Kinematic Character Movement
+
+**Date**: 2026-07
+
+**Status**: Accepted
+
+### Context
+
+Multiplayer needs server-authoritative movement to prevent cheating. Rapier is not deterministic across platforms, and SpacetimeDB reducers run as WASM — a full physics engine per tick inside a reducer is impractical. Options: run Rapier on the server, write our own deterministic physics, or drop the determinism requirement entirely.
+
+### Decision
+
+**Kinematic character controller, not dynamic physics, as the movement model.** A shared movement function lives in `game_shared` and is compiled into both the client and the server WASM module. It shape-casts against **cooked static collision chunks** (same versioned data on both sides). Client-side Rapier remains for **cosmetic effects only** (ragdolls, debris, particles) — never gameplay state.
+
+### Rationale
+
+1. **No determinism required**: server is the single authority; the client predicts and reconciles. Float divergence only causes tiny corrections, not desyncs
+2. **Never write our own physics engine**: multi-year trap; kinematic shape-casts cover an MMO's actual needs (walk, slope, step, jump, swim)
+3. **This is what MMOs do**: WoW, FFXIV — characters are kinematic; dynamic physics is cosmetic everywhere
+4. **WASM-friendly**: shape-cast vs static geometry is cheap and small; a full dynamic solver is not
+5. Long-term solution, not a workaround — this architecture doesn't get replaced later
+
+### Consequences
+
+- Requires a **collision cooking pipeline**: versioned static-collision chunks consumed identically by client Rapier queries and server WASM (roadmap task M2)
+- Client/server movement parity across chunk seams is a named risk — covered by parity tests in Net-B
+- The grounding seam (ground entity ID + generation, local anchor, platform velocity, loss-of-ground rules) is designed into the controller from day one so moving platforms can be added later without a rewrite (implementation deferred to Net-B.5)
+- Dynamic gameplay physics (physics puzzles, vehicles) is out of scope; would need a dedicated design if ever wanted
+
+---
+
+## ADR-016: Spike-First Gating for Networking (Net-0)
+
+**Date**: 2026-07
+
+**Status**: Accepted
+
+### Context
+
+The multiplayer arc (M2–M8, months of work) is built on the assumption that SpacetimeDB can handle MMO-scale load. If that assumption is wrong, discovering it after building collision cooking, zone lifecycle, and prediction on top of it would waste the entire arc.
+
+### Decision
+
+Run a **throwaway, no-engine-integration scale spike (Net-0)** before any engine networking work: a standalone SpacetimeDB module plus headless console bot clients, tested at a 300 / 3,000 / 30,000 bot ladder. The spike is a **go/no-go gate**: pass criteria defined up front, and a failed spike triggers the renet/QUIC fallback (ADR-014) *before* M5–M8 are built.
+
+### Rationale
+
+1. **Cheapest possible falsification**: a console app answers "can this backend hold a realm" in ~2 weeks vs. discovering it after months
+2. **No engine integration** keeps the spike honest: no render loop, no ECS, no FramePacket — nothing to blame or tune except the backend itself; also nothing to un-build if it fails
+3. **Bots must model hotspots, churn, and combat fan-out** — a false-positive spike (uniform wandering bots) is the top residual risk identified in design review
+4. The expected outcome is **discovering the per-module ceiling** and informing sharding/zoning strategy, not necessarily "passing" at 30k
+
+### Consequences
+
+- Spike code is explicitly disposable — no code from it ships; only numbers, configs, and the written report survive (`docs/roadmap/VULKANO-M0-SPACETIMEDB-SPIKE.md`)
+- Engine networking (M5+) is blocked until the gate decision is recorded
+- If the fallback triggers, the `game_shared` command interface (ADR-014) is the swap seam; M2–M4 (collision, greybox, zone lifecycle) proceed unchanged either way
+
+---
+
 ## Decision Template
 
 ```markdown
