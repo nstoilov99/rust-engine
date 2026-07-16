@@ -314,6 +314,23 @@ bot runner + measurement script, own READMEs). Built against SpacetimeDB
   sustained load. Rung 2 (dedicated hardware, bots on a separate machine) must
   disambiguate contention vs organic drift.
 
+### Run: 2026-07-16 rung=3000 scenario=uniform duration=5min LOCAL SMOKE — INVALID for server, conclusive for runner capacity
+- Purpose: smoke-test the runner at 3 k before renting rung-2 hardware. `--bots 3000
+  --workers 24`, server on the same machine.
+- **Machine-wide CPU pinned at 100 % for the entire load window.** stress-bots alone
+  took 40–58 % of the box, the server 20–35 %, remainder OS/network stack. Neither
+  process was the bottleneck — the box was.
+- Consequences visible in the log: immediate delivery collapse (p50 3.4 s at t=10 s,
+  growing ~1 s/s, echoes blind from 150 s) *and* the runner's own input loop stalled
+  from t≈140 s (10 s intervals sending ~2–10 k inputs vs ~290 k expected — workers
+  couldn't schedule at 10 Hz/bot). errs=0, conn held 3000 throughout.
+- Server showed the usual backlog signature: memory +~350 MB/sample to 7.5 GB, CPU
+  flat 20–35 %, drained after disconnect (settled ~4.6 GB retained heap at 7 % idle).
+- Verdict: **one machine cannot honestly drive 3,000 bots and host the server** —
+  all RTT numbers are contaminated by client-side scheduling starvation. Rung 2
+  requires bots on separate hardware (one VM can likely drive 3 k alone; if its CPU
+  pins, split into 2× `--bots 1500` processes). No server conclusions drawn.
+
 Rung 1 complete. Next: rung 2 (3,000 bots, bots on a separate machine from the server).
 
 ## Fallback plan (on no-go)
