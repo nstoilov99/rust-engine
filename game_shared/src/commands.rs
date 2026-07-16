@@ -13,19 +13,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameCommand {
     /// Apply damage to an entity.
-    ApplyDamage {
-        target: Uuid,
-        amount: f32,
-    },
+    ApplyDamage { target: Uuid, amount: f32 },
     /// Spawn an entity from a prefab.
     SpawnPrefab {
         prefab_name: String,
         position: [f32; 3],
     },
     /// Despawn an entity by GUID.
-    DespawnEntity {
-        target: Uuid,
-    },
+    DespawnEntity { target: Uuid },
     /// Play a sound effect.
     PlaySound {
         sound_name: String,

@@ -6,7 +6,13 @@ edition = "2021"
 [dependencies]
 glam = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true }
+# Not the workspace dep: no `v4` (needs a randomness source unavailable on
+# wasm32-unknown-unknown); this crate only stores Uuids, never generates.
+uuid = { version = "1", default-features = false, features = ["serde"] }
+# Exact pin: must match what the workspace lockfile resolves for rapier3d,
+# so client (rapier) and server WASM (parry only) share one parry version.
+# Default features only (std) — no parallel/SIMD/serde.
+parry3d = "=0.20.2"
 
 [dev-dependencies]
 ron = "0.8"

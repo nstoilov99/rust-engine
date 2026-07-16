@@ -41,10 +41,18 @@ pub struct CharacterMovement {
     pub is_grounded: bool,
 }
 
-fn default_move_speed() -> f32 { 50.0 }
-fn default_sprint_mult() -> f32 { 1.8 }
-fn default_jump_impulse() -> f32 { 5.0 }
-fn default_ground_dist() -> f32 { 1.05 }
+fn default_move_speed() -> f32 {
+    50.0
+}
+fn default_sprint_mult() -> f32 {
+    1.8
+}
+fn default_jump_impulse() -> f32 {
+    5.0
+}
+fn default_ground_dist() -> f32 {
+    1.05
+}
 
 impl Default for CharacterMovement {
     fn default() -> Self {
@@ -81,9 +89,15 @@ pub struct LookController {
     pub pitch: f32,
 }
 
-fn default_sensitivity() -> f32 { 0.003 }
-fn default_pitch_min() -> f32 { -89.0_f32.to_radians() }
-fn default_pitch_max() -> f32 { 89.0_f32.to_radians() }
+fn default_sensitivity() -> f32 {
+    0.003
+}
+fn default_pitch_min() -> f32 {
+    -89.0_f32.to_radians()
+}
+fn default_pitch_max() -> f32 {
+    89.0_f32.to_radians()
+}
 
 impl Default for LookController {
     fn default() -> Self {
@@ -118,11 +132,21 @@ pub struct PlayerInput {
     pub context_active: bool,
 }
 
-fn default_mapping_context() -> String { "gameplay".to_string() }
-fn default_move_action() -> String { "move".to_string() }
-fn default_look_action() -> String { "look".to_string() }
-fn default_jump_action() -> String { "jump".to_string() }
-fn default_sprint_action() -> String { "sprint".to_string() }
+fn default_mapping_context() -> String {
+    "gameplay".to_string()
+}
+fn default_move_action() -> String {
+    "move".to_string()
+}
+fn default_look_action() -> String {
+    "look".to_string()
+}
+fn default_jump_action() -> String {
+    "jump".to_string()
+}
+fn default_sprint_action() -> String {
+    "sprint".to_string()
+}
 
 impl Default for PlayerInput {
     fn default() -> Self {

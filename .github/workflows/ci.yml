@@ -54,6 +54,22 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+  # game_shared must stay compatible with the server WASM target (M2/M5) —
+  # catches accidental std/engine dependency creep early.
+  wasm32:
+    name: wasm32 (game_shared)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check game_shared for wasm32
+        run: cargo check -p game_shared --target wasm32-unknown-unknown
+
   # Optional: Linux for cross-platform validation
   linux:
     name: Linux
