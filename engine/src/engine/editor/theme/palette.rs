@@ -67,11 +67,11 @@ impl Palette {
             // Surface stack: darkest to lightest
             // Darker overall — clear separation between each level.
             surface: [
-                rgb(18, 18, 21),    // [0] main/window background (darkest)
-                rgb(24, 24, 28),    // [1] panel background
-                rgb(34, 35, 39),    // [2] elevated (cards, popups, menus)
-                rgb(48, 49, 54),    // [3] hover
-                rgb(60, 62, 68),    // [4] active/pressed
+                rgb(18, 18, 21), // [0] main/window background (darkest)
+                rgb(24, 24, 28), // [1] panel background
+                rgb(34, 35, 39), // [2] elevated (cards, popups, menus)
+                rgb(48, 49, 54), // [3] hover
+                rgb(60, 62, 68), // [4] active/pressed
             ],
 
             // Editable field background — darker than panel fill (surface[1])

@@ -94,10 +94,8 @@ impl PlanktonSystem {
         &mut self,
         depth_view: Arc<ImageView>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.render_pass.set_gbuffer_depth(
-            self.descriptor_set_allocator.clone(),
-            depth_view,
-        )
+        self.render_pass
+            .set_gbuffer_depth(self.descriptor_set_allocator.clone(), depth_view)
     }
 
     /// Update the HDR framebuffer (call on init and resize).
@@ -161,16 +159,10 @@ impl PlanktonSystem {
             if !self.pools.contains_key(&guid) {
                 let capacity = emitter.capacity;
                 let pool = PlanktonPool::new(self.allocator.clone(), capacity)?;
-                self.init_pass.prepare_pool(
-                    self.descriptor_set_allocator.clone(),
-                    guid,
-                    &pool,
-                )?;
-                self.emit_pass.prepare_pool(
-                    self.descriptor_set_allocator.clone(),
-                    guid,
-                    &pool,
-                )?;
+                self.init_pass
+                    .prepare_pool(self.descriptor_set_allocator.clone(), guid, &pool)?;
+                self.emit_pass
+                    .prepare_pool(self.descriptor_set_allocator.clone(), guid, &pool)?;
                 self.simulate_pass.prepare_pool(
                     self.descriptor_set_allocator.clone(),
                     guid,
@@ -310,7 +302,9 @@ impl PlanktonSystem {
         &self,
         builder: &mut AutoCommandBufferBuilder<L>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use vulkano::command_buffer::{RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo};
+        use vulkano::command_buffer::{
+            RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, SubpassEndInfo,
+        };
         use vulkano::pipeline::graphics::viewport::{Scissor, Viewport};
 
         let framebuffer = self

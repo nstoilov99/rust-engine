@@ -7,7 +7,9 @@ use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
 use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{ComputePipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{
+    ComputePipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
+};
 
 mod shader {
     vulkano_shaders::shader! {
@@ -104,11 +106,7 @@ impl PlanktonInitPass {
                 0,
                 set.clone(),
             )?
-            .push_constants(
-                self.layout.clone(),
-                0,
-                InitPushConstants { capacity },
-            )?;
+            .push_constants(self.layout.clone(), 0, InitPushConstants { capacity })?;
 
         let workgroups = capacity.div_ceil(64);
         unsafe {

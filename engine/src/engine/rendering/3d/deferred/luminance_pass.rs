@@ -214,13 +214,9 @@ impl LuminancePass {
         allocator: Arc<StandardMemoryAllocator>,
         render_pass: &Arc<RenderPass>,
         persistent_1x1: &Arc<ImageView>,
-    ) -> Result<
-        (Vec<Arc<ImageView>>, Vec<Arc<Framebuffer>>, Vec<u32>),
-        Box<dyn std::error::Error>,
-    > {
-        let sizes: Vec<u32> = (0..LUM_LEVELS)
-            .map(|i| 256 >> i)
-            .collect();
+    ) -> Result<(Vec<Arc<ImageView>>, Vec<Arc<Framebuffer>>, Vec<u32>), Box<dyn std::error::Error>>
+    {
+        let sizes: Vec<u32> = (0..LUM_LEVELS).map(|i| 256 >> i).collect();
 
         let mut images = Vec::with_capacity(LUM_LEVELS);
         let mut framebuffers = Vec::with_capacity(LUM_LEVELS);
@@ -283,11 +279,19 @@ impl LuminancePass {
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         source: Arc<ImageView>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let layout = self.layout.set_layouts().first().ok_or("Missing Set 0 layout")?;
+        let layout = self
+            .layout
+            .set_layouts()
+            .first()
+            .ok_or("Missing Set 0 layout")?;
         let set = DescriptorSet::new(
             descriptor_set_allocator,
             layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(0, source, self.sampler.clone())],
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                source,
+                self.sampler.clone(),
+            )],
             [],
         )?;
         Ok(set)

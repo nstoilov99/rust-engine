@@ -171,9 +171,7 @@ pub enum RenderEvent {
     },
     /// Asset id → crusty texture id for uploads the render thread finished.
     #[cfg(feature = "editor")]
-    CrustyTexturesRegistered(
-        Vec<(crate::engine::assets::AssetId, crusty_gui::paint::TextureId)>,
-    ),
+    CrustyTexturesRegistered(Vec<(crate::engine::assets::AssetId, crusty_gui::paint::TextureId)>),
     /// Key → crusty texture id for native image views the render thread
     /// registered from [`FramePacket::crusty_native_registrations`].
     #[cfg(feature = "editor")]

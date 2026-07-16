@@ -24,14 +24,12 @@ use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
-    AssetBrowserEvent,
-    AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem, ConsoleLog, DormantScene,
-    EditorAction, EditorCamera, EditorServices, EditorTab,
-    GizmoHandler, GpuThumbnailContext, HierarchyPanel,
-    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
-    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction,
-    ProfilerPanel, RenameTarget, SaveAsDialog, SceneId, SceneRegistry, SecondaryWindowKind,
-    Selection, ViewportSettings, ViewportTexture, WindowConfig,
+    AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem,
+    ConsoleLog, DormantScene, EditorAction, EditorCamera, EditorServices, EditorTab, GizmoHandler,
+    GpuThumbnailContext, HierarchyPanel, ImportDialogAction, ImportDialogState, ImportPreview,
+    InputActionEditor, InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter,
+    LogMessage, MenuAction, ProfilerPanel, RenameTarget, SaveAsDialog, SceneId, SceneRegistry,
+    SecondaryWindowKind, Selection, ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::input::action_state::ActionState;
 use rust_engine::engine::input::enhanced_defaults::default_action_set;
@@ -44,11 +42,11 @@ use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
+use rust_engine::engine::rendering::rendering_3d::material::MaterialBaseId;
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, MaterialInstanceDef, MaterialInstanceId, MaterialManager, MeshRenderData,
     SkinningBackend,
 };
-use rust_engine::engine::rendering::rendering_3d::material::MaterialBaseId;
 use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
 use rust_engine::{GameLoop, InputManager, Renderer};
@@ -488,9 +486,9 @@ impl App {
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
             Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
                 #[cfg(feature = "editor")]
-                crusty_icons: icons,
+                    crusty_icons: icons,
                 #[cfg(feature = "editor")]
-                crusty_viewport_texture: vp_tex,
+                    crusty_viewport_texture: vp_tex,
                 ..
             }) => {
                 log::info!("editor: render thread ready");
@@ -1417,11 +1415,16 @@ impl App {
             };
 
             if let Some(inst) = &inst_def {
-                let base_id = self
-                    .core
-                    .material_manager
-                    .register_base(albedo, normal, mr, ao, sampler.clone());
-                self.core.material_base_ids.insert(base_rel.clone(), base_id);
+                let base_id = self.core.material_manager.register_base(
+                    albedo,
+                    normal,
+                    mr,
+                    ao,
+                    sampler.clone(),
+                );
+                self.core
+                    .material_base_ids
+                    .insert(base_rel.clone(), base_id);
                 self.cache_material_instance(
                     mat_path,
                     base_id,
@@ -1536,8 +1539,7 @@ impl App {
                     // next frame from the changed file. Watcher paths are
                     // absolute with forward slashes, cache keys are
                     // content-relative and may use backslashes.
-                    let matches_event =
-                        |key: &str| path.ends_with(&key.replace('\\', "/"));
+                    let matches_event = |key: &str| path.ends_with(&key.replace('\\', "/"));
                     let stale: Vec<String> = self
                         .core
                         .matinst_ids
@@ -2108,8 +2110,10 @@ impl App {
             CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, screen_h));
         let crusty_menu_bar_rect =
             CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, 24.0));
-        let crusty_status_bar_rect =
-            CRect::from_min_max(CPos2::new(0.0, screen_h - 22.0), CPos2::new(screen_w, screen_h));
+        let crusty_status_bar_rect = CRect::from_min_max(
+            CPos2::new(0.0, screen_h - 22.0),
+            CPos2::new(screen_w, screen_h),
+        );
 
         let is_hovering_files = self.crusty_gui.is_hovering_external_files();
 
@@ -2407,8 +2411,8 @@ impl App {
                                 // Already open: surface the docked tab. A tab
                                 // living in a float OS window stays there.
                                 #[cfg(feature = "editor")]
-                                let in_float = self
-                                    .crusty_float_hosts_tab(&format!("mesh:{relative}"));
+                                let in_float =
+                                    self.crusty_float_hosts_tab(&format!("mesh:{relative}"));
                                 #[cfg(not(feature = "editor"))]
                                 let in_float = false;
                                 if !in_float {
@@ -2925,8 +2929,7 @@ impl App {
                                 new_name = format!("{}_{}.inputaction", base_name, counter);
                                 counter += 1;
                             }
-                            let action_name =
-                                new_name.trim_end_matches(".inputaction").to_string();
+                            let action_name = new_name.trim_end_matches(".inputaction").to_string();
                             let action = rust_engine::engine::input::enhanced_action::InputActionDefinition::new(
                                 &action_name,
                                 rust_engine::engine::input::value::InputValueType::Digital,
@@ -2956,8 +2959,7 @@ impl App {
                                 new_name = format!("{}_{}.mappingcontext", base_name, counter);
                                 counter += 1;
                             }
-                            let ctx_name =
-                                new_name.trim_end_matches(".mappingcontext").to_string();
+                            let ctx_name = new_name.trim_end_matches(".mappingcontext").to_string();
                             let mapping_ctx =
                                 rust_engine::engine::input::enhanced_action::MappingContext::new(
                                     &ctx_name, 0,
@@ -2998,21 +3000,19 @@ impl App {
         let mut crusty_dialog_actions = Vec::new();
         let mut crusty_import_action = ImportDialogAction::None;
         let crusty_result = {
-            use rust_engine::engine::editor::console_crusty::{
-                console_panel, ConsolePanelCtx,
+            use rust_engine::engine::editor::asset_browser_crusty::{
+                asset_browser_panel, AssetBrowserPanelCtx,
             };
+            use rust_engine::engine::editor::console_crusty::{console_panel, ConsolePanelCtx};
             use rust_engine::engine::editor::dock_crusty;
             use rust_engine::engine::editor::hierarchy_crusty::{
                 hierarchy_panel, HierarchyPanelCtx,
             };
-            use rust_engine::engine::editor::inspector_crusty::{
-                inspector_panel, InspectorPanelCtx,
-            };
-            use rust_engine::engine::editor::asset_browser_crusty::{
-                asset_browser_panel, AssetBrowserPanelCtx,
-            };
             use rust_engine::engine::editor::input_editors_crusty::{
                 input_action_panel, input_context_panel, input_settings_panel,
+            };
+            use rust_engine::engine::editor::inspector_crusty::{
+                inspector_panel, InspectorPanelCtx,
             };
             use rust_engine::engine::editor::menu_bar_crusty::{menu_bar_panel, MenuBarCtx};
             use rust_engine::engine::editor::mesh_editor_crusty::{
@@ -3021,9 +3021,7 @@ impl App {
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::status_bar_panel;
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
-            use rust_engine::engine::editor::viewport_crusty::{
-                viewport_panel, ViewportPanelCtx,
-            };
+            use rust_engine::engine::editor::viewport_crusty::{viewport_panel, ViewportPanelCtx};
             // A tab dragged out of a float window: the OS window follows the
             // cursor; feed its position into the main dock as an external
             // drag so the compass/drop-zones light up for re-docking.
@@ -3127,9 +3125,11 @@ impl App {
                     CPos2::new(crusty_screen_rect.min.x, crusty_menu_bar_rect.max.y),
                     CPos2::new(crusty_screen_rect.max.x, crusty_status_bar_rect.min.y),
                 );
-                let ext = float_ext
-                    .take()
-                    .or_else(|| dock_drag.as_ref().map(|tab| dock_crusty::ghost_drag(ui, tab)));
+                let ext = float_ext.take().or_else(|| {
+                    dock_drag
+                        .as_ref()
+                        .map(|tab| dock_crusty::ghost_drag(ui, tab))
+                });
                 let drag_released = ext.as_ref().is_some_and(|e| e.ghost && e.released);
                 let drop_pos = ext.as_ref().filter(|e| e.ghost).map(|e| e.pointer);
                 let resp =
@@ -3186,9 +3186,7 @@ impl App {
                                         icons,
                                     },
                                 ),
-                                Some(EditorTab::Profiler) => {
-                                    profiler_panel(ui, rect, profiler)
-                                }
+                                Some(EditorTab::Profiler) => profiler_panel(ui, rect, profiler),
                                 Some(EditorTab::Viewport(id)) if id == active_scene_id => {
                                     viewport_panel(
                                         ui,
@@ -3213,18 +3211,15 @@ impl App {
                                         },
                                     )
                                 }
-                                Some(EditorTab::Viewport(_)) => dock_crusty::placeholder_panel(
-                                    ui,
-                                    "Activating scene...",
-                                ),
+                                Some(EditorTab::Viewport(_)) => {
+                                    dock_crusty::placeholder_panel(ui, "Activating scene...")
+                                }
                                 Some(EditorTab::InputSettings) => {
                                     input_settings_panel(ui, rect, input_settings, action_set)
                                 }
                                 Some(EditorTab::InputActionEditor(key)) => {
                                     match ia_states.get_mut(&key) {
-                                        Some(state) => {
-                                            input_action_panel(ui, rect, &key, state)
-                                        }
+                                        Some(state) => input_action_panel(ui, rect, &key, state),
                                         None => dock_crusty::placeholder_panel(
                                             ui,
                                             "Input action not loaded.",
@@ -3233,9 +3228,9 @@ impl App {
                                 }
                                 Some(EditorTab::InputContextEditor(key)) => {
                                     match mc_states.get_mut(&key) {
-                                        Some(state) => input_context_panel(
-                                            ui, rect, &key, state, mc_actions,
-                                        ),
+                                        Some(state) => {
+                                            input_context_panel(ui, rect, &key, state, mc_actions)
+                                        }
                                         None => dock_crusty::placeholder_panel(
                                             ui,
                                             "Mapping context not loaded.",
@@ -3249,18 +3244,15 @@ impl App {
                                             rect,
                                             MeshEditorPanelCtx {
                                                 data,
-                                                texture: mesh_textures
-                                                    .get(&key)
-                                                    .and_then(|e| e.id),
+                                                texture: mesh_textures.get(&key).and_then(|e| e.id),
                                                 asset_browser: &mut *asset_browser,
                                                 icons,
                                                 float_thumbs: None,
                                             },
                                         ),
-                                        None => dock_crusty::placeholder_panel(
-                                            ui,
-                                            "Mesh not loaded.",
-                                        ),
+                                        None => {
+                                            dock_crusty::placeholder_panel(ui, "Mesh not loaded.")
+                                        }
                                     }
                                 }
                                 _ => dock_crusty::placeholder_panel(
@@ -3368,12 +3360,8 @@ impl App {
         let mut packet = packet;
         {
             packet.crusty_paint = Some(crusty_result.paint);
-            packet.crusty_texture_uploads = self
-                .editor
-                .scene
-                .asset_browser
-                .thumbnails
-                .poll_crusty();
+            packet.crusty_texture_uploads =
+                self.editor.scene.asset_browser.thumbnails.poll_crusty();
 
             // Mesh-preview render targets: register new ones with the render
             // thread's crusty renderer, re-point ids after a resize recreated
@@ -3389,7 +3377,9 @@ impl App {
                 false
             });
             for (key, data) in mesh_editors.iter() {
-                let Some(ref preview) = data.preview else { continue };
+                let Some(ref preview) = data.preview else {
+                    continue;
+                };
                 if preview.mesh_indices.is_empty() {
                     continue;
                 }
@@ -3399,10 +3389,7 @@ impl App {
                 // sampling it without the CB chained in the same submission
                 // is a validation panic (e.g. while the CB is routed to a
                 // float window during a tab tear-off).
-                let has_cb = self
-                    .crusty_docked_preview_cbs
-                    .iter()
-                    .any(|(k, _)| k == key);
+                let has_cb = self.crusty_docked_preview_cbs.iter().any(|(k, _)| k == key);
                 if !has_cb {
                     continue;
                 }
@@ -3855,89 +3842,101 @@ impl App {
                 }
             }
 
-            let titles =
-                dock_crusty::tab_titles(&fw.tree, active_scene_id, &scene_name, false, dormant, None);
-            let res = fw.frame(device.clone(), queue.clone(), &titles, cbs, |ui, tab, icons, thumbs| {
-                let rect = ui.clip_rect();
-                match dock_crusty::parse_tab(tab) {
-                    Some(EditorTab::Console) => console_panel(
-                        ui,
-                        rect,
-                        ConsolePanelCtx {
-                            messages: &mut console.messages,
-                            filter: &mut console.log_filter,
-                            command_system: &mut console.command_system,
-                            input: &mut console.input,
-                            world: &mut *world,
-                            show_stat_fps: &mut *show_stat_fps,
-                        },
-                    ),
-                    Some(EditorTab::Hierarchy) => hierarchy_panel(
-                        ui,
-                        rect,
-                        HierarchyPanelCtx {
-                            panel: hierarchy,
-                            world: &mut *world,
-                            selection: sel,
-                            play_mode,
-                            icons,
-                            registry: &icon_registry,
-                        },
-                    ),
-                    Some(EditorTab::Inspector) => inspector_panel(
-                        ui,
-                        rect,
-                        InspectorPanelCtx {
-                            panel: inspector,
-                            world: &mut *world,
-                            selection: &*sel,
-                            play_mode,
-                            asset_browser: &mut *asset_browser,
-                            icons,
-                        },
-                    ),
-                    Some(EditorTab::AssetBrowser) => asset_browser_panel(
-                        ui,
-                        rect,
-                        AssetBrowserPanelCtx {
-                            panel: &mut *asset_browser,
-                            icons,
-                        },
-                    ),
-                    Some(EditorTab::Profiler) => profiler_panel(ui, rect, profiler),
-                    Some(EditorTab::InputSettings) => {
-                        input_settings_panel(ui, rect, input_settings, action_set)
-                    }
-                    Some(EditorTab::InputActionEditor(key)) => match ia_states.get_mut(&key) {
-                        Some(state) => input_action_panel(ui, rect, &key, state),
-                        None => dock_crusty::placeholder_panel(ui, "Input action not loaded."),
-                    },
-                    Some(EditorTab::InputContextEditor(key)) => match mc_states.get_mut(&key) {
-                        Some(state) => {
-                            input_context_panel(ui, rect, &key, state, mc_actions)
-                        }
-                        None => dock_crusty::placeholder_panel(ui, "Mapping context not loaded."),
-                    },
-                    Some(EditorTab::MeshEditor(key)) => match mesh_editors.get_mut(&key) {
-                        Some(data) => mesh_editor_panel(
+            let titles = dock_crusty::tab_titles(
+                &fw.tree,
+                active_scene_id,
+                &scene_name,
+                false,
+                dormant,
+                None,
+            );
+            let res = fw.frame(
+                device.clone(),
+                queue.clone(),
+                &titles,
+                cbs,
+                |ui, tab, icons, thumbs| {
+                    let rect = ui.clip_rect();
+                    match dock_crusty::parse_tab(tab) {
+                        Some(EditorTab::Console) => console_panel(
                             ui,
                             rect,
-                            MeshEditorPanelCtx {
-                                data,
-                                texture: mesh_tex.get(&key).copied(),
-                                asset_browser: &mut *asset_browser,
-                                icons,
-                                float_thumbs: Some(thumbs),
+                            ConsolePanelCtx {
+                                messages: &mut console.messages,
+                                filter: &mut console.log_filter,
+                                command_system: &mut console.command_system,
+                                input: &mut console.input,
+                                world: &mut *world,
+                                show_stat_fps: &mut *show_stat_fps,
                             },
                         ),
-                        None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
-                    },
-                    _ => dock_crusty::placeholder_panel(
-                        ui,
-                        "This panel is not yet ported to crusty-gui.",
-                    ),
-                }
-            });
+                        Some(EditorTab::Hierarchy) => hierarchy_panel(
+                            ui,
+                            rect,
+                            HierarchyPanelCtx {
+                                panel: hierarchy,
+                                world: &mut *world,
+                                selection: sel,
+                                play_mode,
+                                icons,
+                                registry: &icon_registry,
+                            },
+                        ),
+                        Some(EditorTab::Inspector) => inspector_panel(
+                            ui,
+                            rect,
+                            InspectorPanelCtx {
+                                panel: inspector,
+                                world: &mut *world,
+                                selection: &*sel,
+                                play_mode,
+                                asset_browser: &mut *asset_browser,
+                                icons,
+                            },
+                        ),
+                        Some(EditorTab::AssetBrowser) => asset_browser_panel(
+                            ui,
+                            rect,
+                            AssetBrowserPanelCtx {
+                                panel: &mut *asset_browser,
+                                icons,
+                            },
+                        ),
+                        Some(EditorTab::Profiler) => profiler_panel(ui, rect, profiler),
+                        Some(EditorTab::InputSettings) => {
+                            input_settings_panel(ui, rect, input_settings, action_set)
+                        }
+                        Some(EditorTab::InputActionEditor(key)) => match ia_states.get_mut(&key) {
+                            Some(state) => input_action_panel(ui, rect, &key, state),
+                            None => dock_crusty::placeholder_panel(ui, "Input action not loaded."),
+                        },
+                        Some(EditorTab::InputContextEditor(key)) => match mc_states.get_mut(&key) {
+                            Some(state) => input_context_panel(ui, rect, &key, state, mc_actions),
+                            None => {
+                                dock_crusty::placeholder_panel(ui, "Mapping context not loaded.")
+                            }
+                        },
+                        Some(EditorTab::MeshEditor(key)) => match mesh_editors.get_mut(&key) {
+                            Some(data) => mesh_editor_panel(
+                                ui,
+                                rect,
+                                MeshEditorPanelCtx {
+                                    data,
+                                    texture: mesh_tex.get(&key).copied(),
+                                    asset_browser: &mut *asset_browser,
+                                    icons,
+                                    float_thumbs: Some(thumbs),
+                                },
+                            ),
+                            None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
+                        },
+                        _ => dock_crusty::placeholder_panel(
+                            ui,
+                            "This panel is not yet ported to crusty-gui.",
+                        ),
+                    }
+                },
+            );
             if let Err(e) = res {
                 eprintln!("crusty float window frame failed: {e}");
             }
@@ -4109,12 +4108,29 @@ impl App {
 
         let supported_extensions: &[&str] = &[
             // Textures
-            "png", "jpg", "jpeg", "tga", "bmp", "dds",
+            "png",
+            "jpg",
+            "jpeg",
+            "tga",
+            "bmp",
+            "dds",
             // Native mesh (already processed)
             "mesh", // Audio
-            "wav", "ogg", "mp3", "flac", // Shaders
-            "glsl", "vert", "frag", "comp", "spv", // Engine RON assets
-            "scene", "material", "matinst", "prefab", "inputaction", "mappingcontext",
+            "wav",
+            "ogg",
+            "mp3",
+            "flac", // Shaders
+            "glsl",
+            "vert",
+            "frag",
+            "comp",
+            "spv", // Engine RON assets
+            "scene",
+            "material",
+            "matinst",
+            "prefab",
+            "inputaction",
+            "mappingcontext",
             // Legacy `.ron`-suffixed assets
             "ron",
         ];

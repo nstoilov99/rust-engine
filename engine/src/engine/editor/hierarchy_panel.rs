@@ -170,14 +170,7 @@ impl HierarchyPanel {
         let parent_entities: SmallVec<[Entity; 16]> = SmallVec::new();
         for (i, root) in roots.into_iter().enumerate() {
             let is_last = i == last_idx;
-            self.collect_rows(
-                world,
-                root,
-                0,
-                &parent_is_last,
-                &parent_entities,
-                is_last,
-            );
+            self.collect_rows(world, root, 0, &parent_is_last, &parent_entities, is_last);
         }
     }
 
@@ -263,12 +256,17 @@ impl HierarchyPanel {
         if world.get::<&Camera>(entity).is_ok() {
             return ("camera", Color::WHITE);
         }
-        if world.get::<&DirectionalLight>(entity).is_ok() || world.get::<&PointLight>(entity).is_ok() {
+        if world.get::<&DirectionalLight>(entity).is_ok()
+            || world.get::<&PointLight>(entity).is_ok()
+        {
             return ("sun", Color::WHITE);
         }
         // Default for everything else (groups, meshes, generics) — covers
         // entries with `Children`, `MeshRenderer`, or no special component.
-        let _ = (world.get::<&MeshRenderer>(entity), world.get::<&Children>(entity));
+        let _ = (
+            world.get::<&MeshRenderer>(entity),
+            world.get::<&Children>(entity),
+        );
         ("object", Color::WHITE)
     }
     /// Set (or insert) the `EditorVisibility` component.

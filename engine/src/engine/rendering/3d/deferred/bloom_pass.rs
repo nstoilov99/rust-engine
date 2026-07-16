@@ -173,8 +173,7 @@ impl BloomPass {
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                     .into_pipeline_layout_create_info(device.clone())?,
             )?;
-            let subpass =
-                vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
+            let subpass = vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
             threshold_pipeline = GraphicsPipeline::new(
                 device.clone(),
                 None,
@@ -220,8 +219,7 @@ impl BloomPass {
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                     .into_pipeline_layout_create_info(device.clone())?,
             )?;
-            let subpass =
-                vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
+            let subpass = vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
             downsample_pipeline = GraphicsPipeline::new(
                 device.clone(),
                 None,
@@ -336,7 +334,11 @@ impl BloomPass {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.threshold_set = Some(Self::build_set(
             descriptor_set_allocator.clone(),
-            self.threshold_layout.set_layouts().first().ok_or("Missing threshold Set 0")?.clone(),
+            self.threshold_layout
+                .set_layouts()
+                .first()
+                .ok_or("Missing threshold Set 0")?
+                .clone(),
             hdr_target,
             self.sampler.clone(),
         )?);
@@ -346,7 +348,11 @@ impl BloomPass {
         for i in 1..mip_count {
             self.downsample_sets.push(Self::build_set(
                 descriptor_set_allocator.clone(),
-                self.downsample_layout.set_layouts().first().ok_or("Missing downsample Set 0")?.clone(),
+                self.downsample_layout
+                    .set_layouts()
+                    .first()
+                    .ok_or("Missing downsample Set 0")?
+                    .clone(),
                 self.mip_images[i - 1].clone(),
                 self.sampler.clone(),
             )?);
@@ -356,7 +362,11 @@ impl BloomPass {
         for i in 0..mip_count.saturating_sub(1) {
             self.upsample_sets.push(Self::build_set(
                 descriptor_set_allocator.clone(),
-                self.upsample_layout.set_layouts().first().ok_or("Missing upsample Set 0")?.clone(),
+                self.upsample_layout
+                    .set_layouts()
+                    .first()
+                    .ok_or("Missing upsample Set 0")?
+                    .clone(),
                 self.mip_images[i + 1].clone(),
                 self.sampler.clone(),
             )?);

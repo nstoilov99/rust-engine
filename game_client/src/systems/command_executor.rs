@@ -16,13 +16,19 @@ impl System for GameCommandExecutor {
                 GameCommand::ApplyDamage { target, amount } => {
                     log::warn!("GameCommand::ApplyDamage not yet implemented (target={target}, amount={amount})");
                 }
-                GameCommand::SpawnPrefab { prefab_name, position } => {
+                GameCommand::SpawnPrefab {
+                    prefab_name,
+                    position,
+                } => {
                     log::warn!("GameCommand::SpawnPrefab not yet implemented (prefab={prefab_name}, pos={position:?})");
                 }
                 GameCommand::DespawnEntity { target } => {
                     log::warn!("GameCommand::DespawnEntity not yet implemented (target={target})");
                 }
-                GameCommand::PlaySound { sound_name, position } => {
+                GameCommand::PlaySound {
+                    sound_name,
+                    position,
+                } => {
                     log::warn!("GameCommand::PlaySound not yet implemented (sound={sound_name}, pos={position:?})");
                 }
             }

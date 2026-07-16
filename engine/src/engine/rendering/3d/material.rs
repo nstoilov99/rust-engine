@@ -27,12 +27,12 @@ pub const DEFAULT_EMISSIVE_RGBA: [u8; 4] = [0, 0, 0, 255];
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialParamsGpu {
-    pub base_color_factor: [f32; 4],   // 16
-    pub metallic_factor: f32,          //  4
-    pub roughness_factor: f32,         //  4
-    pub _pad0: [f32; 2],              //  8 (align emissive_factor to 16)
-    pub emissive_factor: [f32; 3],     // 12
-    pub _pad1: f32,                   //  4  (total 48 B)
+    pub base_color_factor: [f32; 4], // 16
+    pub metallic_factor: f32,        //  4
+    pub roughness_factor: f32,       //  4
+    pub _pad0: [f32; 2],             //  8 (align emissive_factor to 16)
+    pub emissive_factor: [f32; 3],   // 12
+    pub _pad1: f32,                  //  4  (total 48 B)
 }
 
 const _: () = assert!(std::mem::size_of::<MaterialParamsGpu>() == 48);
@@ -227,11 +227,7 @@ impl MaterialInstance {
                     base.metallic_roughness.clone(),
                     base.sampler.clone(),
                 ),
-                WriteDescriptorSet::image_view_sampler(
-                    3,
-                    base.ao.clone(),
-                    base.sampler.clone(),
-                ),
+                WriteDescriptorSet::image_view_sampler(3, base.ao.clone(), base.sampler.clone()),
                 WriteDescriptorSet::buffer(4, params_buffer.clone()),
             ],
             [],
@@ -280,8 +276,7 @@ pub fn create_default_texture_with_format(
 ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
     use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
     use vulkano::command_buffer::{
-        AutoCommandBufferBuilder, CopyBufferToImageInfo,
-        PrimaryCommandBufferAbstract,
+        AutoCommandBufferBuilder, CopyBufferToImageInfo, PrimaryCommandBufferAbstract,
     };
     use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
     use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};

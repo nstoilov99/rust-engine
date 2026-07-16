@@ -287,9 +287,21 @@ fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color {
 
 impl From<&IconPalette> for PaletteFile {
     fn from(p: &IconPalette) -> Self {
-        let mut category: Vec<_> = p.category.iter().map(|(k, v)| (*k, color_to_rgba(*v))).collect();
-        let mut severity: Vec<_> = p.severity.iter().map(|(k, v)| (*k, color_to_rgba(*v))).collect();
-        let mut chrome: Vec<_> = p.chrome.iter().map(|(k, v)| (*k, color_to_rgba(*v))).collect();
+        let mut category: Vec<_> = p
+            .category
+            .iter()
+            .map(|(k, v)| (*k, color_to_rgba(*v)))
+            .collect();
+        let mut severity: Vec<_> = p
+            .severity
+            .iter()
+            .map(|(k, v)| (*k, color_to_rgba(*v)))
+            .collect();
+        let mut chrome: Vec<_> = p
+            .chrome
+            .iter()
+            .map(|(k, v)| (*k, color_to_rgba(*v)))
+            .collect();
         let mut overrides: Vec<_> = p
             .overrides
             .iter()
@@ -315,10 +327,20 @@ impl From<&IconPalette> for PaletteFile {
         chrome.sort_by_key(|(k, _)| format!("{k:?}"));
         overrides.sort_by_key(|(kind, state, _)| format!("{kind:?}/{state:?}"));
         tint_modes.sort_by_key(|(k, _)| format!("{k:?}"));
-        panel_overrides.sort_by(|a, b| (&a.0, &a.1, format!("{:?}", a.2)).cmp(&(&b.0, &b.1, format!("{:?}", b.2))));
+        panel_overrides.sort_by(|a, b| {
+            (&a.0, &a.1, format!("{:?}", a.2)).cmp(&(&b.0, &b.1, format!("{:?}", b.2)))
+        });
         panel_sizes.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
 
-        Self { category, severity, chrome, overrides, tint_modes, panel_overrides, panel_sizes }
+        Self {
+            category,
+            severity,
+            chrome,
+            overrides,
+            tint_modes,
+            panel_overrides,
+            panel_sizes,
+        }
     }
 }
 
@@ -408,9 +430,10 @@ mod tests {
             ),
             Color::from_srgb_u8(255, 0, 0, 255),
         );
-        palette
-            .tint_modes
-            .insert(crate::engine::editor::widgets::IconKind::Folder, TintMode::Authored);
+        palette.tint_modes.insert(
+            crate::engine::editor::widgets::IconKind::Folder,
+            TintMode::Authored,
+        );
         palette.reset();
         assert!(palette.overrides.is_empty());
         assert!(palette.tint_modes.is_empty());

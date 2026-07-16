@@ -81,5 +81,4 @@ impl ToastStack {
         self.toasts.retain(|toast| !toast.expired(now));
         &self.toasts
     }
-
 }

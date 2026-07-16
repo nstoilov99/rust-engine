@@ -21,13 +21,17 @@ fn main() {
 
     // Build schedule with function systems
     let mut schedule = Schedule::new();
-    schedule.add_fn_system("movement", Stage::Update, |world: &mut World, _r: &mut Resources| {
-        let speed = 2.0_f32;
-        let delta_time = 1.0 / 60.0_f32;
-        for (_id, (transform, _player)) in world.query::<(&mut Transform, &Player)>().iter() {
-            transform.position.z -= speed * delta_time;
-        }
-    });
+    schedule.add_fn_system(
+        "movement",
+        Stage::Update,
+        |world: &mut World, _r: &mut Resources| {
+            let speed = 2.0_f32;
+            let delta_time = 1.0 / 60.0_f32;
+            for (_id, (transform, _player)) in world.query::<(&mut Transform, &Player)>().iter() {
+                transform.position.z -= speed * delta_time;
+            }
+        },
+    );
 
     // Simulate 5 frames
     for frame in 0..5 {

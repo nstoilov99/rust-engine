@@ -127,14 +127,24 @@ impl GeometryPass {
         use vulkano::shader::ShaderModule;
 
         let vs_module = unsafe {
-            ShaderModule::new(device.clone(), vulkano::shader::ShaderModuleCreateInfo::new(vs_spirv))?
+            ShaderModule::new(
+                device.clone(),
+                vulkano::shader::ShaderModuleCreateInfo::new(vs_spirv),
+            )?
         };
         let fs_module = unsafe {
-            ShaderModule::new(device.clone(), vulkano::shader::ShaderModuleCreateInfo::new(fs_spirv))?
+            ShaderModule::new(
+                device.clone(),
+                vulkano::shader::ShaderModuleCreateInfo::new(fs_spirv),
+            )?
         };
 
-        let vs = vs_module.entry_point("main").ok_or("Missing vertex entry point 'main'")?;
-        let fs = fs_module.entry_point("main").ok_or("Missing fragment entry point 'main'")?;
+        let vs = vs_module
+            .entry_point("main")
+            .ok_or("Missing vertex entry point 'main'")?;
+        let fs = fs_module
+            .entry_point("main")
+            .ok_or("Missing fragment entry point 'main'")?;
 
         let vertex_input_state = Vertex3D::per_vertex().definition(&vs)?;
 

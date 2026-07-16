@@ -98,7 +98,11 @@ pub fn scan_and_assemble(content_dir: &Path) -> Option<InputActionSet> {
         scan_dir_recursive(&entry.path(), &mut set, &mut found_any);
     }
 
-    if found_any { Some(set) } else { None }
+    if found_any {
+        Some(set)
+    } else {
+        None
+    }
 }
 
 fn scan_dir_recursive(path: &Path, set: &mut InputActionSet, found: &mut bool) {
@@ -116,14 +120,22 @@ fn scan_dir_recursive(path: &Path, set: &mut InputActionSet, found: &mut bool) {
     if filename.ends_with(".inputaction") || filename.ends_with(".inputaction.ron") {
         warn_legacy_ron(filename, path);
         if let Some(action) = load_input_action(path) {
-            log::info!("Loaded input action '{}' from {}", action.name, path.display());
+            log::info!(
+                "Loaded input action '{}' from {}",
+                action.name,
+                path.display()
+            );
             set.add_action(action);
             *found = true;
         }
     } else if filename.ends_with(".mappingcontext") || filename.ends_with(".mappingcontext.ron") {
         warn_legacy_ron(filename, path);
         if let Some(ctx) = load_mapping_context(path) {
-            log::info!("Loaded mapping context '{}' from {}", ctx.name, path.display());
+            log::info!(
+                "Loaded mapping context '{}' from {}",
+                ctx.name,
+                path.display()
+            );
             set.add_context(ctx);
             *found = true;
         }
@@ -192,8 +204,7 @@ pub fn migrate_legacy_action_map(map: &ActionMap) -> InputActionSet {
 
             if !set.actions.contains_key(&action_def.name) {
                 set.add_action(
-                    InputActionDefinition::new(&action_def.name, value_type)
-                        .with_trigger(trigger),
+                    InputActionDefinition::new(&action_def.name, value_type).with_trigger(trigger),
                 );
             }
 
@@ -256,14 +267,8 @@ mod tests {
         assert!(set.actions.contains_key("look"));
         assert!(set.actions.contains_key("pause"));
 
-        assert_eq!(
-            set.actions["jump"].value_type,
-            InputValueType::Digital
-        );
-        assert_eq!(
-            set.actions["move"].value_type,
-            InputValueType::Axis2D
-        );
+        assert_eq!(set.actions["jump"].value_type, InputValueType::Digital);
+        assert_eq!(set.actions["move"].value_type, InputValueType::Axis2D);
     }
 
     #[test]

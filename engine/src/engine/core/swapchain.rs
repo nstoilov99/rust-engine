@@ -117,8 +117,7 @@ fn choose_present_mode(
     preference: SwapchainPresentModePreference,
 ) -> PresentMode {
     match preference {
-        SwapchainPresentModePreference::Default
-        | SwapchainPresentModePreference::Immediate => {
+        SwapchainPresentModePreference::Default | SwapchainPresentModePreference::Immediate => {
             if present_modes.contains(&PresentMode::Immediate) {
                 PresentMode::Immediate
             } else if present_modes.contains(&PresentMode::Mailbox) {
@@ -190,7 +189,11 @@ mod tests {
 
     #[test]
     fn default_preference_prefers_immediate() {
-        let modes = [PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate];
+        let modes = [
+            PresentMode::Fifo,
+            PresentMode::Mailbox,
+            PresentMode::Immediate,
+        ];
         assert_eq!(
             choose_present_mode(&modes, SwapchainPresentModePreference::Default),
             PresentMode::Immediate

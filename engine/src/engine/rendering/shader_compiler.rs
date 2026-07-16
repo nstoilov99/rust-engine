@@ -16,7 +16,9 @@ pub struct ShaderError {
 impl std::fmt::Display for ShaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.line, self.column) {
-            (Some(l), Some(c)) => write!(f, "{}:{}:{}: {}", self.path.display(), l, c, self.message),
+            (Some(l), Some(c)) => {
+                write!(f, "{}:{}:{}: {}", self.path.display(), l, c, self.message)
+            }
             (Some(l), None) => write!(f, "{}:{}: {}", self.path.display(), l, self.message),
             _ => write!(f, "{}: {}", self.path.display(), self.message),
         }
@@ -88,7 +90,10 @@ impl ShaderCompiler {
         options.set_source_language(shaderc::SourceLanguage::GLSL);
 
         // Include callback with cycle guard via depth limit.
-        let base_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let base_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         const MAX_INCLUDE_DEPTH: usize = 32;
 
         options.set_include_callback(move |requested, _type, requesting_source, depth| {
@@ -102,7 +107,10 @@ impl ShaderCompiler {
             let requesting_path = Path::new(requesting_source);
             let requesting_dir = if requesting_source.is_empty() {
                 base_dir.clone()
-            } else if requesting_path.parent().is_none_or(|p| p.as_os_str().is_empty()) {
+            } else if requesting_path
+                .parent()
+                .is_none_or(|p| p.as_os_str().is_empty())
+            {
                 // Requesting source has no directory component — use base dir
                 base_dir.clone()
             } else {
@@ -110,8 +118,7 @@ impl ShaderCompiler {
             };
 
             let resolved = requesting_dir.join(requested);
-            let canonical = std::fs::canonicalize(&resolved)
-                .unwrap_or_else(|_| resolved.clone());
+            let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
 
             let content = std::fs::read_to_string(&canonical)
                 .map_err(|e| format!("Failed to read include '{}': {}", canonical.display(), e))?;
@@ -137,9 +144,7 @@ impl ShaderCompiler {
 
         match result {
             Ok(artifact) => Ok(artifact.as_binary().to_vec()),
-            Err(shaderc::Error::CompilationError(_, msg)) => {
-                Err(parse_shaderc_error(path, &msg))
-            }
+            Err(shaderc::Error::CompilationError(_, msg)) => Err(parse_shaderc_error(path, &msg)),
             Err(e) => Err(ShaderError {
                 path: path.to_path_buf(),
                 line: None,
@@ -162,7 +167,10 @@ fn parse_shaderc_error(path: &Path, msg: &str) -> ShaderError {
         }
 
         // Try to parse "file:line:col: error: msg" or "file:line: error: msg"
-        if let Some(rest) = trimmed.strip_prefix(&format!("{}:", path.file_name().unwrap_or_default().to_string_lossy())) {
+        if let Some(rest) = trimmed.strip_prefix(&format!(
+            "{}:",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )) {
             if let Some((line_part, remainder)) = rest.split_once(':') {
                 if let Ok(line_num) = line_part.trim().parse::<u32>() {
                     // Check if next part is column or error message
@@ -229,11 +237,8 @@ mod tests {
         let temp_dir = std::env::temp_dir().join("rust_engine_shader_test");
         let _ = std::fs::create_dir_all(&temp_dir);
         let bad_path = temp_dir.join("bad.frag");
-        std::fs::write(
-            &bad_path,
-            "#version 460\nvoid main() { int x = }\n",
-        )
-        .expect("write temp file");
+        std::fs::write(&bad_path, "#version 460\nvoid main() { int x = }\n")
+            .expect("write temp file");
 
         let result = compiler.compile(&bad_path, ShaderKind::Fragment);
         assert!(result.is_err());
@@ -274,7 +279,11 @@ mod tests {
         .expect("write fixed shader");
 
         let good_result = compiler.compile(&shader_path, ShaderKind::Fragment);
-        assert!(good_result.is_ok(), "fixed shader must compile: {:?}", good_result.err());
+        assert!(
+            good_result.is_ok(),
+            "fixed shader must compile: {:?}",
+            good_result.err()
+        );
 
         let _ = std::fs::remove_file(&shader_path);
         let _ = std::fs::remove_dir(&temp_dir);
@@ -304,7 +313,11 @@ void main() { out_color = vec4(get_color(), 1.0); }
         .expect("write host.frag");
 
         let result = compiler.compile(&temp_dir.join("host.frag"), ShaderKind::Fragment);
-        assert!(result.is_ok(), "include resolution should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "include resolution should succeed: {:?}",
+            result.err()
+        );
 
         let _ = std::fs::remove_file(temp_dir.join("common.glsl"));
         let _ = std::fs::remove_file(temp_dir.join("host.frag"));

@@ -11,7 +11,11 @@ const AUDIO_COLOR: [f32; 4] = [1.0, 0.55, 0.2, 1.0];
 ///
 /// Draws an orange cross at the emitter position and a wireframe sphere
 /// showing the `max_distance` attenuation radius.
-pub fn submit_audio_debug_draws(world: &hecs::World, buffer: &mut DebugDrawBuffer, is_playing: bool) {
+pub fn submit_audio_debug_draws(
+    world: &hecs::World,
+    buffer: &mut DebugDrawBuffer,
+    is_playing: bool,
+) {
     for (_entity, (transform, emitter)) in world.query::<(&Transform, &AudioEmitter)>().iter() {
         if !emitter.spatial || emitter.clip_path.is_empty() {
             continue;

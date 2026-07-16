@@ -42,15 +42,9 @@ pub enum CurveType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputModifier {
     /// Negate (flip sign) on selected axes.
-    Negate {
-        x: bool,
-        y: bool,
-        z: bool,
-    },
+    Negate { x: bool, y: bool, z: bool },
     /// Remap axis order (e.g., swap X and Y).
-    Swizzle {
-        order: SwizzleOrder,
-    },
+    Swizzle { order: SwizzleOrder },
     /// Apply dead zone processing.
     DeadZone {
         lower: f32,
@@ -58,9 +52,7 @@ pub enum InputModifier {
         kind: DeadZoneKind,
     },
     /// Scale by a per-axis factor.
-    Scale {
-        factor: Vec3,
-    },
+    Scale { factor: Vec3 },
     /// Frame-rate-independent smoothing (lerp toward target).
     Smooth {
         speed: f32,
@@ -68,14 +60,9 @@ pub enum InputModifier {
         previous: Option<Vec3>,
     },
     /// Apply a response curve to the magnitude.
-    ResponseCurve {
-        curve: CurveType,
-    },
+    ResponseCurve { curve: CurveType },
     /// Clamp each axis to a range.
-    Clamp {
-        min: Vec3,
-        max: Vec3,
-    },
+    Clamp { min: Vec3, max: Vec3 },
 }
 
 impl InputModifier {
@@ -88,9 +75,7 @@ impl InputModifier {
                 apply_dead_zone(value, *lower, *upper, *kind)
             }
             InputModifier::Scale { factor } => apply_scale(value, *factor),
-            InputModifier::Smooth { speed, previous } => {
-                apply_smooth(value, *speed, previous, dt)
-            }
+            InputModifier::Smooth { speed, previous } => apply_smooth(value, *speed, previous, dt),
             InputModifier::ResponseCurve { curve } => apply_response_curve(value, curve),
             InputModifier::Clamp { min, max } => apply_clamp(value, *min, *max),
         }
@@ -158,7 +143,11 @@ fn apply_scale(value: InputValue, factor: Vec3) -> InputValue {
 fn apply_smooth(value: InputValue, speed: f32, previous: &mut Option<Vec3>, dt: f32) -> InputValue {
     let target = value.as_vec3();
     let prev = previous.unwrap_or(target);
-    let alpha = if speed > 0.0 { (speed * dt).min(1.0) } else { 1.0 };
+    let alpha = if speed > 0.0 {
+        (speed * dt).min(1.0)
+    } else {
+        1.0
+    };
     let smoothed = prev.lerp(target, alpha);
     *previous = Some(smoothed);
     reconstruct(value, smoothed)
@@ -246,7 +235,11 @@ mod tests {
 
     #[test]
     fn negate_x() {
-        let mut m = InputModifier::Negate { x: true, y: false, z: false };
+        let mut m = InputModifier::Negate {
+            x: true,
+            y: false,
+            z: false,
+        };
         let result = m.apply(InputValue::Axis2D(Vec2::new(1.0, 0.5)), 0.016);
         assert_eq!(result, InputValue::Axis2D(Vec2::new(-1.0, 0.5)));
     }
@@ -264,14 +257,18 @@ mod tests {
 
     #[test]
     fn scale_factor() {
-        let mut m = InputModifier::Scale { factor: Vec3::new(2.0, 3.0, 1.0) };
+        let mut m = InputModifier::Scale {
+            factor: Vec3::new(2.0, 3.0, 1.0),
+        };
         let result = m.apply(InputValue::Axis2D(Vec2::new(0.5, 0.5)), 0.016);
         assert_eq!(result, InputValue::Axis2D(Vec2::new(1.0, 1.5)));
     }
 
     #[test]
     fn response_curve_quadratic() {
-        let mut m = InputModifier::ResponseCurve { curve: CurveType::Quadratic };
+        let mut m = InputModifier::ResponseCurve {
+            curve: CurveType::Quadratic,
+        };
         let result = m.apply(InputValue::Axis1D(0.5), 0.016);
         match result {
             InputValue::Axis1D(v) => assert!((v - 0.25).abs() < 0.001),
@@ -281,7 +278,9 @@ mod tests {
 
     #[test]
     fn swizzle_yx() {
-        let mut m = InputModifier::Swizzle { order: SwizzleOrder::YXZ };
+        let mut m = InputModifier::Swizzle {
+            order: SwizzleOrder::YXZ,
+        };
         let result = m.apply(InputValue::Axis2D(Vec2::new(1.0, 2.0)), 0.016);
         assert_eq!(result, InputValue::Axis2D(Vec2::new(2.0, 1.0)));
     }

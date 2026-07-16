@@ -313,7 +313,7 @@ impl ThumbnailRenderer {
             RenderPassBeginInfo {
                 clear_values: vec![
                     Some([0.16, 0.16, 0.18, 1.0].into()), // color
-                    Some(1.0f32.into()),                    // depth
+                    Some(1.0f32.into()),                  // depth
                 ],
                 ..RenderPassBeginInfo::framebuffer(self.framebuffer.clone())
             },
@@ -372,8 +372,7 @@ impl ThumbnailRenderer {
 
         // Submit and wait
         let fence = {
-            let _submit_guard =
-                crate::engine::rendering::common::gpu_context::lock_queue_submit();
+            let _submit_guard = crate::engine::rendering::common::gpu_context::lock_queue_submit();
             command_buffer
                 .execute(self.queue.clone())?
                 .then_signal_fence_and_flush()?
@@ -414,8 +413,7 @@ fn combined_bounding_sphere(meshes: &[LoadedMesh]) -> (Vec3, f32) {
     }
 
     // Use average center, then find max extent
-    let center: Vec3 =
-        meshes.iter().map(|m| m.center).sum::<Vec3>() / meshes.len() as f32;
+    let center: Vec3 = meshes.iter().map(|m| m.center).sum::<Vec3>() / meshes.len() as f32;
 
     let radius = meshes
         .iter()

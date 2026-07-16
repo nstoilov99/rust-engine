@@ -12,9 +12,7 @@ use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::PipelineLayout;
 
-use super::material::{
-    MaterialBase, MaterialBaseId, MaterialInstance, MaterialParamsGpu,
-};
+use super::material::{MaterialBase, MaterialBaseId, MaterialInstance, MaterialParamsGpu};
 
 /// Unique identifier for a material instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -111,10 +109,7 @@ impl MaterialManager {
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         geom_pipeline_layout: Arc<PipelineLayout>,
     ) -> Result<MaterialInstanceId, Box<dyn std::error::Error>> {
-        let base = self
-            .bases
-            .get(&base_id)
-            .ok_or("MaterialBase not found")?;
+        let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
         let instance = MaterialInstance::new(
             base,
@@ -146,10 +141,7 @@ impl MaterialManager {
         descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         geom_pipeline_layout: Arc<PipelineLayout>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let base = self
-            .bases
-            .get(&base_id)
-            .ok_or("MaterialBase not found")?;
+        let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
         let instance = MaterialInstance::new(
             base,
@@ -194,10 +186,7 @@ impl MaterialManager {
             .get(&id)
             .ok_or("MaterialInstance not found")?;
         let base_id = instance.base_id;
-        let base = self
-            .bases
-            .get(&base_id)
-            .ok_or("MaterialBase not found")?;
+        let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
         let new_instance = MaterialInstance::new(
             base,

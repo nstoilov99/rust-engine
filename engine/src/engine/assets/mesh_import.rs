@@ -131,9 +131,7 @@ pub struct MaterialDefinition {
 }
 
 /// Load a `MaterialDefinition` from a `.material` file.
-pub fn load_material_ron(
-    path: &Path,
-) -> Result<MaterialDefinition, Box<dyn std::error::Error>> {
+pub fn load_material_ron(path: &Path) -> Result<MaterialDefinition, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let def: MaterialDefinition = ron::from_str(&text)?;
     Ok(def)
@@ -277,8 +275,7 @@ pub fn apply_import_settings(model: &mut Model, settings: &MeshImportSettings) {
 
         // Recompute bounds after transform
         if need_scale || need_axis {
-            let (center, radius) =
-                super::model_loader::compute_bounding_sphere(&mesh.vertices);
+            let (center, radius) = super::model_loader::compute_bounding_sphere(&mesh.vertices);
             mesh.center = center;
             mesh.radius = radius;
 
@@ -302,8 +299,7 @@ pub fn apply_import_settings(model: &mut Model, settings: &MeshImportSettings) {
         let axis_mat = if need_axis {
             // Z-up → Y-up: swap Y/Z, negate new Z
             Mat4::from_cols_array(&[
-                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ])
         } else {
             Mat4::IDENTITY
@@ -558,8 +554,7 @@ fn undo_double_axis_conversion(model: &mut Model) {
         }
 
         // Recompute bounds
-        let (center, radius) =
-            super::model_loader::compute_bounding_sphere(&mesh.vertices);
+        let (center, radius) = super::model_loader::compute_bounding_sphere(&mesh.vertices);
         mesh.center = center;
         mesh.radius = radius;
         let mut aabb_min = Vec3::splat(f32::MAX);
@@ -580,8 +575,7 @@ fn undo_double_axis_conversion(model: &mut Model) {
         // Forward applied similarity transform: ibm' = transform * ibm * inv_transform
         // Undo: ibm = inv_transform * ibm' * transform
         let axis_mat = Mat4::from_cols_array(&[
-            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
         let inv_axis = axis_mat.inverse();
         for bone in &mut model.bones {
@@ -699,8 +693,7 @@ pub fn load_mesh_binary_from_bytes(
             if cursor + name_len > data.len() {
                 return Err("Mesh file truncated in bone name".into());
             }
-            let bone_name =
-                String::from_utf8_lossy(&data[cursor..cursor + name_len]).to_string();
+            let bone_name = String::from_utf8_lossy(&data[cursor..cursor + name_len]).to_string();
             cursor += name_len;
 
             if cursor + 4 + 64 > data.len() {
@@ -1189,8 +1182,7 @@ pub fn load_anim_binary_from_bytes(
         if cursor + name_len > data.len() {
             return Err("Anim file truncated in clip name data".into());
         }
-        let clip_name =
-            String::from_utf8_lossy(&data[cursor..cursor + name_len]).to_string();
+        let clip_name = String::from_utf8_lossy(&data[cursor..cursor + name_len]).to_string();
         cursor += name_len;
 
         if cursor + 8 > data.len() {
@@ -1486,7 +1478,10 @@ mod tests {
         assert!(diff, "Inverse bind matrix mismatch");
 
         // Skinning
-        let skinning = loaded.meshes[0].skinning.as_ref().expect("should have skinning");
+        let skinning = loaded.meshes[0]
+            .skinning
+            .as_ref()
+            .expect("should have skinning");
         assert_eq!(skinning.len(), 3);
         assert_eq!(skinning[0].joints, [0, 1, 0, 0]);
         assert!((skinning[0].weights[0] - 0.8).abs() < 0.001);
@@ -1525,7 +1520,10 @@ mod tests {
                     (0.0, Vec3::new(0.0, 0.0, 0.0)),
                     (1.5, Vec3::new(1.0, 0.0, 0.0)),
                 ],
-                rotation_keys: vec![(0.0, Quat::IDENTITY), (1.5, Quat::from_xyzw(0.0, 0.707, 0.0, 0.707))],
+                rotation_keys: vec![
+                    (0.0, Quat::IDENTITY),
+                    (1.5, Quat::from_xyzw(0.0, 0.707, 0.0, 0.707)),
+                ],
                 scale_keys: vec![(0.0, Vec3::ONE)],
             }],
         }];

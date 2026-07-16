@@ -116,7 +116,8 @@ impl MeshRenderer {
     /// Migrate legacy `material_path` to `material_paths` if needed.
     pub fn migrate_legacy_material_path(&mut self) {
         if !self.material_path.is_empty() && self.material_paths.is_empty() {
-            self.material_paths.push(std::mem::take(&mut self.material_path));
+            self.material_paths
+                .push(std::mem::take(&mut self.material_path));
         }
     }
 }
@@ -322,9 +323,19 @@ pub enum UpdateModule {
     Gravity([f32; 3]),
     Drag(f32),
     Wind([f32; 3]),
-    CurlNoise { strength: f32, scale: f32, speed: f32 },
-    ColorOverLife { start: [f32; 4], end: [f32; 4] },
-    SizeOverLife { start: f32, end: f32 },
+    CurlNoise {
+        strength: f32,
+        scale: f32,
+        speed: f32,
+    },
+    ColorOverLife {
+        start: [f32; 4],
+        end: [f32; 4],
+    },
+    SizeOverLife {
+        start: f32,
+        end: f32,
+    },
 }
 
 impl UpdateModule {
@@ -354,15 +365,13 @@ impl Default for RenderMode {
 }
 
 /// Deserialize capacity with clamping to 256..=4096
-fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
     let val = u32::deserialize(deserializer)?;
     let clamped = val.clamp(256, 4096);
     if clamped != val {
-        log::warn!(
-            "ParticleEffect capacity {} clamped to {}",
-            val,
-            clamped
-        );
+        log::warn!("ParticleEffect capacity {} clamped to {}", val, clamped);
     }
     Ok(clamped)
 }
@@ -377,7 +386,10 @@ fn deserialize_clamped_capacity<'de, D: Deserializer<'de>>(deserializer: D) -> R
 pub struct ParticleEffect {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_plankton_capacity", deserialize_with = "deserialize_clamped_capacity")]
+    #[serde(
+        default = "default_plankton_capacity",
+        deserialize_with = "deserialize_clamped_capacity"
+    )]
     pub capacity: u32,
     #[serde(default = "default_plankton_emission_rate")]
     pub emission_rate: f32,
@@ -407,11 +419,21 @@ pub struct ParticleEffect {
     pub show_gizmos: bool,
 }
 
-fn default_plankton_capacity() -> u32 { 2048 }
-fn default_plankton_emission_rate() -> f32 { 20.0 }
-fn default_plankton_lifetime_min() -> f32 { 1.0 }
-fn default_plankton_lifetime_max() -> f32 { 2.0 }
-fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] } // upward in Z-up
+fn default_plankton_capacity() -> u32 {
+    2048
+}
+fn default_plankton_emission_rate() -> f32 {
+    20.0
+}
+fn default_plankton_lifetime_min() -> f32 {
+    1.0
+}
+fn default_plankton_lifetime_max() -> f32 {
+    2.0
+}
+fn default_plankton_initial_velocity() -> [f32; 3] {
+    [0.0, 0.0, 2.0]
+} // upward in Z-up
 
 impl Default for ParticleEffect {
     fn default() -> Self {
@@ -470,7 +492,11 @@ impl ParticleEffect {
 
     pub fn curl_noise(&self) -> Option<(f32, f32, f32)> {
         self.update_modules.iter().find_map(|m| match m {
-            UpdateModule::CurlNoise { strength, scale, speed } => Some((*strength, *scale, *speed)),
+            UpdateModule::CurlNoise {
+                strength,
+                scale,
+                speed,
+            } => Some((*strength, *scale, *speed)),
             _ => None,
         })
     }
@@ -524,7 +550,11 @@ impl ParticleEffect {
             velocity_variance: 0.3,
             update_modules: vec![
                 UpdateModule::Drag(0.5),
-                UpdateModule::CurlNoise { strength: 1.0, scale: 0.5, speed: 0.3 },
+                UpdateModule::CurlNoise {
+                    strength: 1.0,
+                    scale: 0.5,
+                    speed: 0.3,
+                },
                 UpdateModule::ColorOverLife {
                     start: [0.5, 0.5, 0.5, 0.6],
                     end: [0.3, 0.3, 0.3, 0.0],
@@ -571,7 +601,11 @@ impl ParticleEffect {
             velocity_variance: 0.5,
             update_modules: vec![
                 UpdateModule::Drag(1.0),
-                UpdateModule::CurlNoise { strength: 0.5, scale: 2.0, speed: 0.1 },
+                UpdateModule::CurlNoise {
+                    strength: 0.5,
+                    scale: 2.0,
+                    speed: 0.1,
+                },
                 UpdateModule::ColorOverLife {
                     start: [0.6, 0.55, 0.5, 0.4],
                     end: [0.5, 0.45, 0.4, 0.0],

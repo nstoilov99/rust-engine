@@ -18,7 +18,10 @@ pub struct ActionState {
 
 impl ActionState {
     pub fn new() -> Self {
-        Self { actions: HashMap::new(), context_stack: Vec::new() }
+        Self {
+            actions: HashMap::new(),
+            context_stack: Vec::new(),
+        }
     }
 
     pub fn push_context(&mut self, name: impl Into<String>) {
@@ -44,11 +47,14 @@ impl ActionState {
     }
 
     pub fn set_value(&mut self, name: &str, action_type: ActionType, value: ActionValue) {
-        let entry = self.actions.entry(name.to_string()).or_insert_with(|| ActionEntry {
-            action_type,
-            current: ActionValue::zero(action_type),
-            previous: ActionValue::zero(action_type),
-        });
+        let entry = self
+            .actions
+            .entry(name.to_string())
+            .or_insert_with(|| ActionEntry {
+                action_type,
+                current: ActionValue::zero(action_type),
+                previous: ActionValue::zero(action_type),
+            });
         entry.current = value;
         entry.action_type = action_type;
     }
@@ -68,21 +74,29 @@ impl ActionState {
     }
 
     pub fn digital(&self, name: &str) -> bool {
-        self.actions.get(name).is_some_and(|e| matches!(e.current, ActionValue::Digital(true)))
+        self.actions
+            .get(name)
+            .is_some_and(|e| matches!(e.current, ActionValue::Digital(true)))
     }
 
     pub fn axis_1d(&self, name: &str) -> f32 {
-        self.actions.get(name).map(|e| match e.current {
-            ActionValue::Axis1D(v) => v,
-            _ => 0.0,
-        }).unwrap_or(0.0)
+        self.actions
+            .get(name)
+            .map(|e| match e.current {
+                ActionValue::Axis1D(v) => v,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0)
     }
 
     pub fn axis_2d(&self, name: &str) -> (f32, f32) {
-        self.actions.get(name).map(|e| match e.current {
-            ActionValue::Axis2D(x, y) => (x, y),
-            _ => (0.0, 0.0),
-        }).unwrap_or((0.0, 0.0))
+        self.actions
+            .get(name)
+            .map(|e| match e.current {
+                ActionValue::Axis2D(x, y) => (x, y),
+                _ => (0.0, 0.0),
+            })
+            .unwrap_or((0.0, 0.0))
     }
 
     pub fn value(&self, name: &str) -> Option<ActionValue> {
@@ -91,7 +105,9 @@ impl ActionState {
 }
 
 impl Default for ActionState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

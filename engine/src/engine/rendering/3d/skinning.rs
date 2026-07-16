@@ -11,11 +11,11 @@ use std::sync::Arc;
 use glam::Mat4;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::layout::DescriptorSetLayout;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::Pipeline;
 
 use super::pipeline_3d::{BonePaletteData, MAX_PALETTE_BONES};
 

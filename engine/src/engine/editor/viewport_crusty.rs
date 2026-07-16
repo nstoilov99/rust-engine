@@ -81,14 +81,27 @@ pub fn viewport_panel(ui: &mut Ui, tab_rect: Rect, ctx: ViewportPanelCtx) {
         padding: Vec2::ZERO,
         spacing: 0.0,
     };
-    ui.run_at(rect, Direction::TopDown, Id::new("engine_viewport_panel"), opts, |ui| {
-        panel_body(ui, rect, 1.0, ctx);
-    });
+    ui.run_at(
+        rect,
+        Direction::TopDown,
+        Id::new("engine_viewport_panel"),
+        opts,
+        |ui| {
+            panel_body(ui, rect, 1.0, ctx);
+        },
+    );
 }
 
 fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
     let toolbar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TOOLBAR_H * s));
-    toolbar(ui, toolbar_rect, s, ctx.settings, ctx.camera.current_mode(), ctx.icons);
+    toolbar(
+        ui,
+        toolbar_rect,
+        s,
+        ctx.settings,
+        ctx.camera.current_mode(),
+        ctx.icons,
+    );
 
     // ── scene image (raw paint, NOT a widget — camera input must pass through)
     let image_area = Rect::from_min_max(Pos2::new(rect.min.x, toolbar_rect.max.y), rect.max);
@@ -294,7 +307,15 @@ fn toolbar(
     for (mode, stem, fallback, tooltip) in tools {
         let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(BUTTON_W * s, BUTTON_H * s));
         let selected = settings.tool_mode == mode;
-        if pill_button(ui, r, s, icons.get(stem).copied(), fallback, selected, tooltip) {
+        if pill_button(
+            ui,
+            r,
+            s,
+            icons.get(stem).copied(),
+            fallback,
+            selected,
+            tooltip,
+        ) {
             settings.tool_mode = mode;
         }
         x = r.max.x + 2.0 * s;
@@ -384,7 +405,13 @@ fn toolbar(
 
     x = separator(ui, rect, x, s);
 
-    camera_speed_button(ui, Pos2::new(x, y), s, icons.get("camera-speed").copied(), settings);
+    camera_speed_button(
+        ui,
+        Pos2::new(x, y),
+        s,
+        icons.get("camera-speed").copied(),
+        settings,
+    );
 
     // Right-aligned camera mode indicator
     let (text, color) = match camera_mode {
@@ -400,7 +427,10 @@ fn toolbar(
     let font = 11.0 * s;
     let tw = ui.painter().measure_text(&text, font, None).x;
     ui.painter().text(
-        Pos2::new(rect.max.x - 8.0 * s - tw, rect.center().y - font * 1.25 * 0.5),
+        Pos2::new(
+            rect.max.x - 8.0 * s - tw,
+            rect.center().y - font * 1.25 * 0.5,
+        ),
         &text,
         font,
         color,
@@ -434,7 +464,11 @@ fn pill_button(
     let id = ui.alloc_id(("vp_toolbar_btn", tooltip));
     let resp = ui.interact(id, rect);
     let rounding = rect.height() / 2.0;
-    let fill = if selected { button_active() } else { button_inactive() };
+    let fill = if selected {
+        button_active()
+    } else {
+        button_inactive()
+    };
     ui.painter().rect_filled(rect, rounding, fill);
 
     let tint = if selected {
@@ -547,7 +581,8 @@ fn split_button_chrome(
     let dd_resp = ui.interact(id.with("dd"), dropdown_rect);
 
     let rounding = h / 2.0;
-    ui.painter().rect_filled(total_rect, rounding, button_inactive());
+    ui.painter()
+        .rect_filled(total_rect, rounding, button_inactive());
     if enabled {
         ui.painter().rect_filled(
             icon_rect.shrink(1.0 * s),
@@ -620,7 +655,13 @@ fn split_button_chrome(
         );
     }
 
-    (total_rect, icon_rect, dropdown_rect, icon_resp.clicked, dd_resp.clicked)
+    (
+        total_rect,
+        icon_rect,
+        dropdown_rect,
+        icon_resp.clicked,
+        dd_resp.clicked,
+    )
 }
 
 /// Camera speed split-button with an Unreal-style popup (log slider + scalar).
@@ -662,9 +703,7 @@ fn camera_speed_button(
         );
 
         ui.horizontal(|ui| {
-            Label::new("Camera Speed")
-                .size(12.0 * s)
-                .show(ui);
+            Label::new("Camera Speed").size(12.0 * s).show(ui);
             DragValue::new(camera_speed)
                 .range(0.03..=8.0)
                 .speed(0.01)
@@ -677,8 +716,14 @@ fn camera_speed_button(
         let slider_rect = ui.allocate(Vec2::new(ui.available().width(), 16.0 * s));
         let resp = ui.interact(Id::new("vp_camera_speed_slider"), slider_rect);
         let track = Rect::from_min_max(
-            Pos2::new(slider_rect.min.x + 4.0 * s, slider_rect.center().y - 2.0 * s),
-            Pos2::new(slider_rect.max.x - 4.0 * s, slider_rect.center().y + 2.0 * s),
+            Pos2::new(
+                slider_rect.min.x + 4.0 * s,
+                slider_rect.center().y - 2.0 * s,
+            ),
+            Pos2::new(
+                slider_rect.max.x - 4.0 * s,
+                slider_rect.center().y + 2.0 * s,
+            ),
         );
         let (log_min, log_max) = (0.03_f32.ln(), 8.0_f32.ln());
         if resp.pressed {
@@ -703,9 +748,7 @@ fn camera_speed_button(
         );
 
         ui.horizontal(|ui| {
-            Label::new("Speed Scalar")
-                .size(12.0 * s)
-                .show(ui);
+            Label::new("Speed Scalar").size(12.0 * s).show(ui);
             DragValue::new(camera_speed_scalar)
                 .range(0.1..=10.0)
                 .speed(0.1)

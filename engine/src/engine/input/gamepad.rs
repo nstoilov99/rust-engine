@@ -99,11 +99,7 @@ impl GamepadState {
                         for (id, gp) in self.gilrs.gamepads() {
                             if gp.is_connected() && id != event.id {
                                 self.active_gamepad = Some(id);
-                                log::info!(
-                                    "Switched to gamepad: {} ({:?})",
-                                    gp.name(),
-                                    gp.uuid()
-                                );
+                                log::info!("Switched to gamepad: {} ({:?})", gp.name(), gp.uuid());
                                 break;
                             }
                         }
@@ -140,9 +136,7 @@ impl GamepadState {
         };
         let gp = self.gilrs.gamepad(id);
         let gilrs_axis = engine_axis_to_gilrs(axis);
-        gp.axis_data(gilrs_axis)
-            .map(|d| d.value())
-            .unwrap_or(0.0)
+        gp.axis_data(gilrs_axis).map(|d| d.value()).unwrap_or(0.0)
     }
 
     /// Whether any gamepad is connected.

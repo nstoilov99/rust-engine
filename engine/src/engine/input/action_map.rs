@@ -46,7 +46,10 @@ pub struct InputContext {
 
 impl InputContext {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), actions: Vec::new() }
+        Self {
+            name: name.into(),
+            actions: Vec::new(),
+        }
     }
 
     pub fn with_action(mut self, action: ActionDefinition) -> Self {
@@ -63,7 +66,9 @@ pub struct ActionMap {
 
 impl ActionMap {
     pub fn new() -> Self {
-        Self { contexts: HashMap::new() }
+        Self {
+            contexts: HashMap::new(),
+        }
     }
 
     pub fn add_context(&mut self, context: InputContext) {
@@ -80,5 +85,7 @@ impl ActionMap {
 }
 
 impl Default for ActionMap {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

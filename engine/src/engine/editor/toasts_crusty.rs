@@ -44,10 +44,7 @@ pub fn toasts_panel(ui: &mut Ui, screen_rect: Rect, toasts: &[Toast]) {
         let inner_w = label_size.x + 4.0 * s + msg_size.x;
         let inner_h = msg_size.y.max(label_size.y);
         let panel = Rect::from_min_size(
-            Pos2::new(
-                right - (inner_w + PAD * s * 2.0),
-                y,
-            ),
+            Pos2::new(right - (inner_w + PAD * s * 2.0), y),
             Vec2::new(inner_w + PAD * s * 2.0, inner_h + PAD * s * 2.0),
         );
 
@@ -56,7 +53,8 @@ pub fn toasts_panel(ui: &mut Ui, screen_rect: Rect, toasts: &[Toast]) {
 
         let tx = panel.min.x + PAD * s;
         let ty = panel.min.y + PAD * s;
-        ui.painter().text(Pos2::new(tx, ty), label, font, color, None);
+        ui.painter()
+            .text(Pos2::new(tx, ty), label, font, color, None);
         ui.painter().text(
             Pos2::new(tx + label_size.x + 4.0 * s, ty),
             &toast.message,

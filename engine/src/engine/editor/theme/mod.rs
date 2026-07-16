@@ -95,7 +95,11 @@ mod tests {
         assert!(
             issues.is_empty(),
             "WCAG AA failures:\n{}",
-            issues.iter().map(|i| format!("  {i}")).collect::<Vec<_>>().join("\n")
+            issues
+                .iter()
+                .map(|i| format!("  {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
@@ -110,7 +114,13 @@ mod tests {
     #[test]
     fn state_color_returns_semantic() {
         let theme = EditorTheme::dark_default();
-        assert_eq!(theme.state_color(StateKind::Error), theme.palette.semantic.error);
-        assert_eq!(theme.state_color(StateKind::Success), theme.palette.semantic.success);
+        assert_eq!(
+            theme.state_color(StateKind::Error),
+            theme.palette.semantic.error
+        );
+        assert_eq!(
+            theme.state_color(StateKind::Success),
+            theme.palette.semantic.success
+        );
     }
 }

@@ -61,7 +61,6 @@ impl LogMessage {
             text: text.into(),
         }
     }
-
 }
 
 /// Capped console log with incrementally maintained per-level counts.

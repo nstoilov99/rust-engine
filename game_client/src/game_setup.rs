@@ -66,16 +66,22 @@ pub fn load_assets(
     let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("models/Duck.glb")?;
 
     let (plane_verts, plane_idx) = create_plane(1.0);
-    let plane_mesh_index =
-        asset_manager.upload_procedural_mesh_named(&plane_verts, &plane_idx, Some(PRIMITIVE_PLANE))?;
+    let plane_mesh_index = asset_manager.upload_procedural_mesh_named(
+        &plane_verts,
+        &plane_idx,
+        Some(PRIMITIVE_PLANE),
+    )?;
 
     let (cube_verts, cube_idx) = create_cube();
     let cube_mesh_index =
         asset_manager.upload_procedural_mesh_named(&cube_verts, &cube_idx, Some(PRIMITIVE_CUBE))?;
 
     let (sphere_verts, sphere_idx) = create_sphere(32, 16);
-    let _sphere_mesh_index =
-        asset_manager.upload_procedural_mesh_named(&sphere_verts, &sphere_idx, Some(PRIMITIVE_SPHERE))?;
+    let _sphere_mesh_index = asset_manager.upload_procedural_mesh_named(
+        &sphere_verts,
+        &sphere_idx,
+        Some(PRIMITIVE_SPHERE),
+    )?;
 
     Ok((mesh_indices, plane_mesh_index, cube_mesh_index))
 }
@@ -127,7 +133,9 @@ pub fn load_or_create_scene(
         let (_scene_name, root_entities) = load_scene(world, "scenes/main.scene")?;
         Ok((true, root_entities))
     } else if rust_engine::assets::asset_source::exists("scenes/main.scene.ron") {
-        log::warn!("Loading legacy 'scenes/main.scene.ron' — rename via tools/migrate_asset_extensions");
+        log::warn!(
+            "Loading legacy 'scenes/main.scene.ron' — rename via tools/migrate_asset_extensions"
+        );
         let (_scene_name, root_entities) = load_scene(world, "scenes/main.scene.ron")?;
         Ok((true, root_entities))
     } else {

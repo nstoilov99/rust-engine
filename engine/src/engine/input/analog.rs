@@ -54,7 +54,11 @@ impl AnalogSettings {
         }
         let range = self.dead_zone_outer - self.dead_zone_inner;
         if range <= f32::EPSILON {
-            return if magnitude >= self.dead_zone_inner { 1.0 } else { 0.0 };
+            return if magnitude >= self.dead_zone_inner {
+                1.0
+            } else {
+                0.0
+            };
         }
         let normalized = ((magnitude - self.dead_zone_inner) / range).clamp(0.0, 1.0);
         match self.response_curve {
@@ -71,7 +75,11 @@ mod tests {
 
     #[test]
     fn dead_zone_inner_clamps_to_zero() {
-        let s = AnalogSettings { dead_zone_inner: 0.2, dead_zone_outer: 0.9, response_curve: ResponseCurve::Linear };
+        let s = AnalogSettings {
+            dead_zone_inner: 0.2,
+            dead_zone_outer: 0.9,
+            response_curve: ResponseCurve::Linear,
+        };
         assert_eq!(s.apply(0.0), 0.0);
         assert_eq!(s.apply(0.1), 0.0);
         assert_eq!(s.apply(-0.1), 0.0);
@@ -79,26 +87,42 @@ mod tests {
 
     #[test]
     fn dead_zone_outer_clamps_to_one() {
-        let s = AnalogSettings { dead_zone_inner: 0.1, dead_zone_outer: 0.9, response_curve: ResponseCurve::Linear };
+        let s = AnalogSettings {
+            dead_zone_inner: 0.1,
+            dead_zone_outer: 0.9,
+            response_curve: ResponseCurve::Linear,
+        };
         assert_eq!(s.apply(1.0), 1.0);
         assert_eq!(s.apply(-1.0), -1.0);
     }
 
     #[test]
     fn linear_midpoint() {
-        let s = AnalogSettings { dead_zone_inner: 0.0, dead_zone_outer: 1.0, response_curve: ResponseCurve::Linear };
+        let s = AnalogSettings {
+            dead_zone_inner: 0.0,
+            dead_zone_outer: 1.0,
+            response_curve: ResponseCurve::Linear,
+        };
         assert!((s.apply(0.5) - 0.5).abs() < 0.001);
     }
 
     #[test]
     fn quadratic_curve() {
-        let s = AnalogSettings { dead_zone_inner: 0.0, dead_zone_outer: 1.0, response_curve: ResponseCurve::Quadratic };
+        let s = AnalogSettings {
+            dead_zone_inner: 0.0,
+            dead_zone_outer: 1.0,
+            response_curve: ResponseCurve::Quadratic,
+        };
         assert!((s.apply(0.5) - 0.25).abs() < 0.001);
     }
 
     #[test]
     fn radial_2d_dead_zone() {
-        let s = AnalogSettings { dead_zone_inner: 0.2, dead_zone_outer: 0.9, response_curve: ResponseCurve::Linear };
+        let s = AnalogSettings {
+            dead_zone_inner: 0.2,
+            dead_zone_outer: 0.9,
+            response_curve: ResponseCurve::Linear,
+        };
         let (x, y) = s.apply_2d(0.1, 0.1);
         assert_eq!(x, 0.0);
         assert_eq!(y, 0.0);

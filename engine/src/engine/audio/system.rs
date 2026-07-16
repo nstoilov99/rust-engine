@@ -71,7 +71,11 @@ impl AudioSystem {
         fwd: &mut [f32; 3],
         up: &mut [f32; 3],
     ) {
-        *pos = [transform.position.x, transform.position.y, transform.position.z];
+        *pos = [
+            transform.position.x,
+            transform.position.y,
+            transform.position.z,
+        ];
         let rot_mat = glm::quat_to_mat3(&transform.rotation);
         // In Z-up: forward = +Y, up = +Z (engine convention)
         let f = rot_mat * glm::vec3(0.0, 1.0, 0.0);
@@ -139,19 +143,28 @@ impl System for AudioSystem {
                     log::warn!("Multiple active AudioListeners found — using the first one");
                     break;
                 }
-                Self::extract_listener_transform(transform, &mut listener_pos, &mut listener_fwd, &mut listener_up);
+                Self::extract_listener_transform(
+                    transform,
+                    &mut listener_pos,
+                    &mut listener_fwd,
+                    &mut listener_up,
+                );
                 found = true;
             }
 
             // 2. Fallback: use the active Camera (like Unreal's default behavior)
             if !found {
-                for (_entity, (transform, camera)) in
-                    world.query::<(&Transform, &Camera)>().iter()
+                for (_entity, (transform, camera)) in world.query::<(&Transform, &Camera)>().iter()
                 {
                     if !camera.active {
                         continue;
                     }
-                    Self::extract_listener_transform(transform, &mut listener_pos, &mut listener_fwd, &mut listener_up);
+                    Self::extract_listener_transform(
+                        transform,
+                        &mut listener_pos,
+                        &mut listener_fwd,
+                        &mut listener_up,
+                    );
                     found = true;
                     break;
                 }
@@ -172,7 +185,9 @@ impl System for AudioSystem {
 
         if !reloaded_paths.is_empty() {
             // Reload the asset cache entries
-            if let Some(asset_mgr) = resources.get::<std::sync::Arc<crate::engine::assets::AssetManager>>() {
+            if let Some(asset_mgr) =
+                resources.get::<std::sync::Arc<crate::engine::assets::AssetManager>>()
+            {
                 for path in &reloaded_paths {
                     if let Err(e) = asset_mgr.audio.reload(path) {
                         log::warn!("Failed to reload audio asset '{path}': {e}");
@@ -270,7 +285,8 @@ impl System for AudioSystem {
 
                 // Load audio data
                 let sound_data = {
-                    let asset_mgr = resources.get::<std::sync::Arc<crate::engine::assets::AssetManager>>();
+                    let asset_mgr =
+                        resources.get::<std::sync::Arc<crate::engine::assets::AssetManager>>();
                     let Some(asset_mgr) = asset_mgr else {
                         continue;
                     };
@@ -297,12 +313,15 @@ impl System for AudioSystem {
                 let engine = resources.get_mut::<AudioEngine>();
                 let Some(engine) = engine else { continue };
 
-                let play_result: Result<(StaticSoundHandle, Option<SpatialTrackHandle>), Box<dyn std::error::Error>> = if snap.spatial {
-                    engine.play_spatial(sound_data, snap.position, snap.max_distance)
+                let play_result: Result<
+                    (StaticSoundHandle, Option<SpatialTrackHandle>),
+                    Box<dyn std::error::Error>,
+                > = if snap.spatial {
+                    engine
+                        .play_spatial(sound_data, snap.position, snap.max_distance)
                         .map(|(h, st)| (h, Some(st)))
                 } else {
-                    engine.play(sound_data, snap.bus)
-                        .map(|h| (h, None))
+                    engine.play(sound_data, snap.bus).map(|h| (h, None))
                 };
 
                 match play_result {

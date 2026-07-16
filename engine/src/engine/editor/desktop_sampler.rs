@@ -89,7 +89,17 @@ fn sample_patch(eye: &mut EyedropperState) {
         if dib != 0 && !bits.is_null() {
             let old = SelectObject(mem, dib);
             let half = side / 2;
-            let ok = BitBlt(mem, 0, 0, side, side, screen, pt.x - half, pt.y - half, SRCCOPY);
+            let ok = BitBlt(
+                mem,
+                0,
+                0,
+                side,
+                side,
+                screen,
+                pt.x - half,
+                pt.y - half,
+                SRCCOPY,
+            );
             GdiFlush();
             if ok != 0 {
                 // 32bpp DIB pixels are laid out B,G,R,X.

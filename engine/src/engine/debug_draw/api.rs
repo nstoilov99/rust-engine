@@ -59,12 +59,7 @@ impl DebugDrawBuffer {
     }
 
     /// Add a depth-tested box wireframe (12 edges).
-    pub fn box_wireframe(
-        &mut self,
-        center: [f32; 3],
-        half_extents: [f32; 3],
-        color: [f32; 4],
-    ) {
+    pub fn box_wireframe(&mut self, center: [f32; 3], half_extents: [f32; 3], color: [f32; 4]) {
         self.depth_lines
             .extend(primitives::box_lines(center, half_extents, color));
     }
@@ -89,13 +84,18 @@ impl DebugDrawBuffer {
         radius: f32,
         color: [f32; 4],
     ) {
-        self.depth_lines
-            .extend(primitives::capsule_lines(center, half_height, radius, color));
+        self.depth_lines.extend(primitives::capsule_lines(
+            center,
+            half_height,
+            radius,
+            color,
+        ));
     }
 
     /// Add a depth-tested cross (3 axis-colored lines).
     pub fn cross(&mut self, center: [f32; 3], size: f32) {
-        self.depth_lines.extend(primitives::cross_lines(center, size));
+        self.depth_lines
+            .extend(primitives::cross_lines(center, size));
     }
 
     /// Tick persistent line lifetimes and remove expired ones.
@@ -176,6 +176,9 @@ mod tests {
 
         buf.update(0.6);
         let (depth2, _) = buf.drain();
-        assert!(depth2.is_empty(), "Should be removed after lifetime expires");
+        assert!(
+            depth2.is_empty(),
+            "Should be removed after lifetime expires"
+        );
     }
 }

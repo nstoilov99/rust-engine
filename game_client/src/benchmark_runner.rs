@@ -177,7 +177,8 @@ struct BenchmarkRunner {
     frame_slot: usize,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
-    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
+    plankton_emitter_buffer:
+        Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     config: BenchmarkConfig,
     rendered_frames: u32,
     frame_times_ms: Vec<f64>,
@@ -207,7 +208,11 @@ impl BenchmarkRunner {
             window.clone(),
             benchmark_present_mode_preference(&config),
         )?;
-        let actual_present_mode = renderer.swapchain_state.swapchain.create_info().present_mode;
+        let actual_present_mode = renderer
+            .swapchain_state
+            .swapchain
+            .create_info()
+            .present_mode;
         if config.uncapped && actual_present_mode != PresentMode::Immediate {
             println!(
                 "Benchmark uncapped mode requested, but {:?} was selected instead",
@@ -425,7 +430,8 @@ impl BenchmarkRunner {
                 self.previous_frame_ends[slot] = Some(future.boxed());
             }
             Err(error) => {
-                self.previous_frame_ends[slot] = Some(render_loop::create_now_future(&self.renderer));
+                self.previous_frame_ends[slot] =
+                    Some(render_loop::create_now_future(&self.renderer));
                 return Err(format!("Present error: {error:?}").into());
             }
         }
@@ -468,7 +474,14 @@ impl BenchmarkRunner {
                 .properties()
                 .device_name
                 .clone(),
-            present_mode: format!("{:?}", self.renderer.swapchain_state.swapchain.create_info().present_mode),
+            present_mode: format!(
+                "{:?}",
+                self.renderer
+                    .swapchain_state
+                    .swapchain
+                    .create_info()
+                    .present_mode
+            ),
             resolution: self.config.resolution,
             seed: self.config.seed,
         };

@@ -261,9 +261,7 @@ pub enum ValidationError {
         conflict: String,
     },
     /// Two systems share the same name.
-    DuplicateName {
-        name: String,
-    },
+    DuplicateName { name: String },
     /// A system references a nonexistent system in after/before.
     DanglingReference {
         system: String,
@@ -410,7 +408,10 @@ mod tests {
             .writes_resource::<ResY>();
 
         assert!(desc.access.component_reads.contains(&TypeId::of::<CompA>()));
-        assert!(desc.access.component_writes.contains(&TypeId::of::<CompB>()));
+        assert!(desc
+            .access
+            .component_writes
+            .contains(&TypeId::of::<CompB>()));
         assert!(desc.access.resource_reads.contains(&TypeId::of::<ResX>()));
         assert!(desc.access.resource_writes.contains(&TypeId::of::<ResY>()));
         assert_eq!(desc.type_names.len(), 4);
@@ -426,4 +427,3 @@ mod tests {
         assert_eq!(desc.before, vec!["B"]);
     }
 }
-

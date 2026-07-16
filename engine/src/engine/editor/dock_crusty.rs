@@ -79,10 +79,7 @@ impl CrustyDockLayout {
         let center = DockNode::split_v(
             0.75,
             DockNode::leaf(tab_id(&EditorTab::Viewport(SceneId(0)))),
-            DockNode::tabs([
-                tab_id(&EditorTab::Console),
-                tab_id(&EditorTab::Profiler),
-            ]),
+            DockNode::tabs([tab_id(&EditorTab::Console), tab_id(&EditorTab::Profiler)]),
         );
         let tree = DockNode::split_h(
             0.20,
@@ -196,7 +193,11 @@ pub fn tab_titles(
                             .map(|d| (d.display_name.as_str(), d.dirty))
                             .unwrap_or(("(missing)", false))
                     };
-                    let name = if name.is_empty() { "Untitled Scene" } else { name };
+                    let name = if name.is_empty() {
+                        "Untitled Scene"
+                    } else {
+                        name
+                    };
                     let prefix = if dirty { "* " } else { "" };
                     format!("{prefix}{name}")
                 }

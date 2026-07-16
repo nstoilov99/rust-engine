@@ -339,7 +339,11 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
 /// Full-screen tint + border + hint while external files hover the window.
 pub fn file_drop_overlay(ui: &mut Ui, screen: Rect) {
     let mut p = ui.overlay_painter();
-    p.rect_filled(screen, Rounding::ZERO, Color::from_srgb_u8(30, 80, 180, 100));
+    p.rect_filled(
+        screen,
+        Rounding::ZERO,
+        Color::from_srgb_u8(30, 80, 180, 100),
+    );
     p.rect_stroke(
         screen.shrink(4.0),
         Rounding::same(8.0),

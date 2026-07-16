@@ -103,10 +103,7 @@ impl AudioEngine {
         position: [f32; 3],
         max_distance: f32,
     ) -> Result<(StaticSoundHandle, SpatialTrackHandle), Box<dyn std::error::Error>> {
-        let listener = self
-            .listener
-            .as_ref()
-            .ok_or("No audio listener active")?;
+        let listener = self.listener.as_ref().ok_or("No audio listener active")?;
 
         let pos = mint::Vector3 {
             x: position[0],
@@ -117,12 +114,10 @@ impl AudioEngine {
         let mut spatial_track = self.manager.add_spatial_sub_track(
             listener,
             pos,
-            kira::track::SpatialTrackBuilder::new().distances(
-                kira::track::SpatialTrackDistances {
-                    min_distance: 1.0,
-                    max_distance,
-                },
-            ),
+            kira::track::SpatialTrackBuilder::new().distances(kira::track::SpatialTrackDistances {
+                min_distance: 1.0,
+                max_distance,
+            }),
         )?;
 
         let handle = spatial_track.play(data)?;
@@ -144,11 +139,7 @@ impl AudioEngine {
         let u = glam::Vec3::new(up[0], up[1], up[2]).normalize_or_zero();
         // Kira default: faces -Z with +X right, +Y up
         let orientation = if fwd.length_squared() > 0.0 && u.length_squared() > 0.0 {
-            glam::Quat::from_mat3(&glam::Mat3::from_cols(
-                fwd.cross(u).normalize(),
-                u,
-                -fwd,
-            ))
+            glam::Quat::from_mat3(&glam::Mat3::from_cols(fwd.cross(u).normalize(), u, -fwd))
         } else {
             glam::Quat::IDENTITY
         };
@@ -172,16 +163,14 @@ impl AudioEngine {
                 handle.set_position(pos, tween);
                 handle.set_orientation(quat, tween);
             }
-            None => {
-                match self.manager.add_listener(pos, quat) {
-                    Ok(handle) => {
-                        self.listener = Some(handle);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to create audio listener: {e}");
-                    }
+            None => match self.manager.add_listener(pos, quat) {
+                Ok(handle) => {
+                    self.listener = Some(handle);
                 }
-            }
+                Err(e) => {
+                    log::warn!("Failed to create audio listener: {e}");
+                }
+            },
         }
     }
 

@@ -65,7 +65,9 @@ impl InputManager {
         state: winit::event::ElementState,
     ) {
         let Some(winit_key) = keycode else { return };
-        let Some(engine_key) = key_convert::from_winit_keycode(winit_key) else { return };
+        let Some(engine_key) = key_convert::from_winit_keycode(winit_key) else {
+            return;
+        };
 
         match state {
             winit::event::ElementState::Pressed => {
@@ -87,7 +89,9 @@ impl InputManager {
         button: winit::event::MouseButton,
         state: winit::event::ElementState,
     ) {
-        let Some(engine_btn) = key_convert::from_winit_mouse_button(button) else { return };
+        let Some(engine_btn) = key_convert::from_winit_mouse_button(button) else {
+            return;
+        };
 
         match state {
             winit::event::ElementState::Pressed => {
@@ -153,7 +157,11 @@ impl InputManager {
     }
 
     pub fn mouse_delta(&self) -> (f32, f32) {
-        if self.use_raw_mouse { self.raw_mouse_delta } else { self.mouse_delta }
+        if self.use_raw_mouse {
+            self.raw_mouse_delta
+        } else {
+            self.mouse_delta
+        }
     }
 
     pub fn scroll_delta(&self) -> f32 {
@@ -167,10 +175,12 @@ impl InputManager {
     }
 
     pub fn is_winit_key_just_pressed(&self, keycode: winit::keyboard::KeyCode) -> bool {
-        key_convert::from_winit_keycode(keycode).is_some_and(|k| self.keys_just_pressed.contains(&k))
+        key_convert::from_winit_keycode(keycode)
+            .is_some_and(|k| self.keys_just_pressed.contains(&k))
     }
 
     pub fn is_winit_key_just_released(&self, keycode: winit::keyboard::KeyCode) -> bool {
-        key_convert::from_winit_keycode(keycode).is_some_and(|k| self.keys_just_released.contains(&k))
+        key_convert::from_winit_keycode(keycode)
+            .is_some_and(|k| self.keys_just_released.contains(&k))
     }
 }

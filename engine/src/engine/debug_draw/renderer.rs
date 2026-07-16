@@ -115,8 +115,7 @@ impl DebugDrawPass {
             .ok_or("Missing fragment shader entry point")?;
 
         // Vertex input from DebugLineVertex
-        let vertex_input_state =
-            DebugLineVertex::per_vertex().definition(&vs)?;
+        let vertex_input_state = DebugLineVertex::per_vertex().definition(&vs)?;
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),

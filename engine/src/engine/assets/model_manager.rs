@@ -43,15 +43,14 @@ impl ModelManager {
 
         // Prefer native .mesh over source formats for fast loading
         let mesh_relative = mesh_path_for(relative);
-        let effective_path = if !asset_source::is_pak()
-            && asset_source::resolve(&mesh_relative).exists()
-        {
-            println!("Loading native mesh: {}", mesh_relative);
-            mesh_relative
-        } else {
-            println!("Loading model: {}", relative);
-            relative.to_string()
-        };
+        let effective_path =
+            if !asset_source::is_pak() && asset_source::resolve(&mesh_relative).exists() {
+                println!("Loading native mesh: {}", mesh_relative);
+                mesh_relative
+            } else {
+                println!("Loading model: {}", relative);
+                relative.to_string()
+            };
 
         let model = if asset_source::is_pak() {
             let data = asset_source::read_bytes(&effective_path)?;

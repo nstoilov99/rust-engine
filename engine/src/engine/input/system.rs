@@ -152,7 +152,10 @@ impl System for InputActionSystem {
                 for ctx_name in &stack {
                     if let Some(ctx) = action_map.context(ctx_name) {
                         for action in &ctx.actions {
-                            if let Some(existing) = actions_to_resolve.iter_mut().find(|(n, _)| n == &action.name) {
+                            if let Some(existing) = actions_to_resolve
+                                .iter_mut()
+                                .find(|(n, _)| n == &action.name)
+                            {
                                 existing.1 = action.clone();
                             } else {
                                 actions_to_resolve.push((action.name.clone(), action.clone()));
@@ -200,20 +203,36 @@ impl InputActionSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::input::action::{ActionBinding, GamepadAxisType, GamepadButton, KeyCode as EKeyCode, MouseButton};
+    use crate::engine::input::action::{
+        ActionBinding, GamepadAxisType, GamepadButton, KeyCode as EKeyCode, MouseButton,
+    };
 
     struct TestReader {
         keys: Vec<EKeyCode>,
     }
 
     impl InputReader for TestReader {
-        fn is_key_pressed(&self, key: EKeyCode) -> bool { self.keys.contains(&key) }
-        fn is_key_just_pressed(&self, _: EKeyCode) -> bool { false }
-        fn is_mouse_pressed(&self, _: MouseButton) -> bool { false }
-        fn mouse_delta(&self) -> (f32, f32) { (0.0, 0.0) }
-        fn scroll_delta(&self) -> f32 { 0.0 }
-        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool { false }
-        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 { 0.0 }
+        fn is_key_pressed(&self, key: EKeyCode) -> bool {
+            self.keys.contains(&key)
+        }
+        fn is_key_just_pressed(&self, _: EKeyCode) -> bool {
+            false
+        }
+        fn is_mouse_pressed(&self, _: MouseButton) -> bool {
+            false
+        }
+        fn mouse_delta(&self) -> (f32, f32) {
+            (0.0, 0.0)
+        }
+        fn scroll_delta(&self) -> f32 {
+            0.0
+        }
+        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool {
+            false
+        }
+        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 {
+            0.0
+        }
     }
 
     #[test]
@@ -223,20 +242,35 @@ mod tests {
         let reader = TestReader { keys: vec![] };
         assert_eq!(resolve_action(&def, &reader), ActionValue::Digital(false));
 
-        let reader = TestReader { keys: vec![EKeyCode::Space] };
+        let reader = TestReader {
+            keys: vec![EKeyCode::Space],
+        };
         assert_eq!(resolve_action(&def, &reader), ActionValue::Digital(true));
     }
 
     #[test]
     fn resolve_axis2d_normalizes_diagonal() {
         let def = ActionDefinition::new("move", ActionType::Axis2D)
-            .with_binding(ActionBinding::axis_2d(InputSource::Key(EKeyCode::KeyW), 0.0, 1.0))
-            .with_binding(ActionBinding::axis_2d(InputSource::Key(EKeyCode::KeyD), 1.0, 0.0));
+            .with_binding(ActionBinding::axis_2d(
+                InputSource::Key(EKeyCode::KeyW),
+                0.0,
+                1.0,
+            ))
+            .with_binding(ActionBinding::axis_2d(
+                InputSource::Key(EKeyCode::KeyD),
+                1.0,
+                0.0,
+            ));
 
-        let reader = TestReader { keys: vec![EKeyCode::KeyW, EKeyCode::KeyD] };
+        let reader = TestReader {
+            keys: vec![EKeyCode::KeyW, EKeyCode::KeyD],
+        };
         if let ActionValue::Axis2D(x, y) = resolve_action(&def, &reader) {
             let mag = (x * x + y * y).sqrt();
-            assert!((mag - 1.0).abs() < 0.01, "diagonal should be normalized, got mag={mag}");
+            assert!(
+                (mag - 1.0).abs() < 0.01,
+                "diagonal should be normalized, got mag={mag}"
+            );
         } else {
             panic!("expected Axis2D");
         }

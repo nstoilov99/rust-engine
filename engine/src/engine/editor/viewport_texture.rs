@@ -120,8 +120,7 @@ impl ViewportTexture {
         )?;
         builder.clear_color_image(ClearColorImageInfo::image(self.image.clone()))?;
         let fence = {
-            let _submit_guard =
-                crate::engine::rendering::common::gpu_context::lock_queue_submit();
+            let _submit_guard = crate::engine::rendering::common::gpu_context::lock_queue_submit();
             builder
                 .build()?
                 .execute(queue)?

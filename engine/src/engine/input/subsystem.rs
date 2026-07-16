@@ -121,8 +121,7 @@ impl InputSubsystem {
             self.active_contexts.remove(idx);
             self.contexts_dirty = true;
             // Clean up binding states for removed context
-            self.binding_states
-                .retain(|(ctx, _, _), _| ctx != name);
+            self.binding_states.retain(|(ctx, _, _), _| ctx != name);
         }
     }
 
@@ -137,12 +136,7 @@ impl InputSubsystem {
     }
 
     /// Process all input for this frame.
-    pub fn tick(
-        &mut self,
-        reader: &dyn InputReader,
-        dt: f32,
-        events: &mut Events<InputEvent>,
-    ) {
+    pub fn tick(&mut self, reader: &dyn InputReader, dt: f32, events: &mut Events<InputEvent>) {
         crate::profile_scope!("enhanced_input_tick");
 
         // Update sorted context order if needed
@@ -313,16 +307,16 @@ impl InputSubsystem {
 
     /// Whether an action transitioned to active this frame.
     pub fn just_pressed(&self, name: &str) -> bool {
-        self.action_states.get(name).is_some_and(|s| {
-            s.current_value.is_active() && !s.was_active
-        })
+        self.action_states
+            .get(name)
+            .is_some_and(|s| s.current_value.is_active() && !s.was_active)
     }
 
     /// Whether an action transitioned to inactive this frame.
     pub fn just_released(&self, name: &str) -> bool {
-        self.action_states.get(name).is_some_and(|s| {
-            !s.current_value.is_active() && s.was_active
-        })
+        self.action_states
+            .get(name)
+            .is_some_and(|s| !s.current_value.is_active() && s.was_active)
     }
 
     /// Whether a digital action is currently active.
@@ -416,12 +410,12 @@ impl InputSubsystem {
         for entry in &context.entries {
             for (idx, binding) in entry.bindings.iter().enumerate() {
                 let key = (ctx_name.to_string(), entry.action_name.clone(), idx);
-                self.binding_states.entry(key).or_insert_with(|| {
-                    PerBindingState {
+                self.binding_states
+                    .entry(key)
+                    .or_insert_with(|| PerBindingState {
                         modifiers: binding.modifiers.clone(),
                         triggers: binding.triggers.clone(),
-                    }
-                });
+                    });
             }
         }
     }
@@ -472,7 +466,11 @@ fn compute_phase(
 pub struct EnhancedInputSystem;
 
 impl crate::engine::ecs::schedule::System for EnhancedInputSystem {
-    fn run(&mut self, _world: &mut hecs::World, resources: &mut crate::engine::ecs::resources::Resources) {
+    fn run(
+        &mut self,
+        _world: &mut hecs::World,
+        resources: &mut crate::engine::ecs::resources::Resources,
+    ) {
         crate::profile_scope!("enhanced_input_system");
 
         // Get dt from Time resource
@@ -498,9 +496,7 @@ impl crate::engine::ecs::schedule::System for EnhancedInputSystem {
         };
 
         // Get or create events
-        let mut events = resources
-            .remove::<Events<InputEvent>>()
-            .unwrap_or_default();
+        let mut events = resources.remove::<Events<InputEvent>>().unwrap_or_default();
 
         // Tick the subsystem
         subsystem.tick(&reader, dt, &mut events);
@@ -573,12 +569,24 @@ mod tests {
         fn is_key_pressed(&self, key: KeyCode) -> bool {
             self.pressed_keys.contains(&key)
         }
-        fn is_key_just_pressed(&self, _: KeyCode) -> bool { false }
-        fn is_mouse_pressed(&self, _: MouseButton) -> bool { false }
-        fn mouse_delta(&self) -> (f32, f32) { (0.0, 0.0) }
-        fn scroll_delta(&self) -> f32 { 0.0 }
-        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool { false }
-        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 { 0.0 }
+        fn is_key_just_pressed(&self, _: KeyCode) -> bool {
+            false
+        }
+        fn is_mouse_pressed(&self, _: MouseButton) -> bool {
+            false
+        }
+        fn mouse_delta(&self) -> (f32, f32) {
+            (0.0, 0.0)
+        }
+        fn scroll_delta(&self) -> f32 {
+            0.0
+        }
+        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool {
+            false
+        }
+        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 {
+            0.0
+        }
     }
 
     fn make_test_set() -> InputActionSet {
@@ -629,12 +637,16 @@ mod tests {
         let mut events = Events::<InputEvent>::new();
 
         // Frame 1: not pressed
-        let reader = MockReader { pressed_keys: vec![] };
+        let reader = MockReader {
+            pressed_keys: vec![],
+        };
         sub.tick(&reader, 0.016, &mut events);
         assert!(!sub.digital("jump"));
 
         // Frame 2: pressed
-        let reader = MockReader { pressed_keys: vec![KeyCode::Space] };
+        let reader = MockReader {
+            pressed_keys: vec![KeyCode::Space],
+        };
         sub.tick(&reader, 0.016, &mut events);
         assert!(sub.digital("jump"));
     }
@@ -659,8 +671,7 @@ mod tests {
     fn context_priority() {
         let mut set = InputActionSet::new();
         set.add_action(
-            InputActionDefinition::new("action", InputValueType::Digital)
-                .with_consumes(true),
+            InputActionDefinition::new("action", InputValueType::Digital).with_consumes(true),
         );
 
         // High priority context: binds Space
@@ -681,7 +692,9 @@ mod tests {
         sub.add_context("low");
         let mut events = Events::<InputEvent>::new();
 
-        let reader = MockReader { pressed_keys: vec![KeyCode::Space] };
+        let reader = MockReader {
+            pressed_keys: vec![KeyCode::Space],
+        };
         sub.tick(&reader, 0.016, &mut events);
 
         // High priority context should have consumed Space, so "action" resolves

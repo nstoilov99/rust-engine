@@ -115,8 +115,7 @@ pub fn arrow_lines(start: [f32; 3], end: [f32; 3], color: [f32; 4]) -> Vec<Debug
     // Find a perpendicular vector
     let perp = if dir[2].abs() < 0.9 {
         // Cross with Z-up
-        let cross_len =
-            (dir[1] * dir[1] + dir[0] * dir[0]).sqrt();
+        let cross_len = (dir[1] * dir[1] + dir[0] * dir[0]).sqrt();
         if cross_len < 1e-6 {
             [1.0, 0.0, 0.0]
         } else {
@@ -124,8 +123,7 @@ pub fn arrow_lines(start: [f32; 3], end: [f32; 3], color: [f32; 4]) -> Vec<Debug
         }
     } else {
         // Cross with X
-        let cross_len =
-            (dir[2] * dir[2] + dir[1] * dir[1]).sqrt();
+        let cross_len = (dir[2] * dir[2] + dir[1] * dir[1]).sqrt();
         if cross_len < 1e-6 {
             [0.0, 1.0, 0.0]
         } else {
@@ -152,11 +150,7 @@ pub fn arrow_lines(start: [f32; 3], end: [f32; 3], color: [f32; 4]) -> Vec<Debug
     ];
 
     vec![
-        DebugLineData {
-            start,
-            end,
-            color,
-        },
+        DebugLineData { start, end, color },
         DebugLineData {
             start: end,
             end: wing1,
@@ -240,8 +234,16 @@ pub fn capsule_lines(
         let a1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
         lines.push(DebugLineData {
-            start: [cx + radius * a1.cos(), cy + radius * a1.sin(), cz + half_height],
-            end: [cx + radius * a2.cos(), cy + radius * a2.sin(), cz + half_height],
+            start: [
+                cx + radius * a1.cos(),
+                cy + radius * a1.sin(),
+                cz + half_height,
+            ],
+            end: [
+                cx + radius * a2.cos(),
+                cy + radius * a2.sin(),
+                cz + half_height,
+            ],
             color,
         });
     }
@@ -251,8 +253,16 @@ pub fn capsule_lines(
         let a1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
         let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
         lines.push(DebugLineData {
-            start: [cx + radius * a1.cos(), cy + radius * a1.sin(), cz - half_height],
-            end: [cx + radius * a2.cos(), cy + radius * a2.sin(), cz - half_height],
+            start: [
+                cx + radius * a1.cos(),
+                cy + radius * a1.sin(),
+                cz - half_height,
+            ],
+            end: [
+                cx + radius * a2.cos(),
+                cy + radius * a2.sin(),
+                cz - half_height,
+            ],
             color,
         });
     }
@@ -263,14 +273,30 @@ pub fn capsule_lines(
         let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
         // XZ arc
         lines.push(DebugLineData {
-            start: [cx + radius * a1.cos(), cy, cz + half_height + radius * a1.sin()],
-            end: [cx + radius * a2.cos(), cy, cz + half_height + radius * a2.sin()],
+            start: [
+                cx + radius * a1.cos(),
+                cy,
+                cz + half_height + radius * a1.sin(),
+            ],
+            end: [
+                cx + radius * a2.cos(),
+                cy,
+                cz + half_height + radius * a2.sin(),
+            ],
             color,
         });
         // YZ arc
         lines.push(DebugLineData {
-            start: [cx, cy + radius * a1.cos(), cz + half_height + radius * a1.sin()],
-            end: [cx, cy + radius * a2.cos(), cz + half_height + radius * a2.sin()],
+            start: [
+                cx,
+                cy + radius * a1.cos(),
+                cz + half_height + radius * a1.sin(),
+            ],
+            end: [
+                cx,
+                cy + radius * a2.cos(),
+                cz + half_height + radius * a2.sin(),
+            ],
             color,
         });
     }
@@ -281,14 +307,30 @@ pub fn capsule_lines(
         let a2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
         // XZ arc
         lines.push(DebugLineData {
-            start: [cx + radius * a1.cos(), cy, cz - half_height + radius * a1.sin()],
-            end: [cx + radius * a2.cos(), cy, cz - half_height + radius * a2.sin()],
+            start: [
+                cx + radius * a1.cos(),
+                cy,
+                cz - half_height + radius * a1.sin(),
+            ],
+            end: [
+                cx + radius * a2.cos(),
+                cy,
+                cz - half_height + radius * a2.sin(),
+            ],
             color,
         });
         // YZ arc
         lines.push(DebugLineData {
-            start: [cx, cy + radius * a1.cos(), cz - half_height + radius * a1.sin()],
-            end: [cx, cy + radius * a2.cos(), cz - half_height + radius * a2.sin()],
+            start: [
+                cx,
+                cy + radius * a1.cos(),
+                cz - half_height + radius * a1.sin(),
+            ],
+            end: [
+                cx,
+                cy + radius * a2.cos(),
+                cz - half_height + radius * a2.sin(),
+            ],
             color,
         });
     }
@@ -359,7 +401,11 @@ mod tests {
     fn sphere_lines_count() {
         let lines = sphere_lines([0.0, 0.0, 0.0], 1.0, [1.0; 4]);
         // 3 circles * 32 segments = 96 lines
-        assert_eq!(lines.len(), 96, "Sphere wireframe has 3*32 = 96 line segments");
+        assert_eq!(
+            lines.len(),
+            96,
+            "Sphere wireframe has 3*32 = 96 line segments"
+        );
     }
 
     #[test]

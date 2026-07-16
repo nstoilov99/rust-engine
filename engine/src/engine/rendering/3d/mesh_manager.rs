@@ -123,7 +123,8 @@ impl MeshManager {
         }
 
         if let Some(path) = asset_path {
-            self.path_index.insert(path.to_string(), mesh_indices.clone());
+            self.path_index
+                .insert(path.to_string(), mesh_indices.clone());
         }
 
         println!("✅ Uploaded {} meshes to GPU", mesh_indices.len());

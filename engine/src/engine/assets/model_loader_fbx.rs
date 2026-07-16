@@ -69,9 +69,7 @@ fn build_model_from_fbx(
         // Process each material part separately to respect material assignments
         if mesh.material_parts.is_empty() {
             // No material parts — treat entire mesh as one piece
-            if let Some(loaded) =
-                convert_fbx_mesh_whole(mesh, None, &bone_node_to_index)?
-            {
+            if let Some(loaded) = convert_fbx_mesh_whole(mesh, None, &bone_node_to_index)? {
                 model.meshes.push(loaded);
             }
         } else {
@@ -102,10 +100,19 @@ fn build_model_from_fbx(
             normal: None,
             metallic_roughness: None,
             ao: None,
-            base_color_factor: [color.x as f32, color.y as f32, color.z as f32, color.w as f32],
+            base_color_factor: [
+                color.x as f32,
+                color.y as f32,
+                color.z as f32,
+                color.w as f32,
+            ],
             metallic_factor: pbr.metalness.value_vec4.x as f32,
             roughness_factor: pbr.roughness.value_vec4.x as f32,
-            emissive_factor: [emissive_val.x as f32, emissive_val.y as f32, emissive_val.z as f32],
+            emissive_factor: [
+                emissive_val.x as f32,
+                emissive_val.y as f32,
+                emissive_val.z as f32,
+            ],
         });
     }
 
@@ -156,10 +163,7 @@ fn build_model_from_fbx(
 
 /// Extract bone hierarchy from the FBX scene.
 /// Returns a map from ufbx node `typed_id` → index in `model.bones`.
-fn extract_fbx_skeleton(
-    scene: &ufbx::Scene,
-    model: &mut Model,
-) -> HashMap<u32, usize> {
+fn extract_fbx_skeleton(scene: &ufbx::Scene, model: &mut Model) -> HashMap<u32, usize> {
     let mut bone_node_to_index: HashMap<u32, usize> = HashMap::new();
 
     // Collect all nodes that are referenced as bones by skin clusters.
@@ -247,10 +251,22 @@ fn find_inverse_bind_matrix(scene: &ufbx::Scene, bone_typed_id: u32) -> Mat4 {
 fn ufbx_matrix_to_mat4(m: &ufbx::Matrix) -> Mat4 {
     // ufbx Matrix is column-major 4x3 (affine, bottom row implicit [0,0,0,1])
     Mat4::from_cols_array(&[
-        m.m00 as f32, m.m10 as f32, m.m20 as f32, 0.0,
-        m.m01 as f32, m.m11 as f32, m.m21 as f32, 0.0,
-        m.m02 as f32, m.m12 as f32, m.m22 as f32, 0.0,
-        m.m03 as f32, m.m13 as f32, m.m23 as f32, 1.0,
+        m.m00 as f32,
+        m.m10 as f32,
+        m.m20 as f32,
+        0.0,
+        m.m01 as f32,
+        m.m11 as f32,
+        m.m21 as f32,
+        0.0,
+        m.m02 as f32,
+        m.m12 as f32,
+        m.m22 as f32,
+        0.0,
+        m.m03 as f32,
+        m.m13 as f32,
+        m.m23 as f32,
+        1.0,
     ])
 }
 
@@ -443,10 +459,7 @@ fn extract_fbx_animations(
         }
 
         if channels.is_empty() {
-            log::warn!(
-                "Animation '{}' has no bone channels, skipping",
-                clip_name
-            );
+            log::warn!("Animation '{}' has no bone channels, skipping", clip_name);
             continue;
         }
 
@@ -655,16 +668,16 @@ mod tests {
                     bone.name,
                     parent
                 );
-                assert_ne!(
-                    parent, i,
-                    "Bone {} ('{}') is its own parent",
-                    i, bone.name
-                );
+                assert_ne!(parent, i, "Bone {} ('{}') is its own parent", i, bone.name);
             }
         }
 
         // At least one root bone (parent_index = None)
-        let root_count = model.bones.iter().filter(|b| b.parent_index.is_none()).count();
+        let root_count = model
+            .bones
+            .iter()
+            .filter(|b| b.parent_index.is_none())
+            .count();
         assert!(root_count > 0, "Should have at least one root bone");
     }
 

@@ -92,11 +92,10 @@ impl HotReloadWatcher {
                                 if normalized_path.ends_with(".matinst")
                                     || normalized_path.ends_with(".matinst.ron")
                                 {
-                                    let _ = reload_sender.send(
-                                        ReloadEvent::MaterialInstanceChanged {
+                                    let _ =
+                                        reload_sender.send(ReloadEvent::MaterialInstanceChanged {
                                             path: normalized_path.clone(),
-                                        },
-                                    );
+                                        });
                                     continue;
                                 }
 

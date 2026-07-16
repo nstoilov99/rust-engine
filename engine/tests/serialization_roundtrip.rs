@@ -304,12 +304,19 @@ fn particle_effect_roundtrip() {
                 UpdateModule::Gravity([0.0, 0.0, -9.8]),
                 UpdateModule::Wind([1.0, 0.0, 0.0]),
                 UpdateModule::Drag(0.5),
-                UpdateModule::CurlNoise { strength: 2.0, scale: 0.5, speed: 1.0 },
+                UpdateModule::CurlNoise {
+                    strength: 2.0,
+                    scale: 0.5,
+                    speed: 1.0,
+                },
                 UpdateModule::ColorOverLife {
                     start: [1.0, 0.5, 0.0, 1.0],
                     end: [1.0, 0.0, 0.0, 0.0],
                 },
-                UpdateModule::SizeOverLife { start: 0.2, end: 0.05 },
+                UpdateModule::SizeOverLife {
+                    start: 0.2,
+                    end: 0.05,
+                },
             ],
             render_mode: RenderMode::Billboard,
             texture_path: "textures/spark.png".to_string(),

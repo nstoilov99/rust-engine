@@ -300,5 +300,4 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.open = false;
     }
-
 }

@@ -79,9 +79,7 @@ pub enum InputTrigger {
 
     /// Requires another action to also be active (chord).
     /// The chord action is looked up by name at evaluation time.
-    ChordAction {
-        action_name: String,
-    },
+    ChordAction { action_name: String },
 }
 
 impl InputTrigger {
@@ -216,9 +214,7 @@ impl InputTrigger {
     /// Reset any internal state.
     pub fn reset(&mut self) {
         match self {
-            InputTrigger::Held {
-                elapsed, fired, ..
-            } => {
+            InputTrigger::Held { elapsed, fired, .. } => {
                 *elapsed = 0.0;
                 *fired = false;
             }
@@ -303,14 +299,20 @@ mod tests {
         let active = InputValue::Digital(true);
 
         // Frame 1: ongoing (0.016s < 0.5s)
-        assert_eq!(t.evaluate(&active, false, 0.016, &no_chord), TriggerState::Ongoing);
+        assert_eq!(
+            t.evaluate(&active, false, 0.016, &no_chord),
+            TriggerState::Ongoing
+        );
 
         // Simulate holding for 0.5s total
         for _ in 0..30 {
             t.evaluate(&active, true, 0.016, &no_chord);
         }
         // Should have triggered by now
-        assert_eq!(t.evaluate(&active, true, 0.016, &no_chord), TriggerState::Triggered);
+        assert_eq!(
+            t.evaluate(&active, true, 0.016, &no_chord),
+            TriggerState::Triggered
+        );
     }
 
     #[test]
@@ -324,9 +326,15 @@ mod tests {
         let inactive = InputValue::Digital(false);
 
         // Press
-        assert_eq!(t.evaluate(&active, false, 0.016, &no_chord), TriggerState::Ongoing);
+        assert_eq!(
+            t.evaluate(&active, false, 0.016, &no_chord),
+            TriggerState::Ongoing
+        );
         // Release quickly
-        assert_eq!(t.evaluate(&inactive, true, 0.016, &no_chord), TriggerState::Triggered);
+        assert_eq!(
+            t.evaluate(&inactive, true, 0.016, &no_chord),
+            TriggerState::Triggered
+        );
     }
 
     #[test]
@@ -340,15 +348,24 @@ mod tests {
         let active = InputValue::Digital(true);
 
         // First few frames: ongoing
-        assert_eq!(t.evaluate(&active, false, 0.05, &no_chord), TriggerState::Ongoing);
+        assert_eq!(
+            t.evaluate(&active, false, 0.05, &no_chord),
+            TriggerState::Ongoing
+        );
         // After 0.1s total: triggered
-        assert_eq!(t.evaluate(&active, true, 0.05, &no_chord), TriggerState::Triggered);
+        assert_eq!(
+            t.evaluate(&active, true, 0.05, &no_chord),
+            TriggerState::Triggered
+        );
     }
 
     #[test]
     fn axis_2d_active() {
         let mut t = InputTrigger::Down;
         let v = InputValue::Axis2D(Vec2::new(0.5, 0.3));
-        assert_eq!(t.evaluate(&v, false, 0.016, &no_chord), TriggerState::Triggered);
+        assert_eq!(
+            t.evaluate(&v, false, 0.016, &no_chord),
+            TriggerState::Triggered
+        );
     }
 }

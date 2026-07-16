@@ -85,11 +85,21 @@ pub struct Renderer {
 
 // Convenience accessors — keeps call sites shorter during migration
 impl Renderer {
-    pub fn device(&self) -> &Arc<Device> { &self.gpu.device }
-    pub fn queue(&self) -> &Arc<Queue> { &self.gpu.queue }
-    pub fn memory_allocator(&self) -> &Arc<StandardMemoryAllocator> { &self.gpu.memory_allocator }
-    pub fn command_buffer_allocator(&self) -> &Arc<StandardCommandBufferAllocator> { &self.gpu.command_buffer_allocator }
-    pub fn descriptor_set_allocator(&self) -> &Arc<StandardDescriptorSetAllocator> { &self.gpu.descriptor_set_allocator }
+    pub fn device(&self) -> &Arc<Device> {
+        &self.gpu.device
+    }
+    pub fn queue(&self) -> &Arc<Queue> {
+        &self.gpu.queue
+    }
+    pub fn memory_allocator(&self) -> &Arc<StandardMemoryAllocator> {
+        &self.gpu.memory_allocator
+    }
+    pub fn command_buffer_allocator(&self) -> &Arc<StandardCommandBufferAllocator> {
+        &self.gpu.command_buffer_allocator
+    }
+    pub fn descriptor_set_allocator(&self) -> &Arc<StandardDescriptorSetAllocator> {
+        &self.gpu.descriptor_set_allocator
+    }
 }
 
 impl Renderer {
@@ -393,7 +403,8 @@ impl Renderer {
 
         self.swapchain_state.images = new_images;
 
-        self.framebuffers = create_framebuffers(&self.swapchain_state.images, self.render_pass.clone())?;
+        self.framebuffers =
+            create_framebuffers(&self.swapchain_state.images, self.render_pass.clone())?;
         self.framebuffers_3d = crate::engine::framebuffer::create_framebuffers_3d(
             &self.swapchain_state.images,
             self.render_pass_3d.clone(),

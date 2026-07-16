@@ -2,7 +2,7 @@
 //!
 //! All coordinates are in Z-up game space.
 
-use super::components::{SpawnShape, ParticleEffect, Transform};
+use super::components::{ParticleEffect, SpawnShape, Transform};
 use crate::engine::debug_draw::api::DebugDrawBuffer;
 use hecs::World;
 

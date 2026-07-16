@@ -131,7 +131,11 @@ impl CompositePass {
         bloom_texture: Arc<ImageView>,
         luminance_texture: Arc<ImageView>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let layout = self.layout.set_layouts().first().ok_or("Missing Set 0 layout")?;
+        let layout = self
+            .layout
+            .set_layouts()
+            .first()
+            .ok_or("Missing Set 0 layout")?;
         let set = DescriptorSet::new(
             descriptor_set_allocator,
             layout.clone(),

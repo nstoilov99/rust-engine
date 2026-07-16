@@ -146,7 +146,8 @@ impl CrustyFloatWindow {
             WindowEvent::CloseRequested => self.close_requested = true,
             WindowEvent::Resized(size) => {
                 self.recreate_swapchain = true;
-                self.gui.set_screen_size(size.width as f32, size.height as f32);
+                self.gui
+                    .set_screen_size(size.width as f32, size.height as f32);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Pos2::new(position.x as f32, position.y as f32);
@@ -215,9 +216,7 @@ impl CrustyFloatWindow {
         if zone != self.resize_zone {
             self.window.set_cursor(match zone {
                 Some(ResizeDirection::West) | Some(ResizeDirection::East) => CursorIcon::EwResize,
-                Some(ResizeDirection::North) | Some(ResizeDirection::South) => {
-                    CursorIcon::NsResize
-                }
+                Some(ResizeDirection::North) | Some(ResizeDirection::South) => CursorIcon::NsResize,
                 Some(ResizeDirection::NorthWest) | Some(ResizeDirection::SouthEast) => {
                     CursorIcon::NwseResize
                 }
@@ -342,7 +341,8 @@ impl CrustyFloatWindow {
         if size.width == 0 || size.height == 0 || tabs.is_empty() {
             return Ok(());
         }
-        self.gui.set_screen_size(size.width as f32, size.height as f32);
+        self.gui
+            .set_screen_size(size.width as f32, size.height as f32);
 
         // While a tab is being dragged out, the whole window follows the
         // cursor (the OS window itself is the drag ghost).
@@ -371,10 +371,8 @@ impl CrustyFloatWindow {
             thumb_ids,
             ..
         } = self;
-        let rect = Rect::from_min_size(
-            Pos2::ZERO,
-            Vec2::new(size.width as f32, size.height as f32),
-        );
+        let rect =
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(size.width as f32, size.height as f32));
         let mut detached = None;
         let mut close_tab = None;
         let mut caption = CaptionAction::default();
@@ -427,8 +425,7 @@ impl CrustyFloatWindow {
             }
         }
         if self.recreate_swapchain {
-            match recreate_swapchain(device.clone(), self.surface.clone(), self.swapchain.clone())
-            {
+            match recreate_swapchain(device.clone(), self.surface.clone(), self.swapchain.clone()) {
                 Ok((new_swapchain, new_images)) => {
                     if new_images.is_empty() {
                         return Ok(());
@@ -465,9 +462,12 @@ impl CrustyFloatWindow {
 
         let target = self.images[image_index as usize].clone();
         // Clear to the theme's window background (linear ≈ srgb 18,18,21).
-        let Some(cb) = self
-            .renderer
-            .render(target, &result.paint, None, Some([0.0056, 0.0056, 0.0075, 1.0]))?
+        let Some(cb) = self.renderer.render(
+            target,
+            &result.paint,
+            None,
+            Some([0.0056, 0.0056, 0.0075, 1.0]),
+        )?
         else {
             return Ok(());
         };
@@ -482,8 +482,7 @@ impl CrustyFloatWindow {
         let future = pre
             .then_execute(queue.clone(), cb)
             .map_err(|e| format!("crusty float window execute failed: {e:?}"))?;
-        let _submit_guard =
-            crate::engine::rendering::common::gpu_context::lock_queue_submit();
+        let _submit_guard = crate::engine::rendering::common::gpu_context::lock_queue_submit();
         if let Err(e) = future.flush() {
             log::error!("crusty float window flush failed: {e:?}");
             // SAFETY: flush attempted — mark finished so the CBEF drop can't
@@ -498,10 +497,7 @@ impl CrustyFloatWindow {
         let present = future
             .then_swapchain_present(
                 queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(
-                    self.swapchain.clone(),
-                    image_index,
-                ),
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
             )
             .boxed()
             .then_signal_fence_and_flush();
@@ -580,8 +576,10 @@ fn caption_controls(ui: &mut Ui, win: Rect, tabs_end_x: f32, maximized: bool) ->
                         .push(stroke_square(g.translate(Vec2::new(2.5, -2.5))));
                     ctx.paint.push(stroke_square(g));
                 } else {
-                    ctx.paint
-                        .push(stroke_square(Rect::from_center_size(c, Vec2::splat(2.0 * s))));
+                    ctx.paint.push(stroke_square(Rect::from_center_size(
+                        c,
+                        Vec2::splat(2.0 * s),
+                    )));
                 }
             }
             _ => {

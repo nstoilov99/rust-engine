@@ -44,13 +44,10 @@ impl System for CharacterMovementSystem {
             };
 
             if let Some(look) = look {
-                transform.rotation =
-                    glm::quat_angle_axis(look.yaw, &glm::vec3(0.0, 0.0, 1.0));
+                transform.rotation = glm::quat_angle_axis(look.yaw, &glm::vec3(0.0, 0.0, 1.0));
             }
 
-            let camera_children = children
-                .map(|c| c.0.clone())
-                .unwrap_or_default();
+            let camera_children = children.map(|c| c.0.clone()).unwrap_or_default();
 
             moves.push(MoveData {
                 entity,

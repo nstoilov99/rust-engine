@@ -22,8 +22,7 @@ pub fn submit_skeleton_debug_draws(
     buffer: &mut DebugDrawBuffer,
     transform_cache: &TransformCache,
 ) {
-    for (entity, (_transform, skeleton)) in
-        world.query::<(&Transform, &SkeletonInstance)>().iter()
+    for (entity, (_transform, skeleton)) in world.query::<(&Transform, &SkeletonInstance)>().iter()
     {
         if !skeleton.debug_draw_visible || skeleton.bones.is_empty() {
             continue;
@@ -52,8 +51,7 @@ fn submit_one(
     let bone_count = skeleton.bones.len();
     let world_positions: Vec<[f32; 3]> = (0..bone_count)
         .map(|i| {
-            let world_bone =
-                skeleton.palette[i] * skeleton.bones[i].inverse_bind_matrix.inverse();
+            let world_bone = skeleton.palette[i] * skeleton.bones[i].inverse_bind_matrix.inverse();
             let scene_pos = entity_mat * world_bone.w_axis;
             // Convert Y-up render → Z-up game for debug draw API:
             // render (x, y, z) → game (x, z, -y)

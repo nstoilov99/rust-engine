@@ -18,8 +18,8 @@ use crusty_gui::context::{Context, CursorIcon, Ui};
 use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
 use crusty_gui::math::{Pos2, Rect, Rounding, Vec2};
-use crusty_gui::paint::{PaintCmd, TextureFilter};
 pub use crusty_gui::paint::TextureId;
+use crusty_gui::paint::{PaintCmd, TextureFilter};
 use crusty_gui::shell::input as shell_input;
 use crusty_gui::style::Style;
 use crusty_gui::text::TextRenderer;
@@ -28,14 +28,14 @@ use crate::engine::editor::theme::EditorTheme;
 
 pub use crusty_gui::shell::winit_cursor;
 
-use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::command_buffer::allocator::{
     StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
 };
+use vulkano::command_buffer::PrimaryAutoCommandBuffer;
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
-use vulkano::image::Image;
 use vulkano::image::view::ImageView;
+use vulkano::image::Image;
 use winit::event::WindowEvent;
 
 /// Glyph shaper/atlas shared between the main-thread layout pass and the
@@ -184,7 +184,9 @@ impl CrustyGui {
     /// plus input-gating flags. No GPU commands are recorded.
     pub fn layout(&mut self, ui_fn: impl FnOnce(&mut Ui)) -> CrustyLayoutResult {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().clamp(1.0 / 1000.0, 0.1);
+        let dt = (now - self.last_frame)
+            .as_secs_f32()
+            .clamp(1.0 / 1000.0, 0.1);
         self.last_frame = now;
 
         let screen_rect = Rect::from_min_size(
@@ -294,7 +296,9 @@ impl CrustyRenderer {
     /// Register an engine image view (viewport render target, thumbnail) so
     /// the UI can draw it with the `Image` widget.
     pub fn register_native_texture(&mut self, view: Arc<ImageView>) -> TextureId {
-        self.renderer.registry_mut().register(view, TextureFilter::Linear)
+        self.renderer
+            .registry_mut()
+            .register(view, TextureFilter::Linear)
     }
 
     /// Upload raw RGBA8 pixels to a new GPU image and register it for UI
@@ -348,14 +352,19 @@ impl CrustyRenderer {
         memory_allocator: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
         command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     ) -> std::collections::HashMap<String, TextureId> {
-        use crate::engine::editor::hierarchy_icons::{icon_raster_px, icons_dir, rasterize_svg_rgba};
+        use crate::engine::editor::hierarchy_icons::{
+            icon_raster_px, icons_dir, rasterize_svg_rgba,
+        };
 
         let mut map = std::collections::HashMap::new();
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
         match std::fs::read_dir(icons_dir()) {
             Ok(e) => paths.extend(e.flatten().map(|entry| entry.path())),
             Err(e) => {
-                log::warn!("crusty: hierarchy icons dir unreadable ({}): {e}", icons_dir().display());
+                log::warn!(
+                    "crusty: hierarchy icons dir unreadable ({}): {e}",
+                    icons_dir().display()
+                );
             }
         }
         // Extra editor icons living one level up from the hierarchy set.
@@ -403,7 +412,10 @@ impl CrustyRenderer {
 
         for path in paths {
             let ext = path.extension().and_then(|e| e.to_str());
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+            let Some(stem) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
             else {
                 continue;
             };

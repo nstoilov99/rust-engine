@@ -6,18 +6,18 @@ use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::adapters::render_adapter;
+use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{
     EditorVisibility, EntityGuid, ParticleEffect, SpawnShape,
 };
-use rust_engine::engine::animation::SkeletonInstance;
 use rust_engine::engine::ecs::components::{MeshRenderer, Transform};
 use rust_engine::engine::ecs::hierarchy::Parent;
 use rust_engine::engine::ecs::hierarchy::TransformCache;
+use rust_engine::engine::math::{Aabb, Frustum};
 use rust_engine::engine::rendering::frame_packet::{
     EmissionParameters, EmitterFlags, ForceParameters, PlanktonEmitterFrameData, VisualParameters,
 };
-use rust_engine::engine::math::{Aabb, Frustum};
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinningBackend,
 };
@@ -83,8 +83,9 @@ pub fn prepare_mesh_data(
 
     let vp_array: [[f32; 4]; 4] = view_projection.to_cols_array_2d();
 
-    for (entity, (_transform, mesh_renderer, skeleton)) in
-        world.query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>().iter()
+    for (entity, (_transform, mesh_renderer, skeleton)) in world
+        .query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>()
+        .iter()
     {
         if !mesh_renderer.visible || mesh_renderer.mesh_path.is_empty() {
             continue;
@@ -96,11 +97,12 @@ pub fn prepare_mesh_data(
             continue;
         }
 
-        let submesh_indices: &[usize] = if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
-            indices
-        } else {
-            continue;
-        };
+        let submesh_indices: &[usize] =
+            if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
+                indices
+            } else {
+                continue;
+            };
 
         let model_matrix = transform_cache.get_render(entity);
         let glam_model = glam::Mat4::from_cols_array_2d(&unsafe {
@@ -128,9 +130,16 @@ pub fn prepare_mesh_data(
                 let in_camera = camera_frustum.contains_aabb(world_aabb.min, world_aabb.max);
 
                 // Resolve material descriptor set from cache, falling back to default
-                let mat_set = mesh_renderer.material_paths
+                let mat_set = mesh_renderer
+                    .material_paths
                     .get(sub_i)
-                    .and_then(|p| if p.is_empty() { None } else { material_cache.get(p) })
+                    .and_then(|p| {
+                        if p.is_empty() {
+                            None
+                        } else {
+                            material_cache.get(p)
+                        }
+                    })
                     .cloned()
                     .unwrap_or_else(|| default_material_set.clone());
 
@@ -177,7 +186,8 @@ fn compute_light_vp(light_dir_render: glm::Vec3) -> glam::Mat4 {
     };
 
     let view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, up);
-    let proj = glam::Mat4::orthographic_rh(-half_size, half_size, -half_size, half_size, 0.1, 200.0);
+    let proj =
+        glam::Mat4::orthographic_rh(-half_size, half_size, -half_size, half_size, 0.1, 200.0);
     proj * view
 }
 
@@ -379,39 +389,40 @@ pub fn prepare_plankton_data(
     rust_engine::profile_scope!("prepare_plankton_data");
     frame_buffer.clear();
 
-    for (entity, (effect, guid)) in world
-        .query::<(&ParticleEffect, &EntityGuid)>()
-        .iter()
-    {
+    for (entity, (effect, guid)) in world.query::<(&ParticleEffect, &EntityGuid)>().iter() {
         if !effect.enabled {
             continue;
         }
 
         let world_matrix_zup = transform_cache.get_world(entity);
         let world_matrix_yup = render_adapter::world_matrix_to_render(&world_matrix_zup);
-        let model_array: [[f32; 4]; 4] = unsafe {
-            std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(world_matrix_yup)
-        };
+        let model_array: [[f32; 4]; 4] =
+            unsafe { std::mem::transmute::<nalgebra_glm::Mat4, [[f32; 4]; 4]>(world_matrix_yup) };
 
         // Extract module values with defaults
         let gravity_raw = effect.gravity().unwrap_or([0.0, 0.0, 0.0]);
         let wind_raw = effect.wind().unwrap_or([0.0, 0.0, 0.0]);
         let drag_val = effect.drag().unwrap_or(0.0);
-        let (turb_strength, turb_scale, turb_speed) = effect.curl_noise().unwrap_or((0.0, 1.0, 0.0));
-        let (color_start, color_end) = effect.color_over_life()
+        let (turb_strength, turb_scale, turb_speed) =
+            effect.curl_noise().unwrap_or((0.0, 1.0, 0.0));
+        let (color_start, color_end) = effect
+            .color_over_life()
             .unwrap_or(([1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0]));
         let (size_start, size_end) = effect.size_over_life().unwrap_or((0.1, 0.0));
 
         // Convert Z-up force vectors to Y-up render space
-        let gravity_yup = render_adapter::direction_to_render(
-            &glm::vec3(gravity_raw[0], gravity_raw[1], gravity_raw[2]),
-        );
-        let wind_yup = render_adapter::direction_to_render(
-            &glm::vec3(wind_raw[0], wind_raw[1], wind_raw[2]),
-        );
-        let vel_yup = render_adapter::direction_to_render(
-            &glm::vec3(effect.initial_velocity[0], effect.initial_velocity[1], effect.initial_velocity[2]),
-        );
+        let gravity_yup = render_adapter::direction_to_render(&glm::vec3(
+            gravity_raw[0],
+            gravity_raw[1],
+            gravity_raw[2],
+        ));
+        let wind_yup =
+            render_adapter::direction_to_render(&glm::vec3(wind_raw[0], wind_raw[1], wind_raw[2]));
+        let vel_yup = render_adapter::direction_to_render(&glm::vec3(
+            effect.initial_velocity[0],
+            effect.initial_velocity[1],
+            effect.initial_velocity[2],
+        ));
 
         let (shape_type, shape_params) = match effect.spawn_shape {
             SpawnShape::Point => (0u32, [0.0f32; 4]),
@@ -459,5 +470,4 @@ pub fn prepare_plankton_data(
             capacity: effect.capacity,
         });
     }
-
 }

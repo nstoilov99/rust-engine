@@ -5,11 +5,11 @@ pub mod components;
 pub mod events;
 pub mod game_world;
 pub mod hierarchy;
+pub mod plankton_debug_draw;
 pub mod resources;
 pub mod schedule;
-pub mod systems;
 pub mod system_names;
-pub mod plankton_debug_draw;
+pub mod systems;
 pub mod world;
 
 #[cfg(test)]

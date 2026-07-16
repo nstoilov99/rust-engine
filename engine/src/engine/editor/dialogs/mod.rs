@@ -134,5 +134,4 @@ impl DialogStack {
     pub fn pop_top(&mut self) {
         self.dialogs.pop();
     }
-
 }

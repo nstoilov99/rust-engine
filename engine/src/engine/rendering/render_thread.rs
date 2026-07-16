@@ -127,7 +127,11 @@ impl RenderThread {
                 vp_dims[1].max(1),
             ) {
                 Ok(vt) => {
-                    log::info!("render_thread: viewport texture created ({}x{})", vp_dims[0], vp_dims[1]);
+                    log::info!(
+                        "render_thread: viewport texture created ({}x{})",
+                        vp_dims[0],
+                        vp_dims[1]
+                    );
                     if let Err(e) =
                         vt.clear(gpu.queue.clone(), gpu.command_buffer_allocator.clone())
                     {
@@ -290,9 +294,7 @@ impl RenderThread {
                             }
                         }
 
-                        let _ = response.send(RenderEvent::SwapchainRecreated {
-                            dimensions: dims,
-                        });
+                        let _ = response.send(RenderEvent::SwapchainRecreated { dimensions: dims });
                     }
                     Err(e) => {
                         log::error!("render_thread: swapchain recreation failed: {}", e);
@@ -375,9 +377,7 @@ impl RenderThread {
                     // Editor mode: render deferred to viewport texture, then the UI to swapchain
                     let deferred_cb = if let Some(ref vt) = viewport_texture {
                         crate::profile_scope!("record_deferred");
-                        let render_target = RenderTarget::Texture {
-                            image: vt.image(),
-                        };
+                        let render_target = RenderTarget::Texture { image: vt.image() };
                         match deferred_renderer.render(
                             &packet.mesh_data,
                             &packet.shadow_caster_data,
@@ -419,9 +419,8 @@ impl RenderThread {
 
                     // Chain and submit whatever command buffers we have.
                     // Deferred-only frames (no UI pass) don't present.
-                    let mut ui_cbs: Vec<
-                        Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
-                    > = Vec::new();
+                    let mut ui_cbs: Vec<Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>> =
+                        Vec::new();
                     if let Some(cb) = crusty_cb {
                         ui_cbs.push(cb);
                     }
@@ -437,8 +436,7 @@ impl RenderThread {
                         cbs.extend(packet.crusty_preview_cbs.iter().cloned());
                         cbs.extend(ui_cbs);
 
-                        let mut future: Option<Box<dyn GpuFuture>> =
-                            Some(acquire_future.boxed());
+                        let mut future: Option<Box<dyn GpuFuture>> = Some(acquire_future.boxed());
                         for cb in cbs {
                             match future.take().unwrap().then_execute(gpu.queue.clone(), cb) {
                                 Ok(f) => future = Some(f.boxed()),
@@ -563,10 +561,7 @@ impl RenderThread {
 
     /// Block until the render thread sends `RenderThreadReady`.
     /// Returns the event, or an error on timeout / disconnect.
-    pub fn wait_for_ready(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Result<RenderEvent, String> {
+    pub fn wait_for_ready(&self, timeout: std::time::Duration) -> Result<RenderEvent, String> {
         self.response_receiver
             .recv_timeout(timeout)
             .map_err(|e| format!("render thread ready wait failed: {}", e))
@@ -574,7 +569,10 @@ impl RenderThread {
 
     /// Send a frame packet to the render thread.
     #[allow(clippy::result_large_err)]
-    pub fn send(&self, packet: FramePacket) -> Result<(), crossbeam_channel::SendError<FramePacket>> {
+    pub fn send(
+        &self,
+        packet: FramePacket,
+    ) -> Result<(), crossbeam_channel::SendError<FramePacket>> {
         self.sender.send(packet)
     }
 
@@ -629,8 +627,10 @@ mod tests {
         let queue_family_index = physical_device
             .queue_family_properties()
             .iter()
-            .position(|q| q.queue_flags.intersects(vulkano::device::QueueFlags::GRAPHICS))?
-            as u32;
+            .position(|q| {
+                q.queue_flags
+                    .intersects(vulkano::device::QueueFlags::GRAPHICS)
+            })? as u32;
         let (device, mut queues) = vulkano::device::Device::new(
             physical_device,
             vulkano::device::DeviceCreateInfo {

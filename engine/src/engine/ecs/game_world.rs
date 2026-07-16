@@ -278,7 +278,10 @@ impl GameWorld {
     pub fn mark_hierarchy_changed(&mut self) {
         self.hierarchy_changed = true;
         // Also set the resource so scheduled TransformPropagationSystem can see it.
-        if let Some(h) = self.resources.get_mut::<super::hierarchy::HierarchyChanged>() {
+        if let Some(h) = self
+            .resources
+            .get_mut::<super::hierarchy::HierarchyChanged>()
+        {
             h.0 = true;
         }
     }

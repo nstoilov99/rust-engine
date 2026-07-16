@@ -27,7 +27,10 @@ pub fn default_action_set() -> InputActionSet {
     );
 
     // Sprint (Digital, fires every frame while held)
-    set.add_action(InputActionDefinition::new("sprint", InputValueType::Digital));
+    set.add_action(InputActionDefinition::new(
+        "sprint",
+        InputValueType::Digital,
+    ));
 
     // Interact (Digital, fires once on press)
     set.add_action(

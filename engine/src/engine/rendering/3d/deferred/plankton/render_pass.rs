@@ -46,8 +46,8 @@ mod plankton_fs {
 #[derive(Clone, Copy)]
 pub struct PlanktonRenderPushConstants {
     pub view_projection: [[f32; 4]; 4],
-    pub camera_right: [f32; 4],       // .xyz = right, .w = 0
-    pub camera_up: [f32; 4],          // .xyz = up, .w = soft_fade_distance
+    pub camera_right: [f32; 4],        // .xyz = right, .w = 0
+    pub camera_up: [f32; 4],           // .xyz = up, .w = soft_fade_distance
     pub camera_near_far_pad: [f32; 4], // .x = near, .y = far, .zw = 0
 }
 
@@ -72,7 +72,9 @@ impl PlanktonRenderPass {
     pub fn new(
         device: Arc<Device>,
         allocator: Arc<StandardMemoryAllocator>,
-        command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+        command_buffer_allocator: Arc<
+            vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
+        >,
         queue: Arc<vulkano::device::Queue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // HDR render pass with load_op: Load (preserves lighting output)
@@ -153,11 +155,8 @@ impl PlanktonRenderPass {
         )?;
 
         // Create 1x1 white fallback texture (with actual white pixel data uploaded)
-        let fallback_texture = Self::create_fallback_texture(
-            allocator,
-            command_buffer_allocator,
-            queue,
-        )?;
+        let fallback_texture =
+            Self::create_fallback_texture(allocator, command_buffer_allocator, queue)?;
 
         let texture_sampler = Sampler::new(
             device.clone(),
@@ -193,11 +192,15 @@ impl PlanktonRenderPass {
 
     fn create_fallback_texture(
         allocator: Arc<StandardMemoryAllocator>,
-        command_buffer_allocator: Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+        command_buffer_allocator: Arc<
+            vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
+        >,
         queue: Arc<vulkano::device::Queue>,
     ) -> Result<Arc<ImageView>, Box<dyn std::error::Error>> {
         use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
-        use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo};
+        use vulkano::command_buffer::{
+            AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
+        };
         use vulkano::sync::GpuFuture;
 
         let image = Image::new(

@@ -480,11 +480,9 @@ impl Schedule {
                         let name_b = self.system_name(&self.systems[idx_b]).to_string();
 
                         // Check if ordering resolves this conflict.
-                        let ordered = ordering_edges
-                            .iter()
-                            .any(|&(a, b)| {
-                                (a == name_a && b == name_b) || (a == name_b && b == name_a)
-                            });
+                        let ordered = ordering_edges.iter().any(|&(a, b)| {
+                            (a == name_a && b == name_b) || (a == name_b && b == name_a)
+                        });
 
                         if ordered {
                             log::info!(
@@ -552,11 +550,8 @@ impl Schedule {
             })
             .collect();
 
-        let name_to_local: HashMap<&str, usize> = names
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
+        let name_to_local: HashMap<&str, usize> =
+            names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let n = names.len();
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -570,11 +565,12 @@ impl Schedule {
         }
 
         // Kahn's algorithm.
-        let mut queue: std::collections::VecDeque<usize> =
-            in_degree.iter().enumerate()
-                .filter(|(_, &d)| d == 0)
-                .map(|(i, _)| i)
-                .collect();
+        let mut queue: std::collections::VecDeque<usize> = in_degree
+            .iter()
+            .enumerate()
+            .filter(|(_, &d)| d == 0)
+            .map(|(i, _)| i)
+            .collect();
 
         let mut sorted = Vec::with_capacity(n);
         while let Some(node) = queue.pop_front() {
@@ -657,11 +653,8 @@ impl Schedule {
                 .map(|&i| self.system_name(&self.systems[i]))
                 .collect();
 
-            let name_to_local: HashMap<&str, usize> = names
-                .iter()
-                .enumerate()
-                .map(|(i, &n)| (n, i))
-                .collect();
+            let name_to_local: HashMap<&str, usize> =
+                names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
             let n = names.len();
             let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -728,11 +721,8 @@ impl Schedule {
 
         log::info!("=== Schedule Access Report ===");
         for stage in &stages {
-            let stage_systems: Vec<&RegisteredSystem> = self
-                .systems
-                .iter()
-                .filter(|r| r.stage == *stage)
-                .collect();
+            let stage_systems: Vec<&RegisteredSystem> =
+                self.systems.iter().filter(|r| r.stage == *stage).collect();
 
             if stage_systems.is_empty() {
                 continue;
@@ -1028,7 +1018,10 @@ mod tests {
             SystemDescriptor::new("sys_b").reads::<CompA>(),
         );
         let errors = schedule.validate();
-        assert!(errors.is_empty(), "read-read should have no conflicts: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "read-read should have no conflicts: {errors:?}"
+        );
     }
 
     #[test]
@@ -1046,7 +1039,10 @@ mod tests {
         );
         let errors = schedule.validate();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(&errors[0], ValidationError::UnresolvedConflict { .. }));
+        assert!(matches!(
+            &errors[0],
+            ValidationError::UnresolvedConflict { .. }
+        ));
     }
 
     #[test]
@@ -1060,10 +1056,15 @@ mod tests {
         schedule.add_system_described(
             FunctionSystem::new("sys_b", |_w: &mut hecs::World, _r: &mut Resources| {}),
             Stage::Update,
-            SystemDescriptor::new("sys_b").writes::<CompA>().after("sys_a"),
+            SystemDescriptor::new("sys_b")
+                .writes::<CompA>()
+                .after("sys_a"),
         );
         let errors = schedule.validate();
-        assert!(errors.is_empty(), "ordering should resolve conflict: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "ordering should resolve conflict: {errors:?}"
+        );
     }
 
     #[test]
@@ -1094,7 +1095,10 @@ mod tests {
         );
         let errors = schedule.validate();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(&errors[0], ValidationError::DanglingReference { .. }));
+        assert!(matches!(
+            &errors[0],
+            ValidationError::DanglingReference { .. }
+        ));
     }
 
     #[test]
@@ -1112,7 +1116,10 @@ mod tests {
         );
         let errors = schedule.validate();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(&errors[0], ValidationError::CircularDependency { .. }));
+        assert!(matches!(
+            &errors[0],
+            ValidationError::CircularDependency { .. }
+        ));
     }
 
     #[test]
@@ -1127,7 +1134,10 @@ mod tests {
         );
         let errors = schedule.validate();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(&errors[0], ValidationError::UnresolvedConflict { .. }));
+        assert!(matches!(
+            &errors[0],
+            ValidationError::UnresolvedConflict { .. }
+        ));
     }
 
     #[test]
@@ -1143,7 +1153,9 @@ mod tests {
                 o.lock().expect("lock").push("B");
             }),
             Stage::Update,
-            SystemDescriptor::new("sys_b").reads::<CompA>().after("sys_a"),
+            SystemDescriptor::new("sys_b")
+                .reads::<CompA>()
+                .after("sys_a"),
         );
         let o = Arc::clone(&order);
         schedule.add_system_described(
@@ -1222,6 +1234,9 @@ mod tests {
             SystemDescriptor::new("sys_b").writes::<CompA>(),
         );
         let errors = schedule.validate();
-        assert!(errors.is_empty(), "different stages should not conflict: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "different stages should not conflict: {errors:?}"
+        );
     }
 }

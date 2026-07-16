@@ -17,6 +17,7 @@ use crusty_gui::widgets::{
 use super::input_action_editor::{InputActionEditor, InputActionEditorState};
 use super::input_context_editor::{InputContextEditor, InputContextEditorState};
 use super::input_settings_panel::{self as isp, InputSettingsPanel};
+use crate::engine::input::action::{GamepadAxisType, GamepadButton, MouseAxisType};
 use crate::engine::input::action::{InputSource, KeyCode, MouseButton};
 use crate::engine::input::enhanced_action::{
     EnhancedBinding, InputActionDefinition, InputActionSet, MappingContext, MappingContextEntry,
@@ -26,7 +27,6 @@ use crate::engine::input::enhanced_serialization;
 use crate::engine::input::modifier::{CurveType, DeadZoneKind, InputModifier, SwizzleOrder};
 use crate::engine::input::trigger::InputTrigger;
 use crate::engine::input::value::InputValueType;
-use crate::engine::input::action::{GamepadAxisType, GamepadButton, MouseAxisType};
 
 // ── small helpers ───────────────────────────────────────────────────────────
 
@@ -53,8 +53,13 @@ fn row_label(ui: &mut Ui, text: &str, font: f32, color: Color) {
     let row_h = style.fonts.body * 1.25 + style.spacing.button_padding.y * 2.0;
     let w = ui.text_mut().measure(text, font, None).x;
     let rect = ui.allocate(Vec2::new(w, row_h));
-    ui.painter()
-        .text(Pos2::new(rect.min.x, text_y(rect, font)), text, font, color, None);
+    ui.painter().text(
+        Pos2::new(rect.min.x, text_y(rect, font)),
+        text,
+        font,
+        color,
+        None,
+    );
 }
 
 fn small_button(ui: &mut Ui, text: &str) -> bool {
@@ -64,7 +69,11 @@ fn small_button(ui: &mut Ui, text: &str) -> bool {
 
 fn small_red_button(ui: &mut Ui, text: &str) -> bool {
     let small = ui.style().fonts.small;
-    Button::new(text).size(small).text_color(red()).show(ui).clicked
+    Button::new(text)
+        .size(small)
+        .text_color(red())
+        .show(ui)
+        .clicked
 }
 
 /// Stroke-framed group: full available width,
@@ -247,7 +256,9 @@ fn settings_contents(
     }
 
     let style = ui.style();
-    Label::new("Input Settings").size(style.fonts.title).show(ui);
+    Label::new("Input Settings")
+        .size(style.fonts.title)
+        .show(ui);
     ui.separator();
 
     // Toolbar
@@ -379,95 +390,97 @@ fn contexts_section(ui: &mut Ui, set: &mut InputActionSet) {
         let ctx_id = format!("ctx_{}", mctx.name);
         let header = format!("{} (priority: {})", mctx.name, mctx.priority);
 
-        CollapsingHeader::new(header).default_open(true).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                row_label(ui, "Priority:", style.fonts.body, style.palette.text);
-                drag_i32(ui, &mut mctx.priority, -1000, 1000, None);
-            });
+        CollapsingHeader::new(header)
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    row_label(ui, "Priority:", style.fonts.body, style.palette.text);
+                    drag_i32(ui, &mut mctx.priority, -1000, 1000, None);
+                });
 
-            let mut remove_entry = None;
-            for entry_idx in 0..mctx.entries.len() {
-                let entry = &mut mctx.entries[entry_idx];
-                let entry_id = format!("{}_{}", ctx_id, entry.action_name);
+                let mut remove_entry = None;
+                for entry_idx in 0..mctx.entries.len() {
+                    let entry = &mut mctx.entries[entry_idx];
+                    let entry_id = format!("{}_{}", ctx_id, entry.action_name);
 
-                CollapsingHeader::new(entry.action_name.as_str()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        row_label(ui, "Action:", style.fonts.body, style.palette.text);
-                        string_combo(
-                            ui,
-                            format!("{entry_id}_an"),
-                            &mut entry.action_name,
-                            &action_names,
-                            120.0,
-                        );
-                    });
-
-                    Label::new("Bindings:").show(ui);
-                    let value_type = value_types
-                        .get(&entry.action_name)
-                        .copied()
-                        .unwrap_or(InputValueType::Digital);
-
-                    let mut remove_bind = None;
-                    for (bi, binding) in entry.bindings.iter_mut().enumerate() {
-                        let bind_id = format!("{entry_id}_b{bi}");
+                    CollapsingHeader::new(entry.action_name.as_str()).show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            binding_editor(ui, binding, &bind_id, value_type);
-                            if small_red_button(ui, "X") {
-                                remove_bind = Some(bi);
-                            }
+                            row_label(ui, "Action:", style.fonts.body, style.palette.text);
+                            string_combo(
+                                ui,
+                                format!("{entry_id}_an"),
+                                &mut entry.action_name,
+                                &action_names,
+                                120.0,
+                            );
                         });
 
-                        if !binding.modifiers.is_empty() || !binding.triggers.is_empty() {
-                            indent(ui, |ui| {
-                                if !binding.modifiers.is_empty() {
-                                    Label::new("Modifiers:").size(style.fonts.small).show(ui);
-                                    modifier_list(
-                                        ui,
-                                        &mut binding.modifiers,
-                                        &format!("{bind_id}_mod"),
-                                    );
-                                }
-                                if !binding.triggers.is_empty() {
-                                    Label::new("Triggers:").size(style.fonts.small).show(ui);
-                                    trigger_list(
-                                        ui,
-                                        &mut binding.triggers,
-                                        &format!("{bind_id}_trig"),
-                                    );
+                        Label::new("Bindings:").show(ui);
+                        let value_type = value_types
+                            .get(&entry.action_name)
+                            .copied()
+                            .unwrap_or(InputValueType::Digital);
+
+                        let mut remove_bind = None;
+                        for (bi, binding) in entry.bindings.iter_mut().enumerate() {
+                            let bind_id = format!("{entry_id}_b{bi}");
+                            ui.horizontal(|ui| {
+                                binding_editor(ui, binding, &bind_id, value_type);
+                                if small_red_button(ui, "X") {
+                                    remove_bind = Some(bi);
                                 }
                             });
+
+                            if !binding.modifiers.is_empty() || !binding.triggers.is_empty() {
+                                indent(ui, |ui| {
+                                    if !binding.modifiers.is_empty() {
+                                        Label::new("Modifiers:").size(style.fonts.small).show(ui);
+                                        modifier_list(
+                                            ui,
+                                            &mut binding.modifiers,
+                                            &format!("{bind_id}_mod"),
+                                        );
+                                    }
+                                    if !binding.triggers.is_empty() {
+                                        Label::new("Triggers:").size(style.fonts.small).show(ui);
+                                        trigger_list(
+                                            ui,
+                                            &mut binding.triggers,
+                                            &format!("{bind_id}_trig"),
+                                        );
+                                    }
+                                });
+                            }
                         }
-                    }
-                    if let Some(idx) = remove_bind {
-                        entry.bindings.remove(idx);
-                    }
+                        if let Some(idx) = remove_bind {
+                            entry.bindings.remove(idx);
+                        }
 
-                    if small_button(ui, "+ Add Binding") {
-                        entry
-                            .bindings
-                            .push(EnhancedBinding::digital(InputSource::Key(KeyCode::Space)));
-                    }
-                    if small_red_button(ui, "Remove Entry") {
-                        remove_entry = Some(entry_idx);
-                    }
-                });
-            }
-            if let Some(idx) = remove_entry {
-                mctx.entries.remove(idx);
-            }
+                        if small_button(ui, "+ Add Binding") {
+                            entry
+                                .bindings
+                                .push(EnhancedBinding::digital(InputSource::Key(KeyCode::Space)));
+                        }
+                        if small_red_button(ui, "Remove Entry") {
+                            remove_entry = Some(entry_idx);
+                        }
+                    });
+                }
+                if let Some(idx) = remove_entry {
+                    mctx.entries.remove(idx);
+                }
 
-            if small_button(ui, "+ Add Entry") {
-                let action_name = action_names
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "unnamed".to_string());
-                mctx.entries.push(MappingContextEntry::new(action_name));
-            }
-            if small_red_button(ui, "Delete Context") {
-                remove_ctx = Some(ctx_idx);
-            }
-        });
+                if small_button(ui, "+ Add Entry") {
+                    let action_name = action_names
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unnamed".to_string());
+                    mctx.entries.push(MappingContextEntry::new(action_name));
+                }
+                if small_red_button(ui, "Delete Context") {
+                    remove_ctx = Some(ctx_idx);
+                }
+            });
     }
     if let Some(idx) = remove_ctx {
         set.contexts.remove(idx);
@@ -481,7 +494,12 @@ fn contexts_section(ui: &mut Ui, set: &mut InputActionSet) {
 
 // ── Binding editor ──────────────────────────────────────────────────────────
 
-fn binding_editor(ui: &mut Ui, binding: &mut EnhancedBinding, id: &str, value_type: InputValueType) {
+fn binding_editor(
+    ui: &mut Ui,
+    binding: &mut EnhancedBinding,
+    id: &str,
+    value_type: InputValueType,
+) {
     // Source type selector
     let src_label = isp::source_type_label(&binding.source);
     ComboBox::new(format!("{id}_type"))
@@ -564,7 +582,12 @@ fn modifier_list(ui: &mut Ui, modifiers: &mut Vec<InputModifier>, id: &str) {
     for (i, modifier) in modifiers.iter_mut().enumerate() {
         let mod_id = format!("{id}_{i}");
         ui.horizontal(|ui| {
-            row_label(ui, isp::modifier_label(modifier), style.fonts.small, style.palette.text);
+            row_label(
+                ui,
+                isp::modifier_label(modifier),
+                style.fonts.small,
+                style.palette.text,
+            );
             modifier_params(ui, modifier, &mod_id);
             if small_red_button(ui, "X") {
                 remove_idx = Some(i);
@@ -631,8 +654,16 @@ fn modifier_params(ui: &mut Ui, modifier: &mut InputModifier, id: &str) {
             Checkbox::new(z, "Z").show(ui);
         }
         InputModifier::DeadZone { lower, upper, kind } => {
-            DragValue::new(lower).range(0.0..=1.0).speed(0.01).prefix("lo:").show(ui);
-            DragValue::new(upper).range(0.0..=1.0).speed(0.01).prefix("hi:").show(ui);
+            DragValue::new(lower)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .prefix("lo:")
+                .show(ui);
+            DragValue::new(upper)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .prefix("hi:")
+                .show(ui);
             enum_combo(
                 ui,
                 format!("{id}_dzk"),
@@ -642,12 +673,25 @@ fn modifier_params(ui: &mut Ui, modifier: &mut InputModifier, id: &str) {
             );
         }
         InputModifier::Scale { factor } => {
-            DragValue::new(&mut factor.x).speed(0.1).prefix("x:").show(ui);
-            DragValue::new(&mut factor.y).speed(0.1).prefix("y:").show(ui);
-            DragValue::new(&mut factor.z).speed(0.1).prefix("z:").show(ui);
+            DragValue::new(&mut factor.x)
+                .speed(0.1)
+                .prefix("x:")
+                .show(ui);
+            DragValue::new(&mut factor.y)
+                .speed(0.1)
+                .prefix("y:")
+                .show(ui);
+            DragValue::new(&mut factor.z)
+                .speed(0.1)
+                .prefix("z:")
+                .show(ui);
         }
         InputModifier::Smooth { speed, .. } => {
-            DragValue::new(speed).range(0.1..=100.0).speed(0.5).prefix("spd:").show(ui);
+            DragValue::new(speed)
+                .range(0.1..=100.0)
+                .speed(0.5)
+                .prefix("spd:")
+                .show(ui);
         }
         InputModifier::ResponseCurve { curve } => {
             ComboBox::new(format!("{id}_curve"))
@@ -666,8 +710,14 @@ fn modifier_params(ui: &mut Ui, modifier: &mut InputModifier, id: &str) {
                 });
         }
         InputModifier::Clamp { min, max } => {
-            DragValue::new(&mut min.x).speed(0.1).prefix("min:").show(ui);
-            DragValue::new(&mut max.x).speed(0.1).prefix("max:").show(ui);
+            DragValue::new(&mut min.x)
+                .speed(0.1)
+                .prefix("min:")
+                .show(ui);
+            DragValue::new(&mut max.x)
+                .speed(0.1)
+                .prefix("max:")
+                .show(ui);
         }
         InputModifier::Swizzle { order } => {
             enum_combo(ui, format!("{id}_sw"), order, isp::SWIZZLE_ORDERS, 60.0);
@@ -682,7 +732,12 @@ fn trigger_list(ui: &mut Ui, triggers: &mut Vec<InputTrigger>, id: &str) {
     let mut remove_idx = None;
     for (i, trigger) in triggers.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            row_label(ui, isp::trigger_label(trigger), style.fonts.small, style.palette.text);
+            row_label(
+                ui,
+                isp::trigger_label(trigger),
+                style.fonts.small,
+                style.palette.text,
+            );
             trigger_params(ui, trigger);
             if small_red_button(ui, "X") {
                 remove_idx = Some(i);
@@ -792,7 +847,12 @@ fn editor_toolbar(ui: &mut Ui, dirty: bool, status: &mut Option<(String, f64)>) 
         };
         let clicked = btn.show(ui).clicked;
         if dirty {
-            row_label(ui, "\u{2022} Unsaved changes", style.fonts.small, rgb(255, 200, 80));
+            row_label(
+                ui,
+                "\u{2022} Unsaved changes",
+                style.fonts.small,
+                rgb(255, 200, 80),
+            );
         }
         clicked
     });
@@ -874,48 +934,62 @@ pub fn input_action_panel(
                 group(ui, "ia_props", |ui| {
                     Label::new("Properties").color(rgb(140, 180, 220)).show(ui);
                     ui.add_space(2.0);
-                    Grid::new("ia_props_grid").spacing(Vec2::new(8.0, 4.0)).show(ui, |g| {
-                        g.cell(|ui| row_label(ui, "Name:", style.fonts.body, style.palette.text));
-                        g.cell(|ui| {
-                            let before = action.name.clone();
-                            TextEdit::new(&mut action.name).width(280.0).show(ui);
-                            if action.name != before {
-                                dirty = true;
-                            }
-                        });
-                        g.end_row();
+                    Grid::new("ia_props_grid")
+                        .spacing(Vec2::new(8.0, 4.0))
+                        .show(ui, |g| {
+                            g.cell(|ui| {
+                                row_label(ui, "Name:", style.fonts.body, style.palette.text)
+                            });
+                            g.cell(|ui| {
+                                let before = action.name.clone();
+                                TextEdit::new(&mut action.name).width(280.0).show(ui);
+                                if action.name != before {
+                                    dirty = true;
+                                }
+                            });
+                            g.end_row();
 
-                        g.cell(|ui| {
-                            row_label(ui, "Value Type:", style.fonts.body, style.palette.text)
-                        });
-                        g.cell(|ui| {
-                            let before = action.value_type;
-                            value_type_combo(ui, "ia_vt".to_string(), &mut action.value_type, 120.0);
-                            if action.value_type != before {
-                                dirty = true;
-                            }
-                        });
-                        g.end_row();
-
-                        g.cell(|ui| {
-                            row_label(ui, "Consumes Input:", style.fonts.body, style.palette.text)
-                        });
-                        g.cell(|ui| {
-                            let r = Checkbox::new(&mut action.consumes_input, "").show(ui);
-                            if r.hovered {
-                                show_tooltip_for(
+                            g.cell(|ui| {
+                                row_label(ui, "Value Type:", style.fonts.body, style.palette.text)
+                            });
+                            g.cell(|ui| {
+                                let before = action.value_type;
+                                value_type_combo(
                                     ui,
-                                    r.rect,
-                                    "When enabled, this action consumes its input sources \
-                                     and prevents lower-priority contexts from seeing them.",
+                                    "ia_vt".to_string(),
+                                    &mut action.value_type,
+                                    120.0,
                                 );
-                            }
-                            if r.clicked {
-                                dirty = true;
-                            }
+                                if action.value_type != before {
+                                    dirty = true;
+                                }
+                            });
+                            g.end_row();
+
+                            g.cell(|ui| {
+                                row_label(
+                                    ui,
+                                    "Consumes Input:",
+                                    style.fonts.body,
+                                    style.palette.text,
+                                )
+                            });
+                            g.cell(|ui| {
+                                let r = Checkbox::new(&mut action.consumes_input, "").show(ui);
+                                if r.hovered {
+                                    show_tooltip_for(
+                                        ui,
+                                        r.rect,
+                                        "When enabled, this action consumes its input sources \
+                                     and prevents lower-priority contexts from seeing them.",
+                                    );
+                                }
+                                if r.clicked {
+                                    dirty = true;
+                                }
+                            });
+                            g.end_row();
                         });
-                        g.end_row();
-                    });
                 });
 
                 ui.add_space(6.0);
@@ -1029,38 +1103,44 @@ pub fn input_context_panel(
                 ui.add_space(4.0);
 
                 group(ui, "mc_props", |ui| {
-                    Label::new("Context Properties").color(rgb(140, 180, 220)).show(ui);
+                    Label::new("Context Properties")
+                        .color(rgb(140, 180, 220))
+                        .show(ui);
                     ui.add_space(2.0);
-                    Grid::new("mc_props_grid").spacing(Vec2::new(8.0, 4.0)).show(ui, |g| {
-                        g.cell(|ui| row_label(ui, "Name:", style.fonts.body, style.palette.text));
-                        g.cell(|ui| {
-                            let before = mctx.name.clone();
-                            TextEdit::new(&mut mctx.name).width(280.0).show(ui);
-                            if mctx.name != before {
-                                dirty = true;
-                            }
-                        });
-                        g.end_row();
+                    Grid::new("mc_props_grid")
+                        .spacing(Vec2::new(8.0, 4.0))
+                        .show(ui, |g| {
+                            g.cell(|ui| {
+                                row_label(ui, "Name:", style.fonts.body, style.palette.text)
+                            });
+                            g.cell(|ui| {
+                                let before = mctx.name.clone();
+                                TextEdit::new(&mut mctx.name).width(280.0).show(ui);
+                                if mctx.name != before {
+                                    dirty = true;
+                                }
+                            });
+                            g.end_row();
 
-                        g.cell(|ui| {
-                            row_label(ui, "Priority:", style.fonts.body, style.palette.text)
-                        });
-                        g.cell(|ui| {
-                            if drag_i32(
-                                ui,
-                                &mut mctx.priority,
-                                -1000,
-                                1000,
-                                Some(
-                                    "Higher priority contexts are processed first. Actions \
+                            g.cell(|ui| {
+                                row_label(ui, "Priority:", style.fonts.body, style.palette.text)
+                            });
+                            g.cell(|ui| {
+                                if drag_i32(
+                                    ui,
+                                    &mut mctx.priority,
+                                    -1000,
+                                    1000,
+                                    Some(
+                                        "Higher priority contexts are processed first. Actions \
                                      that consume input will block lower-priority contexts.",
-                                ),
-                            ) {
-                                dirty = true;
-                            }
+                                    ),
+                                ) {
+                                    dirty = true;
+                                }
+                            });
+                            g.end_row();
                         });
-                        g.end_row();
-                    });
                 });
 
                 ui.add_space(6.0);
@@ -1088,149 +1168,154 @@ pub fn input_context_panel(
                             if entry.bindings.len() == 1 { "" } else { "s" }
                         );
 
-                        CollapsingHeader::new(header).default_open(true).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                row_label(ui, "Action:", style.fonts.body, style.palette.text);
-                                if string_combo(
-                                    ui,
-                                    format!("{entry_id}_an"),
-                                    &mut entry.action_name,
-                                    available_actions,
-                                    180.0,
-                                ) {
-                                    dirty = true;
-                                }
-                            });
+                        CollapsingHeader::new(header)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    row_label(ui, "Action:", style.fonts.body, style.palette.text);
+                                    if string_combo(
+                                        ui,
+                                        format!("{entry_id}_an"),
+                                        &mut entry.action_name,
+                                        available_actions,
+                                        180.0,
+                                    ) {
+                                        dirty = true;
+                                    }
+                                });
 
-                            ui.add_space(4.0);
-                            Label::new("Bindings:").show(ui);
+                                ui.add_space(4.0);
+                                Label::new("Bindings:").show(ui);
 
-                            let mut remove_bind = None;
-                            for (bi, binding) in entry.bindings.iter_mut().enumerate() {
-                                let bind_id = format!("{entry_id}_b{bi}");
-                                let is_listening = listening == Some((entry_idx, bi));
+                                let mut remove_bind = None;
+                                for (bi, binding) in entry.bindings.iter_mut().enumerate() {
+                                    let bind_id = format!("{entry_id}_b{bi}");
+                                    let is_listening = listening == Some((entry_idx, bi));
 
-                                group(ui, &bind_id, |ui| {
-                                    ui.horizontal(|ui| {
-                                        row_label(
-                                            ui,
-                                            &format!("#{}", bi + 1),
-                                            style.fonts.small,
-                                            style.palette.text_dim,
-                                        );
+                                    group(ui, &bind_id, |ui| {
+                                        ui.horizontal(|ui| {
+                                            row_label(
+                                                ui,
+                                                &format!("#{}", bi + 1),
+                                                style.fonts.small,
+                                                style.palette.text_dim,
+                                            );
 
-                                        if is_listening {
-                                            Button::new("...")
-                                                .text_color(rgb(100, 200, 255))
+                                            if is_listening {
+                                                Button::new("...")
+                                                    .text_color(rgb(100, 200, 255))
+                                                    .show(ui);
+                                            } else {
+                                                let r =
+                                                    Button::new("\u{1F3A7}").size(14.0).show(ui);
+                                                if r.hovered {
+                                                    show_tooltip_for(
+                                                        ui,
+                                                        r.rect,
+                                                        "Click to listen for key/mouse input",
+                                                    );
+                                                }
+                                                if r.clicked {
+                                                    start_listen = Some((entry_idx, bi));
+                                                }
+                                            }
+
+                                            binding_editor(
+                                                ui,
+                                                binding,
+                                                &bind_id,
+                                                InputValueType::Digital,
+                                            );
+
+                                            let small = style.fonts.small;
+                                            let r = Button::new("\u{2716}")
+                                                .size(small)
+                                                .text_color(red())
                                                 .show(ui);
-                                        } else {
-                                            let r =
-                                                Button::new("\u{1F3A7}").size(14.0).show(ui);
                                             if r.hovered {
-                                                show_tooltip_for(
-                                                    ui,
-                                                    r.rect,
-                                                    "Click to listen for key/mouse input",
-                                                );
+                                                show_tooltip_for(ui, r.rect, "Remove binding");
                                             }
                                             if r.clicked {
-                                                start_listen = Some((entry_idx, bi));
-                                            }
-                                        }
-
-                                        binding_editor(
-                                            ui,
-                                            binding,
-                                            &bind_id,
-                                            InputValueType::Digital,
-                                        );
-
-                                        let small = style.fonts.small;
-                                        let r = Button::new("\u{2716}")
-                                            .size(small)
-                                            .text_color(red())
-                                            .show(ui);
-                                        if r.hovered {
-                                            show_tooltip_for(ui, r.rect, "Remove binding");
-                                        }
-                                        if r.clicked {
-                                            remove_bind = Some(bi);
-                                            dirty = true;
-                                        }
-                                    });
-
-                                    let details = format!(
-                                        "Modifiers ({}) / Triggers ({})",
-                                        binding.modifiers.len(),
-                                        binding.triggers.len()
-                                    );
-                                    CollapsingHeader::new(details)
-                                        .default_open(
-                                            !binding.modifiers.is_empty()
-                                                || !binding.triggers.is_empty(),
-                                        )
-                                        .text_size(style.fonts.small)
-                                        .text_color(style.palette.text_dim)
-                                        .fit_width(true)
-                                        .show(ui, |ui| {
-                                            Label::new("Modifiers:")
-                                                .size(style.fonts.small)
-                                                .show(ui);
-                                            let before = binding.modifiers.len();
-                                            modifier_list(
-                                                ui,
-                                                &mut binding.modifiers,
-                                                &format!("{bind_id}_mod"),
-                                            );
-                                            if binding.modifiers.len() != before {
-                                                dirty = true;
-                                            }
-
-                                            ui.add_space(2.0);
-
-                                            Label::new("Triggers:")
-                                                .size(style.fonts.small)
-                                                .show(ui);
-                                            let before = binding.triggers.len();
-                                            trigger_list(
-                                                ui,
-                                                &mut binding.triggers,
-                                                &format!("{bind_id}_trig"),
-                                            );
-                                            if binding.triggers.len() != before {
+                                                remove_bind = Some(bi);
                                                 dirty = true;
                                             }
                                         });
-                                });
-                            }
-                            if let Some(idx) = remove_bind {
-                                entry.bindings.remove(idx);
-                            }
 
-                            ui.horizontal(|ui| {
-                                if Button::new("+ Add Binding").show(ui).clicked {
-                                    entry.bindings.push(EnhancedBinding::digital(
-                                        InputSource::Key(KeyCode::Space),
+                                        let details = format!(
+                                            "Modifiers ({}) / Triggers ({})",
+                                            binding.modifiers.len(),
+                                            binding.triggers.len()
+                                        );
+                                        CollapsingHeader::new(details)
+                                            .default_open(
+                                                !binding.modifiers.is_empty()
+                                                    || !binding.triggers.is_empty(),
+                                            )
+                                            .text_size(style.fonts.small)
+                                            .text_color(style.palette.text_dim)
+                                            .fit_width(true)
+                                            .show(ui, |ui| {
+                                                Label::new("Modifiers:")
+                                                    .size(style.fonts.small)
+                                                    .show(ui);
+                                                let before = binding.modifiers.len();
+                                                modifier_list(
+                                                    ui,
+                                                    &mut binding.modifiers,
+                                                    &format!("{bind_id}_mod"),
+                                                );
+                                                if binding.modifiers.len() != before {
+                                                    dirty = true;
+                                                }
+
+                                                ui.add_space(2.0);
+
+                                                Label::new("Triggers:")
+                                                    .size(style.fonts.small)
+                                                    .show(ui);
+                                                let before = binding.triggers.len();
+                                                trigger_list(
+                                                    ui,
+                                                    &mut binding.triggers,
+                                                    &format!("{bind_id}_trig"),
+                                                );
+                                                if binding.triggers.len() != before {
+                                                    dirty = true;
+                                                }
+                                            });
+                                    });
+                                }
+                                if let Some(idx) = remove_bind {
+                                    entry.bindings.remove(idx);
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if Button::new("+ Add Binding").show(ui).clicked {
+                                        entry.bindings.push(EnhancedBinding::digital(
+                                            InputSource::Key(KeyCode::Space),
+                                        ));
+                                        dirty = true;
+                                    }
+                                    // Right-aligned Remove Entry
+                                    let w = ui
+                                        .text_mut()
+                                        .measure("Remove Entry", style.fonts.body, None)
+                                        .x
+                                        + style.spacing.button_padding.x * 2.0;
+                                    ui.set_cursor(Pos2::new(
+                                        ui.available().max.x - w,
+                                        ui.cursor().y,
                                     ));
-                                    dirty = true;
-                                }
-                                // Right-aligned Remove Entry
-                                let w = ui.text_mut().measure("Remove Entry", style.fonts.body, None).x
-                                    + style.spacing.button_padding.x * 2.0;
-                                ui.set_cursor(Pos2::new(
-                                    ui.available().max.x - w,
-                                    ui.cursor().y,
-                                ));
-                                if Button::new("Remove Entry")
-                                    .text_color(red())
-                                    .show(ui)
-                                    .clicked
-                                {
-                                    remove_entry = Some(entry_idx);
-                                    dirty = true;
-                                }
+                                    if Button::new("Remove Entry")
+                                        .text_color(red())
+                                        .show(ui)
+                                        .clicked
+                                    {
+                                        remove_entry = Some(entry_idx);
+                                        dirty = true;
+                                    }
+                                });
                             });
-                        });
                     }
                     if let Some(idx) = remove_entry {
                         mctx.entries.remove(idx);
@@ -1274,8 +1359,7 @@ fn listening_overlay(ui: &mut Ui, panel_rect: Rect, listening: &mut Option<(usiz
     let btn_h = style.fonts.body * 1.25 + style.spacing.button_padding.y * 2.0;
     let margin = 24.0;
     let content_w = title_w.max(sub_w);
-    let content_h =
-        4.0 + title_size * 1.25 + 8.0 + style.fonts.body * 1.25 + 8.0 + btn_h;
+    let content_h = 4.0 + title_size * 1.25 + 8.0 + style.fonts.body * 1.25 + 8.0 + btn_h;
     let box_size = Vec2::new(content_w + margin * 2.0, content_h + margin * 2.0);
     let center = panel_rect.center();
     let box_rect = Rect::from_min_size(

@@ -44,7 +44,9 @@ pub fn generate_curl_noise_texture(
                     - (value_noise_3d(fx, fy + eps, fz) - value_noise_3d(fx, fy - eps, fz));
 
                 // Normalize and pack into [0, 1] range (shader unpacks with * 2 - 1)
-                let len = (curl_x * curl_x + curl_y * curl_y + curl_z * curl_z).sqrt().max(0.001);
+                let len = (curl_x * curl_x + curl_y * curl_y + curl_z * curl_z)
+                    .sqrt()
+                    .max(0.001);
                 let nx = (curl_x / len) * 0.5 + 0.5;
                 let ny = (curl_y / len) * 0.5 + 0.5;
                 let nz = (curl_z / len) * 0.5 + 0.5;
@@ -155,9 +157,11 @@ fn value_noise_3d(x: f32, y: f32, z: f32) -> f32 {
 }
 
 fn hash_float(x: i32, y: i32, z: i32) -> f32 {
-    let h = hash_int(x.wrapping_mul(374761393)
-        .wrapping_add(y.wrapping_mul(668265263))
-        .wrapping_add(z.wrapping_mul(1274126177)));
+    let h = hash_int(
+        x.wrapping_mul(374761393)
+            .wrapping_add(y.wrapping_mul(668265263))
+            .wrapping_add(z.wrapping_mul(1274126177)),
+    );
     (h as u32 as f32) / (u32::MAX as f32)
 }
 

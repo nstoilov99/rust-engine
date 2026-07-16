@@ -30,8 +30,7 @@ impl GamePlugin for ClientGamePlugin {
         schedule.add_system_described_with_criteria(
             GameCommandExecutor,
             Stage::PostUpdate,
-            SystemDescriptor::new("GameCommandExecutor")
-                .writes_resource::<GameCommandBuffer>(),
+            SystemDescriptor::new("GameCommandExecutor").writes_resource::<GameCommandBuffer>(),
             RunIfPlaying,
         );
     }

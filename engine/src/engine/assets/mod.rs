@@ -29,8 +29,8 @@ pub use dependencies::{AssetDependencies, DependencyStats};
 pub use handle::{AssetId, Handle};
 #[cfg(feature = "editor")]
 pub use hot_reload::{HotReloadWatcher, ReloadEvent};
-pub use metadata::AssetMetadata;
 pub use mesh_import::{MeshImportMeta, MeshImportSettings, UpAxis};
+pub use metadata::AssetMetadata;
 pub use model_loader::{
     load_gltf, load_gltf_from_bytes, load_model, load_model_from_bytes, ImportedMaterial,
     LoadedMesh, Model, VertexBoneData,

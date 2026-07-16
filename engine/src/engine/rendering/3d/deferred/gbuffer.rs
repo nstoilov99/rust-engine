@@ -10,12 +10,12 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 /// G-Buffer attachments
 pub struct GBuffer {
-    pub position: Arc<ImageView>,  // RT0: RGB16F (world position)
-    pub normal: Arc<ImageView>,    // RT1: RGB16F (world normal)
-    pub albedo: Arc<ImageView>,    // RT2: RGBA8 (albedo + roughness)
-    pub material: Arc<ImageView>,  // RT3: RGBA8 (metallic, AO, etc.)
-    pub emissive: Arc<ImageView>,  // RT4: R11G11B10_UFLOAT (emissive)
-    pub depth: Arc<ImageView>,     // Depth buffer
+    pub position: Arc<ImageView>, // RT0: RGB16F (world position)
+    pub normal: Arc<ImageView>,   // RT1: RGB16F (world normal)
+    pub albedo: Arc<ImageView>,   // RT2: RGBA8 (albedo + roughness)
+    pub material: Arc<ImageView>, // RT3: RGBA8 (metallic, AO, etc.)
+    pub emissive: Arc<ImageView>, // RT4: R11G11B10_UFLOAT (emissive)
+    pub depth: Arc<ImageView>,    // Depth buffer
     pub framebuffer: Arc<Framebuffer>,
     pub render_pass: Arc<RenderPass>,
 }

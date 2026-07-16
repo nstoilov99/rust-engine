@@ -59,7 +59,8 @@ impl<'a> PassBuilder<'a> {
 }
 
 pub struct PassContext<'a> {
-    pub builder: &'a mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    pub builder:
+        &'a mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     pub resources: &'a ResourceTable,
 }
 

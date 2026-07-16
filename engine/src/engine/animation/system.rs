@@ -49,7 +49,10 @@ impl System for AnimationUpdateSystem {
                 let t = fade.blend_weight();
 
                 // Blend from snapshot → newly sampled transforms
-                let bone_count = skeleton.local_transforms.len().min(fade.from_transforms.len());
+                let bone_count = skeleton
+                    .local_transforms
+                    .len()
+                    .min(fade.from_transforms.len());
                 for i in 0..bone_count {
                     skeleton.local_transforms[i] =
                         fade.from_transforms[i].blend(&skeleton.local_transforms[i], t);

@@ -20,15 +20,17 @@ use crusty_gui::id::Id;
 use crusty_gui::input::MouseButton;
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureId};
-use crusty_gui::widgets::{show_tooltip_for, CollapsingHeader, ComboBox, Label, ScrollArea, TextEdit};
+use crusty_gui::widgets::{
+    show_tooltip_for, CollapsingHeader, ComboBox, Label, ScrollArea, TextEdit,
+};
 use glam::Vec3;
 
 use super::asset_browser::{AssetBrowserPanel, AssetFilter};
 use super::asset_browser_crusty::DragAsset;
 use super::mesh_editor::{MeshEditorData, MeshEditorPanel, MeshPreviewState};
 use crate::engine::assets::asset_type::AssetType;
-use crate::engine::assets::AssetId;
 use crate::engine::assets::mesh_import::MaterialSlot;
+use crate::engine::assets::AssetId;
 
 const TOOLBAR_H: f32 = 28.0;
 const DETAILS_W: f32 = 300.0;
@@ -95,9 +97,20 @@ pub fn mesh_editor_panel(ui: &mut Ui, tab_rect: Rect, ctx: MeshEditorPanelCtx) {
         toolbar(ui, toolbar_rect, s, data);
 
         let details_w = (DETAILS_W * s).min(rect.width() * 0.5);
-        let details_rect =
-            Rect::from_min_max(Pos2::new(rect.max.x - details_w, toolbar_rect.max.y), rect.max);
-        details(ui, details_rect, s, panel_id, data, asset_browser, icons, float_thumbs);
+        let details_rect = Rect::from_min_max(
+            Pos2::new(rect.max.x - details_w, toolbar_rect.max.y),
+            rect.max,
+        );
+        details(
+            ui,
+            details_rect,
+            s,
+            panel_id,
+            data,
+            asset_browser,
+            icons,
+            float_thumbs,
+        );
 
         let preview_rect = Rect::from_min_max(
             Pos2::new(rect.min.x, toolbar_rect.max.y),
@@ -145,7 +158,8 @@ fn toolbar(ui: &mut Ui, rect: Rect, s: f32, data: &MeshEditorData) {
     x += w + 6.0 * s;
 
     if data.dirty {
-        ui.painter().text(Pos2::new(x, text_y), "*", font, DIRTY_STAR, None);
+        ui.painter()
+            .text(Pos2::new(x, text_y), "*", font, DIRTY_STAR, None);
     }
 }
 
@@ -171,120 +185,130 @@ fn details(
         stroke,
     );
 
-    let save_bar = Rect::from_min_max(
-        Pos2::new(rect.min.x, rect.max.y - SAVE_BAR_H * s),
-        rect.max,
-    );
+    let save_bar = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - SAVE_BAR_H * s), rect.max);
     let body_rect = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, save_bar.min.y));
 
     let opts = UiOptions {
         padding: Vec2::new(8.0 * s, 6.0 * s),
         spacing: 4.0 * s,
     };
-    ui.run_at(body_rect, Direction::TopDown, panel_id.with("details"), opts, |ui| {
-        let style = ui.style();
-        let heading = style.fonts.title;
-        let small = style.fonts.small;
-        let dim = weak(ui);
+    ui.run_at(
+        body_rect,
+        Direction::TopDown,
+        panel_id.with("details"),
+        opts,
+        |ui| {
+            let style = ui.style();
+            let heading = style.fonts.title;
+            let small = style.fonts.small;
+            let dim = weak(ui);
 
-        // Header: filename + dirty star.
-        let filename = filename_of(&data.mesh_path);
-        ui.horizontal(|ui| {
-            Label::new(filename).size(heading).show(ui);
-            if data.dirty {
-                Label::new("*").size(heading).color(DIRTY_STAR).show(ui);
-            }
-        });
-        Label::new(data.mesh_path.clone()).size(small).color(dim).show(ui);
-        ui.separator();
-
-        // "Material Slots: N" + add-circle button, right-aligned.
-        let font = style.fonts.body;
-        let row_h = 20.0 * s;
-        let row = ui.allocate(Vec2::new(ui.available_size().x, row_h));
-        ui.painter().text(
-            Pos2::new(row.min.x, row.center().y - font * 1.25 * 0.5),
-            &format!("Material Slots: {}", data.meta.material_slots.len()),
-            font,
-            style.palette.text_dim,
-            None,
-        );
-        let add_rect = Rect::from_min_size(
-            Pos2::new(row.max.x - row_h, row.min.y),
-            Vec2::splat(row_h),
-        );
-        if icon_button(
-            ui,
-            panel_id.with("add_slot"),
-            add_rect,
-            s,
-            icons.get("add-circle").copied(),
-            "+",
-            true,
-            "Add material slot",
-        ) {
-            let idx = data.meta.material_slots.len();
-            data.meta.material_slots.push(MaterialSlot {
-                name: format!("Slot {}", idx),
-                material_path: String::new(),
+            // Header: filename + dirty star.
+            let filename = filename_of(&data.mesh_path);
+            ui.horizontal(|ui| {
+                Label::new(filename).size(heading).show(ui);
+                if data.dirty {
+                    Label::new("*").size(heading).color(DIRTY_STAR).show(ui);
+                }
             });
-            data.dirty = true;
-        }
-
-        if !data.meta.source.is_empty() {
-            Label::new(format!("Source: {}", data.meta.source))
+            Label::new(data.mesh_path.clone())
                 .size(small)
                 .color(dim)
                 .show(ui);
-        }
-        ui.separator();
+            ui.separator();
 
-        // Slots the mesh was imported with can't be removed; extras can.
-        let floor = data
-            .preview
-            .as_ref()
-            .map(|p| p.mesh_indices.len())
-            .filter(|n| *n > 0);
+            // "Material Slots: N" + add-circle button, right-aligned.
+            let font = style.fonts.body;
+            let row_h = 20.0 * s;
+            let row = ui.allocate(Vec2::new(ui.available_size().x, row_h));
+            ui.painter().text(
+                Pos2::new(row.min.x, row.center().y - font * 1.25 * 0.5),
+                &format!("Material Slots: {}", data.meta.material_slots.len()),
+                font,
+                style.palette.text_dim,
+                None,
+            );
+            let add_rect =
+                Rect::from_min_size(Pos2::new(row.max.x - row_h, row.min.y), Vec2::splat(row_h));
+            if icon_button(
+                ui,
+                panel_id.with("add_slot"),
+                add_rect,
+                s,
+                icons.get("add-circle").copied(),
+                "+",
+                true,
+                "Add material slot",
+            ) {
+                let idx = data.meta.material_slots.len();
+                data.meta.material_slots.push(MaterialSlot {
+                    name: format!("Slot {}", idx),
+                    material_path: String::new(),
+                });
+                data.dirty = true;
+            }
 
-        let avail_h = ui.available_size().y;
-        ScrollArea::new(avail_h).auto_shrink(false).inset(0.0).spacing(4.0 * s).show(ui, |ui| {
-            if data.meta.material_slots.is_empty() {
-                Label::new("No material slots. Re-import with materials enabled.")
+            if !data.meta.source.is_empty() {
+                Label::new(format!("Source: {}", data.meta.source))
+                    .size(small)
                     .color(dim)
                     .show(ui);
-            } else {
-                let mut changed = false;
-                let mut remove: Option<usize> = None;
-                for (i, slot) in data.meta.material_slots.iter_mut().enumerate() {
-                    let title = format!("[{}] {}", i, slot.name);
-                    let removable = floor.is_some_and(|n| i >= n);
-                    CollapsingHeader::new(title).default_open(true).show(ui, |ui| {
-                        let act = slot_card(
-                            ui,
-                            panel_id.with(("slot", i)),
-                            s,
-                            slot,
-                            asset_browser,
-                            icons,
-                            float_thumbs,
-                            removable,
-                        );
-                        changed |= act.changed;
-                        if act.remove {
-                            remove = Some(i);
-                        }
-                    });
-                }
-                if let Some(i) = remove {
-                    data.meta.material_slots.remove(i);
-                    changed = true;
-                }
-                if changed {
-                    data.dirty = true;
-                }
             }
-        });
-    });
+            ui.separator();
+
+            // Slots the mesh was imported with can't be removed; extras can.
+            let floor = data
+                .preview
+                .as_ref()
+                .map(|p| p.mesh_indices.len())
+                .filter(|n| *n > 0);
+
+            let avail_h = ui.available_size().y;
+            ScrollArea::new(avail_h)
+                .auto_shrink(false)
+                .inset(0.0)
+                .spacing(4.0 * s)
+                .show(ui, |ui| {
+                    if data.meta.material_slots.is_empty() {
+                        Label::new("No material slots. Re-import with materials enabled.")
+                            .color(dim)
+                            .show(ui);
+                    } else {
+                        let mut changed = false;
+                        let mut remove: Option<usize> = None;
+                        for (i, slot) in data.meta.material_slots.iter_mut().enumerate() {
+                            let title = format!("[{}] {}", i, slot.name);
+                            let removable = floor.is_some_and(|n| i >= n);
+                            CollapsingHeader::new(title)
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    let act = slot_card(
+                                        ui,
+                                        panel_id.with(("slot", i)),
+                                        s,
+                                        slot,
+                                        asset_browser,
+                                        icons,
+                                        float_thumbs,
+                                        removable,
+                                    );
+                                    changed |= act.changed;
+                                    if act.remove {
+                                        remove = Some(i);
+                                    }
+                                });
+                        }
+                        if let Some(i) = remove {
+                            data.meta.material_slots.remove(i);
+                            changed = true;
+                        }
+                        if changed {
+                            data.dirty = true;
+                        }
+                    }
+                });
+        },
+    );
 
     save_bar_ui(ui, save_bar, s, panel_id, data, icons);
 }
@@ -331,10 +355,18 @@ fn save_bar_ui(
         style.palette.surface
     };
     ui.painter().rect_filled(btn, 4.0, fill);
-    let stroke = if enabled { style.palette.accent } else { style.palette.stroke };
+    let stroke = if enabled {
+        style.palette.accent
+    } else {
+        style.palette.stroke
+    };
     ui.painter().rect_stroke(btn, 4.0, 1.0, stroke);
 
-    let icon_key = if data.dirty { "save-changes" } else { "save-check" };
+    let icon_key = if data.dirty {
+        "save-changes"
+    } else {
+        "save-check"
+    };
     let tint = if enabled { gray(230) } else { gray(120) };
     let icon_rect = Rect::from_min_size(
         Pos2::new(btn.min.x + pad, (btn.center().y - icon_px * 0.5).round()),
@@ -357,7 +389,11 @@ fn save_bar_ui(
         None,
     );
     if resp.hovered {
-        let tip = if data.dirty { "Save changes" } else { "All changes saved" };
+        let tip = if data.dirty {
+            "Save changes"
+        } else {
+            "All changes saved"
+        };
         show_tooltip_for(ui, btn, tip);
     }
 
@@ -429,7 +465,13 @@ fn slot_card(
         Pos2::new(rect.min.x + 6.0 * s, rect.min.y + 6.0 * s),
         Vec2::splat(THUMB * s),
     );
-    draw_material_thumb(ui, thumb_rect, &slot.material_path, asset_browser, float_thumbs);
+    draw_material_thumb(
+        ui,
+        thumb_rect,
+        &slot.material_path,
+        asset_browser,
+        float_thumbs,
+    );
 
     // ── Right column: dropdown on top, undo/trash icons below.
     let col = Rect::from_min_max(
@@ -521,7 +563,10 @@ fn draw_material_thumb(
                 let font = ui.style().fonts.small;
                 let w = ui.painter().measure_text("None", font, None).x;
                 ui.painter().text(
-                    Pos2::new(rect.center().x - w * 0.5, rect.center().y - font * 1.25 * 0.5),
+                    Pos2::new(
+                        rect.center().x - w * 0.5,
+                        rect.center().y - font * 1.25 * 0.5,
+                    ),
                     "None",
                     font,
                     gray(120),
@@ -623,12 +668,23 @@ fn material_picker(
             let mut chosen: Option<String> = None;
 
             // "None" entry.
-            if picker_row(ui, id.with("none"), None, "None", material_path.is_empty(), 0.0) {
+            if picker_row(
+                ui,
+                id.with("none"),
+                None,
+                "None",
+                material_path.is_empty(),
+                0.0,
+            ) {
                 chosen = Some(String::new());
             }
 
             let filter = AssetFilter {
-                search_text: if search.is_empty() { None } else { Some(search) },
+                search_text: if search.is_empty() {
+                    None
+                } else {
+                    Some(search)
+                },
                 asset_types: Some(vec![AssetType::Material]),
                 include_subfolders: true,
                 ..Default::default()
@@ -647,7 +703,10 @@ fn material_picker(
                 })
                 .collect();
             if results.is_empty() {
-                Label::new("No materials found").size(small).color(dim).show(ui);
+                Label::new("No materials found")
+                    .size(small)
+                    .color(dim)
+                    .show(ui);
             }
 
             let indent = if tree_mode { 14.0 } else { 0.0 };
@@ -657,8 +716,15 @@ fn material_picker(
             let mut last_folder: Option<String> = None;
             for (asset_id, name, path, folder) in results {
                 if tree_mode && last_folder.as_deref() != Some(folder.as_str()) {
-                    let label = if folder.is_empty() { "/" } else { folder.as_str() };
-                    Label::new(label.to_string()).size(small).color(dim).show(ui);
+                    let label = if folder.is_empty() {
+                        "/"
+                    } else {
+                        folder.as_str()
+                    };
+                    Label::new(label.to_string())
+                        .size(small)
+                        .color(dim)
+                        .show(ui);
                     last_folder = Some(folder.clone());
                 }
                 let thumb = {
@@ -824,7 +890,8 @@ fn icon_button_impl(
     };
     ui.painter().rect_filled(rect, 4.0, fill);
     if on {
-        ui.painter().rect_stroke(rect, 4.0, 1.0, style.palette.accent);
+        ui.painter()
+            .rect_stroke(rect, 4.0, 1.0, style.palette.accent);
     } else if hovered {
         ui.painter().rect_stroke(rect, 4.0, 1.0, gray(100));
     }
@@ -856,7 +923,10 @@ fn icon_button_impl(
             let font = style.fonts.body;
             let w = ui.painter().measure_text(fallback, font, None).x;
             ui.painter().text(
-                Pos2::new(rect.center().x - w * 0.5, rect.center().y - font * 1.25 * 0.5),
+                Pos2::new(
+                    rect.center().x - w * 0.5,
+                    rect.center().y - font * 1.25 * 0.5,
+                ),
                 fallback,
                 font,
                 tint,
@@ -894,7 +964,13 @@ fn preview(
     if preview.mesh_indices.is_empty() {
         let c = rect.center();
         centered_text_at(ui, Pos2::new(c.x, c.y - 12.0), "3D Preview", 14.0, dim);
-        centered_text_at(ui, Pos2::new(c.x, c.y + 8.0), "Mesh not loaded on GPU", 11.0, dim);
+        centered_text_at(
+            ui,
+            Pos2::new(c.x, c.y + 8.0),
+            "Mesh not loaded on GPU",
+            11.0,
+            dim,
+        );
         return;
     }
     let Some(tex) = texture else {

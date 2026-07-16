@@ -14,7 +14,6 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::sync::GpuFuture;
 use vulkano::pipeline::graphics::{
     color_blend::{ColorBlendAttachmentState, ColorBlendState},
     input_assembly::InputAssemblyState,
@@ -27,6 +26,7 @@ use vulkano::pipeline::graphics::{
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
+use vulkano::sync::GpuFuture;
 
 pub mod ssao_fullscreen_vs {
     vulkano_shaders::shader! {
@@ -169,9 +169,7 @@ impl SsaoPass {
             let vs = ssao_fullscreen_vs::load(device.clone())?
                 .entry_point("main")
                 .unwrap();
-            let fs = ssao_fs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
+            let fs = ssao_fs::load(device.clone())?.entry_point("main").unwrap();
             let stages = [
                 PipelineShaderStageCreateInfo::new(vs),
                 PipelineShaderStageCreateInfo::new(fs),
@@ -181,8 +179,7 @@ impl SsaoPass {
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                     .into_pipeline_layout_create_info(device.clone())?,
             )?;
-            let subpass =
-                vulkano::render_pass::Subpass::from(ssao_render_pass.clone(), 0).unwrap();
+            let subpass = vulkano::render_pass::Subpass::from(ssao_render_pass.clone(), 0).unwrap();
             ssao_pipeline = GraphicsPipeline::new(
                 device.clone(),
                 None,
@@ -228,8 +225,7 @@ impl SsaoPass {
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
                     .into_pipeline_layout_create_info(device.clone())?,
             )?;
-            let subpass =
-                vulkano::render_pass::Subpass::from(blur_render_pass.clone(), 0).unwrap();
+            let subpass = vulkano::render_pass::Subpass::from(blur_render_pass.clone(), 0).unwrap();
             blur_pipeline = GraphicsPipeline::new(
                 device,
                 None,
@@ -426,10 +422,8 @@ impl SsaoPass {
             queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
-        builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            staging,
-            image.clone(),
-        ))?;
+        builder
+            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(staging, image.clone()))?;
         builder
             .build()?
             .execute(queue)?

@@ -336,17 +336,26 @@ impl IconKind {
 
     /// All Chrome icon kinds.
     pub fn chrome_icons() -> impl Iterator<Item = IconKind> {
-        Self::ALL.iter().copied().filter(|k| k.class() == IconClass::Chrome)
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|k| k.class() == IconClass::Chrome)
     }
 
     /// All Typed icon kinds.
     pub fn typed_icons() -> impl Iterator<Item = IconKind> {
-        Self::ALL.iter().copied().filter(|k| k.class() == IconClass::Typed)
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|k| k.class() == IconClass::Typed)
     }
 
     /// All Severity icon kinds.
     pub fn severity_icons() -> impl Iterator<Item = IconKind> {
-        Self::ALL.iter().copied().filter(|k| k.class() == IconClass::Severity)
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|k| k.class() == IconClass::Severity)
     }
 
     /// Typed icons in a specific category.
@@ -470,12 +479,7 @@ impl IconRegistry {
     }
 
     /// Set a per-icon, per-state tint override.
-    pub fn set_icon_override(
-        &mut self,
-        kind: IconKind,
-        state: ChromeState,
-        color: Color,
-    ) {
+    pub fn set_icon_override(&mut self, kind: IconKind, state: ChromeState, color: Color) {
         self.palette.overrides.insert((kind, state), color);
     }
 
@@ -507,11 +511,11 @@ impl IconRegistry {
         state: ChromeState,
         default_tint: Color,
     ) -> Color {
-        if let Some(&c) = self.palette.panel_overrides.get(&(
-            panel.to_string(),
-            stem.to_string(),
-            state,
-        )) {
+        if let Some(&c) =
+            self.palette
+                .panel_overrides
+                .get(&(panel.to_string(), stem.to_string(), state))
+        {
             return c;
         }
         if state != ChromeState::Default {

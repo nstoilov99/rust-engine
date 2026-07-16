@@ -5,8 +5,8 @@ use super::geometry_pass::GeometryPass;
 use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
 use super::luminance_pass::{LuminancePass, LuminancePush};
-use super::shadow_pass::ShadowPass;
 use super::plankton::PlanktonSystem;
+use super::shadow_pass::ShadowPass;
 use super::ssao_pass::{SsaoPass, SsaoPushConstants};
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
@@ -14,8 +14,8 @@ use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
 use crate::engine::rendering::rendering_3d::material::{
-    create_default_texture, create_default_texture_with_format, PbrMaterial,
-    DEFAULT_ALBEDO_RGBA, DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
+    create_default_texture, create_default_texture_with_format, PbrMaterial, DEFAULT_ALBEDO_RGBA,
+    DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
 };
 use glam::{Mat4, Vec3, Vec4};
 use smallvec::smallvec;
@@ -464,19 +464,32 @@ impl DeferredRenderer {
         )?;
         // Albedo is a color texture → SRGB for automatic gamma decoding.
         let default_albedo = create_default_texture(
-            device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA,
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_ALBEDO_RGBA,
         )?;
         // Normal, metallic-roughness, and AO are data textures → UNORM (no gamma).
         let default_normal = create_default_texture_with_format(
-            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA,
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_NORMAL_RGBA,
             Format::R8G8B8A8_UNORM,
         )?;
         let default_mr = create_default_texture_with_format(
-            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA,
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_METALLIC_ROUGHNESS_RGBA,
             Format::R8G8B8A8_UNORM,
         )?;
         let default_ao = create_default_texture_with_format(
-            allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA,
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_AO_RGBA,
             Format::R8G8B8A8_UNORM,
         )?;
         let geom_pipeline_layout = pipeline_registry
@@ -641,8 +654,7 @@ impl DeferredRenderer {
             self.hdr_target.clone(),
         )?;
 
-        self.luminance_pass
-            .resize(self.allocator.clone())?;
+        self.luminance_pass.resize(self.allocator.clone())?;
         self.luminance_pass.prepare_sets(
             self.descriptor_set_allocator.clone(),
             self.hdr_target.clone(),
@@ -708,8 +720,12 @@ impl DeferredRenderer {
         // update_frame still runs so pool eviction/absence counters keep progressing.
         if !plankton_emitters.is_empty() {
             let vp_inverse = view_proj.inverse();
-            let cam_right = (vp_inverse * Vec4::new(1.0, 0.0, 0.0, 0.0)).truncate().normalize();
-            let cam_up = (vp_inverse * Vec4::new(0.0, 1.0, 0.0, 0.0)).truncate().normalize();
+            let cam_right = (vp_inverse * Vec4::new(1.0, 0.0, 0.0, 0.0))
+                .truncate()
+                .normalize();
+            let cam_up = (vp_inverse * Vec4::new(0.0, 1.0, 0.0, 0.0))
+                .truncate()
+                .normalize();
             let vp_cols = view_proj.to_cols_array_2d();
             self.plankton_system.update_frame(
                 &mut builder,
@@ -717,7 +733,7 @@ impl DeferredRenderer {
                 &vp_cols,
                 cam_right.into(),
                 cam_up.into(),
-                0.1,  // near plane (TODO: pass from camera)
+                0.1,    // near plane (TODO: pass from camera)
                 1000.0, // far plane (TODO: pass from camera)
             )?;
         } else {
@@ -871,16 +887,16 @@ impl DeferredRenderer {
                                     Some([0.0, 0.0, 0.0, 0.0].into()), // emissive
                                     Some(1.0.into()),
                                 ],
-                                ..RenderPassBeginInfo::framebuffer(
-                                    self.gbuffer.framebuffer.clone(),
-                                )
+                                ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
                             },
                             SubpassBeginInfo {
                                 contents: SubpassContents::Inline,
                                 ..Default::default()
                             },
                         )?
-                        .bind_pipeline_graphics(self.geometry_pass.pipeline(&self.pipeline_registry))?
+                        .bind_pipeline_graphics(
+                            self.geometry_pass.pipeline(&self.pipeline_registry),
+                        )?
                         .set_viewport(0, smallvec![viewport.clone()])?
                         .set_scissor(0, smallvec![scissor])?;
 
@@ -924,11 +940,7 @@ impl DeferredRenderer {
                             builder
                                 .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
                                 .bind_index_buffer(mesh.index_buffer.clone())?
-                                .push_constants(
-                                    geom_layout.clone(),
-                                    0,
-                                    mesh.push_constants,
-                                )?;
+                                .push_constants(geom_layout.clone(), 0, mesh.push_constants)?;
                             unsafe {
                                 builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
                             }
@@ -971,7 +983,9 @@ impl DeferredRenderer {
                                 ..Default::default()
                             },
                         )?
-                        .bind_pipeline_graphics(self.lighting_pass.pipeline(&self.pipeline_registry))?
+                        .bind_pipeline_graphics(
+                            self.lighting_pass.pipeline(&self.pipeline_registry),
+                        )?
                         .set_viewport(0, smallvec![hdr_viewport])?
                         .set_scissor(0, smallvec![hdr_scissor])?
                         .bind_descriptor_sets(
@@ -1090,12 +1104,8 @@ impl DeferredRenderer {
                         };
 
                         let grid_extent_size = 500.0;
-                        let grid_push = GridPushConstants::new(
-                            view_proj,
-                            camera_pos,
-                            grid_extent_size,
-                            100.0,
-                        );
+                        let grid_push =
+                            GridPushConstants::new(view_proj, camera_pos, grid_extent_size, 100.0);
 
                         builder
                             .begin_render_pass(
@@ -1151,16 +1161,10 @@ impl DeferredRenderer {
 
                         if let Some(ref depth_buf) = debug_draw.depth_buffer {
                             builder
-                                .bind_pipeline_graphics(
-                                    self.debug_draw_pass.depth_pipeline(),
-                                )?
+                                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
                                 .set_viewport(0, smallvec![debug_viewport.clone()])?
                                 .set_scissor(0, smallvec![debug_scissor])?
-                                .push_constants(
-                                    self.debug_draw_pass.layout(),
-                                    0,
-                                    debug_push,
-                                )?
+                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
                                 .bind_vertex_buffers(0, depth_buf.clone())?;
                             unsafe {
                                 builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
@@ -1169,16 +1173,10 @@ impl DeferredRenderer {
 
                         if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
                             builder
-                                .bind_pipeline_graphics(
-                                    self.debug_draw_pass.overlay_pipeline(),
-                                )?
+                                .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?
                                 .set_viewport(0, smallvec![debug_viewport])?
                                 .set_scissor(0, smallvec![debug_scissor])?
-                                .push_constants(
-                                    self.debug_draw_pass.layout(),
-                                    0,
-                                    debug_push,
-                                )?
+                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
                                 .bind_vertex_buffers(0, overlay_buf.clone())?;
                             unsafe {
                                 builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;

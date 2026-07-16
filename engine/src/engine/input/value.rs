@@ -63,7 +63,13 @@ impl InputValue {
     /// Get as f32 (Digital: 0/1, Axis1D: value, Axis2D/3D: length).
     pub fn as_f32(&self) -> f32 {
         match self {
-            InputValue::Digital(v) => if *v { 1.0 } else { 0.0 },
+            InputValue::Digital(v) => {
+                if *v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             InputValue::Axis1D(v) => *v,
             InputValue::Axis2D(v) => v.length(),
             InputValue::Axis3D(v) => v.length(),
@@ -114,10 +120,22 @@ mod tests {
 
     #[test]
     fn zero_values() {
-        assert_eq!(InputValue::zero(InputValueType::Digital), InputValue::Digital(false));
-        assert_eq!(InputValue::zero(InputValueType::Axis1D), InputValue::Axis1D(0.0));
-        assert_eq!(InputValue::zero(InputValueType::Axis2D), InputValue::Axis2D(Vec2::ZERO));
-        assert_eq!(InputValue::zero(InputValueType::Axis3D), InputValue::Axis3D(Vec3::ZERO));
+        assert_eq!(
+            InputValue::zero(InputValueType::Digital),
+            InputValue::Digital(false)
+        );
+        assert_eq!(
+            InputValue::zero(InputValueType::Axis1D),
+            InputValue::Axis1D(0.0)
+        );
+        assert_eq!(
+            InputValue::zero(InputValueType::Axis2D),
+            InputValue::Axis2D(Vec2::ZERO)
+        );
+        assert_eq!(
+            InputValue::zero(InputValueType::Axis3D),
+            InputValue::Axis3D(Vec3::ZERO)
+        );
     }
 
     #[test]

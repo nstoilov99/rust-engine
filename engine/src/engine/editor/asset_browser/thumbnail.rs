@@ -29,7 +29,10 @@ impl RgbaImage {
     /// Wrap a raw RGBA8 pixel buffer. Copies the input.
     pub fn from_rgba_unmultiplied(size: [usize; 2], rgba: &[u8]) -> Self {
         debug_assert_eq!(rgba.len(), size[0] * size[1] * 4);
-        Self { size, rgba: rgba.to_vec() }
+        Self {
+            size,
+            rgba: rgba.to_vec(),
+        }
     }
 }
 
@@ -163,12 +166,14 @@ impl ThumbnailCache {
                     self.crusty_rgba.insert(result.id, (rgba.clone(), w, h));
                 }
                 self.crusty_uploading.insert(result.id);
-                out.push(crate::engine::rendering::frame_packet::CrustyTextureUpload {
-                    id: result.id,
-                    rgba,
-                    width: w,
-                    height: h,
-                });
+                out.push(
+                    crate::engine::rendering::frame_packet::CrustyTextureUpload {
+                        id: result.id,
+                        rgba,
+                        width: w,
+                        height: h,
+                    },
+                );
             }
         }
         out
@@ -284,9 +289,7 @@ fn generate_thumbnail(
         AssetType::Model | AssetType::Mesh => {
             generate_model_thumbnail(request.id, &full_path, gpu_ctx, renderer)
         }
-        AssetType::Animation => {
-            generate_anim_thumbnail(request.id, &full_path, gpu_ctx, renderer)
-        }
+        AssetType::Animation => generate_anim_thumbnail(request.id, &full_path, gpu_ctx, renderer),
         AssetType::Material => generate_material_thumbnail(request.id, &full_path),
         _ => ThumbnailResult {
             id: request.id,
@@ -304,8 +307,7 @@ fn generate_primitive_thumbnail(
 ) -> ThumbnailResult {
     use crate::engine::assets::model_loader::{compute_bounding_sphere, LoadedMesh, Model};
     use crate::engine::rendering::rendering_3d::mesh::{
-        create_cube, create_plane, create_sphere, PRIMITIVE_CUBE, PRIMITIVE_PLANE,
-        PRIMITIVE_SPHERE,
+        create_cube, create_plane, create_sphere, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
     };
 
     let (vertices, indices) = match prim_path {
@@ -390,8 +392,8 @@ fn generate_model_thumbnail(
     gpu_ctx: &Option<super::thumbnail_renderer::GpuThumbnailContext>,
     renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
 ) -> ThumbnailResult {
-    use crate::engine::assets::model_loader::load_model;
     use super::thumbnail_renderer::ThumbnailRenderer;
+    use crate::engine::assets::model_loader::load_model;
 
     let path_str = path.to_string_lossy();
 
@@ -460,10 +462,7 @@ fn generate_anim_thumbnail(
     // Find sibling .mesh file (same stem, different extension)
     let mesh_path = anim_path.with_extension("mesh");
     if !mesh_path.exists() {
-        log::warn!(
-            "Thumbnail: no sibling .mesh for animation {:?}",
-            anim_path
-        );
+        log::warn!("Thumbnail: no sibling .mesh for animation {:?}", anim_path);
         return ThumbnailResult {
             id,
             image_data: Some(create_model_icon_image()),
@@ -475,7 +474,11 @@ fn generate_anim_thumbnail(
     let mut model = match load_model(&mesh_str) {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("Thumbnail: failed to load mesh for anim {:?}: {}", mesh_path, e);
+            log::warn!(
+                "Thumbnail: failed to load mesh for anim {:?}: {}",
+                mesh_path,
+                e
+            );
             return ThumbnailResult {
                 id,
                 image_data: Some(create_model_icon_image()),
@@ -625,13 +628,8 @@ fn apply_first_frame_pose(
             .first()
             .map(|k| k.1)
             .unwrap_or(Quat::IDENTITY);
-        let s = channel
-            .scale_keys
-            .first()
-            .map(|k| k.1)
-            .unwrap_or(Vec3::ONE);
-        local_transforms[channel.bone_index] =
-            Mat4::from_scale_rotation_translation(s, r, t);
+        let s = channel.scale_keys.first().map(|k| k.1).unwrap_or(Vec3::ONE);
+        local_transforms[channel.bone_index] = Mat4::from_scale_rotation_translation(s, r, t);
     }
 
     // Compute world transforms by walking the parent hierarchy (bones are sorted parent-first)
@@ -776,10 +774,30 @@ fn create_model_icon_image() -> RgbaImage {
     };
 
     for i in 0..cube_size {
-        put(&mut rgba_data, center - cube_size / 2 + i, center - cube_size / 2, fg);
-        put(&mut rgba_data, center - cube_size / 2 + i, center + cube_size / 2, fg);
-        put(&mut rgba_data, center - cube_size / 2, center - cube_size / 2 + i, fg);
-        put(&mut rgba_data, center + cube_size / 2, center - cube_size / 2 + i, fg);
+        put(
+            &mut rgba_data,
+            center - cube_size / 2 + i,
+            center - cube_size / 2,
+            fg,
+        );
+        put(
+            &mut rgba_data,
+            center - cube_size / 2 + i,
+            center + cube_size / 2,
+            fg,
+        );
+        put(
+            &mut rgba_data,
+            center - cube_size / 2,
+            center - cube_size / 2 + i,
+            fg,
+        );
+        put(
+            &mut rgba_data,
+            center + cube_size / 2,
+            center - cube_size / 2 + i,
+            fg,
+        );
     }
 
     RgbaImage::from_rgba_unmultiplied([size, size], &rgba_data)

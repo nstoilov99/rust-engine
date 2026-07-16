@@ -14,9 +14,7 @@ use crusty_gui::id::Id;
 use crusty_gui::input::{Key, Modifiers, Shortcut};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureId};
-use crusty_gui::widgets::{
-    Button, ComboBox, ScrollArea, Slider, Splitter, TextEdit, Window,
-};
+use crusty_gui::widgets::{Button, ComboBox, ScrollArea, Slider, Splitter, TextEdit, Window};
 
 use super::asset_browser::{
     AssetBrowserEvent, AssetBrowserPanel, AssetDragPayload, DeleteConfirmation, DeleteTarget,
@@ -196,11 +194,7 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: Rect, ctx: AssetBrowserPanelCt
                     ..
                 } = &mut *panel;
                 for meta in registry.query(&filter) {
-                    let ext = meta
-                        .path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
+                    let ext = meta.path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     let label = if ext.is_empty() {
                         meta.display_name.clone()
                     } else {
@@ -279,15 +273,16 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: Rect, ctx: AssetBrowserPanelCt
 fn sort_rows(rows: &mut [AssetRow], sort: ListSortState) {
     rows.sort_by(|a, b| {
         let ord = match sort.col {
-            1 => a
-                .asset_type
-                .display_name()
-                .cmp(b.asset_type.display_name()),
+            1 => a.asset_type.display_name().cmp(b.asset_type.display_name()),
             2 => a.size.cmp(&b.size),
             3 => a.modified.cmp(&b.modified),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         };
-        if sort.asc { ord } else { ord.reverse() }
+        if sort.asc {
+            ord
+        } else {
+            ord.reverse()
+        }
     });
 }
 
@@ -387,9 +382,7 @@ fn handle_keyboard(ui: &mut Ui, panel: &mut AssetBrowserPanel, visible: &[AssetI
         }
     }
 
-    if ui.ctx().input.key_pressed(Key::Backspace)
-        && !panel.current_folder.as_os_str().is_empty()
-    {
+    if ui.ctx().input.key_pressed(Key::Backspace) && !panel.current_folder.as_os_str().is_empty() {
         if let Some(parent) = panel.current_folder.parent() {
             let parent_path = parent.to_path_buf();
             panel.current_folder = parent_path.clone();
@@ -476,8 +469,10 @@ fn icon_toggle(
             gray(180)
         };
         let c = rect.center();
-        let image_rect =
-            Rect::from_min_max(Pos2::new(c.x - 8.0, c.y - 8.0), Pos2::new(c.x + 8.0, c.y + 8.0));
+        let image_rect = Rect::from_min_max(
+            Pos2::new(c.x - 8.0, c.y - 8.0),
+            Pos2::new(c.x + 8.0, c.y + 8.0),
+        );
         ui.ctx_mut().paint.push(PaintCmd::Image {
             rect: image_rect,
             uv_min: Pos2::new(0.0, 0.0),
@@ -487,7 +482,9 @@ fn icon_toggle(
         });
         resp
     } else {
-        Button::new(fallback).exact_size(Vec2::new(22.0, 20.0)).show(ui)
+        Button::new(fallback)
+            .exact_size(Vec2::new(22.0, 20.0))
+            .show(ui)
     };
     if resp.hovered {
         ui.tooltip_for(resp.rect, tooltip);
@@ -499,8 +496,12 @@ fn toolbar_vsep(ui: &mut Ui) {
     let stroke = ui.style().palette.stroke;
     let r = ui.allocate(Vec2::new(1.0, 20.0));
     let x = r.center().x;
-    ui.painter()
-        .line_segment(Pos2::new(x, r.min.y + 2.0), Pos2::new(x, r.max.y - 2.0), 1.0, stroke);
+    ui.painter().line_segment(
+        Pos2::new(x, r.min.y + 2.0),
+        Pos2::new(x, r.max.y - 2.0),
+        1.0,
+        stroke,
+    );
 }
 
 fn render_toolbar(
@@ -613,12 +614,14 @@ fn render_toolbar(
     });
 
     // Right-aligned cluster: asset count + rescan.
-    let refresh_rect = Rect::from_center_size(
-        Pos2::new(row_right - 10.0, row_center_y),
-        Vec2::splat(20.0),
-    );
+    let refresh_rect =
+        Rect::from_center_size(Pos2::new(row_right - 10.0, row_center_y), Vec2::splat(20.0));
     let resp = ui.interact(Id::new("ab_refresh"), refresh_rect);
-    let color = if resp.hovered { Color::WHITE } else { gray(190) };
+    let color = if resp.hovered {
+        Color::WHITE
+    } else {
+        gray(190)
+    };
     let c = refresh_rect.center();
     ui.painter().circle_stroke(c, 6.0, 1.5, color);
     ui.painter().convex_polygon_filled(
@@ -694,7 +697,10 @@ fn render_breadcrumb(ui: &mut Ui, panel: &mut AssetBrowserPanel) {
             let slash = ui.allocate(Vec2::new(8.0, 20.0));
             let ssz = ui.painter().measure_text("/", small, None);
             ui.painter().text(
-                Pos2::new(slash.center().x - ssz.x * 0.5, slash.center().y - ssz.y * 0.5),
+                Pos2::new(
+                    slash.center().x - ssz.x * 0.5,
+                    slash.center().y - ssz.y * 0.5,
+                ),
                 "/",
                 small,
                 dim,
@@ -804,14 +810,23 @@ fn commit_folder_rename(panel: &mut AssetBrowserPanel, old_path: PathBuf, new_na
 
 // ─── folder tree pane ───────────────────────────────────────────────────
 
-fn render_folder_pane(ui: &mut Ui, panel: &mut AssetBrowserPanel, icons: &HashMap<String, TextureId>) {
+fn render_folder_pane(
+    ui: &mut Ui,
+    panel: &mut AssetBrowserPanel,
+    icons: &HashMap<String, TextureId>,
+) {
     ui.add_space(8.0);
     let top = ui.cursor().y;
     let heading = ui.style().fonts.title;
     let text_color = ui.style().palette.text_dim;
     let left = ui.available().min.x;
-    ui.painter()
-        .text(Pos2::new(left + 6.0, top + 4.0), "Folders", heading, text_color, None);
+    ui.painter().text(
+        Pos2::new(left + 6.0, top + 4.0),
+        "Folders",
+        heading,
+        text_color,
+        None,
+    );
     ui.add_space(26.0);
     ui.separator();
     ui.add_space(4.0);
@@ -884,23 +899,18 @@ fn render_folder_node(
             .is_some_and(|d| d.path == node.path);
 
         // Drop-target highlight (assets always, folders when valid).
-        let folder_drop_valid = ui.ctx().dnd.peek::<DragFolder>().is_some_and(|d| {
-            d.path != node.path && !node.path.starts_with(&d.path)
-        });
+        let folder_drop_valid = ui
+            .ctx()
+            .dnd
+            .peek::<DragFolder>()
+            .is_some_and(|d| d.path != node.path && !node.path.starts_with(&d.path));
         let asset_hover = ui.dnd_hovering::<DragAsset>(row_rect);
         let folder_hover = folder_drop_valid && ui.dnd_hovering::<DragFolder>(row_rect);
         if asset_hover || folder_hover {
-            ui.painter().rect_filled(
-                hl_rect,
-                2.0,
-                Color::from_srgb_u8(100, 180, 255, 60),
-            );
-            ui.painter().rect_stroke(
-                hl_rect,
-                2.0,
-                2.0,
-                Color::from_srgb_u8(100, 180, 255, 255),
-            );
+            ui.painter()
+                .rect_filled(hl_rect, 2.0, Color::from_srgb_u8(100, 180, 255, 60));
+            ui.painter()
+                .rect_stroke(hl_rect, 2.0, 2.0, Color::from_srgb_u8(100, 180, 255, 255));
         } else if is_selected {
             ui.painter().rect_filled(hl_rect, 2.0, sel_bg());
         } else if resp.hovered && !is_renaming {
@@ -920,7 +930,11 @@ fn render_folder_node(
             let ch_resp = ui.interact(row_id.with("chevron"), ch_rect);
             let c = ch_rect.center();
             let s = 3.5;
-            let color = if ch_resp.hovered { Color::WHITE } else { gray(190) };
+            let color = if ch_resp.hovered {
+                Color::WHITE
+            } else {
+                gray(190)
+            };
             let (a, m, b) = if is_expanded {
                 (
                     Pos2::new(c.x - s, c.y - s * 0.45),
@@ -952,10 +966,7 @@ fn render_folder_node(
             "folder"
         };
         let icon_x = left + indent + FOLDER_INDENT + 2.0;
-        let icon_rect = Rect::from_min_size(
-            Pos2::new(icon_x, center_y - 8.0),
-            Vec2::splat(16.0),
-        );
+        let icon_rect = Rect::from_min_size(Pos2::new(icon_x, center_y - 8.0), Vec2::splat(16.0));
         let tint = if is_selected { Color::WHITE } else { gray(200) };
         if let Some(&tex) = icons.get(icon_stem) {
             ui.ctx_mut().paint.push(PaintCmd::Image {
@@ -972,7 +983,10 @@ fn render_folder_node(
         if is_renaming {
             let edit_rect = Rect::from_min_max(
                 Pos2::new(label_x, row_rect.min.y + 1.0),
-                Pos2::new((label_x + 100.0).min(row_rect.max.x - 2.0), row_rect.max.y - 1.0),
+                Pos2::new(
+                    (label_x + 100.0).min(row_rect.max.x - 2.0),
+                    row_rect.max.y - 1.0,
+                ),
             );
             let current_name = node.name.clone();
             match rename_edit(
@@ -1017,9 +1031,7 @@ fn render_folder_node(
             panel.events.push(AssetBrowserEvent::AssetMoved {
                 id: drag.id,
                 old_path: drag.path.clone(),
-                new_path: node
-                    .path
-                    .join(drag.path.file_name().unwrap_or_default()),
+                new_path: node.path.join(drag.path.file_name().unwrap_or_default()),
             });
             panel.drag_payload = None;
         }
@@ -1101,7 +1113,9 @@ fn render_folder_node(
         if reveal {
             panel
                 .events
-                .push(AssetBrowserEvent::RevealFolderInExplorer { path: ctx_path.clone() });
+                .push(AssetBrowserEvent::RevealFolderInExplorer {
+                    path: ctx_path.clone(),
+                });
         }
         if delete {
             let full_path = panel.registry.root_path().join(&ctx_path);
@@ -1479,10 +1493,7 @@ fn render_list(
     let dim = ui.style().palette.text_dim;
     let mut x = header.min.x + 8.0;
     for (label, w, col) in LIST_COLS {
-        let cell = Rect::from_min_max(
-            Pos2::new(x, header.min.y),
-            Pos2::new(x + w, header.max.y),
-        );
+        let cell = Rect::from_min_max(Pos2::new(x, header.min.y), Pos2::new(x + w, header.max.y));
         let resp = ui.interact(Id::new("ab_list_header").with(col), cell);
         if resp.hovered {
             ui.painter().rect_filled(cell, 2.0, hover_bg());
@@ -1607,15 +1618,16 @@ fn render_list_row(
             RenameResult::Pending => {}
         }
     } else {
-        let color = if is_selected {
-            Color::WHITE
-        } else {
-            gray(220)
-        };
+        let color = if is_selected { Color::WHITE } else { gray(220) };
         let text = truncate_to_width(ui, &row.label, body, 200.0 - 20.0 - 4.0);
         let sz = ui.painter().measure_text(&text, body, None);
-        ui.painter()
-            .text(Pos2::new(name_x, center_y - sz.y * 0.5), &text, body, color, None);
+        ui.painter().text(
+            Pos2::new(name_x, center_y - sz.y * 0.5),
+            &text,
+            body,
+            color,
+            None,
+        );
     }
 
     // Type / Size / Modified columns.

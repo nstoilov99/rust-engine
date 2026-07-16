@@ -155,12 +155,24 @@ mod tests {
         fn is_key_pressed(&self, key: KeyCode) -> bool {
             self.pressed_keys.contains(&key)
         }
-        fn is_key_just_pressed(&self, _: KeyCode) -> bool { false }
-        fn is_mouse_pressed(&self, _: MouseButton) -> bool { false }
-        fn mouse_delta(&self) -> (f32, f32) { self.mouse_delta }
-        fn scroll_delta(&self) -> f32 { 0.0 }
-        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool { false }
-        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 { 0.0 }
+        fn is_key_just_pressed(&self, _: KeyCode) -> bool {
+            false
+        }
+        fn is_mouse_pressed(&self, _: MouseButton) -> bool {
+            false
+        }
+        fn mouse_delta(&self) -> (f32, f32) {
+            self.mouse_delta
+        }
+        fn scroll_delta(&self) -> f32 {
+            0.0
+        }
+        fn is_gamepad_pressed(&self, _: GamepadButton) -> bool {
+            false
+        }
+        fn gamepad_axis(&self, _: GamepadAxisType) -> f32 {
+            0.0
+        }
     }
 
     #[test]
@@ -178,20 +190,40 @@ mod tests {
 
     #[test]
     fn promote_digital_to_axis2d() {
-        let v = promote_value(InputValue::Digital(true), InputValueType::Axis2D, (0.0, 1.0));
+        let v = promote_value(
+            InputValue::Digital(true),
+            InputValueType::Axis2D,
+            (0.0, 1.0),
+        );
         assert_eq!(v, InputValue::Axis2D(Vec2::new(0.0, 1.0)));
 
-        let v = promote_value(InputValue::Digital(false), InputValueType::Axis2D, (0.0, 1.0));
+        let v = promote_value(
+            InputValue::Digital(false),
+            InputValueType::Axis2D,
+            (0.0, 1.0),
+        );
         assert_eq!(v, InputValue::Axis2D(Vec2::ZERO));
     }
 
     #[test]
     fn implicit_down_trigger() {
         let mut triggers: Vec<InputTrigger> = vec![];
-        let state = evaluate_triggers(&mut triggers, &InputValue::Digital(true), false, 0.016, &|_| false);
+        let state = evaluate_triggers(
+            &mut triggers,
+            &InputValue::Digital(true),
+            false,
+            0.016,
+            &|_| false,
+        );
         assert_eq!(state, TriggerState::Triggered);
 
-        let state = evaluate_triggers(&mut triggers, &InputValue::Digital(false), false, 0.016, &|_| false);
+        let state = evaluate_triggers(
+            &mut triggers,
+            &InputValue::Digital(false),
+            false,
+            0.016,
+            &|_| false,
+        );
         assert_eq!(state, TriggerState::Idle);
     }
 }

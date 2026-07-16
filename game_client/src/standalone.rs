@@ -4,31 +4,33 @@
 
 use super::{game_setup, render_loop};
 use rust_engine::assets::AssetManager;
+use rust_engine::engine::animation::{AnimationPlayer, AnimationUpdateSystem, SkeletonInstance};
 use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform, TransformDirty};
 use rust_engine::engine::ecs::game_world::GameWorld;
 use rust_engine::engine::ecs::hierarchy::{
     Children, HierarchyChanged, Parent, TransformCache, TransformPropagationSystem,
 };
-use rust_engine::engine::animation::{AnimationPlayer, AnimationUpdateSystem, SkeletonInstance};
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode, Time};
 use rust_engine::engine::ecs::schedule::{Schedule, Stage};
+use rust_engine::engine::input::action_state::ActionState;
+use rust_engine::engine::input::enhanced_defaults::default_action_set;
+use rust_engine::engine::input::enhanced_serialization;
+use rust_engine::engine::input::event::InputEvent;
+use rust_engine::engine::input::gamepad::GamepadState;
+use rust_engine::engine::input::serialization;
+use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
 use rust_engine::engine::physics::{
-    Collider as PhysCollider, PhysicsStepSystem, PhysicsWorld,
-    RigidBody as PhysRigidBody, Velocity as PhysVelocity,
+    Collider as PhysCollider, PhysicsStepSystem, PhysicsWorld, RigidBody as PhysRigidBody,
+    Velocity as PhysVelocity,
 };
 use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::{DeferredRenderer, MeshRenderData, SkinningBackend};
+use rust_engine::engine::rendering::rendering_3d::{
+    DeferredRenderer, MeshRenderData, SkinningBackend,
+};
 use rust_engine::{GameLoop, InputManager, Renderer};
-use rust_engine::engine::input::action_state::ActionState;
-use rust_engine::engine::input::gamepad::GamepadState;
-use rust_engine::engine::input::serialization;
-use rust_engine::engine::input::enhanced_defaults::default_action_set;
-use rust_engine::engine::input::enhanced_serialization;
-use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
-use rust_engine::engine::input::event::InputEvent;
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
 use winit::event::{MouseScrollDelta, WindowEvent};
@@ -50,14 +52,18 @@ pub struct StandaloneApp {
     default_material_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
-    plankton_emitter_buffer: Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
+    plankton_emitter_buffer:
+        Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     schedule: Schedule,
     frame_number: u64,
     render_thread: Option<RenderThread>,
 }
 
 impl StandaloneApp {
-    pub fn new(window: Arc<Window>, plugin: &dyn rust_engine::engine::plugin::GamePlugin) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        window: Arc<Window>,
+        plugin: &dyn rust_engine::engine::plugin::GamePlugin,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up (standalone)...");
 
         let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
@@ -226,11 +232,13 @@ impl StandaloneApp {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Standalone,
             initial_dimensions: [width, height],
-            swapchain_transfer: Some(rust_engine::engine::rendering::render_thread::SwapchainTransfer {
-                surface: renderer.swapchain_state.surface.clone(),
-                swapchain: renderer.swapchain_state.swapchain.clone(),
-                images: renderer.swapchain_state.images.clone(),
-            }),
+            swapchain_transfer: Some(
+                rust_engine::engine::rendering::render_thread::SwapchainTransfer {
+                    surface: renderer.swapchain_state.surface.clone(),
+                    swapchain: renderer.swapchain_state.swapchain.clone(),
+                    images: renderer.swapchain_state.images.clone(),
+                },
+            ),
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
             #[cfg(feature = "editor")]
@@ -238,10 +246,14 @@ impl StandaloneApp {
         });
 
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
-            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady { .. }) => {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderThreadReady {
+                ..
+            }) => {
                 log::info!("standalone: render thread ready");
             }
-            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message }) => {
+            Ok(rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError {
+                message,
+            }) => {
                 return Err(format!("render thread init failed: {}", message).into());
             }
             Ok(_) => {

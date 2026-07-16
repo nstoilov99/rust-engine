@@ -213,10 +213,7 @@ fn build_model(
             .and_then(|info| model.textures.get(info.texture().source().index()))
             .cloned();
 
-        let name = material
-            .name()
-            .unwrap_or("Unnamed")
-            .to_string();
+        let name = material.name().unwrap_or("Unnamed").to_string();
 
         model.materials.push(ImportedMaterial {
             name,
@@ -343,10 +340,7 @@ fn extract_animations(
     };
 
     for anim in document.animations() {
-        let name = anim
-            .name()
-            .unwrap_or("Unnamed")
-            .to_string();
+        let name = anim.name().unwrap_or("Unnamed").to_string();
 
         // Group channels by target node
         let mut bone_channels: HashMap<usize, AnimationChannel> = HashMap::new();
@@ -393,10 +387,9 @@ fn extract_animations(
                         gltf::animation::util::ReadOutputs::Rotations(rotations),
                     ) => {
                         for (t, val) in timestamps.iter().zip(rotations.into_f32()) {
-                            entry.rotation_keys.push((
-                                *t,
-                                Quat::from_xyzw(val[0], val[1], val[2], val[3]),
-                            ));
+                            entry
+                                .rotation_keys
+                                .push((*t, Quat::from_xyzw(val[0], val[1], val[2], val[3])));
                         }
                     }
                     (
@@ -432,15 +425,9 @@ fn extract_skinning(
 ) -> Option<Vec<VertexBoneData>> {
     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
-    let joints: Vec<[u16; 4]> = reader
-        .read_joints(0)?
-        .into_u16()
-        .collect();
+    let joints: Vec<[u16; 4]> = reader.read_joints(0)?.into_u16().collect();
 
-    let weights: Vec<[f32; 4]> = reader
-        .read_weights(0)?
-        .into_f32()
-        .collect();
+    let weights: Vec<[f32; 4]> = reader.read_weights(0)?.into_f32().collect();
 
     if joints.len() != vertex_count || weights.len() != vertex_count {
         return None;
@@ -525,7 +512,10 @@ fn extract_mesh_from_primitive(
     for i in 0..vertex_count {
         let (joint_indices, joint_weights) = if let Some(ref skin) = skinning_data {
             let j = skin[i].joints;
-            ([j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32], skin[i].weights)
+            (
+                [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32],
+                skin[i].weights,
+            )
         } else {
             ([0u32, 0, 0, 0], [1.0f32, 0.0, 0.0, 0.0])
         };
@@ -623,36 +613,84 @@ pub fn extract_material_from_gltf(
     let albedo_view = if let Some(info) = pbr.base_color_texture() {
         let texture = info.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
+        load_gltf_image(
+            &images[image_index],
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?
     } else {
-        create_default_texture(device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_ALBEDO_RGBA)?
+        create_default_texture(
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_ALBEDO_RGBA,
+        )?
     };
 
     // Extract normal map
     let normal_view = if let Some(normal_texture) = material.normal_texture() {
         let texture = normal_texture.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
+        load_gltf_image(
+            &images[image_index],
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?
     } else {
-        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_NORMAL_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
+        create_default_texture_with_format(
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_NORMAL_RGBA,
+            vulkano::format::Format::R8G8B8A8_UNORM,
+        )?
     };
 
     // Extract metallic-roughness map
     let metallic_roughness_view = if let Some(info) = pbr.metallic_roughness_texture() {
         let texture = info.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
+        load_gltf_image(
+            &images[image_index],
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?
     } else {
-        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_METALLIC_ROUGHNESS_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
+        create_default_texture_with_format(
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_METALLIC_ROUGHNESS_RGBA,
+            vulkano::format::Format::R8G8B8A8_UNORM,
+        )?
     };
 
     // Extract ambient occlusion map
     let ao_view = if let Some(ao_texture) = material.occlusion_texture() {
         let texture = ao_texture.texture();
         let image_index = texture.source().index();
-        load_gltf_image(&images[image_index], device.clone(), allocator.clone(), command_buffer_allocator.clone(), queue.clone())?
+        load_gltf_image(
+            &images[image_index],
+            device.clone(),
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+        )?
     } else {
-        create_default_texture_with_format(allocator.clone(), command_buffer_allocator.clone(), queue.clone(), DEFAULT_AO_RGBA, vulkano::format::Format::R8G8B8A8_UNORM)?
+        create_default_texture_with_format(
+            allocator.clone(),
+            command_buffer_allocator.clone(),
+            queue.clone(),
+            DEFAULT_AO_RGBA,
+            vulkano::format::Format::R8G8B8A8_UNORM,
+        )?
     };
 
     let base_color = pbr.base_color_factor();

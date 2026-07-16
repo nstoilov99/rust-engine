@@ -301,10 +301,7 @@ pub(crate) fn calculate_tangents_safe(
 
 /// Generate flat normals from triangle positions and indices.
 /// Each triangle gets a single face normal assigned to all three vertices.
-pub(crate) fn generate_flat_normals(
-    positions: &[[f32; 3]],
-    indices: &[u32],
-) -> Vec<[f32; 3]> {
+pub(crate) fn generate_flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; positions.len()];
 
     for i in (0..indices.len()).step_by(3) {
@@ -376,9 +373,7 @@ pub fn load_model_from_bytes(
     source_path: &str,
 ) -> Result<Model, Box<dyn std::error::Error>> {
     match model_extension(source_path).to_ascii_lowercase().as_str() {
-        "gltf" | "glb" => {
-            super::model_loader_gltf::load_model_gltf_from_bytes(data, source_path)
-        }
+        "gltf" | "glb" => super::model_loader_gltf::load_model_gltf_from_bytes(data, source_path),
         "obj" => super::model_loader_obj::load_model_obj_from_bytes(data, source_path),
         "fbx" => super::model_loader_fbx::load_model_fbx_from_bytes(data, source_path),
         "mesh" => super::mesh_import::load_mesh_binary_from_bytes(data, source_path),

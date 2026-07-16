@@ -22,22 +22,22 @@ pub mod asset_browser;
 #[cfg(feature = "editor")]
 pub mod asset_browser_crusty;
 pub mod build_dialog;
-mod commands;
-mod console;
-#[cfg(feature = "editor")]
-pub mod console_crusty;
-#[cfg(all(feature = "editor", windows))]
-pub mod desktop_sampler;
-pub mod console_cmd;
-mod dock_layout;
 #[cfg(feature = "editor")]
 pub mod command_palette_crusty;
+mod commands;
+mod console;
+pub mod console_cmd;
+#[cfg(feature = "editor")]
+pub mod console_crusty;
+#[cfg(feature = "editor")]
+pub mod crusty_window;
+#[cfg(all(feature = "editor", windows))]
+pub mod desktop_sampler;
 #[cfg(feature = "editor")]
 pub mod dialogs_crusty;
 #[cfg(feature = "editor")]
 pub mod dock_crusty;
-#[cfg(feature = "editor")]
-pub mod crusty_window;
+mod dock_layout;
 #[cfg(feature = "editor")]
 pub mod hierarchy_crusty;
 mod hierarchy_panel;

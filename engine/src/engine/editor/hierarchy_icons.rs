@@ -24,8 +24,8 @@ pub fn rasterize_svg_rgba(path: &Path) -> Result<Vec<u8>, String> {
     // Parse with default options — fonts are needed only for `<text>` nodes
     // in the SVG (we have none), so an empty fontdb is fine.
     let opt = usvg::Options::default();
-    let tree = usvg::Tree::from_data(&svg_bytes, &opt)
-        .map_err(|e| format!("usvg parse failed: {e}"))?;
+    let tree =
+        usvg::Tree::from_data(&svg_bytes, &opt).map_err(|e| format!("usvg parse failed: {e}"))?;
 
     // Scale the SVG into a square pixmap at our target raster size.
     let svg_size = tree.size();

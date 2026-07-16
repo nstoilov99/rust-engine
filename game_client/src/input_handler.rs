@@ -4,11 +4,11 @@
 //! Updated for winit 0.30 - uses KeyCode instead of VirtualKeyCode.
 
 use glam::Vec3;
+use rust_engine::engine::input::action::KeyCode;
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::DeferredRenderer;
 use rust_engine::InputManager;
 use rust_engine::Renderer;
-use rust_engine::engine::input::action::KeyCode;
 
 /// Handle camera movement with WASD + Space/Shift
 ///

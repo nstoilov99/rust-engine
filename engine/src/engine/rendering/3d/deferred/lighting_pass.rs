@@ -139,14 +139,24 @@ impl LightingPass {
         use vulkano::shader::ShaderModule;
 
         let vs_module = unsafe {
-            ShaderModule::new(device.clone(), vulkano::shader::ShaderModuleCreateInfo::new(vs_spirv))?
+            ShaderModule::new(
+                device.clone(),
+                vulkano::shader::ShaderModuleCreateInfo::new(vs_spirv),
+            )?
         };
         let fs_module = unsafe {
-            ShaderModule::new(device.clone(), vulkano::shader::ShaderModuleCreateInfo::new(fs_spirv))?
+            ShaderModule::new(
+                device.clone(),
+                vulkano::shader::ShaderModuleCreateInfo::new(fs_spirv),
+            )?
         };
 
-        let vs = vs_module.entry_point("main").ok_or("Missing vertex entry point 'main'")?;
-        let fs = fs_module.entry_point("main").ok_or("Missing fragment entry point 'main'")?;
+        let vs = vs_module
+            .entry_point("main")
+            .ok_or("Missing vertex entry point 'main'")?;
+        let fs = fs_module
+            .entry_point("main")
+            .ok_or("Missing fragment entry point 'main'")?;
 
         let stages = [
             PipelineShaderStageCreateInfo::new(vs),
@@ -224,11 +234,19 @@ impl LightingPass {
         shadow_map: Arc<ImageView>,
         shadow_sampler: Arc<Sampler>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let layout = self.layout.set_layouts().get(1).ok_or("Missing Set 1 layout")?;
+        let layout = self
+            .layout
+            .set_layouts()
+            .get(1)
+            .ok_or("Missing Set 1 layout")?;
         let set = DescriptorSet::new(
             descriptor_set_allocator,
             layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(0, shadow_map, shadow_sampler)],
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                shadow_map,
+                shadow_sampler,
+            )],
             [],
         )?;
         Ok(set)
@@ -240,11 +258,19 @@ impl LightingPass {
         ssao_texture: Arc<ImageView>,
         ssao_sampler: Arc<Sampler>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let layout = self.layout.set_layouts().get(2).ok_or("Missing Set 2 layout")?;
+        let layout = self
+            .layout
+            .set_layouts()
+            .get(2)
+            .ok_or("Missing Set 2 layout")?;
         let set = DescriptorSet::new(
             descriptor_set_allocator,
             layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(0, ssao_texture, ssao_sampler)],
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                ssao_texture,
+                ssao_sampler,
+            )],
             [],
         )?;
         Ok(set)

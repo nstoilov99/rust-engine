@@ -60,15 +60,17 @@ pub fn command_palette_panel(
 
             ui.separator();
             let list_height = ui.available().height();
-            ScrollArea::new(list_height).auto_shrink(false).show(ui, |ui| {
-                for (index, command) in matches.iter().enumerate() {
-                    if command_row(ui, index == palette.selected, command.label.as_str()) {
-                        palette.selected = index;
-                        selected_action = Some(command.action.clone());
-                        should_close = true;
+            ScrollArea::new(list_height)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    for (index, command) in matches.iter().enumerate() {
+                        if command_row(ui, index == palette.selected, command.label.as_str()) {
+                            palette.selected = index;
+                            selected_action = Some(command.action.clone());
+                            should_close = true;
+                        }
                     }
-                }
-            });
+                });
         });
 
     if should_close {

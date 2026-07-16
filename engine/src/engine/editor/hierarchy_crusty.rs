@@ -121,8 +121,13 @@ fn render_header(ui: &mut Ui, panel: &mut HierarchyPanel, world: &mut World, rea
         let style = ui.style();
         let dim = style.palette.text_dim;
         let size = style.fonts.small;
-        ui.painter()
-            .text(Pos2::new(row_top.x, row_top.y + 6.0), "(Playing)", size, dim, None);
+        ui.painter().text(
+            Pos2::new(row_top.x, row_top.y + 6.0),
+            "(Playing)",
+            size,
+            dim,
+            None,
+        );
     }
 }
 
@@ -325,7 +330,11 @@ fn render_row(
         let ch_resp = ui.interact(row_id.with("chevron"), chevron_rect);
         let center = chevron_rect.center();
         let s = 3.5;
-        let color = if ch_resp.hovered { Color::WHITE } else { gray(190) };
+        let color = if ch_resp.hovered {
+            Color::WHITE
+        } else {
+            gray(190)
+        };
         let (a, m, b) = if is_expanded {
             (
                 Pos2::new(center.x - s, center.y - s * 0.45),
@@ -463,7 +472,9 @@ fn render_row(
         );
     }
 
-    render_visibility_toggle(ui, world, entity, row_id, row_rect, is_visible, icons, read_only);
+    render_visibility_toggle(
+        ui, world, entity, row_id, row_rect, is_visible, icons, read_only,
+    );
 
     // ─── row-wide interactions ────────────────────────────────────────
     if !is_renaming && row_resp.clicked {
@@ -498,7 +509,16 @@ fn render_row(
                 panel.delete_entity(world, selection, entity);
             }
         });
-        handle_drag_drop(ui, panel, world, entity, entity_id, row_rect, has_children, is_expanded);
+        handle_drag_drop(
+            ui,
+            panel,
+            world,
+            entity,
+            entity_id,
+            row_rect,
+            has_children,
+            is_expanded,
+        );
     }
 }
 
@@ -533,11 +553,8 @@ fn handle_drag_drop(
                 DropMode::InsertBelow => draw_insertion_line(ui, row_rect.max.y, row_rect),
                 DropMode::MakeChild => {
                     let green = Color::from_srgb_u8(100, 200, 100, 255);
-                    ui.painter().rect_filled(
-                        row_rect,
-                        2.0,
-                        Color::from_srgb_u8(100, 200, 100, 50),
-                    );
+                    ui.painter()
+                        .rect_filled(row_rect, 2.0, Color::from_srgb_u8(100, 200, 100, 50));
                     ui.painter().rect_stroke(row_rect, 2.0, 2.0, green);
                     let plus_size = 14.0;
                     let sz = ui.painter().measure_text("+", plus_size, None);
@@ -676,7 +693,13 @@ fn render_visibility_toggle(
 /// Draw the Godot-style guide path leading to the selected entity — a port
 /// of `HierarchyPanel::draw_tree_guides` (see that function for the trunk
 /// index-range scheme).
-fn draw_tree_guides(ui: &mut Ui, row_rect: Rect, depth: usize, row_idx: usize, chain_indices: &[usize]) {
+fn draw_tree_guides(
+    ui: &mut Ui,
+    row_rect: Rect,
+    depth: usize,
+    row_idx: usize,
+    chain_indices: &[usize],
+) {
     if depth == 0 || chain_indices.is_empty() {
         return;
     }
@@ -721,8 +744,7 @@ fn draw_tree_guides(ui: &mut Ui, row_rect: Rect, depth: usize, row_idx: usize, c
         );
     }
 
-    let hook_lit =
-        depth <= selected_depth && chain_indices.get(depth).copied() == Some(row_idx);
+    let hook_lit = depth <= selected_depth && chain_indices.get(depth).copied() == Some(row_idx);
     if hook_lit {
         ui.painter().line_segment(
             Pos2::new(x_parent, row_middle),

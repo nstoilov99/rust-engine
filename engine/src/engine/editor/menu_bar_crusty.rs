@@ -77,106 +77,112 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         padding: Vec2::new(4.0 * s, 0.0),
         spacing: 0.0,
     };
-    ui.run_at(rect, Direction::LeftToRight, Id::new("crusty_menu_bar"), opts, |ui| {
-        ui.menu_button("File", |ui| {
-            if ui.menu_item("Save Scene (Ctrl+S)") {
-                action = MenuAction::SaveScene;
-            }
-            if show_benchmark_tools {
+    ui.run_at(
+        rect,
+        Direction::LeftToRight,
+        Id::new("crusty_menu_bar"),
+        opts,
+        |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.menu_item("Save Scene (Ctrl+S)") {
+                    action = MenuAction::SaveScene;
+                }
+                if show_benchmark_tools {
+                    ui.separator();
+                    ui.submenu("Benchmark", |ui| {
+                        if ui.menu_item("Load Benchmark Scene") {
+                            action = MenuAction::LoadBenchmarkScene;
+                        }
+                        if ui.menu_item("Run CPU Benchmark") {
+                            action = MenuAction::RunBenchmark;
+                        }
+                    });
+                }
                 ui.separator();
-                ui.submenu("Benchmark", |ui| {
-                    if ui.menu_item("Load Benchmark Scene") {
-                        action = MenuAction::LoadBenchmarkScene;
-                    }
-                    if ui.menu_item("Run CPU Benchmark") {
-                        action = MenuAction::RunBenchmark;
-                    }
+                ui.submenu_width("Build Game", 260.0 * s, |ui| {
+                    build_game_menu(ui, build_dialog);
                 });
-            }
-            ui.separator();
-            ui.submenu_width("Build Game", 260.0 * s, |ui| {
-                build_game_menu(ui, build_dialog);
-            });
-            ui.separator();
-            if ui.menu_item("Exit") {
-                action = MenuAction::Exit;
-            }
-        });
-
-        let is_edit_mode = play_mode == PlayMode::Edit;
-        ui.menu_button("Edit", |ui| {
-            let undo_text = if let Some(desc) = command_history.undo_description() {
-                format!("Undo: {} (Ctrl+Z)", desc)
-            } else {
-                "Undo (Ctrl+Z)".to_string()
-            };
-            if ui.menu_item_enabled(&undo_text, is_edit_mode && command_history.can_undo()) {
-                action = MenuAction::Undo;
-            }
-
-            let redo_text = if let Some(desc) = command_history.redo_description() {
-                format!("Redo: {} (Ctrl+Y)", desc)
-            } else {
-                "Redo (Ctrl+Y)".to_string()
-            };
-            if ui.menu_item_enabled(&redo_text, is_edit_mode && command_history.can_redo()) {
-                action = MenuAction::Redo;
-            }
-        });
-
-        ui.menu_button("View", |ui| {
-            Label::new("Panels").show(ui);
-            ui.separator();
-
-            let panels = [
-                (EditorTab::Hierarchy, "Hierarchy"),
-                (EditorTab::Inspector, "Inspector"),
-                (EditorTab::AssetBrowser, "Assets"),
-                (EditorTab::Console, "Console"),
-                (EditorTab::Profiler, "Profiler"),
-            ];
-            for (tab, name) in &panels {
-                let is_open = dock_state.is_tab_open(tab);
-                if ui.menu_item(format!(" {}", name)) && !is_open {
-                    dock_state.open_tab(tab.clone());
-                }
-            }
-
-            ui.separator();
-            if ui.menu_item("Save Layout") {
-                action = MenuAction::SaveLayout;
-            }
-            if ui.menu_item("Reset Layout") {
-                action = MenuAction::ResetLayout;
-            }
-        });
-
-        ui.menu_button("Debug", |ui| {
-            if ui.menu_item("Rebuild All Shaders") {
-                action = MenuAction::RebuildShaders;
-            }
-            #[cfg(feature = "editor-debug")]
-            {
                 ui.separator();
-                if ui.menu_item("Icon Inspector") {
-                    action = MenuAction::ToggleIconInspector;
+                if ui.menu_item("Exit") {
+                    action = MenuAction::Exit;
                 }
-                if ui.menu_item("Widget Showcase") {
-                    action = MenuAction::ToggleShowcase;
+            });
+
+            let is_edit_mode = play_mode == PlayMode::Edit;
+            ui.menu_button("Edit", |ui| {
+                let undo_text = if let Some(desc) = command_history.undo_description() {
+                    format!("Undo: {} (Ctrl+Z)", desc)
+                } else {
+                    "Undo (Ctrl+Z)".to_string()
+                };
+                if ui.menu_item_enabled(&undo_text, is_edit_mode && command_history.can_undo()) {
+                    action = MenuAction::Undo;
                 }
-            }
-        });
 
-        ui.menu_button("Help", |ui| {
-            let _ = ui.menu_item("About");
-            ui.separator();
-            Label::new("Rust Game Engine")
-                .color(Color::from_srgb_u8(140, 140, 140, 255))
-                .show(ui);
-        });
+                let redo_text = if let Some(desc) = command_history.redo_description() {
+                    format!("Redo: {} (Ctrl+Y)", desc)
+                } else {
+                    "Redo (Ctrl+Y)".to_string()
+                };
+                if ui.menu_item_enabled(&redo_text, is_edit_mode && command_history.can_redo()) {
+                    action = MenuAction::Redo;
+                }
+            });
 
-        render_play_controls(ui, rect, s, play_mode, icons, &mut action);
-    });
+            ui.menu_button("View", |ui| {
+                Label::new("Panels").show(ui);
+                ui.separator();
+
+                let panels = [
+                    (EditorTab::Hierarchy, "Hierarchy"),
+                    (EditorTab::Inspector, "Inspector"),
+                    (EditorTab::AssetBrowser, "Assets"),
+                    (EditorTab::Console, "Console"),
+                    (EditorTab::Profiler, "Profiler"),
+                ];
+                for (tab, name) in &panels {
+                    let is_open = dock_state.is_tab_open(tab);
+                    if ui.menu_item(format!(" {}", name)) && !is_open {
+                        dock_state.open_tab(tab.clone());
+                    }
+                }
+
+                ui.separator();
+                if ui.menu_item("Save Layout") {
+                    action = MenuAction::SaveLayout;
+                }
+                if ui.menu_item("Reset Layout") {
+                    action = MenuAction::ResetLayout;
+                }
+            });
+
+            ui.menu_button("Debug", |ui| {
+                if ui.menu_item("Rebuild All Shaders") {
+                    action = MenuAction::RebuildShaders;
+                }
+                #[cfg(feature = "editor-debug")]
+                {
+                    ui.separator();
+                    if ui.menu_item("Icon Inspector") {
+                        action = MenuAction::ToggleIconInspector;
+                    }
+                    if ui.menu_item("Widget Showcase") {
+                        action = MenuAction::ToggleShowcase;
+                    }
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                let _ = ui.menu_item("About");
+                ui.separator();
+                Label::new("Rust Game Engine")
+                    .color(Color::from_srgb_u8(140, 140, 140, 255))
+                    .show(ui);
+            });
+
+            render_play_controls(ui, rect, s, play_mode, icons, &mut action);
+        },
+    );
 
     action
 }

@@ -19,12 +19,10 @@ pub fn sample_channels(
         }
 
         if !channel.position_keys.is_empty() {
-            local_transforms[bone_idx].translation =
-                sample_vec3_keys(&channel.position_keys, time);
+            local_transforms[bone_idx].translation = sample_vec3_keys(&channel.position_keys, time);
         }
         if !channel.rotation_keys.is_empty() {
-            local_transforms[bone_idx].rotation =
-                sample_quat_keys(&channel.rotation_keys, time);
+            local_transforms[bone_idx].rotation = sample_quat_keys(&channel.rotation_keys, time);
         }
         if !channel.scale_keys.is_empty() {
             local_transforms[bone_idx].scale = sample_vec3_keys(&channel.scale_keys, time);
@@ -98,10 +96,7 @@ mod tests {
 
     #[test]
     fn lerp_midpoint() {
-        let keys = vec![
-            (0.0, Vec3::ZERO),
-            (1.0, Vec3::new(10.0, 0.0, 0.0)),
-        ];
+        let keys = vec![(0.0, Vec3::ZERO), (1.0, Vec3::new(10.0, 0.0, 0.0))];
         let v = sample_vec3_keys(&keys, 0.5);
         assert!((v.x - 5.0).abs() < 1e-5);
     }
@@ -143,10 +138,7 @@ mod tests {
 
         let channels = vec![AnimationChannel {
             bone_index: 0,
-            position_keys: vec![
-                (0.0, Vec3::ZERO),
-                (1.0, Vec3::new(10.0, 0.0, 0.0)),
-            ],
+            position_keys: vec![(0.0, Vec3::ZERO), (1.0, Vec3::new(10.0, 0.0, 0.0))],
             rotation_keys: vec![],
             scale_keys: vec![],
         }];

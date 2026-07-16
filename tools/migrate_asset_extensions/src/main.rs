@@ -22,7 +22,13 @@ const LEGACY_SUFFIXES: &[&str] = &[
 
 /// Files whose text contents may reference other assets.
 const TEXT_EXTENSIONS: &[&str] = &[
-    "ron", "scene", "material", "matinst", "prefab", "inputaction", "mappingcontext",
+    "ron",
+    "scene",
+    "material",
+    "matinst",
+    "prefab",
+    "inputaction",
+    "mappingcontext",
 ];
 
 fn main() {
@@ -108,7 +114,9 @@ fn main() {
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

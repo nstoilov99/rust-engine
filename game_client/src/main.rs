@@ -474,7 +474,6 @@ impl ApplicationHandler for GameApp {
     }
 }
 
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     puffin::set_scopes_on(true);
 
