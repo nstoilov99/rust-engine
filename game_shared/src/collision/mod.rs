@@ -12,6 +12,8 @@
 //! `store` (ChunkStore), `query` (shape-cast/contact/ray with triangle
 //! attribution).
 
+pub mod format;
+
 /// Stable per-triangle identity: hash of source-entity GUID + source triangle
 /// index. Powers seam dedup (border triangles are duplicated across chunks)
 /// and golden-battery references.
