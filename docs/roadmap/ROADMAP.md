@@ -1884,6 +1884,36 @@ Node graphs (40, 41, 45, 50, 51, 53, 57), visual terrain (46), sky/atmosphere (4
 
 ---
 
+### Task 39.8: Plugin System & Module Registry
+**Status:** 📋 Planned (post-M-arc, alongside/before Task 40 — shares registry infrastructure)
+**Duration:** ~1.5-2 weeks
+**Prerequisites:** Multiplayer Foundation complete
+
+Engine functionality as discoverable, toggleable units (Unreal-plugin analogue,
+Rust-shaped). **Compile-time plugins, not runtime DLLs** — Rust has no stable
+ABI, so dynamically loaded plugin binaries are ruled out; the model is Bevy's:
+
+- `Plugin` trait: each plugin is a crate with one entry point
+  (`fn build(&self, app)`) registering its systems, components, editor panels,
+  and asset types; gated behind a Cargo feature. Disabled = compiled out —
+  zero cost.
+- **Project manifest** (`project.ron`): declares enabled plugins per game
+  project, maps to features; editor shows toggles and triggers the rebuild
+  (flip = recompile, acceptable in Rust land).
+- Registry unification with Task 40's node/component registry (that design
+  already reserves runtime registration "for future plugins").
+- **First candidates, in extraction order:**
+  1. **Physics (Rapier)** — currently hard-wired; extracting it proves the
+     seam on the hardest case (2D physics becomes a sibling plugin later)
+  2. **Steam SDK** (steamworks wrapper: achievements, overlay, rich presence)
+  3. **Gameplay Ability System** — refactor M7's server-authoritative ability
+     code into a reusable plugin
+- **Discipline starting now** (costs nothing): new subsystems are built as
+  self-contained modules with a single registration entry point, so extraction
+  into plugins is mechanical, not surgery.
+
+---
+
 ## Phase 11: Node Graph Foundation & Game Architecture (Tasks 40-45)
 
 **Deferred:** this phase and Phases 12–15 now run **after** the Multiplayer Foundation phase (M0–M8). Per-task annotations below mark what was absorbed into M-tasks.
@@ -2846,6 +2876,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | M9 | Multiplayer Packaging (client & server build targets) | Multiplayer Foundation | Infrastructure | |
 | M9.5 | Packaged Co-op Verification | Multiplayer Foundation | Testing | |
 | -- | 🎯 *Milestone: Networked Co-op Slice (on packaged builds)* | -- | -- | |
+| 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | |
 | **40** | **Node Graph Framework & Custom Node SDK** | **Node Graph Foundation** | **Infrastructure** | **Framework** |
 | **41** | **Animation Graph** | Game Architecture | Feature | **1st consumer** |
 | 42 | 🔀 Save/Load & Runtime Persistence (networked part → M5) | Game Architecture | Feature | |
