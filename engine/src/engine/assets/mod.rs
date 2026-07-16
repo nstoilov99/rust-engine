@@ -3,6 +3,7 @@ pub mod asset_source;
 pub mod asset_type;
 #[cfg(feature = "editor")]
 pub mod async_loader;
+pub mod collision_geometry;
 pub mod content_root;
 pub mod dependencies;
 pub mod handle;
