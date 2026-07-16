@@ -107,7 +107,9 @@ use `println!` for temporary diagnostics (and remove before commit).
 ## Current Development Focus
 
 - Phase 16 (egui → crusty-gui migration): **complete** — egui removed
-- Task 25: Build Pipeline and Export (Planned)
+- Task 25 (Build Pipeline and Export, Windows standalone): **complete**
+- M0 SpacetimeDB scale spike: **complete — GO** (see `docs/roadmap/VULKANO-M0-SPACETIMEDB-SPIKE.md`)
+- Next: Multiplayer Foundation arc M1–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
 
 ## Patched Dependencies
 
