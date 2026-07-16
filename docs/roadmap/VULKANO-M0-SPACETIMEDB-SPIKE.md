@@ -1,6 +1,6 @@
 # Task M0: SpacetimeDB Scale Spike (Net-0)
 
-**Status**: Planned
+**Status**: Complete — **GO** (see decision at the end of this doc)
 **Type**: Throwaway spike — go/no-go gate for the multiplayer arc (M5–M8)
 **Related**: ADR-014 (SpacetimeDB), ADR-015 (kinematic movement), ADR-016 (spike-first gating)
 **Estimated effort**: ~2 weeks
@@ -331,7 +331,143 @@ bot runner + measurement script, own READMEs). Built against SpacetimeDB
   requires bots on separate hardware (one VM can likely drive 3 k alone; if its CPU
   pins, split into 2× `--bots 1500` processes). No server conclusions drawn.
 
-Rung 1 complete. Next: rung 2 (3,000 bots, bots on a separate machine from the server).
+Rung 1 complete. Rung 2 below (dedicated server hardware, bots on a separate machine).
+
+### Rung 2 topology (actual, pivoted from runbook)
+- Server: SpacetimeDB 2.6.1 standalone on GCP `e2-standard-8` (8 vCPU, 32 GB,
+  40 GB pd-balanced), Ubuntu 24.04, Frankfurt (`europe-west3-a`), db `stress`,
+  port 3000 open via firewall rule. GCP free trial caps the account at 8 vCPUs,
+  so all 8 went to the server.
+- Bots: dev desktop (Windows 11) over the public internet (~900 Mbps home
+  connection). Network baseline desktop↔Frankfurt: p50 ≈ 42 ms — all RTT
+  numbers below include this floor; the server adds ~0 under the ceiling.
+- Bot runner hardened first: the Rust SDK *panics* (not errors) when a reducer
+  is called on a connection whose WS sender died; ticks are now wrapped in
+  `catch_unwind` so one dying bot can't zombify its worker thread
+  (STDBStressTest commit c0fc1ed). Validated under load.
+- Client was never the bottleneck in any run: stress-bots 5–12 % CPU,
+  150–650 MB RSS.
+
+### Run: 2026-07-16 rung2 scenario=uniform — capacity bracketed: 500 PASS / 750 over / 1000 far over
+- **500 bots, 5 min: PASS, flat.** p50 42.6 ms (network floor), p95 ≈ 53 ms,
+  errors=0, disc=0. Server: 63 Mbps egress, RSS 2.6 GB stable, CPU well under
+  thresholds.
+- **750 bots: over the line.** p95 diverges over minutes; egress plateaus at
+  ~108 Mbps (the ceiling, see below); RSS climbs to 5.8 GB (queued deliveries).
+- **1000 bots: far over.** p50 plateaus ≈ 40 s (server-paced delivery), RSS
+  backlog to **31 GB on a 32 GB box** — raw CSV shows 278 MB → 28 GB in ~45 s
+  (~700 MB/s fill rate), within ~1 GB of OOM. **No crash, no OOM** — after
+  stopping load the backlog drained fully in ~20 s and memory released. The
+  failure mode is benign *given RAM headroom*: a smaller box would have OOMed
+  in under a minute of over-ceiling load.
+- Per-module uniform capacity on this hardware ≈ **500 concurrent clients**.
+
+### Rung-2 key finding: the ~110–135 Mbps delivery ceiling (not ours, not hardware)
+- Reproduced 4× across runs and both network paths: subscription delivery
+  saturates at **~108–136 Mbps egress ≈ ~100 k row-deliveries/s** per module.
+- **Not resource-bound.** At over-ceiling load: total CPU ~35 % (of 8 cores),
+  busiest thread (wasm module) 64 %, tokio workers ~23 % each — `pidstat`
+  shows *nothing pinned*. Disk 61 % util, 0.6 ms writes, low iowait. NIC far
+  under its cap. A software serialization point, not saturation.
+- **Not our code.** Module audit clean: `cell` is `#[index(btree)]` on all hot
+  tables, events TTL-pruned every 250 ms, reducers are minimal upserts. Bot
+  runner CPU 5–12 %. Internet path ruled out (identical ceiling on both
+  topologies).
+- **Root cause is upstream** (open SpacetimeDB issues, June 2026):
+  - **#2784** — subscription updates are sent one WS message + one flush
+    syscall per transaction, no batching.
+  - **#5317** — `TableCacheImpl` subscription evaluation does full table scans
+    even when btree indexes exist.
+  - **#2891** — serialized per-connection send path.
+  - Outbound queues are **unbounded** — backlog piles into RAM instead of
+    applying backpressure (explains the 24 GB spiral at 1000 bots).
+  - No tuning knobs exist for the delivery path in 2.6.
+- Context: SpacetimeDB's advertised ~300 k TPS benchmark measures **reducer
+  throughput only** (banking workload, i9-14900K) — zero subscription fan-out
+  or WS delivery. Clockwork's own BitCraft ships as a global module plus **one
+  module per region**, i.e. they route around this exact ceiling by sharding.
+- Fork/PR assessment: #2784 (batching) is scoped and PR-able — the biggest
+  single lever; #5317 is a data-structure redesign in subscription-cache
+  internals (weeks); #2891 + unbounded queues are architectural. Decision:
+  **don't fork** — M8 interest management keeps us under the ceiling by
+  construction; an upstream PR for #2784 is optional headroom later.
+- Second ceiling (further out): the wasm module thread executes reducers
+  serially; it scaled 37 % → 64 % from 500 → 750 bots → would pin at
+  ~1,100–1,200 bots even if delivery were fixed.
+
+### Run: 2026-07-16 rung2 scenario=hotspot bots=250 duration=30min — PASS (primary gate)
+- Bracketing first: 500 hotspot bots spiral at ~110 s, 350 at ~180 s (bots
+  converge on the hot zone over ~3 min; delivery load grows ~quadratically
+  with in-zone count — total count is irrelevant, crowd density is the
+  metric). Estimated wall: **~150–200 clients in one zone**.
+- **250 bots, full 1800 s: rock solid.** p50 42–48 ms, p95 mostly 53–68 ms,
+  errors=0, disc=0. Three transient p95 spikes (614 ms at 920 s, ~185 ms at
+  1430 s, ~137 ms at 1760 s), each recovered within 10–20 s — no queue
+  buildup, no spiral.
+- Server: RSS peaked at 1,026 MB early, then *declined* gently to 922 MB over
+  the 30 min (raw CSV) — better than a plateau; CPU avg 4.1 %, max 23.7 %.
+  Rung-1 memory watch-item stays closed on dedicated hardware. Egress not captured (`sar` block-buffers
+  to file and the buffer was lost on kill); steady-state pass implies below
+  ceiling, est. 60–90 Mbps.
+- Also resolves the rung-1 ambiguity: the 300-bot 30-min runaway on the shared
+  desktop was **contention, not organic drift** — dedicated hardware holds a
+  denser hotspot for 30 min with no creep.
+
+### Run: 2026-07-16 rung2 scenario=churn bots=250 duration=10min — PASS
+- disc=189 ≈ reconn=188 climbing in lockstep, conn held 247–250 throughout,
+  p50 pinned at ~42 ms with zero drift, errors=0. One transient p95 blip
+  (336 ms at 550 s), instant recovery.
+- Server: RSS peak 1,017 MB, egress peak 3.7 MB/s. Subscription
+  setup/teardown at this scale costs the server essentially nothing.
+
+### Run: 2026-07-16 rung2 scenario=raid bots=500 raid-frac=0.1 duration=5min — PASS
+- Five raid pulses (~every 60 s, 50 raiders slam one cell). Raiders spike to
+  p50 ≈ 1.5 s worst-case during a pulse; **others rise briefly to p50
+  ≈ 210 ms for 10–20 s, then snap back to 42 ms** — inside the 30 s recovery
+  bar. errors=0, disc=0, full recovery after every pulse, no drift across
+  pulses.
+- Server: RSS peak 1,192 MB; egress peak 12.4 MB/s ≈ 99 Mbps — brushing the
+  ceiling during pulses, never over.
+- Caveat for M8: pulses briefly tax *everyone*, not just raiders — consistent
+  with the shared serialized send path (#2891). Interest management must
+  isolate crowds, not just cap them.
+
+### Rung 3 — skipped (per the doc's option 3)
+Rung 3's deliverable — the per-module ceiling and its failure shape — was
+already obtained at rung 2: ~110–135 Mbps subscription delivery
+(~100 k row-deliveries/s), software-bound, latency-spiral failure mode with
+full recovery. 30 k on one module is arithmetically excluded (60× the
+delivery budget); 30 k across modules is a sharding exercise, which is a
+design input for M8, not a spike question.
+
+## Go/no-go decision
+
+**GO — with documented sharding and interest-management requirements.**
+(The "partial pass = go with sharding requirement" outcome the gate defined
+up front as the realistic expectation.)
+
+Per-module ceiling on 8 vCPU/32 GB:
+- **~500 concurrent clients** uniform / **~150–200 clients in one
+  crowd** (hot cell) / **~110–135 Mbps** subscription delivery. A second,
+  further ceiling at ~1,100–1,200 clients (serial reducer thread).
+- Failure mode is benign and recoverable: latency spirals while RAM absorbs
+  the backlog; drains in seconds once load drops; no crashes, no data loss
+  across the entire spike.
+
+Binding requirements this imposes on the multiplayer arc:
+1. **M8 interest management is not optional.** Effective per-cell subscriber
+   overlap must stay ≲150 at full update rate (tiered/throttled updates or
+   cell splitting above that). Crowd *density*, not realm population, is the
+   limit.
+2. **Realm scale requires module sharding.** A 2–5 k-concurrent realm =
+   several modules (e.g. per-region, as BitCraft does) behind the zone
+   lifecycle (M6). Design the `game_shared` seam so a zone maps to a module.
+3. **Client-side rate limiting** of casts/inputs is required; server-side
+   rejection alone still burns delivery throughput (rung-1 finding).
+4. Budget alert: egress is the scarce resource — monitor Mbps per module in
+   production, not CPU. And size RAM generously: over-ceiling backlog eats
+   ~700 MB/s with no built-in backpressure, so RAM headroom is the only thing
+   standing between a latency spiral and an OOM kill.
 
 ## Fallback plan (on no-go)
 
