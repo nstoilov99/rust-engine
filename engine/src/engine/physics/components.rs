@@ -219,6 +219,11 @@ pub enum ColliderShape {
     Capsule { half_height: f32, radius: f32 },
 }
 
+/// Opt-in marker: this entity's mesh geometry is cooked into static collision chunks (M2).
+/// Only meaningful alongside MeshRenderer; skinned meshes are rejected at cook time.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct StaticCollision;
+
 /// Velocity component (optional, for reading physics velocity)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Velocity {

@@ -33,7 +33,7 @@ use crate::engine::ecs::{
     Camera, CameraProjection, DirectionalLight, LightFalloff, MeshRenderer, Name, ParticleEffect,
     PointLight, SpawnShape, Transform, UpdateModule,
 };
-use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType};
+use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType, StaticCollision};
 
 // Linear-space constants precomputed from their sRGB u8 values (crusty's
 // `Color::from_srgb_u8` isn't const): srgb_to_linear(c) per channel.
@@ -91,6 +91,7 @@ enum ComponentAction {
     RemoveAudioEmitter,
     RemoveAudioListener,
     RemoveParticleEffect,
+    RemoveStaticCollision,
 }
 
 /// Draw the inspector into the dock tab's content rect (physical pixels).
@@ -170,7 +171,10 @@ fn render_header(ui: &mut Ui, selection: &Selection, read_only: bool) {
     let style = ui.style();
     let dim = style.palette.text_dim;
     if read_only {
-        Label::new("(Playing)").size(style.fonts.small).color(dim).show(ui);
+        Label::new("(Playing)")
+            .size(style.fonts.small)
+            .color(dim)
+            .show(ui);
     } else if selection.count() > 1 {
         Label::new(format!("({} selected)", selection.count()))
             .color(dim)
@@ -185,7 +189,10 @@ fn render_empty_state(ui: &mut Ui) {
     let font = ui.style().fonts.body;
     ui.add_space(50.0);
     let avail = ui.available().width();
-    for (text, gap) in [("No entity selected", 10.0), ("Select an entity in the Hierarchy", 0.0)] {
+    for (text, gap) in [
+        ("No entity selected", 10.0),
+        ("Select an entity in the Hierarchy", 0.0),
+    ] {
         let w = ui.painter().measure_text(text, font, None).x;
         let x = ui.cursor().x + ((avail - w) * 0.5).max(0.0);
         let y = ui.cursor().y;
@@ -206,7 +213,10 @@ fn render_filter(ui: &mut Ui, panel: &mut InspectorPanel) {
             style.palette.text,
             None,
         );
-        let label_w = ui.painter().measure_text("Filter:", style.fonts.body, None).x;
+        let label_w = ui
+            .painter()
+            .measure_text("Filter:", style.fonts.body, None)
+            .x;
         ui.add_space(label_w + 8.0);
         let w = (ui.available_size().x - 2.0).max(60.0);
         let out = TextEdit::new(&mut panel.search_filter)
@@ -231,7 +241,10 @@ fn render_entity_info(ui: &mut Ui, world: &World, entity: Entity) {
     let right = ui.available().max.x;
     Label::new(name).size(16.0).show(ui);
     let id_text = format!("ID: {}", entity.id());
-    let id_w = ui.painter().measure_text(&id_text, style.fonts.small, None).x;
+    let id_w = ui
+        .painter()
+        .measure_text(&id_text, style.fonts.small, None)
+        .x;
     ui.painter().text(
         Pos2::new(right - id_w - 6.0, row_top.y + 4.0),
         &id_text,
@@ -325,7 +338,10 @@ fn component_section(
     ui.painter().line_segment(m, b, 1.5, chev);
 
     ui.painter().text(
-        Pos2::new(left + 24.0, header_rect.min.y + (header_h - style.fonts.body) * 0.5),
+        Pos2::new(
+            left + 24.0,
+            header_rect.min.y + (header_h - style.fonts.body) * 0.5,
+        ),
         title,
         style.fonts.body,
         style.palette.text,
@@ -377,7 +393,8 @@ fn property_row<R>(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui) -> R) -
     let top = ui.cursor().y;
     let r = ui.horizontal(|ui| {
         let start = ui.cursor();
-        ui.painter().text(Pos2::new(start.x, start.y + 3.0), label, font, dim, None);
+        ui.painter()
+            .text(Pos2::new(start.x, start.y + 3.0), label, font, dim, None);
         ui.set_cursor(Pos2::new(start.x + PROP_LABEL_W, start.y));
         value(ui)
     });
@@ -404,7 +421,8 @@ fn vec3_row(
     let dim = style.palette.text_dim;
     ui.horizontal(|ui| {
         let start = ui.cursor();
-        ui.painter().text(Pos2::new(start.x, start.y + 3.0), label, font, dim, None);
+        ui.painter()
+            .text(Pos2::new(start.x, start.y + 3.0), label, font, dim, None);
         ui.set_cursor(Pos2::new(start.x + VEC3_LABEL_W, start.y));
 
         let reset = Button::new("R")
@@ -428,7 +446,8 @@ fn vec3_row(
         .enumerate()
         {
             let p = ui.cursor();
-            ui.painter().text(Pos2::new(p.x, p.y + 3.0), axis, font, *color, None);
+            ui.painter()
+                .text(Pos2::new(p.x, p.y + 3.0), axis, font, *color, None);
             ui.add_space(axis_w + 4.0);
             let mut dv = DragValue::new(&mut vals[i])
                 .speed(speed)
@@ -576,7 +595,10 @@ fn asset_slot_row(
                 let mut chosen: Option<String> = None;
 
                 let mut none_sel = path.is_empty();
-                if SelectableValue::new(&mut none_sel, true, "None").show(ui).clicked {
+                if SelectableValue::new(&mut none_sel, true, "None")
+                    .show(ui)
+                    .clicked
+                {
                     chosen = Some(String::new());
                 }
 
@@ -591,7 +613,10 @@ fn asset_slot_row(
                         .copied()
                         .collect();
                     if !prims.is_empty() {
-                        Label::new("Primitives").size(style.fonts.small).color(dim).show(ui);
+                        Label::new("Primitives")
+                            .size(style.fonts.small)
+                            .color(dim)
+                            .show(ui);
                         for prim in prims {
                             let name = prim.rsplit('/').next().unwrap_or(prim);
                             let mut sel = path.as_str() == prim;
@@ -615,7 +640,10 @@ fn asset_slot_row(
                 };
                 let results = asset_browser.registry.query(&filter);
                 if !results.is_empty() {
-                    Label::new("Assets").size(style.fonts.small).color(dim).show(ui);
+                    Label::new("Assets")
+                        .size(style.fonts.small)
+                        .color(dim)
+                        .show(ui);
                     for meta in results {
                         let asset_path = meta.path.to_string_lossy().to_string();
                         let mut sel = path.as_str() == asset_path;
@@ -751,6 +779,14 @@ fn render_components(
     {
         action = Some(ComponentAction::RemoveParticleEffect);
     }
+    if (panel.matches_filter("static")
+        || panel.matches_filter("collision")
+        || panel.matches_filter("physics"))
+        && p.has(ComponentPresence::STATIC_COLLISION)
+        && edit_static_collision(ui, world, entity)
+    {
+        action = Some(ComponentAction::RemoveStaticCollision);
+    }
 
     if let Some(action) = action {
         match action {
@@ -780,6 +816,9 @@ fn render_components(
             }
             ComponentAction::RemoveParticleEffect => {
                 let _ = world.remove_one::<ParticleEffect>(entity);
+            }
+            ComponentAction::RemoveStaticCollision => {
+                let _ = world.remove_one::<StaticCollision>(entity);
             }
         }
         panel.cached_presence = ComponentPresence::probe(world, entity);
@@ -849,8 +888,14 @@ fn edit_transform(ui: &mut Ui, panel: &mut InspectorPanel, world: &mut World, en
             }
 
             ui.add_space(2.0);
-            let reset_pos =
-                vec3_row(ui, "Position", &mut position, 0.1, f32::MIN..=f32::MAX, None);
+            let reset_pos = vec3_row(
+                ui,
+                "Position",
+                &mut position,
+                0.1,
+                f32::MIN..=f32::MAX,
+                None,
+            );
             let reset_rot = vec3_row(ui, "Rotation", &mut euler, 1.0, -180.0..=180.0, Some("°"));
             let reset_scale = vec3_row(ui, "Scale", &mut scale, 0.01, 0.001..=1000.0, None);
             ui.add_space(2.0);
@@ -888,12 +933,7 @@ fn edit_transform(ui: &mut Ui, panel: &mut InspectorPanel, world: &mut World, en
     }
 }
 
-fn edit_camera(
-    ui: &mut Ui,
-    world: &mut World,
-    entity: Entity,
-    picker: &mut Picker,
-) -> bool {
+fn edit_camera(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut Picker) -> bool {
     let Ok(mut camera) = world.get::<&mut Camera>(entity) else {
         return false;
     };
@@ -957,7 +997,13 @@ fn edit_camera(
         drag_row(ui, "Near", &mut camera.near, 0.01, 0.001..=near_max, "");
         drag_row(ui, "Far", &mut camera.far, 1.0, far_min..=100000.0, "");
 
-        color_row(ui, "cam_clear_color", "Clear Color", &mut camera.clear_color, picker);
+        color_row(
+            ui,
+            "cam_clear_color",
+            "Clear Color",
+            &mut camera.clear_color,
+            picker,
+        );
 
         let mut priority = camera.priority as f32;
         property_row(ui, "Priority", |ui| {
@@ -1074,17 +1120,19 @@ fn edit_directional_light(
             if !light.shadow_bias.is_finite() {
                 light.shadow_bias = 0.005;
             }
-            drag_row(ui, "Shadow Bias", &mut light.shadow_bias, 0.001, 0.0..=0.1, "");
+            drag_row(
+                ui,
+                "Shadow Bias",
+                &mut light.shadow_bias,
+                0.001,
+                0.0..=0.1,
+                "",
+            );
         }
     })
 }
 
-fn edit_point_light(
-    ui: &mut Ui,
-    world: &mut World,
-    entity: Entity,
-    picker: &mut Picker,
-) -> bool {
+fn edit_point_light(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut Picker) -> bool {
     let Ok(mut light) = world.get::<&mut PointLight>(entity) else {
         return false;
     };
@@ -1168,7 +1216,14 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
             if !rb.gravity_scale.is_finite() {
                 rb.gravity_scale = 1.0;
             }
-            drag_row(ui, "Gravity Scale", &mut rb.gravity_scale, 0.1, -10.0..=10.0, "");
+            drag_row(
+                ui,
+                "Gravity Scale",
+                &mut rb.gravity_scale,
+                0.1,
+                -10.0..=10.0,
+                "",
+            );
         }
 
         Checkbox::new(&mut rb.continuous_collision, "CCD (Continuous)").show(ui);
@@ -1186,7 +1241,8 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
             .zip(lock.iter_mut())
             {
                 let p = ui.cursor();
-                ui.painter().text(Pos2::new(p.x, p.y + 1.0), axis, font, color, None);
+                ui.painter()
+                    .text(Pos2::new(p.x, p.y + 1.0), axis, font, color, None);
                 let axis_w = ui.painter().measure_text(axis, font, None).x;
                 ui.add_space(axis_w + 3.0);
                 Checkbox::new(v, "").show(ui);
@@ -1386,7 +1442,14 @@ fn edit_audio_emitter(
                 });
         });
 
-        drag_row(ui, "Volume (dB)", &mut emitter.volume_db, 0.1, -80.0..=12.0, " dB");
+        drag_row(
+            ui,
+            "Volume (dB)",
+            &mut emitter.volume_db,
+            0.1,
+            -80.0..=12.0,
+            " dB",
+        );
         drag_row(ui, "Pitch", &mut emitter.pitch, 0.01, 0.1..=4.0, "");
 
         ui.horizontal(|ui| {
@@ -1397,12 +1460,23 @@ fn edit_audio_emitter(
 
         Checkbox::new(&mut emitter.spatial, "Spatial (3D)").show(ui);
         if emitter.spatial {
-            drag_row(ui, "Max Distance", &mut emitter.max_distance, 0.5, 1.0..=1000.0, " m");
+            drag_row(
+                ui,
+                "Max Distance",
+                &mut emitter.max_distance,
+                0.5,
+                1.0..=1000.0,
+                " m",
+            );
             Checkbox::new(&mut emitter.hide_range_in_game, "Hidden in Game").show(ui);
         }
 
         ui.add_space(4.0);
-        if Button::new("Remove").text_color(REMOVE_RED).show(ui).clicked {
+        if Button::new("Remove")
+            .text_color(REMOVE_RED)
+            .show(ui)
+            .clicked
+        {
             remove_button = true;
         }
     });
@@ -1417,7 +1491,30 @@ fn edit_audio_listener(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     let remove_menu = component_section(ui, "Audio Listener", CAT_AUDIO, true, |ui| {
         Checkbox::new(&mut listener.active, "Active").show(ui);
         ui.add_space(4.0);
-        if Button::new("Remove").text_color(REMOVE_RED).show(ui).clicked {
+        if Button::new("Remove")
+            .text_color(REMOVE_RED)
+            .show(ui)
+            .clicked
+        {
+            remove_button = true;
+        }
+    });
+    remove_menu || remove_button
+}
+
+fn edit_static_collision(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+    if world.get::<&StaticCollision>(entity).is_err() {
+        return false;
+    }
+    let mut remove_button = false;
+    let remove_menu = component_section(ui, "Static Collision", CAT_PHYSICS, true, |ui| {
+        Label::new("Static collision source (cooked)").show(ui);
+        ui.add_space(4.0);
+        if Button::new("Remove")
+            .text_color(REMOVE_RED)
+            .show(ui)
+            .clicked
+        {
             remove_button = true;
         }
     });
@@ -1448,7 +1545,10 @@ fn edit_particle_effect(
                         ("Dust", ParticleEffect::dust),
                     ] {
                         let mut dummy = false;
-                        if SelectableValue::new(&mut dummy, true, label).show(ui).clicked {
+                        if SelectableValue::new(&mut dummy, true, label)
+                            .show(ui)
+                            .clicked
+                        {
                             chosen = Some(preset_fn);
                         }
                     }
@@ -1465,247 +1565,289 @@ fn edit_particle_effect(
             }
         });
 
-        CollapsingHeader::new("Lifecycle").default_open(true).show(ui, |ui| {
-            Checkbox::new(&mut effect.enabled, "Enabled").show(ui);
-            let mut capacity = effect.capacity as f32;
-            slider_row(ui, "Capacity", &mut capacity, 256.0..=4096.0, "");
-            effect.capacity = capacity.round() as u32;
-        });
-
-        CollapsingHeader::new("Emission").default_open(true).show(ui, |ui| {
-            #[derive(PartialEq, Copy, Clone)]
-            enum Shape {
-                Point,
-                Sphere,
-                Cone,
-                Box,
-            }
-            let mut kind = match effect.spawn_shape {
-                SpawnShape::Point => Shape::Point,
-                SpawnShape::Sphere { .. } => Shape::Sphere,
-                SpawnShape::Cone { .. } => Shape::Cone,
-                SpawnShape::Box { .. } => Shape::Box,
-            };
-            let before = kind;
-            property_row(ui, "Shape", |ui| {
-                let label = match kind {
-                    Shape::Point => "Point",
-                    Shape::Sphere => "Sphere",
-                    Shape::Cone => "Cone",
-                    Shape::Box => "Box",
-                };
-                ComboBox::new("pe_shape")
-                    .selected_text(label)
-                    .width(120.0)
-                    .show_ui(ui, |ui| {
-                        SelectableValue::new(&mut kind, Shape::Point, "Point").show(ui);
-                        SelectableValue::new(&mut kind, Shape::Sphere, "Sphere").show(ui);
-                        SelectableValue::new(&mut kind, Shape::Cone, "Cone").show(ui);
-                        SelectableValue::new(&mut kind, Shape::Box, "Box").show(ui);
-                    });
+        CollapsingHeader::new("Lifecycle")
+            .default_open(true)
+            .show(ui, |ui| {
+                Checkbox::new(&mut effect.enabled, "Enabled").show(ui);
+                let mut capacity = effect.capacity as f32;
+                slider_row(ui, "Capacity", &mut capacity, 256.0..=4096.0, "");
+                effect.capacity = capacity.round() as u32;
             });
-            if kind != before {
-                effect.spawn_shape = match kind {
-                    Shape::Point => SpawnShape::Point,
-                    Shape::Sphere => SpawnShape::Sphere { radius: 1.0 },
-                    Shape::Cone => SpawnShape::Cone {
-                        angle_rad: 0.5,
-                        radius: 0.5,
-                    },
-                    Shape::Box => SpawnShape::Box {
-                        half_extents: [0.5, 0.5, 0.5],
-                    },
+
+        CollapsingHeader::new("Emission")
+            .default_open(true)
+            .show(ui, |ui| {
+                #[derive(PartialEq, Copy, Clone)]
+                enum Shape {
+                    Point,
+                    Sphere,
+                    Cone,
+                    Box,
+                }
+                let mut kind = match effect.spawn_shape {
+                    SpawnShape::Point => Shape::Point,
+                    SpawnShape::Sphere { .. } => Shape::Sphere,
+                    SpawnShape::Cone { .. } => Shape::Cone,
+                    SpawnShape::Box { .. } => Shape::Box,
                 };
-            }
+                let before = kind;
+                property_row(ui, "Shape", |ui| {
+                    let label = match kind {
+                        Shape::Point => "Point",
+                        Shape::Sphere => "Sphere",
+                        Shape::Cone => "Cone",
+                        Shape::Box => "Box",
+                    };
+                    ComboBox::new("pe_shape")
+                        .selected_text(label)
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            SelectableValue::new(&mut kind, Shape::Point, "Point").show(ui);
+                            SelectableValue::new(&mut kind, Shape::Sphere, "Sphere").show(ui);
+                            SelectableValue::new(&mut kind, Shape::Cone, "Cone").show(ui);
+                            SelectableValue::new(&mut kind, Shape::Box, "Box").show(ui);
+                        });
+                });
+                if kind != before {
+                    effect.spawn_shape = match kind {
+                        Shape::Point => SpawnShape::Point,
+                        Shape::Sphere => SpawnShape::Sphere { radius: 1.0 },
+                        Shape::Cone => SpawnShape::Cone {
+                            angle_rad: 0.5,
+                            radius: 0.5,
+                        },
+                        Shape::Box => SpawnShape::Box {
+                            half_extents: [0.5, 0.5, 0.5],
+                        },
+                    };
+                }
 
-            match &mut effect.spawn_shape {
-                SpawnShape::Point => {}
-                SpawnShape::Sphere { radius } => {
-                    drag_row(ui, "Radius", radius, 0.05, f32::MIN..=f32::MAX, "");
+                match &mut effect.spawn_shape {
+                    SpawnShape::Point => {}
+                    SpawnShape::Sphere { radius } => {
+                        drag_row(ui, "Radius", radius, 0.05, f32::MIN..=f32::MAX, "");
+                    }
+                    SpawnShape::Cone { angle_rad, radius } => {
+                        drag_row(ui, "Angle", angle_rad, 0.01, f32::MIN..=f32::MAX, "");
+                        drag_row(ui, "Radius", radius, 0.05, f32::MIN..=f32::MAX, "");
+                    }
+                    SpawnShape::Box { half_extents } => {
+                        vec3_row(ui, "Extents", half_extents, 0.05, f32::MIN..=f32::MAX, None);
+                    }
                 }
-                SpawnShape::Cone { angle_rad, radius } => {
-                    drag_row(ui, "Angle", angle_rad, 0.01, f32::MIN..=f32::MAX, "");
-                    drag_row(ui, "Radius", radius, 0.05, f32::MIN..=f32::MAX, "");
-                }
-                SpawnShape::Box { half_extents } => {
-                    vec3_row(ui, "Extents", half_extents, 0.05, f32::MIN..=f32::MAX, None);
-                }
-            }
 
-            drag_row(ui, "Rate", &mut effect.emission_rate, 0.5, 0.0..=1000.0, "");
-            let mut burst = effect.burst_count as f32;
-            property_row(ui, "Burst Count", |ui| {
-                let field_bg = ui.style().palette.surface;
-                DragValue::new(&mut burst)
-                    .speed(1.0)
-                    .range(0.0..=100000.0)
-                    .decimals(0)
-                    .width(60.0)
-                    .height(FIELD_H)
-                    .fill(field_bg)
-                    .show(ui);
+                drag_row(ui, "Rate", &mut effect.emission_rate, 0.5, 0.0..=1000.0, "");
+                let mut burst = effect.burst_count as f32;
+                property_row(ui, "Burst Count", |ui| {
+                    let field_bg = ui.style().palette.surface;
+                    DragValue::new(&mut burst)
+                        .speed(1.0)
+                        .range(0.0..=100000.0)
+                        .decimals(0)
+                        .width(60.0)
+                        .height(FIELD_H)
+                        .fill(field_bg)
+                        .show(ui);
+                });
+                effect.burst_count = burst.round().max(0.0) as u32;
+                drag_row(
+                    ui,
+                    "Burst Interval",
+                    &mut effect.burst_interval,
+                    0.01,
+                    f32::MIN..=f32::MAX,
+                    "",
+                );
             });
-            effect.burst_count = burst.round().max(0.0) as u32;
-            drag_row(
-                ui,
-                "Burst Interval",
-                &mut effect.burst_interval,
-                0.01,
-                f32::MIN..=f32::MAX,
-                "",
-            );
-        });
 
-        CollapsingHeader::new("Lifetime").default_open(true).show(ui, |ui| {
-            drag_row(ui, "Min", &mut effect.lifetime_min, 0.01, 0.01..=f32::MAX, "");
-            drag_row(ui, "Max", &mut effect.lifetime_max, 0.01, 0.01..=f32::MAX, "");
-            if effect.lifetime_min > effect.lifetime_max {
-                effect.lifetime_max = effect.lifetime_min;
-            }
-        });
+        CollapsingHeader::new("Lifetime")
+            .default_open(true)
+            .show(ui, |ui| {
+                drag_row(
+                    ui,
+                    "Min",
+                    &mut effect.lifetime_min,
+                    0.01,
+                    0.01..=f32::MAX,
+                    "",
+                );
+                drag_row(
+                    ui,
+                    "Max",
+                    &mut effect.lifetime_max,
+                    0.01,
+                    0.01..=f32::MAX,
+                    "",
+                );
+                if effect.lifetime_min > effect.lifetime_max {
+                    effect.lifetime_max = effect.lifetime_min;
+                }
+            });
 
-        CollapsingHeader::new("Velocity").default_open(true).show(ui, |ui| {
-            vec3_row(
-                ui,
-                "Initial",
-                &mut effect.initial_velocity,
-                0.1,
-                f32::MIN..=f32::MAX,
-                None,
-            );
-            drag_row(
-                ui,
-                "Variance",
-                &mut effect.velocity_variance,
-                0.05,
-                0.0..=f32::MAX,
-                "",
-            );
-        });
+        CollapsingHeader::new("Velocity")
+            .default_open(true)
+            .show(ui, |ui| {
+                vec3_row(
+                    ui,
+                    "Initial",
+                    &mut effect.initial_velocity,
+                    0.1,
+                    f32::MIN..=f32::MAX,
+                    None,
+                );
+                drag_row(
+                    ui,
+                    "Variance",
+                    &mut effect.velocity_variance,
+                    0.05,
+                    0.0..=f32::MAX,
+                    "",
+                );
+            });
 
-        CollapsingHeader::new("Modules").default_open(true).show(ui, |ui| {
-            let mut remove_idx: Option<usize> = None;
-            for (idx, module) in effect.update_modules.iter_mut().enumerate() {
-                let title = format!("{} [{idx}]", module.display_name());
-                CollapsingHeader::new(title).default_open(true).show(ui, |ui| {
-                    match module {
-                        UpdateModule::Gravity(v) | UpdateModule::Wind(v) => {
-                            vec3_row(ui, "Vector", v, 0.1, f32::MIN..=f32::MAX, None);
-                        }
-                        UpdateModule::Drag(v) => {
-                            drag_row(ui, "Drag", v, 0.01, 0.0..=f32::MAX, "");
-                        }
-                        UpdateModule::CurlNoise {
-                            strength,
-                            scale,
-                            speed,
-                        } => {
-                            drag_row(ui, "Strength", strength, 0.05, 0.0..=f32::MAX, "");
-                            drag_row(ui, "Scale", scale, 0.05, 0.01..=f32::MAX, "");
-                            drag_row(ui, "Speed", speed, 0.01, f32::MIN..=f32::MAX, "");
-                        }
-                        UpdateModule::ColorOverLife { start, end } => {
-                            // Stored floats are sRGB-encoded; round-trip u8.
-                            for (label, chan, salt) in
-                                [("Start", start, "col_start"), ("End", end, "col_end")]
+        CollapsingHeader::new("Modules")
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut remove_idx: Option<usize> = None;
+                for (idx, module) in effect.update_modules.iter_mut().enumerate() {
+                    let title = format!("{} [{idx}]", module.display_name());
+                    CollapsingHeader::new(title)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            match module {
+                                UpdateModule::Gravity(v) | UpdateModule::Wind(v) => {
+                                    vec3_row(ui, "Vector", v, 0.1, f32::MIN..=f32::MAX, None);
+                                }
+                                UpdateModule::Drag(v) => {
+                                    drag_row(ui, "Drag", v, 0.01, 0.0..=f32::MAX, "");
+                                }
+                                UpdateModule::CurlNoise {
+                                    strength,
+                                    scale,
+                                    speed,
+                                } => {
+                                    drag_row(ui, "Strength", strength, 0.05, 0.0..=f32::MAX, "");
+                                    drag_row(ui, "Scale", scale, 0.05, 0.01..=f32::MAX, "");
+                                    drag_row(ui, "Speed", speed, 0.01, f32::MIN..=f32::MAX, "");
+                                }
+                                UpdateModule::ColorOverLife { start, end } => {
+                                    // Stored floats are sRGB-encoded; round-trip u8.
+                                    for (label, chan, salt) in
+                                        [("Start", start, "col_start"), ("End", end, "col_end")]
+                                    {
+                                        property_row(ui, label, |ui| {
+                                            let before = [
+                                                (chan[0] * 255.0) as u8,
+                                                (chan[1] * 255.0) as u8,
+                                                (chan[2] * 255.0) as u8,
+                                                (chan[3] * 255.0) as u8,
+                                            ];
+                                            let mut c = Color::from_srgb_u8(
+                                                before[0], before[1], before[2], before[3],
+                                            );
+                                            let mut cp =
+                                                ColorPicker::new(format!("{salt}_{idx}"), &mut c)
+                                                    .swatches(picker.swatches)
+                                                    .eyedropper(picker.eye);
+                                            if let Some(icon) = picker.icon {
+                                                cp = cp.eyedropper_icon(icon);
+                                            }
+                                            cp.show(ui);
+                                            let after = c.to_srgb_u8();
+                                            if after != before {
+                                                *chan = [
+                                                    after[0] as f32 / 255.0,
+                                                    after[1] as f32 / 255.0,
+                                                    after[2] as f32 / 255.0,
+                                                    after[3] as f32 / 255.0,
+                                                ];
+                                            }
+                                        });
+                                    }
+                                }
+                                UpdateModule::SizeOverLife { start, end } => {
+                                    drag_row(ui, "Start", start, 0.005, 0.0..=f32::MAX, "");
+                                    drag_row(ui, "End", end, 0.005, 0.0..=f32::MAX, "");
+                                }
+                            }
+                            if Button::new("Remove Module")
+                                .text_color(REMOVE_RED)
+                                .show(ui)
+                                .clicked
                             {
-                                property_row(ui, label, |ui| {
-                                    let before = [
-                                        (chan[0] * 255.0) as u8,
-                                        (chan[1] * 255.0) as u8,
-                                        (chan[2] * 255.0) as u8,
-                                        (chan[3] * 255.0) as u8,
-                                    ];
-                                    let mut c = Color::from_srgb_u8(
-                                        before[0], before[1], before[2], before[3],
-                                    );
-                                    let mut cp =
-                                        ColorPicker::new(format!("{salt}_{idx}"), &mut c)
-                                            .swatches(picker.swatches)
-                                            .eyedropper(picker.eye);
-                                    if let Some(icon) = picker.icon {
-                                        cp = cp.eyedropper_icon(icon);
-                                    }
-                                    cp.show(ui);
-                                    let after = c.to_srgb_u8();
-                                    if after != before {
-                                        *chan = [
-                                            after[0] as f32 / 255.0,
-                                            after[1] as f32 / 255.0,
-                                            after[2] as f32 / 255.0,
-                                            after[3] as f32 / 255.0,
-                                        ];
-                                    }
-                                });
+                                remove_idx = Some(idx);
+                            }
+                        });
+                }
+                if let Some(idx) = remove_idx {
+                    effect.update_modules.remove(idx);
+                }
+
+                ui.add_space(4.0);
+                let mut add: Option<UpdateModule> = None;
+                ComboBox::new("pe_add_module")
+                    .selected_text("Add Module...")
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        let entries: [(&str, fn() -> UpdateModule); 6] = [
+                            ("Gravity", || UpdateModule::Gravity([0.0, 0.0, -9.8])),
+                            ("Drag", || UpdateModule::Drag(0.5)),
+                            ("Wind", || UpdateModule::Wind([1.0, 0.0, 0.0])),
+                            ("Curl Noise", || UpdateModule::CurlNoise {
+                                strength: 1.0,
+                                scale: 1.0,
+                                speed: 0.5,
+                            }),
+                            ("Color Over Life", || UpdateModule::ColorOverLife {
+                                start: [1.0, 1.0, 1.0, 1.0],
+                                end: [1.0, 1.0, 1.0, 0.0],
+                            }),
+                            ("Size Over Life", || UpdateModule::SizeOverLife {
+                                start: 0.1,
+                                end: 0.0,
+                            }),
+                        ];
+                        for (label, make) in entries {
+                            let mut dummy = false;
+                            if SelectableValue::new(&mut dummy, true, label)
+                                .show(ui)
+                                .clicked
+                            {
+                                add = Some(make());
                             }
                         }
-                        UpdateModule::SizeOverLife { start, end } => {
-                            drag_row(ui, "Start", start, 0.005, 0.0..=f32::MAX, "");
-                            drag_row(ui, "End", end, 0.005, 0.0..=f32::MAX, "");
-                        }
-                    }
-                    if Button::new("Remove Module")
-                        .text_color(REMOVE_RED)
-                        .show(ui)
-                        .clicked
-                    {
-                        remove_idx = Some(idx);
-                    }
-                });
-            }
-            if let Some(idx) = remove_idx {
-                effect.update_modules.remove(idx);
-            }
-
-            ui.add_space(4.0);
-            let mut add: Option<UpdateModule> = None;
-            ComboBox::new("pe_add_module")
-                .selected_text("Add Module...")
-                .width(160.0)
-                .show_ui(ui, |ui| {
-                    let entries: [(&str, fn() -> UpdateModule); 6] = [
-                        ("Gravity", || UpdateModule::Gravity([0.0, 0.0, -9.8])),
-                        ("Drag", || UpdateModule::Drag(0.5)),
-                        ("Wind", || UpdateModule::Wind([1.0, 0.0, 0.0])),
-                        ("Curl Noise", || UpdateModule::CurlNoise {
-                            strength: 1.0,
-                            scale: 1.0,
-                            speed: 0.5,
-                        }),
-                        ("Color Over Life", || UpdateModule::ColorOverLife {
-                            start: [1.0, 1.0, 1.0, 1.0],
-                            end: [1.0, 1.0, 1.0, 0.0],
-                        }),
-                        ("Size Over Life", || UpdateModule::SizeOverLife {
-                            start: 0.1,
-                            end: 0.0,
-                        }),
-                    ];
-                    for (label, make) in entries {
-                        let mut dummy = false;
-                        if SelectableValue::new(&mut dummy, true, label).show(ui).clicked {
-                            add = Some(make());
-                        }
-                    }
-                });
-            if let Some(module) = add {
-                effect.update_modules.push(module);
-            }
-        });
+                    });
+                if let Some(module) = add {
+                    effect.update_modules.push(module);
+                }
+            });
 
         CollapsingHeader::new("Rendering").show(ui, |ui| {
             property_row(ui, "Texture", |ui| {
                 let field_bg = ui.style().palette.surface;
                 let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
-                TextEdit::new(&mut effect.texture_path).width(w).fill(field_bg).show_full(ui);
+                TextEdit::new(&mut effect.texture_path)
+                    .width(w)
+                    .fill(field_bg)
+                    .show_full(ui);
             });
-            slider_row(ui, "Soft Fade", &mut effect.soft_fade_distance, 0.0..=5.0, "");
+            slider_row(
+                ui,
+                "Soft Fade",
+                &mut effect.soft_fade_distance,
+                0.0..=5.0,
+                "",
+            );
         });
 
         Checkbox::new(&mut effect.show_gizmos, "Show Gizmos").show(ui);
 
         ui.add_space(4.0);
-        if Button::new("Remove").text_color(REMOVE_RED).show(ui).clicked {
+        if Button::new("Remove")
+            .text_color(REMOVE_RED)
+            .show(ui)
+            .clicked
+        {
             remove_button = true;
         }
     });
@@ -1728,9 +1870,13 @@ fn render_add_component(
     let has_point_light = p.has(ComponentPresence::POINT_LIGHT);
 
     if has_rigidbody && !has_collider {
-        Label::new("Warning: RigidBody without Collider").color(WARNING).show(ui);
+        Label::new("Warning: RigidBody without Collider")
+            .color(WARNING)
+            .show(ui);
     } else if !has_rigidbody && has_collider {
-        Label::new("Warning: Collider without RigidBody").color(WARNING).show(ui);
+        Label::new("Warning: Collider without RigidBody")
+            .color(WARNING)
+            .show(ui);
     }
 
     ui.add_space(8.0);
@@ -1743,11 +1889,15 @@ fn render_add_component(
         .show_ui(ui, |ui| {
             let entry = |ui: &mut Ui, label: &str, conflict: bool| -> bool {
                 if conflict {
-                    Label::new(format!("{label} (conflicts)")).color(dim).show(ui);
+                    Label::new(format!("{label} (conflicts)"))
+                        .color(dim)
+                        .show(ui);
                     return false;
                 }
                 let mut dummy = false;
-                SelectableValue::new(&mut dummy, true, label).show(ui).clicked
+                SelectableValue::new(&mut dummy, true, label)
+                    .show(ui)
+                    .clicked
             };
 
             if !has_camera && entry(ui, "Camera", has_dir_light || has_point_light) {
@@ -1782,9 +1932,16 @@ fn render_add_component(
                 let _ = world.insert_one(entity, AudioListener::default());
                 added = true;
             }
+            if !p.has(ComponentPresence::STATIC_COLLISION) && entry(ui, "Static Collision", false) {
+                let _ = world.insert_one(entity, StaticCollision);
+                added = true;
+            }
 
             ui.separator();
-            Label::new("VFX").size(ui.style().fonts.small).color(dim).show(ui);
+            Label::new("VFX")
+                .size(ui.style().fonts.small)
+                .color(dim)
+                .show(ui);
             if !p.has(ComponentPresence::PARTICLE_EFFECT) && entry(ui, "Particle Effect", false) {
                 let _ = world.insert_one(entity, ParticleEffect::default());
                 if world

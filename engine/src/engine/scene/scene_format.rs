@@ -394,11 +394,21 @@ fn default_max_distance() -> f32 {
     50.0
 }
 
-fn default_plankton_capacity() -> u32 { 2048 }
-fn default_plankton_emission_rate() -> f32 { 20.0 }
-fn default_plankton_lifetime_min() -> f32 { 1.0 }
-fn default_plankton_lifetime_max() -> f32 { 2.0 }
-fn default_plankton_initial_velocity() -> [f32; 3] { [0.0, 0.0, 2.0] }
+fn default_plankton_capacity() -> u32 {
+    2048
+}
+fn default_plankton_emission_rate() -> f32 {
+    20.0
+}
+fn default_plankton_lifetime_min() -> f32 {
+    1.0
+}
+fn default_plankton_lifetime_max() -> f32 {
+    2.0
+}
+fn default_plankton_initial_velocity() -> [f32; 3] {
+    [0.0, 0.0, 2.0]
+}
 
 /// Spawn shape for scene serialization.
 /// Custom serde impl for the same RON internally-tagged enum reason as CameraProjectionData.
@@ -481,7 +491,9 @@ impl<'de> Deserialize<'de> for SpawnShapeData {
                         "radius" => radius = Some(map.next_value()?),
                         "angle_rad" => angle_rad = Some(map.next_value()?),
                         "half_extents" => half_extents = Some(map.next_value()?),
-                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
                     }
                 }
                 let kind = shape.as_deref().unwrap_or("Point");
@@ -516,9 +528,19 @@ pub enum UpdateModuleData {
     Gravity([f32; 3]),
     Drag(f32),
     Wind([f32; 3]),
-    CurlNoise { strength: f32, scale: f32, speed: f32 },
-    ColorOverLife { start: [f32; 4], end: [f32; 4] },
-    SizeOverLife { start: f32, end: f32 },
+    CurlNoise {
+        strength: f32,
+        scale: f32,
+        speed: f32,
+    },
+    ColorOverLife {
+        start: [f32; 4],
+        end: [f32; 4],
+    },
+    SizeOverLife {
+        start: f32,
+        end: f32,
+    },
 }
 
 impl Serialize for UpdateModuleData {
@@ -538,7 +560,11 @@ impl Serialize for UpdateModuleData {
                 map.serialize_entry("module", "Wind")?;
                 map.serialize_entry("value", v)?;
             }
-            UpdateModuleData::CurlNoise { strength, scale, speed } => {
+            UpdateModuleData::CurlNoise {
+                strength,
+                scale,
+                speed,
+            } => {
                 map.serialize_entry("module", "CurlNoise")?;
                 map.serialize_entry("strength", strength)?;
                 map.serialize_entry("scale", scale)?;
@@ -614,10 +640,14 @@ impl<'de> Deserialize<'de> for UpdateModuleData {
                                 end_color = Some(arr);
                             }
                         }
-                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
                     }
                 }
-                let kind = module.as_deref().ok_or_else(|| de::Error::missing_field("module"))?;
+                let kind = module
+                    .as_deref()
+                    .ok_or_else(|| de::Error::missing_field("module"))?;
                 match kind {
                     "Gravity" => Ok(UpdateModuleData::Gravity(
                         value_vec3.unwrap_or([0.0, 0.0, -9.8]),
@@ -641,7 +671,14 @@ impl<'de> Deserialize<'de> for UpdateModuleData {
                     }),
                     other => Err(de::Error::unknown_variant(
                         other,
-                        &["Gravity", "Drag", "Wind", "CurlNoise", "ColorOverLife", "SizeOverLife"],
+                        &[
+                            "Gravity",
+                            "Drag",
+                            "Wind",
+                            "CurlNoise",
+                            "ColorOverLife",
+                            "SizeOverLife",
+                        ],
                     )),
                 }
             }
@@ -783,6 +820,7 @@ pub enum ComponentData {
         is_sensor: bool,
     },
     Player,
+    StaticCollision,
     Parent {
         parent_name: String, // Reference parent entity by name
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -859,6 +897,14 @@ impl Default for SceneFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_collision_roundtrips() {
+        let component = ComponentData::StaticCollision;
+        let ron_string = ron::ser::to_string(&component).unwrap();
+        let decoded: ComponentData = ron::from_str(&ron_string).unwrap();
+        assert!(matches!(decoded, ComponentData::StaticCollision));
+    }
 
     #[test]
     fn collider_shape_loads_legacy_external_variant() {

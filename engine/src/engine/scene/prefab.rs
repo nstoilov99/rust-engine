@@ -8,6 +8,7 @@ use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
 use crate::engine::physics::{
     Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
+    StaticCollision,
 };
 use hecs::{Entity, EntityBuilder, World};
 use nalgebra_glm as glm;
@@ -253,6 +254,9 @@ impl Prefab {
                 }
                 ComponentData::Player => {
                     builder.add(Player);
+                }
+                ComponentData::StaticCollision => {
+                    builder.add(StaticCollision);
                 }
                 ComponentData::AudioEmitter {
                     clip_path,

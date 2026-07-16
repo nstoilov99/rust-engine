@@ -1,15 +1,15 @@
 //! Scene serialization and deserialization
 
 use super::scene_format::{
-    CameraProjectionData, ColliderShapeData, ComponentData,
-    EntityData, LightFalloffData, RenderModeData, RigidBodyTypeData, SceneFile,
-    SpawnShapeData, UpdateModuleData,
+    CameraProjectionData, ColliderShapeData, ComponentData, EntityData, LightFalloffData,
+    RenderModeData, RigidBodyTypeData, SceneFile, SpawnShapeData, UpdateModuleData,
 };
 use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::components::*;
 use crate::engine::ecs::hierarchy::{set_parent, Children, Parent};
 use crate::engine::physics::{
     Collider as PhysCollider, ColliderShape, RigidBody as PhysRigidBody, RigidBodyType,
+    StaticCollision,
 };
 use hecs::{Entity, World};
 use log;
@@ -120,6 +120,10 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         components.push(ComponentData::Player);
     }
 
+    if world.get::<&StaticCollision>(entity).is_ok() {
+        components.push(ComponentData::StaticCollision);
+    }
+
     if let Ok(rb) = world.get::<&PhysRigidBody>(entity) {
         components.push(ComponentData::RigidBody {
             body_type: match rb.body_type {
@@ -179,20 +183,32 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
     }
 
     if let Ok(effect) = world.get::<&ParticleEffect>(entity) {
-        let modules_data: Vec<UpdateModuleData> = effect.update_modules.iter().map(|m| match m {
-            UpdateModule::Gravity(v) => UpdateModuleData::Gravity(*v),
-            UpdateModule::Drag(v) => UpdateModuleData::Drag(*v),
-            UpdateModule::Wind(v) => UpdateModuleData::Wind(*v),
-            UpdateModule::CurlNoise { strength, scale, speed } => {
-                UpdateModuleData::CurlNoise { strength: *strength, scale: *scale, speed: *speed }
-            }
-            UpdateModule::ColorOverLife { start, end } => {
-                UpdateModuleData::ColorOverLife { start: *start, end: *end }
-            }
-            UpdateModule::SizeOverLife { start, end } => {
-                UpdateModuleData::SizeOverLife { start: *start, end: *end }
-            }
-        }).collect();
+        let modules_data: Vec<UpdateModuleData> = effect
+            .update_modules
+            .iter()
+            .map(|m| match m {
+                UpdateModule::Gravity(v) => UpdateModuleData::Gravity(*v),
+                UpdateModule::Drag(v) => UpdateModuleData::Drag(*v),
+                UpdateModule::Wind(v) => UpdateModuleData::Wind(*v),
+                UpdateModule::CurlNoise {
+                    strength,
+                    scale,
+                    speed,
+                } => UpdateModuleData::CurlNoise {
+                    strength: *strength,
+                    scale: *scale,
+                    speed: *speed,
+                },
+                UpdateModule::ColorOverLife { start, end } => UpdateModuleData::ColorOverLife {
+                    start: *start,
+                    end: *end,
+                },
+                UpdateModule::SizeOverLife { start, end } => UpdateModuleData::SizeOverLife {
+                    start: *start,
+                    end: *end,
+                },
+            })
+            .collect();
 
         components.push(ComponentData::ParticleEffect {
             enabled: effect.enabled,
@@ -206,9 +222,7 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
                 SpawnShape::Cone { angle_rad, radius } => {
                     SpawnShapeData::Cone { angle_rad, radius }
                 }
-                SpawnShape::Box { half_extents } => {
-                    SpawnShapeData::Box { half_extents }
-                }
+                SpawnShape::Box { half_extents } => SpawnShapeData::Box { half_extents },
             },
             lifetime_min: effect.lifetime_min,
             lifetime_max: effect.lifetime_max,
@@ -586,6 +600,9 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             ComponentData::Player => {
                 builder.add(Player);
             }
+            ComponentData::StaticCollision => {
+                builder.add(StaticCollision);
+            }
             ComponentData::AudioEmitter {
                 clip_path,
                 bus,
@@ -634,20 +651,35 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                 soft_fade_distance,
                 show_gizmos,
             } => {
-                let modules: Vec<UpdateModule> = update_modules.iter().map(|m| match m {
-                    UpdateModuleData::Gravity(v) => UpdateModule::Gravity(*v),
-                    UpdateModuleData::Drag(v) => UpdateModule::Drag(*v),
-                    UpdateModuleData::Wind(v) => UpdateModule::Wind(*v),
-                    UpdateModuleData::CurlNoise { strength, scale, speed } => {
-                        UpdateModule::CurlNoise { strength: *strength, scale: *scale, speed: *speed }
-                    }
-                    UpdateModuleData::ColorOverLife { start, end } => {
-                        UpdateModule::ColorOverLife { start: *start, end: *end }
-                    }
-                    UpdateModuleData::SizeOverLife { start, end } => {
-                        UpdateModule::SizeOverLife { start: *start, end: *end }
-                    }
-                }).collect();
+                let modules: Vec<UpdateModule> = update_modules
+                    .iter()
+                    .map(|m| match m {
+                        UpdateModuleData::Gravity(v) => UpdateModule::Gravity(*v),
+                        UpdateModuleData::Drag(v) => UpdateModule::Drag(*v),
+                        UpdateModuleData::Wind(v) => UpdateModule::Wind(*v),
+                        UpdateModuleData::CurlNoise {
+                            strength,
+                            scale,
+                            speed,
+                        } => UpdateModule::CurlNoise {
+                            strength: *strength,
+                            scale: *scale,
+                            speed: *speed,
+                        },
+                        UpdateModuleData::ColorOverLife { start, end } => {
+                            UpdateModule::ColorOverLife {
+                                start: *start,
+                                end: *end,
+                            }
+                        }
+                        UpdateModuleData::SizeOverLife { start, end } => {
+                            UpdateModule::SizeOverLife {
+                                start: *start,
+                                end: *end,
+                            }
+                        }
+                    })
+                    .collect();
 
                 builder.add(ParticleEffect {
                     enabled: *enabled,
@@ -657,20 +689,14 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     burst_interval: *burst_interval,
                     spawn_shape: match spawn_shape {
                         SpawnShapeData::Point => SpawnShape::Point,
-                        SpawnShapeData::Sphere { radius } => {
-                            SpawnShape::Sphere { radius: *radius }
-                        }
-                        SpawnShapeData::Cone { angle_rad, radius } => {
-                            SpawnShape::Cone {
-                                angle_rad: *angle_rad,
-                                radius: *radius,
-                            }
-                        }
-                        SpawnShapeData::Box { half_extents } => {
-                            SpawnShape::Box {
-                                half_extents: *half_extents,
-                            }
-                        }
+                        SpawnShapeData::Sphere { radius } => SpawnShape::Sphere { radius: *radius },
+                        SpawnShapeData::Cone { angle_rad, radius } => SpawnShape::Cone {
+                            angle_rad: *angle_rad,
+                            radius: *radius,
+                        },
+                        SpawnShapeData::Box { half_extents } => SpawnShape::Box {
+                            half_extents: *half_extents,
+                        },
                     },
                     lifetime_min: *lifetime_min,
                     lifetime_max: *lifetime_max,

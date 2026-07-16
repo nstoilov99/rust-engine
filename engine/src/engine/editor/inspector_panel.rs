@@ -11,7 +11,7 @@ use crate::engine::audio::{AudioEmitter, AudioListener};
 use crate::engine::ecs::{
     Camera, DirectionalLight, MeshRenderer, Name, ParticleEffect, PointLight, Transform,
 };
-use crate::engine::physics::{Collider, RigidBody};
+use crate::engine::physics::{Collider, RigidBody, StaticCollision};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +37,7 @@ impl ComponentPresence {
     pub(crate) const AUDIO_EMITTER: u16 = 1 << 10;
     pub(crate) const AUDIO_LISTENER: u16 = 1 << 11;
     pub(crate) const PARTICLE_EFFECT: u16 = 1 << 12;
+    pub(crate) const STATIC_COLLISION: u16 = 1 << 13;
 
     pub(crate) fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -78,6 +79,9 @@ impl ComponentPresence {
         }
         if world.get::<&ParticleEffect>(entity).is_ok() {
             bits |= Self::PARTICLE_EFFECT;
+        }
+        if world.get::<&StaticCollision>(entity).is_ok() {
+            bits |= Self::STATIC_COLLISION;
         }
         Self { bits }
     }
