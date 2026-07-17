@@ -1,0 +1,19 @@
+[package]
+name = "game_module"
+version = "0.1.0"
+edition = "2021"
+
+# Workspace-excluded: built by the spacetime CLI toolchain, not cargo-in-tree.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spacetimedb = "2.6"
+log = "0.4"
+game_shared = { path = "../../game_shared" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

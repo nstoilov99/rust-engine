@@ -8,6 +8,8 @@ members = [
     "tools/greybox_gen",
     "tools/migrate_asset_extensions",
 ]
+# SpacetimeDB module: built by the spacetime CLI toolchain, own lockfile.
+exclude = ["server/game_module"]
 resolver = "2"
 
 [workspace.dependencies]
