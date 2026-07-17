@@ -41,6 +41,8 @@ pub struct CollisionLoadReport {
     /// `Some` = collision is disabled for this scene, with the reason.
     pub disabled: Option<String>,
     pub warnings: Vec<String>,
+    /// Wall-clock load time — the M4 streaming baseline number.
+    pub elapsed_ms: f32,
 }
 
 impl CollisionWorld {
@@ -68,6 +70,7 @@ impl CollisionWorld {
     /// Load all cooked chunks for a scene (`scene_relative` is the
     /// content-relative `.scene` path). Replaces any previous contents.
     pub fn load_for_scene(&mut self, scene_relative: &str) -> CollisionLoadReport {
+        let start = std::time::Instant::now();
         self.clear();
         let stem = scene_stem(scene_relative);
         let manifest_rel = format!("collision/{stem}/manifest.ron");
@@ -77,6 +80,7 @@ impl CollisionWorld {
             skipped: 0,
             disabled: Some(reason),
             warnings: Vec::new(),
+            elapsed_ms: 0.0,
         };
 
         if !asset_source::exists(&manifest_rel) {
@@ -138,6 +142,7 @@ impl CollisionWorld {
             skipped: manifest.chunks.len() - loaded,
             disabled: None,
             warnings,
+            elapsed_ms: start.elapsed().as_secs_f32() * 1000.0,
         }
     }
 

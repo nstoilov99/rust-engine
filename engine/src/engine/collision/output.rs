@@ -41,11 +41,62 @@ pub fn load_model_from_content(mesh_path: &str) -> Option<Arc<Model>> {
         .map(Arc::new)
 }
 
-/// `fnv1a_64` of the scene file bytes, for the manifest's `scene_hash`.
+/// Staleness hash for the manifest's `scene_hash`: `fnv1a_64` of the scene
+/// file bytes, folded with the bytes of every mesh FILE referenced by a
+/// `StaticCollision` entity. Scene-byte hashing alone is not enough — the
+/// common generator iteration (tweak height function → meshes change, scene
+/// byte-identical) must not silently skip re-cooking.
 pub fn scene_content_hash(scene_relative: &str) -> Option<u64> {
-    asset_source::read_bytes(scene_relative)
-        .ok()
-        .map(|b| fnv1a_64(&b))
+    let scene_bytes = asset_source::read_bytes(scene_relative).ok()?;
+    let mut hash = fnv1a_64(&scene_bytes);
+    for path in collision_mesh_paths(&scene_bytes) {
+        let mesh_hash = asset_source::read_bytes(&path)
+            .ok()
+            .map(|b| fnv1a_64(&b))
+            .unwrap_or(0); // missing file still folds the path → hash flips when it appears
+        let mut fold = Vec::with_capacity(8 + path.len() + 8);
+        fold.extend_from_slice(&hash.to_le_bytes());
+        fold.extend_from_slice(path.as_bytes());
+        fold.extend_from_slice(&mesh_hash.to_le_bytes());
+        hash = fnv1a_64(&fold);
+    }
+    Some(hash)
+}
+
+/// Content-relative mesh files whose bytes affect cooked collision: the
+/// non-primitive `mesh_path` of every entity carrying `StaticCollision`.
+/// Sorted + deduped for a stable fold order. Parse failures degrade to an
+/// empty list (the scene-byte hash still guards those).
+fn collision_mesh_paths(scene_bytes: &[u8]) -> Vec<String> {
+    use crate::engine::scene::scene_format::{ComponentData, SceneFile};
+    let Ok(text) = std::str::from_utf8(scene_bytes) else {
+        return Vec::new();
+    };
+    let Ok(scene) = ron::from_str::<SceneFile>(text) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = scene
+        .entities
+        .iter()
+        .filter(|e| {
+            e.components
+                .iter()
+                .any(|c| matches!(c, ComponentData::StaticCollision))
+        })
+        .filter_map(|e| {
+            e.components.iter().find_map(|c| match c {
+                ComponentData::MeshRenderer { mesh_path, .. }
+                    if !mesh_path.is_empty() && !mesh_path.starts_with("__primitive__/") =>
+                {
+                    Some(mesh_path.clone())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// Cheap staleness check: `true` iff a manifest exists for the scene and was
@@ -67,6 +118,23 @@ pub fn cook_is_current(scene_relative: &str) -> bool {
         && m.scene_hash == hash
 }
 
+/// Full headless cook for one scene: load into a fresh world, cook, write.
+/// Returns (chunk count, cook warnings). Used by build/export paths that must
+/// guarantee current collision before packing.
+pub fn cook_scene_headless(scene_relative: &str) -> Result<(usize, Vec<String>), String> {
+    let mut world = crate::engine::ecs::World::new();
+    crate::engine::scene::scene_serializer::load_scene(&mut world, scene_relative)
+        .map_err(|e| format!("load '{scene_relative}': {e}"))?;
+    let stem = scene_stem(scene_relative);
+    let mut loader = load_model_from_content;
+    let mut cooked = super::cook::cook_scene(&world, &stem, &mut loader);
+    cooked.manifest.scene_hash = scene_content_hash(scene_relative).unwrap_or(0);
+    let dir = collision_dir_for_scene(scene_relative)
+        .ok_or_else(|| "no content root initialized".to_string())?;
+    write_cooked_scene(&dir, &cooked).map_err(|e| format!("write '{}': {e}", dir.display()))?;
+    Ok((cooked.chunks.len(), cooked.warnings))
+}
+
 /// Write chunks + manifest to `dir`, replacing any previous cook output
 /// (the directory is cooker-owned build output).
 pub fn write_cooked_scene(dir: &Path, cooked: &CookedScene) -> io::Result<()> {
@@ -85,11 +153,37 @@ pub fn write_cooked_scene(dir: &Path, cooked: &CookedScene) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::scene_stem;
+    use super::{collision_mesh_paths, scene_stem};
 
     #[test]
     fn scene_stem_strips_dir_and_extension() {
         assert_eq!(scene_stem("scenes/main.scene"), "main");
         assert_eq!(scene_stem("demo.scene"), "demo");
+    }
+
+    #[test]
+    fn collision_mesh_paths_filters_and_dedups() {
+        let scene = r#"(
+            version: "1.0",
+            name: "t",
+            entities: [
+                (name: "a", components: [
+                    (type: "MeshRenderer", mesh_path: "models/b.mesh"),
+                    (type: "StaticCollision"),
+                ]),
+                (name: "a2", components: [
+                    (type: "MeshRenderer", mesh_path: "models/b.mesh"),
+                    (type: "StaticCollision"),
+                ]),
+                (name: "prim", components: [
+                    (type: "MeshRenderer", mesh_path: "__primitive__/Cube"),
+                    (type: "StaticCollision"),
+                ]),
+                (name: "no_collision", components: [
+                    (type: "MeshRenderer", mesh_path: "models/c.mesh"),
+                ]),
+            ],
+        )"#;
+        assert_eq!(collision_mesh_paths(scene.as_bytes()), vec!["models/b.mesh"]);
     }
 }

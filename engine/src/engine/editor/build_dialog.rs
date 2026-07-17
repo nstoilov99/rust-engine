@@ -4,7 +4,7 @@
 //! and shows progress in the File > Build Game submenu.
 
 use super::console::LogMessage;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -329,6 +329,8 @@ fn copy_build_output(
     let pak_dst = output_dir.join("game.pak");
 
     if content_src.is_dir() {
+        cook_stale_collision(&content_src, &build_log)?;
+
         if let Ok(mut log) = build_log.lock() {
             log.push("Packing content/ into game.pak...".to_string());
         }
@@ -351,4 +353,42 @@ fn copy_build_output(
     }
 
     Ok(binary_size)
+}
+
+/// Re-cook collision for every scene whose cook is stale before packing, so
+/// the pak never ships outdated chunks. Cook failures fail the build.
+fn cook_stale_collision(
+    content_src: &Path,
+    build_log: &Arc<Mutex<Vec<String>>>,
+) -> Result<(), String> {
+    use crate::engine::collision::output;
+
+    let scenes_dir = content_src.join("scenes");
+    let Ok(entries) = std::fs::read_dir(&scenes_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "scene") != Some(true) {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let scene_relative = format!("scenes/{name}");
+        if output::cook_is_current(&scene_relative) {
+            continue;
+        }
+        let (chunks, warnings) = output::cook_scene_headless(&scene_relative)
+            .map_err(|e| format!("Collision cook failed for '{scene_relative}': {e}"))?;
+        if let Ok(mut log) = build_log.lock() {
+            log.push(format!(
+                "Cooked collision for '{scene_relative}': {chunks} chunk(s)"
+            ));
+            for w in warnings {
+                log.push(format!("  cook warning: {w}"));
+            }
+        }
+    }
+    Ok(())
 }

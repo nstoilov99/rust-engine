@@ -346,8 +346,8 @@ impl App {
                     println!("Collision: {reason}");
                 } else {
                     println!(
-                        "Collision: {} chunk(s) loaded, {} skipped",
-                        report.loaded, report.skipped
+                        "Collision: {} chunk(s) loaded, {} skipped in {:.1} ms",
+                        report.loaded, report.skipped, report.elapsed_ms
                     );
                 }
                 for warning in &report.warnings {
@@ -4061,6 +4061,9 @@ impl App {
                     .console
                     .messages
                     .push(LogMessage::info(format!("Saved scene: {}", scene_relative)));
+                if !rust_engine::engine::collision::output::cook_is_current(&scene_relative) {
+                    self.cook_scene_collision();
+                }
             }
             Err(error) => {
                 eprintln!("Save failed: {}", error);
@@ -4086,8 +4089,8 @@ impl App {
                 .push(LogMessage::warning(format!("Collision: {reason}")));
         } else {
             self.editor.console.messages.push(LogMessage::info(format!(
-                "Collision: {} chunk(s) loaded, {} skipped",
-                report.loaded, report.skipped
+                "Collision: {} chunk(s) loaded, {} skipped in {:.1} ms",
+                report.loaded, report.skipped, report.elapsed_ms
             )));
         }
         for warning in &report.warnings {
@@ -4186,6 +4189,9 @@ impl App {
                     .console
                     .messages
                     .push(LogMessage::info(format!("Saved scene: {}", relative)));
+                if !rust_engine::engine::collision::output::cook_is_current(&relative) {
+                    self.cook_scene_collision();
+                }
             }
             Err(error) => {
                 eprintln!("Save failed: {}", error);
