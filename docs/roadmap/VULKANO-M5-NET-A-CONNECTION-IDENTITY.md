@@ -112,14 +112,16 @@ before Package 1 starts. It must pin down, precisely:
   owned player row — survive restarts. Invalid/expired token ⇒ clear it,
   connect fresh, log a warning (dev policy; account recovery is out of
   scope).
-- **Session policy**: one active session per `Identity`. `client_connected`
-  for an identity that already has a live session kicks the old
-  `ConnectionId` (last-wins). The player row tracks
-  `session: Option<ConnectionId>` rather than a bare `online` bool;
-  `client_disconnected` only marks offline if the disconnecting
-  `ConnectionId` matches.
-- **Ownership**: player rows carry `owner_identity`; every input reducer
-  validates the caller is the owner.
+- **Session policy**: one active session per `Identity`, enforced by
+  **logical revocation** (no server-side kick API exists): the player row
+  tracks `session: Option<ConnectionId>`; a new connection overwrites it
+  (last-wins), and the revoked client sees the change on its own row and
+  disconnects itself. `client_disconnected` only marks offline if the
+  disconnecting `ConnectionId` matches.
+- **Ownership**: player rows carry `owner_identity`; every session-scoped
+  reducer validates **both** `ctx.sender == owner_identity` and
+  `ctx.connection_id == session` (identity alone is insufficient — a
+  revoked connection shares the identity).
 
 The contract doc also records the crate-layout decision (D3) and the
 shared-types-in-WASM decision (D2) — see Open questions.
