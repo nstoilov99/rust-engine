@@ -2169,6 +2169,7 @@ impl App {
                 let _ = self.create_new_scene();
             }
             MenuAction::SaveScene => self.save_active_scene(),
+            MenuAction::CookCollision => self.cook_scene_collision(),
             MenuAction::Exit => {
                 self.save_layout_on_exit();
                 println!("Closing...");
@@ -4004,6 +4005,53 @@ impl App {
                     scene_relative, error
                 )));
             }
+        }
+    }
+
+    /// Cook the active scene's static collision to `content/collision/<scene>/`.
+    fn cook_scene_collision(&mut self) {
+        use rust_engine::engine::collision::{cook, output};
+
+        if self.play_mode() != PlayMode::Edit {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Cook Collision: exit play mode first".to_string(),
+            ));
+            return;
+        }
+        if self.editor.scene.current_scene_relative.is_empty() {
+            self.editor.console.messages.push(LogMessage::warning(
+                "Cook Collision: save the scene first".to_string(),
+            ));
+            return;
+        }
+
+        let scene_relative = self.editor.scene.current_scene_relative.clone();
+        let stem = output::scene_stem(&scene_relative);
+        let mut loader = output::load_model_from_content;
+        let cooked = cook::cook_scene(self.core.game_world.hecs(), &stem, &mut loader);
+        for warning in &cooked.warnings {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::warning(format!("Cook Collision: {warning}")));
+        }
+
+        let Some(dir) = output::collision_dir_for_scene(&scene_relative) else {
+            self.editor.console.messages.push(LogMessage::error(
+                "Cook Collision: no content root initialized".to_string(),
+            ));
+            return;
+        };
+        match output::write_cooked_scene(&dir, &cooked) {
+            Ok(()) => self.editor.console.messages.push(LogMessage::info(format!(
+                "Cooked collision: {} chunk(s) -> {}",
+                cooked.chunks.len(),
+                dir.display()
+            ))),
+            Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
+                "Cook Collision failed writing to '{}': {error}",
+                dir.display()
+            ))),
         }
     }
 

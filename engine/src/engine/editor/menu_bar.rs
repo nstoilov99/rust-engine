@@ -13,6 +13,8 @@ pub enum MenuAction {
     NewScene,
     /// Save the current scene
     SaveScene,
+    /// Cook the current scene's static collision to `content/collision/<scene>/`
+    CookCollision,
     /// Exit the application
     Exit,
     /// Undo the last action

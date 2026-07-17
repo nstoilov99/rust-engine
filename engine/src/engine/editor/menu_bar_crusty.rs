@@ -87,6 +87,9 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 if ui.menu_item("Save Scene (Ctrl+S)") {
                     action = MenuAction::SaveScene;
                 }
+                if ui.menu_item("Cook Collision") {
+                    action = MenuAction::CookCollision;
+                }
                 if show_benchmark_tools {
                     ui.separator();
                     ui.submenu("Benchmark", |ui| {

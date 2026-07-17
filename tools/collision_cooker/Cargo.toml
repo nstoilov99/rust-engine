@@ -1,0 +1,11 @@
+[package]
+name = "collision_cooker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "collision_cooker"
+path = "src/main.rs"
+
+[dependencies]
+rust_engine = { path = "../../engine" }

@@ -5,3 +5,4 @@
 //! only produces cooked `.ccol` chunks from a scene.
 
 pub mod cook;
+pub mod output;
