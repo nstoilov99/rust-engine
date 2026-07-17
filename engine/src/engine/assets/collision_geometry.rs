@@ -41,6 +41,22 @@ pub fn mesh_collision_geometry_zup(mesh: &LoadedMesh) -> Option<CollisionMeshGeo
     })
 }
 
+/// Z-up-local collision geometry for a built-in primitive mesh path
+/// (`__primitive__/...`), or `None` if the path is not a known primitive.
+/// Primitive vertices live in the same Y-up render-local space as imported
+/// meshes, so the same conversion applies.
+pub fn primitive_collision_geometry_zup(mesh_path: &str) -> Option<CollisionMeshGeometry> {
+    let (vertices, indices) =
+        crate::engine::rendering::rendering_3d::mesh::create_primitive(mesh_path)?;
+    Some(CollisionMeshGeometry {
+        positions: vertices
+            .iter()
+            .map(|v| convert_position_yup_to_zup(Vec3::from_array(v.position)))
+            .collect(),
+        indices,
+    })
+}
+
 /// Z-up-local collision geometry for every static mesh in a model, plus the
 /// number of skinned meshes that were skipped (callers should warn if > 0).
 pub fn model_collision_geometry_zup(model: &Model) -> (Vec<CollisionMeshGeometry>, usize) {

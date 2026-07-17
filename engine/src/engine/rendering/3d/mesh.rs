@@ -244,6 +244,19 @@ pub const PRIMITIVE_PLANE: &str = "__primitive__/Plane";
 /// All primitive mesh paths, for UI dropdowns.
 pub const PRIMITIVE_PATHS: &[&str] = &[PRIMITIVE_CUBE, PRIMITIVE_SPHERE, PRIMITIVE_PLANE];
 
+/// Geometry for a built-in primitive mesh path, or `None` if `path` is not a
+/// known primitive. The single source of truth for primitive tessellation —
+/// registration, thumbnails, and collision cooking must all go through this
+/// so cooked collision matches what is drawn.
+pub fn create_primitive(path: &str) -> Option<(Vec<Vertex3D>, Vec<u32>)> {
+    match path {
+        PRIMITIVE_CUBE => Some(create_cube()),
+        PRIMITIVE_SPHERE => Some(create_sphere(32, 16)),
+        PRIMITIVE_PLANE => Some(create_plane(1.0)),
+        _ => None,
+    }
+}
+
 /// Generates a UV sphere with the given number of segments and rings.
 pub fn create_sphere(segments: u32, rings: u32) -> (Vec<Vertex3D>, Vec<u32>) {
     let mut vertices = Vec::new();

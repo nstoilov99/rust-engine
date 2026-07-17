@@ -1,0 +1,17 @@
+(
+    scene: "main",
+    format_version: 1,
+    cooker_hash: 1,
+    scene_hash: 15220668357492741220,
+    chunk_size: 64.0,
+    chunks: [
+        (
+            coord: (-1, -1),
+            content_hash: 7053039451944603948,
+        ),
+        (
+            coord: (-1, 0),
+            content_hash: 13639498481882209000,
+        ),
+    ],
+)

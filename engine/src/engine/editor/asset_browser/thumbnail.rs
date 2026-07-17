@@ -306,20 +306,13 @@ fn generate_primitive_thumbnail(
     renderer: &mut Option<super::thumbnail_renderer::ThumbnailRenderer>,
 ) -> ThumbnailResult {
     use crate::engine::assets::model_loader::{compute_bounding_sphere, LoadedMesh, Model};
-    use crate::engine::rendering::rendering_3d::mesh::{
-        create_cube, create_plane, create_sphere, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
-    };
+    use crate::engine::rendering::rendering_3d::mesh::create_primitive;
 
-    let (vertices, indices) = match prim_path {
-        PRIMITIVE_CUBE => create_cube(),
-        PRIMITIVE_SPHERE => create_sphere(32, 16),
-        PRIMITIVE_PLANE => create_plane(1.0),
-        _ => {
-            return ThumbnailResult {
-                id,
-                image_data: None,
-            };
-        }
+    let Some((vertices, indices)) = create_primitive(prim_path) else {
+        return ThumbnailResult {
+            id,
+            image_data: None,
+        };
     };
 
     let (center, radius) = compute_bounding_sphere(&vertices);

@@ -12,7 +12,7 @@ use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLigh
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
 use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
 use rust_engine::engine::rendering::rendering_3d::mesh::{
-    create_cube, create_plane, create_sphere, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
+    create_primitive, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
 };
 use rust_engine::engine::scene::load_scene;
 use rust_engine::Renderer;
@@ -65,23 +65,13 @@ pub fn load_assets(
 ) -> Result<(Vec<usize>, usize, usize), Box<dyn std::error::Error>> {
     let (mesh_indices, _duck_model) = asset_manager.load_model_gpu("models/Duck.glb")?;
 
-    let (plane_verts, plane_idx) = create_plane(1.0);
-    let plane_mesh_index = asset_manager.upload_procedural_mesh_named(
-        &plane_verts,
-        &plane_idx,
-        Some(PRIMITIVE_PLANE),
-    )?;
-
-    let (cube_verts, cube_idx) = create_cube();
-    let cube_mesh_index =
-        asset_manager.upload_procedural_mesh_named(&cube_verts, &cube_idx, Some(PRIMITIVE_CUBE))?;
-
-    let (sphere_verts, sphere_idx) = create_sphere(32, 16);
-    let _sphere_mesh_index = asset_manager.upload_procedural_mesh_named(
-        &sphere_verts,
-        &sphere_idx,
-        Some(PRIMITIVE_SPHERE),
-    )?;
+    let upload_primitive = |path: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        let (verts, idx) = create_primitive(path).ok_or("unknown primitive")?;
+        asset_manager.upload_procedural_mesh_named(&verts, &idx, Some(path))
+    };
+    let plane_mesh_index = upload_primitive(PRIMITIVE_PLANE)?;
+    let cube_mesh_index = upload_primitive(PRIMITIVE_CUBE)?;
+    upload_primitive(PRIMITIVE_SPHERE)?;
 
     Ok((mesh_indices, plane_mesh_index, cube_mesh_index))
 }

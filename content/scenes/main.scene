@@ -333,5 +333,67 @@
                 ),
             ],
         ),
+        (
+            name: "StaticCollision",
+            guid: Some("51c8423c-25f0-417b-a7a8-65b59deb531c"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (-2.0, -3.0, 0.69222176),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_path: "__primitive__/Cube",
+                    material_paths: [
+                        "",
+                    ],
+                    mesh_index: 2,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    base_color_factor: (1.0, 1.0, 1.0, 1.0),
+                    metallic_factor: 1.0,
+                    roughness_factor: 0.5,
+                    emissive_factor: (0.0, 0.0, 0.0),
+                ),
+                (
+                    type: "StaticCollision",
+                ),
+            ],
+        ),
+        (
+            name: "StaticCollisionSphere",
+            guid: Some("0c64a64b-d1f9-4a53-b768-c9a0deea6afd"),
+            components: [
+                (
+                    type: "Transform",
+                    position: (-2.0, -0.44488195, 0.69222176),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                (
+                    type: "MeshRenderer",
+                    mesh_path: "__primitive__/Sphere",
+                    material_paths: [
+                        "",
+                    ],
+                    mesh_index: 3,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    base_color_factor: (1.0, 1.0, 1.0, 1.0),
+                    metallic_factor: 1.0,
+                    roughness_factor: 0.5,
+                    emissive_factor: (0.0, 0.0, 0.0),
+                ),
+                (
+                    type: "StaticCollision",
+                ),
+            ],
+        ),
     ],
 )

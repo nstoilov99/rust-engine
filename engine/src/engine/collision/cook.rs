@@ -4,6 +4,8 @@
 //! - Mesh entities: `MeshRenderer` + `StaticCollision` marker. Geometry comes
 //!   from the canonical Z-up accessor (`assets::collision_geometry`) and is
 //!   transformed by the full hierarchy world matrix — matches the renderer.
+//!   Built-in `__primitive__/` mesh paths resolve through the same accessor
+//!   (no model load).
 //! - Primitive entities: fixed `RigidBody` + non-sensor `Collider`,
 //!   tessellated to triangles. Transformed by the entity's LOCAL
 //!   position + rotation only (no hierarchy, no scale) — this mirrors how
@@ -30,7 +32,9 @@ use game_shared::collision::format::{
 };
 use game_shared::world_grid::{self, CHUNK_SIZE};
 
-use crate::engine::assets::collision_geometry::model_collision_geometry_zup;
+use crate::engine::assets::collision_geometry::{
+    model_collision_geometry_zup, primitive_collision_geometry_zup,
+};
 use crate::engine::assets::model_loader::Model;
 use crate::engine::ecs::components::{EntityGuid, MeshRenderer, Transform};
 use crate::engine::ecs::hierarchy;
@@ -131,20 +135,31 @@ fn gather_mesh_triangles(
             .expect("queried")
             .mesh_path
             .clone();
-        let Some(model) = load_model(&mesh_path) else {
-            warnings.push(format!(
-                "entity {guid}: mesh '{mesh_path}' failed to load — skipped"
-            ));
-            return;
+        let geoms = if mesh_path.starts_with("__primitive__/") {
+            let Some(geom) = primitive_collision_geometry_zup(&mesh_path) else {
+                warnings.push(format!(
+                    "entity {guid}: unknown primitive mesh '{mesh_path}' — skipped"
+                ));
+                return;
+            };
+            vec![geom]
+        } else {
+            let Some(model) = load_model(&mesh_path) else {
+                warnings.push(format!(
+                    "entity {guid}: mesh '{mesh_path}' failed to load — skipped"
+                ));
+                return;
+            };
+            let (geoms, skinned) = model_collision_geometry_zup(&model);
+            if skinned > 0 {
+                warnings.push(format!(
+                    "entity {guid}: mesh '{mesh_path}' has {skinned} skinned submesh(es) — skipped"
+                ));
+            }
+            geoms
         };
         let m = hierarchy::get_world_transform(world, entity);
         let flip = glm::determinant(&m) < 0.0;
-        let (geoms, skinned) = model_collision_geometry_zup(&model);
-        if skinned > 0 {
-            warnings.push(format!(
-                "entity {guid}: mesh '{mesh_path}' has {skinned} skinned submesh(es) — skipped"
-            ));
-        }
         let mut tri_index: u32 = 0;
         for geom in geoms {
             for tri in geom.indices.chunks_exact(3) {
@@ -512,6 +527,25 @@ mod tests {
         assert_eq!(data.trimesh.indices.len(), 12);
         assert_eq!(data.trimesh.vertices.len(), 8); // welded corners
         assert_eq!(cooked.manifest.chunks.len(), 1);
+    }
+
+    #[test]
+    fn cooks_primitive_mesh_without_model_loader() {
+        let mut world = World::new();
+        world.spawn((
+            EntityGuid(uuid::Uuid::new_v4()),
+            Transform::new(glm::vec3(10.0, 10.0, 0.0)),
+            MeshRenderer {
+                mesh_path: "__primitive__/Cube".to_string(),
+                ..Default::default()
+            },
+            StaticCollision,
+        ));
+        let cooked = cook_scene(&world, "test", &mut no_models);
+        assert!(cooked.warnings.is_empty(), "{:?}", cooked.warnings);
+        assert_eq!(cooked.chunks.len(), 1);
+        let data = read_chunk(&cooked.chunks[0].1).unwrap();
+        assert_eq!(data.trimesh.indices.len(), 12);
     }
 
     #[test]
