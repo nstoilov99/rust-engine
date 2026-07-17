@@ -1738,7 +1738,7 @@ Inherits the surviving goals of superseded Task 39.4, now on crusty-gui:
 ---
 
 ### Task M2: Collision Pipeline v1
-**Status:** 📋 Planned
+**Status:** ✅ Complete (2026-07-17 — see `VULKANO-M2-COLLISION-PIPELINE.md`)
 **Duration:** ~2 weeks
 **Prerequisites:** M0 go decision
 
@@ -2866,7 +2866,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | -- | 🔜 *Refactor #5: Production Readiness Review (slim)* | -- | -- | |
 | **M0** | ✅ **SpacetimeDB Scale Spike — GO decision recorded** | **Multiplayer Foundation** | **Spike** | |
 | M1 | Editor UX & Design System v1 (time-boxed) | Multiplayer Foundation | UX | |
-| M2 | Collision Pipeline v1 (cooked chunks) | Multiplayer Foundation | Infrastructure | |
+| **M2** | ✅ **Collision Pipeline v1 (cooked chunks)** | **Multiplayer Foundation** | **Infrastructure** | |
 | M3 | Greybox World v1 | Multiplayer Foundation | Content | |
 | M4 | Zone & Chunk Lifecycle | Multiplayer Foundation | Feature | |
 | M5 | Net-A: Connection, Identity & Replication | Multiplayer Foundation | Feature | |

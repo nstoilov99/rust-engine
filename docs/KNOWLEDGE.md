@@ -220,6 +220,57 @@ loop {
 }
 ```
 
+## Collision Pipeline (M2, cooked chunks)
+
+See `docs/roadmap/VULKANO-M2-COLLISION-PIPELINE.md` for the full design.
+
+### Conventions
+
+- **Queries run in Z-up world space** — `game_shared::collision::ChunkStore`
+  is the one query layer for client and (M5+) server WASM. Never query Rapier
+  for static world geometry.
+- **World grid**: `game_shared::world_grid`, `CHUNK_SIZE = 64.0`, `IVec2`
+  chunk coords. Shared with M8 interest cells.
+- **`StaticCollision` is opt-in** — unmarked meshes don't cook. Falling
+  through the floor usually means the mesh isn't marked.
+- Border triangles are **duplicated** into both chunks with the same stable
+  triangle id; queries dedup by id (earliest TOI, tie-break lowest id).
+
+### Cooking workflow
+
+```bash
+cargo run --bin collision_cooker -- "scenes/<name>.scene" [--force]
+```
+
+- Also available as an editor menu action. Export scripts cook every scene
+  before packing.
+- Output: `content/collision/<stem>/manifest.ron` + `<x>_<y>.ccol`.
+- **Staleness**: manifest stores `scene_hash` (fnv1a of scene bytes),
+  `format_version`, `cooker_hash`; the cooker skips when all match. The hash
+  does not cover referenced mesh assets — after editing a mesh, use `--force`.
+- Bump `COOKER_VERSION_HASH` (`engine/src/engine/collision/cook.rs`) whenever
+  cook output changes for identical input.
+
+### Precision: shape-casts run in f64
+
+parry's f32 GJK terminates at ~1e-3 relative error — too coarse for the
+1 mm / 0.1° battery tolerances and for stable face-vs-edge contact ordering
+at triangle seams. Per-triangle shape-casts therefore widen to `parry3d-f64`
+(same `=0.20.2` pin). f64 add/mul/sqrt is IEEE-deterministic on both x86-64
+and wasm32, so client/server parity holds. Cooked chunks and raycasts stay
+f32. Never "simplify" the cast path back to f32.
+
+### Golden battery
+
+- Cases: `game_shared/tests/data/collision/battery.ron`, run against
+  checked-in canonical `.ccol` chunks in the same directory. M6 reruns the
+  identical files in server WASM.
+- After changing the test geometry or format:
+  `cargo test -p game_shared --test golden_battery regenerate -- --ignored`
+  (a drift-guard test fails until you do).
+- `game_shared` must keep compiling for `wasm32-unknown-unknown`
+  (`cargo check -p game_shared --target wasm32-unknown-unknown`).
+
 ## Serialization Patterns
 
 ### Custom Serde for nalgebra-glm

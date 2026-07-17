@@ -1,6 +1,6 @@
 # Task M2: Collision Pipeline v1 (cooked chunks)
 
-**Status**: Approved plan (Codex-reviewed, reconciled, user-approved 2026-07-17)
+**Status**: ✅ Complete (implemented 2026-07-17; all 11 work items landed — see "Implementation notes" at the end)
 **Duration**: ~3 weeks
 **Prerequisites**: M0 go decision (✅ 2026-07-16)
 **Related**: ADR-015 (kinematic movement), M3 (greybox world consumes chunks), M4 (zone lifecycle streams them), M6 (movement parity tests), M8 (interest cells share the grid)
@@ -249,3 +249,29 @@ Total: 16 d ≈ 3 weeks with slack.
    Opt-in fails loud (fall through floor → obvious cause).
 4. **Editor cook action ships in v1** — the library entry point exists
    anyway; M3's edit→cook→walk iteration loop needs it immediately.
+
+---
+
+## Implementation notes (final, 2026-07-17)
+
+Landed as planned, with two deviations worth recording:
+
+1. **Shape-casts widen to f64** (`parry3d-f64`, same `=0.20.2` pin). parry's
+   f32 GJK terminates at ~1e-3 *relative* error (`gjk::eps_tol`), which blew
+   the 1 mm/0.1° battery tolerances and — worse — mis-ordered face-vs-edge
+   contacts at triangle seams (a flat-ground cast could return a tilted edge
+   normal from the adjacent triangle). Per-triangle casts now run in f64 via
+   `widen_shape`/`cast_triangle_f64` in `game_shared::collision::store`;
+   unmapped shape types fall back to f32. f64 arithmetic is
+   IEEE-deterministic on x86-64 and wasm32, so parity is preserved. Cooked
+   chunks and raycasts (per-triangle analytic, precise in f32) are unchanged.
+2. **Staleness uses a `scene_hash` in the manifest** (fnv1a of the source
+   `.scene` bytes) checked cook-side only, alongside `format_version` and
+   `COOKER_VERSION_HASH`. It doesn't cover referenced mesh assets;
+   `--force` re-cooks.
+
+Test artifacts: `game_shared/tests/data/collision/` holds the canonical
+`.ccol` chunk set + `battery.ron` (12 analytic cases); a drift-guard test
+byte-compares them against the generator, and a `regenerate` `#[ignore]` test
+rewrites them after intentional changes. Seam fuzz runs 400 randomized casts
+across the x=64 border. M6 reruns these exact files in server WASM.
