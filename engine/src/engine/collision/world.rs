@@ -76,6 +76,33 @@ impl CollisionWorld {
         self.generation
     }
 
+    /// Streaming (M4): insert one cooked chunk's bytes. Bumps generation so
+    /// the debug-wireframe GPU cache invalidates.
+    pub fn insert_chunk_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<glam::IVec2, game_shared::collision::store::ChunkLoadError> {
+        let coord = self.store.insert_chunk(bytes)?;
+        self.generation += 1;
+        Ok(coord)
+    }
+
+    /// Streaming (M4): remove a chunk. Bumps generation when present.
+    pub fn remove_chunk(&mut self, coord: glam::IVec2) -> bool {
+        let removed = self.store.remove_chunk(coord);
+        if removed {
+            self.generation += 1;
+        }
+        removed
+    }
+
+    /// Streaming (M4): mark the store as belonging to a scene without bulk
+    /// loading (chunks arrive via `insert_chunk_bytes`).
+    pub fn begin_streaming(&mut self, scene_relative: &str) {
+        self.clear();
+        self.scene = Some(scene_stem(scene_relative));
+    }
+
     /// Load all cooked chunks for a scene (`scene_relative` is the
     /// content-relative `.scene` path). Replaces any previous contents.
     pub fn load_for_scene(&mut self, scene_relative: &str) -> CollisionLoadReport {

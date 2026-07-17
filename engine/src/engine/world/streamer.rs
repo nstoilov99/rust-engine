@@ -52,12 +52,15 @@ impl Default for StreamingConfig {
 
 /// Validated world manifest plus derived lookup maps.
 pub struct LoadedWorld {
+    /// Scene stem (`"greybox"`), used to derive cooked chunk paths.
+    pub stem: String,
     pub manifest: WorldManifest,
     /// coord → index into `manifest.cells`
     pub cell_by_coord: HashMap<IVec2, usize>,
-    /// All cooked collision chunk coords (superset of cell coords — includes
-    /// border slivers not listed in the world manifest).
-    pub cooked_chunks: HashSet<IVec2>,
+    /// coord → `.ccol` content hash for all cooked collision chunks
+    /// (superset of cell coords — includes border slivers not listed in
+    /// the world manifest).
+    pub cooked_chunks: HashMap<IVec2, u64>,
 }
 
 impl LoadedWorld {
@@ -67,8 +70,23 @@ impl LoadedWorld {
             .map(|&i| self.manifest.cells[i].zone_id)
     }
 
+    pub fn cell(&self, coord: IVec2) -> Option<&game_shared::world_manifest::CellEntry> {
+        self.cell_by_coord
+            .get(&coord)
+            .map(|&i| &self.manifest.cells[i])
+    }
+
     pub fn cell_coords(&self) -> HashSet<IVec2> {
         self.cell_by_coord.keys().copied().collect()
+    }
+
+    pub fn chunk_coords(&self) -> HashSet<IVec2> {
+        self.cooked_chunks.keys().copied().collect()
+    }
+
+    /// Cooked chunk path for a coord (`collision/<stem>/<x>_<y>.ccol`).
+    pub fn chunk_path(&self, coord: IVec2) -> String {
+        format!("collision/{}/{}_{}.ccol", self.stem, coord.x, coord.y)
     }
 }
 
@@ -124,20 +142,20 @@ pub fn load_world(scene_relative: &str) -> (Option<LoadedWorld>, WorldLoadReport
     // Cooked collision manifest: source of the streamable chunk set
     // (includes border slivers the world manifest doesn't list).
     let collision_rel = format!("collision/{stem}/manifest.ron");
-    let cooked_chunks: HashSet<IVec2> = match asset_source::read_string(&collision_rel)
+    let cooked_chunks: HashMap<IVec2, u64> = match asset_source::read_string(&collision_rel)
         .map_err(|e| e.to_string())
         .and_then(|s| ron::from_str::<CollisionManifest>(&s).map_err(|e| e.to_string()))
     {
         Ok(m) => m
             .chunks
             .iter()
-            .map(|c| IVec2::new(c.coord[0], c.coord[1]))
+            .map(|c| (IVec2::new(c.coord[0], c.coord[1]), c.content_hash))
             .collect(),
         Err(e) => {
             warnings.push(format!(
                 "{collision_rel}: {e} — streaming without collision chunks"
             ));
-            HashSet::new()
+            HashMap::new()
         }
     };
 
@@ -147,7 +165,7 @@ pub fn load_world(scene_relative: &str) -> (Option<LoadedWorld>, WorldLoadReport
         if cell_by_coord.insert(coord, i).is_some() {
             warnings.push(format!("duplicate cell {coord} in {manifest_rel}"));
         }
-        if !cooked_chunks.is_empty() && !cooked_chunks.contains(&coord) {
+        if !cooked_chunks.is_empty() && !cooked_chunks.contains_key(&coord) {
             warnings.push(format!(
                 "cell {coord}: collision chunk '{}' not in cooked manifest — cell collision degraded",
                 cell.collision_chunk
@@ -157,6 +175,7 @@ pub fn load_world(scene_relative: &str) -> (Option<LoadedWorld>, WorldLoadReport
 
     (
         Some(LoadedWorld {
+            stem,
             manifest,
             cell_by_coord,
             cooked_chunks,
@@ -216,14 +235,21 @@ pub fn diff_ops(
 #[derive(Default)]
 pub struct WorldStreamer {
     pub config: StreamingConfig,
-    world: Option<LoadedWorld>,
+    pub(super) world: Option<LoadedWorld>,
     current_zone: Option<u32>,
+    /// Lifecycle execution state (IO worker, residency, in-flight tokens).
+    pub(super) runtime: super::lifecycle::Runtime,
 }
 
 impl WorldStreamer {
     /// Loads the world manifest for a scene, replacing any previous world.
+    /// Caller must `flush` first if a previous world was streaming.
     /// Returns the report for the caller to log.
     pub fn load_for_scene(&mut self, scene_relative: &str) -> WorldLoadReport {
+        debug_assert!(
+            self.runtime.is_empty(),
+            "load_for_scene without flush: streamed content leaks"
+        );
         let (world, report) = load_world(scene_relative);
         self.world = world;
         self.current_zone = None;
@@ -231,7 +257,12 @@ impl WorldStreamer {
     }
 
     /// Drops manifest and zone state (scene unload / tab park).
+    /// Caller must `flush` first if streaming was active.
     pub fn clear(&mut self) {
+        debug_assert!(
+            self.runtime.is_empty(),
+            "clear without flush: streamed content leaks"
+        );
         self.world = None;
         self.current_zone = None;
     }
@@ -374,6 +405,7 @@ mod tests {
     fn zone_transition_emits_event_once() {
         let mut streamer = WorldStreamer::default();
         streamer.world = Some(LoadedWorld {
+            stem: "test".into(),
             manifest: WorldManifest {
                 version: 1,
                 scene: "scenes/test.scene".into(),
@@ -405,7 +437,7 @@ mod tests {
             cell_by_coord: [(IVec2::new(0, 0), 0), (IVec2::new(1, 0), 1)]
                 .into_iter()
                 .collect(),
-            cooked_chunks: HashSet::new(),
+            cooked_chunks: HashMap::new(),
         });
 
         // Entering zone 0 from nowhere
