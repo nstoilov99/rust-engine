@@ -8,11 +8,10 @@
 //!
 //! This crate does no I/O: callers hand chunk bytes to the store.
 //!
-//! Landing order (M2 work items): `format` (.ccol reader/writer + manifest),
-//! `store` (ChunkStore), `query` (shape-cast/contact/ray with triangle
-//! attribution).
-
 pub mod format;
+pub mod store;
+
+pub use store::{ChunkLoadError, ChunkStore, ContactHit, RayHit, ShapeHit};
 
 /// Stable per-triangle identity: hash of source-entity GUID + source triangle
 /// index. Powers seam dedup (border triangles are duplicated across chunks)
