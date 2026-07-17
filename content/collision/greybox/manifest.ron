@@ -1,0 +1,333 @@
+(
+    scene: "greybox",
+    format_version: 1,
+    cooker_hash: 1,
+    scene_hash: 5525997491859438995,
+    chunk_size: 64.0,
+    chunks: [
+        (
+            coord: (-4, -4),
+            content_hash: 700489794037488658,
+        ),
+        (
+            coord: (-3, -4),
+            content_hash: 4344204091565940860,
+        ),
+        (
+            coord: (-2, -4),
+            content_hash: 12843181294440251492,
+        ),
+        (
+            coord: (-1, -4),
+            content_hash: 3836722328161456016,
+        ),
+        (
+            coord: (0, -4),
+            content_hash: 18322538378482285038,
+        ),
+        (
+            coord: (1, -4),
+            content_hash: 1906870195934003560,
+        ),
+        (
+            coord: (2, -4),
+            content_hash: 8409371635667535095,
+        ),
+        (
+            coord: (3, -4),
+            content_hash: 13236674909796803982,
+        ),
+        (
+            coord: (4, -4),
+            content_hash: 2882024383638834558,
+        ),
+        (
+            coord: (-4, -3),
+            content_hash: 3686436273265928935,
+        ),
+        (
+            coord: (-3, -3),
+            content_hash: 9537887421652932413,
+        ),
+        (
+            coord: (-2, -3),
+            content_hash: 1683452225950834443,
+        ),
+        (
+            coord: (-1, -3),
+            content_hash: 2049931442551787371,
+        ),
+        (
+            coord: (0, -3),
+            content_hash: 1582432665567810862,
+        ),
+        (
+            coord: (1, -3),
+            content_hash: 11809410166032815832,
+        ),
+        (
+            coord: (2, -3),
+            content_hash: 15738772477642500419,
+        ),
+        (
+            coord: (3, -3),
+            content_hash: 8434837475631155032,
+        ),
+        (
+            coord: (4, -3),
+            content_hash: 6993338632186828343,
+        ),
+        (
+            coord: (-4, -2),
+            content_hash: 6835163740137818017,
+        ),
+        (
+            coord: (-3, -2),
+            content_hash: 6799433262542319105,
+        ),
+        (
+            coord: (-2, -2),
+            content_hash: 17793475646054668610,
+        ),
+        (
+            coord: (-1, -2),
+            content_hash: 13113050343029790707,
+        ),
+        (
+            coord: (0, -2),
+            content_hash: 1659981451445790034,
+        ),
+        (
+            coord: (1, -2),
+            content_hash: 3365277159740512738,
+        ),
+        (
+            coord: (2, -2),
+            content_hash: 7031828215950694803,
+        ),
+        (
+            coord: (3, -2),
+            content_hash: 17417815486272154649,
+        ),
+        (
+            coord: (4, -2),
+            content_hash: 9950084671520000780,
+        ),
+        (
+            coord: (-4, -1),
+            content_hash: 2572513197986556946,
+        ),
+        (
+            coord: (-3, -1),
+            content_hash: 3283670511575530385,
+        ),
+        (
+            coord: (-2, -1),
+            content_hash: 2122409655648422449,
+        ),
+        (
+            coord: (-1, -1),
+            content_hash: 1207470819346383006,
+        ),
+        (
+            coord: (0, -1),
+            content_hash: 10152366625069687071,
+        ),
+        (
+            coord: (1, -1),
+            content_hash: 16387806597124064864,
+        ),
+        (
+            coord: (2, -1),
+            content_hash: 14919064450668931482,
+        ),
+        (
+            coord: (3, -1),
+            content_hash: 7279651619303508820,
+        ),
+        (
+            coord: (4, -1),
+            content_hash: 16440407286711305763,
+        ),
+        (
+            coord: (-4, 0),
+            content_hash: 7470558806733868264,
+        ),
+        (
+            coord: (-3, 0),
+            content_hash: 341331371831522997,
+        ),
+        (
+            coord: (-2, 0),
+            content_hash: 9237315874022613674,
+        ),
+        (
+            coord: (-1, 0),
+            content_hash: 4418567419752493177,
+        ),
+        (
+            coord: (0, 0),
+            content_hash: 6199044042151209933,
+        ),
+        (
+            coord: (1, 0),
+            content_hash: 696877919119210792,
+        ),
+        (
+            coord: (2, 0),
+            content_hash: 10770084118323498547,
+        ),
+        (
+            coord: (3, 0),
+            content_hash: 903103917726553973,
+        ),
+        (
+            coord: (4, 0),
+            content_hash: 14510839890278928630,
+        ),
+        (
+            coord: (-4, 1),
+            content_hash: 3090998014026518412,
+        ),
+        (
+            coord: (-3, 1),
+            content_hash: 16429691568439154029,
+        ),
+        (
+            coord: (-2, 1),
+            content_hash: 3772439950453584541,
+        ),
+        (
+            coord: (-1, 1),
+            content_hash: 8660521707576311262,
+        ),
+        (
+            coord: (0, 1),
+            content_hash: 7345211779503899332,
+        ),
+        (
+            coord: (1, 1),
+            content_hash: 17499368707247293564,
+        ),
+        (
+            coord: (2, 1),
+            content_hash: 4518296179769658216,
+        ),
+        (
+            coord: (3, 1),
+            content_hash: 10904566225415442548,
+        ),
+        (
+            coord: (4, 1),
+            content_hash: 3746156083996313509,
+        ),
+        (
+            coord: (-4, 2),
+            content_hash: 5296531450144317976,
+        ),
+        (
+            coord: (-3, 2),
+            content_hash: 2816955512189167928,
+        ),
+        (
+            coord: (-2, 2),
+            content_hash: 495087086541008857,
+        ),
+        (
+            coord: (-1, 2),
+            content_hash: 9226396877909591258,
+        ),
+        (
+            coord: (0, 2),
+            content_hash: 1029463219861514814,
+        ),
+        (
+            coord: (1, 2),
+            content_hash: 16214899586913513561,
+        ),
+        (
+            coord: (2, 2),
+            content_hash: 11164862198597741378,
+        ),
+        (
+            coord: (3, 2),
+            content_hash: 8174028120272461799,
+        ),
+        (
+            coord: (4, 2),
+            content_hash: 3002005635419774238,
+        ),
+        (
+            coord: (-4, 3),
+            content_hash: 10703068317206732653,
+        ),
+        (
+            coord: (-3, 3),
+            content_hash: 12866063833246363005,
+        ),
+        (
+            coord: (-2, 3),
+            content_hash: 16609018144057262328,
+        ),
+        (
+            coord: (-1, 3),
+            content_hash: 4674267909001348193,
+        ),
+        (
+            coord: (0, 3),
+            content_hash: 6744890971528530497,
+        ),
+        (
+            coord: (1, 3),
+            content_hash: 4436169949095568079,
+        ),
+        (
+            coord: (2, 3),
+            content_hash: 3585608867651121961,
+        ),
+        (
+            coord: (3, 3),
+            content_hash: 5612113527605442593,
+        ),
+        (
+            coord: (4, 3),
+            content_hash: 6928283171033348576,
+        ),
+        (
+            coord: (-4, 4),
+            content_hash: 14209605374461915741,
+        ),
+        (
+            coord: (-3, 4),
+            content_hash: 17540199372063266412,
+        ),
+        (
+            coord: (-2, 4),
+            content_hash: 2067734082917015641,
+        ),
+        (
+            coord: (-1, 4),
+            content_hash: 15286089033905838396,
+        ),
+        (
+            coord: (0, 4),
+            content_hash: 732228303406775187,
+        ),
+        (
+            coord: (1, 4),
+            content_hash: 7615307012435201622,
+        ),
+        (
+            coord: (2, 4),
+            content_hash: 1871497842768661191,
+        ),
+        (
+            coord: (3, 4),
+            content_hash: 14564147674888334033,
+        ),
+        (
+            coord: (4, 4),
+            content_hash: 18429096294467761333,
+        ),
+    ],
+)
