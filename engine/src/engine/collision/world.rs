@@ -31,6 +31,9 @@ pub struct CollisionWorld {
     pub debug_draw_chunks: bool,
     /// Editor toggle: chunk-grid overlay.
     pub debug_draw_grid: bool,
+    /// Bumped whenever the chunk contents change, so debug-draw caches can
+    /// tell when their line data went stale.
+    generation: u64,
 }
 
 /// Outcome of `load_for_scene`, for surfacing in the editor console.
@@ -65,6 +68,12 @@ impl CollisionWorld {
     pub fn clear(&mut self) {
         self.store.clear();
         self.scene = None;
+        self.generation += 1;
+    }
+
+    /// Chunk-content version; changes on every `clear`/`load_for_scene`.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Load all cooked chunks for a scene (`scene_relative` is the

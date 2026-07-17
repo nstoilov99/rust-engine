@@ -73,6 +73,12 @@ pub struct DebugDrawData {
     pub overlay_buffer: Option<Subbuffer<[DebugLineVertex]>>,
     /// Number of vertices in the overlay buffer.
     pub overlay_vertex_count: u32,
+    /// Pre-uploaded depth-tested lines reused across frames (e.g. cached
+    /// collision wireframes) — same pipeline as `depth_buffer`, but the
+    /// caller keeps the buffer alive instead of rebuilding it per frame.
+    pub static_depth_buffer: Option<Subbuffer<[DebugLineVertex]>>,
+    /// Number of vertices in the static depth buffer.
+    pub static_depth_vertex_count: u32,
 }
 
 impl DebugDrawData {
@@ -83,12 +89,16 @@ impl DebugDrawData {
             depth_vertex_count: 0,
             overlay_buffer: None,
             overlay_vertex_count: 0,
+            static_depth_buffer: None,
+            static_depth_vertex_count: 0,
         }
     }
 
     /// Returns true if there is nothing to draw.
     pub fn is_empty(&self) -> bool {
-        self.depth_buffer.is_none() && self.overlay_buffer.is_none()
+        self.depth_buffer.is_none()
+            && self.overlay_buffer.is_none()
+            && self.static_depth_buffer.is_none()
     }
 }
 

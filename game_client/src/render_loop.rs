@@ -309,62 +309,16 @@ pub fn prepare_debug_draw_data(
     debug_draw_buffer: &mut rust_engine::engine::debug_draw::DebugDrawBuffer,
     renderer: &Renderer,
 ) -> rust_engine::engine::debug_draw::DebugDrawData {
-    use rust_engine::engine::debug_draw::{DebugDrawData, DebugLineVertex};
-    use rust_engine::engine::utils::coords::convert_position_zup_to_yup;
-    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
-    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+    use rust_engine::engine::debug_draw::DebugDrawData;
 
     rust_engine::profile_scope!("prepare_debug_draw_data");
 
     let (depth_lines, overlay_lines) = debug_draw_buffer.drain();
 
-    let convert_lines = |lines: &[rust_engine::engine::debug_draw::DebugLineData]| -> Option<(vulkano::buffer::Subbuffer<[DebugLineVertex]>, u32)> {
-        if lines.is_empty() {
-            return None;
-        }
-
-        let mut vertices = Vec::with_capacity(lines.len() * 2);
-        for line in lines {
-            let start_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.start));
-            let end_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.end));
-            vertices.push(DebugLineVertex {
-                position: start_yup.into(),
-                color: line.color,
-            });
-            vertices.push(DebugLineVertex {
-                position: end_yup.into(),
-                color: line.color,
-            });
-        }
-
-        let vertex_count = vertices.len() as u32;
-        let buffer = Buffer::from_iter(
-            renderer.gpu.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices,
-        );
-
-        match buffer {
-            Ok(buf) => Some((buf, vertex_count)),
-            Err(e) => {
-                log::warn!("Failed to create debug draw vertex buffer: {}", e);
-                None
-            }
-        }
-    };
-
-    let (depth_buffer, depth_vertex_count) = convert_lines(&depth_lines)
+    let (depth_buffer, depth_vertex_count) = upload_debug_lines(&depth_lines, renderer)
         .map(|(b, c)| (Some(b), c))
         .unwrap_or((None, 0));
-    let (overlay_buffer, overlay_vertex_count) = convert_lines(&overlay_lines)
+    let (overlay_buffer, overlay_vertex_count) = upload_debug_lines(&overlay_lines, renderer)
         .map(|(b, c)| (Some(b), c))
         .unwrap_or((None, 0));
 
@@ -373,6 +327,66 @@ pub fn prepare_debug_draw_data(
         depth_vertex_count,
         overlay_buffer,
         overlay_vertex_count,
+        static_depth_buffer: None,
+        static_depth_vertex_count: 0,
+    }
+}
+
+/// Convert Z-up debug lines to Y-up render space and upload a GPU vertex
+/// buffer. Callers may hold the returned buffer across frames (used to cache
+/// static line sets like collision wireframes).
+#[cfg(debug_assertions)]
+pub fn upload_debug_lines(
+    lines: &[rust_engine::engine::debug_draw::DebugLineData],
+    renderer: &Renderer,
+) -> Option<(
+    vulkano::buffer::Subbuffer<[rust_engine::engine::debug_draw::DebugLineVertex]>,
+    u32,
+)> {
+    use rust_engine::engine::debug_draw::DebugLineVertex;
+    use rust_engine::engine::utils::coords::convert_position_zup_to_yup;
+    use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+    use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut vertices = Vec::with_capacity(lines.len() * 2);
+    for line in lines {
+        let start_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.start));
+        let end_yup = convert_position_zup_to_yup(rust_engine::Vec3::from(line.end));
+        vertices.push(DebugLineVertex {
+            position: start_yup.into(),
+            color: line.color,
+        });
+        vertices.push(DebugLineVertex {
+            position: end_yup.into(),
+            color: line.color,
+        });
+    }
+
+    let vertex_count = vertices.len() as u32;
+    let buffer = Buffer::from_iter(
+        renderer.gpu.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::VERTEX_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        vertices,
+    );
+
+    match buffer {
+        Ok(buf) => Some((buf, vertex_count)),
+        Err(e) => {
+            log::warn!("Failed to create debug draw vertex buffer: {}", e);
+            None
+        }
     }
 }
 

@@ -1171,6 +1171,18 @@ impl DeferredRenderer {
                             }
                         }
 
+                        if let Some(ref static_buf) = debug_draw.static_depth_buffer {
+                            builder
+                                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
+                                .set_viewport(0, smallvec![debug_viewport.clone()])?
+                                .set_scissor(0, smallvec![debug_scissor])?
+                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                                .bind_vertex_buffers(0, static_buf.clone())?;
+                            unsafe {
+                                builder.draw(debug_draw.static_depth_vertex_count, 1, 0, 0)?;
+                            }
+                        }
+
                         if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
                             builder
                                 .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?

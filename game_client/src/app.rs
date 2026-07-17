@@ -123,6 +123,21 @@ pub struct CoreApp {
     pub matinst_ids: std::collections::HashMap<String, MaterialInstanceId>,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
+    /// Cached collision-wireframe GPU lines, keyed by (collision generation,
+    /// chunks toggle, grid toggle). Rebuilt only when the key changes — the
+    /// full-world wireframe is millions of vertices and must not be
+    /// regenerated per frame.
+    #[cfg(debug_assertions)]
+    pub collision_debug_cache: Option<CollisionDebugCache>,
+}
+
+#[cfg(debug_assertions)]
+pub struct CollisionDebugCache {
+    key: (u64, bool, bool),
+    lines: Option<(
+        vulkano::buffer::Subbuffer<[rust_engine::engine::debug_draw::DebugLineVertex]>,
+        u32,
+    )>,
 }
 
 /// Viewport rendering, camera, gizmo, and interaction state.
@@ -558,6 +573,8 @@ impl App {
             matinst_ids: std::collections::HashMap::new(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
+            #[cfg(debug_assertions)]
+            collision_debug_cache: None,
         };
 
         let gpu_ctx = GpuThumbnailContext {
@@ -2054,7 +2071,23 @@ impl App {
         // ChunkStore (visually checks cooked transforms against the render).
         #[cfg(debug_assertions)]
         if let Some(collision) = self.core.game_world.resource::<CollisionWorld>() {
-            collision.submit_debug_draws(&mut self.core.debug_draw_buffer);
+            // Collision wireframes are static and huge (millions of lines for
+            // a full world) — cache the uploaded GPU buffer and rebuild only
+            // when the chunk contents or toggles change.
+            let key = (
+                collision.generation(),
+                collision.debug_draw_chunks,
+                collision.debug_draw_grid,
+            );
+            if self.core.collision_debug_cache.as_ref().map(|c| c.key) != Some(key) {
+                let mut lines = rust_engine::engine::debug_draw::DebugDrawBuffer::new();
+                collision.submit_debug_draws(&mut lines);
+                let (depth_lines, _) = lines.drain();
+                self.core.collision_debug_cache = Some(CollisionDebugCache {
+                    key,
+                    lines: render_loop::upload_debug_lines(&depth_lines, &self.core.renderer),
+                });
+            }
             if collision.debug_draw_chunks {
                 use rust_engine::engine::utils::coords::convert_position_yup_to_zup;
                 let origin = convert_position_yup_to_zup(camera_pos);
@@ -2083,10 +2116,22 @@ impl App {
         }
 
         #[cfg(debug_assertions)]
-        let debug_draw_data = render_loop::prepare_debug_draw_data(
-            &mut self.core.debug_draw_buffer,
-            &self.core.renderer,
-        );
+        let debug_draw_data = {
+            let mut data = render_loop::prepare_debug_draw_data(
+                &mut self.core.debug_draw_buffer,
+                &self.core.renderer,
+            );
+            if let Some((buf, count)) = self
+                .core
+                .collision_debug_cache
+                .as_ref()
+                .and_then(|c| c.lines.clone())
+            {
+                data.static_depth_buffer = Some(buf);
+                data.static_depth_vertex_count = count;
+            }
+            data
+        };
         #[cfg(not(debug_assertions))]
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
 
