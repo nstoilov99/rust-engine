@@ -1777,7 +1777,7 @@ Scene management **scoped to what multiplayer needs** (absorbs old Task 43; gene
 ---
 
 ### Task M5: Net-A — Connection, Identity & Replication
-**Status:** 📋 Planned
+**Status:** 🚧 In Progress (plan: `VULKANO-M5-NET-A-CONNECTION-IDENTITY.md`)
 **Duration:** ~3 weeks
 **Prerequisites:** M0 go, M4
 
