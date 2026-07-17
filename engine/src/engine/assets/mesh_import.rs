@@ -357,6 +357,11 @@ pub fn apply_import_settings(model: &mut Model, settings: &MeshImportSettings) {
 
 /// Write a `Model` to a `.mesh` binary file (v2 format).
 pub fn write_mesh_binary(path: &Path, model: &Model) -> io::Result<()> {
+    std::fs::write(path, mesh_binary_bytes(model))
+}
+
+/// Serialize a `Model` to `.mesh` (RMSH v2) bytes without touching disk.
+pub fn mesh_binary_bytes(model: &Model) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
 
     let mesh_count = model.meshes.len() as u32;
@@ -462,7 +467,7 @@ pub fn write_mesh_binary(path: &Path, model: &Model) -> io::Result<()> {
         buf[desc_offset..desc_offset + MESH_DESC_SIZE].copy_from_slice(&desc);
     }
 
-    std::fs::write(path, &buf)
+    buf
 }
 
 fn write_material(buf: &mut Vec<u8>, mat: &ImportedMaterial) {
