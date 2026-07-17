@@ -3,6 +3,7 @@ members = [
     "engine",
     "game_shared",
     "game_client",
+    "game_client_net",
     "tools/pak_tool",
     "tools/collision_cooker",
     "tools/greybox_gen",

@@ -74,6 +74,8 @@ pub struct ViewportPanelCtx<'a> {
     pub delta_ms: f32,
     /// World-streaming stats; `None` when the scene has no world manifest.
     pub streaming: Option<StreamingOverlay>,
+    /// Net connection status line (M5); `None` when no net session exists.
+    pub net_status: Option<String>,
 }
 
 /// Snapshot of world-streamer state for the stat overlay.
@@ -229,12 +231,14 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
     if ctx.show_stat_fps {
         let padding = 8.0 * s;
         let line_height = 18.0 * s;
-        let extra_lines = if ctx.streaming.is_some() { 2.0 } else { 0.0 };
+        let extra_lines = if ctx.streaming.is_some() { 2.0 } else { 0.0 }
+            + if ctx.net_status.is_some() { 1.0 } else { 0.0 };
+        let wide = ctx.streaming.is_some() || ctx.net_status.is_some();
         let pos = Pos2::new(image_rect.min.x + padding, image_rect.min.y + padding);
         let bg = Rect::from_min_size(
             pos,
             Vec2::new(
-                if ctx.streaming.is_some() { 190.0 } else { 120.0 } * s,
+                if wide { 190.0 } else { 120.0 } * s,
                 line_height * (2.0 + extra_lines) + padding,
             ),
         );
@@ -281,6 +285,19 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
                     "IO: {} in-flight, {} ready, {:.2} ms worst",
                     st.in_flight, st.ready, st.worst_ms
                 ),
+                13.0 * s,
+                gray(220),
+                None,
+            );
+        }
+        if let Some(net) = &ctx.net_status {
+            let line = if ctx.streaming.is_some() { 4.0 } else { 2.0 };
+            ui.painter().text(
+                Pos2::new(
+                    pos.x + padding * 0.5,
+                    pos.y + padding * 0.5 + line_height * line,
+                ),
+                net,
                 13.0 * s,
                 gray(220),
                 None,

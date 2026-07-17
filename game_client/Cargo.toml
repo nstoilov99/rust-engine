@@ -19,6 +19,7 @@ tracy = ["rust_engine/tracy"]
 [dependencies]
 rust_engine = { path = "../engine" }
 game_shared = { path = "../game_shared" }
+game_client_net = { path = "../game_client_net" }
 
 # Workspace shared deps
 glam = { workspace = true }

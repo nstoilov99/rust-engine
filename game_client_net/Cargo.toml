@@ -1,0 +1,9 @@
+[package]
+name = "game_client_net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+spacetimedb-sdk = "2.6"
+game_shared = { path = "../game_shared" }
+log = { workspace = true }

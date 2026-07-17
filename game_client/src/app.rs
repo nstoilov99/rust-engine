@@ -239,6 +239,8 @@ pub struct App {
     pub core: CoreApp,
     pub editor: EditorApp,
     runtime_flags: EditorRuntimeFlags,
+    /// Net session (M5); `Some` when launched with `--connect`.
+    net: Option<crate::net::NetSession>,
     /// Main-thread half of the crusty-gui integration — the editor's sole UI.
     #[cfg(feature = "editor")]
     pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
@@ -666,6 +668,7 @@ impl App {
             core,
             editor,
             runtime_flags,
+            net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
             #[cfg(feature = "editor")]
             crusty_gui,
             #[cfg(feature = "editor")]
@@ -1138,6 +1141,9 @@ impl App {
         rust_engine::profile_function!();
 
         self.process_hot_reload();
+        if let Some(net) = &mut self.net {
+            net.update();
+        }
         self.update_world_streaming();
         self.resolve_mesh_paths();
         self.resolve_material_sets();
@@ -3196,6 +3202,7 @@ impl App {
             } else {
                 None
             };
+            let net_status = self.net.as_ref().map(|n| n.status_line());
             let world_object_info =
                 rust_engine::engine::editor::world_object::WorldObjectInfo::from_streamer(
                     &self.core.world_streamer,
@@ -3360,6 +3367,7 @@ impl App {
                                             fps,
                                             delta_ms,
                                             streaming: streaming_overlay,
+                                            net_status: net_status.clone(),
                                         },
                                     )
                                 }

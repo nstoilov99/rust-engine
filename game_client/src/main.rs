@@ -8,6 +8,7 @@ mod app;
 mod benchmark_runner;
 mod game_setup;
 mod input_handler;
+mod net;
 mod plugin;
 mod render_loop;
 mod systems;

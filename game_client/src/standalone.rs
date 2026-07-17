@@ -57,6 +57,10 @@ pub struct StandaloneApp {
     schedule: Schedule,
     frame_number: u64,
     render_thread: Option<RenderThread>,
+    /// Net session (M5); `Some` when launched with `--connect`.
+    net: Option<crate::net::NetSession>,
+    /// Last net status shown in the window title (standalone has no text UI).
+    net_title_status: String,
 }
 
 impl StandaloneApp {
@@ -282,6 +286,8 @@ impl StandaloneApp {
             schedule,
             frame_number: 0,
             render_thread: Some(render_thread),
+            net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
+            net_title_status: String::new(),
         })
     }
 
@@ -332,6 +338,14 @@ impl StandaloneApp {
     }
 
     pub fn update(&mut self) {
+        if let Some(net) = &mut self.net {
+            net.update();
+            let status = net.status_line();
+            if status != self.net_title_status {
+                self.window.set_title(&format!("Rust Game Engine — {status}"));
+                self.net_title_status = status;
+            }
+        }
         let delta_time = self.game_loop.tick();
 
         if let Some(time) = self.game_world.resource_mut::<Time>() {
