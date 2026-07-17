@@ -110,7 +110,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - Task 25 (Build Pipeline and Export, Windows standalone): **complete**
 - M0 SpacetimeDB scale spike: **complete — GO** (see `docs/roadmap/VULKANO-M0-SPACETIMEDB-SPIKE.md`)
 - M2 Collision Pipeline v1 (cooked chunks): **complete** (see `docs/roadmap/VULKANO-M2-COLLISION-PIPELINE.md`)
-- Next: Multiplayer Foundation arc M1–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
+- M3 Greybox World v1 (`tools/greybox_gen`, deterministic; generated content checked in): **complete** (see `docs/roadmap/VULKANO-M3-GREYBOX-WORLD.md`)
+- Next: Multiplayer Foundation arc M1/M4–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
 
 ## Patched Dependencies
 
