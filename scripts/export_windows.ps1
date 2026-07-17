@@ -61,6 +61,19 @@ foreach ($dll in $dlls) {
     Write-Host "Copied $($dll.Name)"
 }
 
+# Cook static collision for all scenes (skips up-to-date cooks)
+$scenes = Get-ChildItem -Path "content\scenes" -Filter "*.scene" -ErrorAction SilentlyContinue
+if ($scenes) {
+    Write-Host "Cooking static collision..." -ForegroundColor Yellow
+    foreach ($scene in $scenes) {
+        cargo run --release --bin collision_cooker -- "scenes/$($scene.Name)"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: collision cook failed for $($scene.Name)" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
 # Pack content into game.pak
 $ContentSrc = "content"
 $PakDst = Join-Path $OutputDir "game.pak"

@@ -297,6 +297,10 @@ pub struct CollisionManifest {
     pub scene: String,
     pub format_version: u32,
     pub cooker_hash: u32,
+    /// `fnv1a_64` of the source `.scene` file bytes at cook time. Cook-side
+    /// staleness check only (skip re-cook when unchanged) — not validated at
+    /// load. Does not cover referenced mesh assets; `--force` re-cooks.
+    pub scene_hash: u64,
     pub chunk_size: f32,
     pub chunks: Vec<ManifestChunk>,
 }
@@ -411,6 +415,7 @@ mod tests {
             scene: "greybox".into(),
             format_version: FORMAT_VERSION,
             cooker_hash: 0xABCD,
+            scene_hash: 0xFEED_F00D,
             chunk_size: crate::world_grid::CHUNK_SIZE,
             chunks: vec![ManifestChunk {
                 coord: [-2, 5],

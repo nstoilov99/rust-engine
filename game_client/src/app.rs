@@ -4118,7 +4118,8 @@ impl App {
         let scene_relative = self.editor.scene.current_scene_relative.clone();
         let stem = output::scene_stem(&scene_relative);
         let mut loader = output::load_model_from_content;
-        let cooked = cook::cook_scene(self.core.game_world.hecs(), &stem, &mut loader);
+        let mut cooked = cook::cook_scene(self.core.game_world.hecs(), &stem, &mut loader);
+        cooked.manifest.scene_hash = output::scene_content_hash(&scene_relative).unwrap_or(0);
         for warning in &cooked.warnings {
             self.editor
                 .console

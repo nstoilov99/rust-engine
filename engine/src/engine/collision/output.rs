@@ -9,7 +9,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::cook::CookedScene;
+use game_shared::collision::format::{fnv1a_64, CollisionManifest, FORMAT_VERSION};
+
+use super::cook::{CookedScene, COOKER_VERSION_HASH};
 use crate::engine::assets::asset_source;
 use crate::engine::assets::model_loader::{self, Model};
 
@@ -37,6 +39,32 @@ pub fn load_model_from_content(mesh_path: &str) -> Option<Arc<Model>> {
     model_loader::load_model(&abs.to_string_lossy())
         .ok()
         .map(Arc::new)
+}
+
+/// `fnv1a_64` of the scene file bytes, for the manifest's `scene_hash`.
+pub fn scene_content_hash(scene_relative: &str) -> Option<u64> {
+    asset_source::read_bytes(scene_relative)
+        .ok()
+        .map(|b| fnv1a_64(&b))
+}
+
+/// Cheap staleness check: `true` iff a manifest exists for the scene and was
+/// produced by the current cooker/format from byte-identical scene contents.
+/// Conservative — any read/parse failure means "not current".
+pub fn cook_is_current(scene_relative: &str) -> bool {
+    let Some(hash) = scene_content_hash(scene_relative) else {
+        return false;
+    };
+    let manifest_rel = format!("collision/{}/manifest.ron", scene_stem(scene_relative));
+    let Ok(text) = asset_source::read_string(&manifest_rel) else {
+        return false;
+    };
+    let Ok(m) = ron::from_str::<CollisionManifest>(&text) else {
+        return false;
+    };
+    m.format_version == FORMAT_VERSION
+        && m.cooker_hash == COOKER_VERSION_HASH
+        && m.scene_hash == hash
 }
 
 /// Write chunks + manifest to `dir`, replacing any previous cook output

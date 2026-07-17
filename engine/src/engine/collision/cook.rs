@@ -83,6 +83,8 @@ pub fn cook_scene(
         scene: scene_name.to_string(),
         format_version: FORMAT_VERSION,
         cooker_hash: COOKER_VERSION_HASH,
+        // Callers that know the source scene bytes fill this in before writing.
+        scene_hash: 0,
         chunk_size: CHUNK_SIZE,
         chunks: chunks
             .iter()

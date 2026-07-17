@@ -2,11 +2,12 @@
 //! `rust_engine::engine::collision::cook`).
 //!
 //! Usage:
-//!   collision_cooker <scene_relative> [content_root]
+//!   collision_cooker <scene_relative> [content_root] [--force]
 //!
 //! `scene_relative` is content-relative (e.g. `scenes/main.scene`);
 //! `content_root` defaults to `content`. Output replaces
-//! `<content_root>/collision/<scene_stem>/`.
+//! `<content_root>/collision/<scene_stem>/`. An up-to-date cook (same scene
+//! bytes, same cooker) is skipped unless `--force` is given.
 
 use std::path::PathBuf;
 
@@ -16,14 +17,16 @@ use rust_engine::engine::ecs::World;
 use rust_engine::engine::scene::scene_serializer;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: collision_cooker <scene_relative> [content_root]");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let force = args.iter().any(|a| a == "--force");
+    args.retain(|a| a != "--force");
+    if args.is_empty() {
+        eprintln!("Usage: collision_cooker <scene_relative> [content_root] [--force]");
         eprintln!("  e.g. collision_cooker scenes/main.scene content");
         std::process::exit(1);
     }
-    let scene_relative = &args[1];
-    let content_root = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("content"));
+    let scene_relative = &args[0];
+    let content_root = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("content"));
     if !content_root.is_dir() {
         eprintln!(
             "Error: content root '{}' is not a directory",
@@ -33,6 +36,14 @@ fn main() {
     }
     asset_source::init_filesystem(content_root);
 
+    if !force && output::cook_is_current(scene_relative) {
+        println!(
+            "'{}' collision up to date — skipping (--force to re-cook)",
+            output::scene_stem(scene_relative)
+        );
+        return;
+    }
+
     let mut world = World::new();
     if let Err(e) = scene_serializer::load_scene(&mut world, scene_relative) {
         eprintln!("Error loading scene '{scene_relative}': {e}");
@@ -41,7 +52,8 @@ fn main() {
 
     let stem = output::scene_stem(scene_relative);
     let mut loader = output::load_model_from_content;
-    let cooked = cook::cook_scene(&world, &stem, &mut loader);
+    let mut cooked = cook::cook_scene(&world, &stem, &mut loader);
+    cooked.manifest.scene_hash = output::scene_content_hash(scene_relative).unwrap_or(0);
     for warning in &cooked.warnings {
         eprintln!("warning: {warning}");
     }

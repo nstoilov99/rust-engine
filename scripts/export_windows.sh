@@ -60,6 +60,17 @@ for dll in "$BUILD_DIR"/*.dll; do
     echo "Copied $(basename "$dll")"
 done
 
+# Cook static collision for all scenes (skips up-to-date cooks)
+if compgen -G "content/scenes/*.scene" > /dev/null; then
+    echo "Cooking static collision..."
+    for scene in content/scenes/*.scene; do
+        if ! cargo run --release --bin collision_cooker -- "scenes/$(basename "$scene")"; then
+            echo "ERROR: collision cook failed for $(basename "$scene")"
+            exit 1
+        fi
+    done
+fi
+
 # Pack content into game.pak
 if [ -d "content" ]; then
     echo "Packing content/ into game.pak..."
