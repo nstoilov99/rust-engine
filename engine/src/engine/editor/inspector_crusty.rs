@@ -70,6 +70,9 @@ pub struct InspectorPanelCtx<'a> {
     /// GPU-uploaded icon set (same map as the hierarchy panel); the color
     /// pickers use the `color-picker` stem for the eyedropper button.
     pub icons: &'a std::collections::HashMap<String, TextureId>,
+    /// Streamed-world object info, shown read-only when the world row is
+    /// selected in the hierarchy.
+    pub world_object: Option<&'a super::world_object::WorldObjectInfo>,
 }
 
 /// Shared color-picker context threaded to every color row: the saved
@@ -114,6 +117,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                 play_mode,
                 asset_browser,
                 icons,
+                world_object,
             } = ctx;
             let picker_icon = icons.get("color-picker").copied();
             let read_only = play_mode != PlayMode::Edit;
@@ -122,6 +126,14 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
             ui.add_space(2.0);
             ui.separator();
             ui.add_space(4.0);
+
+            if selection.world_selected() {
+                match world_object {
+                    Some(info) => render_world_info(ui, info),
+                    None => render_empty_state(ui),
+                }
+                return;
+            }
 
             let Some(entity) = selection.primary() else {
                 render_empty_state(ui);
@@ -198,6 +210,86 @@ fn render_empty_state(ui: &mut Ui) {
         let y = ui.cursor().y;
         ui.painter().text(Pos2::new(x, y), text, font, dim, None);
         ui.add_space(font + 4.0 + gap);
+    }
+}
+
+/// Read-only streamed-world details (UE Landscape "Information" style).
+fn render_world_info(ui: &mut Ui, info: &super::world_object::WorldObjectInfo) {
+    let style = ui.style();
+    let text = style.palette.text;
+    let dim = style.palette.text_dim;
+    let width = ui.available().width();
+
+    ui.add_space(6.0);
+    let row_top = ui.cursor();
+    Label::new(info.name.clone()).size(16.0).show(ui);
+    let id_text = "Streamed World";
+    let id_w = ui
+        .painter()
+        .measure_text(id_text, style.fonts.small, None)
+        .x;
+    ui.painter().text(
+        Pos2::new(row_top.x + width - id_w - 6.0, row_top.y + 4.0),
+        id_text,
+        style.fonts.small,
+        dim,
+        None,
+    );
+    ui.separator();
+    ui.add_space(4.0);
+
+    let bar = ui.allocate(Vec2::new(width, 22.0));
+    ui.painter().rect_filled(bar, 2.0, HEADER_BG);
+    ui.painter().text(
+        Pos2::new(bar.min.x + 8.0, bar.min.y + 4.0),
+        "Information",
+        style.fonts.body,
+        text,
+        None,
+    );
+    ui.add_space(4.0);
+
+    let mode = if info.full_world {
+        "Full World"
+    } else {
+        "Around Camera"
+    };
+    let zones = match info.current_zone {
+        Some(z) => format!("{} (current: {z})", info.zone_count),
+        None => info.zone_count.to_string(),
+    };
+    let rows = [
+        ("Streaming Mode", mode.to_string()),
+        ("Cell Size", format!("{:.0} m", info.cell_size)),
+        (
+            "Cells Resident",
+            format!("{} / {}", info.cells_resident, info.cells_total),
+        ),
+        (
+            "Collision Chunks",
+            format!("{} / {}", info.chunks_resident, info.chunks_total),
+        ),
+        ("Zones", zones),
+        ("IO In Flight", info.in_flight.to_string()),
+        ("Ready Queue", info.ready.to_string()),
+        ("Worst Frame", format!("{:.2} ms", info.worst_ms)),
+    ];
+    for (label, value) in rows {
+        let row = ui.allocate(Vec2::new(width, 20.0));
+        ui.painter().text(
+            Pos2::new(row.min.x + 12.0, row.min.y + 3.0),
+            label,
+            style.fonts.body,
+            dim,
+            None,
+        );
+        ui.painter().text(
+            Pos2::new(row.min.x + 150.0, row.min.y + 3.0),
+            &value,
+            style.fonts.body,
+            text,
+            None,
+        );
     }
 }
 

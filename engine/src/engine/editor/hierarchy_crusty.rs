@@ -38,6 +38,9 @@ pub struct HierarchyPanelCtx<'a> {
     pub icons: &'a HashMap<String, TextureId>,
     /// Icon palette (per-state tint / size overrides from the Icon Inspector).
     pub registry: &'a IconRegistry,
+    /// Streamed-world object (UE Landscape-style row), when streaming is
+    /// active for the current scene.
+    pub world_object: Option<&'a super::world_object::WorldObjectInfo>,
 }
 
 fn gray(v: u8) -> Color {
@@ -69,6 +72,7 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
                 play_mode,
                 icons,
                 registry,
+                world_object,
             } = ctx;
             let read_only = play_mode != PlayMode::Edit;
 
@@ -79,7 +83,7 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
                     panel.renaming_entity = None;
                 } else if ui.ctx().dnd.holds::<DragEntity>() {
                     ui.ctx_mut().dnd.clear();
-                } else if !selection.is_empty() {
+                } else if !selection.is_empty() || selection.world_selected() {
                     selection.clear();
                 }
             }
@@ -95,7 +99,16 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
             ui.add_space((panel_top + 65.0 - ui.cursor().y).max(0.0));
             ui.separator();
             ui.add_space((panel_top + 72.0 - ui.cursor().y).max(0.0));
-            render_tree(ui, panel, world, selection, icons, registry, read_only);
+            render_tree(
+                ui,
+                panel,
+                world,
+                selection,
+                icons,
+                registry,
+                read_only,
+                world_object,
+            );
         },
     );
 }
@@ -151,6 +164,7 @@ fn render_search(ui: &mut Ui, panel: &mut HierarchyPanel) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tree(
     ui: &mut Ui,
     panel: &mut HierarchyPanel,
@@ -159,6 +173,7 @@ fn render_tree(
     icons: &HashMap<String, TextureId>,
     registry: &IconRegistry,
     read_only: bool,
+    world_object: Option<&super::world_object::WorldObjectInfo>,
 ) {
     panel.sync_root_order(world);
     panel.build_visible_rows(world);
@@ -195,9 +210,14 @@ fn render_tree(
         // no visible gap (item_spacing.y = 0 for the same reason).
         .spacing(0.0)
         .show(ui, |ui| {
+            if let Some(info) = world_object {
+                render_world_row(ui, selection, icons, registry, &info.name);
+            }
             if total_rows == 0 {
-                let dim = ui.style().palette.text_dim;
-                Label::new("No entities in scene").color(dim).show(ui);
+                if world_object.is_none() {
+                    let dim = ui.style().palette.text_dim;
+                    Label::new("No entities in scene").color(dim).show(ui);
+                }
                 return;
             }
             for idx in 0..panel.flat_rows.len() {
@@ -235,6 +255,89 @@ fn render_tree(
         });
 
     handle_keyboard_shortcuts(ui, panel, world, selection, read_only);
+}
+
+/// Synthetic streamed-world row pinned above the entity tree (UE
+/// Landscape-style): selectable, no chevron / rename / drag / visibility.
+fn render_world_row(
+    ui: &mut Ui,
+    selection: &mut Selection,
+    icons: &HashMap<String, TextureId>,
+    registry: &IconRegistry,
+    name: &str,
+) {
+    let is_selected = selection.world_selected();
+    let width = ui.available().width();
+    let row_rect = ui.allocate(Vec2::new(width, ROW_HEIGHT));
+    let clip = ui.clip_rect();
+    if row_rect.max.y < clip.min.y || row_rect.min.y > clip.max.y {
+        return;
+    }
+
+    let row_id = Id::new("hierarchy_world_row");
+    let resp = ui.interact(row_id, row_rect);
+    if is_selected {
+        ui.painter()
+            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(196, 110, 36, 80));
+        let bar = Rect::from_min_max(
+            row_rect.min,
+            Pos2::new(row_rect.min.x + 3.0, row_rect.max.y),
+        );
+        ui.painter()
+            .rect_filled(bar, 1.0, Color::from_srgb_u8(245, 143, 46, 255));
+    } else if resp.hovered {
+        ui.painter()
+            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 255, 255, 24));
+    }
+
+    let center_y = 0.5 * (row_rect.min.y + row_rect.max.y);
+    let row_state = if is_selected {
+        ChromeState::Active
+    } else {
+        ChromeState::Default
+    };
+    let tint = registry.panel_icon_tint("hierarchy", "world", row_state, Color::WHITE);
+    let icon_size = registry
+        .panel_icon_size("hierarchy", "world")
+        .unwrap_or(ICON_SIZE)
+        .clamp(8.0, ROW_HEIGHT - 2.0);
+    let icon_x = row_rect.min.x + INDENT + 8.0;
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(icon_x, center_y - icon_size * 0.5),
+        Vec2::splat(icon_size),
+    );
+    if let Some(&tex) = icons.get("world") {
+        ui.ctx_mut().paint.push(PaintCmd::Image {
+            rect: icon_rect,
+            uv_min: Pos2::new(0.0, 0.0),
+            uv_max: Pos2::new(1.0, 1.0),
+            tint,
+            texture: tex,
+        });
+    } else {
+        ui.painter()
+            .circle_filled(icon_rect.center(), icon_size * 0.18, tint);
+    }
+
+    let style = ui.style();
+    let color = if is_selected {
+        Color::WHITE
+    } else {
+        style.palette.text_dim
+    };
+    let size = style.fonts.body;
+    let text_h = ui.painter().measure_text(name, size, None).y;
+    ui.painter().text(
+        Pos2::new(icon_rect.max.x + 12.0, center_y - text_h * 0.5),
+        name,
+        size,
+        color,
+        None,
+    );
+
+    if resp.clicked {
+        selection.select_world();
+    }
 }
 
 struct RowData {

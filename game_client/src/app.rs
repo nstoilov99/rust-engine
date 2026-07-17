@@ -3196,6 +3196,10 @@ impl App {
             } else {
                 None
             };
+            let world_object_info =
+                rust_engine::engine::editor::world_object::WorldObjectInfo::from_streamer(
+                    &self.core.world_streamer,
+                );
             let world = self.core.game_world.hecs_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
             let vp = &mut self.editor.viewport;
@@ -3309,6 +3313,7 @@ impl App {
                                         play_mode: current_play_mode,
                                         icons,
                                         registry: &icon_registry,
+                                        world_object: world_object_info.as_ref(),
                                     },
                                 ),
                                 Some(EditorTab::Inspector) => inspector_panel(
@@ -3321,6 +3326,7 @@ impl App {
                                         play_mode: current_play_mode,
                                         asset_browser: &mut *asset_browser,
                                         icons,
+                                        world_object: world_object_info.as_ref(),
                                     },
                                 ),
                                 Some(EditorTab::AssetBrowser) => asset_browser_panel(
@@ -3937,6 +3943,10 @@ impl App {
             .game_world
             .resource::<InputSubsystem>()
             .map(|s| s.action_set.clone());
+        let world_object_info =
+            rust_engine::engine::editor::world_object::WorldObjectInfo::from_streamer(
+                &core.world_streamer,
+            );
         let world = core.game_world.hecs_mut();
         let console = &mut editor.console;
         let show_stat_fps = &mut editor.ui.show_stat_fps;
@@ -4044,6 +4054,7 @@ impl App {
                                 play_mode,
                                 icons,
                                 registry: &icon_registry,
+                                world_object: world_object_info.as_ref(),
                             },
                         ),
                         Some(EditorTab::Inspector) => inspector_panel(
@@ -4056,6 +4067,7 @@ impl App {
                                 play_mode,
                                 asset_browser: &mut *asset_browser,
                                 icons,
+                                world_object: world_object_info.as_ref(),
                             },
                         ),
                         Some(EditorTab::AssetBrowser) => asset_browser_panel(

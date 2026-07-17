@@ -72,6 +72,7 @@ pub mod viewport;
 pub mod viewport_crusty;
 mod viewport_texture;
 mod window_config;
+pub mod world_object;
 
 pub use asset_browser::{
     AssetBrowserEvent, AssetBrowserPanel, AssetDragPayload, AssetEventQueue, AssetFilter,
@@ -105,3 +106,4 @@ pub use toasts::{Toast, ToastKind, ToastStack};
 pub use viewport::*;
 pub use viewport_texture::*;
 pub use window_config::*;
+pub use world_object::WorldObjectInfo;

@@ -10,6 +10,9 @@ pub struct Selection {
     selected: HashSet<Entity>,
     /// Primary selected entity (for single-select operations)
     primary: Option<Entity>,
+    /// The synthetic streamed-world object (not an entity) is selected.
+    /// Mutually exclusive with entity selection.
+    world: bool,
 }
 
 impl Selection {
@@ -22,6 +25,7 @@ impl Selection {
         self.selected.clear();
         self.selected.insert(entity);
         self.primary = Some(entity);
+        self.world = false;
     }
 
     /// Add entity to selection (multi-select)
@@ -30,6 +34,19 @@ impl Selection {
         if self.primary.is_none() {
             self.primary = Some(entity);
         }
+        self.world = false;
+    }
+
+    /// Select the streamed-world object (clears entity selection).
+    pub fn select_world(&mut self) {
+        self.selected.clear();
+        self.primary = None;
+        self.world = true;
+    }
+
+    /// Whether the streamed-world object is selected.
+    pub fn world_selected(&self) -> bool {
+        self.world
     }
 
     /// Remove entity from selection
@@ -53,6 +70,7 @@ impl Selection {
     pub fn clear(&mut self) {
         self.selected.clear();
         self.primary = None;
+        self.world = false;
     }
 
     /// Check if entity is selected
