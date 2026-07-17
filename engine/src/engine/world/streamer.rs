@@ -130,7 +130,9 @@ pub fn load_world(scene_relative: &str) -> (Option<LoadedWorld>, WorldLoadReport
             manifest.version
         ));
     }
-    if manifest.scene != scene_relative {
+    // Callers may pass OS-native separators; the manifest is authored with
+    // forward slashes.
+    if manifest.scene != scene_relative.replace('\\', "/") {
         return disabled(format!(
             "world manifest is for '{}', not '{scene_relative}'",
             manifest.scene

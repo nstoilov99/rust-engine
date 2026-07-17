@@ -2400,7 +2400,12 @@ impl App {
                                 continue;
                             }
 
-                            let relative = meta_path.to_string_lossy().to_string();
+                            // Registry paths are OS-native; scene-relative
+                            // strings are forward-slash everywhere else
+                            // (manifest scene field, MAIN_SCENE_RELATIVE,
+                            // tab dedup).
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
 
                             // If this scene is already the active tab, nothing to do.
                             if relative == self.editor.scene.current_scene_relative {
