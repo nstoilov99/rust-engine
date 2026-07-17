@@ -13,6 +13,11 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 # so client (rapier) and server WASM (parry only) share one parry version.
 # Default features only (std) — no parallel/SIMD/serde.
 parry3d = "=0.20.2"
+# f64 twin, same pin: per-triangle shape-casts run in f64 because f32 GJK
+# terminates at ~1e-3 relative error — too coarse for the golden battery's
+# 1 mm / 0.1° tolerances and for stable face-vs-edge contact ordering at
+# triangle seams. Cooked chunks stay f32; only the cast path widens.
+parry3d-f64 = "=0.20.2"
 
 [dev-dependencies]
 ron = "0.8"

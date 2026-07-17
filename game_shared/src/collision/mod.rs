@@ -8,6 +8,7 @@
 //!
 //! This crate does no I/O: callers hand chunk bytes to the store.
 //!
+pub mod battery;
 pub mod format;
 pub mod store;
 

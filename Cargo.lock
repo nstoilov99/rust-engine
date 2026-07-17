@@ -1175,6 +1175,7 @@ version = "0.1.0"
 dependencies = [
  "glam 0.29.3",
  "parry3d",
+ "parry3d-f64",
  "ron",
  "serde",
  "uuid",
@@ -2585,6 +2586,31 @@ name = "parry3d"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bec55ce6f725367f8149f750575e79a8879d71b7257c02273259f9375822821f"
+dependencies = [
+ "approx",
+ "arrayvec",
+ "bitflags 2.10.0",
+ "downcast-rs 2.0.2",
+ "either",
+ "ena",
+ "hashbrown 0.15.5",
+ "log",
+ "nalgebra 0.33.2",
+ "num-derive",
+ "num-traits",
+ "ordered-float",
+ "rstar",
+ "simba 0.9.1",
+ "slab",
+ "spade",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "parry3d-f64"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b77cdee640b77bd05ded45e9ef4fd20c10350abdfee5c267acae2308ec761d"
 dependencies = [
  "approx",
  "arrayvec",

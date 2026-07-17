@@ -1,0 +1,73 @@
+// Golden query battery for the M2 collision pipeline (see
+// `docs/roadmap/VULKANO-M2-COLLISION-PIPELINE.md`, "Parity & correctness").
+// Runs against the checked-in chunk set in this directory (geometry documented
+// in `game_shared/tests/golden_battery.rs::test_chunk_set`).
+//
+// All values analytic unless noted. Tolerances: position/TOI 1 mm, normal 0.1°.
+// Ray TOI is in units of `dir`'s length; shape-cast TOI is a fraction of `delta`.
+(
+    cases: [
+        (
+            name: "ray_down_flat_ground",
+            query: Ray(origin: (32.0, 40.0, 10.0), dir: (0.0, 0.0, -1.0), max_toi: 100.0),
+            expect: Hit(toi: 10.0, position: (32.0, 40.0, 0.0), normal: (0.0, 0.0, 1.0), id: 2),
+        ),
+        (
+            name: "ray_down_ground_diagonal_tie_breaks_low_id",
+            query: Ray(origin: (40.0, 40.0, 5.0), dir: (0.0, 0.0, -1.0), max_toi: 100.0),
+            expect: Hit(toi: 5.0, position: (40.0, 40.0, 0.0), normal: (0.0, 0.0, 1.0), id: 1),
+        ),
+        (
+            name: "ray_down_45deg_slope",
+            query: Ray(origin: (18.0, 14.0, 20.0), dir: (0.0, 0.0, -1.0), max_toi: 100.0),
+            expect: Hit(toi: 10.0, position: (18.0, 14.0, 10.0), normal: (-0.70710678, 0.0, 0.70710678), id: 10),
+        ),
+        (
+            name: "ray_down_seam_platform_at_border",
+            query: Ray(origin: (64.0, 22.0, 10.0), dir: (0.0, 0.0, -1.0), max_toi: 100.0),
+            expect: Hit(toi: 6.0, position: (64.0, 22.0, 4.0), normal: (0.0, 0.0, 1.0), id: 30),
+        ),
+        (
+            name: "ray_seam_platform_diagonal_duplicate_tie",
+            query: Ray(origin: (64.0, 24.0, 10.0), dir: (0.0, 0.0, -1.0), max_toi: 100.0),
+            expect: Hit(toi: 6.0, position: (64.0, 24.0, 4.0), normal: (0.0, 0.0, 1.0), id: 30),
+        ),
+        (
+            name: "ray_high_horizontal_miss",
+            query: Ray(origin: (32.0, 32.0, 20.0), dir: (1.0, 0.0, 0.0), max_toi: 100.0),
+            expect: Miss,
+        ),
+        (
+            name: "ray_near_parallel_graze",
+            query: Ray(origin: (0.0, 40.0, 0.5), dir: (1.0, 0.0, -0.01), max_toi: 100.0),
+            expect: Hit(toi: 50.0, position: (50.0, 40.0, 0.0), normal: (0.0, 0.0, 1.0), id: 1),
+        ),
+        (
+            name: "ball_down_flat_ground",
+            query: ShapeCast(shape: Ball(radius: 0.5), position: (50.0, 52.0, 5.0), delta: (0.0, 0.0, -8.0)),
+            expect: Hit(toi: 0.5625, position: (50.0, 52.0, 0.0), normal: (0.0, 0.0, 1.0), id: 2),
+        ),
+        (
+            name: "ball_into_step_west_face",
+            query: ShapeCast(shape: Ball(radius: 0.5), position: (36.0, 13.0, 0.8), delta: (8.0, 0.0, 0.0)),
+            // Contact (y 13, z 0.8) lies below the face quad's A->C diagonal
+            // (z 1.25 at y 13) -> second face triangle.
+            expect: Hit(toi: 0.4375, position: (40.0, 13.0, 0.8), normal: (-1.0, 0.0, 0.0), id: 23),
+        ),
+        (
+            name: "ball_onto_step_top_edge",
+            query: ShapeCast(shape: Ball(radius: 0.5), position: (39.8, 12.0, 6.0), delta: (0.0, 0.0, -8.0)),
+            expect: Hit(toi: 0.44271780, position: (40.0, 12.0, 2.0), normal: (-0.4, 0.0, 0.91651514), id: 21),
+        ),
+        (
+            name: "capsule_down_45deg_slope",
+            query: ShapeCast(shape: Capsule(half_height: 0.5, radius: 0.3), position: (18.0, 14.0, 14.0), delta: (0.0, 0.0, -8.0)),
+            expect: Hit(toi: 0.38446699, position: (18.21213203, 14.0, 10.21213203), normal: (-0.70710678, 0.0, 0.70710678), id: 10),
+        ),
+        (
+            name: "ball_diagonal_sweep_across_seam",
+            query: ShapeCast(shape: Ball(radius: 0.3), position: (62.0, 24.0, 10.0), delta: (4.0, 0.0, -8.0)),
+            expect: Hit(toi: 0.7125, position: (64.85, 24.0, 4.0), normal: (0.0, 0.0, 1.0), id: 30),
+        ),
+    ],
+)

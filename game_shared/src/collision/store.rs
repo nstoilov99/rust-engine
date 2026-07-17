@@ -13,6 +13,13 @@
 //! so every query is BVH traversal (candidates under the swept AABB) →
 //! per-triangle cast → earliest TOI, tie-broken on the lowest stable triangle
 //! id. Border-duplicated triangles therefore resolve to one consistent hit.
+//!
+//! Precision: per-triangle shape-casts run in **f64** (`parry3d-f64`, same
+//! pin). f32 GJK terminates at ~1e-3 relative error, which misses the golden
+//! battery's 1 mm / 0.1° tolerances and — worse — mis-orders face-vs-edge
+//! contacts near triangle seams, producing tilted normals on flat ground.
+//! f64 arithmetic (add/mul/sqrt only) is IEEE-deterministic on both x86-64
+//! and wasm32, so client/server parity holds. Chunk storage stays f32.
 
 use std::collections::HashMap;
 
@@ -22,6 +29,13 @@ use parry3d::math::{Isometry, Point, Vector};
 use parry3d::na;
 use parry3d::query::{cast_shapes, contact, Ray, RayCast, ShapeCastOptions};
 use parry3d::shape::{Shape, TriMesh, TriMeshBuilderError};
+use parry3d_f64::math::{Isometry as IsometryF64, Vector as VectorF64};
+use parry3d_f64::na as na64;
+use parry3d_f64::query::{cast_shapes as cast_shapes_f64, ShapeCastOptions as ShapeCastOptionsF64};
+use parry3d_f64::shape::{
+    Ball as BallF64, Capsule as CapsuleF64, Cuboid as CuboidF64, Segment as SegmentF64,
+    Shape as ShapeF64, Triangle as TriangleF64,
+};
 
 use super::format::{self, FormatError};
 use super::{TriangleFlags, TriangleId};
@@ -246,10 +260,12 @@ impl ChunkStore {
             compute_impact_geometry_on_penetration: true,
         };
 
+        let shape_f64 = widen_shape(shape);
         let mut best: Option<ShapeHit> = None;
         for (coord, chunk) in self.chunks_for_aabb(vec_from_na(swept.mins), vec_from_na(swept.maxs))
         {
-            let local_pose = isometry(world_grid::world_to_local(coord, position), rotation);
+            let local_position = world_grid::world_to_local(coord, position);
+            let local_pose = isometry(local_position, rotation);
             let local_aabb = shape.compute_aabb(&local_pose);
             let local_swept = local_aabb
                 .merged(&local_aabb.translated(&vec_na(delta)))
@@ -263,27 +279,38 @@ impl ChunkStore {
 
             for i in candidates {
                 let tri = chunk.trimesh.triangle(i);
-                let Ok(Some(hit)) = cast_shapes(
-                    &local_pose,
-                    &vec_na(delta),
-                    shape,
-                    &Isometry::identity(),
-                    &Vector::zeros(),
-                    &tri,
-                    options,
-                ) else {
+                let hit = match &shape_f64 {
+                    Some(s64) => {
+                        cast_triangle_f64(s64.as_ref(), local_position, rotation, delta, &tri)
+                    }
+                    None => cast_shapes(
+                        &local_pose,
+                        &vec_na(delta),
+                        shape,
+                        &Isometry::identity(),
+                        &Vector::zeros(),
+                        &tri,
+                        options,
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|h| {
+                        (
+                            h.time_of_impact,
+                            vec_from_na(h.witness2),
+                            vec_glam(*h.normal2),
+                        )
+                    }),
+                };
+                let Some((toi, witness_local, normal)) = hit else {
                     continue;
                 };
                 let id = chunk.triangle_ids[i as usize];
-                if better(
-                    hit.time_of_impact,
-                    id,
-                    &best.map(|b| (b.toi, b.triangle_id)),
-                ) {
+                if better(toi, id, &best.map(|b| (b.toi, b.triangle_id))) {
                     best = Some(ShapeHit {
-                        toi: hit.time_of_impact,
-                        position: world_grid::local_to_world(coord, vec_from_na(hit.witness2)),
-                        normal: vec_glam(*hit.normal2),
+                        toi,
+                        position: world_grid::local_to_world(coord, witness_local),
+                        normal,
                         triangle_id: id,
                         flags: chunk.triangle_flags[i as usize],
                     });
@@ -355,6 +382,79 @@ impl ChunkStore {
         });
         out
     }
+}
+
+/// Widen a swept query shape to f64 for the precise cast path. Shapes the
+/// game doesn't sweep fall back to the f32 cast (`None`).
+fn widen_shape(shape: &dyn Shape) -> Option<Box<dyn ShapeF64>> {
+    use parry3d::shape::TypedShape;
+    match shape.as_typed_shape() {
+        TypedShape::Ball(b) => Some(Box::new(BallF64::new(b.radius as f64))),
+        TypedShape::Capsule(c) => Some(Box::new(CapsuleF64 {
+            segment: SegmentF64::new(point_widen(c.segment.a), point_widen(c.segment.b)),
+            radius: c.radius as f64,
+        })),
+        TypedShape::Cuboid(c) => Some(Box::new(CuboidF64::new(VectorF64::new(
+            c.half_extents.x as f64,
+            c.half_extents.y as f64,
+            c.half_extents.z as f64,
+        )))),
+        _ => None,
+    }
+}
+
+/// Per-triangle shape-cast in f64; results narrowed to f32 for the public API.
+fn cast_triangle_f64(
+    shape: &dyn ShapeF64,
+    position: Vec3,
+    rotation: Quat,
+    delta: Vec3,
+    tri: &parry3d::shape::Triangle,
+) -> Option<(f32, Vec3, Vec3)> {
+    let pose = IsometryF64::from_parts(
+        na64::Translation3::new(position.x as f64, position.y as f64, position.z as f64),
+        na64::UnitQuaternion::from_quaternion(na64::Quaternion::new(
+            rotation.w as f64,
+            rotation.x as f64,
+            rotation.y as f64,
+            rotation.z as f64,
+        )),
+    );
+    let vel = VectorF64::new(delta.x as f64, delta.y as f64, delta.z as f64);
+    let tri = TriangleF64::new(point_widen(tri.a), point_widen(tri.b), point_widen(tri.c));
+    let options = ShapeCastOptionsF64 {
+        max_time_of_impact: 1.0,
+        target_distance: 0.0,
+        stop_at_penetration: true,
+        compute_impact_geometry_on_penetration: true,
+    };
+    let hit = cast_shapes_f64(
+        &pose,
+        &vel,
+        shape,
+        &IsometryF64::identity(),
+        &VectorF64::zeros(),
+        &tri,
+        options,
+    )
+    .ok()??;
+    Some((
+        hit.time_of_impact as f32,
+        Vec3::new(
+            hit.witness2.x as f32,
+            hit.witness2.y as f32,
+            hit.witness2.z as f32,
+        ),
+        Vec3::new(
+            hit.normal2.x as f32,
+            hit.normal2.y as f32,
+            hit.normal2.z as f32,
+        ),
+    ))
+}
+
+fn point_widen(p: Point<f32>) -> parry3d_f64::math::Point<f64> {
+    parry3d_f64::math::Point::new(p.x as f64, p.y as f64, p.z as f64)
 }
 
 /// Earliest-TOI comparison with deterministic tie-break on lowest triangle id.
