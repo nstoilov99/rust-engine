@@ -133,8 +133,7 @@ impl AssetManager {
             aabb.min,
             aabb.max,
         )?;
-        let index = meshes.meshes.len();
-        meshes.meshes.push(gpu_mesh);
+        let index = meshes.insert_mesh(gpu_mesh);
 
         if let Some(path) = name {
             meshes.register_path(path, vec![index]);
