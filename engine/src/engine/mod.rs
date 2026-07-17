@@ -33,6 +33,9 @@ pub mod debug_draw;
 pub mod benchmark;
 pub mod physics;
 
+// Static-collision cooking (M2)
+pub mod collision;
+
 // Coordinate system adapters (Z-up ↔ Y-up conversion)
 pub mod adapters;
 
