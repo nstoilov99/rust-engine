@@ -111,7 +111,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M0 SpacetimeDB scale spike: **complete — GO** (see `docs/roadmap/VULKANO-M0-SPACETIMEDB-SPIKE.md`)
 - M2 Collision Pipeline v1 (cooked chunks): **complete** (see `docs/roadmap/VULKANO-M2-COLLISION-PIPELINE.md`)
 - M3 Greybox World v1 (`tools/greybox_gen`, deterministic; generated content checked in): **complete** (see `docs/roadmap/VULKANO-M3-GREYBOX-WORLD.md`)
-- Next: Multiplayer Foundation arc M1/M4–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
+- M4 Zone & Chunk Lifecycle (WorldStreamer: budgeted cell/chunk streaming, GUID-stable reload): **complete** (see `docs/roadmap/VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md`)
+- Next: Multiplayer Foundation arc M1/M5–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
 
 ## Patched Dependencies
 

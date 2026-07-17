@@ -1763,7 +1763,7 @@ A partitioned test world, ugly on purpose (real terrain is deferred Task 46):
 ---
 
 ### Task M4: Zone & Chunk Lifecycle
-**Status:** 🚧 In progress (plan reviewed 2026-07-17)
+**Status:** ✅ Complete (2026-07-17) — see `VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md`
 **Duration:** ~1-2 weeks
 **Prerequisites:** M3
 
@@ -2870,7 +2870,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | M1 | Editor UX & Design System v1 (time-boxed) | Multiplayer Foundation | UX | |
 | **M2** | ✅ **Collision Pipeline v1 (cooked chunks)** | **Multiplayer Foundation** | **Infrastructure** | |
 | **M3** | ✅ **Greybox World v1** | **Multiplayer Foundation** | **Content** | |
-| M4 | Zone & Chunk Lifecycle | Multiplayer Foundation | Feature | |
+| **M4** | ✅ **Zone & Chunk Lifecycle** | **Multiplayer Foundation** | **Feature** | |
 | M5 | Net-A: Connection, Identity & Replication | Multiplayer Foundation | Feature | |
 | M6 | Net-B: Server-Authoritative Movement | Multiplayer Foundation | Feature | |
 | M7 | Net-C: Authoritative Combat & Thin HUD | Multiplayer Foundation | Feature | |

@@ -1,6 +1,13 @@
 # M4 — Zone & Chunk Lifecycle
 
-**Status:** 📋 Draft plan
+**Status:** ✅ Complete (2026-07-17). Packages 0–5 landed (`67f0946`,
+`62942aa`, `ffe5d0d`, `133ec27`, `8b8cc7c`, +acceptance). Acceptance
+(`engine/tests/streaming_acceptance.rs`): streamed-vs-full collision raycast
+parity, GUID stability across load/unload/reload, and the D4 flythrough
+harness — 9 boundary crossings at 3× run speed, worst streaming main-thread
+frame ~0.95 ms (< 2 ms bound), p99 within 1 ms of the standing-still
+baseline. Headless harness measures the streaming update itself; renderer
+frame time is not included.
 **Duration:** ~1–2 weeks
 **Prerequisites:** M3 (complete)
 **Roadmap:** `ROADMAP.md` Task M4 — absorbs the zone-lifecycle slice of old Task 43; general scene transitions/loading screens stay deferred.
