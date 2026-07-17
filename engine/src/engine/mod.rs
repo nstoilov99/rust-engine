@@ -36,6 +36,9 @@ pub mod physics;
 // Static-collision cooking (M2)
 pub mod collision;
 
+// World streaming: zone & chunk lifecycle (M4)
+pub mod world;
+
 // Coordinate system adapters (Z-up ↔ Y-up conversion)
 pub mod adapters;
 
