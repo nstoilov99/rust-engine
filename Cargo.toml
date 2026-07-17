@@ -5,6 +5,7 @@ members = [
     "game_client",
     "tools/pak_tool",
     "tools/collision_cooker",
+    "tools/greybox_gen",
     "tools/migrate_asset_extensions",
 ]
 resolver = "2"

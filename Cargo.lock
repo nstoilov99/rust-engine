@@ -1345,6 +1345,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "greybox_gen"
+version = "0.1.0"
+dependencies = [
+ "game_shared",
+ "glam 0.29.3",
+ "ron",
+ "rust_engine",
+ "serde",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
