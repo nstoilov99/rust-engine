@@ -1763,7 +1763,7 @@ A partitioned test world, ugly on purpose (real terrain is deferred Task 46):
 ---
 
 ### Task M4: Zone & Chunk Lifecycle
-**Status:** 📋 Planned
+**Status:** 🚧 In progress (plan reviewed 2026-07-17)
 **Duration:** ~1-2 weeks
 **Prerequisites:** M3
 
@@ -1771,6 +1771,8 @@ Scene management **scoped to what multiplayer needs** (absorbs old Task 43; gene
 - Load/unload world cells (render assets + collision chunks) around the local player
 - Entity spawn/despawn tied to cell lifecycle, with stable identity across unload/reload (EntityGuid, ADR-013)
 - Async loading budget — no frame hitches on cell boundaries
+
+**Full plan:** [VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md](VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md)
 
 ---
 
