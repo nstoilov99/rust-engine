@@ -45,23 +45,21 @@ pub fn create_swapchain_with_present_mode(
         .physical_device()
         .surface_capabilities(&surface, Default::default())?;
 
-    // Prefer SRGB format (B8G8R8A8 or R8G8B8A8)
-    let image_format = device
+    // Prefer B8G8R8A8_SRGB — the deferred composite render pass hard-codes it —
+    // then R8G8B8A8_SRGB, then whatever the surface offers first.
+    let surface_formats = device
         .physical_device()
-        .surface_formats(&surface, Default::default())?
-        .into_iter()
-        .find(|(format, _)| {
-            matches!(
-                format,
-                vulkano::format::Format::B8G8R8A8_SRGB | vulkano::format::Format::R8G8B8A8_SRGB
-            )
+        .surface_formats(&surface, Default::default())?;
+    let image_format = surface_formats
+        .iter()
+        .find(|(format, _)| *format == vulkano::format::Format::B8G8R8A8_SRGB)
+        .or_else(|| {
+            surface_formats
+                .iter()
+                .find(|(format, _)| *format == vulkano::format::Format::R8G8B8A8_SRGB)
         })
-        .unwrap_or_else(|| {
-            device
-                .physical_device()
-                .surface_formats(&surface, Default::default())
-                .unwrap()[0]
-        });
+        .unwrap_or(&surface_formats[0])
+        .clone();
 
     let composite_alpha = surface_capabilities
         .supported_composite_alpha

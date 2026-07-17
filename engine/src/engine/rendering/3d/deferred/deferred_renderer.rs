@@ -69,9 +69,11 @@ pub struct DeferredRenderer {
     hdr_framebuffer: Arc<Framebuffer>,
     composite_descriptor_set: Arc<DescriptorSet>,
     composite_render_pass: Arc<RenderPass>,
+    composite_present_render_pass: Arc<RenderPass>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
     grid_render_pass: Arc<RenderPass>,
+    grid_present_render_pass: Arc<RenderPass>,
     plankton_system: PlanktonSystem,
 }
 
@@ -217,6 +219,27 @@ impl DeferredRenderer {
             }
         )?;
 
+        // Swapchain variant: swapchain images lack SAMPLED usage, so the
+        // ShaderReadOnlyOptimal final layout above is illegal there — presenting
+        // needs PresentSrc instead. Pipelines are shared (render-pass
+        // compatibility ignores initial/final layouts).
+        let composite_present_render_pass = vulkano::single_pass_renderpass!(
+            device.clone(),
+            attachments: {
+                color: {
+                    format: Format::B8G8R8A8_SRGB,
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                    final_layout: vulkano::image::ImageLayout::PresentSrc,
+                }
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {}
+            }
+        )?;
+
         let composite_pass = CompositePass::new(device.clone(), composite_render_pass.clone())?;
 
         let mut bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
@@ -239,7 +262,7 @@ impl DeferredRenderer {
         // Grid/debug-draw render pass — must match the G-buffer depth's
         // final_layout (DepthStencilReadOnlyOptimal) as initial_layout so the
         // depth values survive the layout transition for correct depth testing.
-        let grid_render_pass = {
+        let make_grid_render_pass = |color_layout: vulkano::image::ImageLayout| {
             use vulkano::image::{ImageLayout, SampleCount};
             use vulkano::render_pass::{
                 AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
@@ -249,15 +272,17 @@ impl DeferredRenderer {
                 device.clone(),
                 RenderPassCreateInfo {
                     attachments: vec![
-                        // Color (composite output): ShaderReadOnlyOptimal in/out to
-                        // match composite's final_layout and the UI's sample expectation.
+                        // Color (composite output): in/out layout matches what the
+                        // preceding composite variant left the target in
+                        // (ShaderReadOnlyOptimal for editor textures, PresentSrc
+                        // for swapchain images).
                         AttachmentDescription {
                             format: Format::B8G8R8A8_SRGB,
                             samples: SampleCount::Sample1,
                             load_op: AttachmentLoadOp::Load,
                             store_op: AttachmentStoreOp::Store,
-                            initial_layout: ImageLayout::ShaderReadOnlyOptimal,
-                            final_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            initial_layout: color_layout,
+                            final_layout: color_layout,
                             ..Default::default()
                         },
                         // Attachment 1: depth (G-buffer depth, read-only for depth testing)
@@ -288,8 +313,12 @@ impl DeferredRenderer {
                     }],
                     ..Default::default()
                 },
-            )?
+            )
         };
+        let grid_render_pass =
+            make_grid_render_pass(vulkano::image::ImageLayout::ShaderReadOnlyOptimal)?;
+        let grid_present_render_pass =
+            make_grid_render_pass(vulkano::image::ImageLayout::PresentSrc)?;
 
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
         let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
@@ -542,9 +571,11 @@ impl DeferredRenderer {
             hdr_framebuffer,
             composite_descriptor_set,
             composite_render_pass,
+            composite_present_render_pass,
             framebuffer_cache: HashMap::new(),
             grid_framebuffer_cache: HashMap::new(),
             grid_render_pass,
+            grid_present_render_pass,
             plankton_system,
         })
     }
@@ -552,6 +583,7 @@ impl DeferredRenderer {
     fn get_or_create_framebuffer(
         &mut self,
         target_image: Arc<Image>,
+        present: bool,
     ) -> Result<Arc<Framebuffer>, Box<dyn std::error::Error>> {
         let cache_key = Arc::as_ptr(&target_image) as usize;
 
@@ -559,9 +591,14 @@ impl DeferredRenderer {
             return Ok(fb.clone());
         }
 
+        let render_pass = if present {
+            self.composite_present_render_pass.clone()
+        } else {
+            self.composite_render_pass.clone()
+        };
         let target_view = ImageView::new_default(target_image)?;
         let framebuffer = Framebuffer::new(
-            self.composite_render_pass.clone(),
+            render_pass,
             FramebufferCreateInfo {
                 attachments: vec![target_view],
                 ..Default::default()
@@ -576,6 +613,7 @@ impl DeferredRenderer {
     fn get_or_create_grid_framebuffer(
         &mut self,
         target_image: Arc<Image>,
+        present: bool,
     ) -> Result<Arc<Framebuffer>, Box<dyn std::error::Error>> {
         let cache_key = Arc::as_ptr(&target_image) as usize;
 
@@ -583,9 +621,14 @@ impl DeferredRenderer {
             return Ok(fb.clone());
         }
 
+        let render_pass = if present {
+            self.grid_present_render_pass.clone()
+        } else {
+            self.grid_render_pass.clone()
+        };
         let target_view = ImageView::new_default(target_image)?;
         let framebuffer = Framebuffer::new(
-            self.grid_render_pass.clone(),
+            render_pass,
             FramebufferCreateInfo {
                 attachments: vec![target_view, self.gbuffer.depth.clone()],
                 ..Default::default()
@@ -700,10 +743,11 @@ impl DeferredRenderer {
 
         let (target_framebuffer, depth_framebuffer, mut builder) = {
             crate::profile_scope!("command_buffer_setup");
+            let present = matches!(target, RenderTarget::Swapchain { .. });
             let target_image = target.image().clone();
-            let target_framebuffer = self.get_or_create_framebuffer(target_image.clone())?;
+            let target_framebuffer = self.get_or_create_framebuffer(target_image.clone(), present)?;
             let depth_framebuffer = if needs_depth_framebuffer {
-                Some(self.get_or_create_grid_framebuffer(target_image)?)
+                Some(self.get_or_create_grid_framebuffer(target_image, present)?)
             } else {
                 None
             };

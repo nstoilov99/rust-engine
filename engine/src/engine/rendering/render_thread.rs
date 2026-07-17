@@ -513,30 +513,41 @@ impl RenderThread {
                     }
                 };
 
+                // Flush + signal_finished before presenting, like the editor
+                // branch: the deferred renderer reuses per-frame GPU resources
+                // (G-buffer, plankton buffers) across frames, and vulkano's
+                // cross-submission tracking would reject the overlap. Same-queue
+                // submission order serializes execution in practice.
                 let _submit_guard =
                     crate::engine::rendering::common::gpu_context::lock_queue_submit();
-                let future = acquire_future
-                    .then_execute(gpu.queue.clone(), deferred_cb)
-                    .map(|f| {
-                        f.then_swapchain_present(
-                            gpu.queue.clone(),
-                            SwapchainPresentInfo::swapchain_image_index(
-                                swapchain_ref.clone(),
-                                image_index,
-                            ),
-                        )
-                        .then_signal_fence_and_flush()
-                    });
-
-                match future {
-                    Ok(Ok(f)) => {
-                        fence_slots[slot] = Some(f.boxed());
-                    }
-                    Ok(Err(Validated::Error(VulkanError::OutOfDate))) => {
-                        needs_recreate = true;
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("render_thread: present error: {:?}", e);
+                match acquire_future.then_execute(gpu.queue.clone(), deferred_cb) {
+                    Ok(future) => {
+                        if let Err(e) = future.flush() {
+                            log::error!("render_thread: flush failed: {:?}", e);
+                            unsafe { future.signal_finished() };
+                        } else {
+                            unsafe { future.signal_finished() };
+                            let present = future
+                                .then_swapchain_present(
+                                    gpu.queue.clone(),
+                                    SwapchainPresentInfo::swapchain_image_index(
+                                        swapchain_ref.clone(),
+                                        image_index,
+                                    ),
+                                )
+                                .then_signal_fence_and_flush();
+                            match present {
+                                Ok(f) => {
+                                    fence_slots[slot] = Some(f.boxed());
+                                }
+                                Err(Validated::Error(VulkanError::OutOfDate)) => {
+                                    needs_recreate = true;
+                                }
+                                Err(e) => {
+                                    log::error!("render_thread: present error: {:?}", e);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         log::error!("render_thread: execute error: {:?}", e);
