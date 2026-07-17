@@ -55,7 +55,7 @@ fn mesh_renderer_roundtrip() {
         EntityGuid::new(),
         Transform::default(),
         MeshRenderer {
-            mesh_path: String::new(),
+            mesh_path: "models/cube.mesh.ron".to_string(),
             material_paths: vec![],
             material_path: String::new(),
             mesh_index: 3,
@@ -69,7 +69,9 @@ fn mesh_renderer_roundtrip() {
 
     let new_world = roundtrip(&world, &[entity]);
     for (_, mr) in new_world.query::<&MeshRenderer>().iter() {
-        assert_eq!(mr.mesh_index, 3);
+        // Runtime mesh_index is not persisted; mesh_path is authoritative
+        assert_eq!(mr.mesh_index, 0);
+        assert_eq!(mr.mesh_path, "models/cube.mesh.ron");
         assert_eq!(mr.material_index, 7);
         assert!(!mr.visible);
         assert!(mr.cast_shadows);

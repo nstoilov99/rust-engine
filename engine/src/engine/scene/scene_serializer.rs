@@ -55,7 +55,7 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
             mesh_path: mesh_renderer.mesh_path.clone(),
             material_paths: mesh_renderer.material_paths.clone(),
             material_path: String::new(),
-            mesh_index: mesh_renderer.mesh_index,
+            mesh_index: 0,
             material_index: mesh_renderer.material_index,
             visible: mesh_renderer.visible,
             cast_shadows: mesh_renderer.cast_shadows,
@@ -467,7 +467,8 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     mesh_path: mesh_path.clone(),
                     material_paths: material_paths.clone(),
                     material_path: material_path.clone(),
-                    mesh_index: *mesh_index,
+                    // mesh_path is authoritative; legacy index only used when path is absent
+                    mesh_index: if mesh_path.is_empty() { *mesh_index } else { 0 },
                     material_index: *material_index,
                     visible: *visible,
                     cast_shadows: *cast_shadows,

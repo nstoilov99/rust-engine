@@ -122,7 +122,8 @@ impl Prefab {
                         mesh_path: mesh_path.clone(),
                         material_paths: material_paths.clone(),
                         material_path: material_path.clone(),
-                        mesh_index: *mesh_index,
+                        // mesh_path is authoritative; legacy index only used when path is absent
+                        mesh_index: if mesh_path.is_empty() { *mesh_index } else { 0 },
                         material_index: *material_index,
                         visible: *visible,
                         cast_shadows: *cast_shadows,

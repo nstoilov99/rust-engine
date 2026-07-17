@@ -742,8 +742,8 @@ pub enum ComponentData {
         /// Backward-compat: old single material_path (migrated to material_paths[0] on load)
         #[serde(default, skip_serializing)]
         material_path: String,
-        /// Kept for backward compat with old scenes (ignored if mesh_path is set)
-        #[serde(default)]
+        /// Backward-compat: runtime slot index from old scenes (ignored if mesh_path is set)
+        #[serde(default, skip_serializing)]
         mesh_index: usize,
         #[serde(default)]
         material_index: usize,
@@ -904,6 +904,42 @@ mod tests {
         let ron_string = ron::ser::to_string(&component).unwrap();
         let decoded: ComponentData = ron::from_str(&ron_string).unwrap();
         assert!(matches!(decoded, ComponentData::StaticCollision));
+    }
+
+    #[test]
+    fn mesh_renderer_does_not_persist_mesh_index() {
+        let component = ComponentData::MeshRenderer {
+            mesh_path: "models/Duck.mesh.ron".to_string(),
+            material_paths: Vec::new(),
+            material_path: String::new(),
+            mesh_index: 42,
+            material_index: 0,
+            visible: true,
+            cast_shadows: true,
+            receive_shadows: true,
+            base_color_factor: [1.0; 4],
+            metallic_factor: 1.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0; 3],
+        };
+
+        let ron_string = ron::ser::to_string(&component).unwrap();
+        assert!(!ron_string.contains("mesh_index"));
+
+        // Legacy scenes with mesh_index still deserialize
+        let legacy = r#"MeshRenderer(type: "MeshRenderer", mesh_index: 7)"#;
+        let decoded: ComponentData = ron::from_str(legacy).unwrap();
+        match decoded {
+            ComponentData::MeshRenderer {
+                mesh_index,
+                mesh_path,
+                ..
+            } => {
+                assert_eq!(mesh_index, 7);
+                assert!(mesh_path.is_empty());
+            }
+            _ => panic!("expected mesh renderer"),
+        }
     }
 
     #[test]
