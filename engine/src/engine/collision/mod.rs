@@ -6,3 +6,6 @@
 
 pub mod cook;
 pub mod output;
+pub mod world;
+
+pub use world::{CollisionLoadReport, CollisionWorld};

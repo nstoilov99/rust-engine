@@ -51,6 +51,24 @@ pub struct LoadedChunk {
     triangle_flags: Vec<TriangleFlags>,
 }
 
+impl LoadedChunk {
+    pub fn num_triangles(&self) -> usize {
+        self.trimesh.num_triangles()
+    }
+
+    /// Chunk-local triangle vertices (debug draw / inspection).
+    pub fn triangle_local(&self, i: u32) -> [Vec3; 3] {
+        let tri = self.trimesh.triangle(i);
+        [vec_from_na(tri.a), vec_from_na(tri.b), vec_from_na(tri.c)]
+    }
+
+    /// Chunk-local geometry AABB as (min, max).
+    pub fn local_aabb(&self) -> (Vec3, Vec3) {
+        let aabb = self.trimesh.local_aabb();
+        (vec_from_na(aabb.mins), vec_from_na(aabb.maxs))
+    }
+}
+
 /// A ray intersection, world Z-up.
 #[derive(Debug, Clone, Copy)]
 pub struct RayHit {
@@ -144,6 +162,11 @@ impl ChunkStore {
 
     pub fn coords(&self) -> impl Iterator<Item = IVec2> + '_ {
         self.chunks.keys().copied()
+    }
+
+    /// Loaded chunks in arbitrary order (debug draw / inspection).
+    pub fn chunks(&self) -> impl Iterator<Item = (IVec2, &LoadedChunk)> + '_ {
+        self.chunks.iter().map(|(c, chunk)| (*c, chunk))
     }
 
     /// Loaded chunks overlapping a world AABB, in deterministic (y, x) order.

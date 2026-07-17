@@ -39,6 +39,10 @@ pub enum MenuAction {
     Stop,
     /// Rebuild all registered shader pipelines from source.
     RebuildShaders,
+    /// Toggle wireframe debug draw of cooked collision chunks.
+    ToggleCollisionChunkDraw,
+    /// Toggle the collision chunk-grid overlay.
+    ToggleCollisionGridDraw,
     /// Toggle the Icon Inspector window (editor-debug only).
     #[cfg(feature = "editor-debug")]
     ToggleIconInspector,

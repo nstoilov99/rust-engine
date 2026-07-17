@@ -163,6 +163,13 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 if ui.menu_item("Rebuild All Shaders") {
                     action = MenuAction::RebuildShaders;
                 }
+                ui.separator();
+                if ui.menu_item("Collision Chunk Wireframe") {
+                    action = MenuAction::ToggleCollisionChunkDraw;
+                }
+                if ui.menu_item("Collision Chunk Grid") {
+                    action = MenuAction::ToggleCollisionGridDraw;
+                }
                 #[cfg(feature = "editor-debug")]
                 {
                     ui.separator();

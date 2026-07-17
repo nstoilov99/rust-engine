@@ -12,6 +12,7 @@ use rust_engine::engine::audio::{AudioEngine, AudioReloadQueue, AudioSystem};
 use rust_engine::engine::benchmark::{
     load_or_create_benchmark_scene, BenchmarkConfig, BENCHMARK_SCENE_RELATIVE,
 };
+use rust_engine::engine::collision::CollisionWorld;
 use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform};
 use rust_engine::engine::ecs::events::PlayModeChanged;
@@ -337,6 +338,24 @@ impl App {
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
         game_world.resources_mut().insert(physics_world);
+        {
+            let mut collision_world = CollisionWorld::new();
+            if scene_loaded {
+                let report = collision_world.load_for_scene("scenes/main.scene");
+                if let Some(reason) = &report.disabled {
+                    println!("Collision: {reason}");
+                } else {
+                    println!(
+                        "Collision: {} chunk(s) loaded, {} skipped",
+                        report.loaded, report.skipped
+                    );
+                }
+                for warning in &report.warnings {
+                    println!("Collision: {warning}");
+                }
+            }
+            game_world.resources_mut().insert(collision_world);
+        }
         game_world.resources_mut().insert(TransformCache::new());
         game_world.resources_mut().insert(InputManager::new());
         // Enhanced input system: try loading enhanced config, fall back to legacy migration, then defaults
@@ -2030,6 +2049,39 @@ impl App {
             &mut self.core.debug_draw_buffer,
         );
 
+        // Cooked collision debug: chunk wireframe / grid overlay, plus a
+        // temporary M2 verification — fly-camera raycast marker against the
+        // ChunkStore (visually checks cooked transforms against the render).
+        #[cfg(debug_assertions)]
+        if let Some(collision) = self.core.game_world.resource::<CollisionWorld>() {
+            collision.submit_debug_draws(&mut self.core.debug_draw_buffer);
+            if collision.debug_draw_chunks {
+                use rust_engine::engine::utils::coords::convert_position_yup_to_zup;
+                let origin = convert_position_yup_to_zup(camera_pos);
+                let dir = convert_position_yup_to_zup(
+                    (self.editor.viewport.camera.target - camera_pos).normalize_or_zero(),
+                );
+                if dir.length_squared() > 0.0 {
+                    if let Some(hit) = collision.store().raycast(origin, dir, 1000.0) {
+                        let p = hit.position;
+                        let red = [1.0, 0.15, 0.15, 1.0];
+                        for axis in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
+                            let a = p - axis * 0.25;
+                            let b = p + axis * 0.25;
+                            self.core
+                                .debug_draw_buffer
+                                .line_overlay(a.into(), b.into(), red);
+                        }
+                        self.core.debug_draw_buffer.line_overlay(
+                            p.into(),
+                            (p + hit.normal).into(),
+                            [0.2, 0.4, 1.0, 1.0],
+                        );
+                    }
+                }
+            }
+        }
+
         #[cfg(debug_assertions)]
         let debug_draw_data = render_loop::prepare_debug_draw_data(
             &mut self.core.debug_draw_buffer,
@@ -2220,6 +2272,16 @@ impl App {
             MenuAction::Resume => self.resume_play_mode(),
             MenuAction::Stop => self.stop_play_mode(),
             MenuAction::RebuildShaders => self.rebuild_all_shaders(),
+            MenuAction::ToggleCollisionChunkDraw => {
+                if let Some(collision) = self.core.game_world.resource_mut::<CollisionWorld>() {
+                    collision.debug_draw_chunks = !collision.debug_draw_chunks;
+                }
+            }
+            MenuAction::ToggleCollisionGridDraw => {
+                if let Some(collision) = self.core.game_world.resource_mut::<CollisionWorld>() {
+                    collision.debug_draw_grid = !collision.debug_draw_grid;
+                }
+            }
             #[cfg(feature = "editor-debug")]
             MenuAction::ToggleIconInspector => {
                 // Icon Inspector was a secondary-window tool tied to the old
@@ -2323,6 +2385,7 @@ impl App {
                                     }
                                     // Resolve mesh_path → mesh_index for loaded entities
                                     self.resolve_mesh_paths();
+                                    self.reload_collision_world(&relative);
 
                                     self.editor.console.messages.push(LogMessage::info(format!(
                                         "Loaded scene: {}",
@@ -3457,6 +3520,7 @@ impl App {
             .resources_mut()
             .insert(self.core.asset_manager.clone());
         world.resources_mut().insert(PhysicsWorld::new());
+        world.resources_mut().insert(CollisionWorld::new());
         world.resources_mut().insert(TransformCache::new());
         world.resources_mut().insert(AudioReloadQueue::new());
         if let Some(audio_engine) = AudioEngine::new() {
@@ -4008,6 +4072,32 @@ impl App {
         }
     }
 
+    /// Reload the `CollisionWorld` from cooked chunks for `scene_relative`,
+    /// reporting the outcome to the editor console.
+    fn reload_collision_world(&mut self, scene_relative: &str) {
+        let Some(collision) = self.core.game_world.resource_mut::<CollisionWorld>() else {
+            return;
+        };
+        let report = collision.load_for_scene(scene_relative);
+        if let Some(reason) = &report.disabled {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::warning(format!("Collision: {reason}")));
+        } else {
+            self.editor.console.messages.push(LogMessage::info(format!(
+                "Collision: {} chunk(s) loaded, {} skipped",
+                report.loaded, report.skipped
+            )));
+        }
+        for warning in &report.warnings {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::warning(format!("Collision: {warning}")));
+        }
+    }
+
     /// Cook the active scene's static collision to `content/collision/<scene>/`.
     fn cook_scene_collision(&mut self) {
         use rust_engine::engine::collision::{cook, output};
@@ -4043,11 +4133,14 @@ impl App {
             return;
         };
         match output::write_cooked_scene(&dir, &cooked) {
-            Ok(()) => self.editor.console.messages.push(LogMessage::info(format!(
-                "Cooked collision: {} chunk(s) -> {}",
-                cooked.chunks.len(),
-                dir.display()
-            ))),
+            Ok(()) => {
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "Cooked collision: {} chunk(s) -> {}",
+                    cooked.chunks.len(),
+                    dir.display()
+                )));
+                self.reload_collision_world(&scene_relative);
+            }
             Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                 "Cook Collision failed writing to '{}': {error}",
                 dir.display()

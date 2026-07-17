@@ -11,7 +11,7 @@
 pub mod format;
 pub mod store;
 
-pub use store::{ChunkLoadError, ChunkStore, ContactHit, RayHit, ShapeHit};
+pub use store::{ChunkLoadError, ChunkStore, ContactHit, LoadedChunk, RayHit, ShapeHit};
 
 /// Stable per-triangle identity: hash of source-entity GUID + source triangle
 /// index. Powers seam dedup (border triangles are duplicated across chunks)
