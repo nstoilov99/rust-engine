@@ -41,24 +41,70 @@ pub fn load_model_from_content(mesh_path: &str) -> Option<Arc<Model>> {
         .map(Arc::new)
 }
 
+/// Content-relative world-manifest path for a scene (M4 streaming):
+/// `world/<stem>.world.ron`.
+pub fn world_manifest_rel(scene_relative: &str) -> String {
+    format!("world/{}.world.ron", scene_stem(scene_relative))
+}
+
+/// Extra cook sources from the scene's world manifest, if one exists:
+/// (cell root GUID, mesh path), cooked at identity transform since cell
+/// meshes bake world placement. Read/parse failures degrade to an empty list
+/// (a manifest-less scene simply has no streamed cells).
+pub fn manifest_cell_sources(scene_relative: &str) -> Vec<(uuid::Uuid, String)> {
+    let Ok(text) = asset_source::read_string(&world_manifest_rel(scene_relative)) else {
+        return Vec::new();
+    };
+    let Ok(m) = ron::from_str::<game_shared::world_manifest::WorldManifest>(&text) else {
+        return Vec::new();
+    };
+    m.cells
+        .iter()
+        .filter_map(|c| {
+            uuid::Uuid::parse_str(&c.root_entity_guid)
+                .ok()
+                .map(|guid| (guid, c.mesh.clone()))
+        })
+        .collect()
+}
+
 /// Staleness hash for the manifest's `scene_hash`: `fnv1a_64` of the scene
-/// file bytes, folded with the bytes of every mesh FILE referenced by a
-/// `StaticCollision` entity. Scene-byte hashing alone is not enough — the
+/// file bytes, folded with the world-manifest bytes (if any) and the bytes of
+/// every mesh FILE that feeds the cook (`StaticCollision` entities plus
+/// world-manifest cells). Scene-byte hashing alone is not enough — the
 /// common generator iteration (tweak height function → meshes change, scene
 /// byte-identical) must not silently skip re-cooking.
 pub fn scene_content_hash(scene_relative: &str) -> Option<u64> {
+    let fold_in = |hash: u64, path: &str, content_hash: u64| {
+        let mut fold = Vec::with_capacity(8 + path.len() + 8);
+        fold.extend_from_slice(&hash.to_le_bytes());
+        fold.extend_from_slice(path.as_bytes());
+        fold.extend_from_slice(&content_hash.to_le_bytes());
+        fnv1a_64(&fold)
+    };
+
     let scene_bytes = asset_source::read_bytes(scene_relative).ok()?;
     let mut hash = fnv1a_64(&scene_bytes);
-    for path in collision_mesh_paths(&scene_bytes) {
+    let mut paths = collision_mesh_paths(&scene_bytes);
+
+    let manifest_rel = world_manifest_rel(scene_relative);
+    if let Ok(bytes) = asset_source::read_bytes(&manifest_rel) {
+        hash = fold_in(hash, &manifest_rel, fnv1a_64(&bytes));
+        paths.extend(
+            manifest_cell_sources(scene_relative)
+                .into_iter()
+                .map(|(_, mesh)| mesh),
+        );
+        paths.sort();
+        paths.dedup();
+    }
+
+    for path in paths {
         let mesh_hash = asset_source::read_bytes(&path)
             .ok()
             .map(|b| fnv1a_64(&b))
             .unwrap_or(0); // missing file still folds the path → hash flips when it appears
-        let mut fold = Vec::with_capacity(8 + path.len() + 8);
-        fold.extend_from_slice(&hash.to_le_bytes());
-        fold.extend_from_slice(path.as_bytes());
-        fold.extend_from_slice(&mesh_hash.to_le_bytes());
-        hash = fnv1a_64(&fold);
+        hash = fold_in(hash, &path, mesh_hash);
     }
     Some(hash)
 }
@@ -126,8 +172,9 @@ pub fn cook_scene_headless(scene_relative: &str) -> Result<(usize, Vec<String>),
     crate::engine::scene::scene_serializer::load_scene(&mut world, scene_relative)
         .map_err(|e| format!("load '{scene_relative}': {e}"))?;
     let stem = scene_stem(scene_relative);
+    let cells = manifest_cell_sources(scene_relative);
     let mut loader = load_model_from_content;
-    let mut cooked = super::cook::cook_scene(&world, &stem, &mut loader);
+    let mut cooked = super::cook::cook_scene(&world, &stem, &cells, &mut loader);
     cooked.manifest.scene_hash = scene_content_hash(scene_relative).unwrap_or(0);
     let dir = collision_dir_for_scene(scene_relative)
         .ok_or_else(|| "no content root initialized".to_string())?;

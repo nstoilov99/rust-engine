@@ -50,6 +50,7 @@ use rust_engine::engine::rendering::rendering_3d::{
 };
 use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
+use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -129,6 +130,10 @@ pub struct CoreApp {
     /// regenerated per frame.
     #[cfg(debug_assertions)]
     pub collision_debug_cache: Option<CollisionDebugCache>,
+    /// M4 world streamer: cell/chunk streaming for scenes with a world
+    /// manifest. Lives on CoreApp (not as a world resource) so streaming can
+    /// borrow the CollisionWorld resource mutably alongside the hecs world.
+    pub world_streamer: WorldStreamer,
 }
 
 #[cfg(debug_assertions)]
@@ -353,24 +358,9 @@ impl App {
         let mut physics_world = PhysicsWorld::new();
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
         game_world.resources_mut().insert(physics_world);
-        {
-            let mut collision_world = CollisionWorld::new();
-            if scene_loaded {
-                let report = collision_world.load_for_scene("scenes/main.scene");
-                if let Some(reason) = &report.disabled {
-                    println!("Collision: {reason}");
-                } else {
-                    println!(
-                        "Collision: {} chunk(s) loaded, {} skipped in {:.1} ms",
-                        report.loaded, report.skipped, report.elapsed_ms
-                    );
-                }
-                for warning in &report.warnings {
-                    println!("Collision: {warning}");
-                }
-            }
-            game_world.resources_mut().insert(collision_world);
-        }
+        // Collision fills in below via `init_streaming_for_scene` (streamed
+        // or monolithic depending on the scene's world manifest).
+        game_world.resources_mut().insert(CollisionWorld::new());
         game_world.resources_mut().insert(TransformCache::new());
         game_world.resources_mut().insert(InputManager::new());
         // Enhanced input system: try loading enhanced config, fall back to legacy migration, then defaults
@@ -575,6 +565,13 @@ impl App {
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
             #[cfg(debug_assertions)]
             collision_debug_cache: None,
+            world_streamer: {
+                let mut s = WorldStreamer::default();
+                // Editor default: keep the whole world resident. The Debug
+                // menu toggles ring streaming for testing.
+                s.full_world = true;
+                s
+            },
         };
 
         let gpu_ctx = GpuThumbnailContext {
@@ -665,7 +662,7 @@ impl App {
                 },
         };
 
-        Ok(Self {
+        let mut app = Self {
             core,
             editor,
             runtime_flags,
@@ -689,7 +686,11 @@ impl App {
             crusty_docked_preview_cbs: Vec::new(),
             #[cfg(feature = "editor")]
             crusty_float_preview_cbs: Vec::new(),
-        })
+        };
+        if scene_loaded {
+            app.init_streaming_for_scene(MAIN_SCENE_RELATIVE);
+        }
+        Ok(app)
     }
 
     pub fn print_controls(&self) {
@@ -1137,6 +1138,7 @@ impl App {
         rust_engine::profile_function!();
 
         self.process_hot_reload();
+        self.update_world_streaming();
         self.resolve_mesh_paths();
         self.resolve_material_sets();
 
@@ -2327,6 +2329,21 @@ impl App {
                     collision.debug_draw_grid = !collision.debug_draw_grid;
                 }
             }
+            MenuAction::ToggleStreamAroundCamera => {
+                // full→rings: far cells unload next update; rings→full: the
+                // rest of the world loads back in. No flush needed.
+                let streamer = &mut self.core.world_streamer;
+                streamer.full_world = !streamer.full_world;
+                let mode = if streamer.full_world {
+                    "full world"
+                } else {
+                    "around camera"
+                };
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("World streaming: {mode}")));
+            }
             #[cfg(feature = "editor-debug")]
             MenuAction::ToggleIconInspector => {
                 // Icon Inspector was a secondary-window tool tied to the old
@@ -2430,7 +2447,7 @@ impl App {
                                     }
                                     // Resolve mesh_path → mesh_index for loaded entities
                                     self.resolve_mesh_paths();
-                                    self.reload_collision_world(&relative);
+                                    self.init_streaming_for_scene(&relative);
 
                                     self.editor.console.messages.push(LogMessage::info(format!(
                                         "Loaded scene: {}",
@@ -3160,6 +3177,20 @@ impl App {
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
+            let streaming_overlay = if self.core.world_streamer.is_active() {
+                let st = &self.core.world_streamer;
+                Some(
+                    rust_engine::engine::editor::viewport_crusty::StreamingOverlay {
+                        cells: st.resident_cell_count(),
+                        chunks: st.resident_chunk_count(),
+                        in_flight: st.in_flight_count(),
+                        ready: st.ready_queue_depth(),
+                        worst_ms: st.worst_frame_ms(),
+                    },
+                )
+            } else {
+                None
+            };
             let world = self.core.game_world.hecs_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
             let vp = &mut self.editor.viewport;
@@ -3317,6 +3348,7 @@ impl App {
                                             show_stat_fps: *show_stat_fps,
                                             fps,
                                             delta_ms,
+                                            streaming: streaming_overlay,
                                         },
                                     )
                                 }
@@ -3596,6 +3628,11 @@ impl App {
     /// Move the currently-active scene's state into a [`DormantScene`] record
     /// (preserving its id) and return it.
     fn park_active_scene(&mut self) -> DormantScene {
+        // Streamed content is runtime state, not scene content: tear it down
+        // before the world is swapped out so nothing leaks into the parked
+        // world (mesh refcounts, StreamedCell entities).
+        self.flush_streaming();
+        self.core.world_streamer.clear();
         let id = self.editor.scene.registry.active_id;
         let mut parked_world = GameWorld::new(); // placeholder; will be swapped out
         std::mem::swap(&mut parked_world, &mut self.core.game_world);
@@ -3633,6 +3670,18 @@ impl App {
             .scene
             .hierarchy_panel
             .set_root_order(dormant.hierarchy_root_order);
+
+        // Re-arm streaming (streamed content was flushed at park time).
+        // Manifest-less scenes keep their parked CollisionWorld as-is.
+        let relative = self.editor.scene.current_scene_relative.clone();
+        if !relative.is_empty() {
+            let report = self.core.world_streamer.load_for_scene(&relative);
+            if report.disabled.is_none() {
+                if let Some(collision) = self.core.game_world.resource_mut::<CollisionWorld>() {
+                    collision.begin_streaming(&relative);
+                }
+            }
+        }
     }
 
     /// Create a new empty scene as a fresh tab and make it active.
@@ -4120,6 +4169,97 @@ impl App {
         }
     }
 
+    /// Runs `f` with a `StreamingCtx` assembled from engine parts. The
+    /// `CollisionWorld` resource is temporarily removed (PhysicsWorld
+    /// pattern) so it can be borrowed alongside the hecs world.
+    fn with_streaming_ctx<R>(
+        &mut self,
+        f: impl FnOnce(&mut WorldStreamer, &mut StreamingCtx<'_>) -> R,
+    ) -> R {
+        let mut collision = self
+            .core
+            .game_world
+            .resources_mut()
+            .remove::<CollisionWorld>()
+            .unwrap_or_default();
+        let allocator = self.core.renderer.gpu.memory_allocator.clone();
+        let result = {
+            let mut meshes = self.core.asset_manager.meshes.write();
+            let mut ctx = StreamingCtx {
+                world: self.core.game_world.hecs_mut(),
+                meshes: &mut meshes,
+                allocator,
+                collision: &mut collision,
+            };
+            f(&mut self.core.world_streamer, &mut ctx)
+        };
+        self.core.game_world.resources_mut().insert(collision);
+        result
+    }
+
+    /// Per-frame world streaming around the editor camera (Z-up center).
+    /// Inert for scenes without a world manifest.
+    fn update_world_streaming(&mut self) {
+        if !self.core.world_streamer.is_active() {
+            return;
+        }
+        use rust_engine::engine::utils::coords::convert_position_yup_to_zup;
+        let center = convert_position_yup_to_zup(self.editor.viewport.camera.position);
+        let output =
+            self.with_streaming_ctx(|streamer, ctx| streamer.update_streaming(center, ctx));
+        if let Some(event) = output.zone_changed {
+            self.editor.console.messages.push(LogMessage::info(format!(
+                "Zone changed: {:?} -> {:?}",
+                event.previous, event.current
+            )));
+            self.core.game_world.send_event(event);
+        }
+    }
+
+    /// Tears down all streamed content. Must run before scene swaps, tab
+    /// parking, and play-mode snapshot restore (those clear/replace the hecs
+    /// world, which would leak mesh refcounts and dangle entity ids).
+    fn flush_streaming(&mut self) {
+        if !self.core.world_streamer.is_active() {
+            return;
+        }
+        self.with_streaming_ctx(|streamer, ctx| streamer.flush(ctx));
+    }
+
+    /// Sets up world streaming for a newly active scene, falling back to the
+    /// monolithic collision load for manifest-less scenes.
+    fn init_streaming_for_scene(&mut self, scene_relative: &str) {
+        let report = self.core.world_streamer.load_for_scene(scene_relative);
+        for warning in &report.warnings {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::warning(format!("Streaming: {warning}")));
+        }
+        if let Some(reason) = &report.disabled {
+            self.editor.console.messages.push(LogMessage::info(format!(
+                "Streaming inactive ({reason}) — monolithic collision load"
+            )));
+            self.reload_collision_world(scene_relative);
+            return;
+        }
+        if let Some(collision) = self.core.game_world.resource_mut::<CollisionWorld>() {
+            collision.begin_streaming(scene_relative);
+        }
+        let world = self.core.world_streamer.world().expect("just loaded");
+        self.editor.console.messages.push(LogMessage::info(format!(
+            "Streaming '{}': {} cell(s), {} collision chunk(s) available ({})",
+            world.stem,
+            world.manifest.cells.len(),
+            world.cooked_chunks.len(),
+            if self.core.world_streamer.full_world {
+                "full world"
+            } else {
+                "around camera"
+            }
+        )));
+    }
+
     /// Reload the `CollisionWorld` from cooked chunks for `scene_relative`,
     /// reporting the outcome to the editor console.
     fn reload_collision_world(&mut self, scene_relative: &str) {
@@ -4165,8 +4305,11 @@ impl App {
 
         let scene_relative = self.editor.scene.current_scene_relative.clone();
         let stem = output::scene_stem(&scene_relative);
+        // Streamed cells are not scene entities — cook them from the world
+        // manifest (resident StreamedCell entities carry no StaticCollision).
+        let cells = output::manifest_cell_sources(&scene_relative);
         let mut loader = output::load_model_from_content;
-        let mut cooked = cook::cook_scene(self.core.game_world.hecs(), &stem, &mut loader);
+        let mut cooked = cook::cook_scene(self.core.game_world.hecs(), &stem, &cells, &mut loader);
         cooked.manifest.scene_hash = output::scene_content_hash(&scene_relative).unwrap_or(0);
         for warning in &cooked.warnings {
             self.editor
@@ -4188,7 +4331,13 @@ impl App {
                     cooked.chunks.len(),
                     dir.display()
                 )));
-                self.reload_collision_world(&scene_relative);
+                if self.core.world_streamer.is_active() {
+                    // Chunk hashes changed: restart streaming on the new cook.
+                    self.flush_streaming();
+                    self.init_streaming_for_scene(&scene_relative);
+                } else {
+                    self.reload_collision_world(&scene_relative);
+                }
             }
             Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                 "Cook Collision failed writing to '{}': {error}",
@@ -4676,6 +4825,10 @@ impl App {
             return;
         }
 
+        // The benchmark scene replaces the active world's contents.
+        self.flush_streaming();
+        self.core.world_streamer.clear();
+
         self.core.game_world.reset_transients(false);
         self.editor.scene.selection.clear();
         let mut pw = self
@@ -4920,6 +5073,11 @@ impl App {
         }
 
         self.core.game_world.reset_transients(false);
+
+        // Snapshot restore clears the whole hecs world — streamed cells must
+        // be torn down first (else dangling entity ids + mesh refcount leaks).
+        // Streaming refills automatically next frame; the manifest stays loaded.
+        self.flush_streaming();
 
         if let Some(snapshot) = self.editor.play.snapshot.as_ref() {
             let mut pw = self

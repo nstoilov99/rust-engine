@@ -72,6 +72,18 @@ pub struct ViewportPanelCtx<'a> {
     pub show_stat_fps: bool,
     pub fps: f32,
     pub delta_ms: f32,
+    /// World-streaming stats; `None` when the scene has no world manifest.
+    pub streaming: Option<StreamingOverlay>,
+}
+
+/// Snapshot of world-streamer state for the stat overlay.
+#[derive(Clone, Copy)]
+pub struct StreamingOverlay {
+    pub cells: usize,
+    pub chunks: usize,
+    pub in_flight: usize,
+    pub ready: usize,
+    pub worst_ms: f32,
 }
 
 /// Render the viewport panel into `tab_rect` (physical pixels).
@@ -217,8 +229,15 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
     if ctx.show_stat_fps {
         let padding = 8.0 * s;
         let line_height = 18.0 * s;
+        let extra_lines = if ctx.streaming.is_some() { 2.0 } else { 0.0 };
         let pos = Pos2::new(image_rect.min.x + padding, image_rect.min.y + padding);
-        let bg = Rect::from_min_size(pos, Vec2::new(120.0 * s, line_height * 2.0 + padding));
+        let bg = Rect::from_min_size(
+            pos,
+            Vec2::new(
+                if ctx.streaming.is_some() { 190.0 } else { 120.0 } * s,
+                line_height * (2.0 + extra_lines) + padding,
+            ),
+        );
         ui.painter()
             .rect_filled(bg, 4.0 * s, Color::from_srgb_u8(0, 0, 0, 180));
         let fps_color = if ctx.fps >= 60.0 {
@@ -242,6 +261,31 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
             gray(220),
             None,
         );
+        if let Some(st) = &ctx.streaming {
+            ui.painter().text(
+                Pos2::new(
+                    pos.x + padding * 0.5,
+                    pos.y + padding * 0.5 + line_height * 2.0,
+                ),
+                &format!("Stream: {} cells, {} chunks", st.cells, st.chunks),
+                13.0 * s,
+                gray(220),
+                None,
+            );
+            ui.painter().text(
+                Pos2::new(
+                    pos.x + padding * 0.5,
+                    pos.y + padding * 0.5 + line_height * 3.0,
+                ),
+                &format!(
+                    "IO: {} in-flight, {} ready, {:.2} ms worst",
+                    st.in_flight, st.ready, st.worst_ms
+                ),
+                13.0 * s,
+                gray(220),
+                None,
+            );
+        }
     }
 }
 

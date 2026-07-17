@@ -43,6 +43,8 @@ pub enum MenuAction {
     ToggleCollisionChunkDraw,
     /// Toggle the collision chunk-grid overlay.
     ToggleCollisionGridDraw,
+    /// Toggle editor world streaming between full-world and camera rings.
+    ToggleStreamAroundCamera,
     /// Toggle the Icon Inspector window (editor-debug only).
     #[cfg(feature = "editor-debug")]
     ToggleIconInspector,

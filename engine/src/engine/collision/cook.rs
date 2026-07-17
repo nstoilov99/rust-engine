@@ -6,6 +6,11 @@
 //!   transformed by the full hierarchy world matrix — matches the renderer.
 //!   Built-in `__primitive__/` mesh paths resolve through the same accessor
 //!   (no model load).
+//! - World-manifest cells (M4): meshes streamed at runtime rather than placed
+//!   in the scene, cooked at identity transform (cell meshes bake world
+//!   placement into their vertices). Merged into the same GUID-sorted order
+//!   as mesh entities, so a world that previously had cell entities re-cooks
+//!   byte-identically.
 //! - Primitive entities: fixed `RigidBody` + non-sensor `Collider`,
 //!   tessellated to triangles. Transformed by the entity's LOCAL
 //!   position + rotation only (no hierarchy, no scale) — this mirrors how
@@ -67,16 +72,21 @@ struct SourceTri {
 
 /// Cook the static collision of an already-loaded scene world.
 ///
+/// `manifest_cells` are extra mesh sources from the world manifest
+/// (root GUID, mesh path), cooked at identity transform — used for streamed
+/// cells that are not scene entities (see `output::manifest_cell_sources`).
+///
 /// `load_model` resolves a `MeshRenderer::mesh_path` to a loaded model
 /// (editor: model manager cache; CLI: filesystem/pak load). No file I/O
 /// happens here — callers write the returned bytes.
 pub fn cook_scene(
     world: &World,
     scene_name: &str,
+    manifest_cells: &[(uuid::Uuid, String)],
     load_model: &mut dyn FnMut(&str) -> Option<Arc<Model>>,
 ) -> CookedScene {
     let mut warnings = Vec::new();
-    let mut tris = gather_mesh_triangles(world, load_model, &mut warnings);
+    let mut tris = gather_mesh_triangles(world, manifest_cells, load_model, &mut warnings);
     tris.extend(gather_primitive_triangles(world, &mut warnings));
 
     let tris = subdivide_oversized(drop_degenerate(tris, &mut warnings), &mut warnings);
@@ -125,22 +135,43 @@ where
 
 fn gather_mesh_triangles(
     world: &World,
+    manifest_cells: &[(uuid::Uuid, String)],
     load_model: &mut dyn FnMut(&str) -> Option<Arc<Model>>,
     warnings: &mut Vec<String>,
 ) -> Vec<SourceTri> {
-    let mut out = Vec::new();
-    sorted_by_guid::<(&MeshRenderer, &StaticCollision)>(world, |entity, guid| {
+    // (guid, mesh_path, world matrix). Entities and manifest cells merge into
+    // one GUID-sorted list so source order is deterministic regardless of
+    // where a mesh comes from.
+    let mut sources: Vec<(uuid::Uuid, String, glm::Mat4)> = Vec::new();
+    let entities: Vec<(uuid::Uuid, hecs::Entity)> = world
+        .query::<&EntityGuid>()
+        .with::<(&MeshRenderer, &StaticCollision)>()
+        .iter()
+        .map(|(e, guid)| (guid.0, e))
+        .collect();
+    for (guid, entity) in entities {
         let mesh_path = world
             .get::<&MeshRenderer>(entity)
             .expect("queried")
             .mesh_path
             .clone();
+        sources.push((guid, mesh_path, hierarchy::get_world_transform(world, entity)));
+    }
+    sources.extend(
+        manifest_cells
+            .iter()
+            .map(|(guid, path)| (*guid, path.clone(), glm::Mat4::identity())),
+    );
+    sources.sort_by_key(|(guid, _, _)| *guid.as_bytes());
+
+    let mut out = Vec::new();
+    for (guid, mesh_path, m) in sources {
         let geoms = if mesh_path.starts_with("__primitive__/") {
             let Some(geom) = primitive_collision_geometry_zup(&mesh_path) else {
                 warnings.push(format!(
                     "entity {guid}: unknown primitive mesh '{mesh_path}' — skipped"
                 ));
-                return;
+                continue;
             };
             vec![geom]
         } else {
@@ -148,7 +179,7 @@ fn gather_mesh_triangles(
                 warnings.push(format!(
                     "entity {guid}: mesh '{mesh_path}' failed to load — skipped"
                 ));
-                return;
+                continue;
             };
             let (geoms, skinned) = model_collision_geometry_zup(&model);
             if skinned > 0 {
@@ -158,7 +189,6 @@ fn gather_mesh_triangles(
             }
             geoms
         };
-        let m = hierarchy::get_world_transform(world, entity);
         let flip = glm::determinant(&m) < 0.0;
         let mut tri_index: u32 = 0;
         for geom in geoms {
@@ -179,7 +209,7 @@ fn gather_mesh_triangles(
                 tri_index += 1;
             }
         }
-    });
+    }
     out
 }
 
@@ -520,7 +550,7 @@ mod tests {
     fn cooks_fixed_cuboid_into_chunk() {
         let mut world = World::new();
         fixed_cuboid(&mut world, glm::vec3(10.0, 10.0, 0.0), 1.0);
-        let cooked = cook_scene(&world, "test", &mut no_models);
+        let cooked = cook_scene(&world, "test", &[], &mut no_models);
         assert_eq!(cooked.chunks.len(), 1);
         assert_eq!(cooked.chunks[0].0, IVec2::new(0, 0));
         let data = read_chunk(&cooked.chunks[0].1).unwrap();
@@ -541,7 +571,7 @@ mod tests {
             },
             StaticCollision,
         ));
-        let cooked = cook_scene(&world, "test", &mut no_models);
+        let cooked = cook_scene(&world, "test", &[], &mut no_models);
         assert!(cooked.warnings.is_empty(), "{:?}", cooked.warnings);
         assert_eq!(cooked.chunks.len(), 1);
         let data = read_chunk(&cooked.chunks[0].1).unwrap();
@@ -549,11 +579,35 @@ mod tests {
     }
 
     #[test]
+    fn manifest_cell_cooks_identically_to_identity_entity() {
+        let guid = uuid::Uuid::from_u128(7);
+        let mut world = World::new();
+        world.spawn((
+            EntityGuid(guid),
+            Transform::new(glm::vec3(0.0, 0.0, 0.0)),
+            MeshRenderer {
+                mesh_path: "__primitive__/Cube".to_string(),
+                ..Default::default()
+            },
+            StaticCollision,
+        ));
+        let via_entity = cook_scene(&world, "test", &[], &mut no_models);
+
+        let empty = World::new();
+        let cells = vec![(guid, "__primitive__/Cube".to_string())];
+        let via_manifest = cook_scene(&empty, "test", &cells, &mut no_models);
+
+        assert!(!via_manifest.chunks.is_empty());
+        assert_eq!(via_entity.chunks, via_manifest.chunks);
+        assert_eq!(via_entity.manifest, via_manifest.manifest);
+    }
+
+    #[test]
     fn border_cuboid_duplicates_into_both_chunks() {
         let mut world = World::new();
         // Straddles the x = 64 chunk border.
         fixed_cuboid(&mut world, glm::vec3(CHUNK_SIZE, 10.0, 0.0), 1.0);
-        let cooked = cook_scene(&world, "test", &mut no_models);
+        let cooked = cook_scene(&world, "test", &[], &mut no_models);
         let coords: Vec<IVec2> = cooked.chunks.iter().map(|(c, _)| *c).collect();
         assert_eq!(coords, vec![IVec2::new(0, 0), IVec2::new(1, 0)]);
         // The -X face (x = 63) lies wholly in chunk (0,0), the +X face (x = 65)
@@ -579,7 +633,7 @@ mod tests {
             RigidBody::fixed(),
             Collider::cuboid(1.0, 1.0, 1.0).as_sensor(),
         ));
-        let cooked = cook_scene(&world, "test", &mut no_models);
+        let cooked = cook_scene(&world, "test", &[], &mut no_models);
         assert!(cooked.chunks.is_empty());
     }
 
@@ -593,8 +647,8 @@ mod tests {
             RigidBody::fixed(),
             Collider::capsule(1.0, 0.5),
         ));
-        let a = cook_scene(&world, "test", &mut no_models);
-        let b = cook_scene(&world, "test", &mut no_models);
+        let a = cook_scene(&world, "test", &[], &mut no_models);
+        let b = cook_scene(&world, "test", &[], &mut no_models);
         assert_eq!(a.chunks, b.chunks);
         assert_eq!(a.manifest, b.manifest);
     }
@@ -605,7 +659,7 @@ mod tests {
         // single chunk holding a triangle bigger than the span limit.
         let mut world = World::new();
         fixed_cuboid(&mut world, glm::vec3(0.0, 0.0, 0.0), 200.0);
-        let cooked = cook_scene(&world, "test", &mut no_models);
+        let cooked = cook_scene(&world, "test", &[], &mut no_models);
         assert!(cooked.warnings.iter().any(|w| w.contains("subdivided")));
         for (coord, bytes) in &cooked.chunks {
             let data = read_chunk(bytes).unwrap();

@@ -170,6 +170,9 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 if ui.menu_item("Collision Chunk Grid") {
                     action = MenuAction::ToggleCollisionGridDraw;
                 }
+                if ui.menu_item("Stream Around Camera") {
+                    action = MenuAction::ToggleStreamAroundCamera;
+                }
                 #[cfg(feature = "editor-debug")]
                 {
                     ui.separator();

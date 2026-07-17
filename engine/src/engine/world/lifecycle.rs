@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 
-use super::streamer::{diff_ops, WorldStreamer, ZoneChanged};
+use super::streamer::{diff_ops, full_ops, WorldStreamer, ZoneChanged};
 
 /// Marker on streamed cell root entities. Excluded from scene serialization
 /// and play-mode snapshots; despawned wholesale on cell unload.
@@ -242,10 +242,17 @@ impl WorldStreamer {
             let rt = &self.runtime;
             let resident_cells: HashSet<IVec2> = rt.resident_cells.keys().copied().collect();
             let resident_chunks = rt.resident_chunks.clone();
-            (
-                diff_ops(center_cell, &resident_cells, &world.cell_coords(), &self.config),
-                diff_ops(center_cell, &resident_chunks, &world.chunk_coords(), &self.config),
-            )
+            if self.full_world {
+                (
+                    full_ops(center_cell, &resident_cells, &world.cell_coords()),
+                    full_ops(center_cell, &resident_chunks, &world.chunk_coords()),
+                )
+            } else {
+                (
+                    diff_ops(center_cell, &resident_cells, &world.cell_coords(), &self.config),
+                    diff_ops(center_cell, &resident_chunks, &world.chunk_coords(), &self.config),
+                )
+            }
         };
 
         self.cancel_undesired(&cell_ops.loads, &chunk_ops.loads);

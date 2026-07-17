@@ -51,8 +51,9 @@ fn main() {
     }
 
     let stem = output::scene_stem(scene_relative);
+    let cells = output::manifest_cell_sources(scene_relative);
     let mut loader = output::load_model_from_content;
-    let mut cooked = cook::cook_scene(&world, &stem, &mut loader);
+    let mut cooked = cook::cook_scene(&world, &stem, &cells, &mut loader);
     cooked.manifest.scene_hash = output::scene_content_hash(scene_relative).unwrap_or(0);
     for warning in &cooked.warnings {
         eprintln!("warning: {warning}");

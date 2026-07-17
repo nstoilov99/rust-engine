@@ -83,12 +83,10 @@ impl AssetManager {
     > {
         self.models.reload(fs_path)?;
 
-        {
-            let mut meshes = self.meshes.write();
-            *meshes = MeshManager::new();
-        }
-
         let relative = super::asset_source::to_content_relative(fs_path);
+        // Evict only this path's stale GPU meshes; other resident (possibly
+        // streamed) meshes keep their slots.
+        self.meshes.write().evict_path(&relative);
         self.load_model_gpu(&relative)
     }
 

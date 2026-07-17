@@ -206,6 +206,18 @@ impl<M> MeshManager<M> {
         );
     }
 
+    /// Removes a path's meshes regardless of ref state, freeing its slots.
+    /// Hot-reload uses this to drop a stale upload for one path without
+    /// disturbing other resident (possibly streamed) meshes.
+    pub fn evict_path(&mut self, path: &str) {
+        if let Some(entry) = self.path_index.remove(path) {
+            for slot in entry.indices {
+                self.meshes[slot] = None;
+                self.free_slots.push(slot);
+            }
+        }
+    }
+
     /// Number of live (occupied) mesh slots.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len() - self.free_slots.len()

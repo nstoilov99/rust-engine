@@ -2,7 +2,7 @@
 //! sampling code) is a generator version bump — regenerate and re-check-in.
 
 /// Bump when generated output changes for identical params.
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;
 
 /// Fixed world seed. Not a CLI knob: the checked-in world is THE world.
 pub const SEED: u32 = 0x00C0FFEE;

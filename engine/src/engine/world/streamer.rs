@@ -229,12 +229,26 @@ pub fn diff_ops(
     StreamOps { loads, unloads }
 }
 
+/// Full-world diff (editor mode): everything `available` loads
+/// (nearest-first from `center`), anything resident that left `available`
+/// unloads. No rings, no hysteresis.
+pub fn full_ops(center: IVec2, resident: &HashSet<IVec2>, available: &HashSet<IVec2>) -> StreamOps {
+    let mut loads: Vec<IVec2> = available.difference(resident).copied().collect();
+    loads.sort_by_key(|c| (chebyshev(*c, center), c.y, c.x));
+    let mut unloads: Vec<IVec2> = resident.difference(available).copied().collect();
+    unloads.sort_by_key(|c| (-chebyshev(*c, center), c.y, c.x));
+    StreamOps { loads, unloads }
+}
+
 /// World streamer resource. This package carries the manifest + zone
 /// tracking + pure desired-set core; lifecycle execution (IO worker, budget,
 /// spawn/despawn) lands in package 3.
 #[derive(Default)]
 pub struct WorldStreamer {
     pub config: StreamingConfig,
+    /// Editor mode: keep the entire world resident instead of rings around
+    /// the streaming center.
+    pub full_world: bool,
     pub(super) world: Option<LoadedWorld>,
     current_zone: Option<u32>,
     /// Lifecycle execution state (IO worker, residency, in-flight tokens).

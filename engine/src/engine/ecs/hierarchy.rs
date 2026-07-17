@@ -174,14 +174,19 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
     let _ = world.remove_one::<Parent>(entity);
 }
 
-/// Get all root entities (entities without Parent component)
+/// Get all root entities (entities without Parent component).
+///
+/// Streamed world cells are excluded: they are streaming runtime state, not
+/// scene content, so they must not appear in the hierarchy, saves, or
+/// play-mode snapshots (all of which are driven by this root list).
 pub fn get_root_entities(world: &World) -> Vec<Entity> {
+    use crate::engine::world::lifecycle::StreamedCell;
     let mut roots = Vec::new();
     let entities_with_parents: std::collections::HashSet<Entity> =
         world.query::<&Parent>().iter().map(|(e, _)| e).collect();
 
     // All entities that don't have a Parent component are roots
-    for (entity, _) in world.query::<()>().iter() {
+    for (entity, _) in world.query::<()>().without::<&StreamedCell>().iter() {
         if !entities_with_parents.contains(&entity) {
             roots.push(entity);
         }

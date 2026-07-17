@@ -1,8 +1,9 @@
 //! Scene + world-manifest emission.
 //!
-//! One entity per terrain cell (identity transform — world placement is
-//! baked into the mesh) marked `StaticCollision` by the generator, plus a
-//! sun and a default camera. Entity GUIDs are derived deterministically from
+//! v2 (M4): terrain cells live only in the world manifest — the scene holds
+//! just the sun, camera and gym. The streamer spawns cell entities at runtime
+//! (identity transform — world placement is baked into the mesh) using the
+//! manifest's `root_entity_guid`. GUIDs are derived deterministically from
 //! (seed, kind, coord) so regeneration preserves identity (M4/M5 rely on
 //! stable GUIDs for spawn/despawn and replication).
 
@@ -14,7 +15,7 @@ use rust_engine::engine::scene::scene_format::{ComponentData, EntityData, SceneF
 use crate::params::{
     CELL_SIZE, JUMP_GAP, MAX_CELL, MIN_CELL, SEED, SLOPE_LIMIT_DEG, STEP_HEIGHT,
 };
-use crate::terrain::{cell_mesh_name, cell_mesh_path};
+use crate::terrain::cell_mesh_path;
 
 pub const SCENE_PATH: &str = "scenes/greybox.scene";
 pub const MANIFEST_PATH: &str = "world/greybox.world.ron";
@@ -66,14 +67,6 @@ pub fn zone_of(cx: i32, cy: i32) -> u32 {
     (if cx >= 0 { 1 } else { 0 }) + (if cy >= 0 { 2 } else { 0 })
 }
 
-fn identity_transform() -> ComponentData {
-    ComponentData::Transform {
-        position: [0.0; 3],
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: [1.0; 3],
-    }
-}
-
 pub(crate) fn mesh_renderer(mesh_path: String, base_color: [f32; 4]) -> ComponentData {
     ComponentData::MeshRenderer {
         mesh_path,
@@ -88,18 +81,6 @@ pub(crate) fn mesh_renderer(mesh_path: String, base_color: [f32; 4]) -> Componen
         metallic_factor: 0.0,
         roughness_factor: 0.9,
         emissive_factor: [0.0; 3],
-    }
-}
-
-fn cell_entity(cx: i32, cy: i32) -> EntityData {
-    EntityData {
-        name: cell_mesh_name(cx, cy),
-        guid: Some(det_guid("cell", cx, cy)),
-        components: vec![
-            identity_transform(),
-            mesh_renderer(cell_mesh_path(cx, cy), [0.5, 0.5, 0.5, 1.0]),
-            ComponentData::StaticCollision,
-        ],
     }
 }
 
@@ -137,12 +118,6 @@ pub fn build_scene() -> SceneFile {
             },
         ],
     });
-
-    for cy in MIN_CELL..MAX_CELL {
-        for cx in MIN_CELL..MAX_CELL {
-            entities.push(cell_entity(cx, cy));
-        }
-    }
 
     entities.extend(crate::gym::gym_entities());
 
@@ -231,17 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn manifest_cells_match_scene_guids_one_to_one() {
+    fn cells_live_only_in_the_manifest() {
         let scene = build_scene();
         let manifest = build_manifest();
         assert_eq!(manifest.cells.len(), 64);
         for cell in &manifest.cells {
-            let found = scene
-                .entities
-                .iter()
-                .filter(|e| e.guid.as_deref() == Some(cell.root_entity_guid.as_str()))
-                .count();
-            assert_eq!(found, 1, "cell {:?}", cell.coord);
+            assert!(
+                !scene
+                    .entities
+                    .iter()
+                    .any(|e| e.guid.as_deref() == Some(cell.root_entity_guid.as_str())),
+                "cell {:?} must not be a scene entity (streamed at runtime)",
+                cell.coord
+            );
         }
     }
 
@@ -266,6 +243,6 @@ mod tests {
         let (name, roots) =
             load_scene_from_string(&mut world, std::str::from_utf8(&bytes).unwrap()).unwrap();
         assert_eq!(name, "Greybox World");
-        assert_eq!(roots.len(), 64 + 2 + crate::gym::gym_entities().len());
+        assert_eq!(roots.len(), 2 + crate::gym::gym_entities().len());
     }
 }
