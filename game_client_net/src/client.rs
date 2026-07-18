@@ -102,6 +102,8 @@ pub struct SpacetimeNetClient {
     enter_world_sent: bool,
     /// Credentials file key of the current connection (token cleanup).
     credentials_key: Option<String>,
+    /// Extra key suffix so multiple local instances get distinct identities.
+    net_id: Option<String>,
     /// Overridable for acceptance tests (version-mismatch path).
     client_version: u32,
 }
@@ -118,8 +120,15 @@ impl SpacetimeNetClient {
             limiter: RateLimiter::new(),
             enter_world_sent: false,
             credentials_key: None,
+            net_id: None,
             client_version: PROTOCOL_VERSION,
         }
+    }
+
+    /// Use a separate credentials file (→ separate identity) per name, so
+    /// multiple local instances can be in world as different players.
+    pub fn set_net_id(&mut self, id: String) {
+        self.net_id = Some(id);
     }
 
     /// Test hook: pretend to be a different protocol version.
@@ -134,8 +143,11 @@ impl SpacetimeNetClient {
             .map(|id| id.to_hex().to_string())
     }
 
-    fn credentials_key(module: &str) -> String {
-        format!("rust-engine-{module}")
+    fn credentials_key(&self, module: &str) -> String {
+        match &self.net_id {
+            Some(id) => format!("rust-engine-{module}-{id}"),
+            None => format!("rust-engine-{module}"),
+        }
     }
 
     /// The SDK has no delete API; remove the token file it writes under
@@ -299,7 +311,7 @@ impl NetClient for SpacetimeNetClient {
         self.flags = Arc::new(Flags::default());
         self.pending.clear();
 
-        let key = Self::credentials_key(&addr.module);
+        let key = self.credentials_key(&addr.module);
         self.credentials_key = Some(key.clone());
         let token = match credentials::File::new(key.clone()).load() {
             Ok(t) => t,

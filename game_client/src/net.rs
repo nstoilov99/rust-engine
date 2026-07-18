@@ -20,17 +20,28 @@ impl NetSession {
     /// `--connect [host [module]]` — defaults to the local dev standalone.
     pub fn from_args(args: &[String]) -> Option<Self> {
         let idx = args.iter().position(|a| a == "--connect")?;
-        let positional = |offset: usize| {
-            args.get(idx + offset)
-                .filter(|a| !a.starts_with("--"))
-                .cloned()
-        };
+        // Positionals stop at the first `--flag` so e.g. `--connect --net-id b`
+        // doesn't read `b` as the module name.
+        let mut positional = args[idx + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .cloned();
         let addr = ModuleAddr {
-            host: positional(1).unwrap_or_else(|| DEFAULT_HOST.to_string()),
-            module: positional(2).unwrap_or_else(|| DEFAULT_MODULE.to_string()),
+            host: positional.next().unwrap_or_else(|| DEFAULT_HOST.to_string()),
+            module: positional
+                .next()
+                .unwrap_or_else(|| DEFAULT_MODULE.to_string()),
         };
         println!("net: connecting to {} / {}", addr.host, addr.module);
         let mut client = SpacetimeNetClient::new();
+        // `--net-id <name>`: distinct identity per name for local multi-
+        // instance testing (default: one shared identity per module).
+        if let Some(i) = args.iter().position(|a| a == "--net-id") {
+            if let Some(id) = args.get(i + 1).filter(|a| !a.starts_with("--")) {
+                println!("net: using identity slot '{id}'");
+                client.set_net_id(id.clone());
+            }
+        }
         client.connect(&addr);
         Some(Self {
             client,
