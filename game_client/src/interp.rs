@@ -1,11 +1,18 @@
 //! M5 Package 4: client clock sync (plan D5) and proxy interpolation
 //! buffers (plan D6). Pure state machines — no ECS, unit-testable.
 
+use game_shared::net::protocol::EntityKind;
 use std::collections::VecDeque;
 
 /// Render this far behind estimated server time so there is normally a
-/// sample pair to interpolate between (server ticks at 100ms).
-pub const INTERP_DELAY_US: u64 = 150_000;
+/// sample pair to interpolate between. Sized to ~1.5× the source's sample
+/// spacing: players update at the 20Hz input rate, NPCs at the 100ms tick.
+pub fn interp_delay_us(kind: EntityKind) -> u64 {
+    match kind {
+        EntityKind::Player => 75_000,
+        EntityKind::Npc => 150_000,
+    }
+}
 
 /// A gap between adjacent samples larger than this snaps instead of
 /// interpolating a long glide through empty time.

@@ -2,7 +2,7 @@
 //! the main thread and routes drained `NetEvent`s into cache-diff
 //! replication. Enabled with `--connect`.
 
-use crate::interp::{NetClock, INTERP_DELAY_US};
+use crate::interp::NetClock;
 use crate::replication::Replication;
 use game_client_net::{local_time_us, SpacetimeNetClient};
 use game_shared::net::protocol::ModuleAddr;
@@ -115,11 +115,8 @@ impl NetSession {
             self.was_moving = moving;
         }
 
-        let render_time = self
-            .clock
-            .server_time_us(local_time_us())
-            .map(|t| t.saturating_sub(INTERP_DELAY_US));
-        self.replication.interpolate(world, render_time);
+        let server_now = self.clock.server_time_us(local_time_us());
+        self.replication.interpolate(world, server_now);
     }
 
     pub fn status_line(&self) -> String {

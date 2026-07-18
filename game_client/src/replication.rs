@@ -138,7 +138,7 @@ pub struct Replication {
     pub evidence: TombstoneEvidence,
     local_player: Option<hecs::Entity>,
     own_entity_id: Option<u64>,
-    buffers: HashMap<(u64, u32), InterpBuffer>,
+    buffers: HashMap<(u64, u32), (EntityKind, InterpBuffer)>,
 }
 
 impl Replication {
@@ -154,21 +154,21 @@ impl Replication {
         if Some(s.entity_id) == self.own_entity_id {
             return;
         }
-        if let Some(buf) = self.buffers.get_mut(&(s.entity_id, s.generation)) {
+        if let Some((_, buf)) = self.buffers.get_mut(&(s.entity_id, s.generation)) {
             buf.push(s.server_time_us, s.pos, s.yaw);
         }
     }
 
-    /// Write interpolated transforms for every proxy. `render_time_us` is
-    /// estimated server time minus the interpolation delay; `None` (clock
-    /// not yet synced) snaps to the newest sample instead.
-    pub fn interpolate(&mut self, world: &mut World, render_time_us: Option<u64>) {
-        for ((id, generation), buf) in &mut self.buffers {
+    /// Write interpolated transforms for every proxy, each evaluated at
+    /// estimated server time minus its kind's interpolation delay.
+    /// `None` (clock not yet synced) snaps to the newest sample instead.
+    pub fn interpolate(&mut self, world: &mut World, server_now_us: Option<u64>) {
+        for ((id, generation), (kind, buf)) in &mut self.buffers {
             let Some(entity) = self.index.get(*id, *generation) else {
                 continue;
             };
-            let evaluated = match render_time_us {
-                Some(t) => buf.sample(t),
+            let evaluated = match server_now_us {
+                Some(t) => buf.sample(t.saturating_sub(crate::interp::interp_delay_us(*kind))),
                 None => buf.latest(),
             };
             if let Some((pos, yaw)) = evaluated {
@@ -317,7 +317,7 @@ impl Replication {
         // Spawn pose is the first sample, so interpolation starts anchored.
         let mut buf = InterpBuffer::default();
         buf.push(s.server_time_us, s.pos, s.yaw);
-        self.buffers.insert((s.entity_id, s.generation), buf);
+        self.buffers.insert((s.entity_id, s.generation), (s.kind, buf));
         println!("net: spawn {label} {} gen {}", s.entity_id, s.generation);
     }
 }
