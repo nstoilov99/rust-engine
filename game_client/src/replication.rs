@@ -249,7 +249,12 @@ fn write_transform(world: &mut World, entity: hecs::Entity, s: &EntityState) {
     if let Ok(mut t) = world.get::<&mut Transform>(entity) {
         t.position = glm::vec3(s.pos[0], s.pos[1], s.pos[2]);
         t.rotation = glm::quat_angle_axis(s.yaw, &glm::vec3(0.0, 0.0, 1.0));
+    } else {
+        return;
     }
+    // The render matrix is cached; incremental propagation only refreshes
+    // entities tagged dirty.
+    rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, entity);
 }
 
 #[cfg(test)]
