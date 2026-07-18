@@ -36,6 +36,17 @@ pub fn local_to_world(coord: IVec2, local: Vec3) -> Vec3 {
     Vec3::new(local.x + o.x, local.y + o.y, local.z)
 }
 
+/// Zone containing an XY position (M5 zone scoping). The greybox world's
+/// four zones are the axis quadrants of the cell grid (SW=0, SE=1, NW=2,
+/// NE=3), so the boundary sits at 0.0 on each axis; positions exactly on a
+/// boundary belong to the higher quadrant (matches `chunk_coord` floor
+/// semantics). The formula extends past the authored 8×8 cells, so
+/// out-of-world positions still map to the nearest quadrant's zone.
+/// Frozen for M5; manifest-driven server zones are future work.
+pub fn zone_id_from_position(x: f32, y: f32) -> u32 {
+    (x >= 0.0) as u32 | (((y >= 0.0) as u32) << 1)
+}
+
 /// All chunks whose XY footprint overlaps the world-space AABB `[min, max]`.
 pub fn chunks_overlapping(min: Vec3, max: Vec3) -> impl Iterator<Item = IVec2> {
     let lo = chunk_coord(min);
@@ -64,6 +75,20 @@ mod tests {
         let own = chunk_coord(world);
         let l = world_to_local(own, world);
         assert!(l.x >= 0.0 && l.x < CHUNK_SIZE && l.y >= 0.0 && l.y < CHUNK_SIZE);
+    }
+
+    #[test]
+    fn zone_quadrants_match_manifest() {
+        // greybox.world.ron: SW=0, SE=1, NW=2, NE=3.
+        assert_eq!(zone_id_from_position(-1.0, -1.0), 0);
+        assert_eq!(zone_id_from_position(1.0, -1.0), 1);
+        assert_eq!(zone_id_from_position(-1.0, 1.0), 2);
+        assert_eq!(zone_id_from_position(1.0, 1.0), 3);
+        // Boundaries belong to the higher quadrant; spawn (0,0) is zone 3.
+        assert_eq!(zone_id_from_position(0.0, 0.0), 3);
+        assert_eq!(zone_id_from_position(0.0, -0.1), 1);
+        // Extends beyond the authored 8×8 cells.
+        assert_eq!(zone_id_from_position(-10_000.0, 10_000.0), 2);
     }
 
     #[test]

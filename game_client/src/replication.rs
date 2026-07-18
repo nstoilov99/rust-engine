@@ -443,6 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn stale_generation_sample_does_not_attach() {
+        let mut r = Replication::default();
+        let mut world = World::new();
+        r.apply_snapshot(&mut world, &snap(vec![state(1, 1)], None));
+        // A respawned incarnation replaces the proxy...
+        let mut newer = state(1, 2);
+        newer.pos = [9.0, 9.0, 9.0];
+        newer.server_time_us = 100;
+        r.apply_snapshot(&mut world, &snap(vec![newer], None));
+        assert!(!r.buffers.contains_key(&(1, 1)));
+        // ...and a late sample from the old incarnation must not attach.
+        let mut stale = state(1, 1);
+        stale.pos = [50.0, 0.0, 0.0];
+        stale.server_time_us = 200;
+        r.push_sample(&stale);
+        let (_, buf) = &r.buffers[&(1, 2)];
+        assert_eq!(buf.latest().unwrap().0, [9.0, 9.0, 9.0]);
+    }
+
+    #[test]
     fn evidence_prunes_on_ttl() {
         let mut ev = TombstoneEvidence::default();
         let old = Instant::now() - Duration::from_secs(TOMBSTONE_TTL_SECS + 1);

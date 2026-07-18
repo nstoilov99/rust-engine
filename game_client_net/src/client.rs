@@ -15,11 +15,14 @@ use game_shared::net::protocol::{
 };
 use game_shared::net::schema::{version_compatible, INPUT_SEND_HZ, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
-use spacetimedb_sdk::{credentials, DbContext, Table, TableWithPrimaryKey};
+use spacetimedb_sdk::{
+    credentials, DbContext, SubscriptionHandle as _, Table, TableWithPrimaryKey,
+};
 
 use crate::module_bindings::{
-    enter_world, ping, submit_input, ConfigTableAccess, DbConnection, Npc, NpcTableAccess,
-    PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle, TombstoneTableAccess,
+    despawn_npc, dev_teleport, enter_world, ping, submit_input, ConfigTableAccess, DbConnection,
+    Npc, NpcTableAccess, PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle,
+    TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
@@ -41,7 +44,8 @@ struct Flags {
     connected: AtomicBool,
     disconnected: AtomicBool,
     base_applied: AtomicBool,
-    repl_applied: AtomicBool,
+    /// The in-flight zone subscription's `on_applied` fired (one at a time).
+    pending_repl_applied: AtomicBool,
     /// Replicated rows changed since the last snapshot (plan D3: callbacks
     /// only mark dirty; the cache-diff is the sole spawn/despawn authority).
     cache_dirty: AtomicBool,
@@ -123,7 +127,13 @@ pub struct SpacetimeNetClient {
     state: ConnectionState,
     conn: Option<DbConnection>,
     base_sub: Option<SubscriptionHandle>,
+    /// Active zone-scoped replication subscription and the zone it covers.
     repl_sub: Option<SubscriptionHandle>,
+    repl_zone: Option<u32>,
+    /// In-flight zone swap: the new zone's subscription, promoted to
+    /// `repl_sub` (and the old one dropped) only once applied — plan D3 §6
+    /// apply-new-then-drop-old, so scoped rows never gap.
+    pending_repl: Option<(u32, SubscriptionHandle)>,
     flags: Arc<Flags>,
     pending: Vec<NetEvent>,
     limiter: RateLimiter,
@@ -158,6 +168,8 @@ impl SpacetimeNetClient {
             conn: None,
             base_sub: None,
             repl_sub: None,
+            repl_zone: None,
+            pending_repl: None,
             flags: Arc::new(Flags::default()),
             pending: Vec::new(),
             limiter: RateLimiter::new(),
@@ -185,6 +197,23 @@ impl SpacetimeNetClient {
     /// Test hook: pretend to be a different protocol version.
     pub fn set_client_version(&mut self, version: u32) {
         self.client_version = version;
+    }
+
+    /// Dev/test hook for the unauthenticated `dev_teleport` reducer:
+    /// teleports the caller's own player (acceptance tests cross zone
+    /// borders deterministically with this).
+    pub fn dev_teleport(&mut self, pos: [f32; 3]) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.reducers.dev_teleport(pos[0], pos[1], pos[2]);
+        }
+    }
+
+    /// Dev/test hook for the unauthenticated `despawn_npc` reducer
+    /// (destroyed-vs-out-of-scope acceptance scenario).
+    pub fn dev_despawn_npc(&mut self, entity_id: u64) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.reducers.despawn_npc(entity_id);
+        }
     }
 
     pub fn identity_hex(&self) -> Option<String> {
@@ -217,6 +246,8 @@ impl SpacetimeNetClient {
     fn teardown(&mut self) {
         self.base_sub = None;
         self.repl_sub = None;
+        self.repl_zone = None;
+        self.pending_repl = None;
         self.enter_world_sent = false;
         self.pending_input = None;
         self.input_epoch = 0;
@@ -264,32 +295,61 @@ impl SpacetimeNetClient {
         self.base_sub = Some(handle);
     }
 
-    /// Package 3 replication scope: all player/NPC rows (populations are
-    /// tiny). Package 5 replaces this with zone-scoped queries swapped on
-    /// `ZoneChanged`.
-    fn subscribe_replication(&mut self) {
+    /// Package 5 replication scope (plan D3 §6): player/NPC rows of the own
+    /// row's authoritative zone. The server derives `zone_id` from position,
+    /// so a zone change shows up on the (always-subscribed) own row and this
+    /// swaps scope; identity and the own row are untouched.
+    ///
+    /// Called with the own row's zone whenever it is known. Promotes an
+    /// applied pending swap first; the SDK ref-counts rows under overlapping
+    /// queries, so shared rows never leave the cache during the overlap and
+    /// old-zone rows are dropped (out-of-scope, no tombstone) only after the
+    /// new zone is fully applied.
+    fn pump_zone_swap(&mut self, own_zone: u32) {
+        if let Some((zone, _)) = &self.pending_repl {
+            let zone = *zone;
+            if self.flags.pending_repl_applied.load(Ordering::Acquire) {
+                let (_, handle) = self.pending_repl.take().expect("checked above");
+                if let Some(old) = self.repl_sub.take() {
+                    let _ = old.unsubscribe();
+                }
+                self.repl_sub = Some(handle);
+                self.repl_zone = Some(zone);
+                self.flags.mark_dirty();
+            }
+            return; // one swap in flight; re-checked next poll
+        }
+        if self.repl_zone != Some(own_zone) {
+            self.start_zone_sub(own_zone);
+        }
+    }
+
+    fn start_zone_sub(&mut self, zone: u32) {
         let conn = self
             .conn
             .as_ref()
-            .expect("subscribe_replication requires a connection");
+            .expect("start_zone_sub requires a connection");
         let queries = vec![
-            "SELECT * FROM player".to_string(),
-            "SELECT * FROM npc".to_string(),
+            format!("SELECT * FROM player WHERE zone_id = {zone}"),
+            format!("SELECT * FROM npc WHERE zone_id = {zone}"),
         ];
+        self.flags
+            .pending_repl_applied
+            .store(false, Ordering::Release);
         let applied = self.flags.clone();
         let errored = self.flags.clone();
         let handle = conn
             .subscription_builder()
             .on_applied(move |_ctx| {
-                applied.repl_applied.store(true, Ordering::Release);
+                applied.pending_repl_applied.store(true, Ordering::Release);
                 applied.mark_dirty();
             })
             .on_error(move |_ctx, err| {
-                errored.set_error(format!("replication subscription failed: {err}"));
+                errored.set_error(format!("zone subscription failed: {err}"));
                 errored.disconnected.store(true, Ordering::Release);
             })
             .subscribe(queries);
-        self.repl_sub = Some(handle);
+        self.pending_repl = Some((zone, handle));
     }
 
     /// Row callbacks mark dirty / record tombstone evidence / queue
@@ -535,7 +595,6 @@ impl NetClient for SpacetimeNetClient {
                     return;
                 };
                 if version_compatible(config.protocol_version, self.client_version) {
-                    self.subscribe_replication();
                     self.state = ConnectionState::EnteringWorld;
                 } else {
                     self.fail(
@@ -567,14 +626,22 @@ impl NetClient for SpacetimeNetClient {
                 // stale row from a previous connection would otherwise trip
                 // the InWorld session-replaced check before our own
                 // `enter_world` round-trips.
-                let own_session_live = conn
+                let own = conn
                     .try_identity()
-                    .and_then(|id| conn.db.player().owner_identity().find(&id))
+                    .and_then(|id| conn.db.player().owner_identity().find(&id));
+                let own_session_live = own
+                    .as_ref()
                     .is_some_and(|p| p.session.is_some() && p.session == conn.try_connection_id());
-                if own_session_live && self.flags.repl_applied.load(Ordering::Acquire) {
-                    self.state = ConnectionState::InWorld;
-                    self.flags.mark_dirty();
-                    out.push(NetEvent::Connected);
+                if own_session_live {
+                    // The own row carries the authoritative zone, so the
+                    // first zone-scoped subscription can only start here.
+                    let zone = own.expect("session live implies own row").zone_id;
+                    self.pump_zone_swap(zone);
+                    if self.repl_zone.is_some() {
+                        self.state = ConnectionState::InWorld;
+                        self.flags.mark_dirty();
+                        out.push(NetEvent::Connected);
+                    }
                 }
             }
             ConnectionState::InWorld => {
@@ -671,6 +738,11 @@ impl NetClient for SpacetimeNetClient {
                         offset_us: server_us as i64 - ((send_us + recv_us) / 2) as i64,
                         rtt_us: recv_us - send_us,
                     }));
+                }
+
+                // Zone swap driven by the own row's authoritative zone.
+                if let Some(zone) = own.map(|p| p.zone_id) {
+                    self.pump_zone_swap(zone);
                 }
             }
             _ => {}

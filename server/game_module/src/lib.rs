@@ -10,6 +10,7 @@
 use game_shared::net::schema::{
     accept_input, MAX_INPUT_STEP_M, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS,
 };
+use game_shared::world_grid::zone_id_from_position;
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 use std::time::Duration;
 
@@ -279,7 +280,7 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
                 vy: 0.0,
                 vz: 0.0,
                 yaw: 0.0,
-                zone_id: 0,
+                zone_id: zone_id_from_position(SPAWN_POINT[0], SPAWN_POINT[1]),
                 epoch: 1,
                 last_input_seq: 0,
                 last_update_micros: now_micros(ctx),
@@ -339,8 +340,33 @@ pub fn submit_input(
     p.y += dy;
     p.z += dz;
     p.yaw = yaw;
+    p.zone_id = zone_id_from_position(p.x, p.y);
     p.last_input_seq = seq;
     p.last_update_micros = now;
+    ctx.db.player().entity_id().update(p);
+    Ok(())
+}
+
+/// Dev/test reducer (unauthenticated like `despawn_npc`): teleports the
+/// caller's player. Lets acceptance tests cross zone borders
+/// deterministically without simulating walks.
+#[reducer]
+pub fn dev_teleport(ctx: &ReducerContext, x: f32, y: f32, z: f32) -> Result<(), String> {
+    let mut p = ctx
+        .db
+        .player()
+        .owner_identity()
+        .find(ctx.sender())
+        .ok_or("no player for caller")?;
+    if ![x, y, z].iter().all(|v| v.is_finite()) {
+        return Err("non-finite position".into());
+    }
+    p.x = x;
+    p.y = y;
+    p.z = z;
+    (p.vx, p.vy, p.vz) = (0.0, 0.0, 0.0);
+    p.zone_id = zone_id_from_position(x, y);
+    p.last_update_micros = now_micros(ctx);
     ctx.db.player().entity_id().update(p);
     Ok(())
 }
@@ -435,6 +461,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             n.yaw = n.yaw.rem_euclid(std::f32::consts::TAU);
             n.x += n.yaw.cos() * NPC_SPEED_MPS * dt;
             n.y += n.yaw.sin() * NPC_SPEED_MPS * dt;
+            n.zone_id = zone_id_from_position(n.x, n.y);
             n.last_update_micros = now;
             ctx.db.npc().entity_id().update(n);
         }
@@ -445,14 +472,16 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
 fn seed_npcs(ctx: &ReducerContext, now: i64) {
     for i in 0..NPC_SEED_COUNT {
         let angle = (i as f32) * std::f32::consts::TAU / NPC_SEED_COUNT as f32;
+        let x = SPAWN_POINT[0] + angle.cos() * 4.0;
+        let y = SPAWN_POINT[1] + angle.sin() * 4.0;
         ctx.db.npc().insert(Npc {
             entity_id: alloc_entity_id(ctx),
             generation: 1,
-            x: SPAWN_POINT[0] + angle.cos() * 4.0,
-            y: SPAWN_POINT[1] + angle.sin() * 4.0,
+            x,
+            y,
             z: SPAWN_POINT[2],
             yaw: angle,
-            zone_id: 0,
+            zone_id: zone_id_from_position(x, y),
             kind: 0,
             last_update_micros: now,
         });

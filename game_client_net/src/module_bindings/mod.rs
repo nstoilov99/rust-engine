@@ -13,6 +13,7 @@ pub mod clock_type;
 pub mod config_table;
 pub mod config_type;
 pub mod despawn_npc_reducer;
+pub mod dev_teleport_reducer;
 pub mod enter_world_reducer;
 pub mod entity_allocator_type;
 pub mod npc_table;
@@ -34,6 +35,7 @@ pub use clock_type::Clock;
 pub use config_table::*;
 pub use config_type::Config;
 pub use despawn_npc_reducer::despawn_npc;
+pub use dev_teleport_reducer::dev_teleport;
 pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
 pub use npc_table::*;
@@ -59,6 +61,11 @@ pub enum Reducer {
     DespawnNpc {
         entity_id: u64,
     },
+    DevTeleport {
+        x: f32,
+        y: f32,
+        z: f32,
+    },
     EnterWorld,
     Ping {
         nonce: u64,
@@ -81,6 +88,7 @@ impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
             Reducer::DespawnNpc { .. } => "despawn_npc",
+            Reducer::DevTeleport { .. } => "dev_teleport",
             Reducer::EnterWorld => "enter_world",
             Reducer::Ping { .. } => "ping",
             Reducer::SubmitInput { .. } => "submit_input",
@@ -93,6 +101,13 @@ impl __sdk::Reducer for Reducer {
             Reducer::DespawnNpc { entity_id } => {
                 __sats::bsatn::to_vec(&despawn_npc_reducer::DespawnNpcArgs {
                     entity_id: entity_id.clone(),
+                })
+            }
+            Reducer::DevTeleport { x, y, z } => {
+                __sats::bsatn::to_vec(&dev_teleport_reducer::DevTeleportArgs {
+                    x: x.clone(),
+                    y: y.clone(),
+                    z: z.clone(),
                 })
             }
             Reducer::EnterWorld => __sats::bsatn::to_vec(&enter_world_reducer::EnterWorldArgs {}),

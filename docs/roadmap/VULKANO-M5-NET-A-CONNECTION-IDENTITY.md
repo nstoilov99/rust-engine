@@ -1,6 +1,6 @@
 # M5 — Net-A: Connection, Identity & Replication
 
-**Status:** 🚧 In Progress
+**Status:** ✅ Complete (Packages 0–5 shipped)
 **Duration:** ~3 weeks
 **Prerequisites:** M0 SpacetimeDB spike (✅ GO), M4 Zone & Chunk Lifecycle (✅)
 **Roadmap:** `ROADMAP.md` Task M5 — first slice of the Multiplayer Foundation
@@ -359,6 +359,16 @@ Zone-subscription swap driven by `ZoneChanged` (apply-new-then-drop-old),
 no duplicates, position persistence across disconnect, cross-zone
 visibility change without gaps, generation bump prevents stale-sample
 attach, destroyed vs out-of-scope distinguished via tombstones.
+
+*As shipped:* the swap is driven by the server-derived `zone_id` on the
+always-subscribed own row (`zone_id_from_position` in `game_shared`,
+frozen quadrant mapping for the greybox world) instead of the client's
+`ZoneChanged` event — the server must not trust a client zone claim, and
+the standalone client does not run `WorldStreamer`. Generation-bump
+stale-sample rejection is covered by `game_client::replication` unit
+tests (M5 has no server path that reuses an entity id); the other four
+scenarios live in `game_client_net/tests/acceptance.rs` (`--ignored`,
+needs a local standalone).
 
 ---
 
