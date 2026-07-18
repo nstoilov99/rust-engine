@@ -161,6 +161,20 @@ impl Default for PlayerInput {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NetProxy
+// ---------------------------------------------------------------------------
+
+/// Marker on client-side proxies of replicated net entities (contract §2.1).
+/// Spawned/despawned only by the replication system; the scene serializer
+/// skips any entity carrying it. Deliberately not serde-serializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetProxy {
+    pub realm_id: u32,
+    pub entity_id: u64,
+    pub generation: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,6 +13,13 @@ use std::time::Duration;
 
 const TICK_INTERVAL_MS: u64 = 250;
 
+/// Dev spawn point (Z-up, meters). The world manifest is runtime-loaded RON
+/// the WASM module cannot read; a manifest-driven spawn is deferred.
+const SPAWN_POINT: [f32; 3] = [0.0, 0.0, 1.0];
+const NPC_SEED_COUNT: u32 = 4;
+const NPC_WANDER_RADIUS: f32 = 8.0;
+const NPC_SPEED_MPS: f32 = 1.5;
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -148,6 +155,19 @@ fn alloc_character_id(ctx: &ReducerContext) -> u64 {
     id
 }
 
+fn alloc_entity_id(ctx: &ReducerContext) -> u64 {
+    let mut a = ctx
+        .db
+        .entity_allocator()
+        .id()
+        .find(0)
+        .expect("allocator row must exist after init");
+    let id = a.next_entity_id;
+    a.next_entity_id += 1;
+    ctx.db.entity_allocator().id().update(a);
+    id
+}
+
 fn short_name(identity: &Identity) -> String {
     let hex = identity.to_hex();
     format!("Player-{}", &hex.as_str()[..8.min(hex.as_str().len())])
@@ -212,6 +232,85 @@ pub fn client_disconnected(ctx: &ReducerContext) {
 }
 
 // ---------------------------------------------------------------------------
+// World entry & despawn
+// ---------------------------------------------------------------------------
+
+/// Contract §4.5: creates or resumes the caller's player and installs the
+/// calling connection as the active session (last-wins revocation, §4.3).
+/// Idempotent from the live connection: no epoch bump, no state change.
+#[reducer]
+pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
+    let conn = ctx
+        .connection_id()
+        .ok_or("enter_world requires a client connection")?;
+    let account = ctx
+        .db
+        .account()
+        .identity()
+        .find(ctx.sender())
+        .ok_or("no account for caller")?;
+
+    match ctx.db.player().owner_identity().find(ctx.sender()) {
+        Some(mut p) => {
+            if p.session == Some(conn) {
+                return Ok(());
+            }
+            p.session = Some(conn);
+            p.epoch += 1;
+            p.last_input_seq = 0;
+            p.last_update_micros = now_micros(ctx);
+            ctx.db.player().entity_id().update(p);
+        }
+        None => {
+            ctx.db.player().insert(Player {
+                entity_id: alloc_entity_id(ctx),
+                generation: 1,
+                owner_identity: ctx.sender(),
+                character_id: account.character_id,
+                session: Some(conn),
+                x: SPAWN_POINT[0],
+                y: SPAWN_POINT[1],
+                z: SPAWN_POINT[2],
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+                yaw: 0.0,
+                zone_id: 0,
+                epoch: 1,
+                last_input_seq: 0,
+                last_update_micros: now_micros(ctx),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Contract §3.1: tombstone upsert + row delete in one transaction — both or
+/// neither. Dev/test reducer (unauthenticated on purpose): lets the CLI and
+/// acceptance tests exercise destroyed-vs-out-of-scope classification.
+#[reducer]
+pub fn despawn_npc(ctx: &ReducerContext, entity_id: u64) -> Result<(), String> {
+    let npc = ctx
+        .db
+        .npc()
+        .entity_id()
+        .find(entity_id)
+        .ok_or("no such npc")?;
+    let ts = Tombstone {
+        entity_id,
+        generation: npc.generation,
+        despawned_at_micros: now_micros(ctx),
+    };
+    if ctx.db.tombstone().entity_id().find(entity_id).is_some() {
+        ctx.db.tombstone().entity_id().update(ts);
+    } else {
+        ctx.db.tombstone().insert(ts);
+    }
+    ctx.db.npc().entity_id().delete(entity_id);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled tick
 // ---------------------------------------------------------------------------
 
@@ -240,6 +339,45 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         ctx.db.tombstone().entity_id().delete(id);
     }
 
-    // NPC wander lands in Package 3.
+    // NPC wander: deterministic bounded walk around the spawn point.
+    // Seeding here (not in `init`) is idempotent across incremental
+    // publishes of an already-initialized database.
+    let npcs: Vec<Npc> = ctx.db.npc().iter().collect();
+    if npcs.is_empty() {
+        seed_npcs(ctx, now);
+    } else {
+        let dt = TICK_INTERVAL_MS as f32 / 1000.0;
+        for mut n in npcs {
+            // Per-entity heading drift; steer home outside the radius.
+            n.yaw += dt * (0.3 + 0.15 * ((n.entity_id % 5) as f32));
+            let dx = n.x - SPAWN_POINT[0];
+            let dy = n.y - SPAWN_POINT[1];
+            if dx * dx + dy * dy > NPC_WANDER_RADIUS * NPC_WANDER_RADIUS {
+                n.yaw = (-dy).atan2(-dx);
+            }
+            n.yaw = n.yaw.rem_euclid(std::f32::consts::TAU);
+            n.x += n.yaw.cos() * NPC_SPEED_MPS * dt;
+            n.y += n.yaw.sin() * NPC_SPEED_MPS * dt;
+            n.last_update_micros = now;
+            ctx.db.npc().entity_id().update(n);
+        }
+    }
     Ok(())
+}
+
+fn seed_npcs(ctx: &ReducerContext, now: i64) {
+    for i in 0..NPC_SEED_COUNT {
+        let angle = (i as f32) * std::f32::consts::TAU / NPC_SEED_COUNT as f32;
+        ctx.db.npc().insert(Npc {
+            entity_id: alloc_entity_id(ctx),
+            generation: 1,
+            x: SPAWN_POINT[0] + angle.cos() * 4.0,
+            y: SPAWN_POINT[1] + angle.sin() * 4.0,
+            z: SPAWN_POINT[2],
+            yaw: angle,
+            zone_id: 0,
+            kind: 0,
+            last_update_micros: now,
+        });
+    }
 }

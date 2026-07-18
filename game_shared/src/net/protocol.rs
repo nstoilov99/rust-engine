@@ -35,6 +35,16 @@ pub struct EntityState {
     pub server_time_us: u64,
 }
 
+/// Complete view of the replicated entity rows currently visible to the
+/// client — the cache-diff input (plan D3). Emitted by the backend on dirty
+/// frames only. `own_entity_id` marks the local player's row so replication
+/// binds it to the local entity instead of proxying it (contract §2.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldSnapshot {
+    pub entities: Vec<EntityState>,
+    pub own_entity_id: Option<u64>,
+}
+
 /// Client input sample, session-scoped (contract §5). Coalesced client-side
 /// and sent at `INPUT_SEND_HZ`, never per-frame.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

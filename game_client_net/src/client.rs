@@ -10,12 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use game_shared::net::protocol::{ClientInput, ModuleAddr};
+use game_shared::net::protocol::{
+    ClientInput, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
+};
 use game_shared::net::schema::{version_compatible, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
-use spacetimedb_sdk::{credentials, DbContext};
+use spacetimedb_sdk::{credentials, DbContext, Table, TableWithPrimaryKey};
 
-use crate::module_bindings::{ConfigTableAccess, DbConnection, SubscriptionHandle};
+use crate::module_bindings::{
+    enter_world, ConfigTableAccess, DbConnection, NpcTableAccess, PlayerTableAccess,
+    SubscriptionHandle, TombstoneTableAccess,
+};
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
 const MAX_REDUCER_CALLS_PER_SEC: f32 = 30.0;
@@ -25,6 +30,14 @@ struct Flags {
     connected: AtomicBool,
     disconnected: AtomicBool,
     base_applied: AtomicBool,
+    repl_applied: AtomicBool,
+    /// Replicated rows changed since the last snapshot (plan D3: callbacks
+    /// only mark dirty; the cache-diff is the sole spawn/despawn authority).
+    cache_dirty: AtomicBool,
+    /// The presented stored token was rejected (contract §4.1: delete it).
+    auth_rejected: AtomicBool,
+    /// Tombstone evidence observed by row callbacks (contract §3.2).
+    tombstones: Mutex<Vec<(u64, u32)>>,
     /// Last transport/subscription error message, if any.
     error: Mutex<Option<String>>,
 }
@@ -38,6 +51,16 @@ impl Flags {
 
     fn take_error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|mut e| e.take())
+    }
+
+    fn mark_dirty(&self) {
+        self.cache_dirty.store(true, Ordering::Release);
+    }
+
+    fn push_tombstone(&self, entity_id: u64, generation: u32) {
+        if let Ok(mut ts) = self.tombstones.lock() {
+            ts.push((entity_id, generation));
+        }
     }
 }
 
@@ -72,9 +95,13 @@ pub struct SpacetimeNetClient {
     state: ConnectionState,
     conn: Option<DbConnection>,
     base_sub: Option<SubscriptionHandle>,
+    repl_sub: Option<SubscriptionHandle>,
     flags: Arc<Flags>,
     pending: Vec<NetEvent>,
     limiter: RateLimiter,
+    enter_world_sent: bool,
+    /// Credentials file key of the current connection (token cleanup).
+    credentials_key: Option<String>,
     /// Overridable for acceptance tests (version-mismatch path).
     client_version: u32,
 }
@@ -85,9 +112,12 @@ impl SpacetimeNetClient {
             state: ConnectionState::Offline,
             conn: None,
             base_sub: None,
+            repl_sub: None,
             flags: Arc::new(Flags::default()),
             pending: Vec::new(),
             limiter: RateLimiter::new(),
+            enter_world_sent: false,
+            credentials_key: None,
             client_version: PROTOCOL_VERSION,
         }
     }
@@ -108,8 +138,23 @@ impl SpacetimeNetClient {
         format!("rust-engine-{module}")
     }
 
+    /// The SDK has no delete API; remove the token file it writes under
+    /// `~/.spacetimedb_client_credentials/<key>` (contract §4.1: a rejected
+    /// token is deleted so the next connect is fresh).
+    fn delete_credentials(key: &str) {
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        if let Some(home) = home {
+            let path = std::path::Path::new(&home)
+                .join(".spacetimedb_client_credentials")
+                .join(key);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     fn teardown(&mut self) {
         self.base_sub = None;
+        self.repl_sub = None;
+        self.enter_world_sent = false;
         if let Some(conn) = self.conn.take() {
             conn.disconnect().ok();
         }
@@ -148,6 +193,96 @@ impl SpacetimeNetClient {
             .subscribe(queries);
         self.base_sub = Some(handle);
     }
+
+    /// Package 3 replication scope: all player/NPC rows (populations are
+    /// tiny). Package 5 replaces this with zone-scoped queries swapped on
+    /// `ZoneChanged`.
+    fn subscribe_replication(&mut self) {
+        let conn = self
+            .conn
+            .as_ref()
+            .expect("subscribe_replication requires a connection");
+        let queries = vec![
+            "SELECT * FROM player".to_string(),
+            "SELECT * FROM npc".to_string(),
+        ];
+        let applied = self.flags.clone();
+        let errored = self.flags.clone();
+        let handle = conn
+            .subscription_builder()
+            .on_applied(move |_ctx| {
+                applied.repl_applied.store(true, Ordering::Release);
+                applied.mark_dirty();
+            })
+            .on_error(move |_ctx, err| {
+                errored.set_error(format!("replication subscription failed: {err}"));
+                errored.disconnected.store(true, Ordering::Release);
+            })
+            .subscribe(queries);
+        self.repl_sub = Some(handle);
+    }
+
+    /// Row callbacks only mark dirty / record tombstone evidence; all
+    /// spawn/despawn decisions belong to the cache-diff (plan D3).
+    fn register_row_callbacks(conn: &DbConnection, flags: &Arc<Flags>) {
+        macro_rules! dirty_on {
+            ($table:expr) => {{
+                let f = flags.clone();
+                $table.on_insert(move |_, _| f.mark_dirty());
+                let f = flags.clone();
+                $table.on_update(move |_, _, _| f.mark_dirty());
+                let f = flags.clone();
+                $table.on_delete(move |_, _| f.mark_dirty());
+            }};
+        }
+        dirty_on!(conn.db.player());
+        dirty_on!(conn.db.npc());
+        let f = flags.clone();
+        conn.db.tombstone().on_insert(move |_, row| {
+            f.push_tombstone(row.entity_id, row.generation);
+        });
+        let f = flags.clone();
+        conn.db.tombstone().on_update(move |_, _, row| {
+            f.push_tombstone(row.entity_id, row.generation);
+        });
+    }
+
+    fn build_snapshot(conn: &DbConnection) -> WorldSnapshot {
+        let own_identity = conn.try_identity();
+        let mut entities = Vec::new();
+        let mut own_entity_id = None;
+        for p in conn.db.player().iter() {
+            if own_identity == Some(p.owner_identity) {
+                own_entity_id = Some(p.entity_id);
+            }
+            entities.push(EntityState {
+                entity_id: p.entity_id,
+                generation: p.generation,
+                kind: EntityKind::Player,
+                pos: [p.x, p.y, p.z],
+                vel: [p.vx, p.vy, p.vz],
+                yaw: p.yaw,
+                zone_id: p.zone_id,
+                server_time_us: p.last_update_micros.max(0) as u64,
+            });
+        }
+        for n in conn.db.npc().iter() {
+            entities.push(EntityState {
+                entity_id: n.entity_id,
+                generation: n.generation,
+                kind: EntityKind::Npc,
+                pos: [n.x, n.y, n.z],
+                vel: [0.0; 3],
+                yaw: n.yaw,
+                zone_id: n.zone_id,
+                server_time_us: n.last_update_micros.max(0) as u64,
+            });
+        }
+        WorldSnapshot {
+            entities,
+            own_entity_id,
+        }
+    }
 }
 
 impl Default for SpacetimeNetClient {
@@ -165,6 +300,7 @@ impl NetClient for SpacetimeNetClient {
         self.pending.clear();
 
         let key = Self::credentials_key(&addr.module);
+        self.credentials_key = Some(key.clone());
         let token = match credentials::File::new(key.clone()).load() {
             Ok(t) => t,
             Err(e) => {
@@ -172,6 +308,7 @@ impl NetClient for SpacetimeNetClient {
                 None
             }
         };
+        let presented_token = token.is_some();
 
         let on_connect = self.flags.clone();
         let on_conn_err = self.flags.clone();
@@ -187,7 +324,14 @@ impl NetClient for SpacetimeNetClient {
                 on_connect.connected.store(true, Ordering::Release);
             })
             .on_connect_error(move |_ctx, err| {
-                on_conn_err.set_error(format!("connect failed: {err}"));
+                let msg = format!("connect failed: {err}");
+                // Contract §4.1: a rejected stored token is deleted so the
+                // next attempt connects fresh.
+                let lower = msg.to_lowercase();
+                if presented_token && (lower.contains("token") || lower.contains("auth")) {
+                    on_conn_err.auth_rejected.store(true, Ordering::Release);
+                }
+                on_conn_err.set_error(msg);
                 on_conn_err.disconnected.store(true, Ordering::Release);
             })
             .on_disconnect(move |_ctx, err| {
@@ -200,6 +344,7 @@ impl NetClient for SpacetimeNetClient {
 
         match result {
             Ok(conn) => {
+                Self::register_row_callbacks(&conn, &self.flags);
                 self.conn = Some(conn);
                 self.state = ConnectionState::Connecting;
             }
@@ -250,12 +395,29 @@ impl NetClient for SpacetimeNetClient {
         }
 
         if self.flags.disconnected.load(Ordering::Acquire) {
+            if self.flags.auth_rejected.load(Ordering::Acquire) {
+                if let Some(key) = &self.credentials_key {
+                    log::warn!("stored auth token rejected; deleting credentials '{key}'");
+                    Self::delete_credentials(key);
+                }
+            }
             let msg = self
                 .flags
                 .take_error()
                 .unwrap_or_else(|| "connection closed".to_string());
             self.fail(out, DisconnectReason::ConnectionLost(msg));
             return;
+        }
+
+        // Tombstone evidence is drained in every state (contract §3.2):
+        // destruction + GC arriving in one pump must still reach the client.
+        if let Ok(mut ts) = self.flags.tombstones.lock() {
+            for (entity_id, generation) in ts.drain(..) {
+                out.push(NetEvent::TombstoneSeen {
+                    entity_id,
+                    generation,
+                });
+            }
         }
 
         match self.state {
@@ -283,8 +445,8 @@ impl NetClient for SpacetimeNetClient {
                     return;
                 };
                 if version_compatible(config.protocol_version, self.client_version) {
-                    self.state = ConnectionState::InWorld;
-                    out.push(NetEvent::Connected);
+                    self.subscribe_replication();
+                    self.state = ConnectionState::EnteringWorld;
                 } else {
                     self.fail(
                         out,
@@ -293,6 +455,54 @@ impl NetClient for SpacetimeNetClient {
                             client: self.client_version,
                         },
                     );
+                }
+            }
+            ConnectionState::EnteringWorld => {
+                // Liveness-guarded (we only get here past the disconnect
+                // checks) and rate-limited like every reducer call.
+                if !self.enter_world_sent {
+                    if !self.limiter.allow() {
+                        return;
+                    }
+                    if let Err(e) = conn.reducers.enter_world() {
+                        self.fail(
+                            out,
+                            DisconnectReason::ConnectionLost(format!("enter_world failed: {e}")),
+                        );
+                        return;
+                    }
+                    self.enter_world_sent = true;
+                }
+                // Wait for OUR session on the own row, not just the row: a
+                // stale row from a previous connection would otherwise trip
+                // the InWorld session-replaced check before our own
+                // `enter_world` round-trips.
+                let own_session_live = conn
+                    .try_identity()
+                    .and_then(|id| conn.db.player().owner_identity().find(&id))
+                    .is_some_and(|p| p.session.is_some() && p.session == conn.try_connection_id());
+                if own_session_live && self.flags.repl_applied.load(Ordering::Acquire) {
+                    self.state = ConnectionState::InWorld;
+                    self.flags.mark_dirty();
+                    out.push(NetEvent::Connected);
+                }
+            }
+            ConnectionState::InWorld => {
+                // Session revocation (contract §4.3): our own row's session
+                // no longer names this connection → another connection of
+                // the same identity took over.
+                if let (Some(identity), Some(my_conn)) =
+                    (conn.try_identity(), conn.try_connection_id())
+                {
+                    if let Some(own) = conn.db.player().owner_identity().find(&identity) {
+                        if own.session != Some(my_conn) {
+                            self.fail(out, DisconnectReason::SessionReplaced);
+                            return;
+                        }
+                    }
+                }
+                if self.flags.cache_dirty.swap(false, Ordering::AcqRel) {
+                    out.push(NetEvent::Snapshot(Self::build_snapshot(conn)));
                 }
             }
             _ => {}

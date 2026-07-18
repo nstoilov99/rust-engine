@@ -12,6 +12,7 @@ mod input_handler;
 mod net;
 mod plugin;
 mod render_loop;
+mod replication;
 mod systems;
 
 #[cfg(feature = "editor")]

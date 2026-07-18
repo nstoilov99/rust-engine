@@ -267,6 +267,15 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
 
 /// Recursively collect entities in hierarchy order (parent first, then children in order)
 fn collect_entities_in_order(world: &World, entity: Entity, entities: &mut Vec<EntityData>) {
+    // Net proxies are runtime-only (M5 contract §2.1): never serialized,
+    // and a proxy subtree never enters a scene file.
+    if world
+        .get::<&game_shared::components::NetProxy>(entity)
+        .is_ok()
+    {
+        return;
+    }
+
     // Serialize this entity first
     if let Some(entity_data) = serialize_entity(world, entity) {
         entities.push(entity_data);

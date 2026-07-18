@@ -1,7 +1,7 @@
 //! The `NetClient` seam (ADR-014): everything the game simulates or renders
 //! from the network arrives as `NetEvent`s from a `NetClient` implementation.
 
-use super::protocol::{ClientInput, ClockSample, EntityState, ModuleAddr};
+use super::protocol::{ClientInput, ClockSample, EntityState, ModuleAddr, WorldSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -11,6 +11,9 @@ pub enum ConnectionState {
     AwaitBaseSub,
     /// Base subscription applied; checking `config.protocol_version`.
     VersionCheck,
+    /// Version accepted; `enter_world` sent, waiting for the own player row.
+    EnteringWorld,
+    /// Own player row visible; replication live.
     InWorld,
     Disconnected,
     Reconnecting,
@@ -35,8 +38,11 @@ pub enum DisconnectReason {
 pub enum NetEvent {
     Connected,
     Disconnected(DisconnectReason),
-    /// Replicated rows changed; run the cache-diff this frame.
-    CacheDirty,
+    /// Replicated rows changed; full current view for the cache-diff (D3).
+    Snapshot(WorldSnapshot),
+    /// Tombstone evidence observed (contract §3.2). Fed from row callbacks,
+    /// so destruction + GC arriving in one pump cannot erase the evidence.
+    TombstoneSeen { entity_id: u64, generation: u32 },
     /// A fresh state sample for a live entity (feeds interpolation buffers).
     StateUpdate(EntityState),
     /// Own-row ack advanced (contract §5: replication of the row IS the ack).

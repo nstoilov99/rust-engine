@@ -12,6 +12,8 @@ pub mod clock_table;
 pub mod clock_type;
 pub mod config_table;
 pub mod config_type;
+pub mod despawn_npc_reducer;
+pub mod enter_world_reducer;
 pub mod entity_allocator_type;
 pub mod npc_table;
 pub mod npc_type;
@@ -29,6 +31,8 @@ pub use clock_table::*;
 pub use clock_type::Clock;
 pub use config_table::*;
 pub use config_type::Config;
+pub use despawn_npc_reducer::despawn_npc;
+pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
 pub use npc_table::*;
 pub use npc_type::Npc;
@@ -47,7 +51,10 @@ pub use tombstone_type::Tombstone;
 /// Contained within a [`__sdk::ReducerEvent`] in [`EventContext`]s for reducer events
 /// to indicate which reducer caused the event.
 
-pub enum Reducer {}
+pub enum Reducer {
+    DespawnNpc { entity_id: u64 },
+    EnterWorld,
+}
 
 impl __sdk::InModule for Reducer {
     type Module = RemoteModule;
@@ -56,12 +63,20 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::DespawnNpc { .. } => "despawn_npc",
+            Reducer::EnterWorld => "enter_world",
             _ => unreachable!(),
         }
     }
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::DespawnNpc { entity_id } => {
+                __sats::bsatn::to_vec(&despawn_npc_reducer::DespawnNpcArgs {
+                    entity_id: entity_id.clone(),
+                })
+            }
+            Reducer::EnterWorld => __sats::bsatn::to_vec(&enter_world_reducer::EnterWorldArgs {}),
             _ => unreachable!(),
         }
     }
