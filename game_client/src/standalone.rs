@@ -61,6 +61,7 @@ pub struct StandaloneApp {
     net: Option<crate::net::NetSession>,
     /// Last net status shown in the window title (standalone has no text UI).
     net_title_status: String,
+    materials: crate::asset_resolve::MaterialStore,
 }
 
 impl StandaloneApp {
@@ -165,6 +166,28 @@ impl StandaloneApp {
             renderer.gpu.descriptor_set_allocator.clone(),
             &geometry_pipeline,
         )?;
+
+        // Load all scene-referenced meshes and materials (the editor does this
+        // via resolve_mesh_paths/resolve_material_sets each frame).
+        crate::asset_resolve::resolve_mesh_paths(game_world.hecs_mut(), &asset_manager);
+        let mut materials = crate::asset_resolve::MaterialStore::default();
+        {
+            use vulkano::pipeline::Pipeline;
+            let gpu = crate::asset_resolve::MaterialGpu {
+                allocator: renderer.gpu.memory_allocator.clone(),
+                ds_allocator: renderer.gpu.descriptor_set_allocator.clone(),
+                cmd_allocator: renderer.gpu.command_buffer_allocator.clone(),
+                queue: renderer.gpu.queue.clone(),
+                device: renderer.gpu.device.clone(),
+                geom_layout: geometry_pipeline.layout().clone(),
+            };
+            crate::asset_resolve::resolve_material_sets(
+                game_world.hecs_mut(),
+                &asset_manager,
+                &gpu,
+                &mut materials,
+            );
+        }
 
         // Set camera from first Camera entity, or use default
         {
@@ -288,6 +311,7 @@ impl StandaloneApp {
             render_thread: Some(render_thread),
             net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
             net_title_status: String::new(),
+            materials,
         })
     }
 
@@ -436,7 +460,6 @@ impl StandaloneApp {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
-        let empty_mat_cache = std::collections::HashMap::new();
         render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
@@ -446,7 +469,7 @@ impl StandaloneApp {
             tc,
             &self.skinning,
             &self.default_material_set,
-            &empty_mat_cache,
+            &self.materials.cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
 

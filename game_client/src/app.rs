@@ -43,10 +43,8 @@ use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
-use rust_engine::engine::rendering::rendering_3d::material::MaterialBaseId;
 use rust_engine::engine::rendering::rendering_3d::{
-    DeferredRenderer, MaterialInstanceDef, MaterialInstanceId, MaterialManager, MeshRenderData,
-    SkinningBackend,
+    DeferredRenderer, MeshRenderData, SkinningBackend,
 };
 use rust_engine::engine::rendering::ResourceCounters;
 use rust_engine::engine::scene::{load_scene, save_scene};
@@ -112,16 +110,8 @@ pub struct CoreApp {
         Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     frame_number: u64,
     pub render_thread: Option<RenderThread>,
-    /// Cache of loaded material descriptor sets, keyed by content-relative
-    /// asset path (`.material` and `.matinst`).
-    pub material_cache: std::collections::HashMap<String, Arc<DescriptorSet>>,
-    /// Owns material bases/instances for `.matinst` assets; their descriptor
-    /// sets land in `material_cache` keyed by the instance's asset path.
-    pub material_manager: MaterialManager,
-    /// Base-material path → registered base id (textures shared across instances).
-    pub material_base_ids: std::collections::HashMap<String, MaterialBaseId>,
-    /// `.matinst` asset path → live instance id.
-    pub matinst_ids: std::collections::HashMap<String, MaterialInstanceId>,
+    /// Material descriptor-set cache and `.matinst` bookkeeping.
+    pub materials: crate::asset_resolve::MaterialStore,
     #[cfg(debug_assertions)]
     pub debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer,
     /// Cached collision-wireframe GPU lines, keyed by (collision generation,
@@ -559,10 +549,7 @@ impl App {
             plankton_emitter_buffer: Vec::with_capacity(32),
             frame_number: 0,
             render_thread: Some(render_thread),
-            material_cache: std::collections::HashMap::new(),
-            material_manager: MaterialManager::new(),
-            material_base_ids: std::collections::HashMap::new(),
-            matinst_ids: std::collections::HashMap::new(),
+            materials: crate::asset_resolve::MaterialStore::default(),
             #[cfg(debug_assertions)]
             debug_draw_buffer: rust_engine::engine::debug_draw::DebugDrawBuffer::new(),
             #[cfg(debug_assertions)]
@@ -1162,385 +1149,40 @@ impl App {
     }
 
     /// Resolve `mesh_path` to `mesh_index` for all MeshRenderer components.
-    ///
-    /// Loads meshes via the AssetManager if they aren't already uploaded.
-    /// Also auto-adapts `material_paths` from the `.mesh.ron` sidecar when a
-    /// mesh is first resolved.
     fn resolve_mesh_paths(&mut self) {
-        use rust_engine::engine::ecs::components::MeshRenderer;
+        crate::asset_resolve::resolve_mesh_paths(
+            self.core.game_world.hecs_mut(),
+            &self.core.asset_manager,
+        );
+    }
 
-        // Collect paths that need resolving
-        let mut paths_to_load: Vec<String> = Vec::new();
-        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
-            if !mr.mesh_path.is_empty() {
-                let meshes = self.core.asset_manager.meshes.read();
-                if meshes.first_index_for_path(&mr.mesh_path).is_none() {
-                    paths_to_load.push(mr.mesh_path.clone());
-                }
-            }
-        }
-
-        // Load unique paths
-        paths_to_load.sort();
-        paths_to_load.dedup();
-        for path in &paths_to_load {
-            if let Err(e) = self.core.asset_manager.load_model_gpu(path) {
-                log::warn!("Failed to load mesh '{}': {}", path, e);
-            }
-        }
-
-        // Collect mesh paths that need material slot sync from sidecar.
-        // This includes newly loaded paths AND any resolved meshes whose
-        // material_paths are still empty (e.g. after re-import).
-        let mut needs_sidecar: Vec<String> = paths_to_load.clone();
-        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
-            if !mr.mesh_path.is_empty()
-                && !mr.mesh_path.starts_with("__primitive__/")
-                && mr.material_paths.iter().all(|p| p.is_empty())
-            {
-                needs_sidecar.push(mr.mesh_path.clone());
-            }
-        }
-        needs_sidecar.sort();
-        needs_sidecar.dedup();
-
-        // Load sidecar material slot info
-        let mut sidecar_slots: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        if let Some(content_root) = rust_engine::engine::assets::asset_source::content_root_path() {
-            for path in &needs_sidecar {
-                let mesh_fs_path = content_root.join(path);
-                if let Ok(meta) =
-                    rust_engine::engine::assets::mesh_import::load_mesh_sidecar(&mesh_fs_path)
-                {
-                    // Material paths in sidecar are relative to the mesh file's directory.
-                    // Convert them to content-relative paths.
-                    let mesh_dir = std::path::Path::new(path)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-                    let mat_paths: Vec<String> = meta
-                        .material_slots
-                        .iter()
-                        .map(|s| {
-                            if s.material_path.is_empty() {
-                                String::new()
-                            } else {
-                                mesh_dir
-                                    .join(&s.material_path)
-                                    .to_string_lossy()
-                                    .replace('\\', "/")
-                            }
-                        })
-                        .collect();
-                    if !mat_paths.is_empty() {
-                        sidecar_slots.insert(path.clone(), mat_paths);
-                    }
-                }
-            }
-        }
-
-        // Resolve indices and sync material slots
-        let meshes = self.core.asset_manager.meshes.read();
-        for (_entity, mr) in self
-            .core
-            .game_world
-            .hecs_mut()
-            .query_mut::<&mut MeshRenderer>()
-        {
-            if !mr.mesh_path.is_empty() {
-                if let Some(idx) = meshes.first_index_for_path(&mr.mesh_path) {
-                    mr.mesh_index = idx;
-                }
-                // Auto-adapt material_paths from sidecar when all slots are empty
-                if let Some(slots) = sidecar_slots.get(&mr.mesh_path) {
-                    let all_empty = mr.material_paths.iter().all(|p| p.is_empty());
-                    if all_empty || mr.material_paths.len() != slots.len() {
-                        mr.material_paths = slots.clone();
-                    }
-                }
-            }
+    fn material_gpu(&self) -> crate::asset_resolve::MaterialGpu {
+        use vulkano::pipeline::Pipeline;
+        crate::asset_resolve::MaterialGpu {
+            allocator: self.core.renderer.gpu.memory_allocator.clone(),
+            ds_allocator: self.core.renderer.gpu.descriptor_set_allocator.clone(),
+            cmd_allocator: self.core.renderer.gpu.command_buffer_allocator.clone(),
+            queue: self.core.renderer.gpu.queue.clone(),
+            device: self.core.renderer.gpu.device.clone(),
+            geom_layout: self
+                .core
+                .deferred_renderer
+                .geometry_pipeline()
+                .layout()
+                .clone(),
         }
     }
 
     /// Load `.material` / `.matinst` files referenced by MeshRenderers and cache their
     /// GPU descriptor sets so `prepare_mesh_data` can bind them.
     fn resolve_material_sets(&mut self) {
-        use rust_engine::engine::assets::mesh_import::load_material_ron;
-        use rust_engine::engine::ecs::components::MeshRenderer;
-        use rust_engine::engine::rendering::rendering_3d::material::{
-            create_default_texture_with_format, PbrMaterial, DEFAULT_AO_RGBA,
-            DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
-        };
-        use vulkano::format::Format;
-        use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
-        use vulkano::pipeline::Pipeline;
-
-        // Collect unique material paths that aren't cached yet
-        let mut uncached: Vec<String> = Vec::new();
-        for (_entity, mr) in self.core.game_world.hecs_mut().query_mut::<&MeshRenderer>() {
-            for mp in &mr.material_paths {
-                if !mp.is_empty() && !self.core.material_cache.contains_key(mp) {
-                    uncached.push(mp.clone());
-                }
-            }
-        }
-        uncached.sort();
-        uncached.dedup();
-
-        if uncached.is_empty() {
-            return;
-        }
-
-        let content_root = match rust_engine::engine::assets::asset_source::content_root_path() {
-            Some(r) => r,
-            None => return,
-        };
-
-        let geom_layout = self
-            .core
-            .deferred_renderer
-            .geometry_pipeline()
-            .layout()
-            .clone();
-        let allocator = self.core.renderer.gpu.memory_allocator.clone();
-        let ds_allocator = self.core.renderer.gpu.descriptor_set_allocator.clone();
-        let cmd_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
-        let queue = self.core.renderer.gpu.queue.clone();
-        let device = self.core.renderer.gpu.device.clone();
-
-        let sampler = match Sampler::new(
-            device,
-            SamplerCreateInfo {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
-                address_mode: [SamplerAddressMode::Repeat; 3],
-                ..Default::default()
-            },
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("Failed to create material sampler: {}", e);
-                return;
-            }
-        };
-
-        for mat_path in &uncached {
-            // `.matinst` assets resolve through the MaterialManager: the base
-            // material supplies the textures, the instance supplies factors.
-            let norm = mat_path.replace('\\', "/");
-            if norm.ends_with(".material.ron") || norm.ends_with(".matinst.ron") {
-                log::warn!(
-                    "Legacy '.ron'-suffixed material path: {} — rename via tools/migrate_asset_extensions",
-                    mat_path
-                );
-            }
-            let inst_def = if norm.ends_with(".matinst.ron") || norm.ends_with(".matinst") {
-                match MaterialInstanceDef::load(&content_root.join(mat_path)) {
-                    Ok(d) => Some(d),
-                    Err(e) => {
-                        log::warn!("Failed to load material instance '{}': {}", mat_path, e);
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-
-            // The file whose textures get loaded: the base material for instances.
-            let base_rel = inst_def
-                .as_ref()
-                .map(|d| d.base_material.clone())
-                .unwrap_or_else(|| mat_path.clone());
-
-            // Instance whose base is already registered: skip texture loading.
-            if let Some(inst) = &inst_def {
-                if let Some(&base_id) = self.core.material_base_ids.get(&base_rel) {
-                    self.cache_material_instance(
-                        mat_path,
-                        base_id,
-                        inst,
-                        &allocator,
-                        &ds_allocator,
-                        &geom_layout,
-                    );
-                    continue;
-                }
-            }
-
-            let mat_ron_path = content_root.join(&base_rel);
-            let mat_dir = mat_ron_path.parent().unwrap_or(&content_root);
-
-            let def = match load_material_ron(&mat_ron_path) {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!("Failed to load material '{}': {}", base_rel, e);
-                    continue;
-                }
-            };
-
-            // Helper: load a texture relative to the material file's directory,
-            // or return a 1×1 fallback.
-            let load_tex = |filename: &str,
-                            fallback: [u8; 4],
-                            format: Format|
-             -> Result<
-                Arc<vulkano::image::view::ImageView>,
-                Box<dyn std::error::Error>,
-            > {
-                if filename.is_empty() {
-                    return create_default_texture_with_format(
-                        allocator.clone(),
-                        cmd_allocator.clone(),
-                        queue.clone(),
-                        fallback,
-                        format,
-                    );
-                }
-                // Try to find the texture relative to the material file
-                let tex_path = mat_dir.join(filename);
-                if tex_path.exists() {
-                    // Convert to content-relative for TextureManager
-                    let content_relative = tex_path
-                        .strip_prefix(&content_root)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| filename.to_string());
-                    match self.core.asset_manager.textures.load(&content_relative) {
-                        Ok(handle) => Ok(handle.get_arc()),
-                        Err(e) => {
-                            log::warn!("Failed to load texture '{}': {}", content_relative, e);
-                            create_default_texture_with_format(
-                                allocator.clone(),
-                                cmd_allocator.clone(),
-                                queue.clone(),
-                                fallback,
-                                format,
-                            )
-                        }
-                    }
-                } else {
-                    log::warn!("Material texture not found: {}", tex_path.display());
-                    create_default_texture_with_format(
-                        allocator.clone(),
-                        cmd_allocator.clone(),
-                        queue.clone(),
-                        fallback,
-                        format,
-                    )
-                }
-            };
-
-            let albedo = match load_tex(
-                &def.albedo_texture,
-                [255, 255, 255, 255],
-                Format::R8G8B8A8_SRGB,
-            ) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let normal = match load_tex(
-                &def.normal_texture,
-                DEFAULT_NORMAL_RGBA,
-                Format::R8G8B8A8_UNORM,
-            ) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let mr = match load_tex(
-                &def.metallic_roughness_texture,
-                DEFAULT_METALLIC_ROUGHNESS_RGBA,
-                Format::R8G8B8A8_UNORM,
-            ) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let ao = match load_tex(&def.ao_texture, DEFAULT_AO_RGBA, Format::R8G8B8A8_UNORM) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if let Some(inst) = &inst_def {
-                let base_id = self.core.material_manager.register_base(
-                    albedo,
-                    normal,
-                    mr,
-                    ao,
-                    sampler.clone(),
-                );
-                self.core
-                    .material_base_ids
-                    .insert(base_rel.clone(), base_id);
-                self.cache_material_instance(
-                    mat_path,
-                    base_id,
-                    inst,
-                    &allocator,
-                    &ds_allocator,
-                    &geom_layout,
-                );
-                continue;
-            }
-
-            match PbrMaterial::new(
-                albedo,
-                normal,
-                mr,
-                ao,
-                sampler.clone(),
-                def.base_color_factor,
-                def.metallic_factor,
-                def.roughness_factor,
-                def.emissive_factor,
-                allocator.clone(),
-                ds_allocator.clone(),
-                geom_layout.clone(),
-            ) {
-                Ok(mat) => {
-                    println!("✅ Loaded material: {}", mat_path);
-                    self.core
-                        .material_cache
-                        .insert(mat_path.clone(), mat.descriptor_set);
-                }
-                Err(e) => {
-                    log::warn!("Failed to create PbrMaterial for '{}': {}", mat_path, e);
-                }
-            }
-        }
-    }
-
-    /// Create a `MaterialInstance` from a registered base and cache its
-    /// descriptor set under the instance's asset path.
-    fn cache_material_instance(
-        &mut self,
-        mat_path: &str,
-        base_id: MaterialBaseId,
-        def: &MaterialInstanceDef,
-        allocator: &Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
-        ds_allocator: &Arc<vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator>,
-        geom_layout: &Arc<vulkano::pipeline::PipelineLayout>,
-    ) {
-        match self.core.material_manager.create_instance(
-            base_id,
-            def.base_color_factor,
-            def.metallic_factor,
-            def.roughness_factor,
-            def.emissive_factor,
-            allocator.clone(),
-            ds_allocator.clone(),
-            geom_layout.clone(),
-        ) {
-            Ok(id) => {
-                if let Some(inst) = self.core.material_manager.get_instance(id) {
-                    self.core.matinst_ids.insert(mat_path.to_string(), id);
-                    self.core
-                        .material_cache
-                        .insert(mat_path.to_string(), inst.descriptor_set.clone());
-                    println!("✅ Loaded material instance: {}", mat_path);
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to create material instance '{}': {}", mat_path, e);
-            }
-        }
+        let gpu = self.material_gpu();
+        crate::asset_resolve::resolve_material_sets(
+            self.core.game_world.hecs_mut(),
+            &self.core.asset_manager,
+            &gpu,
+            &mut self.core.materials,
+        );
     }
 
     fn process_hot_reload(&mut self) {
@@ -1586,16 +1228,17 @@ impl App {
                     let matches_event = |key: &str| path.ends_with(&key.replace('\\', "/"));
                     let stale: Vec<String> = self
                         .core
+                        .materials
                         .matinst_ids
                         .keys()
                         .filter(|k| matches_event(k))
                         .cloned()
                         .collect();
                     for key in &stale {
-                        if let Some(id) = self.core.matinst_ids.remove(key) {
-                            self.core.material_manager.remove_instance(id);
+                        if let Some(id) = self.core.materials.matinst_ids.remove(key) {
+                            self.core.materials.manager.remove_instance(id);
                         }
-                        self.core.material_cache.remove(key);
+                        self.core.materials.cache.remove(key);
                     }
                     println!("Material instance changed: {}", path);
                     self.editor.console.messages.push(LogMessage::info(format!(
@@ -1984,7 +1627,7 @@ impl App {
             transform_cache,
             &self.core.skinning,
             self.core.deferred_renderer.default_material_set(),
-            &self.core.material_cache,
+            &self.core.materials.cache,
         );
         let light_data =
             render_loop::prepare_light_data(self.core.game_world.hecs(), &self.core.renderer);

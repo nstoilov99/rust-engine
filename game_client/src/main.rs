@@ -5,6 +5,7 @@
 
 #[cfg(feature = "editor")]
 mod app;
+mod asset_resolve;
 mod benchmark_runner;
 mod game_setup;
 mod input_handler;
