@@ -17,10 +17,12 @@ pub mod enter_world_reducer;
 pub mod entity_allocator_type;
 pub mod npc_table;
 pub mod npc_type;
+pub mod ping_reducer;
 pub mod ping_result_table;
 pub mod ping_result_type;
 pub mod player_table;
 pub mod player_type;
+pub mod submit_input_reducer;
 pub mod tick_timer_type;
 pub mod tombstone_table;
 pub mod tombstone_type;
@@ -36,10 +38,12 @@ pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
 pub use npc_table::*;
 pub use npc_type::Npc;
+pub use ping_reducer::ping;
 pub use ping_result_table::*;
 pub use ping_result_type::PingResult;
 pub use player_table::*;
 pub use player_type::Player;
+pub use submit_input_reducer::submit_input;
 pub use tick_timer_type::TickTimer;
 pub use tombstone_table::*;
 pub use tombstone_type::Tombstone;
@@ -52,8 +56,21 @@ pub use tombstone_type::Tombstone;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
-    DespawnNpc { entity_id: u64 },
+    DespawnNpc {
+        entity_id: u64,
+    },
     EnterWorld,
+    Ping {
+        nonce: u64,
+    },
+    SubmitInput {
+        epoch: u32,
+        seq: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        yaw: f32,
+    },
 }
 
 impl __sdk::InModule for Reducer {
@@ -65,6 +82,8 @@ impl __sdk::Reducer for Reducer {
         match self {
             Reducer::DespawnNpc { .. } => "despawn_npc",
             Reducer::EnterWorld => "enter_world",
+            Reducer::Ping { .. } => "ping",
+            Reducer::SubmitInput { .. } => "submit_input",
             _ => unreachable!(),
         }
     }
@@ -77,6 +96,24 @@ impl __sdk::Reducer for Reducer {
                 })
             }
             Reducer::EnterWorld => __sats::bsatn::to_vec(&enter_world_reducer::EnterWorldArgs {}),
+            Reducer::Ping { nonce } => __sats::bsatn::to_vec(&ping_reducer::PingArgs {
+                nonce: nonce.clone(),
+            }),
+            Reducer::SubmitInput {
+                epoch,
+                seq,
+                x,
+                y,
+                z,
+                yaw,
+            } => __sats::bsatn::to_vec(&submit_input_reducer::SubmitInputArgs {
+                epoch: epoch.clone(),
+                seq: seq.clone(),
+                x: x.clone(),
+                y: y.clone(),
+                z: z.clone(),
+                yaw: yaw.clone(),
+            }),
             _ => unreachable!(),
         }
     }

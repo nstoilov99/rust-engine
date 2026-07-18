@@ -11,4 +11,4 @@ pub mod module_bindings;
 
 mod client;
 
-pub use client::SpacetimeNetClient;
+pub use client::{local_time_us, SpacetimeNetClient};

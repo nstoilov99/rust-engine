@@ -47,10 +47,18 @@ pub struct WorldSnapshot {
 
 /// Client input sample, session-scoped (contract §5). Coalesced client-side
 /// and sent at `INPUT_SEND_HZ`, never per-frame.
+///
+/// M5 is trust-the-client: `pos` is the client's integrated position and the
+/// server accepts it after sanity checks (finite, per-input distance cap).
+/// M6 replaces this with server-authoritative movement + reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClientInput {
+    /// Stamped by the `NetClient` implementation at send time (it owns the
+    /// authoritative epoch from the own player row); caller values ignored.
     pub epoch: u32,
+    /// Stamped by the `NetClient` implementation at send time.
     pub seq: u32,
+    pub pos: [f32; 3],
     /// Desired movement direction on the XY ground plane (Z-up), unnormalized
     /// is legal; the server normalizes and rejects non-finite input.
     pub move_dir: [f32; 2],
@@ -59,11 +67,16 @@ pub struct ClientInput {
     pub jump: bool,
 }
 
-/// Clock sync sample completed by a ping round trip (plan D5).
+/// Completed clock sync sample (plan D5): the backend finishes the NTP-style
+/// ping round trip and reports the raw measurement; filtering (outlier
+/// rejection, EWMA) is game-side policy in `NetClock`.
+///
+/// `offset_us` is defined so that
+/// `estimated_server_time_us = local_time_us() + offset_us`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockSample {
-    pub nonce: u64,
-    pub server_time_us: u64,
+    pub offset_us: i64,
+    pub rtt_us: u64,
 }
 
 /// Address of one module instance. Part of the seam so zone→module routing

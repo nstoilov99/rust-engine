@@ -7,23 +7,34 @@
 //! `poll()`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use game_shared::net::protocol::{
-    ClientInput, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
+    ClientInput, ClockSample, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
 };
-use game_shared::net::schema::{version_compatible, PROTOCOL_VERSION};
+use game_shared::net::schema::{version_compatible, INPUT_SEND_HZ, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
 use spacetimedb_sdk::{credentials, DbContext, Table, TableWithPrimaryKey};
 
 use crate::module_bindings::{
-    enter_world, ConfigTableAccess, DbConnection, NpcTableAccess, PlayerTableAccess,
-    SubscriptionHandle, TombstoneTableAccess,
+    enter_world, ping, submit_input, ConfigTableAccess, DbConnection, Npc, NpcTableAccess,
+    PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle, TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
 const MAX_REDUCER_CALLS_PER_SEC: f32 = 30.0;
+
+/// Clock sync ping cadence (plan D5).
+const PING_INTERVAL_SECS: f32 = 2.0;
+
+/// Monotonic local timeline in microseconds. The backend stamps ping
+/// round-trips on it and `ClockSample.offset_us` is relative to it, so the
+/// game-side `NetClock` must use this same function.
+pub fn local_time_us() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
 
 #[derive(Default)]
 struct Flags {
@@ -38,6 +49,11 @@ struct Flags {
     auth_rejected: AtomicBool,
     /// Tombstone evidence observed by row callbacks (contract §3.2).
     tombstones: Mutex<Vec<(u64, u32)>>,
+    /// Interpolation samples queued by player/NPC row callbacks (plan D6);
+    /// drained after the snapshot so samples never precede proxy creation.
+    samples: Mutex<Vec<EntityState>>,
+    /// Completed ping rows: (nonce, server_time_us, recv_local_us).
+    pongs: Mutex<Vec<(u64, u64, u64)>>,
     /// Last transport/subscription error message, if any.
     error: Mutex<Option<String>>,
 }
@@ -60,6 +76,18 @@ impl Flags {
     fn push_tombstone(&self, entity_id: u64, generation: u32) {
         if let Ok(mut ts) = self.tombstones.lock() {
             ts.push((entity_id, generation));
+        }
+    }
+
+    fn push_sample(&self, state: EntityState) {
+        if let Ok(mut s) = self.samples.lock() {
+            s.push(state);
+        }
+    }
+
+    fn push_pong(&self, nonce: u64, server_time_us: u64) {
+        if let Ok(mut p) = self.pongs.lock() {
+            p.push((nonce, server_time_us, local_time_us()));
         }
     }
 }
@@ -100,6 +128,21 @@ pub struct SpacetimeNetClient {
     pending: Vec<NetEvent>,
     limiter: RateLimiter,
     enter_world_sent: bool,
+    /// Latest coalesced input (contract §5: never per-frame; sent at
+    /// `INPUT_SEND_HZ` from `poll`).
+    pending_input: Option<ClientInput>,
+    /// Epoch the sequence counter belongs to; a row epoch change restarts
+    /// the sequence space (contract §5).
+    input_epoch: u32,
+    input_seq: u32,
+    last_input_send: Option<Instant>,
+    /// Last (epoch, seq) acked via the own row — replication IS the ack.
+    last_acked: (u32, u32),
+    last_ping: Option<Instant>,
+    ping_nonce: u64,
+    /// In-flight ping: (nonce, send_local_us). One at a time; a new ping
+    /// abandons an unanswered one (stale pongs are nonce-rejected).
+    pending_ping: Option<(u64, u64)>,
     /// Credentials file key of the current connection (token cleanup).
     credentials_key: Option<String>,
     /// Extra key suffix so multiple local instances get distinct identities.
@@ -119,6 +162,14 @@ impl SpacetimeNetClient {
             pending: Vec::new(),
             limiter: RateLimiter::new(),
             enter_world_sent: false,
+            pending_input: None,
+            input_epoch: 0,
+            input_seq: 0,
+            last_input_send: None,
+            last_acked: (0, 0),
+            last_ping: None,
+            ping_nonce: 0,
+            pending_ping: None,
             credentials_key: None,
             net_id: None,
             client_version: PROTOCOL_VERSION,
@@ -167,6 +218,13 @@ impl SpacetimeNetClient {
         self.base_sub = None;
         self.repl_sub = None;
         self.enter_world_sent = false;
+        self.pending_input = None;
+        self.input_epoch = 0;
+        self.input_seq = 0;
+        self.last_input_send = None;
+        self.last_acked = (0, 0);
+        self.last_ping = None;
+        self.pending_ping = None;
         if let Some(conn) = self.conn.take() {
             conn.disconnect().ok();
         }
@@ -234,21 +292,28 @@ impl SpacetimeNetClient {
         self.repl_sub = Some(handle);
     }
 
-    /// Row callbacks only mark dirty / record tombstone evidence; all
-    /// spawn/despawn decisions belong to the cache-diff (plan D3).
+    /// Row callbacks mark dirty / record tombstone evidence / queue
+    /// interpolation samples; all spawn/despawn decisions still belong to
+    /// the cache-diff (plan D3).
     fn register_row_callbacks(conn: &DbConnection, flags: &Arc<Flags>) {
-        macro_rules! dirty_on {
-            ($table:expr) => {{
+        macro_rules! sample_on {
+            ($table:expr, $to_state:expr) => {{
                 let f = flags.clone();
-                $table.on_insert(move |_, _| f.mark_dirty());
+                $table.on_insert(move |_, row| {
+                    f.push_sample($to_state(row));
+                    f.mark_dirty();
+                });
                 let f = flags.clone();
-                $table.on_update(move |_, _, _| f.mark_dirty());
+                $table.on_update(move |_, _, row| {
+                    f.push_sample($to_state(row));
+                    f.mark_dirty();
+                });
                 let f = flags.clone();
                 $table.on_delete(move |_, _| f.mark_dirty());
             }};
         }
-        dirty_on!(conn.db.player());
-        dirty_on!(conn.db.npc());
+        sample_on!(conn.db.player(), Self::player_state);
+        sample_on!(conn.db.npc(), Self::npc_state);
         let f = flags.clone();
         conn.db.tombstone().on_insert(move |_, row| {
             f.push_tombstone(row.entity_id, row.generation);
@@ -257,6 +322,40 @@ impl SpacetimeNetClient {
         conn.db.tombstone().on_update(move |_, _, row| {
             f.push_tombstone(row.entity_id, row.generation);
         });
+        let f = flags.clone();
+        conn.db.ping_result().on_insert(move |_, row| {
+            f.push_pong(row.nonce, row.server_time_micros.max(0) as u64);
+        });
+        let f = flags.clone();
+        conn.db.ping_result().on_update(move |_, _, row| {
+            f.push_pong(row.nonce, row.server_time_micros.max(0) as u64);
+        });
+    }
+
+    fn player_state(p: &Player) -> EntityState {
+        EntityState {
+            entity_id: p.entity_id,
+            generation: p.generation,
+            kind: EntityKind::Player,
+            pos: [p.x, p.y, p.z],
+            vel: [p.vx, p.vy, p.vz],
+            yaw: p.yaw,
+            zone_id: p.zone_id,
+            server_time_us: p.last_update_micros.max(0) as u64,
+        }
+    }
+
+    fn npc_state(n: &Npc) -> EntityState {
+        EntityState {
+            entity_id: n.entity_id,
+            generation: n.generation,
+            kind: EntityKind::Npc,
+            pos: [n.x, n.y, n.z],
+            vel: [0.0; 3],
+            yaw: n.yaw,
+            zone_id: n.zone_id,
+            server_time_us: n.last_update_micros.max(0) as u64,
+        }
     }
 
     fn build_snapshot(conn: &DbConnection) -> WorldSnapshot {
@@ -267,28 +366,10 @@ impl SpacetimeNetClient {
             if own_identity == Some(p.owner_identity) {
                 own_entity_id = Some(p.entity_id);
             }
-            entities.push(EntityState {
-                entity_id: p.entity_id,
-                generation: p.generation,
-                kind: EntityKind::Player,
-                pos: [p.x, p.y, p.z],
-                vel: [p.vx, p.vy, p.vz],
-                yaw: p.yaw,
-                zone_id: p.zone_id,
-                server_time_us: p.last_update_micros.max(0) as u64,
-            });
+            entities.push(Self::player_state(&p));
         }
         for n in conn.db.npc().iter() {
-            entities.push(EntityState {
-                entity_id: n.entity_id,
-                generation: n.generation,
-                kind: EntityKind::Npc,
-                pos: [n.x, n.y, n.z],
-                vel: [0.0; 3],
-                yaw: n.yaw,
-                zone_id: n.zone_id,
-                server_time_us: n.last_update_micros.max(0) as u64,
-            });
+            entities.push(Self::npc_state(&n));
         }
         WorldSnapshot {
             entities,
@@ -382,15 +463,12 @@ impl NetClient for SpacetimeNetClient {
         self.state
     }
 
-    fn send_input(&mut self, _input: &ClientInput) {
-        if self.state != ConnectionState::InWorld {
-            return;
+    fn send_input(&mut self, input: &ClientInput) {
+        // Coalesce: keep only the latest sample; `poll` sends at
+        // `INPUT_SEND_HZ` with epoch/seq stamped from authoritative state.
+        if self.state == ConnectionState::InWorld {
+            self.pending_input = Some(*input);
         }
-        if !self.limiter.allow() {
-            return;
-        }
-        // The input reducer lands in Package 4; until then this is only the
-        // gate (state + rate limit) that all reducer calls will pass through.
     }
 
     fn poll(&mut self, out: &mut Vec<NetEvent>) {
@@ -503,18 +581,96 @@ impl NetClient for SpacetimeNetClient {
                 // Session revocation (contract §4.3): our own row's session
                 // no longer names this connection → another connection of
                 // the same identity took over.
-                if let (Some(identity), Some(my_conn)) =
-                    (conn.try_identity(), conn.try_connection_id())
-                {
-                    if let Some(own) = conn.db.player().owner_identity().find(&identity) {
-                        if own.session != Some(my_conn) {
-                            self.fail(out, DisconnectReason::SessionReplaced);
-                            return;
-                        }
+                let own = conn
+                    .try_identity()
+                    .and_then(|id| conn.db.player().owner_identity().find(&id));
+                if let (Some(own), Some(my_conn)) = (&own, conn.try_connection_id()) {
+                    if own.session != Some(my_conn) {
+                        self.fail(out, DisconnectReason::SessionReplaced);
+                        return;
                     }
                 }
+
+                // Snapshot before samples so a sample can never reach the
+                // game before the proxy it belongs to exists (plan D6).
                 if self.flags.cache_dirty.swap(false, Ordering::AcqRel) {
                     out.push(NetEvent::Snapshot(Self::build_snapshot(conn)));
+                }
+                if let Ok(mut samples) = self.flags.samples.lock() {
+                    for state in samples.drain(..) {
+                        out.push(NetEvent::StateUpdate(state));
+                    }
+                }
+
+                if let Some(own) = &own {
+                    // Row epoch change (rejoin) restarts the sequence space
+                    // (contract §5).
+                    if own.epoch != self.input_epoch {
+                        self.input_epoch = own.epoch;
+                        self.input_seq = 0;
+                    }
+                    // Replication of (epoch, last_input_seq) IS the ack.
+                    let acked = (own.epoch, own.last_input_seq);
+                    if own.last_input_seq > 0 && acked != self.last_acked {
+                        self.last_acked = acked;
+                        out.push(NetEvent::InputAck {
+                            epoch: acked.0,
+                            seq: acked.1,
+                        });
+                    }
+                }
+
+                // Coalesced input send at INPUT_SEND_HZ. A failed call is
+                // dropped, never retried (contract §5) — the next sample
+                // carries fresher state anyway.
+                let input_due = self
+                    .last_input_send
+                    .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0 / INPUT_SEND_HZ as f32);
+                if input_due && own.is_some() && self.pending_input.is_some() && self.limiter.allow()
+                {
+                    let input = self.pending_input.take().expect("checked above");
+                    self.input_seq += 1;
+                    let _ = conn.reducers.submit_input(
+                        self.input_epoch,
+                        self.input_seq,
+                        input.pos[0],
+                        input.pos[1],
+                        input.pos[2],
+                        input.yaw,
+                    );
+                    self.last_input_send = Some(Instant::now());
+                }
+
+                // Clock sync ping (plan D5): one in flight; a new ping
+                // abandons an unanswered one.
+                let ping_due = self
+                    .last_ping
+                    .is_none_or(|t| t.elapsed().as_secs_f32() >= PING_INTERVAL_SECS);
+                if ping_due && self.limiter.allow() {
+                    self.ping_nonce += 1;
+                    if conn.reducers.ping(self.ping_nonce).is_ok() {
+                        self.pending_ping = Some((self.ping_nonce, local_time_us()));
+                    }
+                    self.last_ping = Some(Instant::now());
+                }
+                let pongs: Vec<(u64, u64, u64)> = self
+                    .flags
+                    .pongs
+                    .lock()
+                    .map(|mut p| p.drain(..).collect())
+                    .unwrap_or_default();
+                for (nonce, server_us, recv_us) in pongs {
+                    let Some((sent_nonce, send_us)) = self.pending_ping else {
+                        continue;
+                    };
+                    if nonce != sent_nonce || recv_us < send_us {
+                        continue; // stale/foreign pong
+                    }
+                    self.pending_ping = None;
+                    out.push(NetEvent::ClockSample(ClockSample {
+                        offset_us: server_us as i64 - ((send_us + recv_us) / 2) as i64,
+                        rtt_us: recv_us - send_us,
+                    }));
                 }
             }
             _ => {}

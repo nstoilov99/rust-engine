@@ -1129,7 +1129,7 @@ impl App {
 
         self.process_hot_reload();
         if let Some(net) = &mut self.net {
-            net.update(self.core.game_world.hecs_mut());
+            net.update(&mut self.core.game_world);
         }
         self.update_world_streaming();
         self.resolve_mesh_paths();

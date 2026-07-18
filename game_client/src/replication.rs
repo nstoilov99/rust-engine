@@ -7,9 +7,12 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::interp::InterpBuffer;
 use game_shared::components::NetProxy;
-use game_shared::net::protocol::{EntityKind, EntityState, WorldSnapshot};
-use game_shared::net::schema::{derive_proxy_guid, REALM_ID, TOMBSTONE_TTL_SECS};
+use game_shared::net::protocol::{ClientInput, EntityKind, EntityState, WorldSnapshot};
+use game_shared::net::schema::{
+    derive_proxy_guid, PLAYER_SPEED_MPS, REALM_ID, SPRINT_MULTIPLIER, TOMBSTONE_TTL_SECS,
+};
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::engine::ecs::components::{EntityGuid, MeshRenderer, Name, Transform};
@@ -127,17 +130,90 @@ pub fn diff_snapshot(
     ops
 }
 
-/// Replication state: owns every proxy and the local-player binding.
+/// Replication state: owns every proxy, its interpolation buffer, and the
+/// local-player binding.
 #[derive(Default)]
 pub struct Replication {
     pub index: NetIndex,
     pub evidence: TombstoneEvidence,
     local_player: Option<hecs::Entity>,
+    own_entity_id: Option<u64>,
+    buffers: HashMap<(u64, u32), InterpBuffer>,
 }
 
 impl Replication {
     pub fn record_tombstone(&mut self, entity_id: u64, generation: u32) {
         self.evidence.record(entity_id, generation, Instant::now());
+    }
+
+    /// Queue an authoritative sample for interpolation (plan D6). Own-row
+    /// samples are ignored (the local entity is client-driven in M5), as are
+    /// samples for incarnations the diff hasn't spawned (snapshots are
+    /// always emitted before samples).
+    pub fn push_sample(&mut self, s: &EntityState) {
+        if Some(s.entity_id) == self.own_entity_id {
+            return;
+        }
+        if let Some(buf) = self.buffers.get_mut(&(s.entity_id, s.generation)) {
+            buf.push(s.server_time_us, s.pos, s.yaw);
+        }
+    }
+
+    /// Write interpolated transforms for every proxy. `render_time_us` is
+    /// estimated server time minus the interpolation delay; `None` (clock
+    /// not yet synced) snaps to the newest sample instead.
+    pub fn interpolate(&mut self, world: &mut World, render_time_us: Option<u64>) {
+        for ((id, generation), buf) in &mut self.buffers {
+            let Some(entity) = self.index.get(*id, *generation) else {
+                continue;
+            };
+            let evaluated = match render_time_us {
+                Some(t) => buf.sample(t),
+                None => buf.latest(),
+            };
+            if let Some((pos, yaw)) = evaluated {
+                write_pose(world, entity, pos, yaw);
+            }
+        }
+    }
+
+    /// M5 trust-the-client local movement: integrate the desired direction
+    /// directly on the bound entity and report the pose for `send_input`.
+    /// Deliberately minimal (no physics, no camera); M6 replaces this with
+    /// server-authoritative movement + reconciliation.
+    pub fn drive_local_player(
+        &mut self,
+        world: &mut World,
+        move_dir: [f32; 2],
+        sprint: bool,
+        dt: f32,
+    ) -> Option<ClientInput> {
+        let entity = self.local_player?;
+        let (pos, yaw) = {
+            let mut t = world.get::<&mut Transform>(entity).ok()?;
+            let len = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1]).sqrt();
+            let yaw = if len > 1e-3 {
+                let speed = PLAYER_SPEED_MPS * if sprint { SPRINT_MULTIPLIER } else { 1.0 };
+                t.position.x += move_dir[0] / len * speed * dt;
+                t.position.y += move_dir[1] / len * speed * dt;
+                let yaw = move_dir[1].atan2(move_dir[0]);
+                t.rotation = glm::quat_angle_axis(yaw, &glm::vec3(0.0, 0.0, 1.0));
+                yaw
+            } else {
+                glm::quat_euler_angles(&t.rotation).z
+            };
+            ([t.position.x, t.position.y, t.position.z], yaw)
+        };
+        rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, entity);
+        Some(ClientInput {
+            epoch: 0, // stamped by the backend at send time
+            seq: 0,
+            pos,
+            move_dir,
+            yaw,
+            sprint,
+            jump: false,
+        })
     }
 
     pub fn apply_snapshot(&mut self, world: &mut World, snapshot: &WorldSnapshot) {
@@ -148,16 +224,15 @@ impl Replication {
         for op in diff_snapshot(&live, snapshot, &self.evidence) {
             match op {
                 DiffOp::Spawn(s) => self.spawn_proxy(world, &s),
-                DiffOp::Update(s) => {
-                    if let Some(e) = self.index.get(s.entity_id, s.generation) {
-                        write_transform(world, e, &s);
-                    }
-                }
+                // Motion flows through the interpolation buffer; the buffer
+                // dedupes states that also arrived as `StateUpdate` events.
+                DiffOp::Update(s) => self.push_sample(&s),
                 DiffOp::Despawn {
                     entity_id,
                     generation,
                     destroyed,
                 } => {
+                    self.buffers.remove(&(entity_id, generation));
                     if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
                         let _ = world.despawn(e);
                         let kind = if destroyed { "destroyed" } else { "out of scope" };
@@ -168,6 +243,7 @@ impl Replication {
                     old_generation,
                     state,
                 } => {
+                    self.buffers.remove(&(state.entity_id, old_generation));
                     if let Some(e) = self.index.map.remove(&(state.entity_id, old_generation)) {
                         let _ = world.despawn(e);
                     }
@@ -187,6 +263,7 @@ impl Replication {
         let Some(row) = snapshot.entities.iter().find(|s| s.entity_id == own_id) else {
             return;
         };
+        self.own_entity_id = Some(own_id);
 
         match self.local_player {
             None => {
@@ -205,13 +282,14 @@ impl Replication {
                 println!("net: local player bound to entity {own_id}");
             }
             Some(entity) => {
-                // Generation bump (respawn) re-keys the binding and snaps.
-                self.index.map.retain(|k, v| !(k.0 == own_id && *v == entity));
-                self.index.map.insert((row.entity_id, row.generation), entity);
-                // M5 is trust-the-client, but until the input pipeline
-                // (Package 4) drives this entity, the server row is the
-                // only position source — snap to it.
-                write_transform(world, entity, row);
+                // The entity is client-driven (trust-the-client): routine
+                // snapshots must NOT touch it. Only a generation bump
+                // (respawn) re-keys the binding and snaps.
+                if self.index.get(row.entity_id, row.generation) != Some(entity) {
+                    self.index.map.retain(|k, v| !(k.0 == own_id && *v == entity));
+                    self.index.map.insert((row.entity_id, row.generation), entity);
+                    write_transform(world, entity, row);
+                }
             }
         }
     }
@@ -236,6 +314,10 @@ impl Replication {
             },
         ));
         self.index.map.insert((s.entity_id, s.generation), entity);
+        // Spawn pose is the first sample, so interpolation starts anchored.
+        let mut buf = InterpBuffer::default();
+        buf.push(s.server_time_us, s.pos, s.yaw);
+        self.buffers.insert((s.entity_id, s.generation), buf);
         println!("net: spawn {label} {} gen {}", s.entity_id, s.generation);
     }
 }
@@ -246,9 +328,13 @@ fn transform_from(s: &EntityState) -> Transform {
 }
 
 fn write_transform(world: &mut World, entity: hecs::Entity, s: &EntityState) {
+    write_pose(world, entity, s.pos, s.yaw);
+}
+
+fn write_pose(world: &mut World, entity: hecs::Entity, pos: [f32; 3], yaw: f32) {
     if let Ok(mut t) = world.get::<&mut Transform>(entity) {
-        t.position = glm::vec3(s.pos[0], s.pos[1], s.pos[2]);
-        t.rotation = glm::quat_angle_axis(s.yaw, &glm::vec3(0.0, 0.0, 1.0));
+        t.position = glm::vec3(pos[0], pos[1], pos[2]);
+        t.rotation = glm::quat_angle_axis(yaw, &glm::vec3(0.0, 0.0, 1.0));
     } else {
         return;
     }

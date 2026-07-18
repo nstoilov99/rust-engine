@@ -7,11 +7,15 @@
 //! These tables ARE the save system — player rows are never deleted on
 //! disconnect.
 
-use game_shared::net::schema::{PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
+use game_shared::net::schema::{
+    accept_input, MAX_INPUT_STEP_M, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS,
+};
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 use std::time::Duration;
 
-const TICK_INTERVAL_MS: u64 = 250;
+/// 10 Hz: NPC sample spacing must stay well under the client's ~150 ms
+/// interpolation delay or remote motion stalls between samples.
+const TICK_INTERVAL_MS: u64 = 100;
 
 /// Dev spawn point (Z-up, meters). The world manifest is runtime-loaded RON
 /// the WASM module cannot read; a manifest-driven spawn is deferred.
@@ -281,6 +285,79 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
                 last_update_micros: now_micros(ctx),
             });
         }
+    }
+    Ok(())
+}
+
+/// Contract §5 + §4.4: session-scoped input. Anything not acceptable is
+/// dropped silently — never an error (stale/duplicate/wrong-epoch input is
+/// normal during reconnect churn).
+///
+/// M5 trust-the-client movement: the client's position is accepted after
+/// sanity checks. Isolated here on purpose — M6 replaces this body with
+/// server-authoritative integration.
+#[reducer]
+pub fn submit_input(
+    ctx: &ReducerContext,
+    epoch: u32,
+    seq: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+) -> Result<(), String> {
+    let Some(mut p) = ctx.db.player().owner_identity().find(ctx.sender()) else {
+        return Ok(());
+    };
+    // §4.4: only the active session may act.
+    if p.session.is_none() || p.session != ctx.connection_id() {
+        return Ok(());
+    }
+    if !accept_input(p.epoch, p.last_input_seq, epoch, seq) {
+        return Ok(());
+    }
+    if ![x, y, z, yaw].iter().all(|v| v.is_finite()) {
+        return Ok(());
+    }
+    // Anti-teleport sanity: clamp (never drop) the step so a lag spike can't
+    // deadlock the row behind the cap — the row converges at cap × send rate.
+    let (mut dx, mut dy, mut dz) = (x - p.x, y - p.y, z - p.z);
+    let dist_sq = dx * dx + dy * dy + dz * dz;
+    if dist_sq > MAX_INPUT_STEP_M * MAX_INPUT_STEP_M {
+        let scale = MAX_INPUT_STEP_M / dist_sq.sqrt();
+        dx *= scale;
+        dy *= scale;
+        dz *= scale;
+    }
+
+    let now = now_micros(ctx);
+    let dt = ((now - p.last_update_micros).max(1) as f32) / 1_000_000.0;
+    p.vx = dx / dt;
+    p.vy = dy / dt;
+    p.vz = dz / dt;
+    p.x += dx;
+    p.y += dy;
+    p.z += dz;
+    p.yaw = yaw;
+    p.last_input_seq = seq;
+    p.last_update_micros = now;
+    ctx.db.player().entity_id().update(p);
+    Ok(())
+}
+
+/// Plan D5: upsert the caller's ping row; the client completes the
+/// NTP-style sample from the row update's arrival time.
+#[reducer]
+pub fn ping(ctx: &ReducerContext, nonce: u64) -> Result<(), String> {
+    let row = PingResult {
+        identity: ctx.sender(),
+        nonce,
+        server_time_micros: now_micros(ctx),
+    };
+    if ctx.db.ping_result().identity().find(ctx.sender()).is_some() {
+        ctx.db.ping_result().identity().update(row);
+    } else {
+        ctx.db.ping_result().insert(row);
     }
     Ok(())
 }

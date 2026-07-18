@@ -363,7 +363,7 @@ impl StandaloneApp {
 
     pub fn update(&mut self) {
         if let Some(net) = &mut self.net {
-            net.update(self.game_world.hecs_mut());
+            net.update(&mut self.game_world);
             let status = net.status_line();
             if status != self.net_title_status {
                 self.window.set_title(&format!("Rust Game Engine — {status}"));
