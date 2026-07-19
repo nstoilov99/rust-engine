@@ -112,7 +112,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M2 Collision Pipeline v1 (cooked chunks): **complete** (see `docs/roadmap/VULKANO-M2-COLLISION-PIPELINE.md`)
 - M3 Greybox World v1 (`tools/greybox_gen`, deterministic; generated content checked in): **complete** (see `docs/roadmap/VULKANO-M3-GREYBOX-WORLD.md`)
 - M4 Zone & Chunk Lifecycle (WorldStreamer: budgeted cell/chunk streaming, GUID-stable reload): **complete** (see `docs/roadmap/VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md`)
-- Next: Multiplayer Foundation arc M1/M5–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
+- M5 Net-A (SpacetimeDB connection, identity, replication, zone-scoped subscriptions): **complete** (see `docs/roadmap/VULKANO-M5-NET-A-CONNECTION-IDENTITY.md`)
+- Next: M6 Net-B server-authoritative movement, then M7–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
 
 ## Patched Dependencies
 
