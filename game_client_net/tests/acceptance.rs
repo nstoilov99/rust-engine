@@ -629,6 +629,86 @@ fn forged_inputs_do_not_move() {
     a.leave();
 }
 
+/// M8 D4: an idle player population must produce ~zero replication
+/// deliveries. Two bots park in the far corner of the world (cell (-4,-4),
+/// out of both rings of the spawn area) with only each other in scope; the
+/// NPCs are killed for the window (dead rows write nothing, coarse rows are
+/// deleted). Once gravity grounds the bot rows, the changed-only guards stop
+/// all writes, so no dirty frames → no snapshots. A per-tick echo regression
+/// would show up as ~20 Hz snapshots here.
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn idle_players_produce_no_deliveries() {
+    let mut a = Bot::enter("acc-idle-a");
+    let mut b = Bot::enter("acc-idle-b");
+    // Drop from above the terrain (surface is ~8±8 m; z=30 clears it
+    // everywhere) so the rows ground instead of tunnelling and falling
+    // forever.
+    a.teleport_and_settle([-250.0, -250.0, 30.0]);
+    b.teleport_and_settle([-248.0, -250.0, 30.0]);
+    // Rows persist across runs, so the pre-teleport row can already sit at
+    // the target XY: first confirm the drop row (z ≈ 30) was seen, then wait
+    // for the fall to finish (teleport rows have zero velocity too, hence
+    // the z bound rather than a velocity-only check).
+    for bot in [&mut a, &mut b] {
+        bot.wait("drop row airborne", |b| {
+            let own = b.own_id();
+            b.entity(own).is_some_and(|e| e.pos[2] > 25.0)
+        });
+        bot.wait("own row grounded", |b| {
+            let own = b.own_id();
+            b.entity(own)
+                .is_some_and(|e| e.vel == [0.0; 3] && e.pos[2] < 25.0)
+        });
+    }
+
+    // Kill the NPC population: their wander (and its coarse trickle into
+    // this corner's far ring) is legitimate traffic that would pollute the
+    // idle measurement. Window must end inside RESPAWN_SECS (5 s).
+    let mut k = Bot::enter("acc-idle-k");
+    k.teleport_and_settle([1.0, 1.0, 9.0]);
+    // The near ring from cell (0,0) covers the whole wander disc and the
+    // subscription set applies atomically, so one visible NPC means the
+    // full population is in view (a dev-despawn test may have shrunk it
+    // below the seed count).
+    k.wait("NPC population in scope", |k| {
+        k.latest()
+            .entities
+            .iter()
+            .any(|e| e.kind == EntityKind::Npc && e.alive)
+    });
+    let npcs: Vec<u64> = k
+        .latest()
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Npc && e.alive)
+        .map(|e| e.entity_id)
+        .collect();
+    for &id in &npcs {
+        k.client.dev_damage(id, 1000.0);
+    }
+    k.wait("all NPCs dead", |k| {
+        npcs.iter()
+            .all(|&id| k.entity(id).is_none_or(|e| !e.alive))
+    });
+
+    // Drain in-flight deliveries, then measure a quiet window.
+    a.settle_secs(0.5);
+    b.settle_secs(0.5);
+    let (base_a, base_b) = (a.snapshots.len(), b.snapshots.len());
+    a.settle_secs(1.5);
+    b.settle_secs(1.5);
+    a.pump();
+    b.pump();
+    // ≤1 slop: a single straggling write may cross the baseline edge.
+    let (da, db) = (a.snapshots.len() - base_a, b.snapshots.len() - base_b);
+    assert!(da <= 1, "idle window produced {da} snapshots for bot a");
+    assert!(db <= 1, "idle window produced {db} snapshots for bot b");
+    a.leave();
+    b.leave();
+    k.leave();
+}
+
 /// M8 D3: tier hand-off. A parked row two cells away is coarse-only (far
 /// ring); moving next to it promotes it to the full tier; moving away
 /// demotes it back; killing it in the far ring deletes its coarse row, so

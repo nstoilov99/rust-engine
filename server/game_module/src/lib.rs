@@ -310,6 +310,20 @@ pub struct Tombstone {
     despawned_at_micros: i64,
 }
 
+/// M8 D4: per-table cumulative row-write counters for the load harness.
+/// Deliberately NOT `public`-visible to ordinary clients (owner-only): a
+/// counter in `config` would broadcast a write to the whole population each
+/// tick, defeating the idle-delivery goal it measures.
+#[table(accessor = metrics)]
+pub struct Metrics {
+    #[primary_key]
+    id: u32, // always 0
+    player_rows_written: u64,
+    npc_rows_written: u64,
+    projectile_rows_written: u64,
+    coarse_rows_written: u64,
+}
+
 /// Coarse server time base, updated by the scheduled tick (plan D5).
 #[table(accessor = clock, public)]
 pub struct Clock {
@@ -691,6 +705,7 @@ fn write_coarse(
 
 /// Movement-path coarse upsert under the D3 write policy: cell change or
 /// ≥ `COARSE_MOVE_M` moved, hard-capped at one write per entity per second.
+/// Returns whether a row was written (D4 metrics).
 fn maybe_coarse(
     ctx: &ReducerContext,
     entity_id: u64,
@@ -700,18 +715,46 @@ fn maybe_coarse(
     y: f32,
     z: f32,
     now: i64,
-) {
+) -> bool {
     let Some(c) = ctx.db.entity_coarse().entity_id().find(entity_id) else {
-        return write_coarse(ctx, entity_id, generation, kind, x, y, z, now);
+        write_coarse(ctx, entity_id, generation, kind, x, y, z, now);
+        return true;
     };
     if now - c.updated_micros < COARSE_MIN_INTERVAL_MICROS {
-        return;
+        return false;
     }
     let moved2 = (x - c.x).powi(2) + (y - c.y).powi(2) + (z - c.z).powi(2);
     if c.cell_id == cell_id_from_position(x, y) && moved2 < COARSE_MOVE_M * COARSE_MOVE_M {
-        return;
+        return false;
     }
     write_coarse(ctx, entity_id, generation, kind, x, y, z, now);
+    true
+}
+
+/// M8 D4: cumulative per-table row-write counters for the load harness.
+/// Written only on change, so an idle population costs zero metric writes.
+fn bump_metrics(ctx: &ReducerContext, player: u64, npc: u64, projectile: u64, coarse: u64) {
+    if player + npc + projectile + coarse == 0 {
+        return;
+    }
+    match ctx.db.metrics().id().find(0) {
+        Some(mut m) => {
+            m.player_rows_written += player;
+            m.npc_rows_written += npc;
+            m.projectile_rows_written += projectile;
+            m.coarse_rows_written += coarse;
+            ctx.db.metrics().id().update(m);
+        }
+        None => {
+            ctx.db.metrics().insert(Metrics {
+                id: 0,
+                player_rows_written: player,
+                npc_rows_written: npc,
+                projectile_rows_written: projectile,
+                coarse_rows_written: coarse,
+            });
+        }
+    }
 }
 
 fn upsert_tombstone(ctx: &ReducerContext, entity_id: u64, generation: u32, now: i64) {
@@ -1147,6 +1190,8 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         seed_npcs(ctx, now);
     } else {
         let dt = TICK_INTERVAL_MS as f32 / 1000.0;
+        let mut npc_writes = 0u64;
+        let mut coarse_writes = 0u64;
         for mut n in npcs {
             if !n.alive {
                 if now >= n.respawn_at_micros {
@@ -1173,6 +1218,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                 continue;
             }
             // Per-entity heading drift; steer home outside the radius.
+            let before = (n.x, n.y, n.yaw);
             n.yaw += dt * (0.3 + 0.15 * ((n.entity_id % 5) as f32));
             let dx = n.x - SPAWN_POINT[0];
             let dy = n.y - SPAWN_POINT[1];
@@ -1182,11 +1228,20 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             n.yaw = n.yaw.rem_euclid(std::f32::consts::TAU);
             n.x += n.yaw.cos() * NPC_SPEED_MPS * dt;
             n.y += n.yaw.sin() * NPC_SPEED_MPS * dt;
+            // M8 D4: changed-only guard (insurance — wander moves every
+            // tick today, so NPC write load is activity-bound by design).
+            if (n.x, n.y, n.yaw) == before {
+                continue;
+            }
             n.cell_id = cell_id_from_position(n.x, n.y);
             n.last_update_micros = now;
-            maybe_coarse(ctx, n.entity_id, n.generation, COARSE_KIND_NPC, n.x, n.y, n.z, now);
+            if maybe_coarse(ctx, n.entity_id, n.generation, COARSE_KIND_NPC, n.x, n.y, n.z, now) {
+                coarse_writes += 1;
+            }
             ctx.db.npc().entity_id().update(n);
+            npc_writes += 1;
         }
+        bump_metrics(ctx, 0, npc_writes, 0, coarse_writes);
     }
     Ok(())
 }
@@ -1217,6 +1272,9 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
     // there (no in-module clock). Only ticks that simulate someone are timed.
     let _watch = (!players.is_empty())
         .then(|| spacetimedb::log_stopwatch::LogStopwatch::new("move_tick"));
+    let mut player_writes = 0u64;
+    let mut projectile_writes = 0u64;
+    let mut coarse_writes = 0u64;
     for mut p in players {
         // M7 D5: dead rows are inert (no gravity for corpses) until the
         // respawn timer fires.
@@ -1303,7 +1361,7 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             p.grounded = state.grounded;
             p.cell_id = cell_id_from_position(p.x, p.y);
             p.last_update_micros = now;
-            maybe_coarse(
+            if maybe_coarse(
                 ctx,
                 p.entity_id,
                 p.generation,
@@ -1312,8 +1370,11 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
                 p.y,
                 p.z,
                 now,
-            );
+            ) {
+                coarse_writes += 1;
+            }
             ctx.db.player().entity_id().update(p);
+            player_writes += 1;
         }
     }
 
@@ -1381,6 +1442,7 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
                     row.cell_id = cell_id_from_position(p.pos.x, p.pos.y);
                     row.last_update_micros = now;
                     ctx.db.projectile().entity_id().update(row);
+                    projectile_writes += 1;
                 }
                 None => {
                     ctx.db.projectile().entity_id().delete(row.entity_id);
@@ -1400,6 +1462,7 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
         ctx.db.active_cast().entity_id().delete(cast.entity_id);
         complete_cast(ctx, &cfg, store, &cast, now);
     }
+    bump_metrics(ctx, player_writes, 0, projectile_writes, coarse_writes);
     Ok(())
 }
 
