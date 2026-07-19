@@ -19,9 +19,11 @@ pub struct Player {
     pub vy: f32,
     pub vz: f32,
     pub yaw: f32,
+    pub grounded: bool,
     pub zone_id: u32,
     pub epoch: u32,
     pub last_input_seq: u32,
+    pub last_applied_seq: u32,
     pub last_update_micros: i64,
 }
 
@@ -45,9 +47,11 @@ pub struct PlayerCols {
     pub vy: __sdk::__query_builder::Col<Player, f32>,
     pub vz: __sdk::__query_builder::Col<Player, f32>,
     pub yaw: __sdk::__query_builder::Col<Player, f32>,
+    pub grounded: __sdk::__query_builder::Col<Player, bool>,
     pub zone_id: __sdk::__query_builder::Col<Player, u32>,
     pub epoch: __sdk::__query_builder::Col<Player, u32>,
     pub last_input_seq: __sdk::__query_builder::Col<Player, u32>,
+    pub last_applied_seq: __sdk::__query_builder::Col<Player, u32>,
     pub last_update_micros: __sdk::__query_builder::Col<Player, i64>,
 }
 
@@ -67,9 +71,11 @@ impl __sdk::__query_builder::HasCols for Player {
             vy: __sdk::__query_builder::Col::new(table_name, "vy"),
             vz: __sdk::__query_builder::Col::new(table_name, "vz"),
             yaw: __sdk::__query_builder::Col::new(table_name, "yaw"),
+            grounded: __sdk::__query_builder::Col::new(table_name, "grounded"),
             zone_id: __sdk::__query_builder::Col::new(table_name, "zone_id"),
             epoch: __sdk::__query_builder::Col::new(table_name, "epoch"),
             last_input_seq: __sdk::__query_builder::Col::new(table_name, "last_input_seq"),
+            last_applied_seq: __sdk::__query_builder::Col::new(table_name, "last_applied_seq"),
             last_update_micros: __sdk::__query_builder::Col::new(table_name, "last_update_micros"),
         }
     }

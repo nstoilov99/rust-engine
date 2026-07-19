@@ -725,10 +725,11 @@ impl NetClient for SpacetimeNetClient {
                     let _ = conn.reducers.submit_input(
                         self.input_epoch,
                         self.input_seq,
-                        input.pos[0],
-                        input.pos[1],
-                        input.pos[2],
+                        input.move_dir[0],
+                        input.move_dir[1],
                         input.yaw,
+                        input.sprint,
+                        input.jump,
                     );
                     self.last_input_send = Some(Instant::now());
                 }

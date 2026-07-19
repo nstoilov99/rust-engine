@@ -275,6 +275,7 @@ name = "game_module"
 version = "0.1.0"
 dependencies = [
  "game_shared",
+ "glam",
  "log",
  "spacetimedb",
 ]

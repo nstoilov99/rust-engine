@@ -5,7 +5,7 @@
 
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// M5 runs a single module instance; the realm id exists so sharded modules
 /// (M8+) can never collide in identity-keyed structures.
@@ -14,15 +14,11 @@ pub const REALM_ID: u32 = 0;
 /// Fixed client input send rate (inputs are coalesced, never per-frame).
 pub const INPUT_SEND_HZ: u32 = 20;
 
-/// Shared walk speed so client drive and server sanity checks agree.
-/// M6 makes the server authoritative; until then this is the contract.
+/// Shared walk speed, consumed by `MotionConfig::default()` on both sides
+/// (M6: the server is authoritative; the client predicts with the same
+/// controller).
 pub const PLAYER_SPEED_MPS: f32 = 4.0;
 pub const SPRINT_MULTIPLIER: f32 = 1.6;
-
-/// Server-side trust-the-client cap: an input moving the player farther than
-/// this from its current row position is dropped (anti-teleport sanity, not
-/// anti-cheat — M6 owns real authority).
-pub const MAX_INPUT_STEP_M: f32 = 2.0;
 
 /// Tombstones older than this are GC'd server-side; clients prune their
 /// local tombstone evidence on the same horizon.

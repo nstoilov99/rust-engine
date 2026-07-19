@@ -8,10 +8,10 @@
 //! disconnect.
 
 use game_shared::collision::{manifest_hash, ChunkStore};
-use game_shared::net::schema::{
-    accept_input, MAX_INPUT_STEP_M, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS,
-};
+use game_shared::motion::{self, MotionConfig, MotionState, MoveIntent};
+use game_shared::net::schema::{accept_input, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
 use game_shared::world_grid::zone_id_from_position;
+use glam::Vec3;
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -53,9 +53,25 @@ fn collision_store() -> Option<&'static ChunkStore> {
 /// interpolation delay or remote motion stalls between samples.
 const TICK_INTERVAL_MS: u64 = 100;
 
+/// Movement authority tick (M6 D3): matches the client's 20 Hz input rate;
+/// one queued input = one `motion::step` of `MOVE_DT`.
+const MOVE_TICK_MS: u64 = 50;
+/// Catch-up bound per tick; deeper backlogs wait (or get dropped, below).
+const MAX_STEPS_PER_TICK: usize = 4;
+/// Queue depth beyond this drops oldest inputs (reconciliation snaps).
+const MAX_QUEUE_DEPTH: usize = 8;
+/// Empty-queue grace: repeat the last move intent for this many ticks
+/// (250 ms) before zeroing — bridges ordinary packet gaps without rubber-
+/// banding. Gravity integrates regardless.
+const HELD_INTENT_GRACE_TICKS: u32 = 5;
+
 /// Dev spawn point (Z-up, meters). The world manifest is runtime-loaded RON
 /// the WASM module cannot read; a manifest-driven spawn is deferred.
 const SPAWN_POINT: [f32; 3] = [0.0, 0.0, 1.0];
+/// Player spawn is a capsule *center*, dropped just above the greybox
+/// surface at the origin (ground z = 8, see the recorded golden trace) —
+/// with real gravity the old z = 1 would be under the terrain.
+const PLAYER_SPAWN_Z: f32 = 9.0;
 const NPC_SEED_COUNT: u32 = 4;
 const NPC_WANDER_RADIUS: f32 = 8.0;
 const NPC_SPEED_MPS: f32 = 1.5;
@@ -118,12 +134,48 @@ pub struct Player {
     vy: f32,
     vz: f32,
     yaw: f32,
+    /// M6: controller grounding, part of the atomic own-state ack.
+    grounded: bool,
     #[index(btree)]
     zone_id: u32,
     epoch: u32,
+    /// Highest *received* seq (acceptance guard, M5 semantics).
     last_input_seq: u32,
+    /// Highest seq *consumed by the movement tick* — what client prediction
+    /// reconciles against (M6 D3).
+    last_applied_seq: u32,
     /// Authoritative timestamp of the last state write (interpolation base).
     last_update_micros: i64,
+}
+
+/// Accepted-but-not-yet-simulated inputs (M6 D3). Private: never replicated.
+/// A queue (not a latest-intent mailbox) keeps client prediction steps and
+/// server steps 1:1 per seq and preserves `jump` edges.
+#[table(accessor = pending_input)]
+pub struct PendingInput {
+    #[primary_key]
+    #[auto_inc]
+    id: u64,
+    #[index(btree)]
+    entity_id: u64,
+    seq: u32,
+    move_x: f32,
+    move_y: f32,
+    yaw: f32,
+    sprint: bool,
+    jump: bool,
+}
+
+/// Last consumed move intent per player (M6 D3 grace). Private.
+#[table(accessor = held_intent)]
+pub struct HeldIntent {
+    #[primary_key]
+    entity_id: u64,
+    move_x: f32,
+    move_y: f32,
+    yaw: f32,
+    sprint: bool,
+    grace_ticks: u32,
 }
 
 #[table(accessor = npc, public)]
@@ -178,6 +230,14 @@ pub struct TickTimer {
     scheduled_at: ScheduleAt,
 }
 
+#[table(accessor = move_timer, scheduled(move_tick))]
+pub struct MoveTimer {
+    #[primary_key]
+    #[auto_inc]
+    scheduled_id: u64,
+    scheduled_at: ScheduleAt,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -217,6 +277,12 @@ fn short_name(identity: &Identity) -> String {
     format!("Player-{}", &hex.as_str()[..8.min(hex.as_str().len())])
 }
 
+/// Drop all queued/held input for a player (epoch bump, teleport, teardown).
+fn clear_input_queue(ctx: &ReducerContext, entity_id: u64) {
+    ctx.db.pending_input().entity_id().delete(entity_id);
+    ctx.db.held_intent().entity_id().delete(entity_id);
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle reducers
 // ---------------------------------------------------------------------------
@@ -243,8 +309,12 @@ pub fn init(ctx: &ReducerContext) {
         scheduled_id: 0,
         scheduled_at: ScheduleAt::Interval(Duration::from_millis(TICK_INTERVAL_MS).into()),
     });
+    ctx.db.move_timer().insert(MoveTimer {
+        scheduled_id: 0,
+        scheduled_at: ScheduleAt::Interval(Duration::from_millis(MOVE_TICK_MS).into()),
+    });
     log::info!(
-        "game_module initialized: protocol v{PROTOCOL_VERSION}, realm {REALM_ID}, tick {TICK_INTERVAL_MS} ms"
+        "game_module initialized: protocol v{PROTOCOL_VERSION}, realm {REALM_ID}, tick {TICK_INTERVAL_MS} ms, move tick {MOVE_TICK_MS} ms"
     );
 }
 
@@ -271,7 +341,9 @@ pub fn client_disconnected(ctx: &ReducerContext) {
     if let Some(mut p) = ctx.db.player().owner_identity().find(ctx.sender()) {
         if p.session.is_some() && p.session == ctx.connection_id() {
             p.session = None;
+            let entity_id = p.entity_id;
             ctx.db.player().entity_id().update(p);
+            clear_input_queue(ctx, entity_id);
         }
     }
 }
@@ -303,8 +375,11 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
             p.session = Some(conn);
             p.epoch += 1;
             p.last_input_seq = 0;
+            p.last_applied_seq = 0;
             p.last_update_micros = now_micros(ctx);
+            let entity_id = p.entity_id;
             ctx.db.player().entity_id().update(p);
+            clear_input_queue(ctx, entity_id);
         }
         None => {
             ctx.db.player().insert(Player {
@@ -315,14 +390,16 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
                 session: Some(conn),
                 x: SPAWN_POINT[0],
                 y: SPAWN_POINT[1],
-                z: SPAWN_POINT[2],
+                z: PLAYER_SPAWN_Z,
                 vx: 0.0,
                 vy: 0.0,
                 vz: 0.0,
                 yaw: 0.0,
+                grounded: false,
                 zone_id: zone_id_from_position(SPAWN_POINT[0], SPAWN_POINT[1]),
                 epoch: 1,
                 last_input_seq: 0,
+                last_applied_seq: 0,
                 last_update_micros: now_micros(ctx),
             });
         }
@@ -334,18 +411,20 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
 /// dropped silently — never an error (stale/duplicate/wrong-epoch input is
 /// normal during reconnect churn).
 ///
-/// M5 trust-the-client movement: the client's position is accepted after
-/// sanity checks. Isolated here on purpose — M6 replaces this body with
-/// server-authoritative integration.
+/// M6 (D3): intent-only. Accepted inputs are queued for the movement tick;
+/// this reducer moves nothing. `last_input_seq` advances at acceptance
+/// (reorder/replay guard); `last_applied_seq` advances when the tick
+/// consumes the input.
 #[reducer]
 pub fn submit_input(
     ctx: &ReducerContext,
     epoch: u32,
     seq: u32,
-    x: f32,
-    y: f32,
-    z: f32,
+    move_x: f32,
+    move_y: f32,
     yaw: f32,
+    sprint: bool,
+    jump: bool,
 ) -> Result<(), String> {
     let Some(mut p) = ctx.db.player().owner_identity().find(ctx.sender()) else {
         return Ok(());
@@ -357,33 +436,31 @@ pub fn submit_input(
     if !accept_input(p.epoch, p.last_input_seq, epoch, seq) {
         return Ok(());
     }
-    if ![x, y, z, yaw].iter().all(|v| v.is_finite()) {
+    if ![move_x, move_y, yaw].iter().all(|v| v.is_finite()) {
         return Ok(());
     }
-    // Anti-teleport sanity: clamp (never drop) the step so a lag spike can't
-    // deadlock the row behind the cap — the row converges at cap × send rate.
-    let (mut dx, mut dy, mut dz) = (x - p.x, y - p.y, z - p.z);
-    let dist_sq = dx * dx + dy * dy + dz * dz;
-    if dist_sq > MAX_INPUT_STEP_M * MAX_INPUT_STEP_M {
-        let scale = MAX_INPUT_STEP_M / dist_sq.sqrt();
-        dx *= scale;
-        dy *= scale;
-        dz *= scale;
-    }
-
-    let now = now_micros(ctx);
-    let dt = ((now - p.last_update_micros).max(1) as f32) / 1_000_000.0;
-    p.vx = dx / dt;
-    p.vy = dy / dt;
-    p.vz = dz / dt;
-    p.x += dx;
-    p.y += dy;
-    p.z += dz;
-    p.yaw = yaw;
-    p.zone_id = zone_id_from_position(p.x, p.y);
     p.last_input_seq = seq;
-    p.last_update_micros = now;
+    let entity_id = p.entity_id;
     ctx.db.player().entity_id().update(p);
+
+    ctx.db.pending_input().insert(PendingInput {
+        id: 0, // auto_inc
+        entity_id,
+        seq,
+        move_x,
+        move_y,
+        yaw,
+        sprint,
+        jump,
+    });
+    // Depth cap: drop oldest — reconciliation snaps the client past the gap.
+    let mut queued: Vec<PendingInput> = ctx.db.pending_input().entity_id().filter(entity_id).collect();
+    if queued.len() > MAX_QUEUE_DEPTH {
+        queued.sort_by_key(|i| i.seq);
+        for stale in &queued[..queued.len() - MAX_QUEUE_DEPTH] {
+            ctx.db.pending_input().id().delete(stale.id);
+        }
+    }
     Ok(())
 }
 
@@ -405,9 +482,15 @@ pub fn dev_teleport(ctx: &ReducerContext, x: f32, y: f32, z: f32) -> Result<(), 
     p.y = y;
     p.z = z;
     (p.vx, p.vy, p.vz) = (0.0, 0.0, 0.0);
+    // M6: stale queued intent must not walk the player away from the target;
+    // grounding is re-established by the next movement tick. Seq counters
+    // stay intact (the session did not restart).
+    p.grounded = false;
     p.zone_id = zone_id_from_position(x, y);
     p.last_update_micros = now_micros(ctx);
+    let entity_id = p.entity_id;
     ctx.db.player().entity_id().update(p);
+    clear_input_queue(ctx, entity_id);
     Ok(())
 }
 
@@ -507,6 +590,111 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Movement authority (M6 D3): one transaction per 50 ms tick. Per player
+/// with a live session: pop queued inputs in seq order (bounded), one
+/// `motion::step` per input; empty queue runs a held/zero intent step so
+/// gravity always integrates. One row write per player carries the complete
+/// atomic ack `(epoch, last_applied_seq, pos, vel, yaw, grounded)`.
+#[reducer]
+pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("move_tick may only be invoked by the scheduler".into());
+    }
+    let Some(store) = collision_store() else {
+        return Ok(()); // load failure already logged; never panic per tick
+    };
+    let cfg = MotionConfig::default();
+    let now = now_micros(ctx);
+
+    let players: Vec<Player> = ctx
+        .db
+        .player()
+        .iter()
+        .filter(|p| p.session.is_some())
+        .collect();
+    for mut p in players {
+        let mut state = MotionState {
+            pos: Vec3::new(p.x, p.y, p.z),
+            vel: Vec3::new(p.vx, p.vy, p.vz),
+            yaw: p.yaw,
+            grounded: p.grounded,
+            ground_ref: None,
+        };
+        let before = (state, p.last_applied_seq);
+
+        let mut queued: Vec<PendingInput> =
+            ctx.db.pending_input().entity_id().filter(p.entity_id).collect();
+        queued.sort_by_key(|i| i.seq);
+        let consumed = queued.len().min(MAX_STEPS_PER_TICK);
+        for input in &queued[..consumed] {
+            let intent = MoveIntent {
+                move_dir: [input.move_x, input.move_y],
+                yaw: input.yaw,
+                sprint: input.sprint,
+                jump: input.jump,
+            };
+            state = motion::step(&cfg, &state, &intent, store);
+            p.last_applied_seq = input.seq;
+            ctx.db.pending_input().id().delete(input.id);
+        }
+
+        if consumed > 0 {
+            let last = &queued[consumed - 1];
+            upsert_held_intent(
+                ctx,
+                HeldIntent {
+                    entity_id: p.entity_id,
+                    move_x: last.move_x,
+                    move_y: last.move_y,
+                    yaw: last.yaw,
+                    sprint: last.sprint,
+                    grace_ticks: HELD_INTENT_GRACE_TICKS,
+                },
+            );
+        } else {
+            // No input this tick: held intent inside the grace window, else
+            // zero move. Advances no seq; gravity always integrates.
+            let mut intent = MoveIntent {
+                yaw: state.yaw,
+                ..MoveIntent::IDLE
+            };
+            if let Some(mut held) = ctx.db.held_intent().entity_id().find(p.entity_id) {
+                if held.grace_ticks > 0 {
+                    held.grace_ticks -= 1;
+                    intent.move_dir = [held.move_x, held.move_y];
+                    intent.yaw = held.yaw;
+                    intent.sprint = held.sprint;
+                    ctx.db.held_intent().entity_id().update(held);
+                }
+            }
+            state = motion::step(&cfg, &state, &intent, store);
+        }
+
+        if (state, p.last_applied_seq) != before {
+            p.x = state.pos.x;
+            p.y = state.pos.y;
+            p.z = state.pos.z;
+            p.vx = state.vel.x;
+            p.vy = state.vel.y;
+            p.vz = state.vel.z;
+            p.yaw = state.yaw;
+            p.grounded = state.grounded;
+            p.zone_id = zone_id_from_position(p.x, p.y);
+            p.last_update_micros = now;
+            ctx.db.player().entity_id().update(p);
+        }
+    }
+    Ok(())
+}
+
+fn upsert_held_intent(ctx: &ReducerContext, row: HeldIntent) {
+    if ctx.db.held_intent().entity_id().find(row.entity_id).is_some() {
+        ctx.db.held_intent().entity_id().update(row);
+    } else {
+        ctx.db.held_intent().insert(row);
+    }
 }
 
 fn seed_npcs(ctx: &ReducerContext, now: i64) {

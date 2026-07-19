@@ -177,10 +177,10 @@ impl Replication {
         }
     }
 
-    /// M5 trust-the-client local movement: integrate the desired direction
-    /// directly on the bound entity and report the pose for `send_input`.
-    /// Deliberately minimal (no physics, no camera); M6 replaces this with
-    /// server-authoritative movement + reconciliation.
+    /// Local free-move: integrate the desired direction on the bound entity
+    /// for responsiveness and report the *intent* for `send_input` — the
+    /// server integrates authoritatively (M6 D3). Package 4 replaces this
+    /// cosmetic integration with real prediction + reconciliation.
     pub fn drive_local_player(
         &mut self,
         world: &mut World,
@@ -189,10 +189,10 @@ impl Replication {
         dt: f32,
     ) -> Option<ClientInput> {
         let entity = self.local_player?;
-        let (pos, yaw) = {
+        let yaw = {
             let mut t = world.get::<&mut Transform>(entity).ok()?;
             let len = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1]).sqrt();
-            let yaw = if len > 1e-3 {
+            if len > 1e-3 {
                 let speed = PLAYER_SPEED_MPS * if sprint { SPRINT_MULTIPLIER } else { 1.0 };
                 t.position.x += move_dir[0] / len * speed * dt;
                 t.position.y += move_dir[1] / len * speed * dt;
@@ -201,14 +201,12 @@ impl Replication {
                 yaw
             } else {
                 glm::quat_euler_angles(&t.rotation).z
-            };
-            ([t.position.x, t.position.y, t.position.z], yaw)
+            }
         };
         rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, entity);
         Some(ClientInput {
             epoch: 0, // stamped by the backend at send time
             seq: 0,
-            pos,
             move_dir,
             yaw,
             sprint,

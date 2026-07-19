@@ -16,10 +16,13 @@ pub mod despawn_npc_reducer;
 pub mod dev_teleport_reducer;
 pub mod enter_world_reducer;
 pub mod entity_allocator_type;
+pub mod held_intent_type;
+pub mod move_timer_type;
 pub mod npc_table;
 pub mod npc_type;
 pub mod parity_result_table;
 pub mod parity_result_type;
+pub mod pending_input_type;
 pub mod ping_reducer;
 pub mod ping_result_table;
 pub mod ping_result_type;
@@ -41,10 +44,13 @@ pub use despawn_npc_reducer::despawn_npc;
 pub use dev_teleport_reducer::dev_teleport;
 pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
+pub use held_intent_type::HeldIntent;
+pub use move_timer_type::MoveTimer;
 pub use npc_table::*;
 pub use npc_type::Npc;
 pub use parity_result_table::*;
 pub use parity_result_type::ParityResult;
+pub use pending_input_type::PendingInput;
 pub use ping_reducer::ping;
 pub use ping_result_table::*;
 pub use ping_result_type::PingResult;
@@ -82,10 +88,11 @@ pub enum Reducer {
     SubmitInput {
         epoch: u32,
         seq: u32,
-        x: f32,
-        y: f32,
-        z: f32,
+        move_x: f32,
+        move_y: f32,
         yaw: f32,
+        sprint: bool,
+        jump: bool,
     },
 }
 
@@ -132,17 +139,19 @@ impl __sdk::Reducer for Reducer {
             Reducer::SubmitInput {
                 epoch,
                 seq,
-                x,
-                y,
-                z,
+                move_x,
+                move_y,
                 yaw,
+                sprint,
+                jump,
             } => __sats::bsatn::to_vec(&submit_input_reducer::SubmitInputArgs {
                 epoch: epoch.clone(),
                 seq: seq.clone(),
-                x: x.clone(),
-                y: y.clone(),
-                z: z.clone(),
+                move_x: move_x.clone(),
+                move_y: move_y.clone(),
                 yaw: yaw.clone(),
+                sprint: sprint.clone(),
+                jump: jump.clone(),
             }),
             _ => unreachable!(),
         }

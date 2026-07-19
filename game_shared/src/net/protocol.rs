@@ -45,25 +45,23 @@ pub struct WorldSnapshot {
     pub own_entity_id: Option<u64>,
 }
 
-/// Client input sample, session-scoped (contract §5). Coalesced client-side
-/// and sent at `INPUT_SEND_HZ`, never per-frame.
-///
-/// M5 is trust-the-client: `pos` is the client's integrated position and the
-/// server accepts it after sanity checks (finite, per-input distance cap).
-/// M6 replaces this with server-authoritative movement + reconciliation.
+/// Client input sample, session-scoped (contract §5). Intent-only (M6): the
+/// server queues one sample per sequence number and integrates movement
+/// authoritatively — clients never send positions.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ClientInput {
     /// Stamped by the `NetClient` implementation at send time (it owns the
     /// authoritative epoch from the own player row); caller values ignored.
     pub epoch: u32,
-    /// Stamped by the `NetClient` implementation at send time.
+    /// Stamped by the `NetClient` implementation at send time (moves to the
+    /// prediction side in M6 package 4).
     pub seq: u32,
-    pub pos: [f32; 3],
-    /// Desired movement direction on the XY ground plane (Z-up), unnormalized
-    /// is legal; the server normalizes and rejects non-finite input.
+    /// Desired movement direction on the XY ground plane (Z-up); the
+    /// controller unit-clamps and rejects non-finite input.
     pub move_dir: [f32; 2],
     pub yaw: f32,
     pub sprint: bool,
+    /// Edge-triggered (one jump per press).
     pub jump: bool,
 }
 

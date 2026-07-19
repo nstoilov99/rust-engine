@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 spacetimedb = "2.6"
 log = "0.4"
+glam = "0.29"
 game_shared = { path = "../../game_shared" }
 
 [profile.release]

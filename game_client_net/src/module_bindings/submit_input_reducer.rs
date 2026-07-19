@@ -9,10 +9,11 @@ use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 pub(super) struct SubmitInputArgs {
     pub epoch: u32,
     pub seq: u32,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
+    pub move_x: f32,
+    pub move_y: f32,
     pub yaw: f32,
+    pub sprint: bool,
+    pub jump: bool,
 }
 
 impl From<SubmitInputArgs> for super::Reducer {
@@ -20,10 +21,11 @@ impl From<SubmitInputArgs> for super::Reducer {
         Self::SubmitInput {
             epoch: args.epoch,
             seq: args.seq,
-            x: args.x,
-            y: args.y,
-            z: args.z,
+            move_x: args.move_x,
+            move_y: args.move_y,
             yaw: args.yaw,
+            sprint: args.sprint,
+            jump: args.jump,
         }
     }
 }
@@ -47,12 +49,13 @@ pub trait submit_input {
         &self,
         epoch: u32,
         seq: u32,
-        x: f32,
-        y: f32,
-        z: f32,
+        move_x: f32,
+        move_y: f32,
         yaw: f32,
+        sprint: bool,
+        jump: bool,
     ) -> __sdk::Result<()> {
-        self.submit_input_then(epoch, seq, x, y, z, yaw, |_, _| {})
+        self.submit_input_then(epoch, seq, move_x, move_y, yaw, sprint, jump, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `submit_input` to run as soon as possible,
@@ -65,10 +68,11 @@ pub trait submit_input {
         &self,
         epoch: u32,
         seq: u32,
-        x: f32,
-        y: f32,
-        z: f32,
+        move_x: f32,
+        move_y: f32,
         yaw: f32,
+        sprint: bool,
+        jump: bool,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -81,10 +85,11 @@ impl submit_input for super::RemoteReducers {
         &self,
         epoch: u32,
         seq: u32,
-        x: f32,
-        y: f32,
-        z: f32,
+        move_x: f32,
+        move_y: f32,
         yaw: f32,
+        sprint: bool,
+        jump: bool,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -94,10 +99,11 @@ impl submit_input for super::RemoteReducers {
             SubmitInputArgs {
                 epoch,
                 seq,
-                x,
-                y,
-                z,
+                move_x,
+                move_y,
                 yaw,
+                sprint,
+                jump,
             },
             callback,
         )
