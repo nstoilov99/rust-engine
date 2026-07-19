@@ -113,7 +113,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M3 Greybox World v1 (`tools/greybox_gen`, deterministic; generated content checked in): **complete** (see `docs/roadmap/VULKANO-M3-GREYBOX-WORLD.md`)
 - M4 Zone & Chunk Lifecycle (WorldStreamer: budgeted cell/chunk streaming, GUID-stable reload): **complete** (see `docs/roadmap/VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md`)
 - M5 Net-A (SpacetimeDB connection, identity, replication, zone-scoped subscriptions): **complete** (see `docs/roadmap/VULKANO-M5-NET-A-CONNECTION-IDENTITY.md`)
-- Next: M6 Net-B server-authoritative movement, then M7–M9.5 (`docs/roadmap/ROADMAP.md`, Phase M)
+- M6 Net-B (server-authoritative movement: shared controller, client prediction, WASM parity suite, combat groundwork): **complete** (see `docs/roadmap/VULKANO-M6-NET-B-MOVEMENT.md`)
+- Next: M6.5/M7 per `docs/roadmap/ROADMAP.md` (Phase M)
 
 ## Patched Dependencies
 
