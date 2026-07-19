@@ -433,6 +433,9 @@ impl SpacetimeNetClient {
             vel: [p.vx, p.vy, p.vz],
             yaw: p.yaw,
             zone_id: p.zone_id,
+            hp: p.hp,
+            hp_max: p.hp_max,
+            alive: p.alive,
             server_time_us: p.last_update_micros.max(0) as u64,
         }
     }
@@ -446,6 +449,9 @@ impl SpacetimeNetClient {
             vel: [0.0; 3],
             yaw: n.yaw,
             zone_id: n.zone_id,
+            hp: n.hp,
+            hp_max: n.hp_max,
+            alive: n.alive,
             server_time_us: n.last_update_micros.max(0) as u64,
         }
     }

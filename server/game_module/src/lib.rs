@@ -8,6 +8,7 @@
 //! disconnect.
 
 use game_shared::collision::{manifest_hash, ChunkStore};
+use game_shared::combat::{NPC_HP_MAX, PLAYER_HP_MAX, PLAYER_MANA_MAX};
 use game_shared::motion::{self, MotionConfig, MotionState, MoveIntent};
 use game_shared::net::schema::{accept_input, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
 use game_shared::world_grid::zone_id_from_position;
@@ -75,6 +76,10 @@ const SPAWN_POINT: [f32; 3] = [0.0, 0.0, 1.0];
 /// surface at the origin (ground z = 8, see the recorded golden trace) —
 /// with real gravity the old z = 1 would be under the terrain.
 const PLAYER_SPAWN_Z: f32 = 9.0;
+/// NPC capsule center, same convention as players (M7: dummies must sit on
+/// the greybox surface — the old z = 1 put them ~7 m underground, unhittable
+/// once 3D range/LoS checks exist).
+const NPC_SPAWN_Z: f32 = 9.0;
 const NPC_SEED_COUNT: u32 = 4;
 const NPC_WANDER_RADIUS: f32 = 8.0;
 const NPC_SPEED_MPS: f32 = 1.5;
@@ -139,6 +144,14 @@ pub struct Player {
     yaw: f32,
     /// M6: controller grounding, part of the atomic own-state ack.
     grounded: bool,
+    // M7 combat state (plan D2). Times are server micros; 0 = unset.
+    hp: f32,
+    hp_max: f32,
+    mana: f32,
+    mana_max: f32,
+    alive: bool,
+    respawn_at_micros: i64,
+    gcd_until_micros: i64,
     #[index(btree)]
     zone_id: u32,
     epoch: u32,
@@ -190,10 +203,46 @@ pub struct Npc {
     y: f32,
     z: f32,
     yaw: f32,
+    // M7: target-dummy combat state (plan D2). Dead rows are retained until
+    // `tick` respawns them.
+    hp: f32,
+    hp_max: f32,
+    alive: bool,
+    respawn_at_micros: i64,
     #[index(btree)]
     zone_id: u32,
     kind: u32,
     last_update_micros: i64,
+}
+
+/// Per-(entity, ability) cooldown end time (plan D2). PK is the
+/// deterministic `combat::cooldown_key` — upsert-by-PK, no auto_inc + scan.
+/// End-times (not durations) so replication latency can't skew HUD sweeps.
+/// Expired rows are GC'd in `tick`.
+#[table(accessor = ability_cooldown, public)]
+pub struct AbilityCooldown {
+    #[primary_key]
+    key: u64,
+    #[index(btree)]
+    entity_id: u64,
+    ability_id: u16,
+    ready_at_micros: i64,
+}
+
+/// At most one in-progress cast per entity (new cast replaces). Public so
+/// the target frame can show the target's cast bar; `zone_id` is copied from
+/// the caster at cast time so the row fits the zone-scoped subscriptions
+/// (mid-cast zone changes are impossible — moving cancels).
+#[table(accessor = active_cast, public)]
+pub struct ActiveCast {
+    #[primary_key]
+    entity_id: u64,
+    ability_id: u16,
+    target_entity_id: u64,
+    #[index(btree)]
+    zone_id: u32,
+    start_micros: i64,
+    finish_micros: i64,
 }
 
 /// Destruction evidence (contract §3): upserted on despawn, GC'd after
@@ -399,6 +448,13 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
                 vz: 0.0,
                 yaw: 0.0,
                 grounded: false,
+                hp: PLAYER_HP_MAX,
+                hp_max: PLAYER_HP_MAX,
+                mana: PLAYER_MANA_MAX,
+                mana_max: PLAYER_MANA_MAX,
+                alive: true,
+                respawn_at_micros: 0,
+                gcd_until_micros: 0,
                 zone_id: zone_id_from_position(SPAWN_POINT[0], SPAWN_POINT[1]),
                 epoch: 1,
                 last_input_seq: 0,
@@ -714,8 +770,12 @@ fn seed_npcs(ctx: &ReducerContext, now: i64) {
             generation: 1,
             x,
             y,
-            z: SPAWN_POINT[2],
+            z: NPC_SPAWN_Z,
             yaw: angle,
+            hp: NPC_HP_MAX,
+            hp_max: NPC_HP_MAX,
+            alive: true,
+            respawn_at_micros: 0,
             zone_id: zone_id_from_position(x, y),
             kind: 0,
             last_update_micros: now,

@@ -5,7 +5,8 @@
 
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+/// v4: M7 combat schema (hp/mana/alive columns, cooldown/cast tables).
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// M5 runs a single module instance; the realm id exists so sharded modules
 /// (M8+) can never collide in identity-keyed structures.

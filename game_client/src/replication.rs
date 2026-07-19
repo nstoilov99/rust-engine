@@ -128,6 +128,16 @@ pub fn diff_snapshot(
     ops
 }
 
+/// Latest-value combat state of a proxy (M7 D2): never interpolated, guarded
+/// by sample time so a reordered stale sample can't resurrect hp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CombatState {
+    pub hp: f32,
+    pub hp_max: f32,
+    pub alive: bool,
+    server_time_us: u64,
+}
+
 /// Replication state: owns every proxy, its interpolation buffer, and the
 /// local-player binding.
 #[derive(Default)]
@@ -137,6 +147,7 @@ pub struct Replication {
     local_player: Option<hecs::Entity>,
     own_entity_id: Option<u64>,
     buffers: HashMap<(u64, u32), (EntityKind, InterpBuffer)>,
+    combat: HashMap<(u64, u32), CombatState>,
 }
 
 impl Replication {
@@ -154,7 +165,28 @@ impl Replication {
         }
         if let Some((_, buf)) = self.buffers.get_mut(&(s.entity_id, s.generation)) {
             buf.push(s.server_time_us, s.pos, s.yaw);
+            self.push_combat(s);
         }
+    }
+
+    /// Latest-value overwrite; older samples never regress it.
+    fn push_combat(&mut self, s: &EntityState) {
+        let next = CombatState {
+            hp: s.hp,
+            hp_max: s.hp_max,
+            alive: s.alive,
+            server_time_us: s.server_time_us,
+        };
+        let slot = self.combat.entry((s.entity_id, s.generation)).or_insert(next);
+        if s.server_time_us >= slot.server_time_us {
+            *slot = next;
+        }
+    }
+
+    /// Latest known combat state of a live proxy incarnation (target frame).
+    #[allow(dead_code)] // consumer is the M7 HUD (packages 5–7)
+    pub fn combat_state(&self, entity_id: u64, generation: u32) -> Option<&CombatState> {
+        self.combat.get(&(entity_id, generation))
     }
 
     /// Write interpolated transforms for every proxy, each evaluated at
@@ -200,6 +232,7 @@ impl Replication {
                     destroyed,
                 } => {
                     self.buffers.remove(&(entity_id, generation));
+                    self.combat.remove(&(entity_id, generation));
                     if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
                         let _ = world.despawn(e);
                         let kind = if destroyed { "destroyed" } else { "out of scope" };
@@ -211,6 +244,7 @@ impl Replication {
                     state,
                 } => {
                     self.buffers.remove(&(state.entity_id, old_generation));
+                    self.combat.remove(&(state.entity_id, old_generation));
                     if let Some(e) = self.index.map.remove(&(state.entity_id, old_generation)) {
                         let _ = world.despawn(e);
                     }
@@ -285,6 +319,7 @@ impl Replication {
         let mut buf = InterpBuffer::default();
         buf.push(s.server_time_us, s.pos, s.yaw);
         self.buffers.insert((s.entity_id, s.generation), (s.kind, buf));
+        self.push_combat(s);
         println!("net: spawn {label} {} gen {}", s.entity_id, s.generation);
     }
 }
@@ -323,6 +358,9 @@ mod tests {
             vel: [0.0; 3],
             yaw: 0.5,
             zone_id: 0,
+            hp: 50.0,
+            hp_max: 50.0,
+            alive: true,
             server_time_us: 42,
         }
     }
@@ -427,6 +465,19 @@ mod tests {
         r.push_sample(&stale);
         let (_, buf) = &r.buffers[&(1, 2)];
         assert_eq!(buf.latest().unwrap().0, [9.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn stale_combat_sample_never_resurrects() {
+        let mut r = Replication::default();
+        let mut world = World::new();
+        r.apply_snapshot(&mut world, &snap(vec![state(1, 1)], None));
+        let mut dead = state(1, 1);
+        (dead.hp, dead.alive, dead.server_time_us) = (0.0, false, 100);
+        r.push_sample(&dead);
+        r.push_sample(&state(1, 1)); // reordered stale sample (t=42, hp 50)
+        let c = *r.combat_state(1, 1).unwrap();
+        assert_eq!((c.hp, c.alive), (0.0, false));
     }
 
     #[test]

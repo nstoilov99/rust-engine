@@ -6,8 +6,12 @@
 #![allow(unused, clippy::all)]
 use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
+pub mod ability_cooldown_table;
+pub mod ability_cooldown_type;
 pub mod account_table;
 pub mod account_type;
+pub mod active_cast_table;
+pub mod active_cast_type;
 pub mod clock_table;
 pub mod clock_type;
 pub mod config_table;
@@ -34,8 +38,12 @@ pub mod tick_timer_type;
 pub mod tombstone_table;
 pub mod tombstone_type;
 
+pub use ability_cooldown_table::*;
+pub use ability_cooldown_type::AbilityCooldown;
 pub use account_table::*;
 pub use account_type::Account;
+pub use active_cast_table::*;
+pub use active_cast_type::ActiveCast;
 pub use clock_table::*;
 pub use clock_type::Clock;
 pub use config_table::*;
@@ -162,7 +170,9 @@ impl __sdk::Reducer for Reducer {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
+    ability_cooldown: __sdk::TableUpdate<AbilityCooldown>,
     account: __sdk::TableUpdate<Account>,
+    active_cast: __sdk::TableUpdate<ActiveCast>,
     clock: __sdk::TableUpdate<Clock>,
     config: __sdk::TableUpdate<Config>,
     npc: __sdk::TableUpdate<Npc>,
@@ -178,9 +188,15 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
+                "ability_cooldown" => db_update
+                    .ability_cooldown
+                    .append(ability_cooldown_table::parse_table_update(table_update)?),
                 "account" => db_update
                     .account
                     .append(account_table::parse_table_update(table_update)?),
+                "active_cast" => db_update
+                    .active_cast
+                    .append(active_cast_table::parse_table_update(table_update)?),
                 "clock" => db_update
                     .clock
                     .append(clock_table::parse_table_update(table_update)?),
@@ -228,9 +244,15 @@ impl __sdk::DbUpdate for DbUpdate {
     ) -> AppliedDiff<'_> {
         let mut diff = AppliedDiff::default();
 
+        diff.ability_cooldown = cache
+            .apply_diff_to_table::<AbilityCooldown>("ability_cooldown", &self.ability_cooldown)
+            .with_updates_by_pk(|row| &row.key);
         diff.account = cache
             .apply_diff_to_table::<Account>("account", &self.account)
             .with_updates_by_pk(|row| &row.identity);
+        diff.active_cast = cache
+            .apply_diff_to_table::<ActiveCast>("active_cast", &self.active_cast)
+            .with_updates_by_pk(|row| &row.entity_id);
         diff.clock = cache
             .apply_diff_to_table::<Clock>("clock", &self.clock)
             .with_updates_by_pk(|row| &row.id);
@@ -259,8 +281,14 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "ability_cooldown" => db_update
+                    .ability_cooldown
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "account" => db_update
                     .account
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "active_cast" => db_update
+                    .active_cast
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "clock" => db_update
                     .clock
@@ -296,8 +324,14 @@ impl __sdk::DbUpdate for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_rows in raw.tables {
             match &table_rows.table[..] {
+                "ability_cooldown" => db_update
+                    .ability_cooldown
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "account" => db_update
                     .account
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "active_cast" => db_update
+                    .active_cast
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "clock" => db_update
                     .clock
@@ -335,7 +369,9 @@ impl __sdk::DbUpdate for DbUpdate {
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
+    ability_cooldown: __sdk::TableAppliedDiff<'r, AbilityCooldown>,
     account: __sdk::TableAppliedDiff<'r, Account>,
+    active_cast: __sdk::TableAppliedDiff<'r, ActiveCast>,
     clock: __sdk::TableAppliedDiff<'r, Clock>,
     config: __sdk::TableAppliedDiff<'r, Config>,
     npc: __sdk::TableAppliedDiff<'r, Npc>,
@@ -356,7 +392,13 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         event: &EventContext,
         callbacks: &mut __sdk::DbCallbacks<RemoteModule>,
     ) {
+        callbacks.invoke_table_row_callbacks::<AbilityCooldown>(
+            "ability_cooldown",
+            &self.ability_cooldown,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<Account>("account", &self.account, event);
+        callbacks.invoke_table_row_callbacks::<ActiveCast>("active_cast", &self.active_cast, event);
         callbacks.invoke_table_row_callbacks::<Clock>("clock", &self.clock, event);
         callbacks.invoke_table_row_callbacks::<Config>("config", &self.config, event);
         callbacks.invoke_table_row_callbacks::<Npc>("npc", &self.npc, event);
@@ -1028,7 +1070,9 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type QueryBuilder = __sdk::QueryBuilder;
 
     fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
+        ability_cooldown_table::register_table(client_cache);
         account_table::register_table(client_cache);
+        active_cast_table::register_table(client_cache);
         clock_table::register_table(client_cache);
         config_table::register_table(client_cache);
         npc_table::register_table(client_cache);
@@ -1038,7 +1082,9 @@ impl __sdk::SpacetimeModule for RemoteModule {
         tombstone_table::register_table(client_cache);
     }
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
+        "ability_cooldown",
         "account",
+        "active_cast",
         "clock",
         "config",
         "npc",
