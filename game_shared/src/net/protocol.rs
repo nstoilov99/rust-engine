@@ -31,7 +31,7 @@ pub struct EntityState {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub yaw: f32,
-    pub zone_id: u32,
+    pub cell_id: u64,
     /// M7: latest-value combat state — never interpolated (rides alongside
     /// the interp buffer, not through it).
     pub hp: f32,

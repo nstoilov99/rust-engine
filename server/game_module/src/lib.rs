@@ -17,7 +17,7 @@ use game_shared::motion::combat::{
 };
 use game_shared::motion::{self, MotionConfig, MotionState, MoveIntent};
 use game_shared::net::schema::{accept_input, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
-use game_shared::world_grid::zone_id_from_position;
+use game_shared::world_grid::cell_id_from_position;
 use glam::Vec3;
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
 use std::sync::OnceLock;
@@ -159,7 +159,7 @@ pub struct Player {
     respawn_at_micros: i64,
     gcd_until_micros: i64,
     #[index(btree)]
-    zone_id: u32,
+    cell_id: u64,
     epoch: u32,
     /// Highest *received* seq (acceptance guard, M5 semantics).
     last_input_seq: u32,
@@ -216,7 +216,7 @@ pub struct Npc {
     alive: bool,
     respawn_at_micros: i64,
     #[index(btree)]
-    zone_id: u32,
+    cell_id: u64,
     kind: u32,
     last_update_micros: i64,
 }
@@ -236,9 +236,9 @@ pub struct AbilityCooldown {
 }
 
 /// At most one in-progress cast per entity (new cast replaces). Public so
-/// the target frame can show the target's cast bar; `zone_id` is copied from
-/// the caster at cast time so the row fits the zone-scoped subscriptions
-/// (mid-cast zone changes are impossible — moving cancels).
+/// the target frame can show the target's cast bar; `cell_id` is copied from
+/// the caster at cast time so the row fits the cell-scoped subscriptions
+/// (mid-cast cell changes are impossible — moving cancels).
 #[table(accessor = active_cast, public)]
 pub struct ActiveCast {
     #[primary_key]
@@ -246,7 +246,7 @@ pub struct ActiveCast {
     ability_id: u16,
     target_entity_id: u64,
     #[index(btree)]
-    zone_id: u32,
+    cell_id: u64,
     start_micros: i64,
     finish_micros: i64,
 }
@@ -254,8 +254,8 @@ pub struct ActiveCast {
 /// In-flight firebolt (M7 D4): spawned at cast completion, stepped in
 /// `move_tick` with `projectile_step`, deleted on hit or after
 /// `PROJECTILE_LIFETIME_SECS`. Public — clients render by extrapolating from
-/// the last server step. `zone_id` is fixed at spawn (3 s lifetime; not worth
-/// re-zoning).
+/// the last server step. `cell_id` is recomputed per step (M8: a firebolt
+/// crosses a 64 m cell in ~2 s, so fixed-at-spawn would misfile it).
 #[table(accessor = projectile, public)]
 pub struct Projectile {
     #[primary_key]
@@ -269,7 +269,7 @@ pub struct Projectile {
     vy: f32,
     vz: f32,
     #[index(btree)]
-    zone_id: u32,
+    cell_id: u64,
     spawned_at_micros: i64,
     last_update_micros: i64,
 }
@@ -486,7 +486,7 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
                 alive: true,
                 respawn_at_micros: 0,
                 gcd_until_micros: 0,
-                zone_id: zone_id_from_position(SPAWN_POINT[0], SPAWN_POINT[1]),
+                cell_id: cell_id_from_position(SPAWN_POINT[0], SPAWN_POINT[1]),
                 epoch: 1,
                 last_input_seq: 0,
                 last_applied_seq: 0,
@@ -559,7 +559,7 @@ pub fn submit_input(
 }
 
 /// Dev/test reducer (unauthenticated like `despawn_npc`): teleports the
-/// caller's player. Lets acceptance tests cross zone borders
+/// caller's player. Lets acceptance tests cross cell borders
 /// deterministically without simulating walks.
 #[reducer]
 pub fn dev_teleport(ctx: &ReducerContext, x: f32, y: f32, z: f32) -> Result<(), String> {
@@ -580,7 +580,7 @@ pub fn dev_teleport(ctx: &ReducerContext, x: f32, y: f32, z: f32) -> Result<(), 
     // grounding is re-established by the next movement tick. Seq counters
     // stay intact (the session did not restart).
     p.grounded = false;
-    p.zone_id = zone_id_from_position(x, y);
+    p.cell_id = cell_id_from_position(x, y);
     p.last_update_micros = now_micros(ctx);
     let entity_id = p.entity_id;
     ctx.db.player().entity_id().update(p);
@@ -766,7 +766,7 @@ fn respawn_player(ctx: &ReducerContext, mut p: Player, now: i64) {
     p.epoch += 1;
     p.last_input_seq = 0;
     p.last_applied_seq = 0;
-    p.zone_id = zone_id_from_position(p.x, p.y);
+    p.cell_id = cell_id_from_position(p.x, p.y);
     p.last_update_micros = now;
     let entity_id = p.entity_id;
     ctx.db.player().entity_id().update(p);
@@ -864,7 +864,7 @@ pub fn cast_ability(
                 entity_id: caster.entity_id,
                 ability_id,
                 target_entity_id,
-                zone_id: caster.zone_id,
+                cell_id: caster.cell_id,
                 start_micros: now,
                 finish_micros: now + combat::micros(def.cast_secs) as i64,
             },
@@ -958,7 +958,7 @@ fn complete_cast(
             }
             caster.mana -= def.mana_cost;
             upsert_cooldown(ctx, cast.entity_id, def, now);
-            let zone_id = caster.zone_id;
+            let cell_id = caster.cell_id;
             ctx.db.player().entity_id().update(caster);
             // Dumb-fire eye-to-eye (D4): aim above the target eye by ½·g·t²
             // (first-order gravity compensation over the straight-line flight
@@ -978,7 +978,7 @@ fn complete_cast(
                 vx: vel.x,
                 vy: vel.y,
                 vz: vel.z,
-                zone_id,
+                cell_id,
                 spawned_at_micros: now,
                 last_update_micros: now,
             });
@@ -1074,7 +1074,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             n.yaw = n.yaw.rem_euclid(std::f32::consts::TAU);
             n.x += n.yaw.cos() * NPC_SPEED_MPS * dt;
             n.y += n.yaw.sin() * NPC_SPEED_MPS * dt;
-            n.zone_id = zone_id_from_position(n.x, n.y);
+            n.cell_id = cell_id_from_position(n.x, n.y);
             n.last_update_micros = now;
             ctx.db.npc().entity_id().update(n);
         }
@@ -1192,7 +1192,7 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             p.vz = state.vel.z;
             p.yaw = state.yaw;
             p.grounded = state.grounded;
-            p.zone_id = zone_id_from_position(p.x, p.y);
+            p.cell_id = cell_id_from_position(p.x, p.y);
             p.last_update_micros = now;
             ctx.db.player().entity_id().update(p);
         }
@@ -1259,6 +1259,7 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
                     row.vx = p.vel.x;
                     row.vy = p.vel.y;
                     row.vz = p.vel.z;
+                    row.cell_id = cell_id_from_position(p.pos.x, p.pos.y);
                     row.last_update_micros = now;
                     ctx.db.projectile().entity_id().update(row);
                 }
@@ -1307,7 +1308,7 @@ fn seed_npcs(ctx: &ReducerContext, now: i64) {
             hp_max: NPC_HP_MAX,
             alive: true,
             respawn_at_micros: 0,
-            zone_id: zone_id_from_position(x, y),
+            cell_id: cell_id_from_position(x, y),
             kind: 0,
             last_update_micros: now,
         });

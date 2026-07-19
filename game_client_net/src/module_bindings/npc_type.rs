@@ -17,7 +17,7 @@ pub struct Npc {
     pub hp_max: f32,
     pub alive: bool,
     pub respawn_at_micros: i64,
-    pub zone_id: u32,
+    pub cell_id: u64,
     pub kind: u32,
     pub last_update_micros: i64,
 }
@@ -40,7 +40,7 @@ pub struct NpcCols {
     pub hp_max: __sdk::__query_builder::Col<Npc, f32>,
     pub alive: __sdk::__query_builder::Col<Npc, bool>,
     pub respawn_at_micros: __sdk::__query_builder::Col<Npc, i64>,
-    pub zone_id: __sdk::__query_builder::Col<Npc, u32>,
+    pub cell_id: __sdk::__query_builder::Col<Npc, u64>,
     pub kind: __sdk::__query_builder::Col<Npc, u32>,
     pub last_update_micros: __sdk::__query_builder::Col<Npc, i64>,
 }
@@ -59,7 +59,7 @@ impl __sdk::__query_builder::HasCols for Npc {
             hp_max: __sdk::__query_builder::Col::new(table_name, "hp_max"),
             alive: __sdk::__query_builder::Col::new(table_name, "alive"),
             respawn_at_micros: __sdk::__query_builder::Col::new(table_name, "respawn_at_micros"),
-            zone_id: __sdk::__query_builder::Col::new(table_name, "zone_id"),
+            cell_id: __sdk::__query_builder::Col::new(table_name, "cell_id"),
             kind: __sdk::__query_builder::Col::new(table_name, "kind"),
             last_update_micros: __sdk::__query_builder::Col::new(table_name, "last_update_micros"),
         }
@@ -70,16 +70,16 @@ impl __sdk::__query_builder::HasCols for Npc {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct NpcIxCols {
+    pub cell_id: __sdk::__query_builder::IxCol<Npc, u64>,
     pub entity_id: __sdk::__query_builder::IxCol<Npc, u64>,
-    pub zone_id: __sdk::__query_builder::IxCol<Npc, u32>,
 }
 
 impl __sdk::__query_builder::HasIxCols for Npc {
     type IxCols = NpcIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         NpcIxCols {
+            cell_id: __sdk::__query_builder::IxCol::new(table_name, "cell_id"),
             entity_id: __sdk::__query_builder::IxCol::new(table_name, "entity_id"),
-            zone_id: __sdk::__query_builder::IxCol::new(table_name, "zone_id"),
         }
     }
 }

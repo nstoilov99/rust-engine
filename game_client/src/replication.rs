@@ -385,7 +385,7 @@ mod tests {
             pos: [1.0, 2.0, 3.0],
             vel: [0.0; 3],
             yaw: 0.5,
-            zone_id: 0,
+            cell_id: 0,
             hp: 50.0,
             hp_max: 50.0,
             alive: true,

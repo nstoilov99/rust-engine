@@ -16,7 +16,7 @@ pub struct Projectile {
     pub vx: f32,
     pub vy: f32,
     pub vz: f32,
-    pub zone_id: u32,
+    pub cell_id: u64,
     pub spawned_at_micros: i64,
     pub last_update_micros: i64,
 }
@@ -38,7 +38,7 @@ pub struct ProjectileCols {
     pub vx: __sdk::__query_builder::Col<Projectile, f32>,
     pub vy: __sdk::__query_builder::Col<Projectile, f32>,
     pub vz: __sdk::__query_builder::Col<Projectile, f32>,
-    pub zone_id: __sdk::__query_builder::Col<Projectile, u32>,
+    pub cell_id: __sdk::__query_builder::Col<Projectile, u64>,
     pub spawned_at_micros: __sdk::__query_builder::Col<Projectile, i64>,
     pub last_update_micros: __sdk::__query_builder::Col<Projectile, i64>,
 }
@@ -56,7 +56,7 @@ impl __sdk::__query_builder::HasCols for Projectile {
             vx: __sdk::__query_builder::Col::new(table_name, "vx"),
             vy: __sdk::__query_builder::Col::new(table_name, "vy"),
             vz: __sdk::__query_builder::Col::new(table_name, "vz"),
-            zone_id: __sdk::__query_builder::Col::new(table_name, "zone_id"),
+            cell_id: __sdk::__query_builder::Col::new(table_name, "cell_id"),
             spawned_at_micros: __sdk::__query_builder::Col::new(table_name, "spawned_at_micros"),
             last_update_micros: __sdk::__query_builder::Col::new(table_name, "last_update_micros"),
         }
@@ -67,16 +67,16 @@ impl __sdk::__query_builder::HasCols for Projectile {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct ProjectileIxCols {
+    pub cell_id: __sdk::__query_builder::IxCol<Projectile, u64>,
     pub entity_id: __sdk::__query_builder::IxCol<Projectile, u64>,
-    pub zone_id: __sdk::__query_builder::IxCol<Projectile, u32>,
 }
 
 impl __sdk::__query_builder::HasIxCols for Projectile {
     type IxCols = ProjectileIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         ProjectileIxCols {
+            cell_id: __sdk::__query_builder::IxCol::new(table_name, "cell_id"),
             entity_id: __sdk::__query_builder::IxCol::new(table_name, "entity_id"),
-            zone_id: __sdk::__query_builder::IxCol::new(table_name, "zone_id"),
         }
     }
 }

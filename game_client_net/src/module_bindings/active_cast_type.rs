@@ -10,7 +10,7 @@ pub struct ActiveCast {
     pub entity_id: u64,
     pub ability_id: u16,
     pub target_entity_id: u64,
-    pub zone_id: u32,
+    pub cell_id: u64,
     pub start_micros: i64,
     pub finish_micros: i64,
 }
@@ -26,7 +26,7 @@ pub struct ActiveCastCols {
     pub entity_id: __sdk::__query_builder::Col<ActiveCast, u64>,
     pub ability_id: __sdk::__query_builder::Col<ActiveCast, u16>,
     pub target_entity_id: __sdk::__query_builder::Col<ActiveCast, u64>,
-    pub zone_id: __sdk::__query_builder::Col<ActiveCast, u32>,
+    pub cell_id: __sdk::__query_builder::Col<ActiveCast, u64>,
     pub start_micros: __sdk::__query_builder::Col<ActiveCast, i64>,
     pub finish_micros: __sdk::__query_builder::Col<ActiveCast, i64>,
 }
@@ -38,7 +38,7 @@ impl __sdk::__query_builder::HasCols for ActiveCast {
             entity_id: __sdk::__query_builder::Col::new(table_name, "entity_id"),
             ability_id: __sdk::__query_builder::Col::new(table_name, "ability_id"),
             target_entity_id: __sdk::__query_builder::Col::new(table_name, "target_entity_id"),
-            zone_id: __sdk::__query_builder::Col::new(table_name, "zone_id"),
+            cell_id: __sdk::__query_builder::Col::new(table_name, "cell_id"),
             start_micros: __sdk::__query_builder::Col::new(table_name, "start_micros"),
             finish_micros: __sdk::__query_builder::Col::new(table_name, "finish_micros"),
         }
@@ -49,16 +49,16 @@ impl __sdk::__query_builder::HasCols for ActiveCast {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct ActiveCastIxCols {
+    pub cell_id: __sdk::__query_builder::IxCol<ActiveCast, u64>,
     pub entity_id: __sdk::__query_builder::IxCol<ActiveCast, u64>,
-    pub zone_id: __sdk::__query_builder::IxCol<ActiveCast, u32>,
 }
 
 impl __sdk::__query_builder::HasIxCols for ActiveCast {
     type IxCols = ActiveCastIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         ActiveCastIxCols {
+            cell_id: __sdk::__query_builder::IxCol::new(table_name, "cell_id"),
             entity_id: __sdk::__query_builder::IxCol::new(table_name, "entity_id"),
-            zone_id: __sdk::__query_builder::IxCol::new(table_name, "zone_id"),
         }
     }
 }

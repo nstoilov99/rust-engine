@@ -27,7 +27,7 @@ pub struct Player {
     pub alive: bool,
     pub respawn_at_micros: i64,
     pub gcd_until_micros: i64,
-    pub zone_id: u32,
+    pub cell_id: u64,
     pub epoch: u32,
     pub last_input_seq: u32,
     pub last_applied_seq: u32,
@@ -62,7 +62,7 @@ pub struct PlayerCols {
     pub alive: __sdk::__query_builder::Col<Player, bool>,
     pub respawn_at_micros: __sdk::__query_builder::Col<Player, i64>,
     pub gcd_until_micros: __sdk::__query_builder::Col<Player, i64>,
-    pub zone_id: __sdk::__query_builder::Col<Player, u32>,
+    pub cell_id: __sdk::__query_builder::Col<Player, u64>,
     pub epoch: __sdk::__query_builder::Col<Player, u32>,
     pub last_input_seq: __sdk::__query_builder::Col<Player, u32>,
     pub last_applied_seq: __sdk::__query_builder::Col<Player, u32>,
@@ -93,7 +93,7 @@ impl __sdk::__query_builder::HasCols for Player {
             alive: __sdk::__query_builder::Col::new(table_name, "alive"),
             respawn_at_micros: __sdk::__query_builder::Col::new(table_name, "respawn_at_micros"),
             gcd_until_micros: __sdk::__query_builder::Col::new(table_name, "gcd_until_micros"),
-            zone_id: __sdk::__query_builder::Col::new(table_name, "zone_id"),
+            cell_id: __sdk::__query_builder::Col::new(table_name, "cell_id"),
             epoch: __sdk::__query_builder::Col::new(table_name, "epoch"),
             last_input_seq: __sdk::__query_builder::Col::new(table_name, "last_input_seq"),
             last_applied_seq: __sdk::__query_builder::Col::new(table_name, "last_applied_seq"),
@@ -106,20 +106,20 @@ impl __sdk::__query_builder::HasCols for Player {
 ///
 /// Provides typed access to indexed columns for query building.
 pub struct PlayerIxCols {
+    pub cell_id: __sdk::__query_builder::IxCol<Player, u64>,
     pub character_id: __sdk::__query_builder::IxCol<Player, u64>,
     pub entity_id: __sdk::__query_builder::IxCol<Player, u64>,
     pub owner_identity: __sdk::__query_builder::IxCol<Player, __sdk::Identity>,
-    pub zone_id: __sdk::__query_builder::IxCol<Player, u32>,
 }
 
 impl __sdk::__query_builder::HasIxCols for Player {
     type IxCols = PlayerIxCols;
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         PlayerIxCols {
+            cell_id: __sdk::__query_builder::IxCol::new(table_name, "cell_id"),
             character_id: __sdk::__query_builder::IxCol::new(table_name, "character_id"),
             entity_id: __sdk::__query_builder::IxCol::new(table_name, "entity_id"),
             owner_identity: __sdk::__query_builder::IxCol::new(table_name, "owner_identity"),
-            zone_id: __sdk::__query_builder::IxCol::new(table_name, "zone_id"),
         }
     }
 }
