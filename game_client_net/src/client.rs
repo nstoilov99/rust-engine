@@ -13,7 +13,7 @@ use std::time::Instant;
 use game_shared::net::protocol::{
     ClientInput, ClockSample, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
 };
-use game_shared::net::schema::{version_compatible, INPUT_SEND_HZ, PROTOCOL_VERSION};
+use game_shared::net::schema::{version_compatible, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
 use spacetimedb_sdk::{
     credentials, DbContext, SubscriptionHandle as _, Table, TableWithPrimaryKey,
@@ -123,6 +123,10 @@ impl RateLimiter {
     }
 }
 
+/// (epoch, last_applied_seq, pos, vel, yaw, grounded) — the own-row fields
+/// that constitute one atomic ack (M6 D4).
+type OwnState = (u32, u32, [f32; 3], [f32; 3], f32, bool);
+
 pub struct SpacetimeNetClient {
     state: ConnectionState,
     conn: Option<DbConnection>,
@@ -138,16 +142,15 @@ pub struct SpacetimeNetClient {
     pending: Vec<NetEvent>,
     limiter: RateLimiter,
     enter_world_sent: bool,
-    /// Latest coalesced input (contract §5: never per-frame; sent at
-    /// `INPUT_SEND_HZ` from `poll`).
-    pending_input: Option<ClientInput>,
-    /// Epoch the sequence counter belongs to; a row epoch change restarts
-    /// the sequence space (contract §5).
+    /// Queued input samples (M6 D4: one per prediction step, seq stamped by
+    /// the caller). Drained in `poll`; cleared on epoch change so a rejoin
+    /// can never send stale-seq inputs under the new epoch.
+    pending_inputs: Vec<ClientInput>,
+    /// Epoch stamped onto outgoing inputs, mirrored from the own row.
     input_epoch: u32,
-    input_seq: u32,
-    last_input_send: Option<Instant>,
-    /// Last (epoch, seq) acked via the own row — replication IS the ack.
-    last_acked: (u32, u32),
+    /// Last own-row state emitted as `OwnStateAck` — `None` until the row
+    /// is first seen, so the first sight always emits.
+    last_own_state: Option<OwnState>,
     last_ping: Option<Instant>,
     ping_nonce: u64,
     /// In-flight ping: (nonce, send_local_us). One at a time; a new ping
@@ -177,11 +180,9 @@ impl SpacetimeNetClient {
             pending: Vec::new(),
             limiter: RateLimiter::new(),
             enter_world_sent: false,
-            pending_input: None,
+            pending_inputs: Vec::new(),
             input_epoch: 0,
-            input_seq: 0,
-            last_input_send: None,
-            last_acked: (0, 0),
+            last_own_state: None,
             last_ping: None,
             ping_nonce: 0,
             pending_ping: None,
@@ -261,11 +262,9 @@ impl SpacetimeNetClient {
         self.repl_zone = None;
         self.pending_repl = None;
         self.enter_world_sent = false;
-        self.pending_input = None;
+        self.pending_inputs.clear();
         self.input_epoch = 0;
-        self.input_seq = 0;
-        self.last_input_send = None;
-        self.last_acked = (0, 0);
+        self.last_own_state = None;
         self.last_ping = None;
         self.pending_ping = None;
         if let Some(conn) = self.conn.take() {
@@ -536,10 +535,10 @@ impl NetClient for SpacetimeNetClient {
     }
 
     fn send_input(&mut self, input: &ClientInput) {
-        // Coalesce: keep only the latest sample; `poll` sends at
-        // `INPUT_SEND_HZ` with epoch/seq stamped from authoritative state.
+        // One sample per prediction step (M6 D4); seq is caller-owned,
+        // epoch is stamped in `poll` from the authoritative own row.
         if self.state == ConnectionState::InWorld {
-            self.pending_input = Some(*input);
+            self.pending_inputs.push(*input);
         }
     }
 
@@ -696,42 +695,52 @@ impl NetClient for SpacetimeNetClient {
 
                 if let Some(own) = &own {
                     // Row epoch change (rejoin) restarts the sequence space
-                    // (contract §5).
+                    // (contract §5). Drop queued inputs — their seqs belong
+                    // to the old epoch.
                     if own.epoch != self.input_epoch {
                         self.input_epoch = own.epoch;
-                        self.input_seq = 0;
+                        self.pending_inputs.clear();
                     }
-                    // Replication of (epoch, last_input_seq) IS the ack.
-                    let acked = (own.epoch, own.last_input_seq);
-                    if own.last_input_seq > 0 && acked != self.last_acked {
-                        self.last_acked = acked;
-                        out.push(NetEvent::InputAck {
-                            epoch: acked.0,
-                            seq: acked.1,
+                    // Replication of the own row IS the ack (M6 D4): emit
+                    // whenever its simulated state or counters change,
+                    // including the first time the row is seen.
+                    let state: OwnState = (
+                        own.epoch,
+                        own.last_applied_seq,
+                        [own.x, own.y, own.z],
+                        [own.vx, own.vy, own.vz],
+                        own.yaw,
+                        own.grounded,
+                    );
+                    if self.last_own_state != Some(state) {
+                        self.last_own_state = Some(state);
+                        out.push(NetEvent::OwnStateAck {
+                            epoch: state.0,
+                            seq: state.1,
+                            pos: state.2,
+                            vel: state.3,
+                            yaw: state.4,
+                            grounded: state.5,
                         });
                     }
-                }
 
-                // Coalesced input send at INPUT_SEND_HZ. A failed call is
-                // dropped, never retried (contract §5) — the next sample
-                // carries fresher state anyway.
-                let input_due = self
-                    .last_input_send
-                    .is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0 / INPUT_SEND_HZ as f32);
-                if input_due && own.is_some() && self.pending_input.is_some() && self.limiter.allow()
-                {
-                    let input = self.pending_input.take().expect("checked above");
-                    self.input_seq += 1;
-                    let _ = conn.reducers.submit_input(
-                        self.input_epoch,
-                        self.input_seq,
-                        input.move_dir[0],
-                        input.move_dir[1],
-                        input.yaw,
-                        input.sprint,
-                        input.jump,
-                    );
-                    self.last_input_send = Some(Instant::now());
+                    // Forward queued input samples without re-stamping or
+                    // coalescing (M6 D4). A failed call is dropped, never
+                    // retried (contract §5).
+                    for input in self.pending_inputs.drain(..) {
+                        if !self.limiter.allow() {
+                            break;
+                        }
+                        let _ = conn.reducers.submit_input(
+                            self.input_epoch,
+                            input.seq,
+                            input.move_dir[0],
+                            input.move_dir[1],
+                            input.yaw,
+                            input.sprint,
+                            input.jump,
+                        );
+                    }
                 }
 
                 // Clock sync ping (plan D5): one in flight; a new ping

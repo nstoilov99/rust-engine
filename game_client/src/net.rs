@@ -3,9 +3,10 @@
 //! replication. Enabled with `--connect`.
 
 use crate::interp::NetClock;
+use crate::prediction::Prediction;
 use crate::replication::Replication;
 use game_client_net::{local_time_us, SpacetimeNetClient};
-use game_shared::net::protocol::ModuleAddr;
+use game_shared::net::protocol::{ClientInput, ModuleAddr};
 use game_shared::net::traits::{ConnectionState, NetClient, NetEvent};
 use rust_engine::engine::ecs::game_world::GameWorld;
 use rust_engine::engine::input::action::KeyCode;
@@ -20,12 +21,16 @@ pub struct NetSession {
     events: Vec<NetEvent>,
     replication: Replication,
     clock: NetClock,
+    prediction: Prediction,
+    /// Reused buffer for the input samples one frame's prediction produced.
+    outgoing: Vec<ClientInput>,
     last_update: Option<Instant>,
     /// Last acked (epoch, seq) from the own row, for the status line.
     last_ack: Option<(u32, u32)>,
-    /// True while the previous frame had movement input — lets one final
-    /// stop sample through so the server sees the rest pose.
-    was_moving: bool,
+    /// Facing carried across idle frames (yaw only changes while moving).
+    yaw: f32,
+    /// Space state last frame, for the jump edge trigger.
+    space_was_down: bool,
 }
 
 impl NetSession {
@@ -67,15 +72,20 @@ impl NetSession {
             events: Vec::new(),
             replication: Replication::default(),
             clock: NetClock::default(),
+            prediction: Prediction::new(),
+            outgoing: Vec::new(),
             last_update: None,
             last_ack: None,
-            was_moving: false,
+            yaw: 0.0,
+            space_was_down: false,
         })
     }
 
-    /// Pump once per frame on the main thread: drain events, drive the
-    /// local player from raw WASD (M5 trust-the-client; M6 replaces this),
-    /// and evaluate proxy interpolation at delayed server time.
+    /// Pump once per frame on the main thread: drain events (acks reconcile
+    /// prediction), run fixed-step prediction from raw WASD+Space (M6 D4),
+    /// forward its input samples, and evaluate proxy interpolation at
+    /// delayed server time. Events drain BEFORE inputs are sent, so an epoch
+    /// change can never race a stale-seq sample into the new epoch.
     pub fn update(&mut self, game_world: &mut GameWorld) {
         let now = Instant::now();
         let dt = self
@@ -83,9 +93,14 @@ impl NetSession {
             .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
         self.last_update = Some(now);
 
-        let (move_dir, sprint) = game_world
+        let (move_dir, sprint, space_down) = game_world
             .resource::<InputManager>()
-            .map_or(([0.0; 2], false), read_move_keys);
+            .map_or(([0.0; 2], false, false), read_move_keys);
+        let jump_pressed = space_down && !self.space_was_down;
+        self.space_was_down = space_down;
+        if move_dir != [0.0; 2] {
+            self.yaw = move_dir[1].atan2(move_dir[0]);
+        }
 
         let world = game_world.hecs_mut();
         self.client.poll(&mut self.events);
@@ -102,24 +117,30 @@ impl NetSession {
                 } => self.replication.record_tombstone(entity_id, generation),
                 NetEvent::Snapshot(snapshot) => self.replication.apply_snapshot(world, &snapshot),
                 NetEvent::StateUpdate(state) => self.replication.push_sample(&state),
-                NetEvent::InputAck { epoch, seq } => self.last_ack = Some((epoch, seq)),
+                NetEvent::OwnStateAck {
+                    epoch,
+                    seq,
+                    pos,
+                    vel,
+                    yaw,
+                    grounded,
+                } => {
+                    self.prediction.on_ack(epoch, seq, pos, vel, yaw, grounded);
+                    self.last_ack = Some((epoch, seq));
+                }
                 NetEvent::ClockSample(s) => self.clock.add_sample(s.offset_us, s.rtt_us),
             }
         }
 
         if self.client.connection_state() == ConnectionState::InWorld {
-            let moving = move_dir != [0.0; 2];
-            if let Some(input) = self
-                .replication
-                .drive_local_player(world, move_dir, sprint, dt)
-            {
-                // Coalesced by the backend; only offer samples while moving
-                // (plus one stop sample) so idle clients stay quiet.
-                if moving || self.was_moving {
-                    self.client.send_input(&input);
-                }
+            self.prediction
+                .update(dt, move_dir, self.yaw, sprint, jump_pressed, &mut self.outgoing);
+            for input in self.outgoing.drain(..) {
+                self.client.send_input(&input);
             }
-            self.was_moving = moving;
+            if let Some((pos, yaw)) = self.prediction.visual_pose() {
+                self.replication.set_local_pose(world, pos, yaw);
+            }
         }
 
         let server_now = self.clock.server_time_us(local_time_us());
@@ -144,10 +165,9 @@ impl NetSession {
     }
 }
 
-/// Raw WASD + Shift on the XY ground plane (Z-up: X forward, Y right).
-/// Deliberately bypasses Enhanced Input — M6's server-authoritative player
-/// replaces this whole path.
-fn read_move_keys(im: &InputManager) -> ([f32; 2], bool) {
+/// Raw WASD + Shift (sprint) + Space (jump) on the XY ground plane (Z-up:
+/// X forward, Y right). Deliberately bypasses Enhanced Input for now.
+fn read_move_keys(im: &InputManager) -> ([f32; 2], bool, bool) {
     let axis = |neg, pos| (im.is_key_pressed(pos) as i8 - im.is_key_pressed(neg) as i8) as f32;
     (
         [
@@ -155,5 +175,6 @@ fn read_move_keys(im: &InputManager) -> ([f32; 2], bool) {
             axis(KeyCode::KeyA, KeyCode::KeyD),
         ],
         im.is_key_pressed(KeyCode::ShiftLeft),
+        im.is_key_pressed(KeyCode::Space),
     )
 }

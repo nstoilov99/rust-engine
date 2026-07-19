@@ -12,6 +12,7 @@ mod input_handler;
 mod interp;
 mod net;
 mod plugin;
+mod prediction;
 mod render_loop;
 mod replication;
 mod systems;

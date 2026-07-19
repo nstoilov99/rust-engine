@@ -48,8 +48,20 @@ pub enum NetEvent {
     TombstoneSeen { entity_id: u64, generation: u32 },
     /// A fresh state sample for a live entity (feeds interpolation buffers).
     StateUpdate(EntityState),
-    /// Own-row ack advanced (contract §5: replication of the row IS the ack).
-    InputAck { epoch: u32, seq: u32 },
+    /// Authoritative own-player state (M6 D4; contract §5: replication of the
+    /// own row IS the ack). Emitted whenever the own row's simulated state or
+    /// counters change — including once when the row first becomes visible —
+    /// and atomically pairs `seq` (`last_applied_seq`) with the state it
+    /// produced. An `epoch` change means the sequence space restarted: the
+    /// game side must reset its seq counter and prediction buffer.
+    OwnStateAck {
+        epoch: u32,
+        seq: u32,
+        pos: [f32; 3],
+        vel: [f32; 3],
+        yaw: f32,
+        grounded: bool,
+    },
     ClockSample(ClockSample),
 }
 

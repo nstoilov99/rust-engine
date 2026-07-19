@@ -53,8 +53,9 @@ pub struct ClientInput {
     /// Stamped by the `NetClient` implementation at send time (it owns the
     /// authoritative epoch from the own player row); caller values ignored.
     pub epoch: u32,
-    /// Stamped by the `NetClient` implementation at send time (moves to the
-    /// prediction side in M6 package 4).
+    /// Owned by client prediction (M6 D4): one seq per prediction step,
+    /// strictly increasing within an epoch. The backend forwards without
+    /// re-stamping or coalescing.
     pub seq: u32,
     /// Desired movement direction on the XY ground plane (Z-up); the
     /// controller unit-clamps and rejects non-finite input.

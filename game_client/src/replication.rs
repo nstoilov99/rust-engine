@@ -9,10 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::interp::InterpBuffer;
 use game_shared::components::NetProxy;
-use game_shared::net::protocol::{ClientInput, EntityKind, EntityState, WorldSnapshot};
-use game_shared::net::schema::{
-    derive_proxy_guid, PLAYER_SPEED_MPS, REALM_ID, SPRINT_MULTIPLIER, TOMBSTONE_TTL_SECS,
-};
+use game_shared::net::protocol::{EntityKind, EntityState, WorldSnapshot};
+use game_shared::net::schema::{derive_proxy_guid, REALM_ID, TOMBSTONE_TTL_SECS};
 use hecs::World;
 use nalgebra_glm as glm;
 use rust_engine::engine::ecs::components::{EntityGuid, MeshRenderer, Name, Transform};
@@ -177,41 +175,12 @@ impl Replication {
         }
     }
 
-    /// Local free-move: integrate the desired direction on the bound entity
-    /// for responsiveness and report the *intent* for `send_input` — the
-    /// server integrates authoritatively (M6 D3). Package 4 replaces this
-    /// cosmetic integration with real prediction + reconciliation.
-    pub fn drive_local_player(
-        &mut self,
-        world: &mut World,
-        move_dir: [f32; 2],
-        sprint: bool,
-        dt: f32,
-    ) -> Option<ClientInput> {
-        let entity = self.local_player?;
-        let yaw = {
-            let mut t = world.get::<&mut Transform>(entity).ok()?;
-            let len = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1]).sqrt();
-            if len > 1e-3 {
-                let speed = PLAYER_SPEED_MPS * if sprint { SPRINT_MULTIPLIER } else { 1.0 };
-                t.position.x += move_dir[0] / len * speed * dt;
-                t.position.y += move_dir[1] / len * speed * dt;
-                let yaw = move_dir[1].atan2(move_dir[0]);
-                t.rotation = glm::quat_angle_axis(yaw, &glm::vec3(0.0, 0.0, 1.0));
-                yaw
-            } else {
-                glm::quat_euler_angles(&t.rotation).z
-            }
-        };
-        rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, entity);
-        Some(ClientInput {
-            epoch: 0, // stamped by the backend at send time
-            seq: 0,
-            move_dir,
-            yaw,
-            sprint,
-            jump: false,
-        })
+    /// Write the predicted pose onto the bound local player (M6 D4: the
+    /// local entity is prediction-driven; snapshots never touch it).
+    pub fn set_local_pose(&self, world: &mut World, pos: [f32; 3], yaw: f32) {
+        if let Some(entity) = self.local_player {
+            write_pose(world, entity, pos, yaw);
+        }
     }
 
     pub fn apply_snapshot(&mut self, world: &mut World, snapshot: &WorldSnapshot) {
