@@ -114,7 +114,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M4 Zone & Chunk Lifecycle (WorldStreamer: budgeted cell/chunk streaming, GUID-stable reload): **complete** (see `docs/roadmap/VULKANO-M4-ZONE-CHUNK-LIFECYCLE.md`)
 - M5 Net-A (SpacetimeDB connection, identity, replication, zone-scoped subscriptions): **complete** (see `docs/roadmap/VULKANO-M5-NET-A-CONNECTION-IDENTITY.md`)
 - M6 Net-B (server-authoritative movement: shared controller, client prediction, WASM parity suite, combat groundwork): **complete** (see `docs/roadmap/VULKANO-M6-NET-B-MOVEMENT.md`)
-- Next: M6.5/M7 per `docs/roadmap/ROADMAP.md` (Phase M)
+- M7 Net-C (combat vertical slice: ability roster, cast pipeline, death/respawn, projectiles, standalone crusty HUD behind `hud` feature): **complete** (see `docs/roadmap/VULKANO-M7-NET-C-COMBAT.md`)
+- Next: M8+ per `docs/roadmap/ROADMAP.md` (Phase M)
 
 ## Patched Dependencies
 
