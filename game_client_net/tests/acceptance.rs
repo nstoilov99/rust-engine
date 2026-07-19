@@ -227,6 +227,59 @@ fn zone_swap_overlaps_without_gap() {
     b.leave();
 }
 
+/// M6 D5 parity: every embedded trace replayed inside the server WASM module
+/// must land within tolerance of the same trace replayed natively. Each side
+/// is already bounded to 1 mm of the recorded `expected` per step (a replay
+/// error fails the reducer / the native unwrap), so cross-checking the end
+/// positions bounds native↔WASM divergence to 2·TRACE_TOLERANCE.
+///
+/// Rows are deterministic upserts, so a stale row from a pre-divergence
+/// module could mask a fresh reducer failure — run after a fresh publish
+/// (the suite header's `publish.ps1 -Wipe`) for a strict result.
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn wasm_parity_traces_match_native() {
+    use game_shared::collision::ChunkStore;
+    use game_shared::motion::trace::{load_embedded, EMBEDDED_TRACES, TRACE_TOLERANCE};
+
+    // Native store from the same cooked chunks the module embeds.
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../content/collision/greybox");
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .expect("content/collision/greybox present")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "ccol"))
+        .collect();
+    paths.sort();
+    let mut store = ChunkStore::new();
+    for p in &paths {
+        store.insert_chunk(&std::fs::read(p).unwrap()).unwrap();
+    }
+
+    let mut b = Bot::enter("acc-parity");
+    for (id, _) in EMBEDDED_TRACES {
+        b.client.dev_run_parity_trace(id);
+    }
+    for (id, _) in EMBEDDED_TRACES {
+        let native = load_embedded(id).unwrap().replay(&store).unwrap();
+        b.wait(&format!("parity result for {id}"), |b| {
+            b.client.dev_parity_result(id).is_some()
+        });
+        let (steps, end, _hash) = b.client.dev_parity_result(id).unwrap();
+        assert_eq!(steps, native.steps, "trace {id}: step count mismatch");
+        let d = ((native.end_pos.x - end[0]).powi(2)
+            + (native.end_pos.y - end[1]).powi(2)
+            + (native.end_pos.z - end[2]).powi(2))
+        .sqrt();
+        assert!(
+            d <= 2.0 * TRACE_TOLERANCE,
+            "trace {id}: native end {:?} vs WASM end {end:?} diverge by {d}",
+            native.end_pos
+        );
+    }
+    b.leave();
+}
+
 #[test]
 #[ignore = "needs local spacetime standalone + published module"]
 fn despawned_npc_is_destroyed_with_evidence() {

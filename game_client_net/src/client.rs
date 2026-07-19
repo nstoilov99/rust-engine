@@ -20,9 +20,9 @@ use spacetimedb_sdk::{
 };
 
 use crate::module_bindings::{
-    despawn_npc, dev_teleport, enter_world, ping, submit_input, ConfigTableAccess, DbConnection,
-    Npc, NpcTableAccess, PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle,
-    TombstoneTableAccess,
+    despawn_npc, dev_teleport, enter_world, ping, run_parity_trace, submit_input,
+    ConfigTableAccess, DbConnection, Npc, NpcTableAccess, ParityResultTableAccess,
+    PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle, TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
@@ -229,6 +229,25 @@ impl SpacetimeNetClient {
         }
     }
 
+    /// Dev/test hook: replay the embedded parity trace inside the WASM
+    /// module (M6 D5); the result upserts into `parity_result`.
+    pub fn dev_run_parity_trace(&mut self, trace_id: &str) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.reducers.run_parity_trace(trace_id.to_string());
+        }
+    }
+
+    /// Dev/test reader for the WASM-side replay result:
+    /// `(steps, end_pos, state_hash)`.
+    pub fn dev_parity_result(&self, trace_id: &str) -> Option<(u32, [f32; 3], u64)> {
+        let conn = self.conn.as_ref()?;
+        conn.db
+            .parity_result()
+            .trace_id()
+            .find(&trace_id.to_string())
+            .map(|r| (r.steps, [r.end_x, r.end_y, r.end_z], r.state_hash))
+    }
+
     pub fn identity_hex(&self) -> Option<String> {
         self.conn
             .as_ref()
@@ -292,6 +311,8 @@ impl SpacetimeNetClient {
             format!("SELECT * FROM account WHERE identity = 0x{hex}"),
             format!("SELECT * FROM player WHERE owner_identity = 0x{hex}"),
             format!("SELECT * FROM ping_result WHERE identity = 0x{hex}"),
+            // Dev/test only (≤10 tiny rows): WASM parity replay results.
+            "SELECT * FROM parity_result".to_string(),
         ];
         let applied = self.flags.clone();
         let errored = self.flags.clone();

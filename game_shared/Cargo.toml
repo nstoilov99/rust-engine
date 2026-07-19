@@ -18,6 +18,5 @@ parry3d = "=0.20.2"
 # 1 mm / 0.1° tolerances and for stable face-vs-edge contact ordering at
 # triangle seams. Cooked chunks stay f32; only the cast path widens.
 parry3d-f64 = "=0.20.2"
-
-[dev-dependencies]
+# Parity traces ship as embedded RON parsed at runtime (wasm-safe, no I/O).
 ron = "0.8"

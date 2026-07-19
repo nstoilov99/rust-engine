@@ -35,6 +35,43 @@ pub struct TraceReport {
     pub steps: u32,
     pub end_pos: Vec3,
     pub max_error: f32,
+    /// Order-sensitive FNV-1a over the replayed per-step position bit
+    /// patterns. Diagnostic only — never compared across native/WASM (parity
+    /// is tolerance-based); a differing hash localizes which run diverged.
+    pub state_hash: u64,
+}
+
+/// The checked-in parity trace battery (D5), embedded so the server WASM
+/// module can replay it without I/O. Ids match the file stems.
+pub const EMBEDDED_TRACES: &[(&str, &str)] = &[
+    ("greybox_walk", include_str!("traces/greybox_walk.ron")),
+    ("slope_up_down", include_str!("traces/slope_up_down.ron")),
+    ("slope_blocked", include_str!("traces/slope_blocked.ron")),
+    ("step_up", include_str!("traces/step_up.ron")),
+    ("step_blocked", include_str!("traces/step_blocked.ron")),
+    ("jump_gap", include_str!("traces/jump_gap.ron")),
+    ("fall_land", include_str!("traces/fall_land.ron")),
+    ("wall_slide", include_str!("traces/wall_slide.ron")),
+    ("chunk_seam", include_str!("traces/chunk_seam.ron")),
+    ("long_run", include_str!("traces/long_run.ron")),
+];
+
+fn fnv1a_extend(mut hash: u64, pos: &Vec3) -> u64 {
+    for f in [pos.x, pos.y, pos.z] {
+        for b in f.to_le_bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+pub fn load_embedded(trace_id: &str) -> Result<MotionTrace, String> {
+    let (_, text) = EMBEDDED_TRACES
+        .iter()
+        .find(|(id, _)| *id == trace_id)
+        .ok_or_else(|| format!("unknown parity trace {trace_id:?}"))?;
+    ron::from_str(text).map_err(|e| format!("trace {trace_id:?} failed to parse: {e}"))
 }
 
 impl MotionTrace {
@@ -71,8 +108,10 @@ impl MotionTrace {
         }
         let mut state = self.start_state();
         let mut max_error = 0.0f32;
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
         for (i, (intent, expected)) in self.intents.iter().zip(&self.expected).enumerate() {
             state = step(&self.config, &state, intent, store);
+            hash = fnv1a_extend(hash, &state.pos);
             let err = state.pos.distance(Vec3::from(*expected));
             max_error = max_error.max(err);
             if err > TRACE_TOLERANCE {
@@ -86,6 +125,7 @@ impl MotionTrace {
             steps: self.intents.len() as u32,
             end_pos: state.pos,
             max_error,
+            state_hash: hash,
         })
     }
 }

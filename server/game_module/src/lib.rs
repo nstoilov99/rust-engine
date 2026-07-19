@@ -29,6 +29,9 @@ static COLLISION: OnceLock<Option<ChunkStore>> = OnceLock::new();
 fn collision_store() -> Option<&'static ChunkStore> {
     COLLISION
         .get_or_init(|| {
+            // Cold-load cost (bytes → ChunkStore incl. BVH build) shows up in
+            // the module log via the console timer (M6 pkg 5 perf gate).
+            let _watch = spacetimedb::log_stopwatch::LogStopwatch::new("collision_store_cold_build");
             let mut store = ChunkStore::new();
             for bytes in collision_registry::COLLISION_CHUNKS {
                 if let Err(e) = store.insert_chunk(bytes) {
@@ -614,6 +617,10 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
         .iter()
         .filter(|p| p.session.is_some())
         .collect();
+    // Per-tick duration lands in the module log; p95/p99 are aggregated from
+    // there (no in-module clock). Only ticks that simulate someone are timed.
+    let _watch = (!players.is_empty())
+        .then(|| spacetimedb::log_stopwatch::LogStopwatch::new("move_tick"));
     for mut p in players {
         let mut state = MotionState {
             pos: Vec3::new(p.x, p.y, p.z),
@@ -735,15 +742,37 @@ pub struct ParityResult {
     state_hash: u64,
 }
 
-/// Dev/test reducer (M6 D5): replays a named motion trace against the
-/// embedded collision and records the outcome in `parity_result`. The trace
-/// list ships with the shared controller (packages 2/5); until then this
-/// only proves the embedded store builds inside the module.
+/// Dev/test reducer (M6 D5): replays a named embedded motion trace against
+/// the embedded collision — actual-WASM parity. `replay` errors (which fail
+/// the reducer) if any step diverges from the natively recorded expected
+/// positions by more than `TRACE_TOLERANCE`; success records the outcome in
+/// `parity_result` for the native harness to cross-check.
 #[reducer]
-pub fn run_parity_trace(_ctx: &ReducerContext, trace_id: String) -> Result<(), String> {
+pub fn run_parity_trace(ctx: &ReducerContext, trace_id: String) -> Result<(), String> {
     let store = collision_store().ok_or("embedded collision failed to load")?;
-    Err(format!(
-        "unknown parity trace {trace_id:?} ({} collision chunks loaded)",
-        store.len()
-    ))
+    let trace = motion::trace::load_embedded(&trace_id)?;
+    let report = {
+        let _watch = spacetimedb::log_stopwatch::LogStopwatch::new("parity_trace_replay");
+        trace.replay(store)?
+    };
+    log::info!(
+        "parity trace {trace_id:?}: {} steps, end {:?}, max err {:.6}",
+        report.steps,
+        report.end_pos,
+        report.max_error
+    );
+    let row = ParityResult {
+        trace_id,
+        steps: report.steps,
+        end_x: report.end_pos.x,
+        end_y: report.end_pos.y,
+        end_z: report.end_pos.z,
+        state_hash: report.state_hash,
+    };
+    if ctx.db.parity_result().trace_id().find(&row.trace_id).is_some() {
+        ctx.db.parity_result().trace_id().update(row);
+    } else {
+        ctx.db.parity_result().insert(row);
+    }
+    Ok(())
 }

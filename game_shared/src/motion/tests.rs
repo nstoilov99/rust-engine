@@ -451,3 +451,245 @@ fn record_greybox_trace() {
     let text = ron::ser::to_string_pretty(&trace, Default::default()).unwrap();
     std::fs::write(traces_dir().join("greybox_walk.ron"), text).unwrap();
 }
+
+// ------------------------------------------------------- parity battery (D5)
+
+/// Rest state standing on whatever the greybox has at `(x, y)` (raycast down).
+fn standing_on(store: &ChunkStore, cfg: &MotionConfig, x: f32, y: f32) -> MotionState {
+    let hit = store
+        .raycast(Vec3::new(x, y, 60.0), Vec3::NEG_Z, 120.0)
+        .unwrap_or_else(|| panic!("no ground under ({x}, {y})"));
+    MotionState {
+        yaw: 0.0,
+        ..MotionState::standing_at(cfg, Vec3::new(x, y, 60.0 - hit.toi))
+    }
+}
+
+/// Build a trace by choosing each intent from the live simulated state
+/// (`None` ends the trace), then record expected positions.
+fn build_trace(
+    name: &str,
+    store: &ChunkStore,
+    start: MotionState,
+    mut next: impl FnMut(usize, &MotionState) -> Option<MoveIntent>,
+) -> MotionTrace {
+    let cfg = MotionConfig::default();
+    let mut state = start;
+    let mut intents = Vec::new();
+    while let Some(intent) = next(intents.len(), &state) {
+        state = step(&cfg, &state, &intent, store);
+        intents.push(intent);
+    }
+    let mut trace = MotionTrace {
+        name: name.into(),
+        config: cfg,
+        start: TraceStart {
+            pos: start.pos.to_array(),
+            vel: start.vel.to_array(),
+            yaw: start.yaw,
+            grounded: start.grounded,
+        },
+        intents,
+        expected: Vec::new(),
+    };
+    trace.record(store);
+    trace
+}
+
+fn walk(dir: [f32; 2], sprint: bool, jump: bool) -> MoveIntent {
+    MoveIntent {
+        move_dir: dir,
+        yaw: dir[1].atan2(dir[0]),
+        sprint,
+        jump,
+    }
+}
+
+fn for_steps(n: usize, intent: MoveIntent) -> impl FnMut(usize, &MotionState) -> Option<MoveIntent> {
+    move |i, _| (i < n).then_some(intent)
+}
+
+/// Every registered parity trace replays natively within tolerance against
+/// the checked-in greybox chunks — the native half of D5 (the WASM half runs
+/// the same replays via `run_parity_trace`).
+#[test]
+fn parity_battery_replays() {
+    let store = greybox_store();
+    for (id, _) in trace::EMBEDDED_TRACES {
+        let t = trace::load_embedded(id)
+            .unwrap_or_else(|e| panic!("{e}; run `cargo test -p game_shared record_parity_traces -- --ignored`"));
+        let report = t
+            .replay(&store)
+            .unwrap_or_else(|e| panic!("trace {id:?} failed: {e}"));
+        assert_eq!(report.steps, t.intents.len() as u32, "{id}");
+    }
+}
+
+/// Randomized-intent fuzz (native only): the controller must stay finite,
+/// inside the world envelope, and within speed bounds for arbitrary intent
+/// streams — and be exactly deterministic across runs.
+#[test]
+fn randomized_intent_fuzz() {
+    let store = greybox_store();
+    let cfg = MotionConfig::default();
+    let max_speed = cfg.walk_speed * cfg.sprint_mult + 1e-3;
+    for seed in [1u64, 0xDEAD_BEEF, 0x00C0_FFEE] {
+        let run = |mut rng: u64| {
+            let mut next = move || {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (rng >> 33) as u32
+            };
+            // Start mid-gym so the stream wanders through real stations.
+            let mut state = standing_on(&store, &cfg, 120.0, 60.0);
+            let mut intent = MoveIntent::IDLE;
+            for i in 0..1500 {
+                if i % 7 == 0 {
+                    let dirs: [[f32; 2]; 8] = [
+                        [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0],
+                        [1.0, 1.0], [1.0, -1.0], [-1.0, 1.0], [-1.0, -1.0],
+                    ];
+                    let r = next();
+                    intent = walk(dirs[(r % 8) as usize], r % 3 == 0, r % 11 == 0);
+                } else {
+                    intent.jump = false;
+                }
+                state = step(&cfg, &state, &intent, &store);
+                assert!(state.pos.is_finite() && state.vel.is_finite(), "seed {seed} step {i}");
+                assert!(state.pos.z > -50.0 && state.pos.z < 100.0, "seed {seed} step {i}: z {}", state.pos.z);
+                let h = Vec3::new(state.vel.x, state.vel.y, 0.0).length();
+                assert!(h <= max_speed, "seed {seed} step {i}: speed {h}");
+            }
+            (state.pos, state.vel, state.yaw)
+        };
+        assert_eq!(run(seed), run(seed), "seed {seed} not deterministic");
+    }
+}
+
+/// Records the full parity battery onto `src/motion/traces/`. Each script is
+/// anchored to gym stations (`tools/greybox_gen/src/gym.rs`, plateau ground
+/// z = 9) and sanity-checked so a silently-degenerate recording can't be
+/// committed. Rerun after any controller or greybox content change:
+/// `cargo test -p game_shared record_parity_traces -- --ignored`
+#[test]
+#[ignore = "writes src/motion/traces/*.ron"]
+fn record_parity_traces() {
+    let store = greybox_store();
+    let cfg = MotionConfig::default();
+    let rest_z = |ground: f32| ground + cfg.capsule_half_seg + cfg.capsule_radius + cfg.skin;
+    let save = |trace: &MotionTrace| {
+        let text = ron::ser::to_string_pretty(trace, Default::default()).unwrap();
+        std::fs::write(traces_dir().join(format!("{}.ron", trace.name)), text).unwrap();
+    };
+
+    // Slope up/down: 30° ramp (foot x=88, y=96); up, pause, back down.
+    let t = build_trace("slope_up_down", &store, standing_on(&store, &cfg, 85.0, 96.0), |i, _| {
+        match i {
+            0..=24 => Some(walk([1.0, 0.0], false, false)),
+            25..=29 => Some(MoveIntent::IDLE),
+            30..=59 => Some(walk([-1.0, 0.0], false, false)),
+            _ => None,
+        }
+    });
+    let peak = t.expected.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+    assert!(peak > rest_z(9.0) + 1.0, "never climbed the 30° ramp (peak {peak})");
+    save(&t);
+
+    // Over-limit slope: 60° ramp (foot x=168) refuses to be climbed.
+    let t = build_trace("slope_blocked", &store, standing_on(&store, &cfg, 165.0, 96.0), |i, _| {
+        (i < 40).then_some(walk([1.0, 0.0], false, false))
+    });
+    let end = t.expected.last().unwrap();
+    assert!(end[2] < rest_z(9.0) + 0.4, "climbed a 60° slope (z {})", end[2]);
+    save(&t);
+
+    // Step-up: 0.3 m riser array (x0=108, y=72): up 5, across, down 5.
+    let t = build_trace("step_up", &store, standing_on(&store, &cfg, 106.0, 72.0), {
+        let mut f = for_steps(90, walk([1.0, 0.0], false, false));
+        move |i, s| f(i, s)
+    });
+    let peak = t.expected.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+    assert!(peak > rest_z(9.0) + 1.3, "never reached the step-array top (peak {peak})");
+    assert!(t.expected.last().unwrap()[0] > 119.0, "did not cross the step array");
+    save(&t);
+
+    // Over-limit riser: 0.6 m (x0=168) blocks at the first face (x=168).
+    // (The 0.45 array is climbable: the capsule's rounded bottom rolls over
+    // risers up to roughly `step_height + radius` — a property both sides
+    // share, so parity holds; the trace pins the genuinely-blocking case.)
+    let t = build_trace("step_blocked", &store, standing_on(&store, &cfg, 166.0, 72.0), {
+        let mut f = for_steps(30, walk([1.0, 0.0], false, false));
+        move |i, s| f(i, s)
+    });
+    let end = t.expected.last().unwrap();
+    assert!(end[0] < 167.8 && end[2] < rest_z(9.0) + 0.1, "stepped a 0.6 riser ({end:?})");
+    save(&t);
+
+    // Jump arc over the 1 m and 2 m gap-gauntlet gaps (platform tops z=10,
+    // east edges x=92 and 97); jump when the live state nears an edge.
+    let t = build_trace("jump_gap", &store, standing_on(&store, &cfg, 89.5, 48.0), |i, s| {
+        if i >= 120 || (s.pos.x > 100.5 && s.grounded) {
+            return None;
+        }
+        let near_edge = [92.0f32, 97.0]
+            .iter()
+            .any(|e| s.pos.x < *e && e - s.pos.x < 0.45);
+        Some(walk([1.0, 0.0], false, s.grounded && near_edge))
+    });
+    let end = t.expected.last().unwrap();
+    assert!(end[0] > 99.0 && (end[2] - rest_z(10.0)).abs() < 0.1, "missed a gap landing ({end:?})");
+    save(&t);
+
+    // Fall + land: walk off the tower top floor (z=18) onto the drop pad
+    // (top z=9.25) — an ~8.75 m fall.
+    let t = build_trace("fall_land", &store, standing_on(&store, &cfg, 96.0, 16.0), |i, _| {
+        match i {
+            0..=37 => Some(walk([0.0, 1.0], false, false)),
+            38..=94 => Some(MoveIntent::IDLE),
+            _ => None,
+        }
+    });
+    let end = t.expected.last().unwrap();
+    assert!((end[2] - rest_z(9.25)).abs() < 0.1, "did not land on the drop pad ({end:?})");
+    save(&t);
+
+    // Wall slide: run diagonally into the 16 m gym wall (y≈12.25 north
+    // face), sliding along +X.
+    let t = build_trace("wall_slide", &store, standing_on(&store, &cfg, 166.0, 14.5), {
+        let mut f = for_steps(60, walk([1.0, -1.0], false, false));
+        move |i, s| f(i, s)
+    });
+    let end = t.expected.last().unwrap();
+    assert!(end[0] > 169.0, "did not slide along the wall ({end:?})");
+    assert!(end[1] > 12.4 && end[1] < 13.5, "clipped through the wall ({end:?})");
+    save(&t);
+
+    // Chunk seam (named failure mode): the walled corridor across the cell
+    // border x=128, over the 0.35 m threshold step straddling it.
+    let t = build_trace("chunk_seam", &store, standing_on(&store, &cfg, 122.0, 32.0), {
+        let mut f = for_steps(80, walk([1.0, 0.0], false, false));
+        move |i, s| f(i, s)
+    });
+    let peak = t.expected.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+    assert!(t.expected.last().unwrap()[0] > 134.0, "did not cross the seam corridor");
+    assert!(peak > rest_z(9.0) + 0.25, "never mounted the threshold step (peak {peak})");
+    save(&t);
+
+    // 60 s long-run on the spawn plateau (ground z=8): 24 paired
+    // out-and-back blocks of 50 steps, alternating axis, sprint on odd
+    // pairs, one jump per block — bounds terminal drift natively so the
+    // WASM replay bounds native/WASM divergence over a long horizon.
+    let t = build_trace("long_run", &store, standing_on(&store, &cfg, 0.0, 0.0), |i, _| {
+        if i >= 1200 {
+            return None;
+        }
+        let block = i / 50;
+        let pair = block / 2;
+        let sign = if block % 2 == 0 { 1.0 } else { -1.0 };
+        let dir = if pair % 2 == 0 { [sign, 0.0] } else { [0.0, sign] };
+        Some(walk(dir, pair % 2 == 1, i % 50 == 25))
+    });
+    let end = t.expected.last().unwrap();
+    assert!(end[0].abs() < 40.0 && end[1].abs() < 40.0, "long_run left the plateau ({end:?})");
+    assert!((end[2] - rest_z(8.0)).abs() < 0.2, "long_run ended airborne ({end:?})");
+    save(&t);
+}
