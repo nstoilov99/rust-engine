@@ -40,6 +40,10 @@ pub struct Prediction {
     epoch: Option<u32>,
     next_seq: u32,
     state: Option<MotionState>,
+    /// State before the newest fixed step; the render pose interpolates
+    /// prev → state by the accumulator fraction so 20 Hz steps don't
+    /// stair-step at display rate.
+    prev_state: Option<MotionState>,
     records: VecDeque<Record>,
     accumulator: f32,
     /// Visual-only offset added to the predicted pose, absorbing
@@ -62,6 +66,7 @@ impl Prediction {
             epoch: None,
             next_seq: 1,
             state: None,
+            prev_state: None,
             records: VecDeque::new(),
             accumulator: 0.0,
             error_offset: Vec3::ZERO,
@@ -72,10 +77,26 @@ impl Prediction {
     }
 
     /// Predicted pose for the local player entity: `(pos, yaw)` with the
-    /// visual error offset applied. `None` until the first ack seeds state.
+    /// visual error offset applied, interpolated between the last two fixed
+    /// steps by the accumulator fraction. `None` until the first ack seeds
+    /// state.
     pub fn visual_pose(&self) -> Option<([f32; 3], f32)> {
         let s = self.state.as_ref()?;
-        Some(((s.pos + self.error_offset).to_array(), s.yaw))
+        let (pos, yaw) = self.lerped_pose(s);
+        Some(((pos + self.error_offset).to_array(), yaw))
+    }
+
+    fn lerped_pose(&self, s: &MotionState) -> (Vec3, f32) {
+        match &self.prev_state {
+            Some(p) => {
+                let alpha = (self.accumulator / MOVE_DT).clamp(0.0, 1.0);
+                (
+                    p.pos.lerp(s.pos, alpha),
+                    p.yaw + angle_diff(s.yaw, p.yaw) * alpha,
+                )
+            }
+            None => (s.pos, s.yaw),
+        }
     }
 
     /// Authoritative own-row state (replication IS the ack). An epoch change
@@ -97,6 +118,7 @@ impl Prediction {
             self.accumulator = 0.0;
             self.error_offset = Vec3::ZERO;
             self.state = Some(server);
+            self.prev_state = None;
             return;
         }
         if !alive {
@@ -108,10 +130,12 @@ impl Prediction {
             self.stop_pending = false;
             self.error_offset = Vec3::ZERO;
             self.state = Some(server);
+            self.prev_state = None;
             return;
         }
         let Some(state) = self.state else {
             self.state = Some(server);
+            self.prev_state = None;
             return;
         };
 
@@ -137,7 +161,7 @@ impl Prediction {
 
         // Mispredict: reset to the server state, replay unacked inputs, and
         // move the visual discontinuity into the decaying error offset.
-        let old_visual = state.pos + self.error_offset;
+        let old_visual = self.lerped_pose(&state).0 + self.error_offset;
         let mut new_state = server;
         if let Some(store) = &self.store {
             for rec in self.records.iter_mut() {
@@ -147,6 +171,7 @@ impl Prediction {
         }
         self.error_offset = old_visual - new_state.pos;
         self.state = Some(new_state);
+        self.prev_state = None;
     }
 
     /// Fixed-step prediction: consume accumulated time, one input sample per
@@ -170,7 +195,9 @@ impl Prediction {
             self.stop_pending = true;
         }
         if !(moving || self.pending_jump || !state.grounded || self.stop_pending) {
+            // At rest both sides agree; render the rest pose exactly.
             self.accumulator = 0.0;
+            self.prev_state = None;
             self.decay_error(dt);
             return;
         }
@@ -180,6 +207,7 @@ impl Prediction {
         while self.accumulator >= MOVE_DT && steps < MAX_CATCHUP_STEPS {
             self.accumulator -= MOVE_DT;
             steps += 1;
+            self.prev_state = Some(state);
             let intent = MoveIntent {
                 move_dir,
                 yaw,
