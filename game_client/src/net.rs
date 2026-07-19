@@ -124,8 +124,9 @@ impl NetSession {
                     vel,
                     yaw,
                     grounded,
+                    alive,
                 } => {
-                    self.prediction.on_ack(epoch, seq, pos, vel, yaw, grounded);
+                    self.prediction.on_ack(epoch, seq, pos, vel, yaw, grounded, alive);
                     self.last_ack = Some((epoch, seq));
                 }
                 NetEvent::ClockSample(s) => self.clock.add_sample(s.offset_us, s.rtt_us),

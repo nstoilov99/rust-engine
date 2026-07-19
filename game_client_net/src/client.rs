@@ -20,7 +20,7 @@ use spacetimedb_sdk::{
 };
 
 use crate::module_bindings::{
-    despawn_npc, dev_teleport, enter_world, ping, run_parity_trace, submit_input,
+    despawn_npc, dev_damage, dev_teleport, enter_world, ping, run_parity_trace, submit_input,
     ConfigTableAccess, DbConnection, Npc, NpcTableAccess, ParityResultTableAccess,
     PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle, TombstoneTableAccess,
 };
@@ -123,9 +123,9 @@ impl RateLimiter {
     }
 }
 
-/// (epoch, last_applied_seq, pos, vel, yaw, grounded) — the own-row fields
-/// that constitute one atomic ack (M6 D4).
-type OwnState = (u32, u32, [f32; 3], [f32; 3], f32, bool);
+/// (epoch, last_applied_seq, pos, vel, yaw, grounded, alive) — the own-row
+/// fields that constitute one atomic ack (M6 D4; alive per M7 D5).
+type OwnState = (u32, u32, [f32; 3], [f32; 3], f32, bool, bool);
 
 pub struct SpacetimeNetClient {
     state: ConnectionState,
@@ -226,6 +226,14 @@ impl SpacetimeNetClient {
     pub fn dev_despawn_npc(&mut self, entity_id: u64) {
         if let Some(conn) = &self.conn {
             let _ = conn.reducers.despawn_npc(entity_id);
+        }
+    }
+
+    /// Dev/test hook for the unauthenticated `dev_damage` reducer
+    /// (death/respawn acceptance scenarios).
+    pub fn dev_damage(&mut self, entity_id: u64, amount: f32) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.reducers.dev_damage(entity_id, amount);
         }
     }
 
@@ -738,6 +746,7 @@ impl NetClient for SpacetimeNetClient {
                         [own.vx, own.vy, own.vz],
                         own.yaw,
                         own.grounded,
+                        own.alive,
                     );
                     if self.last_own_state != Some(state) {
                         self.last_own_state = Some(state);
@@ -748,6 +757,7 @@ impl NetClient for SpacetimeNetClient {
                             vel: state.3,
                             yaw: state.4,
                             grounded: state.5,
+                            alive: state.6,
                         });
                     }
 

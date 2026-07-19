@@ -498,6 +498,10 @@ pub fn submit_input(
     if p.session.is_none() || p.session != ctx.connection_id() {
         return Ok(());
     }
+    // M7 D5: corpses don't move — dropped silently like any stale input.
+    if !p.alive {
+        return Ok(());
+    }
     if !accept_input(p.epoch, p.last_input_seq, epoch, seq) {
         return Ok(());
     }
@@ -587,17 +591,32 @@ pub fn despawn_npc(ctx: &ReducerContext, entity_id: u64) -> Result<(), String> {
         .entity_id()
         .find(entity_id)
         .ok_or("no such npc")?;
+    upsert_tombstone(ctx, entity_id, npc.generation, now_micros(ctx));
+    ctx.db.npc().entity_id().delete(entity_id);
+    Ok(())
+}
+
+fn upsert_tombstone(ctx: &ReducerContext, entity_id: u64, generation: u32, now: i64) {
     let ts = Tombstone {
         entity_id,
-        generation: npc.generation,
-        despawned_at_micros: now_micros(ctx),
+        generation,
+        despawned_at_micros: now,
     };
     if ctx.db.tombstone().entity_id().find(entity_id).is_some() {
         ctx.db.tombstone().entity_id().update(ts);
     } else {
         ctx.db.tombstone().insert(ts);
     }
-    ctx.db.npc().entity_id().delete(entity_id);
+}
+
+/// Dev/test reducer (unauthenticated like `despawn_npc`): direct damage to
+/// any entity, so death/respawn is testable without a combat rotation.
+#[reducer]
+pub fn dev_damage(ctx: &ReducerContext, entity_id: u64, amount: f32) -> Result<(), String> {
+    if !amount.is_finite() {
+        return Err("non-finite amount".into());
+    }
+    damage_entity(ctx, entity_id, amount, now_micros(ctx));
     Ok(())
 }
 
@@ -668,22 +687,65 @@ fn upsert_active_cast(ctx: &ReducerContext, row: ActiveCast) {
     }
 }
 
-/// Subtract hp on whichever row carries the target. Clamped at 0; the death
-/// transition (alive=false, tombstone, respawn) is package 3.
+/// Subtract hp on whichever row carries the target. hp 0 is the death
+/// transition (plan D5): the row stays, inert, tombstoned under the current
+/// generation (remote proxies destroy through the M5 evidence path); respawn
+/// is scheduled via `respawn_at_micros`.
 fn damage_entity(ctx: &ReducerContext, entity_id: u64, amount: f32, now: i64) {
     if let Some(mut p) = ctx.db.player().entity_id().find(entity_id) {
-        if p.alive {
-            p.hp = (p.hp - amount).max(0.0);
-            p.last_update_micros = now;
-            ctx.db.player().entity_id().update(p);
+        if !p.alive {
+            return;
         }
+        p.hp = (p.hp - amount).max(0.0);
+        p.last_update_micros = now;
+        if p.hp <= 0.0 {
+            p.alive = false;
+            p.respawn_at_micros = now + combat::micros(combat::RESPAWN_SECS) as i64;
+            (p.vx, p.vy, p.vz) = (0.0, 0.0, 0.0);
+            upsert_tombstone(ctx, entity_id, p.generation, now);
+            clear_input_queue(ctx, entity_id);
+            ctx.db.active_cast().entity_id().delete(entity_id);
+        }
+        ctx.db.player().entity_id().update(p);
     } else if let Some(mut n) = ctx.db.npc().entity_id().find(entity_id) {
-        if n.alive {
-            n.hp = (n.hp - amount).max(0.0);
-            n.last_update_micros = now;
-            ctx.db.npc().entity_id().update(n);
+        if !n.alive {
+            return;
         }
+        n.hp = (n.hp - amount).max(0.0);
+        n.last_update_micros = now;
+        if n.hp <= 0.0 {
+            n.alive = false;
+            n.respawn_at_micros = now + combat::micros(combat::RESPAWN_SECS) as i64;
+            upsert_tombstone(ctx, entity_id, n.generation, now);
+        }
+        ctx.db.npc().entity_id().update(n);
     }
+}
+
+/// Plan D5: teleport to spawn, full restore, `generation += 1` (every remote
+/// client destroy-and-respawns the proxy via the tested generation-replace
+/// path) and `epoch += 1` (the own client restarts prediction exactly like a
+/// reconnect).
+fn respawn_player(ctx: &ReducerContext, mut p: Player, now: i64) {
+    p.x = SPAWN_POINT[0];
+    p.y = SPAWN_POINT[1];
+    p.z = PLAYER_SPAWN_Z;
+    (p.vx, p.vy, p.vz) = (0.0, 0.0, 0.0);
+    p.grounded = false;
+    p.hp = p.hp_max;
+    p.mana = p.mana_max;
+    p.alive = true;
+    p.respawn_at_micros = 0;
+    p.gcd_until_micros = 0;
+    p.generation += 1;
+    p.epoch += 1;
+    p.last_input_seq = 0;
+    p.last_applied_seq = 0;
+    p.zone_id = zone_id_from_position(p.x, p.y);
+    p.last_update_micros = now;
+    let entity_id = p.entity_id;
+    ctx.db.player().entity_id().update(p);
+    clear_input_queue(ctx, entity_id);
 }
 
 fn cast_err(e: combat::CastError) -> String {
@@ -945,6 +1007,20 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     } else {
         let dt = TICK_INTERVAL_MS as f32 / 1000.0;
         for mut n in npcs {
+            if !n.alive {
+                if now >= n.respawn_at_micros {
+                    // In-place respawn (the wander disc is the anchor);
+                    // fresh generation so clients destroy-and-respawn.
+                    n.z = NPC_SPAWN_Z;
+                    n.hp = n.hp_max;
+                    n.alive = true;
+                    n.respawn_at_micros = 0;
+                    n.generation += 1;
+                    n.last_update_micros = now;
+                    ctx.db.npc().entity_id().update(n);
+                }
+                continue;
+            }
             // Per-entity heading drift; steer home outside the radius.
             n.yaw += dt * (0.3 + 0.15 * ((n.entity_id % 5) as f32));
             let dx = n.x - SPAWN_POINT[0];
@@ -990,6 +1066,14 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
     let _watch = (!players.is_empty())
         .then(|| spacetimedb::log_stopwatch::LogStopwatch::new("move_tick"));
     for mut p in players {
+        // M7 D5: dead rows are inert (no gravity for corpses) until the
+        // respawn timer fires.
+        if !p.alive {
+            if now >= p.respawn_at_micros {
+                respawn_player(ctx, p, now);
+            }
+            continue;
+        }
         let mut state = MotionState {
             pos: Vec3::new(p.x, p.y, p.z),
             vel: Vec3::new(p.vx, p.vy, p.vz),

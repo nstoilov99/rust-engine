@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use game_client_net::SpacetimeNetClient;
-use game_shared::net::protocol::{EntityKind, ModuleAddr, WorldSnapshot};
+use game_shared::net::protocol::{EntityKind, EntityState, ModuleAddr, WorldSnapshot};
 use game_shared::net::traits::{NetClient, NetEvent};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -103,6 +103,10 @@ impl Bot {
 
     fn sees(&self, entity_id: u64) -> bool {
         self.latest().entities.iter().any(|e| e.entity_id == entity_id)
+    }
+
+    fn entity(&self, entity_id: u64) -> Option<&EntityState> {
+        self.latest().entities.iter().find(|e| e.entity_id == entity_id)
     }
 
     /// Teleports via the dev reducer and waits until the own row lands.
@@ -293,5 +297,55 @@ fn despawned_npc_is_destroyed_with_evidence() {
         b.tombstones.iter().any(|&(id, _)| id == npc)
     });
     b.wait("npc row gone", |b| !b.sees(npc));
+    b.leave();
+}
+
+/// M7 D5: hp → 0 tombstones the current incarnation (remote proxies destroy
+/// through the M5 evidence path) and `tick` respawns the same row after
+/// `RESPAWN_SECS` with a fresh generation and full hp.
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn killed_npc_respawns_with_fresh_generation() {
+    let mut b = Bot::enter("acc-npc-kill");
+    let npc = b.find_npc();
+    let gen0 = b.entity(npc).expect("npc just found").generation;
+
+    b.client.dev_damage(npc, 1000.0);
+    b.wait("death tombstone for the killed incarnation", |b| {
+        b.tombstones.iter().any(|&(id, g)| id == npc && g == gen0)
+    });
+    // The corpse doesn't wander, so it respawns in place — still in scope.
+    b.wait("fresh-generation respawn with full hp", |b| {
+        b.entity(npc).is_some_and(|e| {
+            e.generation == gen0 + 1 && e.alive && e.hp == e.hp_max
+        })
+    });
+    b.leave();
+}
+
+/// M7 D5: player death leaves the row inert (dead, tombstoned); respawn
+/// teleports to the spawn point with a fresh generation and full restore.
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn player_death_respawns_at_spawn_with_fresh_generation() {
+    let mut b = Bot::enter("acc-death");
+    b.teleport_and_settle([20.0, 20.0, 9.0]);
+    let id = b.own_id();
+    let gen0 = b.entity(id).expect("own row in snapshot").generation;
+
+    b.client.dev_damage(id, 1000.0);
+    b.wait("own row dead with tombstone", |b| {
+        b.entity(id).is_some_and(|e| !e.alive && e.hp == 0.0)
+            && b.tombstones.iter().any(|&(tid, g)| tid == id && g == gen0)
+    });
+    b.wait("respawn at spawn with fresh generation", |b| {
+        b.entity(id).is_some_and(|e| {
+            e.alive
+                && e.generation == gen0 + 1
+                && e.hp == e.hp_max
+                && e.pos[0].abs() < 0.01
+                && e.pos[1].abs() < 0.01
+        })
+    });
     b.leave();
 }

@@ -18,6 +18,7 @@ pub mod clock_type;
 pub mod config_table;
 pub mod config_type;
 pub mod despawn_npc_reducer;
+pub mod dev_damage_reducer;
 pub mod dev_teleport_reducer;
 pub mod enter_world_reducer;
 pub mod entity_allocator_type;
@@ -51,6 +52,7 @@ pub use clock_type::Clock;
 pub use config_table::*;
 pub use config_type::Config;
 pub use despawn_npc_reducer::despawn_npc;
+pub use dev_damage_reducer::dev_damage;
 pub use dev_teleport_reducer::dev_teleport;
 pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
@@ -87,6 +89,10 @@ pub enum Reducer {
     DespawnNpc {
         entity_id: u64,
     },
+    DevDamage {
+        entity_id: u64,
+        amount: f32,
+    },
     DevTeleport {
         x: f32,
         y: f32,
@@ -119,6 +125,7 @@ impl __sdk::Reducer for Reducer {
         match self {
             Reducer::CastAbility { .. } => "cast_ability",
             Reducer::DespawnNpc { .. } => "despawn_npc",
+            Reducer::DevDamage { .. } => "dev_damage",
             Reducer::DevTeleport { .. } => "dev_teleport",
             Reducer::EnterWorld => "enter_world",
             Reducer::Ping { .. } => "ping",
@@ -140,6 +147,12 @@ impl __sdk::Reducer for Reducer {
             Reducer::DespawnNpc { entity_id } => {
                 __sats::bsatn::to_vec(&despawn_npc_reducer::DespawnNpcArgs {
                     entity_id: entity_id.clone(),
+                })
+            }
+            Reducer::DevDamage { entity_id, amount } => {
+                __sats::bsatn::to_vec(&dev_damage_reducer::DevDamageArgs {
+                    entity_id: entity_id.clone(),
+                    amount: amount.clone(),
                 })
             }
             Reducer::DevTeleport { x, y, z } => {

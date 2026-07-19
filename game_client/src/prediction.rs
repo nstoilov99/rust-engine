@@ -49,6 +49,9 @@ pub struct Prediction {
     pending_jump: bool,
     /// A stop sample (zero move) is still owed to the server.
     stop_pending: bool,
+    /// M7 D5: dead freezes prediction (no steps, no input samples) on the
+    /// authoritative corpse state; respawn arrives as an epoch bump.
+    alive: bool,
 }
 
 impl Prediction {
@@ -64,6 +67,7 @@ impl Prediction {
             error_offset: Vec3::ZERO,
             pending_jump: false,
             stop_pending: false,
+            alive: true,
         }
     }
 
@@ -77,7 +81,7 @@ impl Prediction {
     /// Authoritative own-row state (replication IS the ack). An epoch change
     /// restarts the sequence space; otherwise trim acked records and check
     /// the prediction made at `seq` against the server's result.
-    pub fn on_ack(&mut self, epoch: u32, seq: u32, pos: [f32; 3], vel: [f32; 3], yaw: f32, grounded: bool) {
+    pub fn on_ack(&mut self, epoch: u32, seq: u32, pos: [f32; 3], vel: [f32; 3], yaw: f32, grounded: bool, alive: bool) {
         let server = MotionState {
             pos: Vec3::from(pos),
             vel: Vec3::from(vel),
@@ -85,11 +89,23 @@ impl Prediction {
             grounded,
             ground_ref: None,
         };
+        self.alive = alive;
         if self.epoch != Some(epoch) {
             self.epoch = Some(epoch);
             self.next_seq = 1;
             self.records.clear();
             self.accumulator = 0.0;
+            self.error_offset = Vec3::ZERO;
+            self.state = Some(server);
+            return;
+        }
+        if !alive {
+            // Death snap: the server row is inert until respawn — freeze on
+            // the corpse state and discard everything in flight.
+            self.records.clear();
+            self.accumulator = 0.0;
+            self.pending_jump = false;
+            self.stop_pending = false;
             self.error_offset = Vec3::ZERO;
             self.state = Some(server);
             return;
@@ -139,6 +155,9 @@ impl Prediction {
     /// no steps run and the seq space stands still — both sides are at a
     /// stable rest state, so there is nothing to predict.
     pub fn update(&mut self, dt: f32, move_dir: [f32; 2], yaw: f32, sprint: bool, jump_pressed: bool, out: &mut Vec<ClientInput>) {
+        if !self.alive {
+            return;
+        }
         if jump_pressed {
             self.pending_jump = true;
         }

@@ -61,6 +61,9 @@ pub enum NetEvent {
         vel: [f32; 3],
         yaw: f32,
         grounded: bool,
+        /// M7 D5: dead gates prediction + input send; respawn arrives as an
+        /// epoch bump (prediction restart) with `alive` back on.
+        alive: bool,
     },
     ClockSample(ClockSample),
 }
