@@ -15,6 +15,8 @@ use game_shared::net::protocol::{
 };
 use game_shared::net::schema::{version_compatible, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
+use game_shared::world_grid::{cell_key, chunk_coord, near_cells, re_anchor};
+use glam::{IVec2, Vec2, Vec3};
 use spacetimedb_sdk::{
     credentials, DbContext, SubscriptionHandle as _, Table, TableWithPrimaryKey,
 };
@@ -166,13 +168,20 @@ pub struct SpacetimeNetClient {
     state: ConnectionState,
     conn: Option<DbConnection>,
     base_sub: Option<SubscriptionHandle>,
-    /// Active cell-scoped replication subscription and the cell it covers.
+    /// Active interest subscription and the anchor cell it is centered on
+    /// (M8 D2: 3×3 full-detail ring around the anchor).
     repl_sub: Option<SubscriptionHandle>,
-    repl_cell: Option<u64>,
-    /// In-flight cell swap: the new cell's subscription, promoted to
+    repl_anchor: Option<IVec2>,
+    /// In-flight anchor swap: the new set's subscription, promoted to
     /// `repl_sub` (and the old one dropped) only once applied — plan D3 §6
     /// apply-new-then-drop-old, so scoped rows never gap.
-    pending_repl: Option<(u64, SubscriptionHandle)>,
+    pending_repl: Option<(IVec2, SubscriptionHandle)>,
+    /// Latest predicted own XY from `set_interest_hint`; anchors lead the
+    /// authoritative row so subscribe latency hides behind movement.
+    interest_hint: Option<[f32; 2]>,
+    /// Completed anchor swaps (test observability: hysteresis must keep
+    /// border wiggle from thrashing this).
+    interest_swaps: u32,
     flags: Arc<Flags>,
     pending: Vec<NetEvent>,
     limiter: RateLimiter,
@@ -209,8 +218,10 @@ impl SpacetimeNetClient {
             conn: None,
             base_sub: None,
             repl_sub: None,
-            repl_cell: None,
+            repl_anchor: None,
             pending_repl: None,
+            interest_hint: None,
+            interest_swaps: 0,
             flags: Arc::new(Flags::default()),
             pending: Vec::new(),
             limiter: RateLimiter::new(),
@@ -411,7 +422,7 @@ impl SpacetimeNetClient {
     fn teardown(&mut self) {
         self.base_sub = None;
         self.repl_sub = None;
-        self.repl_cell = None;
+        self.repl_anchor = None;
         self.pending_repl = None;
         self.enter_world_sent = false;
         self.pending_inputs.clear();
@@ -460,49 +471,65 @@ impl SpacetimeNetClient {
         self.base_sub = Some(handle);
     }
 
-    /// Package 5 replication scope (plan D3 §6): player/NPC rows of the own
-    /// row's authoritative cell. The server derives `cell_id` from position,
-    /// so a cell change shows up on the (always-subscribed) own row and this
-    /// swaps scope; identity and the own row are untouched.
+    /// M8 D2 interest pump: subscriptions follow a hysteresis-stabilized
+    /// anchor cell (`re_anchor`: the anchor only moves once the position is
+    /// > 8 m outside its AABB, so border wiggle never thrashes). The anchor
+    /// tracks the *predicted* position when a hint is set, the authoritative
+    /// own row otherwise.
     ///
-    /// Called with the own row's cell whenever it is known. Promotes an
-    /// applied pending swap first; the SDK ref-counts rows under overlapping
-    /// queries, so shared rows never leave the cache during the overlap and
-    /// old-cell rows are dropped (out-of-scope, no tombstone) only after the
-    /// new cell is fully applied.
-    fn pump_cell_swap(&mut self, own_cell: u64) {
-        if let Some((cell, _)) = &self.pending_repl {
-            let cell = *cell;
+    /// Promotes an applied pending swap first; the SDK ref-counts rows under
+    /// overlapping queries, so shared rows never leave the cache during the
+    /// overlap and out-of-ring rows are dropped (out-of-scope, no tombstone)
+    /// only after the new set is fully applied.
+    fn pump_interest(&mut self, own_pos: [f32; 2]) {
+        if self.pending_repl.is_some() {
             if self.flags.pending_repl_applied.load(Ordering::Acquire) {
-                let (_, handle) = self.pending_repl.take().expect("checked above");
+                let (anchor, handle) = self.pending_repl.take().expect("checked above");
                 if let Some(old) = self.repl_sub.take() {
                     let _ = old.unsubscribe();
                 }
                 self.repl_sub = Some(handle);
-                self.repl_cell = Some(cell);
+                self.repl_anchor = Some(anchor);
+                self.interest_swaps += 1;
                 self.flags.mark_dirty();
             }
             return; // one swap in flight; re-checked next poll
         }
-        if self.repl_cell != Some(own_cell) {
-            self.start_cell_sub(own_cell);
+        let pos = Vec2::from(self.interest_hint.unwrap_or(own_pos));
+        match self.repl_anchor {
+            None => {
+                let anchor = chunk_coord(Vec3::new(pos.x, pos.y, 0.0));
+                self.start_interest_sub(anchor);
+            }
+            Some(anchor) => {
+                if let Some(new_anchor) = re_anchor(anchor, pos) {
+                    self.start_interest_sub(new_anchor);
+                }
+            }
         }
     }
 
-    fn start_cell_sub(&mut self, cell: u64) {
+    /// Completed interest swaps (acceptance-test observability).
+    pub fn interest_swap_count(&self) -> u32 {
+        self.interest_swaps
+    }
+
+    fn start_interest_sub(&mut self, anchor: IVec2) {
         let conn = self
             .conn
             .as_ref()
-            .expect("start_cell_sub requires a connection");
-        let mut queries = vec![
-            format!("SELECT * FROM player WHERE cell_id = {cell}"),
-            format!("SELECT * FROM npc WHERE cell_id = {cell}"),
-            format!("SELECT * FROM projectile WHERE cell_id = {cell}"),
+            .expect("start_interest_sub requires a connection");
+        let mut queries = Vec::with_capacity(9 * 4 + 1);
+        for cell in near_cells(anchor) {
+            let key = cell_key(cell);
+            queries.push(format!("SELECT * FROM player WHERE cell_id = {key}"));
+            queries.push(format!("SELECT * FROM npc WHERE cell_id = {key}"));
+            queries.push(format!("SELECT * FROM projectile WHERE cell_id = {key}"));
             // M7 D6: in-scope cast bars (rows carry the caster's cell).
-            format!("SELECT * FROM active_cast WHERE cell_id = {cell}"),
-        ];
+            queries.push(format!("SELECT * FROM active_cast WHERE cell_id = {key}"));
+        }
         // Own cooldown rows (HUD sweeps). The own row is always in the cache
-        // by the time the first cell sub starts (it carries the cell).
+        // by the time the first interest sub starts (it carries the pos).
         if let Some(p) = conn
             .try_identity()
             .and_then(|id| conn.db.player().owner_identity().find(&id))
@@ -524,11 +551,11 @@ impl SpacetimeNetClient {
                 applied.mark_dirty();
             })
             .on_error(move |_ctx, err| {
-                errored.set_error(format!("cell subscription failed: {err}"));
+                errored.set_error(format!("interest subscription failed: {err}"));
                 errored.disconnected.store(true, Ordering::Release);
             })
             .subscribe(queries);
-        self.pending_repl = Some((cell, handle));
+        self.pending_repl = Some((anchor, handle));
     }
 
     /// Row callbacks mark dirty / record tombstone evidence / queue
@@ -716,6 +743,12 @@ impl NetClient for SpacetimeNetClient {
         }
     }
 
+    fn set_interest_hint(&mut self, pos: [f32; 2]) {
+        if pos[0].is_finite() && pos[1].is_finite() {
+            self.interest_hint = Some(pos);
+        }
+    }
+
     fn poll(&mut self, out: &mut Vec<NetEvent>) {
         out.append(&mut self.pending);
 
@@ -831,11 +864,11 @@ impl NetClient for SpacetimeNetClient {
                     .as_ref()
                     .is_some_and(|p| p.session.is_some() && p.session == conn.try_connection_id());
                 if own_session_live {
-                    // The own row carries the authoritative cell, so the
-                    // first cell-scoped subscription can only start here.
-                    let cell = own.expect("session live implies own row").cell_id;
-                    self.pump_cell_swap(cell);
-                    if self.repl_cell.is_some() {
+                    // The own row carries the authoritative position, so the
+                    // first interest subscription can only start here.
+                    let p = own.expect("session live implies own row");
+                    self.pump_interest([p.x, p.y]);
+                    if self.repl_anchor.is_some() {
                         self.state = ConnectionState::InWorld;
                         self.flags.mark_dirty();
                         out.push(NetEvent::Connected);
@@ -951,9 +984,10 @@ impl NetClient for SpacetimeNetClient {
                     }));
                 }
 
-                // Cell swap driven by the own row's authoritative cell.
-                if let Some(cell) = own.map(|p| p.cell_id) {
-                    self.pump_cell_swap(cell);
+                // Interest anchored on the predicted position (hint) with
+                // the authoritative own row as fallback.
+                if let Some(pos) = own.map(|p| [p.x, p.y]) {
+                    self.pump_interest(pos);
                 }
             }
             _ => {}

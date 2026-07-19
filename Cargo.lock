@@ -1629,6 +1629,7 @@ name = "game_client_net"
 version = "0.1.0"
 dependencies = [
  "game_shared",
+ "glam 0.29.3",
  "log",
  "spacetimedb-sdk",
 ]

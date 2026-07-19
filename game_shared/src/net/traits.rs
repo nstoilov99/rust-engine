@@ -80,6 +80,10 @@ pub trait NetClient {
     /// Send (or coalesce toward the next send slot) one input sample.
     /// Silently dropped unless `InWorld`.
     fn send_input(&mut self, input: &ClientInput);
+    /// Latest predicted own XY (M8 D2): drives the interest anchor so
+    /// subscriptions lead the authoritative row instead of lagging it.
+    /// Optional — without a hint the backend anchors on the own row.
+    fn set_interest_hint(&mut self, _pos: [f32; 2]) {}
     /// Pump the connection and drain pending events into `out`.
     /// Called exactly once per frame on the main thread.
     fn poll(&mut self, out: &mut Vec<NetEvent>);

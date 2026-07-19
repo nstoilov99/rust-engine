@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 spacetimedb-sdk = "2.6"
 game_shared = { path = "../game_shared" }
+glam = { workspace = true }
 log = { workspace = true }

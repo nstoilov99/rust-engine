@@ -623,3 +623,59 @@ fn forged_inputs_do_not_move() {
     );
     a.leave();
 }
+
+/// M8 D1/D2: wiggling across a cell border inside the 8 m hysteresis band
+/// must not re-anchor (no subscription churn), while a real move re-anchors
+/// exactly once — and a neighbor-cell entity stays visible through the swap
+/// (promote-before-unsubscribe, so scope never gaps).
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn cell_border_wiggle_does_not_thrash_interest() {
+    // Park a persistent row in cell (1,0) — inside the near ring of both
+    // anchor (0,0) and anchor (2,0).
+    let mut parked = Bot::enter("acc-cellanchor");
+    parked.teleport_and_settle([68.0, 32.0, 1.0]);
+    let parked_id = parked.own_id();
+    parked.leave();
+
+    // Mover in cell (0,0), 4 m from the x=64 border.
+    let mut m = Bot::enter("acc-wiggle");
+    m.teleport_and_settle([60.0, 32.0, 1.0]);
+    m.settle_secs(1.0); // let any pending interest swap promote
+    m.wait("neighbor-cell row in scope", |b| b.sees(parked_id));
+    let baseline_swaps = m.client.interest_swap_count();
+    let baseline_snap = m.snapshots.len();
+
+    // Six border crossings, each 4 m past the line — all inside hysteresis.
+    for _ in 0..3 {
+        m.teleport_and_settle([68.0, 32.0, 1.0]);
+        m.teleport_and_settle([60.0, 32.0, 1.0]);
+    }
+    m.settle_secs(1.0);
+    assert_eq!(
+        m.client.interest_swap_count(),
+        baseline_swaps,
+        "border wiggle inside hysteresis re-anchored the subscription"
+    );
+
+    // A real move: cell (2,0), 76 m outside the old anchor cell — one swap.
+    m.teleport_and_settle([140.0, 32.0, 1.0]);
+    m.wait("re-anchor swap to complete", |b| {
+        b.client.interest_swap_count() > baseline_swaps
+    });
+    assert_eq!(
+        m.client.interest_swap_count(),
+        baseline_swaps + 1,
+        "single cell hop caused more than one swap"
+    );
+
+    // The parked row was in scope of both anchors: it must never have
+    // dropped out of any snapshot along the way.
+    assert!(
+        m.snapshots[baseline_snap..]
+            .iter()
+            .all(|s| s.entities.iter().any(|e| e.entity_id == parked_id)),
+        "neighbor-cell entity popped during wiggle or swap"
+    );
+    m.leave();
+}

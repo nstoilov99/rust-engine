@@ -180,6 +180,7 @@ impl NetSession {
                 self.client.send_input(&input);
             }
             if let Some((pos, yaw)) = self.prediction.visual_pose() {
+                self.client.set_interest_hint([pos[0], pos[1]]);
                 self.replication.set_local_pose(world, pos, yaw);
             }
         }
