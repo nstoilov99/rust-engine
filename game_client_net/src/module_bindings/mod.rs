@@ -12,6 +12,7 @@ pub mod account_table;
 pub mod account_type;
 pub mod active_cast_table;
 pub mod active_cast_type;
+pub mod cast_ability_reducer;
 pub mod clock_table;
 pub mod clock_type;
 pub mod config_table;
@@ -44,6 +45,7 @@ pub use account_table::*;
 pub use account_type::Account;
 pub use active_cast_table::*;
 pub use active_cast_type::ActiveCast;
+pub use cast_ability_reducer::cast_ability;
 pub use clock_table::*;
 pub use clock_type::Clock;
 pub use config_table::*;
@@ -78,6 +80,10 @@ pub use tombstone_type::Tombstone;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
+    CastAbility {
+        ability_id: u16,
+        target_entity_id: u64,
+    },
     DespawnNpc {
         entity_id: u64,
     },
@@ -111,6 +117,7 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
+            Reducer::CastAbility { .. } => "cast_ability",
             Reducer::DespawnNpc { .. } => "despawn_npc",
             Reducer::DevTeleport { .. } => "dev_teleport",
             Reducer::EnterWorld => "enter_world",
@@ -123,6 +130,13 @@ impl __sdk::Reducer for Reducer {
     #[allow(clippy::clone_on_copy)]
     fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
+            Reducer::CastAbility {
+                ability_id,
+                target_entity_id,
+            } => __sats::bsatn::to_vec(&cast_ability_reducer::CastAbilityArgs {
+                ability_id: ability_id.clone(),
+                target_entity_id: target_entity_id.clone(),
+            }),
             Reducer::DespawnNpc { entity_id } => {
                 __sats::bsatn::to_vec(&despawn_npc_reducer::DespawnNpcArgs {
                     entity_id: entity_id.clone(),

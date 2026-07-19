@@ -8,7 +8,11 @@
 //! disconnect.
 
 use game_shared::collision::{manifest_hash, ChunkStore};
-use game_shared::combat::{NPC_HP_MAX, PLAYER_HP_MAX, PLAYER_MANA_MAX};
+use game_shared::combat::{
+    self, AbilityId, AbilityKind, TargetView, NPC_HP_MAX, PLAYER_HP_MAX, PLAYER_MANA_MAX,
+};
+use game_shared::motion::broadphase::Broadphase;
+use game_shared::motion::combat::{hitscan, HitKind};
 use game_shared::motion::{self, MotionConfig, MotionState, MoveIntent};
 use game_shared::net::schema::{accept_input, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
 use game_shared::world_grid::zone_id_from_position;
@@ -396,6 +400,8 @@ pub fn client_disconnected(ctx: &ReducerContext) {
             let entity_id = p.entity_id;
             ctx.db.player().entity_id().update(p);
             clear_input_queue(ctx, entity_id);
+            // M7 D3: disconnect teardown deletes any in-progress cast.
+            ctx.db.active_cast().entity_id().delete(entity_id);
         }
     }
 }
@@ -596,6 +602,287 @@ pub fn despawn_npc(ctx: &ReducerContext, entity_id: u64) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Combat (M7 D3)
+// ---------------------------------------------------------------------------
+
+/// Combat-relevant view of a target row (player or NPC) plus its position.
+struct ResolvedTarget {
+    view: TargetView,
+    pos: Vec3,
+}
+
+fn resolve_target(ctx: &ReducerContext, entity_id: u64) -> Option<ResolvedTarget> {
+    if let Some(p) = ctx.db.player().entity_id().find(entity_id) {
+        return Some(ResolvedTarget {
+            view: TargetView {
+                entity_id,
+                alive: p.alive,
+                connected: p.session.is_some(),
+            },
+            pos: Vec3::new(p.x, p.y, p.z),
+        });
+    }
+    ctx.db.npc().entity_id().find(entity_id).map(|n| ResolvedTarget {
+        view: TargetView {
+            entity_id,
+            alive: n.alive,
+            connected: true,
+        },
+        pos: Vec3::new(n.x, n.y, n.z),
+    })
+}
+
+fn eye(capsule_center: Vec3) -> Vec3 {
+    capsule_center + Vec3::Z * combat::EYE_OFFSET_M
+}
+
+/// Eye-to-eye world LoS (plan D3: world blocks, entities don't).
+fn line_of_sight(store: &ChunkStore, from: Vec3, to: Vec3) -> bool {
+    let delta = eye(to) - eye(from);
+    let dist = delta.length();
+    dist <= f32::EPSILON || store.raycast(eye(from), delta / dist, dist).is_none()
+}
+
+fn upsert_cooldown(ctx: &ReducerContext, entity_id: u64, def: &combat::AbilityDef, now: i64) {
+    if def.cooldown_secs <= 0.0 {
+        return; // GCD-limited only
+    }
+    let row = AbilityCooldown {
+        key: combat::cooldown_key(entity_id, def.id),
+        entity_id,
+        ability_id: def.id.0,
+        ready_at_micros: now + combat::micros(def.cooldown_secs) as i64,
+    };
+    if ctx.db.ability_cooldown().key().find(row.key).is_some() {
+        ctx.db.ability_cooldown().key().update(row);
+    } else {
+        ctx.db.ability_cooldown().insert(row);
+    }
+}
+
+fn upsert_active_cast(ctx: &ReducerContext, row: ActiveCast) {
+    if ctx.db.active_cast().entity_id().find(row.entity_id).is_some() {
+        ctx.db.active_cast().entity_id().update(row); // new cast replaces
+    } else {
+        ctx.db.active_cast().insert(row);
+    }
+}
+
+/// Subtract hp on whichever row carries the target. Clamped at 0; the death
+/// transition (alive=false, tombstone, respawn) is package 3.
+fn damage_entity(ctx: &ReducerContext, entity_id: u64, amount: f32, now: i64) {
+    if let Some(mut p) = ctx.db.player().entity_id().find(entity_id) {
+        if p.alive {
+            p.hp = (p.hp - amount).max(0.0);
+            p.last_update_micros = now;
+            ctx.db.player().entity_id().update(p);
+        }
+    } else if let Some(mut n) = ctx.db.npc().entity_id().find(entity_id) {
+        if n.alive {
+            n.hp = (n.hp - amount).max(0.0);
+            n.last_update_micros = now;
+            ctx.db.npc().entity_id().update(n);
+        }
+    }
+}
+
+fn cast_err(e: combat::CastError) -> String {
+    format!("cast rejected: {e:?}")
+}
+
+/// Melee/bolt hit re-check through `hitscan` with the target as the single
+/// candidate — the world can still block the hit even after eye-to-eye LoS.
+fn hits_target(
+    cfg: &MotionConfig,
+    store: &ChunkStore,
+    caster_pos: Vec3,
+    target: &ResolvedTarget,
+) -> bool {
+    let mut bp = Broadphase::new();
+    bp.insert(target.view.entity_id, target.pos);
+    let origin = eye(caster_pos);
+    let dir = eye(target.pos) - origin;
+    let max_dist = dir.length() + cfg.capsule_half_seg + cfg.capsule_radius;
+    matches!(
+        hitscan(cfg, store, &bp, origin, dir, max_dist),
+        Some(h) if h.kind == (HitKind::Entity { entity_id: target.view.entity_id })
+    )
+}
+
+/// M7 D3: server-authoritative cast entry. Validation chain (first failure
+/// aborts the transaction — the failure IS the rejection, no partial state):
+/// session → alive/GCD/cooldown/mana → target legality → range → LoS.
+/// Instant kinds resolve here; cast kinds insert `ActiveCast` + start the
+/// GCD and commit mana/cooldown at completion (`move_tick`).
+#[reducer]
+pub fn cast_ability(
+    ctx: &ReducerContext,
+    ability_id: u16,
+    target_entity_id: u64,
+) -> Result<(), String> {
+    let mut caster = ctx
+        .db
+        .player()
+        .owner_identity()
+        .find(ctx.sender())
+        .ok_or("no player for caller")?;
+    // §4.4: only the active session may act.
+    if caster.session.is_none() || caster.session != ctx.connection_id() {
+        return Err("not the active session".into());
+    }
+    let now = now_micros(ctx);
+    let def = combat::ability(AbilityId(ability_id)).ok_or("unknown ability")?;
+    let ready_at = ctx
+        .db
+        .ability_cooldown()
+        .key()
+        .find(combat::cooldown_key(caster.entity_id, def.id))
+        .map_or(0, |c| c.ready_at_micros);
+    combat::can_cast(
+        def,
+        now.max(0) as u64,
+        caster.gcd_until_micros.max(0) as u64,
+        ready_at.max(0) as u64,
+        caster.mana,
+        caster.alive,
+    )
+    .map_err(cast_err)?;
+
+    let target = if target_entity_id == 0 {
+        None
+    } else {
+        Some(resolve_target(ctx, target_entity_id).ok_or(cast_err(combat::CastError::TargetNotFound))?)
+    };
+    combat::target_legal(def.kind, caster.entity_id, target.as_ref().map(|t| &t.view))
+        .map_err(cast_err)?;
+
+    let caster_pos = Vec3::new(caster.x, caster.y, caster.z);
+    if def.kind.hostile_targeted() {
+        let t = target.as_ref().expect("target_legal enforced presence");
+        if caster_pos.distance(t.pos) > def.range_m {
+            return Err(cast_err(combat::CastError::OutOfRange));
+        }
+        let store = collision_store().ok_or("collision unavailable")?;
+        if !line_of_sight(store, caster_pos, t.pos) {
+            return Err(cast_err(combat::CastError::NoLineOfSight));
+        }
+    }
+
+    caster.gcd_until_micros = now + combat::micros(combat::GCD_SECS) as i64;
+
+    if def.cast_secs > 0.0 {
+        upsert_active_cast(
+            ctx,
+            ActiveCast {
+                entity_id: caster.entity_id,
+                ability_id,
+                target_entity_id,
+                zone_id: caster.zone_id,
+                start_micros: now,
+                finish_micros: now + combat::micros(def.cast_secs) as i64,
+            },
+        );
+        ctx.db.player().entity_id().update(caster);
+        return Ok(());
+    }
+
+    // Instant kinds: all remaining validation happens before any row write.
+    match def.kind {
+        AbilityKind::Strike => {
+            let t = target.as_ref().expect("target_legal enforced presence");
+            let store = collision_store().ok_or("collision unavailable")?;
+            if !hits_target(&MotionConfig::default(), store, caster_pos, t) {
+                return Err(cast_err(combat::CastError::NoLineOfSight));
+            }
+            caster.mana -= def.mana_cost;
+            upsert_cooldown(ctx, caster.entity_id, def, now);
+            ctx.db.player().entity_id().update(caster);
+            damage_entity(ctx, t.view.entity_id, def.amount, now);
+        }
+        AbilityKind::NovaAoe => {
+            // Per-transaction broadphase over live players + NPCs (caster
+            // excluded — nothing hits itself), then a true radius filter.
+            let mut bp = Broadphase::new();
+            for p in ctx.db.player().iter() {
+                if p.session.is_some() && p.alive && p.entity_id != caster.entity_id {
+                    bp.insert(p.entity_id, Vec3::new(p.x, p.y, p.z));
+                }
+            }
+            for n in ctx.db.npc().iter() {
+                if n.alive {
+                    bp.insert(n.entity_id, Vec3::new(n.x, n.y, n.z));
+                }
+            }
+            caster.mana -= def.mana_cost;
+            upsert_cooldown(ctx, caster.entity_id, def, now);
+            ctx.db.player().entity_id().update(caster);
+            for id in bp.aoe_candidates(caster_pos, def.range_m) {
+                if let Some(t) = resolve_target(ctx, id) {
+                    if caster_pos.distance(t.pos) <= def.range_m {
+                        damage_entity(ctx, id, def.amount, now);
+                    }
+                }
+            }
+        }
+        AbilityKind::Projectile | AbilityKind::Heal => unreachable!("cast kinds handled above"),
+    }
+    Ok(())
+}
+
+/// Cast completion (plan D3): runs from `move_tick` AFTER movement/interrupt
+/// consumption. Re-validates what can have changed mid-cast; failures fizzle
+/// silently (a scheduled transaction must not abort per cast) — mana and
+/// cooldown only commit on success.
+fn complete_cast(
+    ctx: &ReducerContext,
+    cfg: &MotionConfig,
+    store: &ChunkStore,
+    cast: &ActiveCast,
+    now: i64,
+) {
+    let Some(def) = combat::ability(AbilityId(cast.ability_id)) else {
+        return;
+    };
+    let Some(mut caster) = ctx.db.player().entity_id().find(cast.entity_id) else {
+        return;
+    };
+    if !caster.alive || caster.session.is_none() || caster.mana < def.mana_cost {
+        return;
+    }
+    let caster_pos = Vec3::new(caster.x, caster.y, caster.z);
+    match def.kind {
+        AbilityKind::Heal => {
+            caster.mana -= def.mana_cost;
+            caster.hp = (caster.hp + def.amount).min(caster.hp_max);
+            caster.last_update_micros = now;
+            upsert_cooldown(ctx, cast.entity_id, def, now);
+            ctx.db.player().entity_id().update(caster);
+        }
+        AbilityKind::Projectile => {
+            let Some(t) = resolve_target(ctx, cast.target_entity_id) else {
+                return;
+            };
+            if !t.view.alive
+                || !t.view.connected
+                || caster_pos.distance(t.pos) > def.range_m
+                || !line_of_sight(store, caster_pos, t.pos)
+            {
+                return;
+            }
+            caster.mana -= def.mana_cost;
+            upsert_cooldown(ctx, cast.entity_id, def, now);
+            ctx.db.player().entity_id().update(caster);
+            // Interim (pre-package-4): hitscan-at-completion — the D4
+            // cut-line shape. Package 4 replaces this with a Projectile row.
+            if hits_target(cfg, store, caster_pos, &t) {
+                damage_entity(ctx, t.view.entity_id, def.amount, now);
+            }
+        }
+        AbilityKind::Strike | AbilityKind::NovaAoe => {} // instant; never queued
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled tick
 // ---------------------------------------------------------------------------
 
@@ -607,9 +894,34 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
     let now = now_micros(ctx);
 
     let mut clock = ctx.db.clock().id().find(0).ok_or("clock row missing")?;
+    // Measured, not nominal: scheduled ticks can run late and fixed ×0.1
+    // regen would silently lose that time.
+    let elapsed_secs = ((now - clock.server_time_micros).max(0) as f32) / 1_000_000.0;
     clock.tick += 1;
     clock.server_time_micros = now;
     ctx.db.clock().id().update(clock);
+
+    // M7 D3: mana regen for live players; expired-cooldown GC.
+    let thirsty: Vec<Player> = ctx
+        .db
+        .player()
+        .iter()
+        .filter(|p| p.session.is_some() && p.alive && p.mana < p.mana_max)
+        .collect();
+    for mut p in thirsty {
+        p.mana = (p.mana + combat::MANA_REGEN_PER_SEC * elapsed_secs).min(p.mana_max);
+        ctx.db.player().entity_id().update(p);
+    }
+    let expired_cd: Vec<u64> = ctx
+        .db
+        .ability_cooldown()
+        .iter()
+        .filter(|c| c.ready_at_micros <= now)
+        .map(|c| c.key)
+        .collect();
+    for key in expired_cd {
+        ctx.db.ability_cooldown().key().delete(key);
+    }
 
     // Tombstone GC (contract §3.1).
     let horizon = now - (TOMBSTONE_TTL_SECS as i64) * 1_000_000;
@@ -691,6 +1003,15 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             ctx.db.pending_input().entity_id().filter(p.entity_id).collect();
         queued.sort_by_key(|i| i.seq);
         let consumed = queued.len().min(MAX_STEPS_PER_TICK);
+        // M7 D3: movement interrupts casting — any consumed input with real
+        // intent cancels, BEFORE due casts resolve below (cancel wins the
+        // same-tick tie by construction).
+        if queued[..consumed]
+            .iter()
+            .any(|i| i.jump || i.move_x != 0.0 || i.move_y != 0.0)
+        {
+            ctx.db.active_cast().entity_id().delete(p.entity_id);
+        }
         for input in &queued[..consumed] {
             let intent = MoveIntent {
                 move_dir: [input.move_x, input.move_y],
@@ -748,6 +1069,18 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             p.last_update_micros = now;
             ctx.db.player().entity_id().update(p);
         }
+    }
+
+    // M7 D3: due casts resolve after movement consumption (normative order).
+    let due: Vec<ActiveCast> = ctx
+        .db
+        .active_cast()
+        .iter()
+        .filter(|c| c.finish_micros <= now)
+        .collect();
+    for cast in due {
+        ctx.db.active_cast().entity_id().delete(cast.entity_id);
+        complete_cast(ctx, &cfg, store, &cast, now);
     }
     Ok(())
 }
