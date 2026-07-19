@@ -325,7 +325,7 @@ impl App {
         let mut game_world = GameWorld::new();
 
         let (scene_loaded, root_entities) =
-            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0])?;
+            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], "scenes/main.scene")?;
 
         if !scene_loaded {
             game_setup::spawn_physics_test_objects(

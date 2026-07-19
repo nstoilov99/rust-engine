@@ -147,6 +147,12 @@ impl NetSession {
         self.replication.interpolate(world, server_now);
     }
 
+    /// Predicted local-player position (Z-up), once in world.
+    #[cfg(not(feature = "editor"))]
+    pub fn local_pos(&self) -> Option<glam::Vec3> {
+        self.prediction.visual_pose().map(|(p, _)| glam::Vec3::from(p))
+    }
+
     pub fn status_line(&self) -> String {
         let state = self.client.connection_state();
         if state == ConnectionState::InWorld {

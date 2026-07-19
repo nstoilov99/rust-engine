@@ -5,6 +5,7 @@
 use super::{game_setup, render_loop};
 use rust_engine::assets::AssetManager;
 use rust_engine::engine::animation::{AnimationPlayer, AnimationUpdateSystem, SkeletonInstance};
+use rust_engine::engine::collision::CollisionWorld;
 use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Camera, Transform, TransformDirty};
 use rust_engine::engine::ecs::game_world::GameWorld;
@@ -30,6 +31,7 @@ use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
 use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, MeshRenderData, SkinningBackend,
 };
+use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
@@ -62,6 +64,12 @@ pub struct StandaloneApp {
     /// Last net status shown in the window title (standalone has no text UI).
     net_title_status: String,
     materials: crate::asset_resolve::MaterialStore,
+    /// M4 runtime streaming (net play on the greybox world); inert for
+    /// manifest-less scenes.
+    world_streamer: WorldStreamer,
+    /// Streamed collision chunks (visual/debug parity; prediction keeps its
+    /// own full `ChunkStore`).
+    collision: CollisionWorld,
 }
 
 impl StandaloneApp {
@@ -99,8 +107,27 @@ impl StandaloneApp {
             state.play_mode = PlayMode::Playing;
         }
 
+        // Net play happens on the greybox world the server simulates; the
+        // demo scene is for offline runs.
+        let net_enabled = std::env::args().any(|a| a == "--connect");
+        let scene_relative = if net_enabled {
+            "scenes/greybox.scene"
+        } else {
+            "scenes/main.scene"
+        };
         let (scene_loaded, _root_entities) =
-            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0])?;
+            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], scene_relative)?;
+
+        let mut world_streamer = WorldStreamer::default();
+        {
+            let report = world_streamer.load_for_scene(scene_relative);
+            if let Some(reason) = &report.disabled {
+                println!("standalone: world streaming inert: {reason}");
+            }
+            for w in &report.warnings {
+                println!("standalone: world manifest warning: {w}");
+            }
+        }
 
         if !scene_loaded {
             game_setup::spawn_physics_test_objects(
@@ -312,6 +339,8 @@ impl StandaloneApp {
             net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
             net_title_status: String::new(),
             materials,
+            world_streamer,
+            collision: CollisionWorld::new(),
         })
     }
 
@@ -370,6 +399,7 @@ impl StandaloneApp {
                 self.net_title_status = status;
             }
         }
+        self.update_world_streaming();
         let delta_time = self.game_loop.tick();
 
         if let Some(time) = self.game_world.resource_mut::<Time>() {
@@ -377,6 +407,38 @@ impl StandaloneApp {
         }
 
         self.game_world.run_schedule(&mut self.schedule);
+    }
+
+    /// Per-frame world streaming around the predicted local player (camera
+    /// as fallback until in world). Inert for manifest-less scenes.
+    fn update_world_streaming(&mut self) {
+        if !self.world_streamer.is_active() {
+            return;
+        }
+        let center = self
+            .net
+            .as_ref()
+            .and_then(|n| n.local_pos())
+            .unwrap_or_else(|| {
+                rust_engine::engine::utils::coords::convert_position_yup_to_zup(
+                    self.renderer.camera_3d.position,
+                )
+            });
+        let allocator = self.renderer.gpu.memory_allocator.clone();
+        let mut meshes = self.asset_manager.meshes.write();
+        let mut ctx = StreamingCtx {
+            world: self.game_world.hecs_mut(),
+            meshes: &mut meshes,
+            allocator,
+            collision: &mut self.collision,
+        };
+        let output = self.world_streamer.update_streaming(center, &mut ctx);
+        if let Some(event) = output.zone_changed {
+            println!(
+                "standalone: zone changed: {:?} -> {:?}",
+                event.previous, event.current
+            );
+        }
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
