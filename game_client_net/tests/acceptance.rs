@@ -118,6 +118,38 @@ impl Bot {
     fn leave(mut self) {
         self.client.disconnect();
     }
+
+    /// NPCs orbit in small deterministic loops near the spawn point, which
+    /// sits on the corner of all four zones — any given quadrant may hold
+    /// none of them. Hop the quadrants until one is in scope.
+    fn find_npc(&mut self) -> u64 {
+        let quadrants = [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            for pos in quadrants {
+                self.teleport_and_settle(pos);
+                let dwell = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < dwell {
+                    self.pump();
+                    if let Some(npc) = self
+                        .latest()
+                        .entities
+                        .iter()
+                        .find(|e| e.kind == EntityKind::Npc)
+                    {
+                        return npc.entity_id;
+                    }
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+            }
+            assert!(Instant::now() < deadline, "no NPC found in any quadrant");
+        }
+    }
 }
 
 #[test]
@@ -199,18 +231,7 @@ fn zone_swap_overlaps_without_gap() {
 #[ignore = "needs local spacetime standalone + published module"]
 fn despawned_npc_is_destroyed_with_evidence() {
     let mut b = Bot::enter("acc-npc-watch");
-    // NPCs wander around the spawn point; watch from the spawn zone.
-    b.teleport_and_settle([1.0, 1.0, 1.0]);
-    b.wait("an NPC in scope", |b| {
-        b.latest().entities.iter().any(|e| e.kind == EntityKind::Npc)
-    });
-    let npc = b
-        .latest()
-        .entities
-        .iter()
-        .find(|e| e.kind == EntityKind::Npc)
-        .expect("checked above")
-        .entity_id;
+    let npc = b.find_npc();
 
     b.client.dev_despawn_npc(npc);
     // Tombstone evidence arrives via the permanent base subscription (§3.2),
