@@ -26,6 +26,11 @@ pub type TriangleFlags = u32;
 
 pub const FLAGS_MATERIAL_MASK: TriangleFlags = 0xFFFF;
 
+/// Force-walkable regardless of slope (M6 motion controller).
+pub const FLAG_WALKABLE: TriangleFlags = 1 << 16;
+/// Never walkable regardless of slope; wins over `FLAG_WALKABLE`.
+pub const FLAG_BLOCKING: TriangleFlags = 1 << 17;
+
 #[cfg(test)]
 mod parry_pin {
     /// Validates the pinned parry3d API surface the plan relies on:
