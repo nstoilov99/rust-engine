@@ -22,8 +22,8 @@ pub mod utils;
 // Entity Component System
 pub mod ecs;
 
-// GUI (crusty-gui integration, editor only)
-#[cfg(feature = "editor")]
+// GUI (crusty-gui integration: editor UI and the standalone runtime HUD)
+#[cfg(any(feature = "editor", feature = "hud"))]
 pub mod gui;
 
 // Debug draw system (wireframe line rendering)

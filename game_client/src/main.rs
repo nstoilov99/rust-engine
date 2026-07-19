@@ -8,6 +8,8 @@ mod app;
 mod asset_resolve;
 mod benchmark_runner;
 mod game_setup;
+#[cfg(all(not(feature = "editor"), feature = "hud"))]
+mod hud;
 mod input_handler;
 mod interp;
 mod net;

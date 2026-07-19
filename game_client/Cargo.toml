@@ -8,7 +8,9 @@ name = "game"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["hud"]
+# In-game HUD (crusty-gui) in the standalone client.
+hud = ["rust_engine/hud"]
 # Editor UI is crusty-gui.
 editor = ["rust_engine/editor"]
 # Alias kept for muscle memory — crusty-gui is the only editor UI.

@@ -9,8 +9,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# Runtime HUD: crusty-gui without any editor machinery.
+hud = ["dep:crusty-gui"]
 # Editor UI is crusty-gui.
-editor = ["dep:crusty-gui", "dep:windows-sys", "dep:transform-gizmo", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
+editor = ["hud", "dep:windows-sys", "dep:transform-gizmo", "dep:arboard", "dep:notify", "dep:tokio", "dep:shaderc", "dep:resvg"]
 # Alias kept for muscle memory — crusty-gui is the only editor UI.
 crusty = ["editor"]
 editor-debug = ["editor"]

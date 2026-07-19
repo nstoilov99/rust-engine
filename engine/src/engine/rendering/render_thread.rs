@@ -34,7 +34,7 @@ pub struct RenderThreadConfig {
     pub viewport_dimensions: Option<[u32; 2]>,
     /// Glyph shaper/atlas shared with the main thread's `CrustyGui`
     /// (Phase 16). `None` disables the crusty render pass.
-    #[cfg(feature = "editor")]
+    #[cfg(any(feature = "editor", feature = "hud"))]
     pub crusty_text: Option<crate::engine::gui::crusty::SharedTextRenderer>,
 }
 
@@ -146,13 +146,13 @@ impl RenderThread {
             }
         };
 
-        #[cfg(feature = "editor")]
+        #[cfg(any(feature = "editor", feature = "hud"))]
         let sc_format = sc_swapchain
             .as_ref()
             .map(|sc| sc.image_format())
             .unwrap_or(vulkano::format::Format::B8G8R8A8_SRGB);
 
-        #[cfg(feature = "editor")]
+        #[cfg(any(feature = "editor", feature = "hud"))]
         let mut crusty_renderer = config.crusty_text.clone().map(|text| {
             log::info!("render_thread: CrustyRenderer created");
             crate::engine::gui::crusty::CrustyRenderer::new(
@@ -282,7 +282,7 @@ impl RenderThread {
                         sc_swapchain = Some(new_sc);
                         sc_images = Some(new_imgs);
                         deferred_renderer.clear_framebuffer_cache();
-                        #[cfg(feature = "editor")]
+                        #[cfg(any(feature = "editor", feature = "hud"))]
                         if let Some(ref mut cr) = crusty_renderer {
                             cr.clear_framebuffer_cache();
                         }
@@ -487,11 +487,12 @@ impl RenderThread {
                     }
                 }
             } else {
-                // Standalone mode: render deferred directly to swapchain
+                // Standalone mode: render deferred directly to swapchain,
+                // then composite the HUD overlay (if any) on top.
                 let deferred_cb = {
                     crate::profile_scope!("record_deferred");
                     let render_target = RenderTarget::Swapchain {
-                        image: target_image,
+                        image: target_image.clone(),
                     };
                     match deferred_renderer.render(
                         &packet.mesh_data,
@@ -513,6 +514,44 @@ impl RenderThread {
                     }
                 };
 
+                // HUD pass composits over the deferred output (same
+                // TargetRenderer serial-execution contract as the editor:
+                // one CB chain per frame).
+                #[cfg(any(feature = "editor", feature = "hud"))]
+                let crusty_cb = if let (Some(ref mut crusty_r), Some(paint)) =
+                    (&mut crusty_renderer, packet.crusty_paint.as_deref())
+                {
+                    crate::profile_scope!("record_crusty");
+                    match crusty_r.render(target_image, paint, None, None) {
+                        Ok(cb) => cb,
+                        Err(e) => {
+                            log::error!("render_thread: crusty render error: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                #[cfg_attr(
+                    not(any(feature = "editor", feature = "hud")),
+                    allow(unused_mut)
+                )]
+                let mut cbs = vec![deferred_cb];
+                #[cfg(any(feature = "editor", feature = "hud"))]
+                cbs.extend(crusty_cb);
+
+                let mut future: Option<Box<dyn GpuFuture>> = Some(acquire_future.boxed());
+                for cb in cbs {
+                    match future.take().unwrap().then_execute(gpu.queue.clone(), cb) {
+                        Ok(f) => future = Some(f.boxed()),
+                        Err(e) => {
+                            log::error!("render_thread: execute error: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+
                 // Flush + signal_finished before presenting, like the editor
                 // branch: the deferred renderer reuses per-frame GPU resources
                 // (G-buffer, plankton buffers) across frames, and vulkano's
@@ -520,37 +559,32 @@ impl RenderThread {
                 // submission order serializes execution in practice.
                 let _submit_guard =
                     crate::engine::rendering::common::gpu_context::lock_queue_submit();
-                match acquire_future.then_execute(gpu.queue.clone(), deferred_cb) {
-                    Ok(future) => {
-                        if let Err(e) = future.flush() {
-                            log::error!("render_thread: flush failed: {:?}", e);
-                            unsafe { future.signal_finished() };
-                        } else {
-                            unsafe { future.signal_finished() };
-                            let present = future
-                                .then_swapchain_present(
-                                    gpu.queue.clone(),
-                                    SwapchainPresentInfo::swapchain_image_index(
-                                        swapchain_ref.clone(),
-                                        image_index,
-                                    ),
-                                )
-                                .then_signal_fence_and_flush();
-                            match present {
-                                Ok(f) => {
-                                    fence_slots[slot] = Some(f.boxed());
-                                }
-                                Err(Validated::Error(VulkanError::OutOfDate)) => {
-                                    needs_recreate = true;
-                                }
-                                Err(e) => {
-                                    log::error!("render_thread: present error: {:?}", e);
-                                }
+                if let Some(future) = future {
+                    if let Err(e) = future.flush() {
+                        log::error!("render_thread: flush failed: {:?}", e);
+                        unsafe { future.signal_finished() };
+                    } else {
+                        unsafe { future.signal_finished() };
+                        let present = future
+                            .then_swapchain_present(
+                                gpu.queue.clone(),
+                                SwapchainPresentInfo::swapchain_image_index(
+                                    swapchain_ref.clone(),
+                                    image_index,
+                                ),
+                            )
+                            .then_signal_fence_and_flush();
+                        match present {
+                            Ok(f) => {
+                                fence_slots[slot] = Some(f.boxed());
+                            }
+                            Err(Validated::Error(VulkanError::OutOfDate)) => {
+                                needs_recreate = true;
+                            }
+                            Err(e) => {
+                                log::error!("render_thread: present error: {:?}", e);
                             }
                         }
-                    }
-                    Err(e) => {
-                        log::error!("render_thread: execute error: {:?}", e);
                     }
                 }
             }
@@ -679,7 +713,7 @@ mod tests {
             swapchain_transfer: None,
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
-            #[cfg(feature = "editor")]
+            #[cfg(any(feature = "editor", feature = "hud"))]
             crusty_text: None,
         })
     }

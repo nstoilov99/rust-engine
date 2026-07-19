@@ -61,7 +61,13 @@ pub struct StandaloneApp {
     render_thread: Option<RenderThread>,
     /// Net session (M5); `Some` when launched with `--connect`.
     net: Option<crate::net::NetSession>,
-    /// Last net status shown in the window title (standalone has no text UI).
+    /// In-game HUD overlay (M7 D7): main-thread layout half; the paint list
+    /// crosses to the render thread in the frame packet.
+    #[cfg(feature = "hud")]
+    hud: rust_engine::engine::gui::crusty::CrustyGui,
+    /// Last net status shown in the window title (hud-less builds only —
+    /// with the HUD it lives in the connection chip).
+    #[cfg(not(feature = "hud"))]
     net_title_status: String,
     materials: crate::asset_resolve::MaterialStore,
     /// M4 runtime streaming (net play on the greybox world); inert for
@@ -282,6 +288,12 @@ impl StandaloneApp {
         }
         schedule.print_access_report();
 
+        #[cfg(feature = "hud")]
+        let hud = rust_engine::engine::gui::crusty::CrustyGui::new(
+            renderer.gpu.device.clone(),
+            [width as f32, height as f32],
+        );
+
         let render_thread = RenderThread::spawn(RenderThreadConfig {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Standalone,
@@ -295,8 +307,8 @@ impl StandaloneApp {
             ),
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
-            #[cfg(feature = "editor")]
-            crusty_text: None,
+            #[cfg(feature = "hud")]
+            crusty_text: Some(hud.text_handle()),
         });
 
         match render_thread.wait_for_ready(std::time::Duration::from_secs(10)) {
@@ -337,6 +349,9 @@ impl StandaloneApp {
             frame_number: 0,
             render_thread: Some(render_thread),
             net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
+            #[cfg(feature = "hud")]
+            hud,
+            #[cfg(not(feature = "hud"))]
             net_title_status: String::new(),
             materials,
             world_streamer,
@@ -393,10 +408,15 @@ impl StandaloneApp {
     pub fn update(&mut self) {
         if let Some(net) = &mut self.net {
             net.update(&mut self.game_world);
-            let status = net.status_line();
-            if status != self.net_title_status {
-                self.window.set_title(&format!("Rust Game Engine — {status}"));
-                self.net_title_status = status;
+            // With the HUD the status lives in the connection chip; the
+            // title keeps only the app name.
+            #[cfg(not(feature = "hud"))]
+            {
+                let status = net.status_line();
+                if status != self.net_title_status {
+                    self.window.set_title(&format!("Rust Game Engine — {status}"));
+                    self.net_title_status = status;
+                }
             }
         }
         self.update_world_streaming();
@@ -443,8 +463,12 @@ impl StandaloneApp {
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
-            WindowEvent::Resized(_new_size) => {
+            #[cfg_attr(not(feature = "hud"), allow(unused_variables))]
+            WindowEvent::Resized(new_size) => {
                 self.renderer.swapchain_state.recreate_swapchain = true;
+                #[cfg(feature = "hud")]
+                self.hud
+                    .set_screen_size(new_size.width as f32, new_size.height as f32);
             }
             WindowEvent::KeyboardInput {
                 event: key_event, ..
@@ -554,7 +578,8 @@ impl StandaloneApp {
 
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
 
-        let packet = FramePacket::build_standalone(
+        #[cfg_attr(not(feature = "hud"), allow(unused_mut))]
+        let mut packet = FramePacket::build_standalone(
             std::mem::take(&mut self.mesh_data_buffer),
             std::mem::take(&mut self.shadow_caster_buffer),
             light_data,
@@ -567,6 +592,13 @@ impl StandaloneApp {
             std::mem::take(&mut self.plankton_emitter_buffer),
         );
         self.frame_number += 1;
+
+        #[cfg(feature = "hud")]
+        {
+            let status = self.net.as_ref().map(|n| n.status_line());
+            let out = self.hud.layout(|ui| crate::hud::draw(ui, status.as_deref()));
+            packet.crusty_paint = Some(out.paint);
+        }
 
         if let Some(ref rt) = self.render_thread {
             if let Err(e) = rt.send(packet) {

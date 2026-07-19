@@ -94,8 +94,9 @@ pub struct FramePacket {
     pub post_processing: PostProcessingSettings,
     pub plankton_emitters: Vec<PlanktonEmitterFrameData>,
 
-    /// crusty-gui paint list — the editor's sole UI pass.
-    #[cfg(feature = "editor")]
+    /// crusty-gui paint list — the editor's sole UI pass, and the
+    /// standalone HUD overlay when the `hud` feature is on.
+    #[cfg(any(feature = "editor", feature = "hud"))]
     pub crusty_paint: Option<Vec<crusty_gui::paint::PaintCmd>>,
 
     /// Thumbnail pixels the render thread should upload + register as
@@ -203,7 +204,7 @@ impl FramePacket {
             debug_draw,
             post_processing: PostProcessingSettings::default(),
             plankton_emitters,
-            #[cfg(feature = "editor")]
+            #[cfg(any(feature = "editor", feature = "hud"))]
             crusty_paint: None,
             #[cfg(feature = "editor")]
             crusty_texture_uploads: Vec::new(),

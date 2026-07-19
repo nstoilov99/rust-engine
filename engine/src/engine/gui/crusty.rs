@@ -14,16 +14,22 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crusty_gui::backend::TargetRenderer;
-use crusty_gui::context::{Context, CursorIcon, Ui};
+use crusty_gui::context::{Context, CursorIcon};
+// Re-exported so downstream HUD code can draw without a direct crusty-gui dep.
+pub use crusty_gui::context::Ui;
+pub use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
-use crusty_gui::math::{Pos2, Rect, Rounding, Vec2};
+#[cfg(feature = "editor")]
+use crusty_gui::math::Rounding;
 pub use crusty_gui::paint::TextureId;
 use crusty_gui::paint::{PaintCmd, TextureFilter};
 use crusty_gui::shell::input as shell_input;
+#[cfg(feature = "editor")]
 use crusty_gui::style::Style;
 use crusty_gui::text::TextRenderer;
 
+#[cfg(feature = "editor")]
 use crate::engine::editor::theme::EditorTheme;
 
 pub use crusty_gui::shell::winit_cursor;
@@ -45,6 +51,7 @@ pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
 /// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`]. The
 /// runtime pixels_per_point is 1.0, so theme point values map 1:1 to
 /// crusty's physical pixels — no pre-scaling.
+#[cfg(feature = "editor")]
 pub fn style_from_theme(theme: &EditorTheme) -> Style {
     let p = &theme.palette;
     let sp = &theme.spacing;
@@ -121,8 +128,14 @@ pub struct CrustyGui {
 
 impl CrustyGui {
     pub fn new(device: Arc<Device>, screen_size: [f32; 2]) -> Self {
+        #[cfg_attr(not(feature = "editor"), allow(unused_mut))]
         let mut ctx = Context::new();
-        ctx.style = style_from_theme(&EditorTheme::dark_default());
+        // HUD-only builds keep crusty's default style; the editor maps its
+        // theme tokens on top.
+        #[cfg(feature = "editor")]
+        {
+            ctx.style = style_from_theme(&EditorTheme::dark_default());
+        }
         let text = TextRenderer::new(device, [1024, 1024]);
         // TextRenderer falls back to the OS default font. (The previously
         // bundled Ubuntu-Light shortcut is gone with the old runtime.)
@@ -239,6 +252,7 @@ impl CrustyGui {
 
     /// Re-derive the crusty style from the engine theme (call after theme
     /// or density changes so both UIs stay in sync).
+    #[cfg(feature = "editor")]
     pub fn apply_theme(&mut self, theme: &EditorTheme) {
         self.ctx.style = style_from_theme(theme);
     }
@@ -346,6 +360,7 @@ impl CrustyRenderer {
     /// `RenderEvent::RenderThreadReady` so the crusty layout pass can draw
     /// the icons. Missing dir / broken SVGs are logged and skipped — the
     /// panel falls back to a dot glyph for absent stems.
+    #[cfg(feature = "editor")]
     pub fn load_hierarchy_icons(
         &mut self,
         queue: Arc<Queue>,
