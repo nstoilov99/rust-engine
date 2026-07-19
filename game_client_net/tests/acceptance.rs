@@ -17,11 +17,17 @@
 
 use std::time::{Duration, Instant};
 
-use game_client_net::SpacetimeNetClient;
+use game_client_net::{OwnCombat, SpacetimeNetClient};
 use game_shared::net::protocol::{EntityKind, EntityState, ModuleAddr, WorldSnapshot};
 use game_shared::net::traits::{NetClient, NetEvent};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ability ids from the shared roster (`game_shared::combat`).
+const STRIKE: u16 = 1;
+const FIREBOLT: u16 = 2;
+const NOVA: u16 = 3;
+const HEAL: u16 = 4;
 
 /// Zone anchor positions (quadrant zones: SW=0, SE=1, NW=2, NE=3).
 const ZONE3_POS: [f32; 3] = [16.0, 16.0, 1.0];
@@ -33,6 +39,9 @@ struct Bot {
     /// Every snapshot seen since connect, newest last.
     snapshots: Vec<WorldSnapshot>,
     tombstones: Vec<(u64, u32)>,
+    /// Last own-row ack `(epoch, last_applied_seq)` — the exploit battery
+    /// forges inputs relative to these.
+    ack: Option<(u32, u32)>,
 }
 
 impl Bot {
@@ -50,6 +59,7 @@ impl Bot {
             in_world: false,
             snapshots: Vec::new(),
             tombstones: Vec::new(),
+            ack: None,
         };
         bot.wait("InWorld with a snapshot", |b| {
             b.in_world && !b.snapshots.is_empty()
@@ -69,6 +79,7 @@ impl Bot {
                     entity_id,
                     generation,
                 } => self.tombstones.push((entity_id, generation)),
+                NetEvent::OwnStateAck { epoch, seq, .. } => self.ack = Some((epoch, seq)),
                 _ => {}
             }
         }
@@ -121,6 +132,61 @@ impl Bot {
     /// Clean disconnect without pumping (pump treats Disconnected as fatal).
     fn leave(mut self) {
         self.client.disconnect();
+    }
+
+    /// Pump for a fixed wall-clock span (letting rejected casts prove
+    /// themselves by their absence of effects).
+    fn settle_secs(&mut self, secs: f32) {
+        let deadline = Instant::now() + Duration::from_secs_f32(secs);
+        while Instant::now() < deadline {
+            self.pump();
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+
+    fn combat(&self) -> OwnCombat {
+        self.client.own_combat().expect("own combat state in cache")
+    }
+
+    fn gcd(&self) -> u64 {
+        self.combat().gcd_until_us
+    }
+
+    fn hp_of(&self, entity_id: u64) -> f32 {
+        self.entity(entity_id).expect("entity in scope").hp
+    }
+
+    /// Player hp never regenerates and rows persist across runs — self-kill
+    /// and respawn back to full when a scenario needs hp headroom. Ends at
+    /// the spawn point.
+    fn normalize_hp(&mut self) {
+        let own = self.own_id();
+        let (hp, hp_max, gen0) = {
+            let e = self.entity(own).expect("own row in snapshot");
+            (e.hp, e.hp_max, e.generation)
+        };
+        if hp < hp_max - 0.01 {
+            self.client.dev_damage(own, 1000.0);
+            self.wait("normalize-hp respawn", |b| {
+                b.entity(own)
+                    .is_some_and(|e| e.generation > gen0 && e.alive && e.hp == e.hp_max)
+            });
+        }
+    }
+
+    /// Mana persists across runs and regenerates at 5/s — wait for full
+    /// before scenarios that count on exact drain arithmetic.
+    fn wait_mana_full(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let c = self.combat();
+            if c.mana >= c.mana_max - 0.5 {
+                return;
+            }
+            assert!(Instant::now() < deadline, "mana never refilled");
+            self.pump();
+            std::thread::sleep(Duration::from_millis(16));
+        }
     }
 
     /// NPCs orbit in small deterministic loops near the spawn point, which
@@ -348,4 +414,212 @@ fn player_death_respawns_at_spawn_with_fresh_generation() {
         })
     });
     b.leave();
+}
+
+// ---------------------------------------------------------------------------
+// M7 D6 exploit battery. Assertions are effect-based — hp/mana/gcd rows —
+// because reducer rejections never surface to the caller. A rejected cast
+// aborts its transaction, so the GCD timestamp not moving IS the rejection.
+// Player targets (not NPCs) keep scenarios deterministic: they don't wander
+// out of strike range or zone scope mid-test.
+// ---------------------------------------------------------------------------
+
+/// Park bot `b_id` at `b_pos` with full hp (kept connected), and put caster
+/// `a_id` at `a_pos` with the target in scope.
+fn combat_pair(a_id: &str, b_id: &str, a_pos: [f32; 3], b_pos: [f32; 3]) -> (Bot, Bot, u64) {
+    let mut b = Bot::enter(b_id);
+    b.normalize_hp();
+    b.teleport_and_settle(b_pos);
+    let target = b.own_id();
+    let mut a = Bot::enter(a_id);
+    a.teleport_and_settle(a_pos);
+    a.wait("target in scope", |a| a.sees(target));
+    (a, b, target)
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn gcd_blocks_back_to_back_strikes() {
+    let (mut a, b, target) = combat_pair("acc-gcd-a", "acc-gcd-b", [16.2, 15.0, 9.0], [15.0, 15.0, 9.0]);
+    let hp0 = a.hp_of(target);
+    a.client.cast_ability(STRIKE, target);
+    a.client.cast_ability(STRIKE, target);
+    a.wait("exactly one strike lands", |a| (a.hp_of(target) - (hp0 - 15.0)).abs() < 0.01);
+    a.settle_secs(1.5);
+    assert!(
+        (a.hp_of(target) - (hp0 - 15.0)).abs() < 0.01,
+        "second immediate strike bypassed the GCD"
+    );
+    a.leave();
+    b.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn cooldown_blocks_early_nova_recast() {
+    let mut a = Bot::enter("acc-nova-cd");
+    a.teleport_and_settle([70.0, 15.0, 9.0]); // alone: nova needs no target
+    a.wait_mana_full();
+    let mana0 = a.combat().mana;
+    a.client.cast_ability(NOVA, 0);
+    a.wait("nova commits mana", |a| a.combat().mana <= mana0 - 39.0);
+    let mana1 = a.combat().mana;
+    a.settle_secs(1.2); // GCD over, 8 s cooldown very much not
+    let gcd0 = a.gcd();
+    a.client.cast_ability(NOVA, 0);
+    a.settle_secs(1.0);
+    assert_eq!(a.gcd(), gcd0, "recast inside the cooldown started a GCD");
+    assert!(a.combat().mana >= mana1, "recast inside the cooldown burned mana");
+    a.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn out_of_range_cast_lands_nothing() {
+    // Same zone (NE), 40 m apart: beyond strike (3 m) and firebolt (25 m).
+    let (mut a, b, target) = combat_pair("acc-range-a", "acc-range-b", [55.0, 15.0, 9.0], [15.0, 15.0, 9.0]);
+    let hp0 = a.hp_of(target);
+    let gcd0 = a.gcd();
+    a.client.cast_ability(STRIKE, target);
+    a.client.cast_ability(FIREBOLT, target);
+    a.settle_secs(2.5);
+    assert_eq!(a.gcd(), gcd0, "out-of-range cast started a GCD");
+    assert!((a.hp_of(target) - hp0).abs() < 0.01, "out-of-range cast dealt damage");
+    a.leave();
+    b.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn offline_target_rejected() {
+    let (mut a, b, target) = combat_pair("acc-off-a", "acc-off-b", [16.2, 15.0, 9.0], [15.0, 15.0, 9.0]);
+    b.leave(); // row persists, session gone
+    a.wait("target row still in scope", |a| a.sees(target));
+    let hp0 = a.hp_of(target);
+    let gcd0 = a.gcd();
+    a.client.cast_ability(STRIKE, target);
+    a.settle_secs(1.0);
+    assert_eq!(a.gcd(), gcd0, "strike on an offline row started a GCD");
+    assert!((a.hp_of(target) - hp0).abs() < 0.01, "offline row took damage");
+    a.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn dead_target_and_dead_caster_rejected() {
+    let (mut a, b, target) = combat_pair("acc-dead-a", "acc-dead-b", [16.2, 15.0, 9.0], [15.0, 15.0, 9.0]);
+    a.client.dev_damage(target, 1000.0);
+    a.wait("target dead", |a| a.entity(target).is_some_and(|e| !e.alive));
+    let gcd0 = a.gcd();
+    a.client.cast_ability(STRIKE, target);
+    a.settle_secs(1.0); // inside the 5 s corpse window
+    assert_eq!(a.gcd(), gcd0, "strike on a corpse started a GCD");
+
+    let own = a.own_id();
+    a.client.dev_damage(own, 1000.0);
+    a.wait("caster dead", |a| a.entity(own).is_some_and(|e| !e.alive));
+    let gcd1 = a.gcd();
+    let mana1 = a.combat().mana; // regen skips the dead: must hold exactly
+    a.client.cast_ability(NOVA, 0);
+    a.settle_secs(1.0);
+    assert_eq!(a.gcd(), gcd1, "dead caster started a GCD");
+    assert_eq!(a.combat().mana, mana1, "dead caster's mana changed");
+    a.wait("caster respawn (clean exit)", |a| {
+        a.entity(own).is_some_and(|e| e.alive)
+    });
+    a.leave();
+    b.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn mana_floor_stops_casts() {
+    // 6 m apart: outside the projectile's 2-tick caster-grace sweep (which
+    // skips collision), inside nova's 8 m and firebolt's 25 m.
+    let (mut a, b, target) = combat_pair("acc-mana-a", "acc-mana-b", [21.0, 15.0, 9.0], [15.0, 15.0, 9.0]);
+    a.wait_mana_full();
+    let mana0 = a.combat().mana; // 100
+
+    // Nova (instant, −40) hits the adjacent target too (−15 hp).
+    a.client.cast_ability(NOVA, 0);
+    a.wait("nova commits mana", |a| a.combat().mana <= mana0 - 39.0);
+    a.settle_secs(1.1); // GCD
+
+    // Two firebolts (1.5 s cast, −30 at completion, 25 dmg on hit).
+    for round in 0..2 {
+        let before = a.combat().mana;
+        a.client.cast_ability(FIREBOLT, target);
+        a.wait("firebolt cast started", |a| a.combat().active_cast.is_some());
+        a.wait("firebolt completion commits mana", |a| {
+            a.combat().active_cast.is_none() && a.combat().mana < before - 20.0
+        });
+        assert!(round == 1 || a.combat().mana >= 30.0, "drain arithmetic drifted");
+    }
+    let mana_low = a.combat().mana;
+    assert!(mana_low < 30.0, "expected sub-cost mana, got {mana_low}");
+
+    // The actual exploit check: a cast the caster cannot afford must not
+    // start, commit mana, or touch the GCD.
+    let gcd0 = a.gcd();
+    a.client.cast_ability(FIREBOLT, target);
+    a.settle_secs(1.0);
+    assert_eq!(a.gcd(), gcd0, "unaffordable cast started a GCD");
+    assert!(a.combat().mana >= mana_low, "unaffordable cast burned mana");
+    assert!(a.combat().active_cast.is_none(), "unaffordable cast is casting");
+
+    // Sanity on the damage side: nova 15 + two projectile hits 2×25 = 65.
+    a.wait("both projectiles landed", |a| {
+        (a.hp_of(target) - 35.0).abs() < 0.01
+    });
+    a.leave();
+    b.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn movement_input_interrupts_cast() {
+    let mut a = Bot::enter("acc-interrupt");
+    a.teleport_and_settle([70.0, 40.0, 9.0]);
+    a.wait_mana_full();
+    let mana0 = a.combat().mana;
+    a.client.cast_ability(HEAL, 0);
+    a.wait("heal cast started", |a| a.combat().active_cast.is_some());
+    let (epoch, seq) = a.ack.expect("own-row ack seen");
+    a.client.dev_submit_input_raw(epoch, seq + 1, [1.0, 0.0], 0.0);
+    a.wait("movement cancels the cast", |a| a.combat().active_cast.is_none());
+    a.settle_secs(2.5); // past would-be completion
+    assert!(
+        a.combat().mana >= mana0 - 0.01,
+        "interrupted heal still committed mana"
+    );
+    a.leave();
+}
+
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn forged_inputs_do_not_move() {
+    let mut a = Bot::enter("acc-forge");
+    a.teleport_and_settle([70.0, 70.0, 9.0]);
+    a.settle_secs(0.5);
+    let (epoch, seq) = a.ack.expect("own-row ack seen");
+    let p0 = a.own_pos();
+
+    // Foreign epoch: dropped before simulation.
+    a.client.dev_submit_input_raw(epoch + 7, seq + 1, [1.0, 0.0], 0.0);
+    a.settle_secs(1.0);
+    let p1 = a.own_pos();
+    assert!(
+        (p1[0] - p0[0]).abs() < 0.05 && (p1[1] - p0[1]).abs() < 0.05,
+        "forged-epoch input moved the player: {p0:?} -> {p1:?}"
+    );
+
+    // Replayed (already-consumed) seq under the right epoch: also dropped.
+    a.client.dev_submit_input_raw(epoch, seq, [1.0, 0.0], 0.0);
+    a.settle_secs(1.0);
+    let p2 = a.own_pos();
+    assert!(
+        (p2[0] - p0[0]).abs() < 0.05 && (p2[1] - p0[1]).abs() < 0.05,
+        "replayed-seq input moved the player: {p0:?} -> {p2:?}"
+    );
+    a.leave();
 }

@@ -189,6 +189,22 @@ impl Replication {
         self.combat.get(&(entity_id, generation))
     }
 
+    /// Alive proxies with a known position (M7 D6 Tab targeting). The own
+    /// row is never in `buffers`, so the local player is excluded for free.
+    pub fn targetables(&self) -> Vec<(u64, [f32; 3])> {
+        self.buffers
+            .iter()
+            .filter_map(|((id, generation), (_, buf))| {
+                let alive = self
+                    .combat
+                    .get(&(*id, *generation))
+                    .map_or(true, |c| c.alive);
+                let (pos, _) = buf.latest()?;
+                (alive).then_some((*id, pos))
+            })
+            .collect()
+    }
+
     /// Write interpolated transforms for every proxy, each evaluated at
     /// estimated server time minus its kind's interpolation delay.
     /// `None` (clock not yet synced) snaps to the newest sample instead.

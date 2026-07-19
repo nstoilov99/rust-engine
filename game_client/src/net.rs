@@ -38,6 +38,9 @@ pub struct NetSession {
     space_was_down: bool,
     /// Rendered projectile spheres by server entity id (M7 D4).
     projectiles: HashMap<u64, hecs::Entity>,
+    /// Client-side target selection (M7 D6): sent per cast, never stored
+    /// server-side. Cleared when the proxy leaves scope or dies.
+    target: Option<u64>,
 }
 
 impl NetSession {
@@ -86,6 +89,7 @@ impl NetSession {
             yaw: 0.0,
             space_was_down: false,
             projectiles: HashMap::new(),
+            target: None,
         })
     }
 
@@ -104,6 +108,9 @@ impl NetSession {
         let (move_dir, sprint, space_down) = game_world
             .resource::<InputManager>()
             .map_or(([0.0; 2], false, false), read_move_keys);
+        let (tab_pressed, cast_slot) = game_world
+            .resource::<InputManager>()
+            .map_or((false, None), read_combat_keys);
         let jump_pressed = space_down && !self.space_was_down;
         self.space_was_down = space_down;
         if move_dir != [0.0; 2] {
@@ -142,6 +149,7 @@ impl NetSession {
         }
 
         if self.client.connection_state() == ConnectionState::InWorld {
+            self.handle_combat_keys(tab_pressed, cast_slot);
             self.prediction
                 .update(dt, move_dir, self.yaw, sprint, jump_pressed, &mut self.outgoing);
             for input in self.outgoing.drain(..) {
@@ -155,6 +163,42 @@ impl NetSession {
         let server_now = self.clock.server_time_us(local_time_us());
         self.replication.interpolate(world, server_now);
         self.update_projectiles(world, server_now);
+    }
+
+    /// M7 D6: Tab cycles alive proxies nearest-first; keys 1–4 cast the
+    /// roster slots. Targeting is pure client selection state — the server
+    /// re-checks legality against the id sent with each cast.
+    fn handle_combat_keys(&mut self, tab_pressed: bool, cast_slot: Option<usize>) {
+        let candidates = self.replication.targetables();
+        if self.target.is_some_and(|t| !candidates.iter().any(|(id, _)| *id == t)) {
+            self.target = None;
+        }
+        if tab_pressed && !candidates.is_empty() {
+            let own = self
+                .prediction
+                .visual_pose()
+                .map_or([0.0; 3], |(p, _)| p);
+            let d2 = |p: [f32; 3]| {
+                (p[0] - own[0]).powi(2) + (p[1] - own[1]).powi(2) + (p[2] - own[2]).powi(2)
+            };
+            let mut sorted = candidates;
+            sorted.sort_by(|a, b| d2(a.1).total_cmp(&d2(b.1)));
+            let next = match self.target.and_then(|t| sorted.iter().position(|(id, _)| *id == t)) {
+                Some(i) => sorted[(i + 1) % sorted.len()].0,
+                None => sorted[0].0,
+            };
+            self.target = Some(next);
+            println!("net: target {next}");
+        }
+        if let Some(slot) = cast_slot {
+            let def = &game_shared::combat::ABILITIES[slot];
+            let target = if def.kind.hostile_targeted() {
+                self.target.unwrap_or(0)
+            } else {
+                0
+            };
+            self.client.cast_ability(def.id.0, target);
+        }
     }
 
     /// M7 D4: small spheres extrapolated ballistically from the last server
@@ -225,6 +269,19 @@ impl NetSession {
             format!("Net: {state:?}")
         }
     }
+}
+
+/// Tab (target cycle) + 1–4 (ability slots), edge-triggered.
+fn read_combat_keys(im: &InputManager) -> (bool, Option<usize>) {
+    let slot = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+    ]
+    .iter()
+    .position(|&k| im.is_key_just_pressed(k));
+    (im.is_key_just_pressed(KeyCode::Tab), slot)
 }
 
 /// Raw WASD + Shift (sprint) + Space (jump) on the XY ground plane (Z-up:

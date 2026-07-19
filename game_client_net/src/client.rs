@@ -20,10 +20,10 @@ use spacetimedb_sdk::{
 };
 
 use crate::module_bindings::{
-    despawn_npc, dev_damage, dev_teleport, enter_world, ping, run_parity_trace, submit_input,
-    ConfigTableAccess, DbConnection, Npc, NpcTableAccess, ParityResultTableAccess,
-    PingResultTableAccess, Player, PlayerTableAccess, ProjectileTableAccess, SubscriptionHandle,
-    TombstoneTableAccess,
+    cast_ability, despawn_npc, dev_damage, dev_teleport, enter_world, ping, run_parity_trace,
+    submit_input, AbilityCooldownTableAccess, ActiveCastTableAccess, ConfigTableAccess,
+    DbConnection, Npc, NpcTableAccess, ParityResultTableAccess, PingResultTableAccess, Player,
+    PlayerTableAccess, ProjectileTableAccess, SubscriptionHandle, TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
@@ -48,6 +48,30 @@ pub struct ProjectileView {
     pub pos: [f32; 3],
     pub vel: [f32; 3],
     pub server_time_us: u64,
+}
+
+/// Own combat state polled per frame by the HUD (M7 D6) — no events;
+/// the HUD re-reads everything each frame anyway. Times are server micros.
+#[derive(Debug, Clone, Default)]
+pub struct OwnCombat {
+    pub hp: f32,
+    pub hp_max: f32,
+    pub mana: f32,
+    pub mana_max: f32,
+    pub alive: bool,
+    pub gcd_until_us: u64,
+    pub respawn_at_us: u64,
+    /// `(ability_id, ready_at_us)` for every live cooldown row.
+    pub cooldowns: Vec<(u16, u64)>,
+    pub active_cast: Option<ActiveCastView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveCastView {
+    pub ability_id: u16,
+    pub target_entity_id: u64,
+    pub start_us: u64,
+    pub finish_us: u64,
 }
 
 #[derive(Default)]
@@ -248,6 +272,77 @@ impl SpacetimeNetClient {
         }
     }
 
+    /// M7 D6: request a cast. Fire-and-forget — rejections are server-side
+    /// only; the client observes effects (hp/mana/cooldown rows).
+    pub fn cast_ability(&mut self, ability_id: u16, target_entity_id: u64) {
+        if let Some(conn) = &self.conn {
+            let _ = conn.reducers.cast_ability(ability_id, target_entity_id);
+        }
+    }
+
+    /// Own combat state from the client cache (M7 D6), polled per frame.
+    /// `None` until the own row is in the cache.
+    pub fn own_combat(&self) -> Option<OwnCombat> {
+        let conn = self.conn.as_ref()?;
+        let identity = conn.try_identity()?;
+        let p = conn.db.player().owner_identity().find(&identity)?;
+        let cooldowns = conn
+            .db
+            .ability_cooldown()
+            .iter()
+            .filter(|c| c.entity_id == p.entity_id)
+            .map(|c| (c.ability_id, c.ready_at_micros.max(0) as u64))
+            .collect();
+        let active_cast = conn
+            .db
+            .active_cast()
+            .entity_id()
+            .find(&p.entity_id)
+            .map(|c| ActiveCastView {
+                ability_id: c.ability_id,
+                target_entity_id: c.target_entity_id,
+                start_us: c.start_micros.max(0) as u64,
+                finish_us: c.finish_micros.max(0) as u64,
+            });
+        Some(OwnCombat {
+            hp: p.hp,
+            hp_max: p.hp_max,
+            mana: p.mana,
+            mana_max: p.mana_max,
+            alive: p.alive,
+            gcd_until_us: p.gcd_until_micros.max(0) as u64,
+            respawn_at_us: p.respawn_at_micros.max(0) as u64,
+            cooldowns,
+            active_cast,
+        })
+    }
+
+    /// Active cast of any entity in scope (target frame cast bar).
+    pub fn active_cast_of(&self, entity_id: u64) -> Option<ActiveCastView> {
+        let conn = self.conn.as_ref()?;
+        conn.db
+            .active_cast()
+            .entity_id()
+            .find(&entity_id)
+            .map(|c| ActiveCastView {
+                ability_id: c.ability_id,
+                target_entity_id: c.target_entity_id,
+                start_us: c.start_micros.max(0) as u64,
+                finish_us: c.finish_micros.max(0) as u64,
+            })
+    }
+
+    /// Dev/test hook: raw `submit_input` with caller-controlled epoch AND
+    /// seq, bypassing the own-row epoch stamping — the exploit battery
+    /// forges stale and foreign values through this.
+    pub fn dev_submit_input_raw(&mut self, epoch: u32, seq: u32, move_dir: [f32; 2], yaw: f32) {
+        if let Some(conn) = &self.conn {
+            let _ = conn
+                .reducers
+                .submit_input(epoch, seq, move_dir[0], move_dir[1], yaw, false, false);
+        }
+    }
+
     /// In-flight projectiles from the client cache (zone-scoped sub). The
     /// renderer extrapolates from the last server step (M7 D4) — polled per
     /// frame, no events.
@@ -399,11 +494,24 @@ impl SpacetimeNetClient {
             .conn
             .as_ref()
             .expect("start_zone_sub requires a connection");
-        let queries = vec![
+        let mut queries = vec![
             format!("SELECT * FROM player WHERE zone_id = {zone}"),
             format!("SELECT * FROM npc WHERE zone_id = {zone}"),
             format!("SELECT * FROM projectile WHERE zone_id = {zone}"),
+            // M7 D6: in-scope cast bars (rows carry the caster's zone).
+            format!("SELECT * FROM active_cast WHERE zone_id = {zone}"),
         ];
+        // Own cooldown rows (HUD sweeps). The own row is always in the cache
+        // by the time the first zone sub starts (it carries the zone).
+        if let Some(p) = conn
+            .try_identity()
+            .and_then(|id| conn.db.player().owner_identity().find(&id))
+        {
+            queries.push(format!(
+                "SELECT * FROM ability_cooldown WHERE entity_id = {}",
+                p.entity_id
+            ));
+        }
         self.flags
             .pending_repl_applied
             .store(false, Ordering::Release);
