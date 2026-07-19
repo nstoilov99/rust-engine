@@ -10,6 +10,8 @@
 //! → jump → gravity → horizontal collide-and-slide (with one step-up
 //! attempt) → vertical pass → ground snap.
 
+pub mod broadphase;
+pub mod combat;
 pub mod trace;
 
 use crate::collision::{ChunkStore, FLAG_BLOCKING, FLAG_WALKABLE, TriangleFlags};

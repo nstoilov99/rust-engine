@@ -693,3 +693,147 @@ fn record_parity_traces() {
     assert!((end[2] - rest_z(8.0)).abs() < 0.2, "long_run ended airborne ({end:?})");
     save(&t);
 }
+
+// ---------------------------------------------------------------- combat (D6)
+
+mod combat_tests {
+    use super::super::broadphase::Broadphase;
+    use super::super::combat::{hitscan, projectile_step, Hit, HitKind, Projectile, SweepOutcome};
+    use super::*;
+
+    /// Flat floor plus a wall at x=40 facing −X; targets stand on the floor.
+    fn arena() -> ChunkStore {
+        let mut tris = floor(0.0, 0.0, 60.0, 60.0, 0.0, 0).to_vec();
+        tris.extend(wall_neg_x(40.0, 0.0, 60.0, 0.0, 10.0, 0));
+        store_from_tris(&tris)
+    }
+
+    fn capsule_center(cfg: &MotionConfig, x: f32, y: f32) -> Vec3 {
+        Vec3::new(x, y, cfg.capsule_half_seg + cfg.capsule_radius)
+    }
+
+    fn targets(cfg: &MotionConfig, at: &[(u64, [f32; 2])]) -> Broadphase {
+        let mut bp = Broadphase::new();
+        for &(id, [x, y]) in at {
+            bp.insert(id, capsule_center(cfg, x, y));
+        }
+        bp
+    }
+
+    /// Level ray at capsule-center height along +X from (5, 30).
+    fn level_ray(cfg: &MotionConfig) -> (Vec3, Vec3) {
+        (capsule_center(cfg, 5.0, 30.0), Vec3::X)
+    }
+
+    #[test]
+    fn hitscan_hits_wall_when_unobstructed() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let (origin, dir) = level_ray(&cfg);
+        let hit = hitscan(&cfg, &store, &Broadphase::new(), origin, dir * 3.0, 100.0).unwrap();
+        assert!(matches!(hit.kind, HitKind::World { .. }));
+        assert!((hit.distance - 35.0).abs() < 1e-3, "distance {}", hit.distance);
+        assert!((hit.normal - Vec3::NEG_X).length() < 1e-3);
+    }
+
+    #[test]
+    fn hitscan_prefers_nearer_entity_over_wall() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let bp = targets(&cfg, &[(7, [20.0, 30.0]), (8, [50.0, 30.0])]); // 8 is behind the wall
+        let (origin, dir) = level_ray(&cfg);
+        let hit = hitscan(&cfg, &store, &bp, origin, dir, 100.0).unwrap();
+        assert_eq!(hit.kind, HitKind::Entity { entity_id: 7 });
+        // Capsule surface at 20 − radius from x=5 → 14.6 m.
+        assert!((hit.distance - (15.0 - cfg.capsule_radius)).abs() < 1e-3);
+        assert!((hit.normal - Vec3::NEG_X).length() < 1e-3);
+    }
+
+    #[test]
+    fn hitscan_tie_breaks_to_lowest_entity_id() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        // Same position → identical toi; id-sorted candidates + strict `<`
+        // keep the lower id.
+        let bp = targets(&cfg, &[(9, [20.0, 30.0]), (3, [20.0, 30.0])]);
+        let (origin, dir) = level_ray(&cfg);
+        let hit = hitscan(&cfg, &store, &bp, origin, dir, 100.0).unwrap();
+        assert_eq!(hit.kind, HitKind::Entity { entity_id: 3 });
+    }
+
+    #[test]
+    fn hitscan_misses_offset_entity_and_range_caps() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let bp = targets(&cfg, &[(7, [20.0, 35.0])]); // 5 m off the ray line
+        let (origin, dir) = level_ray(&cfg);
+        let hit = hitscan(&cfg, &store, &bp, origin, dir, 100.0).unwrap();
+        assert!(matches!(hit.kind, HitKind::World { .. }), "offset capsule was hit");
+        // Range shorter than every obstacle → no hit at all.
+        assert!(hitscan(&cfg, &store, &bp, origin, dir, 10.0).is_none());
+        // Zero direction → None.
+        assert!(hitscan(&cfg, &store, &bp, origin, Vec3::ZERO, 10.0).is_none());
+    }
+
+    fn fly(
+        cfg: &MotionConfig,
+        store: &ChunkStore,
+        bp: &Broadphase,
+        mut p: Projectile,
+        gravity: f32,
+        max_steps: usize,
+    ) -> (Hit, usize) {
+        for i in 0..max_steps {
+            match projectile_step(cfg, store, bp, p, gravity, MOVE_DT) {
+                SweepOutcome::Hit(hit) => return (hit, i),
+                SweepOutcome::Flying(next) => p = next,
+            }
+        }
+        panic!("projectile never hit anything in {max_steps} steps");
+    }
+
+    #[test]
+    fn projectile_flies_straight_into_wall() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let p = Projectile {
+            pos: capsule_center(&cfg, 5.0, 30.0),
+            vel: Vec3::X * 20.0,
+        };
+        let (hit, steps) = fly(&cfg, &store, &Broadphase::new(), p, 0.0, 100);
+        assert!(matches!(hit.kind, HitKind::World { .. }));
+        assert!((hit.position.x - 40.0).abs() < 1e-3);
+        // 35 m at 20 m/s and 1 m per step; the impact sits exactly on a step
+        // boundary, so either adjacent step may report it.
+        assert!((34..=35).contains(&steps), "hit at step {steps}");
+    }
+
+    #[test]
+    fn projectile_arcs_into_ground_under_gravity() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let p = Projectile {
+            pos: Vec3::new(5.0, 30.0, 2.0),
+            vel: Vec3::X * 10.0,
+        };
+        let (hit, _) = fly(&cfg, &store, &Broadphase::new(), p, cfg.gravity, 100);
+        assert!(matches!(hit.kind, HitKind::World { .. }));
+        assert!(hit.position.z.abs() < 1e-3, "did not land on the floor: {:?}", hit.position);
+        assert!(hit.position.x < 40.0 - 1e-3, "reached the wall despite gravity");
+        assert!((hit.normal - Vec3::Z).length() < 1e-3);
+    }
+
+    #[test]
+    fn projectile_hits_entity_before_wall() {
+        let cfg = MotionConfig::default();
+        let store = arena();
+        let bp = targets(&cfg, &[(7, [20.0, 30.0])]);
+        let p = Projectile {
+            pos: capsule_center(&cfg, 5.0, 30.0),
+            vel: Vec3::X * 20.0,
+        };
+        let (hit, _) = fly(&cfg, &store, &bp, p, 0.0, 100);
+        assert_eq!(hit.kind, HitKind::Entity { entity_id: 7 });
+        assert!((hit.position.x - (20.0 - cfg.capsule_radius)).abs() < 1e-3);
+    }
+}
