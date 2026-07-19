@@ -22,7 +22,8 @@ use spacetimedb_sdk::{
 use crate::module_bindings::{
     despawn_npc, dev_damage, dev_teleport, enter_world, ping, run_parity_trace, submit_input,
     ConfigTableAccess, DbConnection, Npc, NpcTableAccess, ParityResultTableAccess,
-    PingResultTableAccess, Player, PlayerTableAccess, SubscriptionHandle, TombstoneTableAccess,
+    PingResultTableAccess, Player, PlayerTableAccess, ProjectileTableAccess, SubscriptionHandle,
+    TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
@@ -37,6 +38,16 @@ const PING_INTERVAL_SECS: f32 = 2.0;
 pub fn local_time_us() -> u64 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+/// Last-server-step view of an in-flight projectile (M7 D4): the renderer
+/// extrapolates `pos + vel·dt − ½·g·dt²·ẑ` from `server_time_us`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectileView {
+    pub entity_id: u64,
+    pub pos: [f32; 3],
+    pub vel: [f32; 3],
+    pub server_time_us: u64,
 }
 
 #[derive(Default)]
@@ -237,6 +248,25 @@ impl SpacetimeNetClient {
         }
     }
 
+    /// In-flight projectiles from the client cache (zone-scoped sub). The
+    /// renderer extrapolates from the last server step (M7 D4) — polled per
+    /// frame, no events.
+    pub fn projectiles(&self) -> Vec<ProjectileView> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        conn.db
+            .projectile()
+            .iter()
+            .map(|p| ProjectileView {
+                entity_id: p.entity_id,
+                pos: [p.x, p.y, p.z],
+                vel: [p.vx, p.vy, p.vz],
+                server_time_us: p.last_update_micros.max(0) as u64,
+            })
+            .collect()
+    }
+
     /// Dev/test hook: replay the embedded parity trace inside the WASM
     /// module (M6 D5); the result upserts into `parity_result`.
     pub fn dev_run_parity_trace(&mut self, trace_id: &str) {
@@ -372,6 +402,7 @@ impl SpacetimeNetClient {
         let queries = vec![
             format!("SELECT * FROM player WHERE zone_id = {zone}"),
             format!("SELECT * FROM npc WHERE zone_id = {zone}"),
+            format!("SELECT * FROM projectile WHERE zone_id = {zone}"),
         ];
         self.flags
             .pending_repl_applied

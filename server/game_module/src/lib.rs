@@ -12,7 +12,9 @@ use game_shared::combat::{
     self, AbilityId, AbilityKind, TargetView, NPC_HP_MAX, PLAYER_HP_MAX, PLAYER_MANA_MAX,
 };
 use game_shared::motion::broadphase::Broadphase;
-use game_shared::motion::combat::{hitscan, HitKind};
+use game_shared::motion::combat::{
+    hitscan, projectile_step, HitKind, Projectile as SimProjectile, SweepOutcome,
+};
 use game_shared::motion::{self, MotionConfig, MotionState, MoveIntent};
 use game_shared::net::schema::{accept_input, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS};
 use game_shared::world_grid::zone_id_from_position;
@@ -247,6 +249,29 @@ pub struct ActiveCast {
     zone_id: u32,
     start_micros: i64,
     finish_micros: i64,
+}
+
+/// In-flight firebolt (M7 D4): spawned at cast completion, stepped in
+/// `move_tick` with `projectile_step`, deleted on hit or after
+/// `PROJECTILE_LIFETIME_SECS`. Public — clients render by extrapolating from
+/// the last server step. `zone_id` is fixed at spawn (3 s lifetime; not worth
+/// re-zoning).
+#[table(accessor = projectile, public)]
+pub struct Projectile {
+    #[primary_key]
+    entity_id: u64,
+    caster_entity_id: u64,
+    ability_id: u16,
+    x: f32,
+    y: f32,
+    z: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    #[index(btree)]
+    zone_id: u32,
+    spawned_at_micros: i64,
+    last_update_micros: i64,
 }
 
 /// Destruction evidence (contract §3): upserted on despawn, GC'd after
@@ -933,12 +958,30 @@ fn complete_cast(
             }
             caster.mana -= def.mana_cost;
             upsert_cooldown(ctx, cast.entity_id, def, now);
+            let zone_id = caster.zone_id;
             ctx.db.player().entity_id().update(caster);
-            // Interim (pre-package-4): hitscan-at-completion — the D4
-            // cut-line shape. Package 4 replaces this with a Projectile row.
-            if hits_target(cfg, store, caster_pos, &t) {
-                damage_entity(ctx, t.view.entity_id, def.amount, now);
-            }
+            // Dumb-fire eye-to-eye (D4): aim above the target eye by ½·g·t²
+            // (first-order gravity compensation over the straight-line flight
+            // time). No homing — the target can outrun or dodge it.
+            let origin = eye(caster_pos);
+            let dist = origin.distance(eye(t.pos)).max(0.001);
+            let t_flight = dist / def.projectile_speed_mps;
+            let aim = eye(t.pos) + Vec3::Z * 0.5 * cfg.gravity * t_flight * t_flight;
+            let vel = (aim - origin).normalize() * def.projectile_speed_mps;
+            ctx.db.projectile().insert(Projectile {
+                entity_id: alloc_entity_id(ctx),
+                caster_entity_id: cast.entity_id,
+                ability_id: cast.ability_id,
+                x: origin.x,
+                y: origin.y,
+                z: origin.z,
+                vx: vel.x,
+                vy: vel.y,
+                vz: vel.z,
+                zone_id,
+                spawned_at_micros: now,
+                last_update_micros: now,
+            });
         }
         AbilityKind::Strike | AbilityKind::NovaAoe => {} // instant; never queued
     }
@@ -1152,6 +1195,77 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             p.zone_id = zone_id_from_position(p.x, p.y);
             p.last_update_micros = now;
             ctx.db.player().entity_id().update(p);
+        }
+    }
+
+    // M7 D4: step in-flight projectiles against one shared broadphase of
+    // live targets. Runs before due-cast completion, so fresh spawns take
+    // their first step next tick (never in their spawn transaction).
+    let projectiles: Vec<Projectile> = ctx.db.projectile().iter().collect();
+    if !projectiles.is_empty() {
+        let mut bp = Broadphase::new();
+        for p in ctx.db.player().iter() {
+            if p.session.is_some() && p.alive {
+                bp.insert(p.entity_id, Vec3::new(p.x, p.y, p.z));
+            }
+        }
+        for n in ctx.db.npc().iter() {
+            if n.alive {
+                bp.insert(n.entity_id, Vec3::new(n.x, n.y, n.z));
+            }
+        }
+        let lifetime = combat::micros(combat::PROJECTILE_LIFETIME_SECS) as i64;
+        // Caster transparency window: the bolt spawns at the caster's eye,
+        // inside their own capsule — ignore caster hits for two ticks.
+        let grace = 2 * (MOVE_TICK_MS as i64) * 1000;
+        for mut row in projectiles {
+            if now - row.spawned_at_micros >= lifetime {
+                ctx.db.projectile().entity_id().delete(row.entity_id);
+                continue;
+            }
+            let dt = ((now - row.last_update_micros).max(0) as f32) / 1_000_000.0;
+            let sim = SimProjectile {
+                pos: Vec3::new(row.x, row.y, row.z),
+                vel: Vec3::new(row.vx, row.vy, row.vz),
+            };
+            let flying = match projectile_step(&cfg, store, &bp, sim, cfg.gravity, dt) {
+                SweepOutcome::Hit(hit) => match hit.kind {
+                    HitKind::Entity { entity_id }
+                        if entity_id == row.caster_entity_id
+                            && now - row.spawned_at_micros < grace =>
+                    {
+                        // Integrate through the caster as if nothing was hit.
+                        let vel = sim.vel - Vec3::Z * cfg.gravity * dt;
+                        Some(SimProjectile {
+                            pos: sim.pos + vel * dt,
+                            vel,
+                        })
+                    }
+                    HitKind::Entity { entity_id } => {
+                        let amount = combat::ability(AbilityId(row.ability_id))
+                            .map_or(0.0, |d| d.amount);
+                        damage_entity(ctx, entity_id, amount, now);
+                        None
+                    }
+                    HitKind::World { .. } => None,
+                },
+                SweepOutcome::Flying(p) => Some(p),
+            };
+            match flying {
+                Some(p) => {
+                    row.x = p.pos.x;
+                    row.y = p.pos.y;
+                    row.z = p.pos.z;
+                    row.vx = p.vel.x;
+                    row.vy = p.vel.y;
+                    row.vz = p.vel.z;
+                    row.last_update_micros = now;
+                    ctx.db.projectile().entity_id().update(row);
+                }
+                None => {
+                    ctx.db.projectile().entity_id().delete(row.entity_id);
+                }
+            }
         }
     }
 

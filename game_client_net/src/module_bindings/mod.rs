@@ -34,6 +34,8 @@ pub mod ping_result_table;
 pub mod ping_result_type;
 pub mod player_table;
 pub mod player_type;
+pub mod projectile_table;
+pub mod projectile_type;
 pub mod run_parity_trace_reducer;
 pub mod submit_input_reducer;
 pub mod tick_timer_type;
@@ -68,6 +70,8 @@ pub use ping_result_table::*;
 pub use ping_result_type::PingResult;
 pub use player_table::*;
 pub use player_type::Player;
+pub use projectile_table::*;
+pub use projectile_type::Projectile;
 pub use run_parity_trace_reducer::run_parity_trace;
 pub use submit_input_reducer::submit_input;
 pub use tick_timer_type::TickTimer;
@@ -206,6 +210,7 @@ pub struct DbUpdate {
     parity_result: __sdk::TableUpdate<ParityResult>,
     ping_result: __sdk::TableUpdate<PingResult>,
     player: __sdk::TableUpdate<Player>,
+    projectile: __sdk::TableUpdate<Projectile>,
     tombstone: __sdk::TableUpdate<Tombstone>,
 }
 
@@ -242,6 +247,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "player" => db_update
                     .player
                     .append(player_table::parse_table_update(table_update)?),
+                "projectile" => db_update
+                    .projectile
+                    .append(projectile_table::parse_table_update(table_update)?),
                 "tombstone" => db_update
                     .tombstone
                     .append(tombstone_table::parse_table_update(table_update)?),
@@ -298,6 +306,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.player = cache
             .apply_diff_to_table::<Player>("player", &self.player)
             .with_updates_by_pk(|row| &row.entity_id);
+        diff.projectile = cache
+            .apply_diff_to_table::<Projectile>("projectile", &self.projectile)
+            .with_updates_by_pk(|row| &row.entity_id);
         diff.tombstone = cache
             .apply_diff_to_table::<Tombstone>("tombstone", &self.tombstone)
             .with_updates_by_pk(|row| &row.entity_id);
@@ -334,6 +345,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "player" => db_update
                     .player
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "projectile" => db_update
+                    .projectile
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "tombstone" => db_update
                     .tombstone
@@ -378,6 +392,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "player" => db_update
                     .player
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "projectile" => db_update
+                    .projectile
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "tombstone" => db_update
                     .tombstone
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -405,6 +422,7 @@ pub struct AppliedDiff<'r> {
     parity_result: __sdk::TableAppliedDiff<'r, ParityResult>,
     ping_result: __sdk::TableAppliedDiff<'r, PingResult>,
     player: __sdk::TableAppliedDiff<'r, Player>,
+    projectile: __sdk::TableAppliedDiff<'r, Projectile>,
     tombstone: __sdk::TableAppliedDiff<'r, Tombstone>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
@@ -436,6 +454,7 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         );
         callbacks.invoke_table_row_callbacks::<PingResult>("ping_result", &self.ping_result, event);
         callbacks.invoke_table_row_callbacks::<Player>("player", &self.player, event);
+        callbacks.invoke_table_row_callbacks::<Projectile>("projectile", &self.projectile, event);
         callbacks.invoke_table_row_callbacks::<Tombstone>("tombstone", &self.tombstone, event);
     }
 }
@@ -1106,6 +1125,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         parity_result_table::register_table(client_cache);
         ping_result_table::register_table(client_cache);
         player_table::register_table(client_cache);
+        projectile_table::register_table(client_cache);
         tombstone_table::register_table(client_cache);
     }
     const ALL_TABLE_NAMES: &'static [&'static str] = &[
@@ -1118,6 +1138,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "parity_result",
         "ping_result",
         "player",
+        "projectile",
         "tombstone",
     ];
 }

@@ -6,11 +6,16 @@ use crate::interp::NetClock;
 use crate::prediction::Prediction;
 use crate::replication::Replication;
 use game_client_net::{local_time_us, SpacetimeNetClient};
+use game_shared::motion::MotionConfig;
 use game_shared::net::protocol::{ClientInput, ModuleAddr};
 use game_shared::net::traits::{ConnectionState, NetClient, NetEvent};
+use nalgebra_glm as glm;
+use rust_engine::engine::ecs::components::{MeshRenderer, Name, Transform};
 use rust_engine::engine::ecs::game_world::GameWorld;
 use rust_engine::engine::input::action::KeyCode;
 use rust_engine::engine::input::InputManager;
+use rust_engine::engine::rendering::rendering_3d::mesh::PRIMITIVE_SPHERE;
+use std::collections::HashMap;
 use std::time::Instant;
 
 const DEFAULT_HOST: &str = "http://127.0.0.1:3000";
@@ -31,6 +36,8 @@ pub struct NetSession {
     yaw: f32,
     /// Space state last frame, for the jump edge trigger.
     space_was_down: bool,
+    /// Rendered projectile spheres by server entity id (M7 D4).
+    projectiles: HashMap<u64, hecs::Entity>,
 }
 
 impl NetSession {
@@ -78,6 +85,7 @@ impl NetSession {
             last_ack: None,
             yaw: 0.0,
             space_was_down: false,
+            projectiles: HashMap::new(),
         })
     }
 
@@ -146,6 +154,53 @@ impl NetSession {
 
         let server_now = self.clock.server_time_us(local_time_us());
         self.replication.interpolate(world, server_now);
+        self.update_projectiles(world, server_now);
+    }
+
+    /// M7 D4: small spheres extrapolated ballistically from the last server
+    /// step — `pos + vel·dt − ½·g·dt²·ẑ` at estimated server time, dt capped
+    /// so a stale row can't fly off before its delete arrives.
+    fn update_projectiles(&mut self, world: &mut hecs::World, server_now: Option<u64>) {
+        const MAX_EXTRAPOLATE_SECS: f32 = 0.25;
+        let gravity = MotionConfig::default().gravity;
+        let views = self.client.projectiles();
+        for v in &views {
+            // Unsynced clock: dt 0 renders at the last server step.
+            let dt = (server_now.unwrap_or(0).saturating_sub(v.server_time_us) as f32
+                / 1_000_000.0)
+                .min(MAX_EXTRAPOLATE_SECS);
+            let pos = glm::vec3(
+                v.pos[0] + v.vel[0] * dt,
+                v.pos[1] + v.vel[1] * dt,
+                v.pos[2] + v.vel[2] * dt - 0.5 * gravity * dt * dt,
+            );
+            match self.projectiles.get(&v.entity_id) {
+                Some(&e) => {
+                    if let Ok(mut t) = world.get::<&mut Transform>(e) {
+                        t.position = pos;
+                    }
+                    rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, e);
+                }
+                None => {
+                    let e = world.spawn((
+                        Transform::new(pos).with_scale(glm::vec3(0.25, 0.25, 0.25)),
+                        MeshRenderer {
+                            mesh_path: PRIMITIVE_SPHERE.to_string(),
+                            ..Default::default()
+                        },
+                        Name::new(format!("Net Projectile {}", v.entity_id)),
+                    ));
+                    self.projectiles.insert(v.entity_id, e);
+                }
+            }
+        }
+        self.projectiles.retain(|id, e| {
+            let live = views.iter().any(|v| v.entity_id == *id);
+            if !live {
+                let _ = world.despawn(*e);
+            }
+            live
+        });
     }
 
     /// Predicted local-player position (Z-up), once in world.

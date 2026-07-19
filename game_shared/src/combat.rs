@@ -87,7 +87,9 @@ pub const ABILITIES: &[AbilityDef] = &[
         mana_cost: 30.0,
         range_m: 25.0,
         amount: 25.0,
-        projectile_speed_mps: 20.0,
+        // Under MotionConfig gravity (20 m/s²) the ballistic ceiling is
+        // v²/g: 30 m/s reaches 45 m, comfortably past the 25 m cast range.
+        projectile_speed_mps: 30.0,
         kind: AbilityKind::Projectile,
     },
     AbilityDef {
