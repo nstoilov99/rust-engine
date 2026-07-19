@@ -22,6 +22,8 @@ pub mod dev_damage_reducer;
 pub mod dev_teleport_reducer;
 pub mod enter_world_reducer;
 pub mod entity_allocator_type;
+pub mod entity_coarse_table;
+pub mod entity_coarse_type;
 pub mod held_intent_type;
 pub mod move_timer_type;
 pub mod npc_table;
@@ -58,6 +60,8 @@ pub use dev_damage_reducer::dev_damage;
 pub use dev_teleport_reducer::dev_teleport;
 pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
+pub use entity_coarse_table::*;
+pub use entity_coarse_type::EntityCoarse;
 pub use held_intent_type::HeldIntent;
 pub use move_timer_type::MoveTimer;
 pub use npc_table::*;
@@ -206,6 +210,7 @@ pub struct DbUpdate {
     active_cast: __sdk::TableUpdate<ActiveCast>,
     clock: __sdk::TableUpdate<Clock>,
     config: __sdk::TableUpdate<Config>,
+    entity_coarse: __sdk::TableUpdate<EntityCoarse>,
     npc: __sdk::TableUpdate<Npc>,
     parity_result: __sdk::TableUpdate<ParityResult>,
     ping_result: __sdk::TableUpdate<PingResult>,
@@ -235,6 +240,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "config" => db_update
                     .config
                     .append(config_table::parse_table_update(table_update)?),
+                "entity_coarse" => db_update
+                    .entity_coarse
+                    .append(entity_coarse_table::parse_table_update(table_update)?),
                 "npc" => db_update
                     .npc
                     .append(npc_table::parse_table_update(table_update)?),
@@ -294,6 +302,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.config = cache
             .apply_diff_to_table::<Config>("config", &self.config)
             .with_updates_by_pk(|row| &row.id);
+        diff.entity_coarse = cache
+            .apply_diff_to_table::<EntityCoarse>("entity_coarse", &self.entity_coarse)
+            .with_updates_by_pk(|row| &row.entity_id);
         diff.npc = cache
             .apply_diff_to_table::<Npc>("npc", &self.npc)
             .with_updates_by_pk(|row| &row.entity_id);
@@ -333,6 +344,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "config" => db_update
                     .config
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "entity_coarse" => db_update
+                    .entity_coarse
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "npc" => db_update
                     .npc
@@ -380,6 +394,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "config" => db_update
                     .config
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "entity_coarse" => db_update
+                    .entity_coarse
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "npc" => db_update
                     .npc
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -418,6 +435,7 @@ pub struct AppliedDiff<'r> {
     active_cast: __sdk::TableAppliedDiff<'r, ActiveCast>,
     clock: __sdk::TableAppliedDiff<'r, Clock>,
     config: __sdk::TableAppliedDiff<'r, Config>,
+    entity_coarse: __sdk::TableAppliedDiff<'r, EntityCoarse>,
     npc: __sdk::TableAppliedDiff<'r, Npc>,
     parity_result: __sdk::TableAppliedDiff<'r, ParityResult>,
     ping_result: __sdk::TableAppliedDiff<'r, PingResult>,
@@ -446,6 +464,11 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<ActiveCast>("active_cast", &self.active_cast, event);
         callbacks.invoke_table_row_callbacks::<Clock>("clock", &self.clock, event);
         callbacks.invoke_table_row_callbacks::<Config>("config", &self.config, event);
+        callbacks.invoke_table_row_callbacks::<EntityCoarse>(
+            "entity_coarse",
+            &self.entity_coarse,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<Npc>("npc", &self.npc, event);
         callbacks.invoke_table_row_callbacks::<ParityResult>(
             "parity_result",
@@ -1121,6 +1144,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         active_cast_table::register_table(client_cache);
         clock_table::register_table(client_cache);
         config_table::register_table(client_cache);
+        entity_coarse_table::register_table(client_cache);
         npc_table::register_table(client_cache);
         parity_result_table::register_table(client_cache);
         ping_result_table::register_table(client_cache);
@@ -1134,6 +1158,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "active_cast",
         "clock",
         "config",
+        "entity_coarse",
         "npc",
         "parity_result",
         "ping_result",

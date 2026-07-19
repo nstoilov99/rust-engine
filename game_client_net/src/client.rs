@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use game_shared::net::protocol::{
-    ClientInput, ClockSample, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
+    ClientInput, ClockSample, CoarseState, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
 };
 use game_shared::net::schema::{version_compatible, PROTOCOL_VERSION};
 use game_shared::net::traits::{ConnectionState, DisconnectReason, NetClient, NetEvent};
-use game_shared::world_grid::{cell_key, chunk_coord, near_cells, re_anchor};
+use game_shared::world_grid::{cell_key, chunk_coord, far_cells, near_cells, re_anchor};
 use glam::{IVec2, Vec2, Vec3};
 use spacetimedb_sdk::{
     credentials, DbContext, SubscriptionHandle as _, Table, TableWithPrimaryKey,
@@ -24,8 +24,9 @@ use spacetimedb_sdk::{
 use crate::module_bindings::{
     cast_ability, despawn_npc, dev_damage, dev_teleport, enter_world, ping, run_parity_trace,
     submit_input, AbilityCooldownTableAccess, ActiveCastTableAccess, ConfigTableAccess,
-    DbConnection, Npc, NpcTableAccess, ParityResultTableAccess, PingResultTableAccess, Player,
-    PlayerTableAccess, ProjectileTableAccess, SubscriptionHandle, TombstoneTableAccess,
+    DbConnection, EntityCoarseTableAccess, Npc, NpcTableAccess, ParityResultTableAccess,
+    PingResultTableAccess, Player, PlayerTableAccess, ProjectileTableAccess, SubscriptionHandle,
+    TombstoneTableAccess,
 };
 
 /// Spike binding requirement 3: hard client-side cap on reducer calls.
@@ -519,7 +520,7 @@ impl SpacetimeNetClient {
             .conn
             .as_ref()
             .expect("start_interest_sub requires a connection");
-        let mut queries = Vec::with_capacity(9 * 4 + 1);
+        let mut queries = Vec::with_capacity(9 * 4 + 40 + 1);
         for cell in near_cells(anchor) {
             let key = cell_key(cell);
             queries.push(format!("SELECT * FROM player WHERE cell_id = {key}"));
@@ -527,6 +528,12 @@ impl SpacetimeNetClient {
             queries.push(format!("SELECT * FROM projectile WHERE cell_id = {key}"));
             // M7 D6: in-scope cast bars (rows carry the caster's cell).
             queries.push(format!("SELECT * FROM active_cast WHERE cell_id = {key}"));
+        }
+        // M8 D3: far ring gets coarse position rows only. The query-set size
+        // (~77) is the acknowledged risk the package-5 harness measures.
+        for cell in far_cells(anchor) {
+            let key = cell_key(cell);
+            queries.push(format!("SELECT * FROM entity_coarse WHERE cell_id = {key}"));
         }
         // Own cooldown rows (HUD sweeps). The own row is always in the cache
         // by the time the first interest sub starts (it carries the pos).
@@ -580,6 +587,13 @@ impl SpacetimeNetClient {
         }
         sample_on!(conn.db.player(), Self::player_state);
         sample_on!(conn.db.npc(), Self::npc_state);
+        // Coarse rows only dirty the snapshot — no interp samples (M8 D3).
+        let f = flags.clone();
+        conn.db.entity_coarse().on_insert(move |_, _| f.mark_dirty());
+        let f = flags.clone();
+        conn.db.entity_coarse().on_update(move |_, _, _| f.mark_dirty());
+        let f = flags.clone();
+        conn.db.entity_coarse().on_delete(move |_, _| f.mark_dirty());
         let f = flags.clone();
         conn.db.tombstone().on_insert(move |_, row| {
             f.push_tombstone(row.entity_id, row.generation);
@@ -643,8 +657,25 @@ impl SpacetimeNetClient {
         for n in conn.db.npc().iter() {
             entities.push(Self::npc_state(&n));
         }
+        let coarse = conn
+            .db
+            .entity_coarse()
+            .iter()
+            .map(|c| CoarseState {
+                entity_id: c.entity_id,
+                generation: c.generation,
+                kind: if c.kind == 1 {
+                    EntityKind::Npc
+                } else {
+                    EntityKind::Player
+                },
+                pos: [c.x, c.y, c.z],
+                server_time_us: c.updated_micros.max(0) as u64,
+            })
+            .collect();
         WorldSnapshot {
             entities,
+            coarse,
             own_entity_id,
         }
     }

@@ -116,6 +116,11 @@ impl Bot {
         self.latest().entities.iter().any(|e| e.entity_id == entity_id)
     }
 
+    /// Far-tier visibility (M8 D3).
+    fn sees_coarse(&self, entity_id: u64) -> bool {
+        self.latest().coarse.iter().any(|c| c.entity_id == entity_id)
+    }
+
     fn entity(&self, entity_id: u64) -> Option<&EntityState> {
         self.latest().entities.iter().find(|e| e.entity_id == entity_id)
     }
@@ -622,6 +627,58 @@ fn forged_inputs_do_not_move() {
         "replayed-seq input moved the player: {p0:?} -> {p2:?}"
     );
     a.leave();
+}
+
+/// M8 D3: tier hand-off. A parked row two cells away is coarse-only (far
+/// ring); moving next to it promotes it to the full tier; moving away
+/// demotes it back; killing it in the far ring deletes its coarse row, so
+/// the corpse vanishes from far observers entirely.
+#[test]
+#[ignore = "needs local spacetime standalone + published module"]
+fn far_tier_handoff_and_corpse_vanish() {
+    // Parked row in cell (2,0). Rows persist across runs and a session-less
+    // corpse never respawns, so wait for alive before parking.
+    let mut parked = Bot::enter("acc-far");
+    let parked_id = parked.own_id();
+    parked.wait("parked row alive", |b| {
+        b.entity(parked_id).is_some_and(|e| e.alive)
+    });
+    parked.teleport_and_settle([160.0, 32.0, 1.0]);
+    parked.leave();
+
+    // Mover anchored in cell (0,0): parked is Chebyshev-2 away — far ring.
+    let mut m = Bot::enter("acc-handoff");
+    m.teleport_and_settle([32.0, 32.0, 1.0]);
+    m.wait("parked row coarse-only", |b| {
+        b.sees_coarse(parked_id) && !b.sees(parked_id)
+    });
+
+    // Move next to it: full tier takes over.
+    m.teleport_and_settle([150.0, 32.0, 1.0]);
+    m.wait("parked row promoted to full tier", |b| b.sees(parked_id));
+    assert_eq!(
+        m.latest()
+            .entities
+            .iter()
+            .filter(|e| e.entity_id == parked_id)
+            .count(),
+        1,
+        "duplicate full-tier rows after promotion"
+    );
+
+    // Move away again: back to coarse-only.
+    m.teleport_and_settle([32.0, 32.0, 1.0]);
+    m.wait("parked row demoted to far tier", |b| {
+        b.sees_coarse(parked_id) && !b.sees(parked_id)
+    });
+
+    // Kill it in the far ring: the coarse row is deleted with the death, so
+    // the corpse vanishes from the far view (ruled: no far corpses).
+    m.client.dev_damage(parked_id, 1000.0);
+    m.wait("far corpse vanished", |b| {
+        !b.sees_coarse(parked_id) && !b.sees(parked_id)
+    });
+    m.leave();
 }
 
 /// M8 D1/D2: wiggling across a cell border inside the 8 m hysteresis band

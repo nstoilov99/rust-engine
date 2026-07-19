@@ -90,6 +90,13 @@ const NPC_SEED_COUNT: u32 = 4;
 const NPC_WANDER_RADIUS: f32 = 8.0;
 const NPC_SPEED_MPS: f32 = 1.5;
 
+// M8 D3 coarse-tier write policy (ruled 2026-07-20): movement upserts only
+// on cell change or ≥ 2 m moved, capped at one write per entity per second.
+const COARSE_MOVE_M: f32 = 2.0;
+const COARSE_MIN_INTERVAL_MICROS: i64 = 1_000_000;
+const COARSE_KIND_PLAYER: u32 = 0;
+const COARSE_KIND_NPC: u32 = 1;
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -272,6 +279,25 @@ pub struct Projectile {
     cell_id: u64,
     spawned_at_micros: i64,
     last_update_micros: i64,
+}
+
+/// M8 D3: far-tier position row — whole-row replication means "position
+/// only" is a second, smaller table, not a projection. Movement upserts are
+/// rate-limited (`maybe_coarse`); death deletes the row, respawn re-upserts
+/// it with the bumped generation so far observers see corpses vanish.
+#[table(accessor = entity_coarse, public)]
+pub struct EntityCoarse {
+    #[primary_key]
+    entity_id: u64,
+    generation: u32,
+    /// 0 = player, 1 = npc (client maps to `EntityKind`).
+    kind: u32,
+    #[index(btree)]
+    cell_id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    updated_micros: i64,
 }
 
 /// Destruction evidence (contract §3): upserted on despawn, GC'd after
@@ -465,8 +491,19 @@ pub fn enter_world(ctx: &ReducerContext) -> Result<(), String> {
             clear_input_queue(ctx, entity_id);
         }
         None => {
+            let entity_id = alloc_entity_id(ctx);
+            write_coarse(
+                ctx,
+                entity_id,
+                1,
+                COARSE_KIND_PLAYER,
+                SPAWN_POINT[0],
+                SPAWN_POINT[1],
+                PLAYER_SPAWN_Z,
+                now_micros(ctx),
+            );
             ctx.db.player().insert(Player {
-                entity_id: alloc_entity_id(ctx),
+                entity_id,
                 generation: 1,
                 owner_identity: ctx.sender(),
                 character_id: account.character_id,
@@ -582,8 +619,9 @@ pub fn dev_teleport(ctx: &ReducerContext, x: f32, y: f32, z: f32) -> Result<(), 
     p.grounded = false;
     p.cell_id = cell_id_from_position(x, y);
     p.last_update_micros = now_micros(ctx);
-    let entity_id = p.entity_id;
+    let (entity_id, generation) = (p.entity_id, p.generation);
     ctx.db.player().entity_id().update(p);
+    write_coarse(ctx, entity_id, generation, COARSE_KIND_PLAYER, x, y, z, now_micros(ctx));
     clear_input_queue(ctx, entity_id);
     Ok(())
 }
@@ -618,7 +656,62 @@ pub fn despawn_npc(ctx: &ReducerContext, entity_id: u64) -> Result<(), String> {
         .ok_or("no such npc")?;
     upsert_tombstone(ctx, entity_id, npc.generation, now_micros(ctx));
     ctx.db.npc().entity_id().delete(entity_id);
+    ctx.db.entity_coarse().entity_id().delete(entity_id);
     Ok(())
+}
+
+/// Unconditional coarse upsert — spawn/teleport/respawn sites, where the
+/// row must reflect the new position (or generation) immediately.
+fn write_coarse(
+    ctx: &ReducerContext,
+    entity_id: u64,
+    generation: u32,
+    kind: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    now: i64,
+) {
+    let row = EntityCoarse {
+        entity_id,
+        generation,
+        kind,
+        cell_id: cell_id_from_position(x, y),
+        x,
+        y,
+        z,
+        updated_micros: now,
+    };
+    if ctx.db.entity_coarse().entity_id().find(entity_id).is_some() {
+        ctx.db.entity_coarse().entity_id().update(row);
+    } else {
+        ctx.db.entity_coarse().insert(row);
+    }
+}
+
+/// Movement-path coarse upsert under the D3 write policy: cell change or
+/// ≥ `COARSE_MOVE_M` moved, hard-capped at one write per entity per second.
+fn maybe_coarse(
+    ctx: &ReducerContext,
+    entity_id: u64,
+    generation: u32,
+    kind: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    now: i64,
+) {
+    let Some(c) = ctx.db.entity_coarse().entity_id().find(entity_id) else {
+        return write_coarse(ctx, entity_id, generation, kind, x, y, z, now);
+    };
+    if now - c.updated_micros < COARSE_MIN_INTERVAL_MICROS {
+        return;
+    }
+    let moved2 = (x - c.x).powi(2) + (y - c.y).powi(2) + (z - c.z).powi(2);
+    if c.cell_id == cell_id_from_position(x, y) && moved2 < COARSE_MOVE_M * COARSE_MOVE_M {
+        return;
+    }
+    write_coarse(ctx, entity_id, generation, kind, x, y, z, now);
 }
 
 fn upsert_tombstone(ctx: &ReducerContext, entity_id: u64, generation: u32, now: i64) {
@@ -730,6 +823,8 @@ fn damage_entity(ctx: &ReducerContext, entity_id: u64, amount: f32, now: i64) {
             upsert_tombstone(ctx, entity_id, p.generation, now);
             clear_input_queue(ctx, entity_id);
             ctx.db.active_cast().entity_id().delete(entity_id);
+            // M8 D3: far observers see the corpse vanish.
+            ctx.db.entity_coarse().entity_id().delete(entity_id);
         }
         ctx.db.player().entity_id().update(p);
     } else if let Some(mut n) = ctx.db.npc().entity_id().find(entity_id) {
@@ -742,6 +837,7 @@ fn damage_entity(ctx: &ReducerContext, entity_id: u64, amount: f32, now: i64) {
             n.alive = false;
             n.respawn_at_micros = now + combat::micros(combat::RESPAWN_SECS) as i64;
             upsert_tombstone(ctx, entity_id, n.generation, now);
+            ctx.db.entity_coarse().entity_id().delete(entity_id);
         }
         ctx.db.npc().entity_id().update(n);
     }
@@ -768,8 +864,10 @@ fn respawn_player(ctx: &ReducerContext, mut p: Player, now: i64) {
     p.last_applied_seq = 0;
     p.cell_id = cell_id_from_position(p.x, p.y);
     p.last_update_micros = now;
-    let entity_id = p.entity_id;
+    let (entity_id, generation) = (p.entity_id, p.generation);
+    let (x, y, z) = (p.x, p.y, p.z);
     ctx.db.player().entity_id().update(p);
+    write_coarse(ctx, entity_id, generation, COARSE_KIND_PLAYER, x, y, z, now);
     clear_input_queue(ctx, entity_id);
 }
 
@@ -1060,6 +1158,16 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
                     n.respawn_at_micros = 0;
                     n.generation += 1;
                     n.last_update_micros = now;
+                    write_coarse(
+                        ctx,
+                        n.entity_id,
+                        n.generation,
+                        COARSE_KIND_NPC,
+                        n.x,
+                        n.y,
+                        n.z,
+                        now,
+                    );
                     ctx.db.npc().entity_id().update(n);
                 }
                 continue;
@@ -1076,6 +1184,7 @@ pub fn tick(ctx: &ReducerContext, _timer: TickTimer) -> Result<(), String> {
             n.y += n.yaw.sin() * NPC_SPEED_MPS * dt;
             n.cell_id = cell_id_from_position(n.x, n.y);
             n.last_update_micros = now;
+            maybe_coarse(ctx, n.entity_id, n.generation, COARSE_KIND_NPC, n.x, n.y, n.z, now);
             ctx.db.npc().entity_id().update(n);
         }
     }
@@ -1194,6 +1303,16 @@ pub fn move_tick(ctx: &ReducerContext, _timer: MoveTimer) -> Result<(), String> 
             p.grounded = state.grounded;
             p.cell_id = cell_id_from_position(p.x, p.y);
             p.last_update_micros = now;
+            maybe_coarse(
+                ctx,
+                p.entity_id,
+                p.generation,
+                COARSE_KIND_PLAYER,
+                p.x,
+                p.y,
+                p.z,
+                now,
+            );
             ctx.db.player().entity_id().update(p);
         }
     }
@@ -1297,8 +1416,10 @@ fn seed_npcs(ctx: &ReducerContext, now: i64) {
         let angle = (i as f32) * std::f32::consts::TAU / NPC_SEED_COUNT as f32;
         let x = SPAWN_POINT[0] + angle.cos() * 4.0;
         let y = SPAWN_POINT[1] + angle.sin() * 4.0;
+        let entity_id = alloc_entity_id(ctx);
+        write_coarse(ctx, entity_id, 1, COARSE_KIND_NPC, x, y, NPC_SPAWN_Z, now);
         ctx.db.npc().insert(Npc {
-            entity_id: alloc_entity_id(ctx),
+            entity_id,
             generation: 1,
             x,
             y,

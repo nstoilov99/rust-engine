@@ -40,13 +40,32 @@ pub struct EntityState {
     pub server_time_us: u64,
 }
 
+/// M8 D3: far-tier sample — position only, no combat fields. Never fed to
+/// the interpolation buffers; the client lerps between successive coarse
+/// samples over their timestamp gap (reads as slow drift at distance).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CoarseState {
+    pub entity_id: u64,
+    pub generation: u32,
+    pub kind: EntityKind,
+    pub pos: [f32; 3],
+    pub server_time_us: u64,
+}
+
 /// Complete view of the replicated entity rows currently visible to the
 /// client — the cache-diff input (plan D3). Emitted by the backend on dirty
 /// frames only. `own_entity_id` marks the local player's row so replication
 /// binds it to the local entity instead of proxying it (contract §2.1).
+///
+/// M8: tier precedence, not exclusion — an entity present in `entities`
+/// (full tier) wins; a `coarse` row matters only when the full row is
+/// absent. Transient dual membership during interest swaps is a supported
+/// state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorldSnapshot {
     pub entities: Vec<EntityState>,
+    /// Far-tier rows (D3); may transiently overlap `entities`.
+    pub coarse: Vec<CoarseState>,
     pub own_entity_id: Option<u64>,
 }
 

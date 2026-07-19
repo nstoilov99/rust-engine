@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::interp::InterpBuffer;
 use game_shared::components::NetProxy;
-use game_shared::net::protocol::{EntityKind, EntityState, WorldSnapshot};
+use game_shared::net::protocol::{CoarseState, EntityKind, EntityState, WorldSnapshot};
 use game_shared::net::schema::{derive_proxy_guid, REALM_ID, TOMBSTONE_TTL_SECS};
 use hecs::World;
 use nalgebra_glm as glm;
@@ -73,6 +73,11 @@ pub enum DiffOp {
     Spawn(EntityState),
     /// Raw transform write (interpolation lands in Package 4).
     Update(EntityState),
+    /// M8 D3: far-tier light proxy (no interp buffer, no combat, no HUD).
+    SpawnCoarse(CoarseState),
+    /// Same-incarnation coarse row: feed the coarse track — or, if the proxy
+    /// is currently full-tier, demote it (near→far hand-off, GUID kept).
+    UpdateCoarse(CoarseState),
     Despawn {
         entity_id: u64,
         generation: u32,
@@ -84,6 +89,18 @@ pub enum DiffOp {
         old_generation: u32,
         state: EntityState,
     },
+    ReplaceCoarse {
+        old_generation: u32,
+        state: CoarseState,
+    },
+}
+
+/// Merged per-entity view of the snapshot (M8 tier precedence): a full-tier
+/// row always wins; a coarse row matters only when no full row is present.
+#[derive(Clone, Copy)]
+enum Tier<'a> {
+    Full(&'a EntityState),
+    Coarse(&'a CoarseState),
 }
 
 /// Diff the snapshot against the live proxy set. `own_entity_id` rows and
@@ -97,10 +114,15 @@ pub fn diff_snapshot(
     let own = snapshot.own_entity_id;
     let mut ops = Vec::new();
 
-    let mut rows: HashMap<u64, &EntityState> = HashMap::new();
+    let mut rows: HashMap<u64, Tier> = HashMap::new();
+    for c in &snapshot.coarse {
+        if Some(c.entity_id) != own {
+            rows.insert(c.entity_id, Tier::Coarse(c));
+        }
+    }
     for s in &snapshot.entities {
         if Some(s.entity_id) != own {
-            rows.insert(s.entity_id, s);
+            rows.insert(s.entity_id, Tier::Full(s)); // full tier wins
         }
     }
 
@@ -109,10 +131,17 @@ pub fn diff_snapshot(
             continue;
         }
         match rows.remove(&entity_id) {
-            Some(s) if s.generation == generation => ops.push(DiffOp::Update(*s)),
-            Some(s) => ops.push(DiffOp::Replace {
+            Some(Tier::Full(s)) if s.generation == generation => ops.push(DiffOp::Update(*s)),
+            Some(Tier::Full(s)) => ops.push(DiffOp::Replace {
                 old_generation: generation,
                 state: *s,
+            }),
+            Some(Tier::Coarse(c)) if c.generation == generation => {
+                ops.push(DiffOp::UpdateCoarse(*c))
+            }
+            Some(Tier::Coarse(c)) => ops.push(DiffOp::ReplaceCoarse {
+                old_generation: generation,
+                state: *c,
             }),
             None => ops.push(DiffOp::Despawn {
                 entity_id,
@@ -122,8 +151,11 @@ pub fn diff_snapshot(
         }
     }
 
-    for (_, s) in rows {
-        ops.push(DiffOp::Spawn(*s));
+    for (_, row) in rows {
+        ops.push(match row {
+            Tier::Full(s) => DiffOp::Spawn(*s),
+            Tier::Coarse(c) => DiffOp::SpawnCoarse(*c),
+        });
     }
     ops
 }
@@ -138,6 +170,67 @@ pub struct CombatState {
     server_time_us: u64,
 }
 
+/// Far-tier motion (M8 D3): coarse samples arrive ~1 Hz, so no
+/// `InterpBuffer` — lerp from the rendered position toward the newest sample
+/// over the two samples' timestamp gap, on the local wall clock (reads as
+/// slow drift at distance; no server-clock coupling).
+struct CoarseTrack {
+    from: [f32; 3],
+    to: [f32; 3],
+    duration: Duration,
+    since: Instant,
+    last_time_us: u64,
+    yaw: f32,
+}
+
+impl CoarseTrack {
+    fn new(pos: [f32; 3], time_us: u64) -> Self {
+        Self {
+            from: pos,
+            to: pos,
+            duration: Duration::ZERO,
+            since: Instant::now(),
+            last_time_us: time_us,
+            yaw: 0.0,
+        }
+    }
+
+    fn push(&mut self, pos: [f32; 3], time_us: u64) {
+        if time_us <= self.last_time_us {
+            return; // stale/duplicate sample
+        }
+        let now = Instant::now();
+        let cur = self.eval(now).0;
+        let gap_us = (time_us - self.last_time_us).clamp(100_000, 2_000_000);
+        let (dx, dy) = (pos[0] - cur[0], pos[1] - cur[1]);
+        if dx * dx + dy * dy > 1e-4 {
+            self.yaw = dy.atan2(dx);
+        }
+        self.from = cur;
+        self.to = pos;
+        self.duration = Duration::from_micros(gap_us);
+        self.since = now;
+        self.last_time_us = time_us;
+    }
+
+    fn eval(&self, now: Instant) -> ([f32; 3], f32) {
+        if self.duration.is_zero() {
+            return (self.to, self.yaw);
+        }
+        let f = (now.duration_since(self.since).as_secs_f32() / self.duration.as_secs_f32())
+            .min(1.0);
+        let lerp = |a: f32, b: f32| a + (b - a) * f;
+        (
+            [
+                lerp(self.from[0], self.to[0]),
+                lerp(self.from[1], self.to[1]),
+                lerp(self.from[2], self.to[2]),
+            ],
+            self.yaw,
+        )
+    }
+}
+
 /// Replication state: owns every proxy, its interpolation buffer, and the
 /// local-player binding.
 #[derive(Default)]
@@ -148,6 +241,9 @@ pub struct Replication {
     own_entity_id: Option<u64>,
     buffers: HashMap<(u64, u32), (EntityKind, InterpBuffer)>,
     combat: HashMap<(u64, u32), CombatState>,
+    /// Far-tier proxies (M8 D3): disjoint from `buffers`, so coarse proxies
+    /// are excluded from targeting and HUD for free.
+    coarse: HashMap<(u64, u32), CoarseTrack>,
 }
 
 impl Replication {
@@ -233,6 +329,14 @@ impl Replication {
                 write_pose(world, entity, pos, yaw);
             }
         }
+        // Far-tier drift (M8 D3): wall-clock lerp, no server time base.
+        let now = Instant::now();
+        for ((id, generation), track) in &self.coarse {
+            if let Some(entity) = self.index.get(*id, *generation) {
+                let (pos, yaw) = track.eval(now);
+                write_pose(world, entity, pos, yaw);
+            }
+        }
     }
 
     /// Write the predicted pose onto the bound local player (M6 D4: the
@@ -253,7 +357,34 @@ impl Replication {
                 DiffOp::Spawn(s) => self.spawn_proxy(world, &s),
                 // Motion flows through the interpolation buffer; the buffer
                 // dedupes states that also arrived as `StateUpdate` events.
-                DiffOp::Update(s) => self.push_sample(&s),
+                // A coarse-tier proxy seeing a full row is the far→near
+                // hand-off: promote in place (same entity, same GUID).
+                DiffOp::Update(s) => {
+                    let key = (s.entity_id, s.generation);
+                    if self.coarse.remove(&key).is_some() {
+                        let mut buf = InterpBuffer::default();
+                        buf.push(s.server_time_us, s.pos, s.yaw);
+                        self.buffers.insert(key, (s.kind, buf));
+                        self.push_combat(&s);
+                    } else {
+                        self.push_sample(&s);
+                    }
+                }
+                DiffOp::SpawnCoarse(c) => self.spawn_coarse_proxy(world, &c),
+                DiffOp::UpdateCoarse(c) => {
+                    let key = (c.entity_id, c.generation);
+                    // Near→far hand-off: drop full-tier state, keep the
+                    // entity; the track starts from the last rendered pose.
+                    if let Some((_, buf)) = self.buffers.remove(&key) {
+                        self.combat.remove(&key);
+                        let pos = buf.latest().map_or(c.pos, |(p, _)| p);
+                        let mut track = CoarseTrack::new(pos, 0);
+                        track.push(c.pos, c.server_time_us.max(1));
+                        self.coarse.insert(key, track);
+                    } else if let Some(track) = self.coarse.get_mut(&key) {
+                        track.push(c.pos, c.server_time_us);
+                    }
+                }
                 DiffOp::Despawn {
                     entity_id,
                     generation,
@@ -261,6 +392,7 @@ impl Replication {
                 } => {
                     self.buffers.remove(&(entity_id, generation));
                     self.combat.remove(&(entity_id, generation));
+                    self.coarse.remove(&(entity_id, generation));
                     if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
                         let _ = world.despawn(e);
                         let kind = if destroyed { "destroyed" } else { "out of scope" };
@@ -271,14 +403,26 @@ impl Replication {
                     old_generation,
                     state,
                 } => {
-                    self.buffers.remove(&(state.entity_id, old_generation));
-                    self.combat.remove(&(state.entity_id, old_generation));
-                    if let Some(e) = self.index.map.remove(&(state.entity_id, old_generation)) {
-                        let _ = world.despawn(e);
-                    }
+                    self.remove_incarnation(world, state.entity_id, old_generation);
                     self.spawn_proxy(world, &state);
                 }
+                DiffOp::ReplaceCoarse {
+                    old_generation,
+                    state,
+                } => {
+                    self.remove_incarnation(world, state.entity_id, old_generation);
+                    self.spawn_coarse_proxy(world, &state);
+                }
             }
+        }
+    }
+
+    fn remove_incarnation(&mut self, world: &mut World, entity_id: u64, generation: u32) {
+        self.buffers.remove(&(entity_id, generation));
+        self.combat.remove(&(entity_id, generation));
+        self.coarse.remove(&(entity_id, generation));
+        if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
+            let _ = world.despawn(e);
         }
     }
 
@@ -350,6 +494,36 @@ impl Replication {
         self.push_combat(s);
         println!("net: spawn {label} {} gen {}", s.entity_id, s.generation);
     }
+
+    /// M8 D3: far-tier light proxy — same mesh and GUID scheme as a full
+    /// proxy (tier hand-offs keep the entity), but no interp buffer and no
+    /// combat state, so it is untargetable and HUD-invisible by construction.
+    fn spawn_coarse_proxy(&mut self, world: &mut World, c: &CoarseState) {
+        let (mesh, label) = match c.kind {
+            EntityKind::Player => (PRIMITIVE_SPHERE, "Net Player"),
+            EntityKind::Npc => (PRIMITIVE_CUBE, "Net NPC"),
+        };
+        let entity = world.spawn((
+            Transform::new(glm::vec3(c.pos[0], c.pos[1], c.pos[2])),
+            MeshRenderer {
+                mesh_path: mesh.to_string(),
+                ..Default::default()
+            },
+            Name::new(format!("{label} {} (far)", c.entity_id)),
+            EntityGuid(derive_proxy_guid(REALM_ID, c.entity_id, c.generation)),
+            NetProxy {
+                realm_id: REALM_ID,
+                entity_id: c.entity_id,
+                generation: c.generation,
+            },
+        ));
+        self.index.map.insert((c.entity_id, c.generation), entity);
+        self.coarse.insert(
+            (c.entity_id, c.generation),
+            CoarseTrack::new(c.pos, c.server_time_us),
+        );
+        println!("net: spawn {label} {} gen {} (far)", c.entity_id, c.generation);
+    }
 }
 
 fn transform_from(s: &EntityState) -> Transform {
@@ -393,9 +567,32 @@ mod tests {
         }
     }
 
+    fn coarse(entity_id: u64, generation: u32) -> CoarseState {
+        CoarseState {
+            entity_id,
+            generation,
+            kind: EntityKind::Npc,
+            pos: [4.0, 5.0, 6.0],
+            server_time_us: 42,
+        }
+    }
+
     fn snap(entities: Vec<EntityState>, own: Option<u64>) -> WorldSnapshot {
         WorldSnapshot {
             entities,
+            coarse: vec![],
+            own_entity_id: own,
+        }
+    }
+
+    fn snap_tiers(
+        entities: Vec<EntityState>,
+        coarse: Vec<CoarseState>,
+        own: Option<u64>,
+    ) -> WorldSnapshot {
+        WorldSnapshot {
+            entities,
+            coarse,
             own_entity_id: own,
         }
     }
@@ -506,6 +703,73 @@ mod tests {
         r.push_sample(&state(1, 1)); // reordered stale sample (t=42, hp 50)
         let c = *r.combat_state(1, 1).unwrap();
         assert_eq!((c.hp, c.alive), (0.0, false));
+    }
+
+    #[test]
+    fn full_row_wins_over_coarse_row() {
+        // M8 tier precedence: dual membership during a swap must not
+        // produce a second op for the same entity.
+        let ev = TombstoneEvidence::default();
+        let ops = diff_snapshot(
+            &[(1, 1)],
+            &snap_tiers(vec![state(1, 1)], vec![coarse(1, 1)], None),
+            &ev,
+        );
+        assert_eq!(ops, vec![DiffOp::Update(state(1, 1))]);
+    }
+
+    #[test]
+    fn coarse_only_row_spawns_and_updates_light() {
+        let ev = TombstoneEvidence::default();
+        let ops = diff_snapshot(&[], &snap_tiers(vec![], vec![coarse(2, 1)], None), &ev);
+        assert_eq!(ops, vec![DiffOp::SpawnCoarse(coarse(2, 1))]);
+        let ops = diff_snapshot(&[(2, 1)], &snap_tiers(vec![], vec![coarse(2, 1)], None), &ev);
+        assert_eq!(ops, vec![DiffOp::UpdateCoarse(coarse(2, 1))]);
+    }
+
+    #[test]
+    fn coarse_generation_bump_is_replace() {
+        let ev = TombstoneEvidence::default();
+        let ops = diff_snapshot(&[(2, 1)], &snap_tiers(vec![], vec![coarse(2, 2)], None), &ev);
+        assert_eq!(
+            ops,
+            vec![DiffOp::ReplaceCoarse {
+                old_generation: 1,
+                state: coarse(2, 2)
+            }]
+        );
+    }
+
+    #[test]
+    fn tier_handoff_keeps_entity_and_toggles_targetability() {
+        let mut r = Replication::default();
+        let mut world = World::new();
+        // Spawn far, promote to near, demote back — one entity throughout.
+        r.apply_snapshot(&mut world, &snap_tiers(vec![], vec![coarse(1, 1)], None));
+        let far = r.index.get(1, 1).expect("far proxy spawned");
+        assert!(r.targetables().is_empty(), "coarse proxy must be untargetable");
+
+        r.apply_snapshot(&mut world, &snap(vec![state(1, 1)], None));
+        assert_eq!(r.index.get(1, 1), Some(far), "promotion replaced the entity");
+        assert!(r.buffers.contains_key(&(1, 1)) && !r.coarse.contains_key(&(1, 1)));
+        assert_eq!(r.targetables().len(), 1);
+
+        r.apply_snapshot(&mut world, &snap_tiers(vec![], vec![coarse(1, 1)], None));
+        assert_eq!(r.index.get(1, 1), Some(far), "demotion replaced the entity");
+        assert!(!r.buffers.contains_key(&(1, 1)) && r.coarse.contains_key(&(1, 1)));
+        assert!(r.targetables().is_empty());
+        assert_eq!(world.len(), 1);
+    }
+
+    #[test]
+    fn coarse_track_ignores_stale_and_drifts_toward_newest() {
+        let mut t = CoarseTrack::new([0.0; 3], 100);
+        t.push([10.0, 0.0, 0.0], 50); // stale: ignored
+        assert_eq!(t.eval(Instant::now()).0, [0.0; 3]);
+        t.push([10.0, 0.0, 0.0], 1_100_000);
+        let (pos, yaw) = t.eval(Instant::now() + Duration::from_secs(10));
+        assert_eq!(pos, [10.0, 0.0, 0.0]); // clamped at the newest sample
+        assert!(yaw.abs() < 1e-6); // facing +X
     }
 
     #[test]
