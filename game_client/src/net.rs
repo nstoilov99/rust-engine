@@ -41,6 +41,28 @@ pub struct NetSession {
     /// Client-side target selection (M7 D6): sent per cast, never stored
     /// server-side. Cleared when the proxy leaves scope or dies.
     target: Option<u64>,
+    /// Monotonic server-time estimate for HUD timers: the EWMA clock offset
+    /// can step backwards, which would make cooldown sweeps jitter.
+    #[cfg(all(not(feature = "editor"), feature = "hud"))]
+    hud_server_now: u64,
+}
+
+/// Everything the standalone HUD draws in one frame (M7 D7).
+#[cfg(all(not(feature = "editor"), feature = "hud"))]
+pub struct HudState {
+    pub status: String,
+    pub server_now_us: u64,
+    pub own: Option<game_client_net::OwnCombat>,
+    pub target: Option<HudTarget>,
+}
+
+#[cfg(all(not(feature = "editor"), feature = "hud"))]
+pub struct HudTarget {
+    pub label: String,
+    pub hp: f32,
+    pub hp_max: f32,
+    pub alive: bool,
+    pub cast: Option<game_client_net::ActiveCastView>,
 }
 
 impl NetSession {
@@ -90,6 +112,8 @@ impl NetSession {
             space_was_down: false,
             projectiles: HashMap::new(),
             target: None,
+            #[cfg(all(not(feature = "editor"), feature = "hud"))]
+            hud_server_now: 0,
         })
     }
 
@@ -251,6 +275,36 @@ impl NetSession {
     #[cfg(not(feature = "editor"))]
     pub fn local_pos(&self) -> Option<glam::Vec3> {
         self.prediction.visual_pose().map(|(p, _)| glam::Vec3::from(p))
+    }
+
+    /// Per-frame HUD snapshot (M7 D7). `&mut` only for the monotonic clamp.
+    #[cfg(all(not(feature = "editor"), feature = "hud"))]
+    pub fn hud_state(&mut self) -> HudState {
+        use game_shared::net::protocol::EntityKind;
+        let estimate = self.clock.server_time_us(local_time_us()).unwrap_or(0);
+        self.hud_server_now = self.hud_server_now.max(estimate);
+        let target = self.target.and_then(|id| {
+            let (kind, combat) = self.replication.target_info(id)?;
+            let label = match kind {
+                EntityKind::Player => format!("Player {id}"),
+                EntityKind::Npc => format!("Dummy #{id}"),
+            };
+            let (hp, hp_max, alive) =
+                combat.map_or((0.0, 1.0, true), |c| (c.hp, c.hp_max, c.alive));
+            Some(HudTarget {
+                label,
+                hp,
+                hp_max,
+                alive,
+                cast: self.client.active_cast_of(id),
+            })
+        });
+        HudState {
+            status: self.status_line(),
+            server_now_us: self.hud_server_now,
+            own: self.client.own_combat(),
+            target,
+        }
     }
 
     pub fn status_line(&self) -> String {

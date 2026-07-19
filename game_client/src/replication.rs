@@ -189,6 +189,18 @@ impl Replication {
         self.combat.get(&(entity_id, generation))
     }
 
+    /// Kind + latest combat state of the live incarnation of `entity_id`
+    /// (M7 HUD target frame). At most one incarnation is ever live.
+    #[cfg(all(not(feature = "editor"), feature = "hud"))]
+    pub fn target_info(&self, entity_id: u64) -> Option<(EntityKind, Option<CombatState>)> {
+        self.buffers
+            .iter()
+            .find(|((id, _), _)| *id == entity_id)
+            .map(|((id, generation), (kind, _))| {
+                (*kind, self.combat.get(&(*id, *generation)).copied())
+            })
+    }
+
     /// Alive proxies with a known position (M7 D6 Tab targeting). The own
     /// row is never in `buffers`, so the local player is excluded for free.
     pub fn targetables(&self) -> Vec<(u64, [f32; 3])> {

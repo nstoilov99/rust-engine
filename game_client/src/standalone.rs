@@ -595,8 +595,8 @@ impl StandaloneApp {
 
         #[cfg(feature = "hud")]
         {
-            let status = self.net.as_ref().map(|n| n.status_line());
-            let out = self.hud.layout(|ui| crate::hud::draw(ui, status.as_deref()));
+            let state = self.net.as_mut().map(|n| n.hud_state());
+            let out = self.hud.layout(|ui| crate::hud::draw(ui, state.as_ref()));
             packet.crusty_paint = Some(out.paint);
         }
 

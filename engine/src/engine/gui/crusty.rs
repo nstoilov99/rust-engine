@@ -22,7 +22,7 @@ use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
 #[cfg(feature = "editor")]
 use crusty_gui::math::Rounding;
-pub use crusty_gui::paint::TextureId;
+pub use crusty_gui::paint::{Painter, TextureId};
 use crusty_gui::paint::{PaintCmd, TextureFilter};
 use crusty_gui::shell::input as shell_input;
 #[cfg(feature = "editor")]
