@@ -12,6 +12,7 @@ pub mod battery;
 pub mod format;
 pub mod store;
 
+pub use format::manifest_hash;
 pub use store::{ChunkLoadError, ChunkStore, ContactHit, LoadedChunk, RayHit, ShapeHit};
 
 /// Stable per-triangle identity: hash of source-entity GUID + source triangle

@@ -7,12 +7,47 @@
 //! These tables ARE the save system — player rows are never deleted on
 //! disconnect.
 
+use game_shared::collision::{manifest_hash, ChunkStore};
 use game_shared::net::schema::{
     accept_input, MAX_INPUT_STEP_M, PROTOCOL_VERSION, REALM_ID, TOMBSTONE_TTL_SECS,
 };
 use game_shared::world_grid::zone_id_from_position;
 use spacetimedb::{reducer, table, ConnectionId, Identity, ReducerContext, ScheduleAt, Table};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Cooked greybox collision embedded at build time (M6 D1, `build.rs`).
+mod collision_registry {
+    include!(concat!(env!("OUT_DIR"), "/collision_registry.rs"));
+}
+
+/// World collision, built lazily on first use and kept for the lifetime of
+/// the module instance. `None` = embedded data failed validation; callers
+/// must skip simulation (with a log) instead of panicking every transaction.
+static COLLISION: OnceLock<Option<ChunkStore>> = OnceLock::new();
+
+fn collision_store() -> Option<&'static ChunkStore> {
+    COLLISION
+        .get_or_init(|| {
+            let mut store = ChunkStore::new();
+            for bytes in collision_registry::COLLISION_CHUNKS {
+                if let Err(e) = store.insert_chunk(bytes) {
+                    log::error!("embedded collision chunk rejected: {e}");
+                    return None;
+                }
+            }
+            log::info!(
+                "collision store built: {} chunks, {} embedded bytes",
+                store.len(),
+                collision_registry::COLLISION_CHUNKS
+                    .iter()
+                    .map(|c| c.len())
+                    .sum::<usize>()
+            );
+            Some(store)
+        })
+        .as_ref()
+}
 
 /// 10 Hz: NPC sample spacing must stay well under the client's ~150 ms
 /// interpolation delay or remote motion stalls between samples.
@@ -37,6 +72,10 @@ pub struct Config {
     id: u32, // always 0
     protocol_version: u32,
     realm_id: u32,
+    /// FNV-1a 64 of the embedded collision manifest (M6 D1). Clients compare
+    /// against their local manifest at connect; mismatch = refuse, since the
+    /// two sides would simulate against different geometry.
+    collision_manifest_hash: u64,
 }
 
 /// Singleton ID source (contract §1.2): one monotonic namespace for all
@@ -188,6 +227,7 @@ pub fn init(ctx: &ReducerContext) {
         id: 0,
         protocol_version: PROTOCOL_VERSION,
         realm_id: REALM_ID,
+        collision_manifest_hash: manifest_hash(collision_registry::COLLISION_MANIFEST),
     });
     ctx.db.entity_allocator().insert(EntityAllocator {
         id: 0,
@@ -486,4 +526,36 @@ fn seed_npcs(ctx: &ReducerContext, now: i64) {
             last_update_micros: now,
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parity harness (M6 D5)
+// ---------------------------------------------------------------------------
+
+/// Result of one `run_parity_trace` call, read by the native test harness
+/// (public so the harness can subscribe). One row per trace id, overwritten
+/// on re-run.
+#[table(accessor = parity_result, public)]
+pub struct ParityResult {
+    #[primary_key]
+    trace_id: String,
+    steps: u32,
+    end_x: f32,
+    end_y: f32,
+    end_z: f32,
+    /// Order-sensitive hash over per-step positions (defined in package 5).
+    state_hash: u64,
+}
+
+/// Dev/test reducer (M6 D5): replays a named motion trace against the
+/// embedded collision and records the outcome in `parity_result`. The trace
+/// list ships with the shared controller (packages 2/5); until then this
+/// only proves the embedded store builds inside the module.
+#[reducer]
+pub fn run_parity_trace(_ctx: &ReducerContext, trace_id: String) -> Result<(), String> {
+    let store = collision_store().ok_or("embedded collision failed to load")?;
+    Err(format!(
+        "unknown parity trace {trace_id:?} ({} collision chunks loaded)",
+        store.len()
+    ))
 }

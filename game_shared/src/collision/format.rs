@@ -70,6 +70,18 @@ impl std::fmt::Display for FormatError {
 }
 impl std::error::Error for FormatError {}
 
+/// FNV-1a 64 over raw bytes. Client and server hash their collision manifest
+/// with this and compare at connect (M6 D1) — a mismatch means the two sides
+/// would simulate against different geometry.
+pub fn manifest_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 // ---------------------------------------------------------------- writing
 
 pub fn write_chunk(chunk: &ChunkData, cooker_hash: u32) -> Vec<u8> {
@@ -424,5 +436,13 @@ mod tests {
         };
         let text = ron::ser::to_string_pretty(&m, Default::default()).unwrap();
         assert_eq!(ron::from_str::<CollisionManifest>(&text).unwrap(), m);
+    }
+
+    #[test]
+    fn manifest_hash_is_fnv1a64() {
+        // Reference vectors — the value is a wire contract (client vs server
+        // config row), so it must never drift.
+        assert_eq!(manifest_hash(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(manifest_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 }

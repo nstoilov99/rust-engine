@@ -159,6 +159,9 @@ pub struct SpacetimeNetClient {
     net_id: Option<String>,
     /// Overridable for acceptance tests (version-mismatch path).
     client_version: u32,
+    /// Local collision manifest hash (M6 D1). `None` = no local collision
+    /// content → the gate is skipped (dev tools, bots).
+    expected_collision_hash: Option<u64>,
 }
 
 impl SpacetimeNetClient {
@@ -185,7 +188,16 @@ impl SpacetimeNetClient {
             credentials_key: None,
             net_id: None,
             client_version: PROTOCOL_VERSION,
+            expected_collision_hash: None,
         }
+    }
+
+    /// Gate the connection on the server's collision manifest hash matching
+    /// `hash` (of the locally loaded manifest, M6 D1). Mismatch = clean
+    /// refusal at version check — the two sides would simulate against
+    /// different geometry.
+    pub fn set_expected_collision_hash(&mut self, hash: u64) {
+        self.expected_collision_hash = Some(hash);
     }
 
     /// Use a separate credentials file (→ separate identity) per name, so
@@ -594,9 +606,7 @@ impl NetClient for SpacetimeNetClient {
                     );
                     return;
                 };
-                if version_compatible(config.protocol_version, self.client_version) {
-                    self.state = ConnectionState::EnteringWorld;
-                } else {
+                if !version_compatible(config.protocol_version, self.client_version) {
                     self.fail(
                         out,
                         DisconnectReason::VersionMismatch {
@@ -604,7 +614,22 @@ impl NetClient for SpacetimeNetClient {
                             client: self.client_version,
                         },
                     );
+                    return;
                 }
+                // M6 D1: refuse to simulate against different geometry.
+                if let Some(expected) = self.expected_collision_hash {
+                    if config.collision_manifest_hash != expected {
+                        self.fail(
+                            out,
+                            DisconnectReason::CollisionMismatch {
+                                server: config.collision_manifest_hash,
+                                client: expected,
+                            },
+                        );
+                        return;
+                    }
+                }
+                self.state = ConnectionState::EnteringWorld;
             }
             ConnectionState::EnteringWorld => {
                 // Liveness-guarded (we only get here past the disconnect

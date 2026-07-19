@@ -18,11 +18,14 @@ pub mod enter_world_reducer;
 pub mod entity_allocator_type;
 pub mod npc_table;
 pub mod npc_type;
+pub mod parity_result_table;
+pub mod parity_result_type;
 pub mod ping_reducer;
 pub mod ping_result_table;
 pub mod ping_result_type;
 pub mod player_table;
 pub mod player_type;
+pub mod run_parity_trace_reducer;
 pub mod submit_input_reducer;
 pub mod tick_timer_type;
 pub mod tombstone_table;
@@ -40,11 +43,14 @@ pub use enter_world_reducer::enter_world;
 pub use entity_allocator_type::EntityAllocator;
 pub use npc_table::*;
 pub use npc_type::Npc;
+pub use parity_result_table::*;
+pub use parity_result_type::ParityResult;
 pub use ping_reducer::ping;
 pub use ping_result_table::*;
 pub use ping_result_type::PingResult;
 pub use player_table::*;
 pub use player_type::Player;
+pub use run_parity_trace_reducer::run_parity_trace;
 pub use submit_input_reducer::submit_input;
 pub use tick_timer_type::TickTimer;
 pub use tombstone_table::*;
@@ -70,6 +76,9 @@ pub enum Reducer {
     Ping {
         nonce: u64,
     },
+    RunParityTrace {
+        trace_id: String,
+    },
     SubmitInput {
         epoch: u32,
         seq: u32,
@@ -91,6 +100,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::DevTeleport { .. } => "dev_teleport",
             Reducer::EnterWorld => "enter_world",
             Reducer::Ping { .. } => "ping",
+            Reducer::RunParityTrace { .. } => "run_parity_trace",
             Reducer::SubmitInput { .. } => "submit_input",
             _ => unreachable!(),
         }
@@ -114,6 +124,11 @@ impl __sdk::Reducer for Reducer {
             Reducer::Ping { nonce } => __sats::bsatn::to_vec(&ping_reducer::PingArgs {
                 nonce: nonce.clone(),
             }),
+            Reducer::RunParityTrace { trace_id } => {
+                __sats::bsatn::to_vec(&run_parity_trace_reducer::RunParityTraceArgs {
+                    trace_id: trace_id.clone(),
+                })
+            }
             Reducer::SubmitInput {
                 epoch,
                 seq,
@@ -142,6 +157,7 @@ pub struct DbUpdate {
     clock: __sdk::TableUpdate<Clock>,
     config: __sdk::TableUpdate<Config>,
     npc: __sdk::TableUpdate<Npc>,
+    parity_result: __sdk::TableUpdate<ParityResult>,
     ping_result: __sdk::TableUpdate<PingResult>,
     player: __sdk::TableUpdate<Player>,
     tombstone: __sdk::TableUpdate<Tombstone>,
@@ -165,6 +181,9 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
                 "npc" => db_update
                     .npc
                     .append(npc_table::parse_table_update(table_update)?),
+                "parity_result" => db_update
+                    .parity_result
+                    .append(parity_result_table::parse_table_update(table_update)?),
                 "ping_result" => db_update
                     .ping_result
                     .append(ping_result_table::parse_table_update(table_update)?),
@@ -212,6 +231,9 @@ impl __sdk::DbUpdate for DbUpdate {
         diff.npc = cache
             .apply_diff_to_table::<Npc>("npc", &self.npc)
             .with_updates_by_pk(|row| &row.entity_id);
+        diff.parity_result = cache
+            .apply_diff_to_table::<ParityResult>("parity_result", &self.parity_result)
+            .with_updates_by_pk(|row| &row.trace_id);
         diff.ping_result = cache
             .apply_diff_to_table::<PingResult>("ping_result", &self.ping_result)
             .with_updates_by_pk(|row| &row.identity);
@@ -239,6 +261,9 @@ impl __sdk::DbUpdate for DbUpdate {
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "npc" => db_update
                     .npc
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "parity_result" => db_update
+                    .parity_result
                     .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
                 "ping_result" => db_update
                     .ping_result
@@ -274,6 +299,9 @@ impl __sdk::DbUpdate for DbUpdate {
                 "npc" => db_update
                     .npc
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "parity_result" => db_update
+                    .parity_result
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
                 "ping_result" => db_update
                     .ping_result
                     .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
@@ -302,6 +330,7 @@ pub struct AppliedDiff<'r> {
     clock: __sdk::TableAppliedDiff<'r, Clock>,
     config: __sdk::TableAppliedDiff<'r, Config>,
     npc: __sdk::TableAppliedDiff<'r, Npc>,
+    parity_result: __sdk::TableAppliedDiff<'r, ParityResult>,
     ping_result: __sdk::TableAppliedDiff<'r, PingResult>,
     player: __sdk::TableAppliedDiff<'r, Player>,
     tombstone: __sdk::TableAppliedDiff<'r, Tombstone>,
@@ -322,6 +351,11 @@ impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
         callbacks.invoke_table_row_callbacks::<Clock>("clock", &self.clock, event);
         callbacks.invoke_table_row_callbacks::<Config>("config", &self.config, event);
         callbacks.invoke_table_row_callbacks::<Npc>("npc", &self.npc, event);
+        callbacks.invoke_table_row_callbacks::<ParityResult>(
+            "parity_result",
+            &self.parity_result,
+            event,
+        );
         callbacks.invoke_table_row_callbacks::<PingResult>("ping_result", &self.ping_result, event);
         callbacks.invoke_table_row_callbacks::<Player>("player", &self.player, event);
         callbacks.invoke_table_row_callbacks::<Tombstone>("tombstone", &self.tombstone, event);
@@ -989,6 +1023,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         clock_table::register_table(client_cache);
         config_table::register_table(client_cache);
         npc_table::register_table(client_cache);
+        parity_result_table::register_table(client_cache);
         ping_result_table::register_table(client_cache);
         player_table::register_table(client_cache);
         tombstone_table::register_table(client_cache);
@@ -998,6 +1033,7 @@ impl __sdk::SpacetimeModule for RemoteModule {
         "clock",
         "config",
         "npc",
+        "parity_result",
         "ping_result",
         "player",
         "tombstone",

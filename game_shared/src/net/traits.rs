@@ -23,6 +23,9 @@ pub enum ConnectionState {
 pub enum DisconnectReason {
     /// Server/client protocol mismatch — clean refusal, no retry (contract).
     VersionMismatch { server: u32, client: u32 },
+    /// Collision manifest hash mismatch (M6 D1) — client and server would
+    /// simulate against different geometry. Clean refusal, no retry.
+    CollisionMismatch { server: u64, client: u64 },
     /// Another connection of the same identity took the session (§4.3).
     SessionReplaced,
     /// Transport-level loss (socket death, server gone).

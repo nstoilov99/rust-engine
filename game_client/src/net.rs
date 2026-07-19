@@ -54,6 +54,13 @@ impl NetSession {
                 client.set_net_id(id.clone());
             }
         }
+        // M6 D1: refuse servers whose collision content differs from ours.
+        match rust_engine::assets::asset_source::read_bytes("collision/greybox/manifest.ron") {
+            Ok(bytes) => {
+                client.set_expected_collision_hash(game_shared::collision::manifest_hash(&bytes));
+            }
+            Err(e) => println!("net: no local collision manifest ({e}); skipping collision gate"),
+        }
         client.connect(&addr);
         Some(Self {
             client,
