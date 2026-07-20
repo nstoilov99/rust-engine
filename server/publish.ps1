@@ -39,3 +39,7 @@ $wasm = Get-ChildItem "$PSScriptRoot/game_module/target/wasm32-unknown-unknown/r
 if ($wasm) {
     "module size: {0:N0} bytes ({1})" -f $wasm.Length, $wasm.Name
 }
+
+# Explicit success: a warn-only set_build_id failure must not leak its exit
+# code to callers gating on $LASTEXITCODE (scripts/host_local.ps1).
+exit 0
