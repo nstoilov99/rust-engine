@@ -1793,7 +1793,7 @@ First engine↔SpacetimeDB integration, through the `game_shared` command interf
 ---
 
 ### Task M6: Net-B — Server-Authoritative Movement
-**Status:** 📋 Planned
+**Status:** ✅ Complete (2026-07-19 — see `VULKANO-M6-NET-B-MOVEMENT.md`)
 **Duration:** ~3 weeks
 **Prerequisites:** M5
 
@@ -1809,7 +1809,7 @@ ADR-015 made real:
 ---
 
 ### Task M7: Net-C — Authoritative Combat & Thin HUD
-**Status:** 📋 Planned
+**Status:** ✅ Complete (2026-07-20 — see `VULKANO-M7-NET-C-COMBAT.md`)
 **Duration:** ~3 weeks
 **Prerequisites:** M6
 
@@ -1821,7 +1821,7 @@ ADR-015 made real:
 ---
 
 ### Task M8: Net-D — Interest Management & Load
-**Status:** 📋 Planned
+**Status:** ✅ Complete (2026-07-20 — see `VULKANO-M8-NET-D-INTEREST.md`; load results in `M8-LOAD-REPORT.md`)
 **Duration:** ~2-3 weeks
 **Prerequisites:** M7
 

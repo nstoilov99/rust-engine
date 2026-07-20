@@ -115,7 +115,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M5 Net-A (SpacetimeDB connection, identity, replication, zone-scoped subscriptions): **complete** (see `docs/roadmap/VULKANO-M5-NET-A-CONNECTION-IDENTITY.md`)
 - M6 Net-B (server-authoritative movement: shared controller, client prediction, WASM parity suite, combat groundwork): **complete** (see `docs/roadmap/VULKANO-M6-NET-B-MOVEMENT.md`)
 - M7 Net-C (combat vertical slice: ability roster, cast pipeline, death/respawn, projectiles, standalone crusty HUD behind `hud` feature): **complete** (see `docs/roadmap/VULKANO-M7-NET-C-COMBAT.md`)
-- Next: M8+ per `docs/roadmap/ROADMAP.md` (Phase M)
+- M8 Net-D (interest management: cell anchor + hysteresis, near 3×3 full / far 7×7 coarse tiers, write hygiene, `tools/net_bots` load harness): **complete** (see `docs/roadmap/VULKANO-M8-NET-D-INTEREST.md`; load results in `docs/roadmap/M8-LOAD-REPORT.md` — sim CPU ceiling ~150 active movers/module is the next scaling constraint)
+- Next: M9+ per `docs/roadmap/ROADMAP.md` (Phase M)
 
 ## Patched Dependencies
 

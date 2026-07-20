@@ -1,8 +1,9 @@
 # M8 — Net-D: Interest Management & Load
 
-**Status:** 📝 Draft (2026-07-20) — gpt-5.6-Sol/Codex review reconciled
-(9 findings folded in); open questions ruled 2026-07-20 (3×3/7×7 rings,
-2 m/1 s coarse cadence, no far labels, 50 bots/process).
+**Status:** ✅ Complete (2026-07-20) — all 6 packages landed; load results
+and the D2 decision in `M8-LOAD-REPORT.md`. Plan review reconciled
+(gpt-5.6-Sol/Codex, 9 findings); open questions ruled 2026-07-20 (3×3/7×7
+rings, 2 m/1 s coarse cadence, no far labels, 50 bots/process).
 
 Replaces M5's crude quadrant-zone visibility with cell-indexed interest
 management: subscriptions follow a hysteresis-stabilized anchor cell, with a
