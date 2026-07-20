@@ -128,7 +128,7 @@ NetConfig(
     module: "$Module",
     auto_connect: true,
 )
-"@ | Set-Content -Path $NetConfigPath -Encoding utf8
+"@ | Set-Content -Path $NetConfigPath -Encoding ascii  # utf8 in PS 5.1 adds a BOM, which RON rejects
     Write-Host "Wrote net_config.ron -> $ServerUri / $Module" -ForegroundColor Green
 } elseif (Test-Path $NetConfigPath) {
     Remove-Item $NetConfigPath -Force

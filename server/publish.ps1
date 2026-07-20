@@ -16,7 +16,10 @@ if ($Module -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') {
 
 $modArgs = @("publish", "--module-path", "$PSScriptRoot/game_module", $Module)
 if ($Server) { $modArgs += @("--server", $Server) }
-if ($Wipe) { $modArgs += @("--delete-data=always", "--yes") }
+if ($Wipe) { $modArgs += "--delete-data=always" }
+# --yes: wipe skips the data-destruction prompt; non-local targets skip the
+# "publish to a non-local server?" prompt (M9.5: scripted Maincloud publish).
+if ($Wipe -or $Server) { $modArgs += "--yes" }
 & spacetime @modArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "spacetime publish failed (exit $LASTEXITCODE)"

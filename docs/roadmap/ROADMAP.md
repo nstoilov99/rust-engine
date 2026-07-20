@@ -1856,7 +1856,7 @@ the "server build" is the WASM module plus a publish step.
 ---
 
 ### Task M9.5: Packaged Co-op Verification
-**Status:** 📋 Planned
+**Status:** ✅ Complete (automatable scope; two-machine hour soak pending, user-executed — see `VULKANO-M9.5-COOP-VERIFICATION.md` and `M9.5-COOP-RUNBOOK.md`)
 **Duration:** ~2-3 days
 **Prerequisites:** M8, M9
 

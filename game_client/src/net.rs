@@ -43,7 +43,9 @@ impl Default for NetConfig {
 
 impl NetConfig {
     pub fn parse(s: &str) -> Result<Self, ron::error::SpannedError> {
-        ron::from_str(s)
+        // Hand-edited configs (Notepad) often carry a UTF-8 BOM, which RON
+        // rejects at 1:1.
+        ron::from_str(s.trim_start_matches('\u{feff}'))
     }
 
     /// `<exe dir>/net_config.ron` (same discovery rule as `game.pak`).
@@ -455,6 +457,12 @@ mod net_config_tests {
         assert_eq!(c.host, DEFAULT_HOST);
         assert_eq!(c.module, "my-game");
         assert!(!c.auto_connect);
+    }
+
+    #[test]
+    fn parse_tolerates_utf8_bom() {
+        let c = NetConfig::parse("\u{feff}NetConfig(module: \"my-game\")").unwrap();
+        assert_eq!(c.module, "my-game");
     }
 
     #[test]

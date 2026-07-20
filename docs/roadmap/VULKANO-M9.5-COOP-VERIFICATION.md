@@ -1,6 +1,28 @@
 # M9.5 — Packaged Co-op Verification
 
-**Status:** 📋 Planned
+**Status:** ✅ Complete (automatable scope, 2026-07-20) — hour soak pending (user-executed)
+
+- **P1** (`efeea59`): `scripts/smoke_packaged.ps1` — SMOKE PASS (spawn 2 s,
+  kill-cleanup 1 s); missing-export failure path exits 1. Found + fixed a PS
+  5.1 trap: function return unrolls 1-element arrays to a scalar (call sites
+  wrap in `@()`). All repo .ps1 made ASCII-only (PS 5.1 mangles UTF-8-no-BOM
+  non-ASCII).
+- **P2** (`152a3eb`): load subset rerun vs a packaged-published module —
+  parity with M8 fresh-DB baselines (see `M8-LOAD-REPORT.md` addendum);
+  `run_scenarios.ps1` gained `-TargetHost`/`-Module` passthrough.
+- **P3** (this commit): published `nstoilov-rust-engine` to Maincloud —
+  SQL-verified protocol v5 + `build_id` stamp matching HEAD. mp-client
+  bundle auto-connected over TLS; two clients (distinct `--net-id` slots)
+  mutually visible over real WAN, no mismatch warnings; hard-kill cleared
+  the session server-side in <8 s; soak monitor exercised live against both
+  processes. **Bug found + fixed**: PS 5.1 `Set-Content -Encoding utf8`
+  wrote a BOM into `net_config.ron`, RON rejected it at 1:1 and the client
+  silently fell back to localhost defaults — export script now writes ascii,
+  and `NetConfig::parse` strips a leading BOM (Notepad hand-edits) with a
+  regression test.
+- **Remaining**: the two-machine one-hour soak per `M9.5-COOP-RUNBOOK.md`
+  (user + friend); record the outcome here.
+
 **Duration:** ~2–3 days
 **Prerequisites:** M8 (interest + load harness), M9 (packaging targets, publish script, host-local loop, build-id stamp)
 
@@ -154,15 +176,15 @@ disappoints (latency, version skew vs CLI 2.6.1): rented VPS running
 
 ## Acceptance
 
-- [ ] `scripts/smoke_packaged.ps1` passes from a clean shell; exit 1 with a
+- [x] `scripts/smoke_packaged.ps1` passes from a clean shell; exit 1 with a
       clear message when the export is missing or an assertion fails
-- [ ] Load rerun numbers recorded; within 1.5× M0 bars (parity with M8
+- [x] Load rerun numbers recorded; within 1.5× M0 bars (parity with M8
       fresh-DB expected)
-- [ ] Module published to Maincloud with correct protocol v5 and the
+- [x] Module published to Maincloud with correct protocol v5 and the
       build-id stamp **verified via SQL** (not just publish exit code); two
       packaged clients complete the co-op checklist over WAN from this
       machine
-- [ ] Runbook + soak monitor committed — the two-machine hour soak is
+- [x] Runbook + soak monitor committed — the two-machine hour soak is
       hand-off-able to "user + friend" without me in the loop
 - [ ] The hour soak itself: **user-executed**, results recorded back into
       this doc's status line when done
