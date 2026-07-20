@@ -1874,6 +1874,28 @@ slice. No cargo, no editor, no source checkout on the test machines.
 
 ---
 
+### Task M9.6: Editor Net Play Modes
+**Status:** 📋 Planned
+**Duration:** ~3-5 days
+**Prerequisites:** M9 (consumes its net config, publish params, host-local logic)
+
+UE-style **Net Mode** in the editor play settings (see the follow-up
+section of `VULKANO-M9-MP-PACKAGING.md` for the scope sketch):
+
+- **Play Standalone**: today's play mode, unchanged
+- **Play As Client**: `NetSession` created on play-enter / torn down on
+  play-exit against the configured server (today it only exists via
+  startup CLI args) — includes play-mode snapshot/restore handling of
+  net-spawned proxies
+- **Play As Listen Server**: Play-As-Client + auto-start local
+  SpacetimeDB and publish if needed (there is no true listen server in
+  SpacetimeDB — the sim always runs in the SpacetimeDB process; this is
+  the launcher analogue)
+- **Number of Players**: spawn N−1 extra standalone client processes
+  with `--connect`
+
+---
+
 ### 🎯 Milestone: Networked Co-op Slice
 **Replaces the old "Single-Player Vertical Slice" as the engine's first proof point.**
 
@@ -2877,6 +2899,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | M8 | Net-D: Interest Management & Load | Multiplayer Foundation | Feature | |
 | M9 | Multiplayer Packaging (client & server build targets) | Multiplayer Foundation | Infrastructure | |
 | M9.5 | Packaged Co-op Verification | Multiplayer Foundation | Testing | |
+| M9.6 | Editor Net Play Modes (Play as Client / Listen Server) | Multiplayer Foundation | Feature | |
 | -- | 🎯 *Milestone: Networked Co-op Slice (on packaged builds)* | -- | -- | |
 | 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | |
 | **40** | **Node Graph Framework & Custom Node SDK** | **Node Graph Foundation** | **Infrastructure** | **Framework** |
