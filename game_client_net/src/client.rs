@@ -210,6 +210,9 @@ pub struct SpacetimeNetClient {
     /// Local collision manifest hash (M6 D1). `None` = no local collision
     /// content → the gate is skipped (dev tools, bots).
     expected_collision_hash: Option<u64>,
+    /// Local build stamp (M9 D4). `None` = check skipped. Mismatch is
+    /// advisory (`NetEvent::BuildMismatch`), never a refusal.
+    expected_build_id: Option<String>,
 }
 
 impl SpacetimeNetClient {
@@ -237,6 +240,7 @@ impl SpacetimeNetClient {
             net_id: None,
             client_version: PROTOCOL_VERSION,
             expected_collision_hash: None,
+            expected_build_id: None,
         }
     }
 
@@ -246,6 +250,12 @@ impl SpacetimeNetClient {
     /// different geometry.
     pub fn set_expected_collision_hash(&mut self, hash: u64) {
         self.expected_collision_hash = Some(hash);
+    }
+
+    /// Enable the advisory build-stamp comparison (M9 D4): a differing
+    /// server `build_id` emits `NetEvent::BuildMismatch` but still connects.
+    pub fn set_expected_build_id(&mut self, id: String) {
+        self.expected_build_id = Some(id);
     }
 
     /// Use a separate credentials file (→ separate identity) per name, so
@@ -864,6 +874,16 @@ impl NetClient for SpacetimeNetClient {
                             },
                         );
                         return;
+                    }
+                }
+                // M9 D4: soft stamp — warn-only; protocol version above is
+                // the hard gate.
+                if let Some(expected) = &self.expected_build_id {
+                    if &config.build_id != expected {
+                        out.push(NetEvent::BuildMismatch {
+                            server: config.build_id.clone(),
+                            client: expected.clone(),
+                        });
                     }
                 }
                 self.state = ConnectionState::EnteringWorld;

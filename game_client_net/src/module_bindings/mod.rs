@@ -26,6 +26,7 @@ pub mod entity_coarse_table;
 pub mod entity_coarse_type;
 pub mod held_intent_type;
 pub mod metrics_type;
+pub mod module_owner_type;
 pub mod move_timer_type;
 pub mod npc_table;
 pub mod npc_type;
@@ -40,6 +41,7 @@ pub mod player_type;
 pub mod projectile_table;
 pub mod projectile_type;
 pub mod run_parity_trace_reducer;
+pub mod set_build_id_reducer;
 pub mod submit_input_reducer;
 pub mod tick_timer_type;
 pub mod tombstone_table;
@@ -65,6 +67,7 @@ pub use entity_coarse_table::*;
 pub use entity_coarse_type::EntityCoarse;
 pub use held_intent_type::HeldIntent;
 pub use metrics_type::Metrics;
+pub use module_owner_type::ModuleOwner;
 pub use move_timer_type::MoveTimer;
 pub use npc_table::*;
 pub use npc_type::Npc;
@@ -79,6 +82,7 @@ pub use player_type::Player;
 pub use projectile_table::*;
 pub use projectile_type::Projectile;
 pub use run_parity_trace_reducer::run_parity_trace;
+pub use set_build_id_reducer::set_build_id;
 pub use submit_input_reducer::submit_input;
 pub use tick_timer_type::TickTimer;
 pub use tombstone_table::*;
@@ -115,6 +119,7 @@ pub enum Reducer {
     RunParityTrace {
         trace_id: String,
     },
+    SetBuildId,
     SubmitInput {
         epoch: u32,
         seq: u32,
@@ -140,6 +145,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::EnterWorld => "enter_world",
             Reducer::Ping { .. } => "ping",
             Reducer::RunParityTrace { .. } => "run_parity_trace",
+            Reducer::SetBuildId => "set_build_id",
             Reducer::SubmitInput { .. } => "submit_input",
             _ => unreachable!(),
         }
@@ -181,6 +187,7 @@ impl __sdk::Reducer for Reducer {
                     trace_id: trace_id.clone(),
                 })
             }
+            Reducer::SetBuildId => __sats::bsatn::to_vec(&set_build_id_reducer::SetBuildIdArgs {}),
             Reducer::SubmitInput {
                 epoch,
                 seq,

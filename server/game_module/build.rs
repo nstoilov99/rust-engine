@@ -17,8 +17,38 @@ fn literal_path(p: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn git(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// M9 D4: soft build stamp — short git hash, `-dirty` when the tree has
+/// uncommitted changes, `"unknown"` without git. Must match the format the
+/// client stamps (`game_client/build.rs`) for the mismatch warning to work.
+fn emit_build_id(workspace_root: &Path) {
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join(".git/HEAD").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join(".git/index").display()
+    );
+    let build_id = match git(&["rev-parse", "--short", "HEAD"]).filter(|h| !h.is_empty()) {
+        Some(hash) => {
+            let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+            if dirty { format!("{hash}-dirty") } else { hash }
+        }
+        None => "unknown".to_string(),
+    };
+    println!("cargo:rustc-env=GIT_HASH={build_id}");
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    emit_build_id(&manifest_dir.join("../.."));
     let content = manifest_dir.join("../../content/collision/greybox");
     println!("cargo:rerun-if-changed={}", content.display());
 

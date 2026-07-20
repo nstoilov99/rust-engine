@@ -66,6 +66,10 @@ pub enum NetEvent {
         alive: bool,
     },
     ClockSample(ClockSample),
+    /// Server/client build stamps differ (M9 D4). Advisory only — protocol
+    /// version stays the hard gate; this catches stale deploys of the same
+    /// protocol version.
+    BuildMismatch { server: String, client: String },
 }
 
 /// Backend-neutral client. The SpacetimeDB implementation lives in

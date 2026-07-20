@@ -162,6 +162,8 @@ impl NetSession {
                 client.set_net_id(id.clone());
             }
         }
+        // M9 D4: advisory build stamp (short git hash from build.rs).
+        client.set_expected_build_id(env!("GIT_HASH").to_string());
         // M6 D1: refuse servers whose collision content differs from ours.
         match rust_engine::assets::asset_source::read_bytes("collision/greybox/manifest.ron") {
             Ok(bytes) => {
@@ -240,6 +242,10 @@ impl NetSession {
                     self.last_ack = Some((epoch, seq));
                 }
                 NetEvent::ClockSample(s) => self.clock.add_sample(s.offset_us, s.rtt_us),
+                NetEvent::BuildMismatch { server, client } => println!(
+                    "net: WARNING: build mismatch (server {server}, client {client}) — \
+                     same protocol, different builds; consider republishing/updating"
+                ),
             }
         }
 

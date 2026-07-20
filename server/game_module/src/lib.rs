@@ -97,6 +97,10 @@ const COARSE_MIN_INTERVAL_MICROS: i64 = 1_000_000;
 const COARSE_KIND_PLAYER: u32 = 0;
 const COARSE_KIND_NPC: u32 = 1;
 
+/// Soft build stamp (M9 D4): short git hash (+`-dirty`), emitted by
+/// `build.rs`. Advisory only — `PROTOCOL_VERSION` stays the hard gate.
+const BUILD_ID: &str = env!("GIT_HASH");
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -113,6 +117,19 @@ pub struct Config {
     /// against their local manifest at connect; mismatch = refuse, since the
     /// two sides would simulate against different geometry.
     collision_manifest_hash: u64,
+    /// Soft build stamp (M9 D4): mismatch is a client-side warning, never a
+    /// refusal. Kept current by `set_build_id` (init only runs on the first
+    /// publish).
+    build_id: String,
+}
+
+/// Private (not client-visible): the publisher identity, recorded at init.
+/// Gates `set_build_id` to the module owner.
+#[table(accessor = module_owner)]
+pub struct ModuleOwner {
+    #[primary_key]
+    id: u32, // always 0
+    identity: Identity,
 }
 
 /// Singleton ID source (contract §1.2): one monotonic namespace for all
@@ -415,6 +432,11 @@ pub fn init(ctx: &ReducerContext) {
         protocol_version: PROTOCOL_VERSION,
         realm_id: REALM_ID,
         collision_manifest_hash: manifest_hash(collision_registry::COLLISION_MANIFEST),
+        build_id: BUILD_ID.to_string(),
+    });
+    ctx.db.module_owner().insert(ModuleOwner {
+        id: 0,
+        identity: ctx.sender(),
     });
     ctx.db.entity_allocator().insert(EntityAllocator {
         id: 0,
@@ -437,6 +459,28 @@ pub fn init(ctx: &ReducerContext) {
     log::info!(
         "game_module initialized: protocol v{PROTOCOL_VERSION}, realm {REALM_ID}, tick {TICK_INTERVAL_MS} ms, move tick {MOVE_TICK_MS} ms"
     );
+}
+
+/// Copies the embedded build id into `Config` (M9 D4). Exists because
+/// `init` only runs on the first publish — `publish.ps1` calls this after
+/// every publish so the stamp tracks the deployed WASM. Owner-only.
+#[reducer]
+pub fn set_build_id(ctx: &ReducerContext) {
+    let Some(owner) = ctx.db.module_owner().id().find(0) else {
+        log::warn!("set_build_id: no owner recorded; ignoring");
+        return;
+    };
+    if ctx.sender() != owner.identity {
+        log::warn!("set_build_id: rejected non-owner call from {}", ctx.sender());
+        return;
+    }
+    if let Some(mut cfg) = ctx.db.config().id().find(0) {
+        if cfg.build_id != BUILD_ID {
+            log::info!("build id: {} -> {BUILD_ID}", cfg.build_id);
+            cfg.build_id = BUILD_ID.to_string();
+            ctx.db.config().id().update(cfg);
+        }
+    }
 }
 
 /// Creates the account on first sight (contract §4.2). Does NOT create the
