@@ -1,8 +1,8 @@
 # Publish the game module to a SpacetimeDB instance.
 # Prereq (local default): `spacetime start` running in another terminal.
-#   ./publish.ps1                          — incremental publish to local, keeps data
-#   ./publish.ps1 -Wipe                    — publish and clear all dev data
-#   ./publish.ps1 -Server <uri> -Module <name>  — remote/named target (M9 D3)
+#   ./publish.ps1                          - incremental publish to local, keeps data
+#   ./publish.ps1 -Wipe                    - publish and clear all dev data
+#   ./publish.ps1 -Server <uri> -Module <name>  - remote/named target (M9 D3)
 param(
     [switch]$Wipe,
     [string]$Server = "",
@@ -23,14 +23,14 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-# M9 D4: `init` only runs on the first publish — stamp the build id every
+# M9 D4: `init` only runs on the first publish - stamp the build id every
 # time so Config tracks the deployed WASM. Soft stamp: failure is a warning.
 $callArgs = @("call")
 if ($Server) { $callArgs += @("--server", $Server) }
 $callArgs += @($Module, "set_build_id")
 & spacetime @callArgs
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "set_build_id call failed (exit $LASTEXITCODE) — Config.build_id may be stale"
+    Write-Warning "set_build_id call failed (exit $LASTEXITCODE) - Config.build_id may be stale"
 }
 
 # M6 D1: the module embeds ~4.3 MB of collision data; keep an eye on size.

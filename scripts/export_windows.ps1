@@ -5,7 +5,7 @@
 #                                     [-Target <standalone|mp-client>]
 #                                     [-ServerUri <uri>] [-Module <name>]
 #
-# Targets (M9 D2): same binary either way — the target is configuration.
+# Targets (M9 D2): same binary either way - the target is configuration.
 #   standalone : no net config in the bundle (and deletes a stale one)
 #   mp-client  : writes net_config.ron (auto_connect) next to the exe
 
@@ -118,7 +118,7 @@ if (Test-Path $ContentSrc) {
     Write-Host "WARNING: content/ directory not found" -ForegroundColor Yellow
 }
 
-# Net config (M9 D2): targets own their marker files — standalone deletes a
+# Net config (M9 D2): targets own their marker files - standalone deletes a
 # stale config so re-exporting over an mp-client bundle can't auto-connect.
 $NetConfigPath = Join-Path $OutputDir "net_config.ron"
 if ($Target -eq "mp-client") {

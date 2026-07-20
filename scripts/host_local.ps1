@@ -1,11 +1,11 @@
 # Host-local loop (M9 D5): start (or reuse) a local SpacetimeDB, publish the
 # module, and launch the exported client against it.
 #
-#   ./scripts/host_local.ps1                    — publish + launch build/export
-#   ./scripts/host_local.ps1 -Wipe              — wipe dev data on publish
+#   ./scripts/host_local.ps1                    - publish + launch build/export
+#   ./scripts/host_local.ps1 -Wipe              - wipe dev data on publish
 #   ./scripts/host_local.ps1 -ExportDir <dir> -Module <name>
 #
-# This script never stops a running SpacetimeDB instance — it may hold state
+# This script never stops a running SpacetimeDB instance - it may hold state
 # from other work. It only starts one (own window) when :3000 is quiet.
 param(
     [string]$ExportDir = "build/export",
@@ -18,7 +18,7 @@ $ServerUri = "http://127.0.0.1:3000"
 
 $Exe = Join-Path (Join-Path $RepoRoot $ExportDir) "game.exe"
 if (-not (Test-Path $Exe)) {
-    Write-Host "ERROR: no exported client at $Exe — run scripts/export_windows.ps1 first" -ForegroundColor Red
+    Write-Host "ERROR: no exported client at $Exe - run scripts/export_windows.ps1 first" -ForegroundColor Red
     exit 1
 }
 
@@ -46,7 +46,7 @@ while ($true) {
     & $Publish @pubArgs
     if ($LASTEXITCODE -eq 0) { break }
     if ($waited -ge 30) {
-        Write-Host "ERROR: publish kept failing for ${waited}s of retries — is SpacetimeDB healthy?" -ForegroundColor Red
+        Write-Host "ERROR: publish kept failing for ${waited}s of retries - is SpacetimeDB healthy?" -ForegroundColor Red
         exit 1
     }
     Write-Host "publish failed; retrying in 2 s..." -ForegroundColor Yellow
