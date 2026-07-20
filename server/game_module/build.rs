@@ -36,6 +36,12 @@ fn emit_build_id(workspace_root: &Path) {
         "cargo:rerun-if-changed={}",
         workspace_root.join(".git/index").display()
     );
+    // logs/HEAD changes on every commit — plain HEAD doesn't while the
+    // branch stays the same.
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join(".git/logs/HEAD").display()
+    );
     let build_id = match git(&["rev-parse", "--short", "HEAD"]).filter(|h| !h.is_empty()) {
         Some(hash) => {
             let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());

@@ -10,8 +10,11 @@ fn git(args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     // Workspace-root .git — package-relative paths would never exist here.
+    // logs/HEAD changes on every commit — plain HEAD doesn't while the
+    // branch stays the same.
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/index");
+    println!("cargo:rerun-if-changed=../.git/logs/HEAD");
 
     // M9 D4: same format as the server module stamps (short hash + `-dirty`),
     // so the connect-time build-id comparison is meaningful.

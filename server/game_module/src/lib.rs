@@ -463,16 +463,17 @@ pub fn init(ctx: &ReducerContext) {
 
 /// Copies the embedded build id into `Config` (M9 D4). Exists because
 /// `init` only runs on the first publish — `publish.ps1` calls this after
-/// every publish so the stamp tracks the deployed WASM. Owner-only.
+/// every publish so the stamp tracks the deployed WASM. Owner-only; errors
+/// so a failed stamp fails the `spacetime call` (visible in publish.ps1).
+/// A database without an owner row predates M9 — the protocol v5 bump
+/// already forces those to wipe-publish (which reruns `init`).
 #[reducer]
-pub fn set_build_id(ctx: &ReducerContext) {
+pub fn set_build_id(ctx: &ReducerContext) -> Result<(), String> {
     let Some(owner) = ctx.db.module_owner().id().find(0) else {
-        log::warn!("set_build_id: no owner recorded; ignoring");
-        return;
+        return Err("set_build_id: no owner recorded (pre-M9 database; wipe-publish)".into());
     };
     if ctx.sender() != owner.identity {
-        log::warn!("set_build_id: rejected non-owner call from {}", ctx.sender());
-        return;
+        return Err(format!("set_build_id: rejected non-owner call from {}", ctx.sender()));
     }
     if let Some(mut cfg) = ctx.db.config().id().find(0) {
         if cfg.build_id != BUILD_ID {
@@ -481,6 +482,7 @@ pub fn set_build_id(ctx: &ReducerContext) {
             ctx.db.config().id().update(cfg);
         }
     }
+    Ok(())
 }
 
 /// Creates the account on first sight (contract §4.2). Does NOT create the
