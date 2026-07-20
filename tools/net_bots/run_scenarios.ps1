@@ -36,5 +36,7 @@ for ($i = 0; $i -lt $procs; $i++) {
 }
 Write-Host "spawned $procs processes ($Total bots), waiting ${Duration}s..."
 $jobs | Wait-Process
-Get-ChildItem (Join-Path $outDir "$Scenario-p*.txt") -Exclude "*.err.txt" |
-    ForEach-Object { Write-Host "== $($_.Name)"; Get-Content $_ }
+for ($i = 0; $i -lt $procs; $i++) {
+    $f = Join-Path $outDir "$Scenario-p$i.txt"
+    Write-Host "== $Scenario-p$i.txt"; Get-Content $f
+}
