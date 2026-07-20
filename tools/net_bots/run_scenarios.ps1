@@ -14,7 +14,11 @@ param(
     [int]$Duration = 120,
     [string]$Center = "32,32",
     [double]$Disperse = 0,
-    [double]$Area = 200
+    [double]$Area = 200,
+    # M9.5 P2: target a non-default instance/module (e.g. the smoke or a
+    # packaged-published database). Defaults match the exe's own defaults.
+    [string]$TargetHost = "http://127.0.0.1:3000",
+    [string]$Module = "rust-engine-dev"
 )
 $exe = Join-Path $PSScriptRoot "..\..\target\release\net_bots.exe"
 $outDir = Join-Path $PSScriptRoot "out"
@@ -26,7 +30,8 @@ for ($i = 0; $i -lt $procs; $i++) {
     $n = [math]::Min($PerProcess, $Total - $i * $PerProcess)
     $argList = @(
         "--bots", $n, "--prefix", "ld-$Scenario-p$i", "--scenario", $Scenario,
-        "--duration", $Duration, "--center", $Center, "--area", $Area
+        "--duration", $Duration, "--center", $Center, "--area", $Area,
+        "--host", $TargetHost, "--module", $Module
     )
     if ($Disperse -gt 0) { $argList += @("--disperse", $Disperse) }
     $jobs += Start-Process -FilePath $exe -ArgumentList $argList `

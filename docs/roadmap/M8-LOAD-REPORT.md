@@ -207,3 +207,21 @@ tick logs:
    equally, sim cost scales with total player-table rows, not just active
    movers — worth revisiting when the sim optimization work (D2 options)
    happens.
+
+## Addendum: M9.5 packaged-publish rerun (2026-07-20)
+
+M9.5 P2 load sanity: same harness, module published via the M9 flow
+(`server/publish.ps1 -Wipe -Module rust-engine-load`, protocol v5 WASM with
+build-id stamp), bots rebuilt against v5, fresh DB per scenario, 120 s each.
+Runner gained `-TargetHost` / `-Module` passthrough for this.
+
+| scenario | RTT p50/p95 (ms) | move_tick p50/p95/max (ms) | M8 fresh-DB reference | disc/reconn |
+|---|---|---|---|---|
+| uniform 50 | 9.0 / 28.6 | 15.7 / 24.5 / 33.5 | 16.5 / 22.9 / - | 0/0 |
+| churn 100 | 11.9-12.8 / ~51 | 31.1 / 46.0 / 71.5 | 32.0 / 48.8 / 73.0 | 334+333/660 |
+| thrash 50 | 10.3 / 29.8 | 19.8 / 30.4 / 47.7 | 20.0 / 32.2 / 41.1 | 0/0 |
+
+Parity within noise across the board; all inside the 1.5x-M0 bars
+(uniform-50 RTT p50 9.0 <= 39, churn p50 ~12 <= 43). The M9 packaging work
+(v5 schema, build-id stamp, Config/ModuleOwner tables) introduced no
+shipping-profile or cooked-content regression in the publish path.
