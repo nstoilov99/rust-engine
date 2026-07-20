@@ -2745,6 +2745,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "net_bots"
+version = "0.1.0"
+dependencies = [
+ "game_client_net",
+ "game_shared",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

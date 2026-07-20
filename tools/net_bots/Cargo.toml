@@ -1,0 +1,8 @@
+[package]
+name = "net_bots"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+game_shared = { path = "../../game_shared" }
+game_client_net = { path = "../../game_client_net" }
