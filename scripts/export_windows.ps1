@@ -2,19 +2,42 @@
 # Builds the standalone game and copies all required files to an output directory.
 #
 # Usage: .\scripts\export_windows.ps1 [-OutputDir <path>] [-Profile <release|shipping>]
+#                                     [-Target <standalone|mp-client>]
+#                                     [-ServerUri <uri>] [-Module <name>]
+#
+# Targets (M9 D2): same binary either way — the target is configuration.
+#   standalone : no net config in the bundle (and deletes a stale one)
+#   mp-client  : writes net_config.ron (auto_connect) next to the exe
 
 param(
     [string]$OutputDir = "build\export",
     [ValidateSet("release", "shipping")]
-    [string]$Profile = "release"
+    [string]$Profile = "release",
+    [ValidateSet("standalone", "mp-client")]
+    [string]$Target = "standalone",
+    [string]$ServerUri = "http://127.0.0.1:3000",
+    [string]$Module = "rust-engine-dev"
 )
 
 $ErrorActionPreference = "Stop"
 
 $BinName = "game"
 
+if ($Target -eq "mp-client") {
+    if ($Module -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') {
+        Write-Host "ERROR: invalid module name '$Module' (must match ^[a-z0-9]+(-[a-z0-9]+)*$)" -ForegroundColor Red
+        exit 1
+    }
+    $parsed = $null
+    if (-not [System.Uri]::TryCreate($ServerUri, [System.UriKind]::Absolute, [ref]$parsed)) {
+        Write-Host "ERROR: invalid server URI '$ServerUri'" -ForegroundColor Red
+        exit 1
+    }
+}
+
 Write-Host "=== Rust Game Engine - Windows Export ===" -ForegroundColor Cyan
 Write-Host "Profile : $Profile"
+Write-Host "Target  : $Target"
 Write-Host "Output  : $OutputDir"
 Write-Host ""
 
@@ -95,5 +118,22 @@ if (Test-Path $ContentSrc) {
     Write-Host "WARNING: content/ directory not found" -ForegroundColor Yellow
 }
 
+# Net config (M9 D2): targets own their marker files — standalone deletes a
+# stale config so re-exporting over an mp-client bundle can't auto-connect.
+$NetConfigPath = Join-Path $OutputDir "net_config.ron"
+if ($Target -eq "mp-client") {
+    @"
+NetConfig(
+    host: "$ServerUri",
+    module: "$Module",
+    auto_connect: true,
+)
+"@ | Set-Content -Path $NetConfigPath -Encoding utf8
+    Write-Host "Wrote net_config.ron -> $ServerUri / $Module" -ForegroundColor Green
+} elseif (Test-Path $NetConfigPath) {
+    Remove-Item $NetConfigPath -Force
+    Write-Host "Removed stale net_config.ron (standalone target)"
+}
+
 Write-Host ""
-Write-Host "=== Export complete: $OutputDir ===" -ForegroundColor Cyan
+Write-Host "=== Export complete: $OutputDir ($Target) ===" -ForegroundColor Cyan

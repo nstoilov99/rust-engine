@@ -3,23 +3,48 @@
 # Builds the standalone game and copies all required files to an output directory.
 #
 # Usage: ./scripts/export_windows.sh [--output-dir <path>] [--profile <release|shipping>]
+#                                    [--target <standalone|mp-client>]
+#                                    [--server-uri <uri>] [--module <name>]
+#
+# Targets (M9 D2): same binary either way — the target is configuration.
+#   standalone : no net config in the bundle (and deletes a stale one)
+#   mp-client  : writes net_config.ron (auto_connect) next to the exe
 
 set -euo pipefail
 
 BIN_NAME="game"
 OUTPUT_DIR="build/export"
 PROFILE="release"
+TARGET="standalone"
+SERVER_URI="http://127.0.0.1:3000"
+MODULE="rust-engine-dev"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --profile) PROFILE="$2"; shift 2 ;;
+        --target) TARGET="$2"; shift 2 ;;
+        --server-uri) SERVER_URI="$2"; shift 2 ;;
+        --module) MODULE="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
+if [[ "$TARGET" != "standalone" && "$TARGET" != "mp-client" ]]; then
+    echo "ERROR: invalid target '$TARGET' (standalone|mp-client)"; exit 1
+fi
+if [[ "$TARGET" == "mp-client" ]]; then
+    if [[ ! "$MODULE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+        echo "ERROR: invalid module name '$MODULE' (must match ^[a-z0-9]+(-[a-z0-9]+)*\$)"; exit 1
+    fi
+    if [[ ! "$SERVER_URI" =~ ^https?:// ]]; then
+        echo "ERROR: invalid server URI '$SERVER_URI' (must be http(s)://...)"; exit 1
+    fi
+fi
+
 echo "=== Rust Game Engine - Windows Export ==="
 echo "Profile : $PROFILE"
+echo "Target  : $TARGET"
 echo "Output  : $OUTPUT_DIR"
 echo ""
 
@@ -88,5 +113,22 @@ else
     echo "WARNING: content/ directory not found"
 fi
 
+# Net config (M9 D2): targets own their marker files — standalone deletes a
+# stale config so re-exporting over an mp-client bundle can't auto-connect.
+NET_CONFIG="$OUTPUT_DIR/net_config.ron"
+if [[ "$TARGET" == "mp-client" ]]; then
+    cat > "$NET_CONFIG" <<EOF
+NetConfig(
+    host: "$SERVER_URI",
+    module: "$MODULE",
+    auto_connect: true,
+)
+EOF
+    echo "Wrote net_config.ron -> $SERVER_URI / $MODULE"
+elif [[ -f "$NET_CONFIG" ]]; then
+    rm -f "$NET_CONFIG"
+    echo "Removed stale net_config.ron (standalone target)"
+fi
+
 echo ""
-echo "=== Export complete: $OUTPUT_DIR ==="
+echo "=== Export complete: $OUTPUT_DIR ($TARGET) ==="
