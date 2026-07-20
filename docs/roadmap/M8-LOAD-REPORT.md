@@ -186,3 +186,24 @@ future work, not part of M8 scope.
 
 M8 Net-D: **accepted**, with the sim-CPU ceiling logged as the next
 scaling constraint.
+
+## Addendum: post-report verification runs (fresh DB)
+
+All scenarios were re-run on a freshly wiped database (`publish -c always`)
+and reproduced the report within noise (churn p50 13-14 ms, thrash swaps
+mean 1.3, hotspot-150 ~20% better). Two new facts surfaced from the raw
+tick logs:
+
+1. **Tick scheduling is completion-relative.** SpacetimeDB schedules the
+   next `move_tick` ~50 ms after the previous one *finishes*, not on a
+   fixed 20 Hz grid: inter-tick gap ≈ tick duration + 50 ms. Even a healthy
+   ~25 ms tick yields ~13 Hz effective, and `MAX_STEPS_PER_TICK` catch-up
+   absorbs the difference. Any future tick-rate math should use
+   duration+50 ms, not 50 ms.
+2. **Table size inflates tick cost.** Wiping ~350 stale (offline) player
+   rows dropped 150-bot tick cost from p50 ~158 ms to ~25-45 ms. The
+   report's uniform-150 server numbers were measured with that stale
+   population present, so the ~150-active-mover ceiling is conservative;
+   equally, sim cost scales with total player-table rows, not just active
+   movers — worth revisiting when the sim optimization work (D2 options)
+   happens.
