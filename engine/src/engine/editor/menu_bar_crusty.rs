@@ -8,7 +8,7 @@ use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureId};
 use crusty_gui::widgets::{show_tooltip_for, Button, ComboBox, Label, SelectableValue, TextEdit};
 
-use super::build_dialog::{BuildDialog, BuildProfile, BuildState};
+use super::build_dialog::{BuildDialog, BuildProfile, BuildState, BuildTarget};
 use super::console::ConsoleLog;
 use super::dock_crusty::CrustyDockLayout;
 use super::menu_bar::MenuAction;
@@ -258,35 +258,80 @@ fn build_game_menu(ui: &mut Ui, build_dialog: &mut BuildDialog) {
         build_row_value(ui, build_dialog.settings.platform.label());
     });
 
-    let profile = &mut build_dialog.settings.profile;
-    build_row(ui, "Profile:", |ui, w| {
+    let target = &mut build_dialog.settings.target;
+    build_row(ui, "Target:", |ui, w| {
         if is_building {
-            build_row_value(ui, profile.label());
+            build_row_value(ui, target.label());
         } else {
-            ComboBox::new("build_profile_menu")
-                .selected_text(profile.label())
+            ComboBox::new("build_target_menu")
+                .selected_text(target.label())
                 .width(w)
                 .show_ui(ui, |ui| {
-                    SelectableValue::new(profile, BuildProfile::Release, "Release").show(ui);
-                    SelectableValue::new(profile, BuildProfile::Shipping, "Shipping").show(ui);
+                    for t in [
+                        BuildTarget::Standalone,
+                        BuildTarget::MpClient,
+                        BuildTarget::MpServer,
+                    ] {
+                        SelectableValue::new(target, t, t.label()).show(ui);
+                    }
                 });
         }
     });
+    let target = build_dialog.settings.target;
 
-    let output_dir = &mut build_dialog.settings.output_dir;
-    build_row(ui, "Output:", |ui, w| {
-        if is_building {
-            build_row_value(ui, output_dir);
-        } else {
-            TextEdit::new(output_dir).width(w).show(ui);
-        }
-    });
+    // MP Server publishes the WASM module — no exe profile or output dir.
+    if target != BuildTarget::MpServer {
+        let profile = &mut build_dialog.settings.profile;
+        build_row(ui, "Profile:", |ui, w| {
+            if is_building {
+                build_row_value(ui, profile.label());
+            } else {
+                ComboBox::new("build_profile_menu")
+                    .selected_text(profile.label())
+                    .width(w)
+                    .show_ui(ui, |ui| {
+                        SelectableValue::new(profile, BuildProfile::Release, "Release").show(ui);
+                        SelectableValue::new(profile, BuildProfile::Shipping, "Shipping").show(ui);
+                    });
+            }
+        });
+
+        let output_dir = &mut build_dialog.settings.output_dir;
+        build_row(ui, "Output:", |ui, w| {
+            if is_building {
+                build_row_value(ui, output_dir);
+            } else {
+                TextEdit::new(output_dir).width(w).show(ui);
+            }
+        });
+    }
+
+    if target != BuildTarget::Standalone {
+        let server_uri = &mut build_dialog.settings.server_uri;
+        build_row(ui, "Server:", |ui, w| {
+            if is_building {
+                build_row_value(ui, server_uri);
+            } else {
+                TextEdit::new(server_uri).width(w).show(ui);
+            }
+        });
+
+        let module = &mut build_dialog.settings.module;
+        build_row(ui, "Module:", |ui, w| {
+            if is_building {
+                build_row_value(ui, module);
+            } else {
+                TextEdit::new(module).width(w).show(ui);
+            }
+        });
+    }
 
     ui.separator();
 
     match &build_dialog.state {
         BuildState::Idle => {
-            if Button::new("Build").show(ui).clicked {
+            let label = if target == BuildTarget::MpServer { "Publish" } else { "Build" };
+            if Button::new(label).show(ui).clicked {
                 build_dialog.start_build();
             }
         }

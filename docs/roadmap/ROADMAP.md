@@ -1833,7 +1833,7 @@ ADR-015 made real:
 ---
 
 ### Task M9: Multiplayer Packaging — Client & Server Build Targets
-**Status:** 📋 Planned
+**Status:** ✅ Complete (see `VULKANO-M9-MP-PACKAGING.md`)
 **Duration:** ~1 week
 **Prerequisites:** M5 (can run any time after; the Co-op Slice milestone consumes it)
 

@@ -116,7 +116,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M6 Net-B (server-authoritative movement: shared controller, client prediction, WASM parity suite, combat groundwork): **complete** (see `docs/roadmap/VULKANO-M6-NET-B-MOVEMENT.md`)
 - M7 Net-C (combat vertical slice: ability roster, cast pipeline, death/respawn, projectiles, standalone crusty HUD behind `hud` feature): **complete** (see `docs/roadmap/VULKANO-M7-NET-C-COMBAT.md`)
 - M8 Net-D (interest management: cell anchor + hysteresis, near 3×3 full / far 7×7 coarse tiers, write hygiene, `tools/net_bots` load harness): **complete** (see `docs/roadmap/VULKANO-M8-NET-D-INTEREST.md`; load results in `docs/roadmap/M8-LOAD-REPORT.md` — sim CPU ceiling ~150 active movers/module is the next scaling constraint)
-- Next: M9+ per `docs/roadmap/ROADMAP.md` (Phase M)
+- M9 Multiplayer Packaging (net_config.ron, export/build-dialog targets standalone/mp-client/mp-server, build-id stamp + protocol v5, `scripts/host_local.ps1` play-test loop): **complete** (see `docs/roadmap/VULKANO-M9-MP-PACKAGING.md`)
+- Next: M9.5 packaged co-op verification, M9.6 editor net play modes per `docs/roadmap/ROADMAP.md`
 
 ## Patched Dependencies
 

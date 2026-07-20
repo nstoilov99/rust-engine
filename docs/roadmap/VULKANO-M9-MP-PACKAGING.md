@@ -1,8 +1,10 @@
 # M9 — Multiplayer Packaging: Client & Server Build Targets
 
-**Status:** 📋 Ready to implement (2026-07-20) — gpt-5.6-Sol/Codex review
-reconciled (8 findings); all open questions ruled 2026-07-20. Editor Net
-Mode play settings split off as follow-up task M9.6.
+**Status:** ✅ Complete (2026-07-20) — P1 `62eca4b`, P2 `f743929`, P3
+`d8cce5c` (protocol v5, wipe-published), P4 `811367a` (+ review follow-ups
+`8197977`), P5 build dialog targets. Host-local loop verified end-to-end
+(export → publish → packaged client in world). Editor Net Mode play
+settings split off as follow-up task M9.6.
 
 Extends Task 25's Windows export (✅ `game.exe` + `game.pak`) with build
 *targets* so the Co-op Slice can ship artifacts instead of dev checkouts.
