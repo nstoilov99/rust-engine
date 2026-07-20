@@ -348,7 +348,7 @@ impl StandaloneApp {
             schedule,
             frame_number: 0,
             render_thread: Some(render_thread),
-            net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
+            net: crate::net::NetSession::from_args_or_config(&std::env::args().collect::<Vec<_>>()),
             #[cfg(feature = "hud")]
             hud,
             #[cfg(not(feature = "hud"))]

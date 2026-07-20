@@ -21,6 +21,61 @@ use std::time::Instant;
 const DEFAULT_HOST: &str = "http://127.0.0.1:3000";
 const DEFAULT_MODULE: &str = "rust-engine-dev";
 
+/// Optional `net_config.ron` beside the exe (M9 D1): lets a shipped client
+/// be repointed at another server with a text editor, no recompile.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct NetConfig {
+    pub host: String,
+    pub module: String,
+    pub auto_connect: bool,
+}
+
+impl Default for NetConfig {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_HOST.to_string(),
+            module: DEFAULT_MODULE.to_string(),
+            auto_connect: false,
+        }
+    }
+}
+
+impl NetConfig {
+    pub fn parse(s: &str) -> Result<Self, ron::error::SpannedError> {
+        ron::from_str(s)
+    }
+
+    /// `<exe dir>/net_config.ron` (same discovery rule as `game.pak`).
+    /// Absent file = defaults; malformed file = warn + defaults, never
+    /// crash a shipped client.
+    pub fn load() -> Self {
+        let path = match std::env::current_exe() {
+            Ok(exe) => match exe.parent() {
+                Some(dir) => dir.join("net_config.ron"),
+                None => return Self::default(),
+            },
+            Err(_) => return Self::default(),
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(s) => Self::parse(&s).unwrap_or_else(|e| {
+                println!("net: malformed {} ({e}); using defaults", path.display());
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+}
+
+/// Field-wise precedence (M9 D1): CLI positional > config value. Compiled
+/// defaults are already folded into the config's `Default`.
+fn resolve_addr(positionals: &[String], cfg: &NetConfig) -> ModuleAddr {
+    ModuleAddr {
+        host: positionals.first().cloned().unwrap_or_else(|| cfg.host.clone()),
+        module: positionals.get(1).cloned().unwrap_or_else(|| cfg.module.clone()),
+    }
+}
+
 pub struct NetSession {
     client: SpacetimeNetClient,
     events: Vec<NetEvent>,
@@ -66,21 +121,37 @@ pub struct HudTarget {
 }
 
 impl NetSession {
-    /// `--connect [host [module]]` — defaults to the local dev standalone.
+    /// `--connect [host [module]]` — missing positionals fall back to
+    /// `net_config.ron` beside the exe, then compiled defaults (M9 D1).
     pub fn from_args(args: &[String]) -> Option<Self> {
         let idx = args.iter().position(|a| a == "--connect")?;
         // Positionals stop at the first `--flag` so e.g. `--connect --net-id b`
         // doesn't read `b` as the module name.
-        let mut positional = args[idx + 1..]
+        let positionals: Vec<String> = args[idx + 1..]
             .iter()
             .take_while(|a| !a.starts_with("--"))
-            .cloned();
-        let addr = ModuleAddr {
-            host: positional.next().unwrap_or_else(|| DEFAULT_HOST.to_string()),
-            module: positional
-                .next()
-                .unwrap_or_else(|| DEFAULT_MODULE.to_string()),
-        };
+            .cloned()
+            .collect();
+        Some(Self::connect(
+            resolve_addr(&positionals, &NetConfig::load()),
+            args,
+        ))
+    }
+
+    /// Standalone startup (M9 D1): `--connect` wins; without it, a config
+    /// with `auto_connect: true` connects using its own host/module —
+    /// double-click-the-exe multiplayer. Editor builds never auto-connect.
+    #[cfg(not(feature = "editor"))]
+    pub fn from_args_or_config(args: &[String]) -> Option<Self> {
+        if args.iter().any(|a| a == "--connect") {
+            return Self::from_args(args);
+        }
+        let cfg = NetConfig::load();
+        cfg.auto_connect
+            .then(|| Self::connect(resolve_addr(&[], &cfg), args))
+    }
+
+    fn connect(addr: ModuleAddr, args: &[String]) -> Self {
         println!("net: connecting to {} / {}", addr.host, addr.module);
         let mut client = SpacetimeNetClient::new();
         // `--net-id <name>`: distinct identity per name for local multi-
@@ -99,7 +170,7 @@ impl NetSession {
             Err(e) => println!("net: no local collision manifest ({e}); skipping collision gate"),
         }
         client.connect(&addr);
-        Some(Self {
+        Self {
             client,
             events: Vec::new(),
             replication: Replication::default(),
@@ -114,7 +185,7 @@ impl NetSession {
             target: None,
             #[cfg(all(not(feature = "editor"), feature = "hud"))]
             hud_server_now: 0,
-        })
+        }
     }
 
     /// Pump once per frame on the main thread: drain events (acks reconcile
@@ -351,4 +422,62 @@ fn read_move_keys(im: &InputManager) -> ([f32; 2], bool, bool) {
         im.is_key_pressed(KeyCode::ShiftLeft),
         im.is_key_pressed(KeyCode::Space),
     )
+}
+
+#[cfg(test)]
+mod net_config_tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_full_config() {
+        let c = NetConfig::parse(
+            r#"NetConfig(host: "http://example.com", module: "my-game", auto_connect: true)"#,
+        )
+        .unwrap();
+        assert_eq!(c.host, "http://example.com");
+        assert_eq!(c.module, "my-game");
+        assert!(c.auto_connect);
+    }
+
+    #[test]
+    fn parse_partial_config_keeps_defaults() {
+        let c = NetConfig::parse(r#"NetConfig(module: "my-game")"#).unwrap();
+        assert_eq!(c.host, DEFAULT_HOST);
+        assert_eq!(c.module, "my-game");
+        assert!(!c.auto_connect);
+    }
+
+    #[test]
+    fn parse_malformed_is_err() {
+        assert!(NetConfig::parse("NetConfig(host: )").is_err());
+        assert!(NetConfig::parse("").is_err());
+    }
+
+    #[test]
+    fn resolve_field_wise_precedence() {
+        let cfg = NetConfig {
+            host: "http://cfg:3000".into(),
+            module: "cfg-module".into(),
+            auto_connect: false,
+        };
+        // Both positionals: CLI wins outright.
+        let a = resolve_addr(&args(&["http://cli:3000", "cli-module"]), &cfg);
+        assert_eq!((a.host.as_str(), a.module.as_str()), ("http://cli:3000", "cli-module"));
+        // Host only: module still comes from the config.
+        let a = resolve_addr(&args(&["http://cli:3000"]), &cfg);
+        assert_eq!((a.host.as_str(), a.module.as_str()), ("http://cli:3000", "cfg-module"));
+        // Bare --connect: both from the config.
+        let a = resolve_addr(&[], &cfg);
+        assert_eq!((a.host.as_str(), a.module.as_str()), ("http://cfg:3000", "cfg-module"));
+    }
+
+    #[test]
+    fn resolve_defaults_without_config() {
+        let a = resolve_addr(&[], &NetConfig::default());
+        assert_eq!((a.host.as_str(), a.module.as_str()), (DEFAULT_HOST, DEFAULT_MODULE));
+    }
 }
