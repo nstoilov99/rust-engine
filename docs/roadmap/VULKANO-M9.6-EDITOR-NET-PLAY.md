@@ -1,6 +1,6 @@
 # M9.6 — Editor Net Play Modes & Server-Announced World
 
-**Status:** 📋 Planned
+**Status:** ✅ Complete
 **Duration:** ~4-6 days
 **Prerequisites:** M9 (net_config, publish/host-local scripts, build-id stamp), M9.5 (packaged verification)
 
@@ -153,21 +153,41 @@ runs in the SpacetimeDB process):
 
 ## Acceptance
 
-- [ ] Module announces `world_scene`; packaged mp-client with **no
+- [x] Module announces `world_scene`; packaged mp-client with **no
       client-side scene knowledge beyond the pak** loads the right world
       (delete the hardcoded greybox path from `standalone.rs`)
-- [ ] Announced-scene-missing-from-pak refuses with a clear message;
+- [x] Announced-scene-missing-from-pak refuses with a clear message;
       dead-server standalone falls back offline
-- [ ] Protocol v6 wipe-published; bindings + net_bots regenerated; smoke
+- [x] Protocol v6 wipe-published; bindings + net_bots regenerated; smoke
       script (`smoke_packaged.ps1`) still passes
-- [ ] Play As Client: enter play → connected proxies visible in the open
+- [x] Play As Client: enter play → connected proxies visible in the open
       scene; exit play → clean disconnect, no proxies in edit mode, undo
       history sane; re-enter → rejoin without ghosts
-- [ ] Play As Listen Server from a cold machine (no spacetime running):
+- [x] Play As Listen Server from a cold machine (no spacetime running):
       one button → server up, module published, editor in world
-- [ ] Number of Players = 2 spawns a second client that appears in-world;
+- [x] Number of Players = 2 spawns a second client that appears in-world;
       both torn down on stop
-- [ ] Settings persist across editor restarts
+- [x] Settings persist across editor restarts
+
+## Close-out (2026-07-22)
+
+Landed as five packages: P1 `98015e3` (server-announced world, protocol
+v6, deferred standalone load + offline fallback, 15 s handshake timeout),
+P2 `2391686` (PlaySettings persisted in `editor_layout_crusty.ron`,
+play-cluster dropdown; crusty-gui popup outside-click fix `fd261b5`),
+P3 `92c4138` (Play As Client: session per play run, `--connect` prefills
+settings, one-shot scene-mismatch warning), P4 `f0e3637` (listen-server
+launcher: `spacetime start` + publish off-thread, server outlives play,
+non-local host refused), P5 `1b27b4b` (N−1 child clients on
+`--net-id editor_p<i>` slots, killed on play-exit).
+
+Verified live: cold-machine listen server (kill spacetime → one F5 →
+published + in world), reuse path, remote-host refusal, 2-player child
+spawn/kill, `smoke_packaged.ps1` PASS against the v6 export. Deliberate
+deviation from the plan: PlaySettings lives solely on `CrustyDockLayout`
+(single source of truth, auto-persisted) instead of duplicating on
+`PlayModeState`. Known wart: PIE plays on the open scene by design — the
+console warns once when it differs from the server's world scene.
 
 ## Out of scope
 

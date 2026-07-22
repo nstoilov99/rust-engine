@@ -118,7 +118,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M8 Net-D (interest management: cell anchor + hysteresis, near 3×3 full / far 7×7 coarse tiers, write hygiene, `tools/net_bots` load harness): **complete** (see `docs/roadmap/VULKANO-M8-NET-D-INTEREST.md`; load results in `docs/roadmap/M8-LOAD-REPORT.md` — sim CPU ceiling ~150 active movers/module is the next scaling constraint)
 - M9 Multiplayer Packaging (net_config.ron, export/build-dialog targets standalone/mp-client/mp-server, build-id stamp + protocol v5, `scripts/host_local.ps1` play-test loop): **complete** (see `docs/roadmap/VULKANO-M9-MP-PACKAGING.md`)
 - M9.5 Packaged Co-op Verification (smoke script, load-sanity rerun, Maincloud publish + WAN two-client check, soak monitor + runbook): **complete** (see `docs/roadmap/VULKANO-M9.5-COOP-VERIFICATION.md`) — the two-machine hour soak itself is user-executed per `docs/roadmap/M9.5-COOP-RUNBOOK.md`
-- Next: two-machine hour co-op soak (user + friend), then M9.6 editor net play modes per `docs/roadmap/ROADMAP.md`
+- M9.6 Editor Net Play (server-announced `Config.world_scene` + protocol v6, deferred standalone world load with offline fallback, editor PlaySettings dropdown: Play As Client / Listen Server launcher / Number of Players): **complete** (see `docs/roadmap/VULKANO-M9.6-EDITOR-NET-PLAY.md`)
+- Next: two-machine hour co-op soak (user + friend, per `docs/roadmap/M9.5-COOP-RUNBOOK.md`), then next milestone per `docs/roadmap/ROADMAP.md`
 
 ## Patched Dependencies
 

@@ -1875,7 +1875,7 @@ slice. No cargo, no editor, no source checkout on the test machines.
 ---
 
 ### Task M9.6: Editor Net Play Modes & Server-Announced World
-**Status:** 📋 Planned (full plan: `VULKANO-M9.6-EDITOR-NET-PLAY.md`)
+**Status:** ✅ Complete (full plan + close-out: `VULKANO-M9.6-EDITOR-NET-PLAY.md`)
 **Duration:** ~4-6 days
 **Prerequisites:** M9 (consumes its net config, publish params, host-local logic), M9.5
 
