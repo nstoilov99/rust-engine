@@ -1874,14 +1874,17 @@ slice. No cargo, no editor, no source checkout on the test machines.
 
 ---
 
-### Task M9.6: Editor Net Play Modes
-**Status:** 📋 Planned
-**Duration:** ~3-5 days
-**Prerequisites:** M9 (consumes its net config, publish params, host-local logic)
+### Task M9.6: Editor Net Play Modes & Server-Announced World
+**Status:** 📋 Planned (full plan: `VULKANO-M9.6-EDITOR-NET-PLAY.md`)
+**Duration:** ~4-6 days
+**Prerequisites:** M9 (consumes its net config, publish params, host-local logic), M9.5
 
-UE-style **Net Mode** in the editor play settings (see the follow-up
-section of `VULKANO-M9-MP-PACKAGING.md` for the scope sketch):
+UE-style **Net Mode** in the editor play settings, plus the **Server
+Default Map** analogue folded in:
 
+- **Server-announced world**: module `config` table gains `world_scene`
+  (protocol v6); clients load the announced scene instead of hardcoding
+  `greybox.scene` — kills the connected-but-wrong-scene bug class
 - **Play Standalone**: today's play mode, unchanged
 - **Play As Client**: `NetSession` created on play-enter / torn down on
   play-exit against the configured server (today it only exists via
@@ -2153,6 +2156,9 @@ pub struct SpeedBlend {
 - Trigger-volume-based level streaming: `StreamingVolume` component, async load/unload scene chunks when player enters/exits
 - Background loading with progress reporting (loading screen integration)
 - Upgrade `.pak` format (Task 25) to support cooked assets
+- Replace load-whole-pak-into-RAM with mmap/ranged reads (pak size must stop costing RAM before content grows)
+- Multiple paks mounted in priority order: base + patch paks (ship updates as small overlay paks) — same mechanism serves DLC
+- Chunk paks by locality (per-zone / per-asset-type) so streaming reads are contiguous and platform install-chunks map cleanly
 
 **What you'll learn:**
 - Asset pipeline architecture (import → process → cook → package)
