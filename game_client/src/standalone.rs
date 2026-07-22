@@ -114,9 +114,11 @@ impl StandaloneApp {
         }
 
         // Net play happens on the greybox world the server simulates; the
-        // demo scene is for offline runs.
-        let net_enabled = std::env::args().any(|a| a == "--connect");
-        let scene_relative = if net_enabled {
+        // demo scene is for offline runs. Create the session first so the
+        // scene choice follows the real connect decision (--connect arg or
+        // net_config.ron auto_connect) instead of re-deriving it.
+        let net = crate::net::NetSession::from_args_or_config(&std::env::args().collect::<Vec<_>>());
+        let scene_relative = if net.is_some() {
             "scenes/greybox.scene"
         } else {
             "scenes/main.scene"
@@ -348,7 +350,7 @@ impl StandaloneApp {
             schedule,
             frame_number: 0,
             render_thread: Some(render_thread),
-            net: crate::net::NetSession::from_args_or_config(&std::env::args().collect::<Vec<_>>()),
+            net,
             #[cfg(feature = "hud")]
             hud,
             #[cfg(not(feature = "hud"))]
