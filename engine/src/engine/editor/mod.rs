@@ -57,6 +57,7 @@ pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
 pub mod play_mode;
+pub mod play_settings;
 pub mod profiler;
 #[cfg(feature = "editor")]
 pub mod profiler_crusty;

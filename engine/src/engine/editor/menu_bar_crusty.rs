@@ -6,12 +6,15 @@ use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureId};
-use crusty_gui::widgets::{show_tooltip_for, Button, ComboBox, Label, SelectableValue, TextEdit};
+use crusty_gui::widgets::{
+    show_tooltip_for, Button, ComboBox, Label, Popup, SelectableValue, TextEdit,
+};
 
 use super::build_dialog::{BuildDialog, BuildProfile, BuildState, BuildTarget};
 use super::console::ConsoleLog;
 use super::dock_crusty::CrustyDockLayout;
 use super::menu_bar::MenuAction;
+use super::play_settings::{NetPlayMode, PlaySettings};
 use super::{CommandHistory, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
 
@@ -193,7 +196,15 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                     .show(ui);
             });
 
-            render_play_controls(ui, rect, s, play_mode, icons, &mut action);
+            render_play_controls(
+                ui,
+                rect,
+                s,
+                play_mode,
+                icons,
+                &mut dock_state.play_settings,
+                &mut action,
+            );
         },
     );
 
@@ -379,11 +390,13 @@ fn render_play_controls(
     s: f32,
     play_mode: PlayMode,
     icons: &HashMap<String, TextureId>,
+    settings: &mut PlaySettings,
     action: &mut MenuAction,
 ) {
     let size = 18.0 * s;
     let gap = 4.0 * s;
-    let x0 = bar.max.x - 8.0 * s - (size * 3.0 + gap * 2.0);
+    // Four slots: play | pause | stop | settings chevron (UE-style).
+    let x0 = bar.max.x - 8.0 * s - (size * 4.0 + gap * 3.0);
     let y0 = bar.min.y + (bar.height() - size) * 0.5;
     let slot = |i: usize| {
         Rect::from_min_size(
@@ -481,6 +494,89 @@ fn render_play_controls(
             *action = b.action.clone();
         }
     }
+
+    render_play_settings_dropdown(ui, slot(3), play_mode, icons, settings);
+}
+
+/// Chevron trigger + anchored popup with the net-play settings (M9.6).
+/// Editable only in edit mode; while playing the values render read-only.
+fn render_play_settings_dropdown(
+    ui: &mut Ui,
+    rect: Rect,
+    play_mode: PlayMode,
+    icons: &HashMap<String, TextureId>,
+    settings: &mut PlaySettings,
+) {
+    let chevron = PlayButton {
+        icon: "chevron-down",
+        fallback: "\u{25BE}",
+        tint: Color::from_srgb_u8(160, 160, 160, 255),
+        hover: Color::from_srgb_u8(230, 230, 230, 255),
+        tooltip: "Play settings",
+        action: MenuAction::None,
+    };
+    let popup_id = ui.alloc_id("play_settings_popup");
+    if play_icon_button(ui, rect, icons.get(chevron.icon).copied(), &chevron) {
+        Popup::toggle(ui, popup_id);
+    }
+
+    let locked = play_mode != PlayMode::Edit;
+    Popup::new(popup_id, rect, 240.0).show(ui, |ui| {
+        build_row(ui, "Mode:", |ui, w| {
+            if locked {
+                build_row_value(ui, settings.mode.label());
+            } else {
+                ComboBox::new("play_mode_combo")
+                    .selected_text(settings.mode.label())
+                    .width(w)
+                    .show_ui(ui, |ui| {
+                        for m in [
+                            NetPlayMode::Standalone,
+                            NetPlayMode::Client,
+                            NetPlayMode::ListenServer,
+                        ] {
+                            SelectableValue::new(&mut settings.mode, m, m.label()).show(ui);
+                        }
+                    });
+            }
+        });
+
+        if settings.mode != NetPlayMode::Standalone {
+            build_row(ui, "Host:", |ui, w| {
+                if locked {
+                    build_row_value(ui, &settings.host);
+                } else {
+                    TextEdit::new(&mut settings.host).width(w).show(ui);
+                }
+            });
+            build_row(ui, "Module:", |ui, w| {
+                if locked {
+                    build_row_value(ui, &settings.module);
+                } else {
+                    TextEdit::new(&mut settings.module).width(w).show(ui);
+                }
+            });
+            build_row(ui, "Players:", |ui, w| {
+                if locked {
+                    build_row_value(ui, &settings.player_count.to_string());
+                } else {
+                    ComboBox::new("play_players_combo")
+                        .selected_text(settings.player_count.to_string())
+                        .width(w)
+                        .show_ui(ui, |ui| {
+                            for n in 1..=4u8 {
+                                SelectableValue::new(
+                                    &mut settings.player_count,
+                                    n,
+                                    n.to_string(),
+                                )
+                                .show(ui);
+                            }
+                        });
+                }
+            });
+        }
+    });
 }
 
 struct PlayButton<'a> {

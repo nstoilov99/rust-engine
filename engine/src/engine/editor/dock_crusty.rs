@@ -5,6 +5,7 @@
 //! is `Hierarchy | Viewport+bottom | Inspector`.
 
 use super::dock_layout::EditorTab;
+use super::play_settings::PlaySettings;
 use super::scene_tab::{DormantScene, SceneId};
 use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::dock::{DockNode, DockState, Leaf};
@@ -64,6 +65,10 @@ pub fn parse_tab(id: &str) -> Option<EditorTab> {
 pub struct CrustyDockLayout {
     pub tree: DockNode,
     pub state: DockState,
+    /// Editor net-play settings (M9.6) — ride along in the layout file so
+    /// no extra config file appears; old layouts parse via the default.
+    #[serde(default)]
+    pub play_settings: PlaySettings,
 }
 
 impl Default for CrustyDockLayout {
@@ -89,11 +94,16 @@ impl CrustyDockLayout {
         Self {
             tree,
             state: DockState::default(),
+            play_settings: PlaySettings::default(),
         }
     }
 
+    /// Reset the dock tree, keeping the play settings (they only share the
+    /// file, not the "layout" concept).
     pub fn reset(&mut self) {
+        let play_settings = self.play_settings.clone();
         *self = Self::new();
+        self.play_settings = play_settings;
     }
 
     pub fn is_tab_open(&self, tab: &EditorTab) -> bool {
