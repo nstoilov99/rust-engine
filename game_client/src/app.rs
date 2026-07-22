@@ -238,6 +238,9 @@ pub struct App {
     /// M9.6 P4: pending listen-server launcher (spacetime start + publish
     /// off-thread); yields once, then the editor connects as a client.
     listen_server_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// M9.6 P5: extra client child processes (Number of Players > 1),
+    /// killed on play-exit.
+    play_clients: Vec<std::process::Child>,
     /// Main-thread half of the crusty-gui integration — the editor's sole UI.
     #[cfg(feature = "editor")]
     pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
@@ -668,6 +671,7 @@ impl App {
             // settings below instead of connecting at startup.
             net: None,
             listen_server_rx: None,
+            play_clients: Vec::new(),
             #[cfg(feature = "editor")]
             crusty_gui,
             #[cfg(feature = "editor")]
@@ -1165,6 +1169,44 @@ impl App {
         self.editor.play.net_scene_warned = true;
     }
 
+    /// M9.6 P5: Number of Players — N−1 extra clients as child processes,
+    /// each on its own identity slot (`--net-id editor_p<i>`, the M9.5
+    /// same-machine lesson). Prefers the packaged exe; falls back to
+    /// `cargo run --release`. Killed on play-exit.
+    fn spawn_extra_clients(&mut self, host: &str, module: &str) {
+        let count = self.editor.ui.crusty_dock.play_settings.player_count;
+        for i in 1..count {
+            let exe = std::path::Path::new("build/export/game.exe");
+            let mut cmd = if exe.exists() {
+                let mut c = std::process::Command::new(exe);
+                c.current_dir("build/export");
+                c
+            } else {
+                let mut c = std::process::Command::new("cargo");
+                c.args(["run", "--release", "-p", "game_client", "--"]);
+                c
+            };
+            cmd.args(["--connect", host, module, "--net-id", &format!("editor_p{i}")]);
+            match cmd.spawn() {
+                Ok(child) => {
+                    self.editor.console.messages.push(LogMessage::info(format!(
+                        "Players: launched extra client {} of {count} (editor_p{i})",
+                        i + 1
+                    )));
+                    self.play_clients.push(child);
+                }
+                Err(e) => self
+                    .editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!(
+                        "Players: failed to launch extra client {}: {e}",
+                        i + 1
+                    ))),
+            }
+        }
+    }
+
     /// M9.6 P4: once the off-thread launcher reports the local server up
     /// and published, join it as a client (play continues meanwhile).
     fn poll_listen_server_launcher(&mut self) {
@@ -1178,6 +1220,7 @@ impl App {
                 self.editor.console.messages.push(LogMessage::info(format!(
                     "Listen Server ready: connecting to {host} / {module}"
                 )));
+                self.spawn_extra_clients(&host, &module);
                 self.net = Some(crate::net::NetSession::connect_to(host, module));
             }
             Ok(Err(e)) => {
@@ -4800,14 +4843,12 @@ impl App {
         let ps = &self.editor.ui.crusty_dock.play_settings;
         match ps.mode {
             rust_engine::engine::editor::play_settings::NetPlayMode::Client => {
+                let (host, module) = (ps.host.clone(), ps.module.clone());
                 self.editor.console.messages.push(LogMessage::info(format!(
-                    "Play As Client: connecting to {} / {}",
-                    ps.host, ps.module
+                    "Play As Client: connecting to {host} / {module}"
                 )));
-                self.net = Some(crate::net::NetSession::connect_to(
-                    ps.host.clone(),
-                    ps.module.clone(),
-                ));
+                self.spawn_extra_clients(&host, &module);
+                self.net = Some(crate::net::NetSession::connect_to(host, module));
                 self.editor.play.net_scene_warned = false;
             }
             rust_engine::engine::editor::play_settings::NetPlayMode::ListenServer => {
@@ -4854,6 +4895,18 @@ impl App {
         self.listen_server_rx = None;
         if let Some(mut net) = self.net.take() {
             net.disconnect();
+        }
+        // M9.6 P5: kill is the harshest disconnect — M9.5 proved server
+        // cleanup handles it within seconds.
+        let extra = self.play_clients.len();
+        for mut child in self.play_clients.drain(..) {
+            let _ = child.kill();
+        }
+        if extra > 0 {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::info(format!("Players: stopped {extra} extra client(s)")));
         }
 
         // Remove all gameplay mapping contexts (pushed by PlayerInputSystem)
