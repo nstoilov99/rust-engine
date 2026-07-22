@@ -12,6 +12,8 @@ mod game_setup;
 mod hud;
 mod input_handler;
 mod interp;
+#[cfg(feature = "editor")]
+mod listen_server;
 mod net;
 mod plugin;
 mod prediction;

@@ -235,6 +235,9 @@ pub struct App {
     runtime_flags: EditorRuntimeFlags,
     /// Net session (M5); `Some` when launched with `--connect`.
     net: Option<crate::net::NetSession>,
+    /// M9.6 P4: pending listen-server launcher (spacetime start + publish
+    /// off-thread); yields once, then the editor connects as a client.
+    listen_server_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Main-thread half of the crusty-gui integration — the editor's sole UI.
     #[cfg(feature = "editor")]
     pub crusty_gui: rust_engine::engine::gui::crusty::CrustyGui,
@@ -664,6 +667,7 @@ impl App {
             // play-enter and play-exit; `--connect` pre-fills the play
             // settings below instead of connecting at startup.
             net: None,
+            listen_server_rx: None,
             #[cfg(feature = "editor")]
             crusty_gui,
             #[cfg(feature = "editor")]
@@ -1161,6 +1165,34 @@ impl App {
         self.editor.play.net_scene_warned = true;
     }
 
+    /// M9.6 P4: once the off-thread launcher reports the local server up
+    /// and published, join it as a client (play continues meanwhile).
+    fn poll_listen_server_launcher(&mut self) {
+        let Some(rx) = self.listen_server_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                let ps = &self.editor.ui.crusty_dock.play_settings;
+                let (host, module) = (ps.host.clone(), ps.module.clone());
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "Listen Server ready: connecting to {host} / {module}"
+                )));
+                self.net = Some(crate::net::NetSession::connect_to(host, module));
+            }
+            Ok(Err(e)) => {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Listen Server failed: {e}")));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.listen_server_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
     pub fn update(&mut self) {
         rust_engine::profile_function!();
 
@@ -1174,6 +1206,7 @@ impl App {
             .map(|s| s.play_mode)
             .unwrap_or(PlayMode::Edit);
         if play_mode != PlayMode::Edit {
+            self.poll_listen_server_launcher();
             if let Some(net) = &mut self.net {
                 net.update(&mut self.core.game_world);
             }
@@ -4674,6 +4707,22 @@ impl App {
             return;
         }
 
+        // M9.6 P4: a listen server is by definition local — refuse before
+        // any play state changes (use Play As Client for remote servers).
+        {
+            let ps = &self.editor.ui.crusty_dock.play_settings;
+            if ps.mode == rust_engine::engine::editor::play_settings::NetPlayMode::ListenServer
+                && !crate::listen_server::is_local_host(&ps.host)
+            {
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Listen Server requires a local host (got '{}') — use Play As Client \
+                     for remote servers",
+                    ps.host
+                )));
+                return;
+            }
+        }
+
         self.core.game_world.reset_transients(true);
 
         match play_mode::create_snapshot(
@@ -4746,19 +4795,33 @@ impl App {
             current: PlayMode::Playing,
         });
 
-        // M9.6 P3: Play As Client — the net session lives from play-enter
-        // to play-exit; re-entering play reconnects fresh (M9.5 rejoin path).
+        // M9.6 P3/P4: the net session lives from play-enter to play-exit;
+        // re-entering play reconnects fresh (M9.5 rejoin path).
         let ps = &self.editor.ui.crusty_dock.play_settings;
-        if ps.mode == rust_engine::engine::editor::play_settings::NetPlayMode::Client {
-            self.editor.console.messages.push(LogMessage::info(format!(
-                "Play As Client: connecting to {} / {}",
-                ps.host, ps.module
-            )));
-            self.net = Some(crate::net::NetSession::connect_to(
-                ps.host.clone(),
-                ps.module.clone(),
-            ));
-            self.editor.play.net_scene_warned = false;
+        match ps.mode {
+            rust_engine::engine::editor::play_settings::NetPlayMode::Client => {
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "Play As Client: connecting to {} / {}",
+                    ps.host, ps.module
+                )));
+                self.net = Some(crate::net::NetSession::connect_to(
+                    ps.host.clone(),
+                    ps.module.clone(),
+                ));
+                self.editor.play.net_scene_warned = false;
+            }
+            rust_engine::engine::editor::play_settings::NetPlayMode::ListenServer => {
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "Listen Server: ensuring local SpacetimeDB + publishing '{}'…",
+                    ps.module
+                )));
+                self.listen_server_rx = Some(crate::listen_server::spawn_launcher(
+                    ps.host.clone(),
+                    ps.module.clone(),
+                ));
+                self.editor.play.net_scene_warned = false;
+            }
+            rust_engine::engine::editor::play_settings::NetPlayMode::Standalone => {}
         }
 
         log::info!("Entered play mode");
@@ -4785,7 +4848,10 @@ impl App {
 
         // M9.6 P3: clean disconnect, then drop the session before the
         // snapshot restore clears the world (net proxies die with it;
-        // server-side cleanup is the proven M5 disconnect path).
+        // server-side cleanup is the proven M5 disconnect path). P4: an
+        // unfinished listen-server launch is abandoned — the spawned
+        // SpacetimeDB deliberately outlives play (reuse-don't-stop).
+        self.listen_server_rx = None;
         if let Some(mut net) = self.net.take() {
             net.disconnect();
         }
