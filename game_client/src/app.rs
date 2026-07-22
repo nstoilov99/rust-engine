@@ -210,6 +210,10 @@ pub struct PlayModeState {
     pub build_dialog: BuildDialog,
     /// When true, cursor is temporarily released during play mode (F1 toggle).
     pub cursor_released: bool,
+    /// Set once the server's `world_scene` was compared against the open
+    /// scene this play session (M9.6: PIE keeps the open scene, warns on
+    /// mismatch instead of swapping it).
+    pub net_scene_warned: bool,
 }
 
 /// Editor-specific state, decomposed into semantic sub-structures.
@@ -634,6 +638,7 @@ impl App {
                 pre_play_camera: None,
                 build_dialog: BuildDialog::new(),
                 cursor_released: false,
+                net_scene_warned: false,
             },
             mesh_preview_renderer:
                 match rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer::new(
@@ -655,7 +660,10 @@ impl App {
             core,
             editor,
             runtime_flags,
-            net: crate::net::NetSession::from_args(&std::env::args().collect::<Vec<_>>()),
+            // M9.6 P3: in the editor a net session exists only between
+            // play-enter and play-exit; `--connect` pre-fills the play
+            // settings below instead of connecting at startup.
+            net: None,
             #[cfg(feature = "editor")]
             crusty_gui,
             #[cfg(feature = "editor")]
@@ -679,6 +687,14 @@ impl App {
         };
         if scene_loaded {
             app.init_streaming_for_scene(MAIN_SCENE_RELATIVE);
+        }
+        if let Some(addr) =
+            crate::net::NetSession::parse_connect_args(&std::env::args().collect::<Vec<_>>())
+        {
+            let ps = &mut app.editor.ui.crusty_dock.play_settings;
+            ps.mode = rust_engine::engine::editor::play_settings::NetPlayMode::Client;
+            ps.host = addr.host;
+            ps.module = addr.module;
         }
         Ok(app)
     }
@@ -1124,12 +1140,44 @@ impl App {
         }
     }
 
+    /// One console warning per play session when the server simulates a
+    /// different scene than the one open in the editor (M9.6: PIE keeps the
+    /// open scene; prediction collision may diverge, server stays
+    /// authoritative).
+    fn warn_on_net_scene_mismatch(&mut self) {
+        if self.editor.play.net_scene_warned {
+            return;
+        }
+        let Some(server_scene) = self.net.as_ref().and_then(|n| n.world_scene()) else {
+            return;
+        };
+        if server_scene != self.editor.scene.current_scene_relative {
+            self.editor.console.messages.push(LogMessage::warning(format!(
+                "Server world is '{server_scene}' but the open scene is '{}' — \
+                 playing on the open scene; movement collision may diverge",
+                self.editor.scene.current_scene_relative
+            )));
+        }
+        self.editor.play.net_scene_warned = true;
+    }
+
     pub fn update(&mut self) {
         rust_engine::profile_function!();
 
         self.process_hot_reload();
-        if let Some(net) = &mut self.net {
-            net.update(&mut self.core.game_world);
+        // M9.6 P3: net runs while playing OR paused (freezing the pump
+        // under pause would time the connection out), never in edit mode.
+        let play_mode = self
+            .core
+            .game_world
+            .resource::<EditorState>()
+            .map(|s| s.play_mode)
+            .unwrap_or(PlayMode::Edit);
+        if play_mode != PlayMode::Edit {
+            if let Some(net) = &mut self.net {
+                net.update(&mut self.core.game_world);
+            }
+            self.warn_on_net_scene_mismatch();
         }
         self.update_world_streaming();
         self.resolve_mesh_paths();
@@ -4698,6 +4746,21 @@ impl App {
             current: PlayMode::Playing,
         });
 
+        // M9.6 P3: Play As Client — the net session lives from play-enter
+        // to play-exit; re-entering play reconnects fresh (M9.5 rejoin path).
+        let ps = &self.editor.ui.crusty_dock.play_settings;
+        if ps.mode == rust_engine::engine::editor::play_settings::NetPlayMode::Client {
+            self.editor.console.messages.push(LogMessage::info(format!(
+                "Play As Client: connecting to {} / {}",
+                ps.host, ps.module
+            )));
+            self.net = Some(crate::net::NetSession::connect_to(
+                ps.host.clone(),
+                ps.module.clone(),
+            ));
+            self.editor.play.net_scene_warned = false;
+        }
+
         log::info!("Entered play mode");
     }
 
@@ -4718,6 +4781,13 @@ impl App {
         }
         if let Some(time) = self.core.game_world.resource_mut::<Time>() {
             time.paused = false;
+        }
+
+        // M9.6 P3: clean disconnect, then drop the session before the
+        // snapshot restore clears the world (net proxies die with it;
+        // server-side cleanup is the proven M5 disconnect path).
+        if let Some(mut net) = self.net.take() {
+            net.disconnect();
         }
 
         // Remove all gameplay mapping contexts (pushed by PlayerInputSystem)

@@ -128,7 +128,14 @@ pub struct HudTarget {
 impl NetSession {
     /// `--connect [host [module]]` — missing positionals fall back to
     /// `net_config.ron` beside the exe, then compiled defaults (M9 D1).
+    #[cfg(not(feature = "editor"))]
     pub fn from_args(args: &[String]) -> Option<Self> {
+        Some(Self::connect(Self::parse_connect_args(args)?, args))
+    }
+
+    /// Parse `--connect [host [module]]` without connecting — the editor
+    /// uses this to pre-fill Play As Client settings (M9.6).
+    pub fn parse_connect_args(args: &[String]) -> Option<ModuleAddr> {
         let idx = args.iter().position(|a| a == "--connect")?;
         // Positionals stop at the first `--flag` so e.g. `--connect --net-id b`
         // doesn't read `b` as the module name.
@@ -137,10 +144,13 @@ impl NetSession {
             .take_while(|a| !a.starts_with("--"))
             .cloned()
             .collect();
-        Some(Self::connect(
-            resolve_addr(&positionals, &NetConfig::load()),
-            args,
-        ))
+        Some(resolve_addr(&positionals, &NetConfig::load()))
+    }
+
+    /// Editor play-mode entry (M9.6): connect to an explicit host/module.
+    #[cfg(feature = "editor")]
+    pub fn connect_to(host: String, module: String) -> Self {
+        Self::connect(ModuleAddr { host, module }, &[])
     }
 
     /// Standalone startup (M9 D1): `--connect` wins; without it, a config
@@ -401,6 +411,8 @@ impl NetSession {
     }
 
     /// True once the connection is dead (handshake timeout, refusal, loss).
+    /// Standalone only: drives the deferred-world offline fallback.
+    #[cfg(not(feature = "editor"))]
     pub fn is_disconnected(&self) -> bool {
         matches!(
             self.client.connection_state(),
