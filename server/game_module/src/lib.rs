@@ -101,6 +101,10 @@ const COARSE_KIND_NPC: u32 = 1;
 /// `build.rs`. Advisory only — `PROTOCOL_VERSION` stays the hard gate.
 const BUILD_ID: &str = env!("GIT_HASH");
 
+/// The world this module simulates (M9.6). Announced via `Config` so
+/// clients load the matching scene instead of hardcoding one.
+const WORLD_SCENE: &str = "scenes/greybox.scene";
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -121,6 +125,9 @@ pub struct Config {
     /// refusal. Kept current by `set_build_id` (init only runs on the first
     /// publish).
     build_id: String,
+    /// The scene this module simulates (M9.6, UE "Server Default Map").
+    /// Clients load this pak path on connect instead of guessing.
+    world_scene: String,
 }
 
 /// Private (not client-visible): the publisher identity, recorded at init.
@@ -433,6 +440,7 @@ pub fn init(ctx: &ReducerContext) {
         realm_id: REALM_ID,
         collision_manifest_hash: manifest_hash(collision_registry::COLLISION_MANIFEST),
         build_id: BUILD_ID.to_string(),
+        world_scene: WORLD_SCENE.to_string(),
     });
     ctx.db.module_owner().insert(ModuleOwner {
         id: 0,

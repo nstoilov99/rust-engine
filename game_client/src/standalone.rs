@@ -76,7 +76,17 @@ pub struct StandaloneApp {
     /// Streamed collision chunks (visual/debug parity; prediction keeps its
     /// own full `ChunkStore`).
     collision: CollisionWorld,
+    /// Geometry pipeline layout, kept for deferred material resolution
+    /// (M9.6: net sessions load the world after the handshake).
+    geom_layout: Arc<vulkano::pipeline::PipelineLayout>,
+    /// False while a net session waits for the server-announced scene.
+    world_ready: bool,
+    plane_mesh_index: usize,
+    cube_mesh_index: usize,
 }
+
+/// Offline / fallback scene.
+const OFFLINE_SCENE: &str = "scenes/main.scene";
 
 impl StandaloneApp {
     pub fn new(
@@ -113,45 +123,14 @@ impl StandaloneApp {
             state.play_mode = PlayMode::Playing;
         }
 
-        // Net play happens on the greybox world the server simulates; the
-        // demo scene is for offline runs. Create the session first so the
-        // scene choice follows the real connect decision (--connect arg or
-        // net_config.ron auto_connect) instead of re-deriving it.
+        // M9.6: the server announces the scene it simulates (`Config.world_scene`),
+        // so a net session starts sceneless and loads the world once the
+        // handshake delivers it (`load_world` below). Offline runs load the
+        // demo scene right after construction.
         let net = crate::net::NetSession::from_args_or_config(&std::env::args().collect::<Vec<_>>());
-        let scene_relative = if net.is_some() {
-            "scenes/greybox.scene"
-        } else {
-            "scenes/main.scene"
-        };
-        let (scene_loaded, _root_entities) =
-            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], scene_relative)?;
 
-        let mut world_streamer = WorldStreamer::default();
-        {
-            let report = world_streamer.load_for_scene(scene_relative);
-            if let Some(reason) = &report.disabled {
-                println!("standalone: world streaming inert: {reason}");
-            }
-            for w in &report.warnings {
-                println!("standalone: world manifest warning: {w}");
-            }
-        }
-
-        if !scene_loaded {
-            game_setup::spawn_physics_test_objects(
-                game_world.hecs_mut(),
-                plane_mesh_index,
-                cube_mesh_index,
-            );
-        }
-
-        let mut physics_world = PhysicsWorld::new();
-        game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
-        game_world.resources_mut().insert(physics_world);
-
-        let mut transform_cache = TransformCache::new();
-        transform_cache.propagate(game_world.hecs_mut());
-        game_world.resources_mut().insert(transform_cache);
+        game_world.resources_mut().insert(PhysicsWorld::new());
+        game_world.resources_mut().insert(TransformCache::new());
         game_world.resources_mut().insert(InputManager::new());
         // Enhanced input system
         let action_set = enhanced_serialization::load_action_set(
@@ -202,27 +181,13 @@ impl StandaloneApp {
             &geometry_pipeline,
         )?;
 
-        // Load all scene-referenced meshes and materials (the editor does this
-        // via resolve_mesh_paths/resolve_material_sets each frame).
-        crate::asset_resolve::resolve_mesh_paths(game_world.hecs_mut(), &asset_manager);
-        let mut materials = crate::asset_resolve::MaterialStore::default();
-        {
+        // Scene-referenced meshes/materials resolve inside `load_world` (once
+        // per world load, not per frame like the editor).
+        let geom_layout = {
             use vulkano::pipeline::Pipeline;
-            let gpu = crate::asset_resolve::MaterialGpu {
-                allocator: renderer.gpu.memory_allocator.clone(),
-                ds_allocator: renderer.gpu.descriptor_set_allocator.clone(),
-                cmd_allocator: renderer.gpu.command_buffer_allocator.clone(),
-                queue: renderer.gpu.queue.clone(),
-                device: renderer.gpu.device.clone(),
-                geom_layout: geometry_pipeline.layout().clone(),
-            };
-            crate::asset_resolve::resolve_material_sets(
-                game_world.hecs_mut(),
-                &asset_manager,
-                &gpu,
-                &mut materials,
-            );
-        }
+            geometry_pipeline.layout().clone()
+        };
+        let materials = crate::asset_resolve::MaterialStore::default();
 
         // Set camera from first Camera entity, or use default
         {
@@ -332,7 +297,7 @@ impl StandaloneApp {
             }
         }
 
-        Ok(Self {
+        let mut app = Self {
             renderer,
             window,
             asset_manager,
@@ -356,9 +321,131 @@ impl StandaloneApp {
             #[cfg(not(feature = "hud"))]
             net_title_status: String::new(),
             materials,
-            world_streamer,
+            world_streamer: WorldStreamer::default(),
             collision: CollisionWorld::new(),
-        })
+            geom_layout,
+            world_ready: false,
+            plane_mesh_index,
+            cube_mesh_index,
+        };
+        if app.net.is_none() {
+            app.load_world(OFFLINE_SCENE);
+        } else {
+            println!("standalone: waiting for server world scene");
+        }
+        Ok(app)
+    }
+
+    /// Load a world into the (empty) ECS: scene + streaming manifest +
+    /// physics registration + transform propagation + mesh/material
+    /// resolution. Net sessions call this deferred, once the server has
+    /// announced its scene (M9.6); offline runs call it at startup.
+    fn load_world(&mut self, scene_relative: &str) {
+        let scene_loaded = match game_setup::load_or_create_scene(
+            self.game_world.hecs_mut(),
+            self._mesh_indices[0],
+            scene_relative,
+        ) {
+            Ok((loaded, _roots)) => loaded,
+            Err(e) => {
+                println!("standalone: failed to load '{scene_relative}': {e}");
+                false
+            }
+        };
+
+        let report = self.world_streamer.load_for_scene(scene_relative);
+        if let Some(reason) = &report.disabled {
+            println!("standalone: world streaming inert: {reason}");
+        }
+        for w in &report.warnings {
+            println!("standalone: world manifest warning: {w}");
+        }
+
+        if !scene_loaded {
+            game_setup::spawn_physics_test_objects(
+                self.game_world.hecs_mut(),
+                self.plane_mesh_index,
+                self.cube_mesh_index,
+            );
+        }
+
+        let mut physics_world = self
+            .game_world
+            .resources_mut()
+            .remove::<PhysicsWorld>()
+            .unwrap_or_default();
+        game_setup::register_physics_entities(&mut physics_world, self.game_world.hecs_mut());
+        self.game_world.resources_mut().insert(physics_world);
+
+        let mut transform_cache = self
+            .game_world
+            .resources_mut()
+            .remove::<TransformCache>()
+            .unwrap_or_else(TransformCache::new);
+        transform_cache.propagate(self.game_world.hecs_mut());
+        self.game_world.resources_mut().insert(transform_cache);
+
+        crate::asset_resolve::resolve_mesh_paths(self.game_world.hecs_mut(), &self.asset_manager);
+        let gpu = crate::asset_resolve::MaterialGpu {
+            allocator: self.renderer.gpu.memory_allocator.clone(),
+            ds_allocator: self.renderer.gpu.descriptor_set_allocator.clone(),
+            cmd_allocator: self.renderer.gpu.command_buffer_allocator.clone(),
+            queue: self.renderer.gpu.queue.clone(),
+            device: self.renderer.gpu.device.clone(),
+            geom_layout: self.geom_layout.clone(),
+        };
+        crate::asset_resolve::resolve_material_sets(
+            self.game_world.hecs_mut(),
+            &self.asset_manager,
+            &gpu,
+            &mut self.materials,
+        );
+        self.world_ready = true;
+    }
+
+    /// While a net session is world-less: load the server-announced scene as
+    /// soon as it arrives; if the scene is not in local content, refuse
+    /// (disconnect) and fall back offline; if the connection dies first
+    /// (handshake timeout, refusal), fall back offline.
+    fn poll_deferred_world(&mut self) {
+        enum Decision {
+            Wait,
+            Load(String),
+            MissingScene(String),
+            Offline,
+        }
+        let decision = match &self.net {
+            Some(net) => match net.world_scene() {
+                Some(scene) if rust_engine::assets::asset_source::exists(scene) => {
+                    Decision::Load(scene.to_string())
+                }
+                Some(scene) => Decision::MissingScene(scene.to_string()),
+                None if net.is_disconnected() => Decision::Offline,
+                None => Decision::Wait,
+            },
+            None => Decision::Offline,
+        };
+        match decision {
+            Decision::Wait => {}
+            Decision::Load(scene) => {
+                println!("standalone: loading server world '{scene}'");
+                self.load_world(&scene);
+            }
+            Decision::MissingScene(scene) => {
+                println!(
+                    "standalone: server world '{scene}' missing from local content; \
+                     disconnecting (client build too old?)"
+                );
+                if let Some(net) = &mut self.net {
+                    net.disconnect();
+                }
+                self.load_world(OFFLINE_SCENE);
+            }
+            Decision::Offline => {
+                println!("standalone: no server world (connection failed); loading offline scene");
+                self.load_world(OFFLINE_SCENE);
+            }
+        }
     }
 
     fn sync_camera_from_ecs(
@@ -420,6 +507,9 @@ impl StandaloneApp {
                     self.net_title_status = status;
                 }
             }
+        }
+        if !self.world_ready {
+            self.poll_deferred_world();
         }
         self.update_world_streaming();
         let delta_time = self.game_loop.tick();

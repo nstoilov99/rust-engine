@@ -98,6 +98,9 @@ pub struct NetSession {
     /// Client-side target selection (M7 D6): sent per cast, never stored
     /// server-side. Cleared when the proxy leaves scope or dies.
     target: Option<u64>,
+    /// Scene the server announced (M9.6, `Config.world_scene`); `Some` once
+    /// the handshake gates pass. Consumers poll `world_scene()`.
+    world_scene: Option<String>,
     /// Monotonic server-time estimate for HUD timers: the EWMA clock offset
     /// can step backwards, which would make cooldown sweeps jitter.
     #[cfg(all(not(feature = "editor"), feature = "hud"))]
@@ -187,6 +190,7 @@ impl NetSession {
             space_was_down: false,
             projectiles: HashMap::new(),
             target: None,
+            world_scene: None,
             #[cfg(all(not(feature = "editor"), feature = "hud"))]
             hud_server_now: 0,
         }
@@ -248,6 +252,10 @@ impl NetSession {
                     "net: WARNING: build mismatch (server {server}, client {client}) — \
                      same protocol, different builds; consider republishing/updating"
                 ),
+                NetEvent::WorldScene(scene) => {
+                    println!("net: server world scene '{scene}'");
+                    self.world_scene = Some(scene);
+                }
             }
         }
 
@@ -385,6 +393,23 @@ impl NetSession {
             own: self.client.own_combat(),
             target,
         }
+    }
+
+    /// Scene the server announced (M9.6); `Some` once the handshake gates pass.
+    pub fn world_scene(&self) -> Option<&str> {
+        self.world_scene.as_deref()
+    }
+
+    /// True once the connection is dead (handshake timeout, refusal, loss).
+    pub fn is_disconnected(&self) -> bool {
+        matches!(
+            self.client.connection_state(),
+            ConnectionState::Disconnected | ConnectionState::Offline
+        )
+    }
+
+    pub fn disconnect(&mut self) {
+        self.client.disconnect();
     }
 
     pub fn status_line(&self) -> String {

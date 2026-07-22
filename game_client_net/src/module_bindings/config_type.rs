@@ -12,6 +12,7 @@ pub struct Config {
     pub realm_id: u32,
     pub collision_manifest_hash: u64,
     pub build_id: String,
+    pub world_scene: String,
 }
 
 impl __sdk::InModule for Config {
@@ -27,6 +28,7 @@ pub struct ConfigCols {
     pub realm_id: __sdk::__query_builder::Col<Config, u32>,
     pub collision_manifest_hash: __sdk::__query_builder::Col<Config, u64>,
     pub build_id: __sdk::__query_builder::Col<Config, String>,
+    pub world_scene: __sdk::__query_builder::Col<Config, String>,
 }
 
 impl __sdk::__query_builder::HasCols for Config {
@@ -41,6 +43,7 @@ impl __sdk::__query_builder::HasCols for Config {
                 "collision_manifest_hash",
             ),
             build_id: __sdk::__query_builder::Col::new(table_name, "build_id"),
+            world_scene: __sdk::__query_builder::Col::new(table_name, "world_scene"),
         }
     }
 }

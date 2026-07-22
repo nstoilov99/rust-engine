@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use game_shared::net::protocol::{
     ClientInput, ClockSample, CoarseState, EntityKind, EntityState, ModuleAddr, WorldSnapshot,
@@ -34,6 +34,10 @@ const MAX_REDUCER_CALLS_PER_SEC: f32 = 30.0;
 
 /// Clock sync ping cadence (plan D5).
 const PING_INTERVAL_SECS: f32 = 2.0;
+
+/// M9.6: connect-to-InWorld budget. Generous vs the observed WAN handshake
+/// (~2 s to Maincloud) but finite, so a dead host surfaces as a disconnect.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Monotonic local timeline in microseconds. The backend stamps ping
 /// round-trips on it and `ClockSample.offset_us` is relative to it, so the
@@ -213,6 +217,10 @@ pub struct SpacetimeNetClient {
     /// Local build stamp (M9 D4). `None` = check skipped. Mismatch is
     /// advisory (`NetEvent::BuildMismatch`), never a refusal.
     expected_build_id: Option<String>,
+    /// M9.6: the handshake must complete by this instant or the connection
+    /// fails — without it a dead host leaves the client in `Connecting`
+    /// forever (no elapsed-time check anywhere else in `poll`).
+    handshake_deadline: Option<Instant>,
 }
 
 impl SpacetimeNetClient {
@@ -241,6 +249,7 @@ impl SpacetimeNetClient {
             client_version: PROTOCOL_VERSION,
             expected_collision_hash: None,
             expected_build_id: None,
+            handshake_deadline: None,
         }
     }
 
@@ -431,6 +440,7 @@ impl SpacetimeNetClient {
     }
 
     fn teardown(&mut self) {
+        self.handshake_deadline = None;
         self.base_sub = None;
         self.repl_sub = None;
         self.repl_anchor = None;
@@ -753,6 +763,7 @@ impl NetClient for SpacetimeNetClient {
                 Self::register_row_callbacks(&conn, &self.flags);
                 self.conn = Some(conn);
                 self.state = ConnectionState::Connecting;
+                self.handshake_deadline = Some(Instant::now() + HANDSHAKE_TIMEOUT);
             }
             Err(e) => {
                 self.state = ConnectionState::Disconnected;
@@ -815,6 +826,20 @@ impl NetClient for SpacetimeNetClient {
                 .take_error()
                 .unwrap_or_else(|| "connection closed".to_string());
             self.fail(out, DisconnectReason::ConnectionLost(msg));
+            return;
+        }
+
+        // M9.6: handshake deadline — every pre-InWorld state waits on some
+        // asynchronous progress (identity, subscription, own row); a host
+        // that stops responding mid-handshake would otherwise hang forever.
+        if self.handshake_deadline.is_some_and(|d| Instant::now() > d) {
+            self.fail(
+                out,
+                DisconnectReason::ConnectionLost(format!(
+                    "handshake timeout after {}s",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                )),
+            );
             return;
         }
 
@@ -886,6 +911,9 @@ impl NetClient for SpacetimeNetClient {
                         });
                     }
                 }
+                // M9.6: gates passed — announce the server's world so the
+                // game can load the matching scene.
+                out.push(NetEvent::WorldScene(config.world_scene.clone()));
                 self.state = ConnectionState::EnteringWorld;
             }
             ConnectionState::EnteringWorld => {
@@ -921,6 +949,7 @@ impl NetClient for SpacetimeNetClient {
                     self.pump_interest([p.x, p.y]);
                     if self.repl_anchor.is_some() {
                         self.state = ConnectionState::InWorld;
+                        self.handshake_deadline = None;
                         self.flags.mark_dirty();
                         out.push(NetEvent::Connected);
                     }

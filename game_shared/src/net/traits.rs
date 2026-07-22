@@ -70,6 +70,9 @@ pub enum NetEvent {
     /// version stays the hard gate; this catches stale deploys of the same
     /// protocol version.
     BuildMismatch { server: String, client: String },
+    /// The scene the server simulates (M9.6, `Config.world_scene`). Emitted
+    /// once per connection, after the version/collision gates pass.
+    WorldScene(String),
 }
 
 /// Backend-neutral client. The SpacetimeDB implementation lives in

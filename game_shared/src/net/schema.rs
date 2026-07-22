@@ -5,8 +5,8 @@
 
 use uuid::Uuid;
 
-/// v5: M9 packaging (`Config.build_id` soft stamp + owner table).
-pub const PROTOCOL_VERSION: u32 = 5;
+/// v6: M9.6 server-announced world (`Config.world_scene`).
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// M5 runs a single module instance; the realm id exists so sharded modules
 /// (M8+) can never collide in identity-keyed structures.
