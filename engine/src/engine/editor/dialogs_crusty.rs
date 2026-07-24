@@ -8,7 +8,7 @@ use super::import_dialog::{ImportDialogAction, ImportDialogState};
 use super::scene_tab::SaveAsDialog;
 use crate::engine::assets::mesh_import::UpAxis;
 use crusty_gui::context::Ui;
-use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
+use crusty_gui::math::{Pos2, Rect, Rounding, Vec2};
 use crusty_gui::widgets::{
     Button, Checkbox, ComboBox, DragValue, Grid, Label, SelectableValue, TextEdit, Window,
 };
@@ -51,37 +51,37 @@ pub fn dialog_stack_panel(ui: &mut Ui, stack: &mut DialogStack) -> Vec<EditorAct
         close = true;
     };
 
-    dialog_window(&dialog.title, 340.0).show(ui, |ui| {
+    dialog_window(&dialog.title, 360.0).show(ui, |ui| {
         message_lines(ui, &dialog.message);
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let button = |ui: &mut Ui, label: &str| {
-                let r = Button::new(label).min_size(BUTTON_SIZE).show(ui).clicked;
+            let button = |ui: &mut Ui, b: Button| {
+                let r = b.min_size(BUTTON_SIZE).show(ui).clicked;
                 ui.add_space(8.0);
                 r
             };
             match dialog.buttons {
                 DialogButtons::Ok => {
-                    if button(ui, "OK") {
+                    if button(ui, Button::new("OK").primary()) {
                         clicked(&dialog.actions.primary);
                     }
                 }
                 DialogButtons::OkCancel => {
-                    if button(ui, "OK") {
+                    if button(ui, Button::new("OK").primary()) {
                         clicked(&dialog.actions.primary);
                     }
-                    if button(ui, "Cancel") {
+                    if button(ui, Button::new("Cancel").ghost()) {
                         clicked(&dialog.actions.cancel);
                     }
                 }
                 DialogButtons::SaveDiscardCancel => {
-                    if button(ui, "Save") {
+                    if button(ui, Button::new("Save").primary()) {
                         clicked(&dialog.actions.primary);
                     }
-                    if button(ui, "Discard") {
+                    if button(ui, Button::new("Discard").danger()) {
                         clicked(&dialog.actions.secondary);
                     }
-                    if button(ui, "Cancel") {
+                    if button(ui, Button::new("Cancel").ghost()) {
                         clicked(&dialog.actions.cancel);
                     }
                 }
@@ -110,11 +110,21 @@ pub fn save_as_dialog_panel(ui: &mut Ui, dlg: &mut SaveAsDialog) -> bool {
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if Button::new("Save").min_size(BUTTON_SIZE).show(ui).clicked {
+            if Button::new("Save")
+                .primary()
+                .min_size(BUTTON_SIZE)
+                .show(ui)
+                .clicked
+            {
                 dlg.commit = true;
             }
             ui.add_space(8.0);
-            if Button::new("Cancel").min_size(BUTTON_SIZE).show(ui).clicked {
+            if Button::new("Cancel")
+                .ghost()
+                .min_size(BUTTON_SIZE)
+                .show(ui)
+                .clicked
+            {
                 cancel = true;
             }
         });
@@ -316,13 +326,12 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
         let pad = ((ui.available_size().x - (button.x * 2.0 + spacing)) * 0.5).max(0.0);
         ui.horizontal(|ui| {
             ui.add_space(pad);
-            if Button::new("Cancel").min_size(button).show(ui).clicked {
+            if Button::new("Cancel").ghost().min_size(button).show(ui).clicked {
                 action = ImportDialogAction::Cancel;
             }
             ui.add_space(spacing);
             if Button::new("Import")
-                .fill(Color::from_srgb_u8(50, 120, 200, 255))
-                .text_color(Color::WHITE)
+                .primary()
                 .min_size(button)
                 .show(ui)
                 .clicked
@@ -338,17 +347,18 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
 
 /// Full-screen tint + border + hint while external files hover the window.
 pub fn file_drop_overlay(ui: &mut Ui, screen: Rect) {
+    let palette = ui.style().palette;
     let mut p = ui.overlay_painter();
     p.rect_filled(
         screen,
         Rounding::ZERO,
-        Color::from_srgb_u8(30, 80, 180, 100),
+        palette.accent_active.with_alpha(0.12),
     );
     p.rect_stroke(
         screen.shrink(4.0),
         Rounding::same(8.0),
         3.0,
-        Color::from_srgb_u8(100, 160, 255, 255),
+        palette.accent_active,
     );
     let text = "Drop files to import into current folder";
     let size = p.measure_text(text, 24.0, None);
@@ -359,7 +369,7 @@ pub fn file_drop_overlay(ui: &mut Ui, screen: Rect) {
         ),
         text,
         24.0,
-        Color::WHITE,
+        palette.text,
         None,
     );
 }

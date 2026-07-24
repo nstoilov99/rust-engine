@@ -29,7 +29,8 @@ impl Toast {
     }
 
     fn expired(&self, now: Instant) -> bool {
-        now.duration_since(self.created_at) >= self.duration
+        // Errors are sticky — dismissed only via the toast close button.
+        self.kind != ToastKind::Error && now.duration_since(self.created_at) >= self.duration
     }
 }
 
@@ -80,5 +81,13 @@ impl ToastStack {
         let now = Instant::now();
         self.toasts.retain(|toast| !toast.expired(now));
         &self.toasts
+    }
+
+    pub fn as_slice(&self) -> &[Toast] {
+        &self.toasts
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        self.toasts.remove(index);
     }
 }

@@ -342,7 +342,7 @@ impl HierarchyPanel {
         self.renaming_entity = None;
     }
 
-    pub(crate) fn duplicate_entity(&self, world: &mut World, entity: Entity) {
+    pub fn duplicate_entity(&self, world: &mut World, entity: Entity) {
         let name = world
             .get::<&Name>(entity)
             .map(|n| format!("{} (Copy)", n.0))

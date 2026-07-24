@@ -958,10 +958,23 @@ impl App {
                 self.push_action_unavailable("Paste", "entity clipboard is not implemented yet");
             }
             EditorAction::Duplicate => {
-                self.push_action_unavailable(
-                    "Duplicate",
-                    "use the Hierarchy context menu until duplicate is command-backed",
-                );
+                if self.play_mode() == PlayMode::Edit {
+                    let selected: Vec<_> =
+                        self.editor.scene.selection.all().copied().collect();
+                    for entity in selected {
+                        if self.core.game_world.hecs().contains(entity) {
+                            self.editor
+                                .scene
+                                .hierarchy_panel
+                                .duplicate_entity(self.core.game_world.hecs_mut(), entity);
+                        }
+                    }
+                    self.editor
+                        .scene
+                        .hierarchy_panel
+                        .sync_root_order(self.core.game_world.hecs());
+                    self.editor.scene.command_history.mark_dirty();
+                }
             }
             EditorAction::Delete => {
                 let selected: Vec<_> = self.editor.scene.selection.all().copied().collect();
@@ -1957,20 +1970,6 @@ impl App {
         let active_scene_id = self.editor.scene.registry.active_id;
         let current_scene_name = self.editor.scene.current_scene_name.clone();
 
-        // Update status bar (crusty layout reads these at draw time).
-        {
-            let services = &mut self.editor.services;
-            services.status_bar.set_left(if active_dirty {
-                "Scene has unsaved changes"
-            } else {
-                "Ready"
-            });
-            services.status_bar.set_right(format!(
-                "Dirty assets: {}",
-                services.dirty.dirty_asset_count()
-            ));
-        }
-
         // Compute layout rects for the crusty pass in physical pixels
         // (crusty runs at pixels_per_point = 1.0, so the values below are the
         // exact screen coordinates the panels draw to).
@@ -1981,9 +1980,9 @@ impl App {
         let crusty_screen_rect =
             CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, screen_h));
         let crusty_menu_bar_rect =
-            CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, 24.0));
+            CRect::from_min_max(CPos2::new(0.0, 0.0), CPos2::new(screen_w, 30.0));
         let crusty_status_bar_rect = CRect::from_min_max(
-            CPos2::new(0.0, screen_h - 22.0),
+            CPos2::new(0.0, screen_h - 28.0),
             CPos2::new(screen_w, screen_h),
         );
 
@@ -2071,6 +2070,8 @@ impl App {
                     }
                 }
             }
+            MenuAction::Duplicate => self.handle_editor_action(EditorAction::Duplicate),
+            MenuAction::Delete => self.handle_editor_action(EditorAction::Delete),
             MenuAction::SaveLayout => {
                 match self.editor.ui.crusty_dock.save_to_default() {
                     Ok(()) => println!(
@@ -2923,7 +2924,7 @@ impl App {
                 mesh_editor_panel, MeshEditorPanelCtx,
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
-            use rust_engine::engine::editor::status_bar_crusty::status_bar_panel;
+            use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
             use rust_engine::engine::editor::viewport_crusty::{viewport_panel, ViewportPanelCtx};
             // A tab dragged out of a float window: the OS window follows the
@@ -2995,7 +2996,7 @@ impl App {
             let mesh_textures = &self.crusty_mesh_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
-            let titles = dock_crusty::tab_titles(
+            let (titles, dirty_tabs) = dock_crusty::tab_titles(
                 &self.editor.ui.crusty_dock.tree,
                 active_scene_id,
                 &current_scene_name,
@@ -3003,13 +3004,17 @@ impl App {
                 &self.editor.scene.registry.dormant,
                 self.crusty_dock_drag.as_deref(),
             );
+            let theme = self.editor.services.theme.clone();
+            let has_selection = !sel.is_empty();
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;
             let pending_floats = &mut self.pending_crusty_floats;
             let build_dialog = &mut self.editor.play.build_dialog;
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
-            let status_bar_state = &self.editor.services.status_bar;
-            let live_toasts = self.editor.services.toasts.prune();
+            let status_error_count = console.messages.counts().2;
+            let unsaved_count =
+                dirty_tabs.len() + self.editor.services.dirty.dirty_asset_count();
+            let toasts = &mut self.editor.services.toasts;
             let dialog_stack = &mut self.editor.services.dialogs;
             let command_palette = &mut self.editor.services.command_palette;
             let command_registry = &self.editor.services.command_registry;
@@ -3039,9 +3044,24 @@ impl App {
                         console_messages: &mut console.messages,
                         show_benchmark_tools: benchmark_tools,
                         icons,
+                        theme: &theme,
+                        has_selection,
                     },
                 );
-                status_bar_panel(ui, crusty_status_bar_rect, status_bar_state);
+                if status_bar_panel(
+                    ui,
+                    crusty_status_bar_rect,
+                    StatusBarCtx {
+                        dock_state: crusty_dock,
+                        theme: &theme,
+                        error_count: status_error_count,
+                        unsaved_count,
+                        fps,
+                        delta_ms,
+                    },
+                ) {
+                    command_palette.open();
+                }
 
                 // Dock: everything between the menu and status strips.
                 let dock_rect = CRect::from_min_max(
@@ -3060,7 +3080,8 @@ impl App {
                         .titles(&titles)
                         .show_close_buttons(true)
                         .min_tab_width(120.0)
-                        .tab_bar_height(28.0)
+                        .tab_bar_height(30.0)
+                        .dirty_tabs(&dirty_tabs, theme.palette.status.warning)
                         .external_drag(ext)
                         .show_in(ui, dock_rect, |ui, tab| {
                             let rect = ui.clip_rect();
@@ -3228,7 +3249,7 @@ impl App {
 
                 // Last so they draw above the panels (menus/tooltips live in
                 // the overlay list and stay on top regardless).
-                toasts_panel(ui, crusty_screen_rect, live_toasts);
+                toasts_panel(ui, crusty_screen_rect, toasts, &theme);
 
                 use rust_engine::engine::editor::{command_palette_crusty, dialogs_crusty};
                 crusty_dialog_actions = dialogs_crusty::dialog_stack_panel(ui, dialog_stack);
@@ -3791,7 +3812,7 @@ impl App {
                 }
             }
 
-            let titles = dock_crusty::tab_titles(
+            let (titles, _) = dock_crusty::tab_titles(
                 &fw.tree,
                 active_scene_id,
                 &scene_name,

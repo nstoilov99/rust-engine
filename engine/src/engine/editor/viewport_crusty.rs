@@ -32,22 +32,10 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_srgb_u8(r, g, b, 255)
 }
 
-fn toolbar_bg() -> Color {
-    Color::from_srgb_u8(33, 33, 33, 230)
-}
-
-fn button_active() -> Color {
-    rgb(70, 90, 120)
-}
-
-fn button_inactive() -> Color {
-    Color::from_srgb_u8(64, 64, 64, 200)
-}
-
-const TOOLBAR_H: f32 = 30.0; // 24 button + 3 margin top/bottom
+const TOOLBAR_H: f32 = 36.0;
 const BUTTON_W: f32 = 26.0;
 const BUTTON_H: f32 = 24.0;
-const ICON_PX: f32 = 16.0; // uniform icon size, centered with padding
+const ICON_PX: f32 = 12.0; // uniform icon size, centered with padding
 
 /// Everything the viewport panel reads/writes.
 pub struct ViewportPanelCtx<'a> {
@@ -353,10 +341,11 @@ fn toolbar(
     camera_mode: CameraControlMode,
     icons: &HashMap<String, TextureId>,
 ) {
-    ui.painter().rect_filled(rect, 0.0, toolbar_bg());
+    let panel_fill = ui.style().palette.panel;
+    ui.painter().rect_filled(rect, 0.0, panel_fill);
 
     let mut x = rect.min.x + 6.0 * s;
-    let y = rect.min.y + 3.0 * s;
+    let y = rect.min.y + (rect.height() - BUTTON_H * s) * 0.5;
 
     // Transform tools
     let tools = [
@@ -501,18 +490,20 @@ fn toolbar(
 
 /// Vertical separator line; returns the next cursor x.
 fn separator(ui: &mut Ui, toolbar_rect: Rect, x: f32, s: f32) -> f32 {
+    let stroke = ui.style().palette.stroke;
     let line_x = x + 4.0 * s;
     ui.painter().line_segment(
-        Pos2::new(line_x, toolbar_rect.min.y + 7.0 * s),
-        Pos2::new(line_x, toolbar_rect.max.y - 7.0 * s),
+        Pos2::new(line_x, toolbar_rect.min.y + 10.0 * s),
+        Pos2::new(line_x, toolbar_rect.max.y - 10.0 * s),
         1.0,
-        gray(60),
+        stroke,
     );
     x + 13.0 * s
 }
 
-/// Pill-shaped icon button. The icon is a uniform 16px square centered in
-/// the button (padding all around — never edge-to-edge).
+/// Toolbar icon button (26×24, 3px radius). Toggled-on state uses the
+/// accent-soft fill with an accent border and accent icon per the design
+/// system; at rest the button is flat on the panel.
 fn pill_button(
     ui: &mut Ui,
     rect: Rect,
@@ -522,27 +513,29 @@ fn pill_button(
     selected: bool,
     tooltip: &str,
 ) -> bool {
+    let style = ui.style();
     let id = ui.alloc_id(("vp_toolbar_btn", tooltip));
     let resp = ui.interact(id, rect);
-    let rounding = rect.height() / 2.0;
-    let fill = if selected {
-        button_active()
-    } else {
-        button_inactive()
-    };
-    ui.painter().rect_filled(rect, rounding, fill);
+    let rounding = style.rounding.small;
+    if selected {
+        ui.painter()
+            .rect_filled(rect, rounding, style.palette.accent_soft);
+        ui.painter()
+            .rect_stroke(rect, rounding, 1.0, style.palette.accent_active);
+    } else if resp.hovered {
+        ui.painter().rect_filled(rect, rounding, style.palette.hover);
+    }
 
     let tint = if selected {
-        Color::WHITE
+        style.palette.accent_active
     } else if resp.hovered {
-        gray(240)
+        style.palette.text
     } else {
-        gray(210)
+        style.palette.text_secondary
     };
     paint_icon_centered(ui, rect, s, icon, fallback, tint);
 
     if resp.hovered {
-        ui.painter().rect_stroke(rect, rounding, 1.0, gray(100));
         show_tooltip_for(ui, rect, tooltip);
     }
     resp.clicked
@@ -578,7 +571,7 @@ fn paint_icon_centered(
             Pos2::new(c.x - size.x * 0.5, c.y - font * 1.25 * 0.5),
             fallback,
             font,
-            Color::WHITE,
+            tint,
             None,
         );
     }
@@ -641,29 +634,35 @@ fn split_button_chrome(
     let icon_resp = ui.interact(id.with("icon"), icon_rect);
     let dd_resp = ui.interact(id.with("dd"), dropdown_rect);
 
-    let rounding = h / 2.0;
+    let style = ui.style();
+    let r = style.rounding.small.nw;
+    let rounding = Rounding::same(r);
     ui.painter()
-        .rect_filled(total_rect, rounding, button_inactive());
+        .rect_filled(total_rect, rounding, style.palette.header);
     if enabled {
         ui.painter().rect_filled(
-            icon_rect.shrink(1.0 * s),
+            icon_rect,
             Rounding {
-                nw: 11.0 * s,
-                sw: 11.0 * s,
+                nw: r,
+                sw: r,
                 ne: 0.0,
                 se: 0.0,
             },
-            button_active(),
+            style.palette.accent_soft,
         );
     }
     ui.painter().line_segment(
         Pos2::new(icon_rect.max.x, icon_rect.min.y + 4.0 * s),
         Pos2::new(icon_rect.max.x, icon_rect.max.y - 4.0 * s),
         1.0,
-        gray(60),
+        style.palette.stroke,
     );
 
-    let tint = if enabled { Color::WHITE } else { gray(210) };
+    let tint = if enabled {
+        style.palette.accent_active
+    } else {
+        style.palette.text_secondary
+    };
     paint_icon_centered(ui, icon_rect, s, icon, fallback, tint);
 
     // Value text centered in the dropdown zone (nudged left of the caret).
@@ -674,7 +673,7 @@ fn split_button_chrome(
         Pos2::new(tc.x - 4.0 * s - tw * 0.5, tc.y - font * 1.25 * 0.5),
         value_text,
         font,
-        Color::WHITE,
+        style.palette.text,
         None,
     );
 
@@ -685,20 +684,20 @@ fn split_button_chrome(
         Pos2::new(cc.x - cs, cc.y - cs * 0.5),
         Pos2::new(cc.x + cs, cc.y - cs * 0.5),
         Pos2::new(cc.x, cc.y + cs * 0.5),
-        gray(180),
+        style.palette.text_secondary,
     );
 
     if icon_resp.hovered {
         ui.painter().rect_stroke(
             icon_rect,
             Rounding {
-                nw: 12.0 * s,
-                sw: 12.0 * s,
+                nw: r,
+                sw: r,
                 ne: 0.0,
                 se: 0.0,
             },
             1.0,
-            gray(100),
+            style.palette.stroke_strong,
         );
         show_tooltip_for(ui, icon_rect, tooltip);
     }
@@ -708,11 +707,11 @@ fn split_button_chrome(
             Rounding {
                 nw: 0.0,
                 sw: 0.0,
-                ne: 12.0 * s,
-                se: 12.0 * s,
+                ne: r,
+                se: r,
             },
             1.0,
-            gray(100),
+            style.palette.stroke_strong,
         );
     }
 

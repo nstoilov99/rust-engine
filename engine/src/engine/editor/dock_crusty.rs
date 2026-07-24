@@ -176,7 +176,8 @@ impl CrustyDockLayout {
 
 /// Display titles for every tab in the tree; viewport tabs show their scene
 /// name. `extra` covers a tab currently torn off the tree (ghost drag) so its
-/// card still shows the display title.
+/// card still shows the display title. The second return value is the set of
+/// dirty tabs, shown as a warning dot in the tab strip.
 pub fn tab_titles(
     tree: &DockNode,
     active_id: SceneId,
@@ -184,13 +185,15 @@ pub fn tab_titles(
     active_dirty: bool,
     dormant: &[DormantScene],
     extra: Option<&str>,
-) -> HashMap<String, String> {
+) -> (HashMap<String, String>, std::collections::HashSet<String>) {
     let mut ids = Vec::new();
     tree.collect_tabs(&mut ids);
     if let Some(extra) = extra {
         ids.push(extra.to_string());
     }
-    ids.into_iter()
+    let mut dirty_set = std::collections::HashSet::new();
+    let titles = ids
+        .into_iter()
         .map(|id| {
             let title = match parse_tab(&id) {
                 Some(EditorTab::Viewport(vid)) => {
@@ -208,15 +211,18 @@ pub fn tab_titles(
                     } else {
                         name
                     };
-                    let prefix = if dirty { "* " } else { "" };
-                    format!("{prefix}{name}")
+                    if dirty {
+                        dirty_set.insert(id.clone());
+                    }
+                    name.to_string()
                 }
                 Some(tab) => tab.title_string(),
                 None => id.clone(),
             };
             (id, title)
         })
-        .collect()
+        .collect();
+    (titles, dirty_set)
 }
 
 /// This frame's [`ExternalDrag`] for an in-window ghost re-drag (a tab that

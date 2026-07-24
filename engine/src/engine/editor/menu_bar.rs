@@ -21,6 +21,10 @@ pub enum MenuAction {
     Undo,
     /// Redo the last undone action
     Redo,
+    /// Duplicate the selected entity
+    Duplicate,
+    /// Delete the selected entity
+    Delete,
     /// Save the current layout
     SaveLayout,
     /// Reset dock layout to default

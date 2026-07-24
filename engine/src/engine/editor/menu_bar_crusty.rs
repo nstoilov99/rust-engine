@@ -15,6 +15,7 @@ use super::console::ConsoleLog;
 use super::dock_crusty::CrustyDockLayout;
 use super::menu_bar::MenuAction;
 use super::play_settings::{NetPlayMode, PlaySettings};
+use super::theme::EditorTheme;
 use super::{CommandHistory, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
 
@@ -26,32 +27,19 @@ pub struct MenuBarCtx<'a> {
     pub console_messages: &'a mut ConsoleLog,
     pub show_benchmark_tools: bool,
     pub icons: &'a HashMap<String, TextureId>,
+    pub theme: &'a EditorTheme,
+    pub has_selection: bool,
 }
 
-mod play_colors {
-    use crusty_gui::math::Color;
-
-    pub fn play() -> Color {
-        Color::from_srgb_u8(80, 200, 80, 255)
-    }
-    pub fn play_hover() -> Color {
-        Color::from_srgb_u8(120, 255, 120, 255)
-    }
-    pub fn pause() -> Color {
-        Color::from_srgb_u8(220, 200, 60, 255)
-    }
-    pub fn pause_hover() -> Color {
-        Color::from_srgb_u8(255, 240, 100, 255)
-    }
-    pub fn stop() -> Color {
-        Color::from_srgb_u8(200, 80, 80, 255)
-    }
-    pub fn stop_hover() -> Color {
-        Color::from_srgb_u8(255, 120, 120, 255)
-    }
-    pub fn disabled() -> Color {
-        Color::from_srgb_u8(80, 80, 80, 255)
-    }
+/// Brighten a status color for the hovered play-control state.
+fn hover_tint(c: Color) -> Color {
+    let t = 0.35;
+    Color::rgba(
+        c.r + (1.0 - c.r) * t,
+        c.g + (1.0 - c.g) * t,
+        c.b + (1.0 - c.b) * t,
+        c.a,
+    )
 }
 
 pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuAction {
@@ -73,6 +61,8 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         build_dialog,
         show_benchmark_tools,
         icons,
+        theme,
+        has_selection,
         ..
     } = ctx;
 
@@ -106,7 +96,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 }
                 ui.separator();
                 ui.submenu_width("Build Game", 260.0 * s, |ui| {
-                    build_game_menu(ui, build_dialog);
+                    build_game_menu(ui, build_dialog, theme);
                 });
                 ui.separator();
                 if ui.menu_item("Exit") {
@@ -115,24 +105,46 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
             });
 
             let is_edit_mode = play_mode == PlayMode::Edit;
-            ui.menu_button("Edit", |ui| {
-                let undo_text = if let Some(desc) = command_history.undo_description() {
-                    format!("Undo: {} (Ctrl+Z)", desc)
-                } else {
-                    "Undo (Ctrl+Z)".to_string()
-                };
-                if ui.menu_item_enabled(&undo_text, is_edit_mode && command_history.can_undo()) {
+            ui.menu_button_width("Edit", 250.0, |ui| {
+                ui.menu_group_header("History");
+                if ui.menu_item_shortcut(
+                    "Undo",
+                    "Ctrl+Z",
+                    is_edit_mode && command_history.can_undo(),
+                ) {
                     action = MenuAction::Undo;
                 }
-
-                let redo_text = if let Some(desc) = command_history.redo_description() {
-                    format!("Redo: {} (Ctrl+Y)", desc)
-                } else {
-                    "Redo (Ctrl+Y)".to_string()
-                };
-                if ui.menu_item_enabled(&redo_text, is_edit_mode && command_history.can_redo()) {
+                if ui.menu_item_shortcut(
+                    "Redo",
+                    "Ctrl+Y",
+                    is_edit_mode && command_history.can_redo(),
+                ) {
                     action = MenuAction::Redo;
                 }
+                // Ships disabled until the undo-history browser lands (P9).
+                let _ = ui.menu_item_enabled("Undo History\u{2026}", false);
+
+                ui.separator();
+                ui.menu_group_header("Edit");
+                // Cut/Copy/Paste need the entity clipboard (P9) — disabled.
+                let _ = ui.menu_item_shortcut("Cut", "Ctrl+X", false);
+                let _ = ui.menu_item_shortcut("Copy", "Ctrl+C", false);
+                let _ = ui.menu_item_shortcut("Paste", "Ctrl+V", false);
+                let can_edit_sel = is_edit_mode && has_selection;
+                if ui.menu_item_shortcut("Duplicate", "Ctrl+D", can_edit_sel) {
+                    action = MenuAction::Duplicate;
+                }
+                if ui.menu_item_shortcut("Delete", "Del", can_edit_sel) {
+                    action = MenuAction::Delete;
+                }
+
+                ui.separator();
+                ui.menu_group_header("Configuration");
+                // Settings windows arrive with P7; shortcuts/plugins later.
+                let _ = ui.menu_item_enabled("Editor Preferences\u{2026}", false);
+                let _ = ui.menu_item_enabled("Keyboard Shortcuts\u{2026}", false);
+                let _ = ui.menu_item_enabled("Project Settings\u{2026}", false);
+                let _ = ui.menu_item_enabled("Plugins", false);
             });
 
             ui.menu_button("View", |ui| {
@@ -191,9 +203,8 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
             ui.menu_button("Help", |ui| {
                 let _ = ui.menu_item("About");
                 ui.separator();
-                Label::new("Rust Game Engine")
-                    .color(Color::from_srgb_u8(140, 140, 140, 255))
-                    .show(ui);
+                let dim = ui.style().palette.text_secondary;
+                Label::new("Rust Game Engine").color(dim).show(ui);
             });
 
             render_play_controls(
@@ -202,6 +213,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 s,
                 play_mode,
                 icons,
+                theme,
                 &mut dock_state.play_settings,
                 &mut action,
             );
@@ -259,7 +271,7 @@ fn build_row_value(ui: &mut Ui, text: &str) {
 
 /// Body of the `File > Build Game` flyout: settings while idle, progress /
 /// result while building. While a build runs the settings render read-only.
-fn build_game_menu(ui: &mut Ui, build_dialog: &mut BuildDialog) {
+fn build_game_menu(ui: &mut Ui, build_dialog: &mut BuildDialog, theme: &EditorTheme) {
     let is_building = matches!(
         build_dialog.state,
         BuildState::Building | BuildState::CopyingContent
@@ -365,7 +377,7 @@ fn build_game_menu(ui: &mut Ui, build_dialog: &mut BuildDialog) {
                 "Done! {:.1} MB",
                 *binary_size as f64 / (1024.0 * 1024.0)
             ))
-            .color(Color::from_srgb_u8(80, 200, 80, 255))
+            .color(theme.palette.status.success)
             .show(ui);
             if Button::new("Build Again").show(ui).clicked {
                 build_dialog.start_build();
@@ -373,7 +385,7 @@ fn build_game_menu(ui: &mut Ui, build_dialog: &mut BuildDialog) {
         }
         BuildState::Failed { error } => {
             Label::new(format!("Failed: {}", error))
-                .color(Color::from_srgb_u8(200, 80, 80, 255))
+                .color(theme.palette.status.error)
                 .show(ui);
             if Button::new("Retry").show(ui).clicked {
                 build_dialog.start_build();
@@ -390,6 +402,7 @@ fn render_play_controls(
     s: f32,
     play_mode: PlayMode,
     icons: &HashMap<String, TextureId>,
+    theme: &EditorTheme,
     settings: &mut PlaySettings,
     action: &mut MenuAction,
 ) {
@@ -405,14 +418,17 @@ fn render_play_controls(
         )
     };
 
-    let dis = play_colors::disabled();
+    let dis = ui.style().palette.text_disabled;
+    let play = theme.palette.status.success;
+    let pause = theme.palette.status.warning;
+    let stop = theme.palette.status.error;
     let buttons: [PlayButton; 3] = match play_mode {
         PlayMode::Edit => [
             PlayButton {
                 icon: "play-fill",
                 fallback: "\u{25B6}",
-                tint: play_colors::play(),
-                hover: play_colors::play_hover(),
+                tint: play,
+                hover: hover_tint(play),
                 tooltip: "Play (F5)",
                 action: MenuAction::Play,
             },
@@ -445,16 +461,16 @@ fn render_play_controls(
             PlayButton {
                 icon: "pause-fill",
                 fallback: "\u{23F8}",
-                tint: play_colors::pause(),
-                hover: play_colors::pause_hover(),
+                tint: pause,
+                hover: hover_tint(pause),
                 tooltip: "Pause (F6)",
                 action: MenuAction::Pause,
             },
             PlayButton {
                 icon: "stop-fill",
                 fallback: "\u{23F9}",
-                tint: play_colors::stop(),
-                hover: play_colors::stop_hover(),
+                tint: stop,
+                hover: hover_tint(stop),
                 tooltip: "Stop (F5)",
                 action: MenuAction::Stop,
             },
@@ -463,8 +479,8 @@ fn render_play_controls(
             PlayButton {
                 icon: "skip-forward-fill",
                 fallback: "\u{23ED}",
-                tint: play_colors::play(),
-                hover: play_colors::play_hover(),
+                tint: play,
+                hover: hover_tint(play),
                 tooltip: "Resume (F6)",
                 action: MenuAction::Resume,
             },
@@ -479,8 +495,8 @@ fn render_play_controls(
             PlayButton {
                 icon: "stop-fill",
                 fallback: "\u{23F9}",
-                tint: play_colors::stop(),
-                hover: play_colors::stop_hover(),
+                tint: stop,
+                hover: hover_tint(stop),
                 tooltip: "Stop (F5)",
                 action: MenuAction::Stop,
             },
@@ -510,8 +526,8 @@ fn render_play_settings_dropdown(
     let chevron = PlayButton {
         icon: "chevron-down",
         fallback: "\u{25BE}",
-        tint: Color::from_srgb_u8(160, 160, 160, 255),
-        hover: Color::from_srgb_u8(230, 230, 230, 255),
+        tint: ui.style().palette.text_secondary,
+        hover: ui.style().palette.text,
         tooltip: "Play settings",
         action: MenuAction::None,
     };

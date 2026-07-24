@@ -16,7 +16,6 @@ use std::sync::Arc;
 use super::command_palette::{CommandPalette, CommandRegistry};
 use super::dialogs::DialogStack;
 use super::dirty_state::DirtyState;
-use super::status_bar::StatusBarState;
 use super::theme::EditorTheme;
 use super::toasts::ToastStack;
 use super::widgets::IconRegistry;
@@ -33,8 +32,6 @@ pub struct EditorServices {
     pub dialogs: DialogStack,
     /// Toast notifications shown over the editor UI.
     pub toasts: ToastStack,
-    /// Shared status bar text.
-    pub status_bar: StatusBarState,
     /// Central command registry and palette UI state.
     pub command_registry: CommandRegistry,
     pub command_palette: CommandPalette,
@@ -49,7 +46,6 @@ impl EditorServices {
             dirty: DirtyState::new(),
             dialogs: DialogStack::new(),
             toasts: ToastStack::new(),
-            status_bar: StatusBarState::new(),
             command_registry: CommandRegistry::new(),
             command_palette: CommandPalette::new(),
         }
