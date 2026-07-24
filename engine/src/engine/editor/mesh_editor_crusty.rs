@@ -38,14 +38,6 @@ const DETAILS_W: f32 = 300.0;
 const THUMB: f32 = 64.0;
 /// Bottom save-bar height.
 const SAVE_BAR_H: f32 = 40.0;
-/// srgb(220,180,50) — the dirty-star color.
-const DIRTY_STAR: Color = Color::rgba(0.715694, 0.456411, 0.031896, 1.0);
-/// srgb(30,31,35) — engine theme `header_bg` (same constant as other ports).
-const HEADER_BG: Color = Color::rgba(0.012983, 0.013702, 0.016807, 1.0);
-
-fn gray(v: u8) -> Color {
-    Color::from_srgb_u8(v, v, v, 255)
-}
 
 /// Weak text: gamma-blended halfway toward the panel fill (`text_dim` alone
 /// is the *normal* label color, too bright here).
@@ -123,14 +115,14 @@ pub fn mesh_editor_panel(ui: &mut Ui, tab_rect: Rect, ctx: MeshEditorPanelCtx) {
 // ── toolbar ─────────────────────────────────────────────────────────────────
 
 fn toolbar(ui: &mut Ui, rect: Rect, s: f32, data: &MeshEditorData) {
-    let stroke = ui.style().palette.stroke;
-    let font = ui.style().fonts.body;
-    ui.painter().rect_filled(rect, 0.0, HEADER_BG);
+    let style = ui.style();
+    let font = style.fonts.body;
+    ui.painter().rect_filled(rect, 0.0, style.palette.header);
     ui.painter().line_segment(
         Pos2::new(rect.min.x, rect.max.y),
         Pos2::new(rect.max.x, rect.max.y),
         1.0,
-        stroke,
+        style.palette.stroke,
     );
 
     let text_y = rect.center().y - font * 1.25 * 0.5;
@@ -138,7 +130,7 @@ fn toolbar(ui: &mut Ui, rect: Rect, s: f32, data: &MeshEditorData) {
 
     let w = ui
         .painter()
-        .text(Pos2::new(x, text_y), "Mesh Editor", font, gray(230), None)
+        .text(Pos2::new(x, text_y), "Mesh Editor", font, style.palette.text, None)
         .x;
     x += w + 10.0 * s;
 
@@ -146,20 +138,21 @@ fn toolbar(ui: &mut Ui, rect: Rect, s: f32, data: &MeshEditorData) {
         Pos2::new(x, rect.min.y + 7.0 * s),
         Pos2::new(x, rect.max.y - 7.0 * s),
         1.0,
-        gray(60),
+        style.palette.stroke,
     );
     x += 10.0 * s;
 
     let filename = filename_of(&data.mesh_path);
     let w = ui
         .painter()
-        .text(Pos2::new(x, text_y), &filename, font, gray(200), None)
+        .text(Pos2::new(x, text_y), &filename, font, style.palette.text_secondary, None)
         .x;
     x += w + 6.0 * s;
 
     if data.dirty {
+        let dirty_color = super::theme::Palette::invariant_status().warning;
         ui.painter()
-            .text(Pos2::new(x, text_y), "*", font, DIRTY_STAR, None);
+            .text(Pos2::new(x, text_y), "*", font, dirty_color, None);
     }
 }
 
@@ -208,7 +201,8 @@ fn details(
             ui.horizontal(|ui| {
                 Label::new(filename).size(heading).show(ui);
                 if data.dirty {
-                    Label::new("*").size(heading).color(DIRTY_STAR).show(ui);
+                    let dirty_color = super::theme::Palette::invariant_status().warning;
+                    Label::new("*").size(heading).color(dirty_color).show(ui);
                 }
             });
             Label::new(data.mesh_path.clone())
@@ -324,7 +318,7 @@ fn save_bar_ui(
     icons: &HashMap<String, TextureId>,
 ) {
     let style = ui.style();
-    ui.painter().rect_filled(rect, 0.0, HEADER_BG);
+    ui.painter().rect_filled(rect, 0.0, style.palette.header);
     ui.painter().line_segment(
         Pos2::new(rect.min.x, rect.min.y),
         Pos2::new(rect.max.x, rect.min.y),
@@ -367,7 +361,7 @@ fn save_bar_ui(
     } else {
         "save-check"
     };
-    let tint = if enabled { gray(230) } else { gray(120) };
+    let tint = if enabled { style.palette.text } else { style.palette.text_disabled };
     let icon_rect = Rect::from_min_size(
         Pos2::new(btn.min.x + pad, (btn.center().y - icon_px * 0.5).round()),
         Vec2::splat(icon_px),
@@ -449,13 +443,11 @@ fn slot_card(
     }
 
     // ── Card background (blue highlight while a material hovers).
+    let style = ui.style();
     let (bg, border) = if hover_valid {
-        (
-            Color::from_srgb_u8(40, 60, 90, 255),
-            Color::from_srgb_u8(100, 180, 255, 255),
-        )
+        (style.palette.accent_soft, style.palette.accent_active)
     } else {
-        (gray(35), gray(60))
+        (style.palette.elevated, style.palette.stroke)
     };
     ui.painter().rect_filled(rect, 4.0, bg);
     ui.painter().rect_stroke(rect, 4.0, 1.0, border);
@@ -545,6 +537,7 @@ fn draw_material_thumb(
     } else {
         material_thumb(asset_browser, float_thumbs, material_path)
     };
+    let style = ui.style();
     match tex {
         Some(tex) => {
             ui.painter().paint_mut().push(PaintCmd::Image {
@@ -554,13 +547,13 @@ fn draw_material_thumb(
                 tint: Color::WHITE,
                 texture: tex,
             });
-            ui.painter().rect_stroke(rect, 2.0, 1.0, gray(70));
+            ui.painter().rect_stroke(rect, 2.0, 1.0, style.palette.stroke);
         }
         None => {
-            ui.painter().rect_filled(rect, 2.0, gray(50));
-            ui.painter().rect_stroke(rect, 2.0, 1.0, gray(70));
+            ui.painter().rect_filled(rect, 2.0, style.palette.window);
+            ui.painter().rect_stroke(rect, 2.0, 1.0, style.palette.stroke);
             if material_path.is_empty() {
-                let font = ui.style().fonts.small;
+                let font = style.fonts.small;
                 let w = ui.painter().measure_text("None", font, None).x;
                 ui.painter().text(
                     Pos2::new(
@@ -569,7 +562,7 @@ fn draw_material_thumb(
                     ),
                     "None",
                     font,
-                    gray(120),
+                    style.palette.text_disabled,
                     None,
                 );
             }
@@ -812,11 +805,11 @@ fn picker_row(
             tint: Color::WHITE,
             texture: tex,
         }),
-        None => ui.painter().rect_filled(thumb_rect, 2.0, gray(50)),
+        None => ui.painter().rect_filled(thumb_rect, 2.0, style.palette.window),
     }
 
     let text_color = if selected {
-        Color::rgba(0.10, 0.10, 0.12, 0.95)
+        style.palette.window.with_alpha(0.95)
     } else {
         style.palette.text
     };
@@ -893,15 +886,15 @@ fn icon_button_impl(
         ui.painter()
             .rect_stroke(rect, 4.0, 1.0, style.palette.accent_active);
     } else if hovered {
-        ui.painter().rect_stroke(rect, 4.0, 1.0, gray(100));
+        ui.painter().rect_stroke(rect, 4.0, 1.0, style.palette.stroke_strong);
     }
 
     let tint = if !enabled {
-        gray(90)
+        style.palette.text_disabled
     } else if hovered || on {
-        gray(240)
+        style.palette.text
     } else {
-        gray(200)
+        style.palette.text_secondary
     };
     match icon {
         Some(texture) => {

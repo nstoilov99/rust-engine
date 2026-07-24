@@ -30,18 +30,6 @@ use crate::engine::input::value::InputValueType;
 
 // ── small helpers ───────────────────────────────────────────────────────────
 
-fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::from_srgb_u8(r, g, b, 255)
-}
-
-fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
-    Color::from_srgb_u8(r, g, b, a)
-}
-
-fn red() -> Color {
-    rgb(200, 80, 80)
-}
-
 /// Top-left y so text of `font` px sits vertically centered in `rect`.
 fn text_y(rect: Rect, font: f32) -> f32 {
     rect.min.y + (rect.height() - font * 1.25) * 0.5
@@ -71,7 +59,7 @@ fn small_red_button(ui: &mut Ui, text: &str) -> bool {
     let small = ui.style().fonts.small;
     Button::new(text)
         .size(small)
-        .text_color(red())
+        .danger()
         .show(ui)
         .clicked
 }
@@ -841,17 +829,18 @@ fn editor_toolbar(ui: &mut Ui, dirty: bool, status: &mut Option<(String, f64)>) 
 
     let save_clicked = ui.horizontal(|ui| {
         let btn = if dirty {
-            Button::new("Save").text_color(Color::rgba(1.0, 1.0, 1.0, 1.0))
+            Button::new("Save").primary()
         } else {
             Button::new("Save")
         };
         let clicked = btn.show(ui).clicked;
         if dirty {
+            let warning_color = super::theme::Palette::invariant_status().warning;
             row_label(
                 ui,
                 "\u{2022} Unsaved changes",
                 style.fonts.small,
-                rgb(255, 200, 80),
+                warning_color,
             );
         }
         clicked
@@ -932,7 +921,7 @@ pub fn input_action_panel(
                 ui.add_space(4.0);
 
                 group(ui, "ia_props", |ui| {
-                    Label::new("Properties").color(rgb(140, 180, 220)).show(ui);
+                    Label::new("Properties").color(super::theme::Palette::invariant_type_colors().cameras).show(ui);
                     ui.add_space(2.0);
                     Grid::new("ia_props_grid")
                         .spacing(Vec2::new(8.0, 4.0))
@@ -996,7 +985,7 @@ pub fn input_action_panel(
 
                 group(ui, "ia_triggers", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Triggers", style.fonts.body, rgb(180, 200, 140));
+                        row_label(ui, "Triggers", style.fonts.body, super::theme::Palette::invariant_type_colors().physics);
                         row_label(
                             ui,
                             &format!("({})", action.triggers.len()),
@@ -1016,7 +1005,7 @@ pub fn input_action_panel(
 
                 group(ui, "ia_modifiers", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Modifiers", style.fonts.body, rgb(200, 160, 180));
+                        row_label(ui, "Modifiers", style.fonts.body, super::theme::Palette::invariant_type_colors().animation);
                         row_label(
                             ui,
                             &format!("({})", action.modifiers.len()),
@@ -1104,7 +1093,7 @@ pub fn input_context_panel(
 
                 group(ui, "mc_props", |ui| {
                     Label::new("Context Properties")
-                        .color(rgb(140, 180, 220))
+                        .color(super::theme::Palette::invariant_type_colors().cameras)
                         .show(ui);
                     ui.add_space(2.0);
                     Grid::new("mc_props_grid")
@@ -1147,7 +1136,7 @@ pub fn input_context_panel(
 
                 group(ui, "mc_entries", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Action Mappings", style.fonts.body, rgb(180, 200, 140));
+                        row_label(ui, "Action Mappings", style.fonts.body, super::theme::Palette::invariant_type_colors().physics);
                         row_label(
                             ui,
                             &format!("({})", mctx.entries.len()),
@@ -1203,7 +1192,7 @@ pub fn input_context_panel(
 
                                             if is_listening {
                                                 Button::new("...")
-                                                    .text_color(rgb(100, 200, 255))
+                                                    .primary()
                                                     .show(ui);
                                             } else {
                                                 let r =
@@ -1230,7 +1219,7 @@ pub fn input_context_panel(
                                             let small = style.fonts.small;
                                             let r = Button::new("\u{2716}")
                                                 .size(small)
-                                                .text_color(red())
+                                                .danger()
                                                 .show(ui);
                                             if r.hovered {
                                                 show_tooltip_for(ui, r.rect, "Remove binding");
@@ -1307,7 +1296,7 @@ pub fn input_context_panel(
                                         ui.cursor().y,
                                     ));
                                     if Button::new("Remove Entry")
-                                        .text_color(red())
+                                        .danger()
                                         .show(ui)
                                         .clicked
                                     {
@@ -1371,13 +1360,13 @@ fn listening_overlay(ui: &mut Ui, panel_rect: Rect, listening: &mut Option<(usiz
     let mut y = box_rect.min.y + margin + 4.0;
     {
         let mut p = ui.painter();
-        p.rect_filled(box_rect, 8.0, rgba(20, 20, 30, 220));
-        p.rect_stroke(box_rect, 8.0, 2.0, rgb(100, 160, 255));
+        p.rect_filled(box_rect, 8.0, style.palette.window.with_alpha(0.88));
+        p.rect_stroke(box_rect, 8.0, 2.0, style.palette.accent_active);
         p.text(
             Pos2::new(cx - title_w * 0.5, y),
             title,
             title_size,
-            Color::rgba(1.0, 1.0, 1.0, 1.0),
+            style.palette.text,
             None,
         );
         y += title_size * 1.25 + 8.0;
@@ -1385,7 +1374,7 @@ fn listening_overlay(ui: &mut Ui, panel_rect: Rect, listening: &mut Option<(usiz
             Pos2::new(cx - sub_w * 0.5, y),
             subtitle,
             style.fonts.body,
-            rgb(180, 180, 200),
+            style.palette.text_secondary,
             None,
         );
         y += style.fonts.body * 1.25 + 8.0;

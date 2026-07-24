@@ -74,47 +74,25 @@ struct AssetRow {
     thumb: Option<TextureId>,
 }
 
-// Reference-matched colors (sRGB → linear at the boundary).
-fn sel_bg() -> Color {
-    // Historical selection tint: t=100/255 of the accent (245,143,46) over
-    // the content bg (24,24,28), baked to a solid sRGB value (the source
-    // reference blended in gamma space, so no linear-blend equivalent).
-    Color::from_srgb_u8(111, 71, 35, 255)
-}
-fn sel_border() -> Color {
-    // Theme accent (rusty orange).
-    Color::from_srgb_u8(245, 143, 46, 255)
-}
-fn hover_bg() -> Color {
-    Color::from_srgb_u8(100, 100, 100, 50)
-}
-
-fn gray(v: u8) -> Color {
-    Color::from_srgb_u8(v, v, v, 255)
-}
-
 fn hash_key<T: Hash>(t: &T) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     t.hash(&mut h);
     h.finish()
 }
 
+/// Asset types map onto the preset-invariant category palette (same 10-color
+/// system as component icons and inspector section bars).
 fn type_color(t: AssetType) -> Color {
-    let (r, g, b) = match t {
-        AssetType::Texture => (100, 180, 100),
-        AssetType::Model => (100, 150, 220),
-        AssetType::Mesh => (80, 170, 240),
-        AssetType::Animation => (240, 160, 60),
-        AssetType::Scene => (220, 180, 100),
-        AssetType::Material => (200, 100, 180),
-        AssetType::Audio => (220, 120, 100),
-        AssetType::Shader => (150, 220, 220),
-        AssetType::Prefab => (180, 180, 100),
-        AssetType::InputAction => (120, 200, 160),
-        AssetType::InputMappingContext => (160, 140, 200),
-        _ => (150, 150, 150),
-    };
-    Color::from_srgb_u8(r, g, b, 255)
+    let c = super::theme::Palette::invariant_type_colors();
+    match t {
+        AssetType::Texture | AssetType::Material => c.materials,
+        AssetType::Model | AssetType::Mesh | AssetType::Prefab => c.geometry,
+        AssetType::Animation => c.animation,
+        AssetType::Scene => c.lights,
+        AssetType::Audio => c.audio,
+        AssetType::Shader | AssetType::InputAction | AssetType::InputMappingContext => c.scripting,
+        _ => c.geometry,
+    }
 }
 
 fn type_icon_stem(t: AssetType) -> &'static str {
@@ -235,10 +213,11 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: Rect, ctx: AssetBrowserPanelCt
 
             // paint the folder/grid area on the inner-panel fill
             // (surface[1]); only the toolbar/breadcrumb strips keep tab fill.
+            let panel_fill = ui.style().palette.panel;
             ui.painter().rect_filled(
                 Rect::from_min_max(Pos2::new(rect.min.x, panel_top + 74.0), rect.max),
                 0.0,
-                Color::from_srgb_u8(24, 24, 28, 255),
+                panel_fill,
             );
 
             // ── content: folder tree + asset views ──────────────────────
@@ -248,8 +227,8 @@ pub fn asset_browser_panel(ui: &mut Ui, tab_rect: Rect, ctx: AssetBrowserPanelCt
             if panel.show_folders {
                 let cell = std::cell::RefCell::new(&mut *panel);
                 Splitter::horizontal("asset_browser_split")
-                    // Side panel default width 180.0
-                    .default_ratio((180.0 / rect.width().max(1.0)).clamp(0.1, 0.5))
+                    // Folder rail default width 150.0 (design system).
+                    .default_ratio((150.0 / rect.width().max(1.0)).clamp(0.1, 0.5))
                     .min_sizes(120.0, 200.0)
                     .show(
                         ui,
@@ -444,29 +423,28 @@ fn icon_toggle(
     tooltip: &str,
 ) -> bool {
     let style = ui.style();
-    let (surface, surface_hover, surface_active) = (
-        style.palette.input,
-        style.palette.hover,
-        style.palette.active,
-    );
     let resp = if let Some(&tex) = icons.get(stem) {
-        // Bg chip (idle too), white → gray icon tint.
+        // Idle: bare icon. Active: lit accent-soft toggle (accent border).
         let rect = ui.allocate(Vec2::splat(20.0));
         let resp = ui.interact(Id::new("ab_icon_toggle").with(stem), rect);
-        let bg = if active {
-            surface_active
+        if active {
+            ui.painter()
+                .rect_filled(rect, 3.0, style.palette.accent_soft);
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                style.metrics.border,
+                style.palette.accent_active,
+            );
         } else if resp.hovered {
-            surface_hover
-        } else {
-            surface
-        };
-        ui.painter().rect_filled(rect, 2.0, bg);
+            ui.painter().rect_filled(rect, 3.0, style.palette.hover);
+        }
         let tint = if active {
-            Color::WHITE
+            style.palette.accent_active
         } else if resp.hovered {
-            gray(230)
+            style.palette.text
         } else {
-            gray(180)
+            style.palette.text_secondary
         };
         let c = rect.center();
         let image_rect = Rect::from_min_max(
@@ -618,9 +596,9 @@ fn render_toolbar(
         Rect::from_center_size(Pos2::new(row_right - 10.0, row_center_y), Vec2::splat(20.0));
     let resp = ui.interact(Id::new("ab_refresh"), refresh_rect);
     let color = if resp.hovered {
-        Color::WHITE
+        ui.style().palette.text
     } else {
-        gray(190)
+        ui.style().palette.text_secondary
     };
     let c = refresh_rect.center();
     ui.painter().circle_stroke(c, 6.0, 1.5, color);
@@ -641,34 +619,40 @@ fn render_toolbar(
 
     let dim = ui.style().palette.text_secondary;
     let small = ui.style().fonts.small;
+    let mono = crusty_gui::text::FontFamily::Mono;
     let count_text = format!("{asset_count} assets");
-    let sz = ui.painter().measure_text(&count_text, small, None);
-    ui.painter().text(
+    let sz = ui
+        .painter()
+        .measure_text_family(&count_text, small, None, mono);
+    ui.painter().text_family(
         Pos2::new(refresh_rect.min.x - 8.0 - sz.x, row_center_y - sz.y * 0.5),
         &count_text,
         small,
         dim,
         None,
+        mono,
     );
 }
 
 // ─── breadcrumb ─────────────────────────────────────────────────────────
 
 fn crumb(ui: &mut Ui, id: Id, text: &str, selected: bool) -> bool {
-    let body = ui.style().fonts.body;
-    let dim = ui.style().palette.text_secondary;
-    let accent = ui.style().palette.accent_active;
+    let style = ui.style();
+    let body = style.fonts.body;
     let sz = ui.painter().measure_text(text, body, None);
     let rect = ui.allocate(Vec2::new(sz.x + 12.0, 20.0));
     let resp = ui.interact(id, rect);
     if selected {
-        // Selectable-label style: selection fill = accent × 0.35, accent text.
-        let fill = Color::rgba(accent.r * 0.35, accent.g * 0.35, accent.b * 0.35, 1.0);
-        ui.painter().rect_filled(rect, 3.0, fill);
+        ui.painter()
+            .rect_filled(rect, 3.0, style.palette.accent_soft);
     } else if resp.hovered {
-        ui.painter().rect_filled(rect, 3.0, hover_bg());
+        ui.painter().rect_filled(rect, 3.0, style.palette.hover);
     }
-    let color = if selected { accent } else { dim };
+    let color = if selected {
+        style.palette.accent_text
+    } else {
+        style.palette.text_secondary
+    };
     ui.painter().text(
         Pos2::new(rect.min.x + 6.0, rect.center().y - sz.y * 0.5),
         text,
@@ -817,19 +801,17 @@ fn render_folder_pane(
 ) {
     ui.add_space(8.0);
     let top = ui.cursor().y;
-    let heading = ui.style().fonts.title;
     let text_color = ui.style().palette.text_secondary;
     let left = ui.available().min.x;
-    ui.painter().text(
-        Pos2::new(left + 6.0, top + 4.0),
-        "Folders",
-        heading,
+    ui.painter().text_family(
+        Pos2::new(left + 8.0, top + 4.0),
+        "FOLDERS",
+        10.0,
         text_color,
         None,
+        crusty_gui::text::FontFamily::Mono,
     );
-    ui.add_space(26.0);
-    ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(24.0);
 
     let tree = panel.registry.get_folder_tree();
     let avail_h = ui.available_size().y;
@@ -842,7 +824,7 @@ fn render_folder_pane(
         });
 }
 
-const FOLDER_ROW_H: f32 = 20.0;
+const FOLDER_ROW_H: f32 = 22.0;
 const FOLDER_INDENT: f32 = 16.0;
 
 fn render_folder_node(
@@ -906,19 +888,24 @@ fn render_folder_node(
             .is_some_and(|d| d.path != node.path && !node.path.starts_with(&d.path));
         let asset_hover = ui.dnd_hovering::<DragAsset>(row_rect);
         let folder_hover = folder_drop_valid && ui.dnd_hovering::<DragFolder>(row_rect);
+        let style = ui.style();
         if asset_hover || folder_hover {
-            ui.painter()
-                .rect_filled(hl_rect, 2.0, Color::from_srgb_u8(100, 180, 255, 60));
-            ui.painter()
-                .rect_stroke(hl_rect, 2.0, 2.0, Color::from_srgb_u8(100, 180, 255, 255));
+            // Drop-into: 1px accent border, never repaint the row fill.
+            ui.painter().rect_stroke(
+                hl_rect,
+                2.0,
+                style.metrics.border,
+                style.palette.accent_active,
+            );
         } else if is_selected {
-            ui.painter().rect_filled(hl_rect, 2.0, sel_bg());
+            ui.painter()
+                .rect_filled(hl_rect, 2.0, style.palette.selection_fill);
         } else if resp.hovered && !is_renaming {
-            ui.painter().rect_filled(hl_rect, 2.0, hover_bg());
+            ui.painter().rect_filled(hl_rect, 2.0, style.palette.hover);
         }
         if dragging_self {
             ui.painter()
-                .rect_filled(hl_rect, 2.0, Color::from_srgb_u8(80, 80, 80, 150));
+                .rect_filled(hl_rect, 2.0, style.palette.window.with_alpha(0.55));
         }
 
         // Chevron.
@@ -931,9 +918,9 @@ fn render_folder_node(
             let c = ch_rect.center();
             let s = 3.5;
             let color = if ch_resp.hovered {
-                Color::WHITE
+                style.palette.text
             } else {
-                gray(190)
+                style.palette.text_secondary
             };
             let (a, m, b) = if is_expanded {
                 (
@@ -967,7 +954,14 @@ fn render_folder_node(
         };
         let icon_x = left + indent + FOLDER_INDENT + 2.0;
         let icon_rect = Rect::from_min_size(Pos2::new(icon_x, center_y - 8.0), Vec2::splat(16.0));
-        let tint = if is_selected { Color::WHITE } else { gray(200) };
+        // Open folder keeps its yellow even when selected (design system).
+        let tint = if is_expanded && has_children {
+            super::theme::Palette::invariant_type_colors().lights
+        } else if is_selected {
+            style.palette.selection_text
+        } else {
+            style.palette.text_secondary
+        };
         if let Some(&tex) = icons.get(icon_stem) {
             ui.ctx_mut().paint.push(PaintCmd::Image {
                 rect: icon_rect,
@@ -1003,9 +997,12 @@ fn render_folder_node(
                 RenameResult::Pending => {}
             }
         } else {
-            let body = ui.style().fonts.body;
-            let dim = ui.style().palette.text_secondary;
-            let color = if is_selected { Color::WHITE } else { dim };
+            let body = style.fonts.body;
+            let color = if is_selected {
+                style.palette.selection_text
+            } else {
+                style.palette.text_secondary
+            };
             let sz = ui.painter().measure_text(&node.name, body, None);
             ui.painter().text(
                 Pos2::new(label_x, center_y - sz.y * 0.5),
@@ -1269,9 +1266,12 @@ fn render_grid(
     rows: &[AssetRow],
     visible_ids: &[AssetId],
 ) {
+    // Improved tile: thumbnail well + 2px type edge + framed two-line label.
+    // 96px wide at the default slider value, scaling with it.
     let item = panel.grid_item_size;
-    let card_w = item + 8.0;
-    let card_h = item + 28.0;
+    let card_w = item;
+    let thumb_h = (item * (70.0 / 96.0)).round();
+    let card_h = thumb_h + 2.0 + 32.0;
     let spacing = 8.0;
 
     let avail_h = ui.available_size().y;
@@ -1299,7 +1299,7 @@ fn render_grid(
                 if card.max.y < clip.min.y || card.min.y > clip.max.y {
                     continue;
                 }
-                render_grid_card(ui, panel, icons, row, card, item, visible_ids);
+                render_grid_card(ui, panel, icons, row, card, thumb_h, visible_ids);
             }
         });
 }
@@ -1311,7 +1311,7 @@ fn render_grid_card(
     icons: &HashMap<String, TextureId>,
     row: &AssetRow,
     card: Rect,
-    item: f32,
+    thumb_h: f32,
     visible_ids: &[AssetId],
 ) {
     let is_selected = panel.selection.is_selected(row.id);
@@ -1322,18 +1322,26 @@ fn render_grid_card(
     let card_id = Id::new("ab_card").with(hash_key(&row.id));
     let resp = ui.interact(card_id, card);
 
-    if is_selected {
-        ui.painter().rect_filled(card, 4.0, sel_bg());
-        ui.painter().rect_stroke(card, 4.0, 2.0, sel_border());
+    // Selection fills the card body + focus-ring border; the thumbnail well
+    // keeps its own bg so content never tints.
+    let style = ui.style();
+    let (fill, border) = if is_selected {
+        (style.palette.selection_fill, style.palette.focus_ring)
     } else if resp.hovered {
-        ui.painter().rect_filled(card, 4.0, hover_bg());
-    }
+        (style.palette.elevated, style.palette.stroke_strong)
+    } else {
+        (style.palette.header, style.palette.stroke)
+    };
+    ui.painter().rect_filled(card, 4.0, fill);
+    ui.painter()
+        .rect_stroke(card, 4.0, style.metrics.border, border);
 
-    // Thumbnail / placeholder.
-    let thumb = Rect::from_min_size(
-        Pos2::new(card.min.x + 4.0, card.min.y + 4.0),
-        Vec2::splat(item),
+    // Thumbnail well.
+    let thumb = Rect::from_min_max(
+        Pos2::new(card.min.x + 1.0, card.min.y + 1.0),
+        Pos2::new(card.max.x - 1.0, card.min.y + 1.0 + thumb_h),
     );
+    ui.painter().rect_filled(thumb, 3.0, style.palette.window);
     if let Some(tex) = row.thumb {
         ui.ctx_mut().paint.push(PaintCmd::Image {
             rect: thumb,
@@ -1343,14 +1351,13 @@ fn render_grid_card(
             texture: tex,
         });
     } else {
-        ui.painter().rect_filled(thumb, 2.0, gray(40));
-        let icon_rect = Rect::from_center_size(thumb.center(), Vec2::splat(32.0));
+        let icon_rect = Rect::from_center_size(thumb.center(), Vec2::splat(30.0));
         if let Some(&tex) = icons.get(type_icon_stem(row.asset_type)) {
             ui.ctx_mut().paint.push(PaintCmd::Image {
                 rect: icon_rect,
                 uv_min: Pos2::new(0.0, 0.0),
                 uv_max: Pos2::new(1.0, 1.0),
-                tint: gray(180),
+                tint: type_color(row.asset_type),
                 texture: tex,
             });
         } else {
@@ -1360,56 +1367,30 @@ fn render_grid_card(
                 .next()
                 .map(|c| c.to_ascii_uppercase().to_string())
                 .unwrap_or_default();
-            let sz = ui.painter().measure_text(&letter, 32.0, None);
+            let sz = ui.painter().measure_text(&letter, 30.0, None);
             let c = thumb.center();
             ui.painter().text(
                 Pos2::new(c.x - sz.x * 0.5, c.y - sz.y * 0.5),
                 &letter,
-                32.0,
-                gray(120),
+                30.0,
+                style.palette.text_disabled,
                 None,
             );
         }
     }
 
-    // Type badge, bottom-right of the thumbnail.
-    let badge = Rect::from_min_size(
-        Pos2::new(thumb.max.x - 18.0 - 2.0, thumb.max.y - 18.0 - 2.0),
-        Vec2::splat(18.0),
+    // 2px type edge under the thumbnail.
+    let edge = Rect::from_min_size(
+        Pos2::new(thumb.min.x, thumb.max.y),
+        Vec2::new(thumb.width(), style.metrics.edge_accent),
     );
     ui.painter()
-        .rect_filled(badge, 2.0, Color::from_srgb_u8(0, 0, 0, 180));
-    if let Some(&tex) = icons.get(type_icon_stem(row.asset_type)) {
-        ui.ctx_mut().paint.push(PaintCmd::Image {
-            rect: badge.shrink(2.0),
-            uv_min: Pos2::new(0.0, 0.0),
-            uv_max: Pos2::new(1.0, 1.0),
-            tint: type_color(row.asset_type),
-            texture: tex,
-        });
-    } else {
-        let letter = row
-            .asset_type
-            .display_name()
-            .chars()
-            .next()
-            .map(|c| c.to_string())
-            .unwrap_or_default();
-        let sz = ui.painter().measure_text(&letter, 10.0, None);
-        let c = badge.center();
-        ui.painter().text(
-            Pos2::new(c.x - sz.x * 0.5, c.y - sz.y * 0.5),
-            &letter,
-            10.0,
-            type_color(row.asset_type),
-            None,
-        );
-    }
+        .rect_filled(edge, 0.0, type_color(row.asset_type));
 
-    // Label / rename editor (bottom 20px strip).
+    // Label frame: name + mono type line (or the rename editor).
     let label_rect = Rect::from_min_max(
-        Pos2::new(card.min.x + 2.0, thumb.max.y + 2.0),
-        Pos2::new(card.max.x - 2.0, card.max.y - 2.0),
+        Pos2::new(card.min.x + 6.0, edge.max.y + 4.0),
+        Pos2::new(card.max.x - 6.0, card.max.y - 4.0),
     );
     if is_renaming {
         match rename_edit(
@@ -1424,18 +1405,33 @@ fn render_grid_card(
             RenameResult::Pending => {}
         }
     } else {
-        let color = if is_selected { Color::WHITE } else { gray(200) };
-        let text = truncate_to_width(ui, &row.label, 11.0, label_rect.width());
-        let sz = ui.painter().measure_text(&text, 11.0, None);
+        let name_color = if is_selected {
+            style.palette.selection_text
+        } else {
+            style.palette.text
+        };
+        let name_size = 10.5;
+        let text = truncate_to_width(ui, &row.label, name_size, label_rect.width());
         ui.painter().text(
-            Pos2::new(
-                label_rect.center().x - sz.x * 0.5,
-                label_rect.center().y - sz.y * 0.5,
-            ),
+            Pos2::new(label_rect.min.x, label_rect.min.y),
             &text,
-            11.0,
-            color,
+            name_size,
+            name_color,
             None,
+        );
+        let type_text = row.asset_type.display_name().to_uppercase();
+        let type_col = if is_selected || resp.hovered {
+            type_color(row.asset_type)
+        } else {
+            style.palette.text_secondary
+        };
+        ui.painter().text_family(
+            Pos2::new(label_rect.min.x, label_rect.min.y + 14.0),
+            &type_text,
+            9.0,
+            type_col,
+            None,
+            crusty_gui::text::FontFamily::Mono,
         );
     }
 
@@ -1496,7 +1492,8 @@ fn render_list(
         let cell = Rect::from_min_max(Pos2::new(x, header.min.y), Pos2::new(x + w, header.max.y));
         let resp = ui.interact(Id::new("ab_list_header").with(col), cell);
         if resp.hovered {
-            ui.painter().rect_filled(cell, 2.0, hover_bg());
+            let hover = ui.style().palette.hover;
+            ui.painter().rect_filled(cell, 2.0, hover);
         }
         let is_sorted = sort.col == col;
         let color = if is_sorted { text_color } else { dim };
@@ -1574,10 +1571,12 @@ fn render_list_row(
     let row_id = Id::new("ab_list_row").with(hash_key(&row.id));
     let resp = ui.interact(row_id, row_rect);
 
+    let style = ui.style();
     if is_selected {
-        ui.painter().rect_filled(row_rect, 0.0, sel_bg());
+        ui.painter()
+            .rect_filled(row_rect, 0.0, style.palette.selection_fill);
     } else if resp.hovered && !is_renaming {
-        ui.painter().rect_filled(row_rect, 0.0, hover_bg());
+        ui.painter().rect_filled(row_rect, 0.0, style.palette.hover);
     }
 
     let center_y = row_rect.center().y;
@@ -1618,7 +1617,11 @@ fn render_list_row(
             RenameResult::Pending => {}
         }
     } else {
-        let color = if is_selected { Color::WHITE } else { gray(220) };
+        let color = if is_selected {
+            style.palette.selection_text
+        } else {
+            style.palette.text
+        };
         let text = truncate_to_width(ui, &row.label, body, 200.0 - 20.0 - 4.0);
         let sz = ui.painter().measure_text(&text, body, None);
         ui.painter().text(
@@ -1766,6 +1769,7 @@ fn render_delete_confirmation(ui: &mut Ui, panel: &mut AssetBrowserPanel) {
             ui.horizontal(|ui| {
                 ui.add_space(pad);
                 if Button::new("Cancel")
+                    .ghost()
                     .min_size(Vec2::new(button_w, 28.0))
                     .show(ui)
                     .clicked
@@ -1774,8 +1778,7 @@ fn render_delete_confirmation(ui: &mut Ui, panel: &mut AssetBrowserPanel) {
                 }
                 ui.add_space(16.0);
                 if Button::new("Delete")
-                    .fill(Color::from_srgb_u8(180, 60, 60, 255))
-                    .text_color(Color::WHITE)
+                    .danger()
                     .min_size(Vec2::new(button_w, 28.0))
                     .show(ui)
                     .clicked

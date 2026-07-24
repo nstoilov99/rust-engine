@@ -43,12 +43,6 @@ pub struct HierarchyPanelCtx<'a> {
     pub world_object: Option<&'a super::world_object::WorldObjectInfo>,
 }
 
-fn gray(v: u8) -> Color {
-    Color::from_srgb_u8(v, v, v, 255)
-}
-
-const YELLOW: Color = Color::rgb(1.0, 1.0, 0.0);
-
 /// Draw the hierarchy into the dock tab's content rect (physical pixels).
 pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
     let rect = tab_rect;
@@ -116,9 +110,7 @@ pub fn hierarchy_panel(ui: &mut Ui, tab_rect: Rect, ctx: HierarchyPanelCtx) {
 fn render_header(ui: &mut Ui, panel: &mut HierarchyPanel, world: &mut World, read_only: bool) {
     let row_top = ui.cursor();
     ui.horizontal_aligned(Align::Max, |ui| {
-        // Dark chip (fill 14,14,17, 20px square).
         let resp = Button::new("+")
-            .fill(Color::from_srgb_u8(14, 14, 17, 255))
             // 23x22 pins the rect to the historical button apparent size
             // (a centered 1px stroke adds a row/col on each side).
             .exact_size(Vec2::new(23.0, 22.0))
@@ -153,7 +145,6 @@ fn render_search(ui: &mut Ui, panel: &mut HierarchyPanel) {
         let out = TextEdit::new(&mut panel.search_text)
             .width(w)
             .height(18.0)
-            .fill(Color::from_srgb_u8(14, 14, 17, 255))
             .hint("Filter entities...")
             .show_full(ui);
         panel.filter_active = !panel.search_text.is_empty();
@@ -276,18 +267,13 @@ fn render_world_row(
 
     let row_id = Id::new("hierarchy_world_row");
     let resp = ui.interact(row_id, row_rect);
+    let style = ui.style();
     if is_selected {
         ui.painter()
-            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(196, 110, 36, 80));
-        let bar = Rect::from_min_max(
-            row_rect.min,
-            Pos2::new(row_rect.min.x + 3.0, row_rect.max.y),
-        );
-        ui.painter()
-            .rect_filled(bar, 1.0, Color::from_srgb_u8(245, 143, 46, 255));
+            .rect_filled(row_rect, style.rounding.small, style.palette.selection_fill);
     } else if resp.hovered {
         ui.painter()
-            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 255, 255, 24));
+            .rect_filled(row_rect, style.rounding.small, style.palette.hover);
     }
 
     let center_y = 0.5 * (row_rect.min.y + row_rect.max.y);
@@ -319,9 +305,8 @@ fn render_world_row(
             .circle_filled(icon_rect.center(), icon_size * 0.18, tint);
     }
 
-    let style = ui.style();
     let color = if is_selected {
-        Color::WHITE
+        style.palette.selection_text
     } else {
         style.palette.text_secondary
     };
@@ -394,21 +379,15 @@ fn render_row(
     let dragging = ui.ctx().dnd.is_dragging();
 
     // Selection / hover backgrounds — painted first so they sit behind the
-    // row's guides, icons and text.
+    // row's guides, icons and text. Selected uses the preset-invariant
+    // selection pair; hover stays neutral (never combined with selection).
+    let style = ui.style();
     if is_selected {
-        // Subtle accent-tinted fill; full-strength orange lives only in the
-        // left indicator bar (Unreal-style) so row text stays readable.
         ui.painter()
-            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(196, 110, 36, 80));
-        let bar = Rect::from_min_max(
-            row_rect.min,
-            Pos2::new(row_rect.min.x + 3.0, row_rect.max.y),
-        );
-        ui.painter()
-            .rect_filled(bar, 1.0, Color::from_srgb_u8(245, 143, 46, 255));
+            .rect_filled(row_rect, style.rounding.small, style.palette.selection_fill);
     } else if row_resp.hovered && !dragging && !is_renaming {
         ui.painter()
-            .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 255, 255, 24));
+            .rect_filled(row_rect, style.rounding.small, style.palette.hover);
     }
 
     // Whole-row drag source, same id as the row interact so a completed
@@ -434,9 +413,9 @@ fn render_row(
         let center = chevron_rect.center();
         let s = 3.5;
         let color = if ch_resp.hovered {
-            Color::WHITE
+            style.palette.text
         } else {
-            gray(190)
+            style.palette.text_secondary
         };
         let (a, m, b) = if is_expanded {
             (
@@ -468,7 +447,7 @@ fn render_row(
                     Pos2::new(center.x, tail_top),
                     Pos2::new(center.x, tail_bottom),
                     1.0,
-                    gray(180),
+                    style.palette.stroke_strong,
                 );
             }
         }
@@ -554,13 +533,12 @@ fn render_row(
             panel.commit_rename(world, entity);
         }
     } else {
-        let style = ui.style();
         // Default row text is the theme's secondary color (theme's default
         // label color), not the bright primary.
         let color = if !is_visible {
-            gray(120)
+            style.palette.text_disabled
         } else if is_selected {
-            Color::WHITE
+            style.palette.selection_text
         } else {
             style.palette.text_secondary
         };
@@ -646,19 +624,24 @@ fn handle_drag_drop(
 
     let is_hovered = ui.contains_pointer(row_rect);
     if is_hovered {
+        let style = ui.style();
         let mouse_y = ui.ctx().input.pointer_pos.map(|p| p.y).unwrap_or(0.0);
         let mode = panel.calculate_drop_mode(mouse_y, row_rect.min.y, row_rect.max.y);
         let is_valid = panel.is_valid_drop(world, source, entity, mode);
 
+        // Drag feedback per the design system: 2px accent insertion line
+        // between rows, 1px accent border for drop-into — never a row fill.
         if is_valid {
             match mode {
                 DropMode::InsertAbove => draw_insertion_line(ui, row_rect.min.y, row_rect),
                 DropMode::InsertBelow => draw_insertion_line(ui, row_rect.max.y, row_rect),
                 DropMode::MakeChild => {
-                    let green = Color::from_srgb_u8(100, 200, 100, 255);
-                    ui.painter()
-                        .rect_filled(row_rect, 2.0, Color::from_srgb_u8(100, 200, 100, 50));
-                    ui.painter().rect_stroke(row_rect, 2.0, 2.0, green);
+                    ui.painter().rect_stroke(
+                        row_rect,
+                        style.rounding.small,
+                        style.metrics.border,
+                        style.palette.accent_active,
+                    );
                     let plus_size = 14.0;
                     let sz = ui.painter().measure_text("+", plus_size, None);
                     let center = Pos2::new(row_rect.max.x - 16.0, row_rect.center().y);
@@ -666,7 +649,7 @@ fn handle_drag_drop(
                         Pos2::new(center.x - sz.x * 0.5, center.y - sz.y * 0.5),
                         "+",
                         plus_size,
-                        green,
+                        style.palette.accent_active,
                         None,
                     );
                 }
@@ -675,15 +658,15 @@ fn handle_drag_drop(
                 panel.perform_drop(world, src, entity, mode);
             }
         } else {
-            ui.painter()
-                .rect_stroke(row_rect, 2.0, 2.0, Color::from_srgb_u8(200, 60, 60, 255));
+            ui.painter().rect_stroke(
+                row_rect,
+                style.rounding.small,
+                style.metrics.border,
+                style.palette.danger,
+            );
         }
 
-        // Valid-drop tint over everything, across the full row.
         if source != entity && can_set_parent(world, source, entity) {
-            ui.painter()
-                .rect_filled(row_rect, 2.0, Color::from_srgb_u8(255, 200, 0, 60));
-
             // Auto-expand a collapsed branch after hovering it for 500ms.
             if has_children && !is_expanded {
                 if panel.drag_hover_entity != Some(entity) {
@@ -705,11 +688,12 @@ fn handle_drag_drop(
 }
 
 fn draw_insertion_line(ui: &mut Ui, line_y: f32, rect: Rect) {
+    let accent = ui.style().palette.accent_active;
     ui.painter().line_segment(
         Pos2::new(rect.min.x, line_y),
         Pos2::new(rect.max.x, line_y),
         2.0,
-        YELLOW,
+        accent,
     );
     let arrow_left = rect.min.x - 8.0;
     let arrow_size = 5.0;
@@ -719,7 +703,7 @@ fn draw_insertion_line(ui: &mut Ui, line_y: f32, rect: Rect) {
             Pos2::new(arrow_left + arrow_size * 1.5, line_y),
             Pos2::new(arrow_left, line_y + arrow_size),
         ],
-        YELLOW,
+        accent,
     );
 }
 
@@ -741,9 +725,17 @@ fn render_visibility_toggle(
     );
     let resp = ui.interact(row_id.with("eye"), eye_rect);
 
-    let tint_alpha: u8 = if is_visible { 255 } else { 110 };
-    let base: u8 = if resp.hovered { 255 } else { 200 };
-    let tint = Color::from_srgb_u8(base, base, base, tint_alpha);
+    let style = ui.style();
+    let base = if resp.hovered {
+        style.palette.text
+    } else {
+        style.palette.text_secondary
+    };
+    let tint = if is_visible {
+        base
+    } else {
+        base.with_alpha(base.a * 0.45)
+    };
 
     let icon_rect = Rect::from_center_size(eye_rect.center(), Vec2::splat(ICON_SIZE));
     if let Some(&tex) = icons.get("visibility") {
@@ -773,7 +765,7 @@ fn render_visibility_toggle(
             Pos2::new(icon_rect.min.x + 1.0, icon_rect.max.y - 1.0),
             Pos2::new(icon_rect.max.x - 1.0, icon_rect.min.y + 1.0),
             1.5,
-            Color::from_srgb_u8(255, 120, 120, 200),
+            style.palette.text_secondary,
         );
     }
 
@@ -812,7 +804,7 @@ fn draw_tree_guides(
     let row_middle = 0.5 * (row_rect.min.y + row_rect.max.y);
     let left = row_rect.min.x;
 
-    let stroke_color = gray(180);
+    let stroke_color = ui.style().palette.stroke_strong;
     let selected_depth = chain_indices.len().saturating_sub(1);
 
     let trunk_top = |c: usize| -> bool {

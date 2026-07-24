@@ -125,7 +125,7 @@ pub fn command_palette_panel(
             style.palette.elevated.with_alpha(style.palette.popover_alpha),
         )
         .with_stroke(style.metrics.border, style.palette.stroke_strong)
-        .with_shadow(24.0, Color::rgba(0.0, 0.0, 0.0, 0.45)),
+        .with_shadow(24.0, Color::BLACK.with_alpha(0.45)),
     ));
     ui.ctx_mut().overlay_paint.extend(drained);
 

@@ -220,6 +220,18 @@ impl Palette {
         }
     }
 
+    /// Preset-invariant token groups, usable from panel code without a live
+    /// theme reference (the design system locks these across presets).
+    pub fn invariant_axis() -> Axis {
+        Self::invariants().axis
+    }
+    pub fn invariant_status() -> Status {
+        Self::invariants().status
+    }
+    pub fn invariant_type_colors() -> TypeColors {
+        Self::invariants().type_colors
+    }
+
     /// Tokens shared by every preset. (Surfaces/accents here are placeholders
     /// immediately overridden by the preset constructors.)
     fn invariants() -> Self {

@@ -20,43 +20,24 @@ use super::profiler::data::{
 };
 use super::profiler::scope_colors::{darken, dim_color, frame_bar_color_fps, lighten, scope_color};
 use super::profiler::{budget, ProfilerPanel};
-
-// ── color helpers ───────────────────────────────────────────────────────────
-
-fn gray(v: u8) -> Color {
-    Color::from_srgb_u8(v, v, v, 255)
-}
-
-fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::from_srgb_u8(r, g, b, 255)
-}
-
-#[allow(dead_code)]
-fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
-    Color::from_srgb_u8(r, g, b, a)
-}
+use super::theme::Palette;
 
 /// Solid frame color by FPS thresholds (green >60, yellow 30–60, red <30).
 fn fps_color(duration_ms: f64) -> Color {
     frame_bar_color_fps(duration_ms)
 }
 
-/// Plain toolbar button fill (matches the historical reference palette; the
-/// default crusty surface is much darker).
-fn btn_fill() -> Color {
-    gray(60)
-}
-
 /// Threshold color for table time cells (settings-driven).
 fn time_color(ms: f64, settings: &ProfilerSettings) -> Color {
+    let st = Palette::invariant_status();
     if ms < settings.fast_threshold_ms as f64 {
-        rgb(120, 200, 120)
+        st.success
     } else if ms < settings.warning_threshold_ms as f64 {
-        rgb(220, 200, 80)
+        st.warning
     } else if ms < settings.slow_threshold_ms as f64 {
-        rgb(220, 140, 80)
+        st.overridden
     } else {
-        rgb(220, 80, 80)
+        st.error
     }
 }
 
@@ -180,15 +161,11 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
     let mut tracy_anchor = Pos2::new(row_top.x, row_top.y + btn_h + 4.0 * s);
 
     // Left cluster: capture controls + selected-frame stats.
+    let status = Palette::invariant_status();
     ui.horizontal(|ui| {
-        let (label, fill) = if state.is_paused {
-            ("Resume", rgb(80, 180, 80))
-        } else {
-            ("Pause", rgb(180, 140, 60))
-        };
+        let label = if state.is_paused { "Resume" } else { "Pause" };
         let r = Button::new(label)
-            .fill(fill)
-            .text_color(Color::WHITE)
+            .toggled(state.is_paused)
             .show(ui);
         if r.clicked {
             state.toggle_pause();
@@ -197,7 +174,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
             show_tooltip_for(ui, r.rect, "Toggle capture (Space)");
         }
 
-        let r = Button::new("Clear").fill(btn_fill()).show(ui);
+        let r = Button::new("Clear").show(ui);
         if r.clicked {
             state.clear();
         }
@@ -209,15 +186,17 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
         ui.separator();
         ui.add_space(4.0 * s);
 
-        let (tlabel, tfill, ttext) = if state.tracy_state.is_connected() {
-            ("Tracy \u{25CF}", rgb(50, 100, 50), gray(220))
+        let r = if state.tracy_state.is_connected() {
+            Button::new("Tracy \u{25CF}").toggled(true).show(ui)
         } else if state.tracy_state.is_enabled() {
-            ("Tracy \u{25CB}", rgb(100, 80, 30), gray(220))
+            Button::new("Tracy \u{25CB}")
+                .text_color(status.warning)
+                .show(ui)
         } else {
-            // Disabled look (non-interactive dimmed button).
-            ("Tracy", gray(30), gray(110))
+            Button::new("Tracy")
+                .text_color(style.palette.text_disabled)
+                .show(ui)
         };
-        let r = Button::new(tlabel).fill(tfill).text_color(ttext).show(ui);
         if r.clicked {
             state.show_tracy_popup = !state.show_tracy_popup;
         }
@@ -225,7 +204,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
 
         if state.is_paused {
             ui.add_space(4.0 * s);
-            row_label(ui, "PAUSED", font, rgb(255, 220, 80));
+            row_label(ui, "PAUSED", font, status.warning);
             ui.add_space(8.0 * s);
         }
 
@@ -239,7 +218,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
                 ui,
                 &format!("Frame #{}", frame.frame_number),
                 font,
-                gray(200),
+                style.palette.text,
             );
             ui.separator();
             row_label(ui, &format!("{dur:.2} ms"), font, color);
@@ -250,21 +229,21 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
                 ui,
                 &format!("{} threads", frame.thread_count()),
                 font,
-                gray(180),
+                style.palette.text_secondary,
             );
             ui.separator();
             row_label(
                 ui,
                 &format!("{} scopes", frame.total_scopes),
                 font,
-                gray(180),
+                style.palette.text_secondary,
             );
             ui.separator();
             row_label(
                 ui,
                 &format!("{:.1} KB", frame.data_size_bytes as f64 / 1024.0),
                 font,
-                gray(160),
+                style.palette.text_secondary,
             );
         } else {
             row_label(ui, "No frame selected", font, style.palette.text_secondary);
@@ -288,11 +267,11 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
         Id::new("profiler_toolbar_right"),
         ropts,
         |ui| {
-            let ri = Button::new("Info").fill(btn_fill()).show(ui);
+            let ri = Button::new("Info").show(ui);
             if ri.clicked {
                 state.show_info = !state.show_info;
             }
-            let rs = Button::new("Settings").fill(btn_fill()).show(ui);
+            let rs = Button::new("Settings").show(ui);
             if rs.clicked {
                 state.show_settings = !state.show_settings;
             }
@@ -306,16 +285,18 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
     // Second row: aggregate statistics over the whole history.
     let stats = state.frame_statistics();
     if stats.frame_count > 0 {
+        let status2 = Palette::invariant_status();
         ui.horizontal(|ui| {
+            let style = ui.style();
             ui.add_space(8.0 * s);
             let avg_color = if stats.avg_fps >= 60.0 {
-                rgb(80, 200, 80)
+                status2.success
             } else if stats.avg_fps >= 30.0 {
-                rgb(220, 180, 60)
+                status2.warning
             } else {
-                rgb(220, 80, 80)
+                status2.error
             };
-            Label::new("Avg:").color(gray(140)).show(ui);
+            Label::new("Avg:").color(style.palette.text_disabled).show(ui);
             Label::new(format!("{:.2} ms", stats.avg_duration_ms))
                 .color(avg_color)
                 .show(ui);
@@ -323,18 +304,18 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
                 .color(avg_color)
                 .show(ui);
             ui.separator();
-            Label::new("Min:").color(gray(140)).show(ui);
+            Label::new("Min:").color(style.palette.text_disabled).show(ui);
             Label::new(format!("{:.2} ms", stats.min_duration_ms))
-                .color(gray(180))
+                .color(style.palette.text_secondary)
                 .show(ui);
             ui.separator();
-            Label::new("Max:").color(gray(140)).show(ui);
+            Label::new("Max:").color(style.palette.text_disabled).show(ui);
             Label::new(format!("{:.2} ms", stats.max_duration_ms))
-                .color(gray(180))
+                .color(style.palette.text_secondary)
                 .show(ui);
             ui.separator();
             Label::new(format!("({} frames)", stats.frame_count))
-                .color(gray(120))
+                .color(style.palette.text_disabled)
                 .show(ui);
         });
     }
@@ -356,7 +337,7 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 
     if state.frame_history.is_empty() {
         let mut p = ui.painter();
-        p.rect_filled(chart, 0.0, gray(30));
+        p.rect_filled(chart, 0.0, style.palette.window);
         let text = "No frames captured";
         let size = p.measure_text(text, style.fonts.body, None);
         p.text(
@@ -366,7 +347,7 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             ),
             text,
             style.fonts.body,
-            gray(120),
+            style.palette.text_disabled,
             None,
         );
         return;
@@ -419,14 +400,16 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let bar_w = ((chart.width() - bar_pad * n as f32) / n as f32).max(2.0 * s);
     let mut hovered_bar: Option<(usize, Rect)> = None; // display idx + bar rect
 
+    let fh_status = Palette::invariant_status();
+    let fh_text = style.palette.text;
     {
         let mut p = ui.painter();
-        p.rect_filled(chart, 0.0, gray(30));
+        p.rect_filled(chart, 0.0, style.palette.window);
 
         // FPS threshold guide lines (60 / 30 FPS).
         for (ms, line, label) in [
-            (16.67f64, rgba(100, 200, 100, 100), "60"),
-            (33.33, rgba(220, 180, 60, 100), "30"),
+            (16.67f64, fh_status.success.with_alpha(0.4), "60"),
+            (33.33, fh_status.warning.with_alpha(0.4), "30"),
         ] {
             if ms < max_ms {
                 let y = chart.max.y - (ms / max_ms) as f32 * chart_h;
@@ -477,7 +460,7 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     bar.expand(1.0 * s),
                     Rounding::same(1.0 * s),
                     2.0,
-                    Color::WHITE,
+                    fh_text,
                 );
             }
         }
@@ -533,13 +516,14 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
         }
         ui.separator();
 
+        let fh_style = ui.style();
         match state.frame_history_mode {
             FrameHistoryMode::Slowest => {
                 row_label(
                     ui,
                     &format!("Showing {n} slowest of {total} frames"),
-                    style.fonts.small,
-                    gray(160),
+                    fh_style.fonts.small,
+                    fh_style.palette.text_secondary,
                 );
             }
             FrameHistoryMode::Live if overflow > 0 => {
@@ -548,9 +532,9 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     let start = overflow - state.frame_history_scroll;
                     format!("{}-{} of {}", start + 1, start + n, total)
                 };
-                let label_w = ui.text_mut().measure(&label, style.fonts.small, None).x;
+                let label_w = ui.text_mut().measure(&label, fh_style.fonts.small, None).x;
                 let track_w = (ui.available_size().x - label_w - 16.0 * s).max(60.0 * s);
-                let row_h = style.fonts.body + style.spacing.button_padding.y * 2.0;
+                let row_h = fh_style.fonts.body + fh_style.spacing.button_padding.y * 2.0;
                 let slot = ui.allocate(Vec2::new(track_w, row_h));
                 let track = Rect::from_min_max(
                     Pos2::new(slot.min.x, slot.center().y - 3.0 * s),
@@ -559,6 +543,12 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                 let sr = ui.interact(Id::new("profiler_fh_scrollbar"), slot);
                 let ratio = n as f32 / total as f32;
                 let thumb_w = (track.width() * ratio).max(20.0 * s);
+                let (track_col, thumb_pressed, thumb_hover, thumb_rest) = (
+                    fh_style.palette.header,
+                    fh_style.palette.text_secondary,
+                    fh_style.palette.text_disabled,
+                    fh_style.palette.stroke,
+                );
                 if sr.pressed {
                     if let Some(pt) = ui.ctx().input.pointer_pos {
                         let f = ((pt.x - track.min.x - thumb_w * 0.5)
@@ -575,20 +565,22 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     Pos2::new(thumb_x + thumb_w, track.max.y),
                 );
                 let thumb_color = if sr.pressed {
-                    gray(180)
+                    thumb_pressed
                 } else if sr.hovered {
-                    gray(140)
+                    thumb_hover
                 } else {
-                    gray(100)
+                    thumb_rest
                 };
                 let mut p = ui.painter();
-                p.rect_filled(track, Rounding::same(3.0 * s), gray(40));
+                p.rect_filled(track, Rounding::same(3.0 * s), track_col);
                 p.rect_filled(thumb, Rounding::same(3.0 * s), thumb_color);
                 drop(p);
-                row_label(ui, &label, style.fonts.small, gray(160));
+                let fh_style2 = ui.style();
+                row_label(ui, &label, fh_style2.fonts.small, fh_style2.palette.text_secondary);
             }
             _ => {
-                row_label(ui, &format!("{total} frames"), style.fonts.small, gray(160));
+                let fh_style2 = ui.style();
+                row_label(ui, &format!("{total} frames"), fh_style2.fonts.small, fh_style2.palette.text_secondary);
             }
         }
     });
@@ -599,21 +591,22 @@ fn frame_history(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 /// Selection fill: accent over the backdrop, strong enough to read as a
 /// solid chip (a 0.55 tint would be barely visible on our darker theme).
 fn selection_fill(accent: Color) -> Color {
-    Color::rgba(accent.r, accent.g, accent.b, 0.8)
+    accent.with_alpha(0.8)
 }
 
 /// Selected-button variant: a regular button that switches to the
 /// accent selection fill when active. Returns true on click.
 fn toggle_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label: &str) -> bool {
     let clicked = if *value == option {
-        let a = ui.style().palette.accent_active;
+        let style = ui.style();
+        let a = style.palette.accent_active;
         Button::new(label)
             .fill(selection_fill(a))
-            .text_color(gray(255))
+            .text_color(style.palette.text)
             .show(ui)
             .clicked
     } else {
-        Button::new(label).fill(btn_fill()).show(ui).clicked
+        Button::new(label).show(ui).clicked
     };
     if clicked {
         *value = option;
@@ -644,9 +637,9 @@ fn select_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label
         };
         ui.painter().rect_filled(rect, style.rounding.widget, fill);
     }
-    // White on the accent fill — accent-on-accent text was unreadable.
+    // Full-brightness text on the accent fill — accent-on-accent text was unreadable.
     let text_color = if selected {
-        gray(255)
+        style.palette.text
     } else {
         style.palette.text
     };
@@ -680,11 +673,12 @@ fn view_row(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
         select_chip(ui, &mut state.current_view, ProfilerView::Budget, "Budget");
         ui.separator();
         row_label(ui, "Filter:", font, text);
+        let vr_style = ui.style();
         TextEdit::new(&mut state.filter_text)
             .width(150.0 * s)
-            .fill(rgb(14, 14, 17))
+            .fill(vr_style.palette.input)
             .show_full(ui);
-        if Button::new("x").fill(btn_fill()).show(ui).clicked {
+        if Button::new("x").show(ui).clicked {
             state.filter_text.clear();
         }
     });
@@ -770,18 +764,20 @@ fn fmt_axis(ms: f64, spacing: f64) -> String {
 
 fn centered_message(ui: &mut Ui, text: &str) {
     let style = ui.style();
+    let text_col = style.palette.text_disabled;
+    let font = style.fonts.body;
     let avail = Rect::from_min_max(ui.cursor(), ui.available().max);
     ui.allocate(avail.size());
     let mut p = ui.painter();
-    let size = p.measure_text(text, style.fonts.body, None);
+    let size = p.measure_text(text, font, None);
     p.text(
         Pos2::new(
             avail.center().x - size.x * 0.5,
             avail.center().y - size.y * 0.5,
         ),
         text,
-        style.fonts.body,
-        gray(120),
+        font,
+        text_col,
         None,
     );
 }
@@ -805,9 +801,13 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
         let bc_h = 22.0 * s;
         let avail_w = ui.available_size().x;
         let bc_rect = ui.allocate(Vec2::new(avail_w, bc_h));
+        let bc_style = ui.style();
+        let bc_bg = bc_style.palette.header;
+        let bc_text = bc_style.palette.text_secondary;
+        let bc_text_dim = bc_style.palette.stroke_strong;
         {
             let mut p = ui.painter();
-            p.rect_filled(bc_rect, 0.0, gray(35));
+            p.rect_filled(bc_rect, 0.0, bc_bg);
         }
         let content_w = avail_w - left_margin;
         let mut nav: Option<usize> = None;
@@ -823,8 +823,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             bopts,
             |ui| {
                 if Button::new("Frame")
-                    .fill(gray(45))
-                    .text_color(gray(180))
+                    .text_color(bc_text)
                     .show(ui)
                     .clicked
                 {
@@ -840,7 +839,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                         Pos2::new(sep.min.x, text_y(sep, font)),
                         ">",
                         font,
-                        gray(100),
+                        bc_text_dim,
                         None,
                     );
                     let name = if item.name.chars().count() > 20 {
@@ -850,8 +849,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                         item.name.clone()
                     };
                     let r = Button::new(name)
-                        .fill(gray(45))
-                        .text_color(gray(180))
+                        .text_color(bc_text)
                         .show(ui);
                     if r.hovered {
                         show_tooltip_for(
@@ -930,11 +928,18 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let mut hovered: Option<HoveredScope> = None;
     let mut headers: Vec<(Rect, String)> = Vec::new();
 
+    // Bind palette colors before entering painter blocks.
+    let fg_bg = ui.style().palette.window;
+    let fg_grid_major = ui.style().palette.stroke;
+    let fg_grid_minor = ui.style().palette.header;
+    let fg_thread_header = ui.style().palette.panel;
+    let fg_thread_text = ui.style().palette.text_secondary;
+
     // ── content pass
     ui.ctx_mut().paint.push(PaintCmd::PushClip(content));
     {
         let mut p = ui.painter();
-        p.rect_filled(content, 0.0, gray(25));
+        p.rect_filled(content, 0.0, fg_bg);
 
         // Grid lines.
         let spacing = nice_spacing(zoom);
@@ -949,7 +954,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     Pos2::new(x, content.min.y),
                     Pos2::new(x, content.max.y),
                     1.0,
-                    gray(40),
+                    fg_grid_major,
                 );
             }
             if sub > 1 {
@@ -962,7 +967,7 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                             Pos2::new(xs, content.min.y),
                             Pos2::new(xs, content.max.y),
                             1.0,
-                            gray(32),
+                            fg_grid_minor,
                         );
                     }
                 }
@@ -979,14 +984,14 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             );
             let collapsed = state.collapsed_threads.contains(&thread.name);
             if header.max.y >= content.min.y && header.min.y <= content.max.y {
-                p.rect_filled(header, 0.0, gray(30));
+                p.rect_filled(header, 0.0, fg_thread_header);
                 let arrow = if collapsed { ">" } else { "v" };
                 let label = format!("{arrow} {} ({} scopes)", thread.name, thread.scope_count());
                 p.text(
                     Pos2::new(header.min.x + 8.0 * s, text_y(header, 12.0 * s)),
                     &label,
                     12.0 * s,
-                    gray(220),
+                    fg_thread_text,
                     None,
                 );
             }
@@ -1005,14 +1010,21 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     ui.ctx_mut().paint.push(PaintCmd::PopClip);
 
     // ── axis pass + cursor line
+    let ax_bg = ui.style().palette.header;
+    let ax_stroke = ui.style().palette.stroke;
+    let ax_tick = ui.style().palette.stroke_strong;
+    let ax_label = ui.style().palette.text_secondary;
+    let ax_text = ui.style().palette.text;
+    let ax_accent = ui.style().palette.accent_active;
+    let ax_tooltip_bg = ui.style().palette.window;
     {
         let mut p = ui.painter();
-        p.rect_filled(axis_rect, 0.0, gray(35));
+        p.rect_filled(axis_rect, 0.0, ax_bg);
         p.line_segment(
             Pos2::new(axis_rect.min.x, axis_rect.max.y),
             Pos2::new(axis_rect.max.x, axis_rect.max.y),
             1.0,
-            gray(50),
+            ax_stroke,
         );
         let spacing = nice_spacing(zoom);
         let first = (start_ms / spacing).floor() * spacing;
@@ -1025,14 +1037,14 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     Pos2::new(x, axis_rect.max.y - 6.0 * s),
                     Pos2::new(x, axis_rect.max.y),
                     1.0,
-                    gray(100),
+                    ax_tick,
                 );
                 let label = fmt_axis(t, spacing);
                 p.text(
                     Pos2::new(x + 3.0 * s, text_y(axis_rect, 11.0 * s)),
                     &label,
                     11.0 * s,
-                    gray(180),
+                    ax_label,
                     None,
                 );
             }
@@ -1049,12 +1061,12 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                         } else {
                             h.rect.max.x
                         };
-                        (snap, rgba(100, 200, 255, 180))
+                        (snap, ax_accent.with_alpha(0.7))
                     } else {
-                        (pt.x, rgba(255, 255, 255, 180))
+                        (pt.x, ax_text.with_alpha(0.7))
                     }
                 } else {
-                    (pt.x, rgba(255, 255, 255, 180))
+                    (pt.x, ax_text.with_alpha(0.7))
                 };
                 p.line_segment(
                     Pos2::new(line_x, axis_rect.min.y),
@@ -1071,12 +1083,12 @@ fn flamegraph(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     Pos2::new(lx - 3.0 * s, axis_rect.min.y + 2.0 * s),
                     Vec2::new(sz.x + 6.0 * s, sz.y + 2.0 * s),
                 );
-                p.rect_filled(bg, Rounding::same(3.0 * s), rgba(30, 30, 30, 230));
+                p.rect_filled(bg, Rounding::same(3.0 * s), ax_tooltip_bg.with_alpha(0.9));
                 p.text(
                     Pos2::new(lx, axis_rect.min.y + 3.0 * s),
                     &label,
                     11.0 * s,
-                    gray(230),
+                    ax_text,
                     None,
                 );
             }
@@ -1272,7 +1284,7 @@ fn draw_scope(
             // reference — computed in gamma space, not linear).
             let [cr, cg, cb, _] = c.to_srgb_u8();
             let lum = 0.299 * cr as f32 + 0.587 * cg as f32 + 0.114 * cb as f32;
-            let tc = if lum > 140.0 { gray(30) } else { gray(250) };
+            let tc = if lum > 140.0 { Color::BLACK } else { Color::WHITE };
             let clip = rect.intersect(fg.content);
             p.paint_mut().push(PaintCmd::PushClip(clip));
             let tx = rect.min.x.max(fg.content.min.x) + 4.0 * fg.s;
@@ -1306,6 +1318,12 @@ fn draw_scope(
 
 fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let style = ui.style();
+    let tv_header_sorted_col = style.palette.accent_active;
+    let tv_header_unsorted_col = style.palette.text_disabled;
+    let tv_hover_overlay = style.palette.text.with_alpha(0.04);
+    let tv_stripe_overlay = style.palette.text.with_alpha(0.02);
+    let tv_loc_col = style.palette.text_disabled;
+    let tv_count_col = style.palette.text_secondary;
     let frame_ms = state
         .selected_frame()
         .map(|f| f.duration_ms())
@@ -1361,12 +1379,12 @@ fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             };
             let mut p = ui.painter();
             if hover {
-                p.rect_filled(cell, Rounding::same(2.0 * s), rgba(255, 255, 255, 10));
+                p.rect_filled(cell, Rounding::same(2.0 * s), tv_hover_overlay);
             }
             let color = if sorted {
-                style.palette.accent_active
+                tv_header_sorted_col
             } else {
-                gray(150)
+                tv_header_unsorted_col
             };
             let tw = p.measure_text(&text, style.fonts.small, None).x;
             let tx = if right {
@@ -1416,9 +1434,9 @@ fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                 let hover = ui.contains_pointer(row);
                 let mut p = ui.painter();
                 if hover {
-                    p.rect_filled(row, 0.0, rgba(255, 255, 255, 12));
+                    p.rect_filled(row, 0.0, tv_hover_overlay);
                 } else if i % 2 == 1 {
-                    p.rect_filled(row, 0.0, rgba(255, 255, 255, 5));
+                    p.rect_filled(row, 0.0, tv_stripe_overlay);
                 }
                 let mut x = row.min.x;
                 for (ci, (_, frac, right, _)) in columns.iter().enumerate() {
@@ -1426,8 +1444,8 @@ fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                     let cell = Rect::from_min_size(Pos2::new(x, row.min.y), Vec2::new(w, row_h));
                     let (text, color, font) = match ci {
                         0 => (st.name.to_string(), style.palette.text, style.fonts.body),
-                        1 => (st.location.to_string(), gray(130), style.fonts.small),
-                        2 => (st.call_count.to_string(), gray(180), style.fonts.body),
+                        1 => (st.location.to_string(), tv_loc_col, style.fonts.small),
+                        2 => (st.call_count.to_string(), tv_count_col, style.fonts.body),
                         3 => (
                             format!("{:.3} ms", st.total_time_ms()),
                             time_color(st.total_time_ms(), &settings),
@@ -1475,9 +1493,18 @@ fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 // ── budget view (redesigned) ────────────────────────────────────────────────
 
 /// A budget bar with a marker at 100%: the bar spans 0..2× budget.
-fn budget_bar(p: &mut Painter, rect: Rect, actual: f64, budget_ms: f64, color: Color, s: f32) {
+fn budget_bar(
+    p: &mut Painter,
+    rect: Rect,
+    actual: f64,
+    budget_ms: f64,
+    color: Color,
+    s: f32,
+    track_bg: Color,
+    marker_color: Color,
+) {
     let round = Rounding::same(rect.height() * 0.3);
-    p.rect_filled(rect, round, gray(38));
+    p.rect_filled(rect, round, track_bg);
     let f = ((actual / (budget_ms * 2.0)).clamp(0.0, 1.0)) as f32;
     if f > 0.005 {
         let fill = Rect::from_min_size(rect.min, Vec2::new(rect.width() * f, rect.height()));
@@ -1489,7 +1516,7 @@ fn budget_bar(p: &mut Painter, rect: Rect, actual: f64, budget_ms: f64, color: C
         Pos2::new(mx, rect.min.y - 1.0 * s),
         Pos2::new(mx, rect.max.y + 1.0 * s),
         1.0,
-        rgba(230, 230, 230, 160),
+        marker_color,
     );
 }
 
@@ -1505,6 +1532,11 @@ fn budget_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 
 fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let style = ui.style();
+    let bv_status = Palette::invariant_status();
+    let bv_track_bg = style.palette.header;
+    let bv_marker = style.palette.text_secondary;
+    let bv_label_col = style.palette.text_secondary;
+    let bv_card_label_col = style.palette.text_disabled;
     let Some(frame) = state.selected_frame().cloned() else {
         centered_message(ui, "Select a captured frame to inspect budgets");
         return;
@@ -1512,11 +1544,11 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let fb = &budget::FRAME_BUDGET;
     let dur = frame.duration_ms();
     let frame_color = if dur <= fb.total_budget_ms {
-        rgb(80, 200, 80)
+        bv_status.success
     } else if dur <= 33.33 {
-        rgb(220, 180, 60)
+        bv_status.warning
     } else {
-        rgb(220, 80, 80)
+        bv_status.error
     };
 
     ui.add_space(4.0 * s);
@@ -1551,12 +1583,12 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     let bar = ui.allocate(Vec2::new(avail_w, 14.0 * s));
     {
         let mut p = ui.painter();
-        budget_bar(&mut p, bar, dur, fb.total_budget_ms, frame_color, s);
+        budget_bar(&mut p, bar, dur, fb.total_budget_ms, frame_color, s, bv_track_bg, bv_marker);
     }
 
     ui.add_space(10.0 * s);
     Label::new("Category Budgets")
-        .color(gray(150))
+        .color(bv_label_col)
         .size(style.fonts.small)
         .show(ui);
     ui.add_space(4.0 * s);
@@ -1566,11 +1598,11 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
     for category in fb.categories {
         let actual = budget::scope_total_ms(&frame, category.scopes);
         let color = if actual <= category.budget_ms {
-            rgb(80, 200, 80)
+            bv_status.success
         } else if actual <= category.budget_ms * 1.5 {
-            rgb(220, 180, 60)
+            bv_status.warning
         } else {
-            rgb(220, 80, 80)
+            bv_status.error
         };
         let row = ui.allocate(Vec2::new(avail_w, 18.0 * s));
         let mut p = ui.painter();
@@ -1585,7 +1617,7 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
             Pos2::new(row.min.x + label_w, row.min.y + 4.0 * s),
             Pos2::new(row.max.x - value_w, row.max.y - 4.0 * s),
         );
-        budget_bar(&mut p, bar, actual, category.budget_ms, color, s);
+        budget_bar(&mut p, bar, actual, category.budget_ms, color, s, bv_track_bg, bv_marker);
         let value = format!("{:.2} / {:.2} ms", actual, category.budget_ms);
         let vw = p.measure_text(&value, style.fonts.small, None).x;
         p.text(
@@ -1601,7 +1633,7 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
 
     ui.add_space(10.0 * s);
     Label::new("Runtime Counters")
-        .color(gray(150))
+        .color(bv_label_col)
         .size(style.fonts.small)
         .show(ui);
     ui.add_space(4.0 * s);
@@ -1633,7 +1665,7 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                 Pos2::new(card.min.x + 8.0 * s, card.min.y + 4.0 * s),
                 label,
                 style.fonts.small,
-                gray(140),
+                bv_card_label_col,
                 None,
             );
             p.text(
@@ -1674,9 +1706,10 @@ fn section<R>(ui: &mut Ui, s: f32, id: &str, f: impl FnOnce(&mut Ui) -> R) -> R 
         f,
     );
     let bg = Rect::from_min_max(top, Pos2::new(avail.max.x, used.max.y + pad));
+    let sec_bg = ui.style().palette.header;
     ui.ctx_mut().paint.insert(
         insert_at,
-        PaintCmd::Rrect(RectShape::fill(bg, Rounding::same(4.0 * s), gray(35))),
+        PaintCmd::Rrect(RectShape::fill(bg, Rounding::same(4.0 * s), sec_bg)),
     );
     ui.allocate(Vec2::new(bg.width(), bg.height()));
     r
@@ -1752,7 +1785,7 @@ fn settings_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) 
             popup_heading(ui, s, "Performance Thresholds");
             Label::new("Affects bar colors + flamegraph")
                 .size(style.fonts.small)
-                .color(gray(140))
+                .color(style.palette.text_disabled)
                 .show(ui);
             ui.add_space(2.0 * s);
             section(ui, s, "thresholds", |ui| {
@@ -1781,11 +1814,12 @@ fn settings_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) 
                     }
                 });
                 ui.add_space(4.0 * s);
+                let tr_status = Palette::invariant_status();
                 let warn = settings.warning_threshold_ms;
                 threshold_row(
                     ui,
                     s,
-                    rgb(80, 200, 80),
+                    tr_status.success,
                     "Fast <",
                     &mut settings.fast_threshold_ms,
                     0.1,
@@ -1796,7 +1830,7 @@ fn settings_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) 
                 threshold_row(
                     ui,
                     s,
-                    rgb(220, 180, 60),
+                    tr_status.warning,
                     "Warning <",
                     &mut settings.warning_threshold_ms,
                     0.5,
@@ -1806,7 +1840,7 @@ fn settings_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) 
                 threshold_row(
                     ui,
                     s,
-                    rgb(220, 80, 80),
+                    tr_status.error,
                     "Slow >=",
                     &mut settings.slow_threshold_ms,
                     1.0,
@@ -1931,7 +1965,7 @@ fn info_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
     let mut close = false;
     let width = 300.0 * s;
     let pos = Pos2::new(anchor.x - width * 0.5, anchor.y);
-    let dim = gray(170);
+    let dim = style.palette.text_secondary;
     let show = &mut state.show_info;
     Window::new("Profiler Help")
         .open(show)
@@ -1993,11 +2027,14 @@ fn tracy_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
         return;
     }
     let style = ui.style();
+    let tp_status = Palette::invariant_status();
     let mut close = false;
     let width = 330.0 * s;
     let pos = Pos2::new(anchor.x, anchor.y);
     let connected = state.tracy_state.is_connected();
-    let dim = gray(170);
+    let dim = style.palette.text_secondary;
+    let dim2 = style.palette.text_disabled;
+    let label_col = style.palette.text_secondary;
     let show = &mut state.show_tracy_popup;
     Window::new("Tracy Profiler")
         .open(show)
@@ -2008,18 +2045,19 @@ fn tracy_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
         .auto_size(true)
         .show(ui, |ui| {
             popup_heading(ui, s, "Status");
+            let style2 = ui.style();
             section(ui, s, "status", |ui| {
                 if connected {
                     Label::new("\u{25CF} Tracy Active")
-                        .color(rgb(80, 200, 80))
+                        .color(tp_status.success)
                         .show(ui);
                 } else {
                     Label::new("Tracy not compiled in")
-                        .color(gray(140))
+                        .color(style2.palette.text_disabled)
                         .show(ui);
                     Label::new("Build with: cargo build --features tracy")
-                        .size(style.fonts.small)
-                        .color(gray(100))
+                        .size(style2.fonts.small)
+                        .color(style2.palette.text_disabled)
                         .show(ui);
                 }
             });
@@ -2035,15 +2073,15 @@ fn tracy_popup(ui: &mut Ui, s: f32, state: &mut ProfilerState, anchor: Pos2) {
                 Label::new("- GPU profiling support").color(dim).show(ui);
                 Label::new("- Lock contention analysis").color(dim).show(ui);
                 ui.add_space(4.0 * s);
-                Label::new("Puffin:").color(gray(180)).show(ui);
+                Label::new("Puffin:").color(label_col).show(ui);
                 Label::new("Quick in-app overview")
-                    .size(style.fonts.small)
-                    .color(gray(140))
+                    .size(style2.fonts.small)
+                    .color(dim2)
                     .show(ui);
-                Label::new("Tracy:").color(gray(180)).show(ui);
+                Label::new("Tracy:").color(label_col).show(ui);
                 Label::new("Deep investigation tool")
-                    .size(style.fonts.small)
-                    .color(gray(140))
+                    .size(style2.fonts.small)
+                    .color(dim2)
                     .show(ui);
             });
             ui.add_space(8.0 * s);

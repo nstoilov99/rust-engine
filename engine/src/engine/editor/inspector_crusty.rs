@@ -35,23 +35,11 @@ use crate::engine::ecs::{
 };
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType, StaticCollision};
 
-// Linear-space constants precomputed from their sRGB u8 values (crusty's
-// `Color::from_srgb_u8` isn't const): srgb_to_linear(c) per channel.
-const AXIS_COLOR_X: Color = Color::rgba(0.715694, 0.08022, 0.08022, 1.0); // srgb(220,80,80)
-const AXIS_COLOR_Y: Color = Color::rgba(0.08022, 0.456411, 0.08022, 1.0); // srgb(80,180,80)
-const AXIS_COLOR_Z: Color = Color::rgba(0.08022, 0.187821, 0.715694, 1.0); // srgb(80,120,220)
-
-const CAT_CORE: Color = Color::rgba(0.127438, 0.351533, 0.715694, 1.0); // srgb(100,160,220)
-const CAT_RENDERING: Color = Color::rgba(0.715694, 0.456411, 0.08022, 1.0); // srgb(220,180,80)
-const CAT_PHYSICS: Color = Color::rgba(0.127438, 0.456411, 0.187821, 1.0); // srgb(100,180,120)
-const CAT_ANIMATION: Color = Color::rgba(0.57758, 0.187821, 0.57758, 1.0); // srgb(200,120,200)
-const CAT_AUDIO: Color = Color::rgba(0.715694, 0.262251, 0.08022, 1.0); // srgb(220,140,80)
-
-/// Engine theme `palette.header_bg` (30,31,35) — crusty's mapped palette has
-/// no header token, so it's mirrored here like the hierarchy port does.
-const HEADER_BG: Color = Color::rgba(0.012983, 0.013702, 0.016807, 1.0); // srgb(30,31,35)
-const WARNING: Color = Color::rgba(0.715694, 0.456411, 0.031896, 1.0); // srgb(220,180,50)
-const REMOVE_RED: Color = Color::rgba(0.715694, 0.08022, 0.08022, 1.0); // srgb(220,80,80)
+/// Section accent stripes use the preset-invariant per-component-category
+/// colors (Transform = geometry grey, Mesh Renderer = materials, …).
+fn cats() -> super::theme::TypeColors {
+    super::theme::Palette::invariant_type_colors()
+}
 
 const PROP_LABEL_W: f32 = 90.0;
 const VEC3_LABEL_W: f32 = 52.0;
@@ -239,7 +227,7 @@ fn render_world_info(ui: &mut Ui, info: &super::world_object::WorldObjectInfo) {
     ui.add_space(4.0);
 
     let bar = ui.allocate(Vec2::new(width, 22.0));
-    ui.painter().rect_filled(bar, 2.0, HEADER_BG);
+    ui.painter().rect_filled(bar, 2.0, style.palette.header);
     ui.painter().text(
         Pos2::new(bar.min.x + 8.0, bar.min.y + 4.0),
         "Information",
@@ -364,7 +352,7 @@ fn component_section(
     let (left, right) = (panel_rect.min.x, panel_rect.max.x);
     let start_y = ui.cursor().y;
 
-    let header_h = style.fonts.body + 13.0;
+    let header_h = 26.0;
     let header_rect = ui.allocate(Vec2::new(panel_rect.width(), header_h));
     let sid = Id::new("inspector_section").with(title);
     // Before `interact`, which itself creates the memory entry.
@@ -391,7 +379,7 @@ fn component_section(
     let bg = if resp.hovered {
         style.palette.hover
     } else {
-        HEADER_BG
+        style.palette.header
     };
     let header_bg_rect = Rect::from_min_max(
         Pos2::new(left, header_rect.min.y),
@@ -458,10 +446,14 @@ fn component_section(
         ui.add_space(6.0);
     }
 
-    // Accent stripe over the full section height + bottom separator.
+    // Category stripe over the full section height + bottom separator
+    // (2px — the reserved edge-accent width).
     let end_y = ui.cursor().y;
     ui.painter().rect_filled(
-        Rect::from_min_max(Pos2::new(left, start_y), Pos2::new(left + 3.0, end_y)),
+        Rect::from_min_max(
+            Pos2::new(left, start_y),
+            Pos2::new(left + style.metrics.edge_accent, end_y),
+        ),
         0.0,
         accent,
     );
@@ -498,8 +490,9 @@ fn property_row<R>(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui) -> R) -
     r
 }
 
-/// Transform-style row: label, "R" reset button, colored X/Y/Z drag fields.
-/// Returns true when reset was clicked.
+/// Transform-style row: label, X/Y/Z drag fields with a 3px axis-colored
+/// inset edge + tinted axis letter, then a 20×22 "R" reset at the row's
+/// end. Returns true when reset was clicked.
 fn vec3_row(
     ui: &mut Ui,
     label: &str,
@@ -511,47 +504,39 @@ fn vec3_row(
     let style = ui.style();
     let font = style.fonts.body;
     let dim = style.palette.text_secondary;
+    let axis = super::theme::Palette::invariant_axis();
     ui.horizontal(|ui| {
         let start = ui.cursor();
         ui.painter()
             .text(Pos2::new(start.x, start.y + 3.0), label, font, dim, None);
         ui.set_cursor(Pos2::new(start.x + VEC3_LABEL_W, start.y));
 
-        let reset = Button::new("R")
-            .exact_size(Vec2::new(VEC3_RESET_W, FIELD_H))
-            .show(ui);
-        if reset.hovered {
-            ui.tooltip_for(reset.rect, "Reset");
-        }
-        ui.add_space(6.0);
-
-        let axis_w = ui.painter().measure_text("X", font, None).x;
         let remain = ui.available_size().x;
-        let field_w = ((remain - 3.0 * (axis_w + 4.0 + 6.0)) / 3.0).clamp(40.0, VEC3_INPUT_W);
+        let field_w =
+            ((remain - (VEC3_RESET_W + 6.0) - 3.0 * 6.0) / 3.0).clamp(40.0, VEC3_INPUT_W);
 
-        for (i, (axis, color)) in [
-            ("X", AXIS_COLOR_X),
-            ("Y", AXIS_COLOR_Y),
-            ("Z", AXIS_COLOR_Z),
-        ]
-        .iter()
-        .enumerate()
+        for (i, (axis_label, color)) in [("X", axis.x), ("Y", axis.y), ("Z", axis.z)]
+            .into_iter()
+            .enumerate()
         {
-            let p = ui.cursor();
-            ui.painter()
-                .text(Pos2::new(p.x, p.y + 3.0), axis, font, *color, None);
-            ui.add_space(axis_w + 4.0);
             let mut dv = DragValue::new(&mut vals[i])
                 .speed(speed)
                 .range(range.clone())
                 .width(field_w)
                 .height(FIELD_H)
-                .fill(style.palette.input);
+                .axis(axis_label, color);
             if let Some(suffix) = suffix {
                 dv = dv.suffix(suffix);
             }
             dv.show(ui);
             ui.add_space(6.0);
+        }
+
+        let reset = Button::new("R")
+            .exact_size(Vec2::new(VEC3_RESET_W, FIELD_H))
+            .show(ui);
+        if reset.hovered {
+            ui.tooltip_for(reset.rect, "Reset");
         }
         reset.clicked
     })
@@ -919,7 +904,7 @@ fn render_components(
 
 fn edit_name(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut name) = world.get::<&mut Name>(entity) {
-        component_section(ui, "Name", CAT_CORE, false, |ui| {
+        component_section(ui, "Name", cats().geometry, false, |ui| {
             property_row(ui, "Name:", |ui| {
                 let field_bg = ui.style().palette.input;
                 // text_edit_width
@@ -939,7 +924,7 @@ fn edit_transform(ui: &mut Ui, panel: &mut InspectorPanel, world: &mut World, en
 
     if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
         let euler_cache = &mut panel.euler_cache;
-        component_section(ui, "Transform", CAT_CORE, false, |ui| {
+        component_section(ui, "Transform", cats().geometry, false, |ui| {
             let mut position = [
                 transform.position.x,
                 transform.position.y,
@@ -1029,7 +1014,7 @@ fn edit_camera(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut Pick
     let Ok(mut camera) = world.get::<&mut Camera>(entity) else {
         return false;
     };
-    component_section(ui, "Camera", CAT_RENDERING, true, |ui| {
+    component_section(ui, "Camera", cats().cameras, true, |ui| {
         checkbox_row(ui, "Active", &mut camera.active);
 
         #[derive(PartialEq, Copy, Clone)]
@@ -1122,7 +1107,7 @@ fn edit_mesh_renderer(
     let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) else {
         return false;
     };
-    component_section(ui, "Mesh Renderer", CAT_RENDERING, true, |ui| {
+    component_section(ui, "Mesh Renderer", cats().materials, true, |ui| {
         checkbox_row(ui, "Visible", &mut renderer.visible);
 
         asset_slot_row(
@@ -1169,7 +1154,7 @@ fn edit_directional_light(
     let Ok(mut light) = world.get::<&mut DirectionalLight>(entity) else {
         return false;
     };
-    component_section(ui, "Directional Light", CAT_RENDERING, true, |ui| {
+    component_section(ui, "Directional Light", cats().lights, true, |ui| {
         if !light.direction.x.is_finite() {
             light.direction.x = 0.0;
         }
@@ -1228,7 +1213,7 @@ fn edit_point_light(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut
     let Ok(mut light) = world.get::<&mut PointLight>(entity) else {
         return false;
     };
-    component_section(ui, "Point Light", CAT_RENDERING, true, |ui| {
+    component_section(ui, "Point Light", cats().lights, true, |ui| {
         if !light.intensity.is_finite() {
             light.intensity = 1.0;
         }
@@ -1270,7 +1255,7 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     let Ok(mut rb) = world.get::<&mut RigidBody>(entity) else {
         return false;
     };
-    component_section(ui, "Rigid Body", CAT_PHYSICS, true, |ui| {
+    component_section(ui, "Rigid Body", cats().physics, true, |ui| {
         if !rb.mass.is_finite() {
             rb.mass = 1.0;
         }
@@ -1324,13 +1309,10 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
         property_row(ui, "Lock Rotation", |ui| {
             let style = ui.style();
             let font = style.fonts.body;
-            for ((axis, color), v) in [
-                ("X", AXIS_COLOR_X),
-                ("Y", AXIS_COLOR_Y),
-                ("Z", AXIS_COLOR_Z),
-            ]
-            .into_iter()
-            .zip(lock.iter_mut())
+            let ax = crate::engine::editor::theme::Palette::invariant_axis();
+            for ((axis, color), v) in [("X", ax.x), ("Y", ax.y), ("Z", ax.z)]
+                .into_iter()
+                .zip(lock.iter_mut())
             {
                 let p = ui.cursor();
                 ui.painter()
@@ -1349,7 +1331,7 @@ fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     let Ok(mut collider) = world.get::<&mut Collider>(entity) else {
         return false;
     };
-    component_section(ui, "Collider", CAT_PHYSICS, true, |ui| {
+    component_section(ui, "Collider", cats().physics, true, |ui| {
         #[derive(PartialEq, Copy, Clone)]
         enum Shape {
             Cuboid,
@@ -1436,7 +1418,7 @@ fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
 
 fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut skeleton) = world.get::<&mut SkeletonInstance>(entity) {
-        component_section(ui, "Skeleton", CAT_ANIMATION, false, |ui| {
+        component_section(ui, "Skeleton", cats().animation, false, |ui| {
             property_row(ui, "Bones", |ui| {
                 Label::new(format!("{}", skeleton.bones.len())).show(ui);
             });
@@ -1464,7 +1446,7 @@ fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
 
 fn edit_animation_player(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut player) = world.get::<&mut AnimationPlayer>(entity) {
-        component_section(ui, "Animation Player", CAT_ANIMATION, false, |ui| {
+        component_section(ui, "Animation Player", cats().animation, false, |ui| {
             property_row(ui, "Clip", |ui| {
                 Label::new(player.clip.name.clone()).show(ui);
             });
@@ -1513,7 +1495,7 @@ fn edit_audio_emitter(
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Audio Emitter", CAT_AUDIO, true, |ui| {
+    let remove_menu = component_section(ui, "Audio Emitter", cats().audio, true, |ui| {
         asset_slot_row(
             ui,
             "audio_clip_slot",
@@ -1565,7 +1547,7 @@ fn edit_audio_emitter(
 
         ui.add_space(4.0);
         if Button::new("Remove")
-            .text_color(REMOVE_RED)
+            .text_color(ui.style().palette.danger)
             .show(ui)
             .clicked
         {
@@ -1580,11 +1562,11 @@ fn edit_audio_listener(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Audio Listener", CAT_AUDIO, true, |ui| {
+    let remove_menu = component_section(ui, "Audio Listener", cats().audio, true, |ui| {
         Checkbox::new(&mut listener.active, "Active").show(ui);
         ui.add_space(4.0);
         if Button::new("Remove")
-            .text_color(REMOVE_RED)
+            .text_color(ui.style().palette.danger)
             .show(ui)
             .clicked
         {
@@ -1599,11 +1581,11 @@ fn edit_static_collision(ui: &mut Ui, world: &mut World, entity: Entity) -> bool
         return false;
     }
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Static Collision", CAT_PHYSICS, true, |ui| {
+    let remove_menu = component_section(ui, "Static Collision", cats().physics, true, |ui| {
         Label::new("Static collision source (cooked)").show(ui);
         ui.add_space(4.0);
         if Button::new("Remove")
-            .text_color(REMOVE_RED)
+            .text_color(ui.style().palette.danger)
             .show(ui)
             .clicked
         {
@@ -1623,7 +1605,7 @@ fn edit_particle_effect(
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Particle Effect", CAT_RENDERING, true, |ui| {
+    let remove_menu = component_section(ui, "Particle Effect", cats().vfx, true, |ui| {
         property_row(ui, "Preset", |ui| {
             let mut chosen: Option<fn() -> ParticleEffect> = None;
             ComboBox::new("pe_preset")
@@ -1863,7 +1845,7 @@ fn edit_particle_effect(
                                 }
                             }
                             if Button::new("Remove Module")
-                                .text_color(REMOVE_RED)
+                                .text_color(ui.style().palette.danger)
                                 .show(ui)
                                 .clicked
                             {
@@ -1936,7 +1918,7 @@ fn edit_particle_effect(
 
         ui.add_space(4.0);
         if Button::new("Remove")
-            .text_color(REMOVE_RED)
+            .text_color(ui.style().palette.danger)
             .show(ui)
             .clicked
         {
@@ -1961,13 +1943,14 @@ fn render_add_component(
     let has_dir_light = p.has(ComponentPresence::DIR_LIGHT);
     let has_point_light = p.has(ComponentPresence::POINT_LIGHT);
 
+    let warning = super::theme::Palette::invariant_status().warning;
     if has_rigidbody && !has_collider {
         Label::new("Warning: RigidBody without Collider")
-            .color(WARNING)
+            .color(warning)
             .show(ui);
     } else if !has_rigidbody && has_collider {
         Label::new("Warning: Collider without RigidBody")
-            .color(WARNING)
+            .color(warning)
             .show(ui);
     }
 
@@ -1977,7 +1960,7 @@ fn render_add_component(
     let dim = ui.style().palette.text_secondary;
     ComboBox::new("add_component")
         .selected_text("Add Component...")
-        .width(127.0)
+        .width(150.0)
         .show_ui(ui, |ui| {
             let entry = |ui: &mut Ui, label: &str, conflict: bool| -> bool {
                 if conflict {

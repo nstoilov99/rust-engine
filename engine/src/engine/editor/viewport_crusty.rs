@@ -22,16 +22,6 @@ use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::resources::PlayMode;
 use hecs::{Entity, World};
 
-// ── colors (toolbar palette, premultiplied → straight alpha) ───────────────
-
-fn gray(v: u8) -> Color {
-    Color::from_srgb_u8(v, v, v, 255)
-}
-
-fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::from_srgb_u8(r, g, b, 255)
-}
-
 const TOOLBAR_H: f32 = 36.0;
 const BUTTON_W: f32 = 26.0;
 const BUTTON_H: f32 = 24.0;
@@ -205,9 +195,10 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
     }
 
     // ── play-mode indicator bar over the image top edge
+    let status = super::theme::Palette::invariant_status();
     let bar_color = match ctx.play_mode {
-        PlayMode::Playing => Some(rgb(50, 200, 50)),
-        PlayMode::Paused => Some(rgb(220, 200, 50)),
+        PlayMode::Playing => Some(status.success),
+        PlayMode::Paused => Some(status.warning),
         PlayMode::Edit => None,
     };
     if let Some(color) = bar_color {
@@ -230,14 +221,16 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
                 line_height * (2.0 + extra_lines) + padding,
             ),
         );
+        let style = ui.style();
+        let stat_status = super::theme::Palette::invariant_status();
         ui.painter()
-            .rect_filled(bg, 4.0 * s, Color::from_srgb_u8(0, 0, 0, 180));
+            .rect_filled(bg, 4.0 * s, style.palette.window.with_alpha(0.85));
         let fps_color = if ctx.fps >= 60.0 {
-            rgb(100, 220, 100)
+            stat_status.success
         } else if ctx.fps >= 30.0 {
-            rgb(220, 200, 80)
+            stat_status.warning
         } else {
-            rgb(220, 90, 80)
+            stat_status.error
         };
         ui.painter().text(
             Pos2::new(pos.x + padding * 0.5, pos.y + padding * 0.5),
@@ -250,7 +243,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
             Pos2::new(pos.x + padding * 0.5, pos.y + padding * 0.5 + line_height),
             &format!("Frame: {:.2} ms", ctx.delta_ms),
             13.0 * s,
-            gray(220),
+            style.palette.text,
             None,
         );
         if let Some(st) = &ctx.streaming {
@@ -261,7 +254,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
                 ),
                 &format!("Stream: {} cells, {} chunks", st.cells, st.chunks),
                 13.0 * s,
-                gray(220),
+                style.palette.text,
                 None,
             );
             ui.painter().text(
@@ -274,7 +267,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
                     st.in_flight, st.ready, st.worst_ms
                 ),
                 13.0 * s,
-                gray(220),
+                style.palette.text,
                 None,
             );
         }
@@ -287,7 +280,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
                 ),
                 net,
                 13.0 * s,
-                gray(220),
+                style.palette.text,
                 None,
             );
         }
@@ -301,6 +294,7 @@ fn key_pressed(ui: &Ui, c: char) -> bool {
 }
 
 fn placeholder(ui: &mut Ui, rect: Rect, s: f32) {
+    let style = ui.style();
     let center = rect.center();
     let heading = "3D Viewport";
     let hw = ui.painter().measure_text(heading, 20.0 * s, None).x;
@@ -308,7 +302,7 @@ fn placeholder(ui: &mut Ui, rect: Rect, s: f32) {
         Pos2::new(center.x - hw * 0.5, center.y - 40.0 * s),
         heading,
         20.0 * s,
-        gray(230),
+        style.palette.text,
         None,
     );
     let size_text = format!("Size: {:.0} x {:.0}", rect.width(), rect.height());
@@ -317,7 +311,7 @@ fn placeholder(ui: &mut Ui, rect: Rect, s: f32) {
         Pos2::new(center.x - sw * 0.5, center.y - 12.0 * s),
         &size_text,
         14.0 * s,
-        gray(190),
+        style.palette.text_secondary,
         None,
     );
     let init = "Initializing viewport texture...";
@@ -326,7 +320,7 @@ fn placeholder(ui: &mut Ui, rect: Rect, s: f32) {
         Pos2::new(center.x - iw * 0.5, center.y + 14.0 * s),
         init,
         14.0 * s,
-        gray(120),
+        style.palette.text_disabled,
         None,
     );
 }
@@ -464,14 +458,16 @@ fn toolbar(
     );
 
     // Right-aligned camera mode indicator
+    let cam_status = super::theme::Palette::invariant_status();
+    let cam_types = super::theme::Palette::invariant_type_colors();
     let (text, color) = match camera_mode {
         CameraControlMode::Fly => (
             format!("Fly {:.1}x", settings.camera_speed),
-            rgb(100, 200, 100),
+            cam_status.success,
         ),
-        CameraControlMode::Orbit => ("Orbit".to_string(), rgb(100, 150, 200)),
-        CameraControlMode::Pan => ("Pan".to_string(), rgb(200, 150, 100)),
-        CameraControlMode::LookDrag => ("Look".to_string(), rgb(150, 100, 200)),
+        CameraControlMode::Orbit => ("Orbit".to_string(), cam_types.cameras),
+        CameraControlMode::Pan => ("Pan".to_string(), cam_types.vfx),
+        CameraControlMode::LookDrag => ("Look".to_string(), cam_types.materials),
         CameraControlMode::None => return,
     };
     let font = 11.0 * s;
@@ -752,7 +748,7 @@ fn camera_speed_button(
         let style = ui.style();
         Label::new("CAMERA SPEED")
             .size(10.0 * s)
-            .color(gray(140))
+            .color(style.palette.text_disabled)
             .show(ui);
         let sep = ui.allocate(Vec2::new(ui.available().width(), 5.0 * s));
         ui.painter().line_segment(
@@ -792,14 +788,14 @@ fn camera_speed_button(
                 *camera_speed = (log_min + t * (log_max - log_min)).exp();
             }
         }
-        ui.painter().rect_filled(track, 2.0 * s, gray(60));
+        ui.painter().rect_filled(track, 2.0 * s, style.palette.header);
         let t = ((camera_speed.ln() - log_min) / (log_max - log_min)).clamp(0.0, 1.0);
         let handle_color = if resp.pressed {
-            rgb(100, 150, 255)
+            style.palette.accent_active
         } else if resp.hovered {
-            gray(180)
+            style.palette.text_secondary
         } else {
-            gray(150)
+            style.palette.text_disabled
         };
         ui.painter().circle_filled(
             Pos2::new(track.min.x + t * track.width(), slider_rect.center().y),
