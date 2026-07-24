@@ -1,6 +1,6 @@
 # M10 — Editor UX & Design System v1 (Crusty Theme Tokens)
 
-**Status:** 📋 Planned
+**Status:** ✅ Complete (P0–P9 delivered)
 **Duration:** ~3–4 weeks (supersedes Task M1's 2-week box — scope grew from
 "tokens + style guide + focus" to a full mockup-fidelity restyle plus the
 settings windows; flagged and accepted)
@@ -236,10 +236,18 @@ implementation; the rendered page wins per its own source-of-truth rule.)
   rounds**; after round two, remaining nits become backlog notes, not
   merge blockers (the grep gate is the objective check).
 
-### P9 — Edit menu functionality (may slip past P8)
+### P9 — Edit menu functionality (may slip past P8) — ✅ delivered
 
 Deliberately split out of P4: this is systems work, not restyle, and the
 visual milestone must not block on it.
+
+Delivered: `serialize_subtree`/`spawn_subtree` in the scene serializer
+(fresh-GUID paste with intra-subtree Parent remap via live `set_parent`
+against an old-GUID→index map — no serialized rewriting needed; unit-tested),
+`DeleteSubtreeCommand` + `PasteCommand` (GUID-tracked, respawn-safe),
+Cut = clipboard write + one delete command labeled "Cut X" (single undo
+action, no compound machinery), verb/object undo labels ("Undo Paste Duck"),
+Delete now undoable in edit mode, shortcuts gated on `wants_keyboard`.
 
 - **Entity clipboard**: RON-serialize the selected entity subtree via the
   scene serializer to an internal buffer; Paste instantiates as sibling
@@ -256,23 +264,25 @@ visual milestone must not block on it.
 
 ## Acceptance
 
-- [ ] Four presets switch live from Editor Preferences → Appearance and
+- [x] Four presets switch live from Editor Preferences → Appearance and
       persist across restarts; Steel is the default
-- [ ] `grep -rn "Color::rgb" game_client/src/panels engine/src/engine/editor`
+- [x] `grep -rn "Color::rgb" game_client/src/panels engine/src/engine/editor`
       (crusty panels) returns zero widget-color literals
-- [ ] Every interactive widget shows the five ladder states; Tab traverses
+      (`game_client/src/panels` doesn't exist; the 4 editor hits are
+      computed color math — picker value, hover blend, status tint, gizmo
+      premultiply — not widget literals)
+- [x] Every interactive widget shows the five ladder states; Tab traverses
       the settings windows and inspector; focus ring visible
-- [ ] IBM Plex Sans renders UI text; JetBrains Mono renders values, paths,
+- [x] IBM Plex Sans renders UI text; JetBrains Mono renders values, paths,
       shortcuts, logs
-- [ ] Edit menu complete per mockup; Duplicate/Delete functional;
-      Cut/Copy/Paste functional if P9 lands in-box, else present-disabled
-      (P9 tracked separately, not a milestone blocker)
-- [ ] Editor Preferences autosaves `editor_prefs.ron` live; Project
+- [x] Edit menu complete per mockup; Duplicate/Delete functional;
+      Cut/Copy/Paste functional (P9 landed in-box)
+- [x] Editor Preferences autosaves `editor_prefs.ron` live; Project
       Settings saves `project.ron`; both windows searchable with
       modified-dots and resets
-- [ ] PlaySettings live in Editor Preferences → Play; M9.6 play flows
+- [x] PlaySettings live in Editor Preferences → Play; M9.6 play flows
       (Client / Listen Server / N players) still pass
-- [ ] Side-by-side screenshots vs mockup judged ≥95% on: chrome, hierarchy,
+- [x] Side-by-side screenshots vs mockup judged ≥95% on: chrome, hierarchy,
       inspector, asset browser, console, settings windows
 
 ## Out of scope
@@ -301,3 +311,22 @@ visual milestone must not block on it.
    `net_config.ron` as the runtime file; Project Settings is its editor.
    Merging into `project.ron` would force the packaged client to parse
    editor config — wrong direction.
+
+## P8 fidelity backlog (round-2 close-out, 2026-07-24)
+
+Reviewed vs mockup (codex round 1+2). Fixed: Reset All → new crusty
+`ButtonVariant::DangerOutline` (filled danger stays in confirm dialogs).
+Remaining nits — deliberate deviations or UX-v2 items, not blockers:
+
+- Centered "Main Scene — Crusty" chrome identity: superseded by scene
+  tabs (P4 decision; docking reality).
+- Toolbar mode control is icon-only, not the mockup's wide
+  icon+label dropdown (P4 decision; toolbar density).
+- Settings shell keeps a fixed 780×560 window (stable across category
+  switches) instead of content-hugging height.
+- Settings header is two rows (crusty Window title bar + scope strip);
+  mockup folds chip+search into the 36px title bar — needs custom
+  title-bar content API in crusty Window. UX v2.
+- Appearance lacks accent / UI scale / font-size rows — features don't
+  exist engine-side yet; add rows when they do.
+- Undo/Redo verb+object labels → P9.

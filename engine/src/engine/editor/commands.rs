@@ -3,9 +3,38 @@
 //! Each undoable action is represented as a Command that knows how to
 //! execute and undo itself.
 
+use crate::engine::ecs::components::EntityGuid;
+use crate::engine::ecs::hierarchy::despawn_recursive;
 use crate::engine::ecs::{Name, Transform};
+use crate::engine::scene::scene_format::EntityData;
+use crate::engine::scene::scene_serializer::{serialize_subtree, spawn_subtree};
 use hecs::{Entity, World};
 use nalgebra_glm as glm;
+
+/// Resolve an entity by its GUID string (entities are respawned across
+/// undo/redo, so commands track GUIDs instead of `Entity` ids).
+fn find_by_guid(world: &World, guid: &str) -> Option<Entity> {
+    let guid = EntityGuid::from_string(guid)?;
+    world
+        .query::<&EntityGuid>()
+        .iter()
+        .find(|(_, g)| g.0 == guid.0)
+        .map(|(e, _)| e)
+}
+
+/// "Delete Duck", "Cut 3 Entities", … for undo labels.
+pub fn verb_object_label(verb: &str, world: &World, roots: &[Entity]) -> String {
+    match roots {
+        [single] => {
+            let name = world
+                .get::<&Name>(*single)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|_| "Entity".to_string());
+            format!("{verb} {name}")
+        }
+        many => format!("{verb} {} Entities", many.len()),
+    }
+}
 
 /// Trait for undoable commands
 pub trait Command: Send + Sync {
@@ -53,6 +82,17 @@ impl CommandHistory {
         self.redo_stack.clear(); // Clear redo stack on new action
 
         // Limit history size
+        if self.undo_stack.len() > self.max_history {
+            self.undo_stack.remove(0);
+        }
+        self.dirty = true;
+    }
+
+    /// Record an already-executed command (for commands whose results the
+    /// caller needs to inspect before handing them over, e.g. Paste).
+    pub fn push_executed(&mut self, command: Box<dyn Command>) {
+        self.undo_stack.push(command);
+        self.redo_stack.clear();
         if self.undo_stack.len() > self.max_history {
             self.undo_stack.remove(0);
         }
@@ -174,7 +214,7 @@ impl Command for TransformChangeCommand {
     }
 
     fn description(&self) -> &str {
-        "Transform Change"
+        "Transform Entity"
     }
 }
 
@@ -280,5 +320,126 @@ impl<T: Clone + Send + Sync + 'static> Command for RemoveComponentCommand<T> {
 
     fn description(&self) -> &str {
         self.description_str
+    }
+}
+
+/// Undoable delete of entity subtrees (also the delete half of Cut — the
+/// clipboard write itself is not undone, matching common editors).
+///
+/// Subtrees are serialized at construction. Execute despawns them, resolving
+/// entities by GUID so redo still works after an undo respawned them; undo
+/// respawns with the original GUIDs and re-links surviving external parents.
+pub struct DeleteSubtreeCommand {
+    subtrees: Vec<Vec<EntityData>>,
+    root_guids: Vec<String>,
+    description: String,
+}
+
+impl DeleteSubtreeCommand {
+    /// `roots` must be top-most (no root an ancestor of another).
+    pub fn new(world: &World, roots: &[Entity], verb: &str) -> Self {
+        Self {
+            subtrees: roots.iter().map(|&r| serialize_subtree(world, r)).collect(),
+            root_guids: roots
+                .iter()
+                .filter_map(|&r| world.get::<&EntityGuid>(r).ok().map(|g| g.0.to_string()))
+                .collect(),
+            description: verb_object_label(verb, world, roots),
+        }
+    }
+}
+
+impl Command for DeleteSubtreeCommand {
+    fn execute(&mut self, world: &mut World) {
+        for guid in &self.root_guids {
+            if let Some(entity) = find_by_guid(world, guid) {
+                despawn_recursive(world, entity);
+            }
+        }
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        for subtree in &self.subtrees {
+            spawn_subtree(world, subtree, false);
+        }
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+/// Undoable paste of the entity clipboard as siblings of the paste target.
+///
+/// The first execute spawns with fresh GUIDs and re-serializes the result so
+/// redo restores the *same* pasted entities (GUIDs stay stable across
+/// undo/redo). The target parent is tracked by GUID; if it no longer exists
+/// the entities paste as scene roots.
+pub struct PasteCommand {
+    data: Vec<EntityData>,
+    target_parent_guid: Option<String>,
+    root_guids: Vec<String>,
+    description: String,
+}
+
+impl PasteCommand {
+    pub fn new(world: &World, clipboard: Vec<EntityData>, target_parent: Option<Entity>) -> Self {
+        Self {
+            data: clipboard,
+            target_parent_guid: target_parent
+                .and_then(|p| world.get::<&EntityGuid>(p).ok().map(|g| g.0.to_string())),
+            root_guids: Vec::new(),
+            description: "Paste".to_string(),
+        }
+    }
+
+    /// The pasted subtree roots (valid after execute).
+    pub fn roots(&self, world: &World) -> Vec<Entity> {
+        self.root_guids
+            .iter()
+            .filter_map(|g| find_by_guid(world, g))
+            .collect()
+    }
+}
+
+impl Command for PasteCommand {
+    fn execute(&mut self, world: &mut World) {
+        if self.root_guids.is_empty() {
+            // First execute: fresh GUIDs, then reparent + snapshot the result.
+            let (_, roots) = spawn_subtree(world, &self.data, true);
+            let target = self
+                .target_parent_guid
+                .as_deref()
+                .and_then(|g| find_by_guid(world, g));
+            if let Some(target) = target {
+                for &root in &roots {
+                    crate::engine::ecs::hierarchy::set_parent(world, root, target);
+                }
+            }
+            self.root_guids = roots
+                .iter()
+                .filter_map(|&r| world.get::<&EntityGuid>(r).ok().map(|g| g.0.to_string()))
+                .collect();
+            self.data = roots
+                .iter()
+                .flat_map(|&r| serialize_subtree(world, r))
+                .collect();
+            self.description = verb_object_label("Paste", world, &roots);
+        } else {
+            // Redo: restore the exact entities the first paste created.
+            spawn_subtree(world, &self.data, false);
+        }
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        for guid in &self.root_guids {
+            if let Some(entity) = find_by_guid(world, guid) {
+                despawn_recursive(world, entity);
+            }
+        }
+    }
+
+    fn description(&self) -> &str {
+        &self.description
     }
 }

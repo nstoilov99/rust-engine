@@ -21,6 +21,12 @@ pub enum MenuAction {
     Undo,
     /// Redo the last undone action
     Redo,
+    /// Cut the selected entity subtree to the entity clipboard
+    Cut,
+    /// Copy the selected entity subtree to the entity clipboard
+    Copy,
+    /// Paste the entity clipboard as sibling of the selection
+    Paste,
     /// Duplicate the selected entity
     Duplicate,
     /// Delete the selected entity

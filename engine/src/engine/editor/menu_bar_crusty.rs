@@ -29,6 +29,7 @@ pub struct MenuBarCtx<'a> {
     pub icons: &'a HashMap<String, TextureId>,
     pub theme: &'a EditorTheme,
     pub has_selection: bool,
+    pub has_clipboard: bool,
     pub play_settings: &'a mut PlaySettings,
 }
 
@@ -64,6 +65,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         icons,
         theme,
         has_selection,
+        has_clipboard,
         play_settings,
         ..
     } = ctx;
@@ -109,30 +111,43 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
             let is_edit_mode = play_mode == PlayMode::Edit;
             ui.menu_button_width("Edit", 250.0, |ui| {
                 ui.menu_group_header("History");
+                let undo_label = command_history
+                    .undo_description()
+                    .map(|d| format!("Undo {d}"))
+                    .unwrap_or_else(|| "Undo".to_string());
                 if ui.menu_item_shortcut(
-                    "Undo",
+                    undo_label,
                     "Ctrl+Z",
                     is_edit_mode && command_history.can_undo(),
                 ) {
                     action = MenuAction::Undo;
                 }
+                let redo_label = command_history
+                    .redo_description()
+                    .map(|d| format!("Redo {d}"))
+                    .unwrap_or_else(|| "Redo".to_string());
                 if ui.menu_item_shortcut(
-                    "Redo",
+                    redo_label,
                     "Ctrl+Y",
                     is_edit_mode && command_history.can_redo(),
                 ) {
                     action = MenuAction::Redo;
                 }
-                // Ships disabled until the undo-history browser lands (P9).
+                // Ships disabled until the undo-history browser lands (post-M10).
                 let _ = ui.menu_item_enabled("Undo History\u{2026}", false);
 
                 ui.separator();
                 ui.menu_group_header("Edit");
-                // Cut/Copy/Paste need the entity clipboard (P9) — disabled.
-                let _ = ui.menu_item_shortcut("Cut", "Ctrl+X", false);
-                let _ = ui.menu_item_shortcut("Copy", "Ctrl+C", false);
-                let _ = ui.menu_item_shortcut("Paste", "Ctrl+V", false);
                 let can_edit_sel = is_edit_mode && has_selection;
+                if ui.menu_item_shortcut("Cut", "Ctrl+X", can_edit_sel) {
+                    action = MenuAction::Cut;
+                }
+                if ui.menu_item_shortcut("Copy", "Ctrl+C", can_edit_sel) {
+                    action = MenuAction::Copy;
+                }
+                if ui.menu_item_shortcut("Paste", "Ctrl+V", is_edit_mode && has_clipboard) {
+                    action = MenuAction::Paste;
+                }
                 if ui.menu_item_shortcut("Duplicate", "Ctrl+D", can_edit_sel) {
                     action = MenuAction::Duplicate;
                 }

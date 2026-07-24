@@ -744,6 +744,80 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
     entity
 }
 
+/// Serialize an entity subtree (root first, children in hierarchy order).
+/// Used by the editor entity clipboard and undoable delete.
+pub fn serialize_subtree(world: &World, root: Entity) -> Vec<EntityData> {
+    let mut entities = Vec::new();
+    collect_entities_in_order(world, root, &mut entities);
+    entities
+}
+
+/// Spawn a serialized subtree back into the world.
+///
+/// With `fresh_guids` (paste), stored GUIDs are dropped so every entity gets
+/// a new one; intra-subtree `Parent` references are remapped to the new
+/// copies via the old GUIDs, and references to entities outside the set are
+/// dropped (those entities become subtree roots — the caller reparents them).
+/// Without it (undo of delete), original GUIDs are restored and external
+/// parents that still exist in the world are re-linked.
+///
+/// Returns (spawned entities in input order, subtree roots).
+pub fn spawn_subtree(
+    world: &mut World,
+    entities: &[EntityData],
+    fresh_guids: bool,
+) -> (Vec<Entity>, Vec<Entity>) {
+    use std::collections::HashMap;
+
+    let mut index_by_guid: HashMap<&str, usize> = HashMap::new();
+    for (i, data) in entities.iter().enumerate() {
+        if let Some(guid) = &data.guid {
+            index_by_guid.insert(guid.as_str(), i);
+        }
+    }
+
+    let mut spawned = Vec::with_capacity(entities.len());
+    for data in entities {
+        if fresh_guids {
+            let mut copy = data.clone();
+            copy.guid = None; // spawn generates a fresh v4 GUID
+            spawned.push(spawn_entity_from_data(world, &copy));
+        } else {
+            spawned.push(spawn_entity_from_data(world, data));
+        }
+    }
+
+    let mut roots = Vec::new();
+    for (i, data) in entities.iter().enumerate() {
+        let parent_ref = data.components.iter().find_map(|c| match c {
+            ComponentData::Parent {
+                parent_name,
+                parent_guid,
+            } => Some((parent_name, parent_guid)),
+            _ => None,
+        });
+        let Some((parent_name, parent_guid)) = parent_ref else {
+            roots.push(spawned[i]);
+            continue;
+        };
+        if let Some(&pi) = parent_guid
+            .as_deref()
+            .and_then(|g| index_by_guid.get(g))
+        {
+            set_parent(world, spawned[i], spawned[pi]);
+        } else if !fresh_guids {
+            if let Some(parent) = resolve_parent(world, parent_name, parent_guid.as_deref()) {
+                set_parent(world, spawned[i], parent);
+            } else {
+                roots.push(spawned[i]);
+            }
+        } else {
+            roots.push(spawned[i]);
+        }
+    }
+    (spawned, roots)
+}
+
 /// Resolve a parent entity by GUID (preferred) or name (fallback).
 fn resolve_parent(world: &World, parent_name: &str, parent_guid: Option<&str>) -> Option<Entity> {
     // Try GUID first
@@ -765,4 +839,88 @@ fn resolve_parent(world: &World, parent_name: &str, parent_guid: Option<&str>) -
         .iter()
         .find(|(_, name)| name.0 == parent_name)
         .map(|(entity, _)| entity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spawn_named(world: &mut World, name: &str) -> Entity {
+        world.spawn((
+            Transform::default(),
+            Name::new(name.to_string()),
+            EntityGuid::new(),
+        ))
+    }
+
+    fn guid_of(world: &World, entity: Entity) -> String {
+        world.get::<&EntityGuid>(entity).unwrap().0.to_string()
+    }
+
+    fn parent_guid_of(data: &[EntityData], name: &str) -> Option<String> {
+        data.iter()
+            .find(|e| e.name == name)?
+            .components
+            .iter()
+            .find_map(|c| match c {
+                ComponentData::Parent { parent_guid, .. } => parent_guid.clone(),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn paste_remaps_intra_subtree_parent_guids() {
+        let mut world = World::new();
+        let parent = spawn_named(&mut world, "Parent");
+        let child = spawn_named(&mut world, "Child");
+        set_parent(&mut world, child, parent);
+        let old_parent_guid = guid_of(&world, parent);
+
+        let data = serialize_subtree(&world, parent);
+        assert_eq!(data.len(), 2);
+        assert_eq!(
+            parent_guid_of(&data, "Child").as_deref(),
+            Some(old_parent_guid.as_str())
+        );
+
+        let (spawned, roots) = spawn_subtree(&mut world, &data, true);
+        assert_eq!(spawned.len(), 2);
+        assert_eq!(roots, vec![spawned[0]]);
+
+        // Fresh GUIDs, and the pasted child is parented to the pasted copy.
+        let new_parent_guid = guid_of(&world, spawned[0]);
+        assert_ne!(new_parent_guid, old_parent_guid);
+        assert_ne!(guid_of(&world, spawned[1]), guid_of(&world, child));
+        assert_eq!(world.get::<&Parent>(spawned[1]).unwrap().0, spawned[0]);
+
+        // Re-serializing the pasted subtree records the NEW parent GUID.
+        let pasted = serialize_subtree(&world, spawned[0]);
+        assert_eq!(
+            parent_guid_of(&pasted, "Child").as_deref(),
+            Some(new_parent_guid.as_str())
+        );
+    }
+
+    #[test]
+    fn restore_preserves_guids_and_relinks_external_parent() {
+        let mut world = World::new();
+        let outer = spawn_named(&mut world, "Outer");
+        let root = spawn_named(&mut world, "Root");
+        let child = spawn_named(&mut world, "Child");
+        set_parent(&mut world, root, outer);
+        set_parent(&mut world, child, root);
+        let root_guid = guid_of(&world, root);
+        let child_guid = guid_of(&world, child);
+
+        let data = serialize_subtree(&world, root);
+        crate::engine::ecs::hierarchy::despawn_recursive(&mut world, root);
+        assert!(!world.contains(root));
+
+        let (spawned, roots) = spawn_subtree(&mut world, &data, false);
+        assert_eq!(roots.len(), 0); // root re-linked to Outer, so no dangling roots
+        assert_eq!(guid_of(&world, spawned[0]), root_guid);
+        assert_eq!(guid_of(&world, spawned[1]), child_guid);
+        assert_eq!(world.get::<&Parent>(spawned[0]).unwrap().0, outer);
+        assert_eq!(world.get::<&Parent>(spawned[1]).unwrap().0, spawned[0]);
+    }
 }

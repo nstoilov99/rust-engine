@@ -23,14 +23,16 @@ use rust_engine::engine::ecs::hierarchy::{
 use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
+use rust_engine::engine::editor::commands::Command as _;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::{
-    AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory, ConsoleCommandSystem,
-    ConsoleLog, DormantScene, EditorAction, EditorCamera, EditorServices, EditorTab, GizmoHandler,
-    GpuThumbnailContext, HierarchyPanel, ImportDialogAction, ImportDialogState, ImportPreview,
-    InputActionEditor, InputContextEditor, InputSettingsPanel, InspectorPanel, LogFilter,
-    LogMessage, MenuAction, ProfilerPanel, RenameTarget, SaveAsDialog, SceneId, SceneRegistry,
-    SecondaryWindowKind, Selection, ViewportSettings, ViewportTexture, WindowConfig,
+    AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory,
+    ConsoleCommandSystem, ConsoleLog, DeleteSubtreeCommand, DormantScene, EditorAction,
+    EditorCamera, EditorServices, EditorTab, GizmoHandler, GpuThumbnailContext, HierarchyPanel,
+    ImportDialogAction, ImportDialogState, ImportPreview, InputActionEditor, InputContextEditor,
+    InputSettingsPanel, InspectorPanel, LogFilter, LogMessage, MenuAction, PasteCommand,
+    ProfilerPanel, RenameTarget, SaveAsDialog, SceneId, SceneRegistry, SecondaryWindowKind,
+    Selection, ViewportSettings, ViewportTexture, WindowConfig,
 };
 use rust_engine::engine::input::action_state::ActionState;
 use rust_engine::engine::input::enhanced_defaults::default_action_set;
@@ -47,7 +49,7 @@ use rust_engine::engine::rendering::rendering_3d::{
     DeferredRenderer, MeshRenderData, SkinningBackend,
 };
 use rust_engine::engine::rendering::ResourceCounters;
-use rust_engine::engine::scene::{load_scene, save_scene};
+use rust_engine::engine::scene::{load_scene, save_scene, scene_serializer, EntityData};
 use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
@@ -190,6 +192,8 @@ pub struct SceneEditorState {
     pub input_context_editor: InputContextEditor,
     /// Active "Save As" dialog state (shown when saving an untitled scene).
     pub save_as_dialog: Option<SaveAsDialog>,
+    /// Entity clipboard: serialized subtrees from Copy/Cut.
+    pub clipboard: Vec<EntityData>,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -667,6 +671,7 @@ impl App {
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
                 save_as_dialog: None,
+                clipboard: Vec::new(),
             },
             ui: EditorUIState {
                 crusty_dock,
@@ -1096,6 +1101,7 @@ impl App {
                             .console
                             .messages
                             .push(LogMessage::info(format!("Undo: {desc}")));
+                        self.post_history_change();
                     }
                 }
             }
@@ -1111,17 +1117,32 @@ impl App {
                             .console
                             .messages
                             .push(LogMessage::info(format!("Redo: {desc}")));
+                        self.post_history_change();
                     }
                 }
             }
             EditorAction::Cut => {
-                self.push_action_unavailable("Cut", "entity clipboard is not implemented yet");
+                if self.play_mode() == PlayMode::Edit {
+                    if self.copy_selection_to_clipboard() > 0 {
+                        self.delete_selection_undoable("Cut");
+                    }
+                }
             }
             EditorAction::Copy => {
-                self.push_action_unavailable("Copy", "entity clipboard is not implemented yet");
+                if self.play_mode() == PlayMode::Edit {
+                    let n = self.copy_selection_to_clipboard();
+                    if n > 0 {
+                        self.editor.console.messages.push(LogMessage::info(format!(
+                            "Copied {n} {}",
+                            if n == 1 { "entity" } else { "entities" }
+                        )));
+                    }
+                }
             }
             EditorAction::Paste => {
-                self.push_action_unavailable("Paste", "entity clipboard is not implemented yet");
+                if self.play_mode() == PlayMode::Edit {
+                    self.paste_clipboard();
+                }
             }
             EditorAction::Duplicate => {
                 if self.play_mode() == PlayMode::Edit {
@@ -1143,21 +1164,23 @@ impl App {
                 }
             }
             EditorAction::Delete => {
-                let selected: Vec<_> = self.editor.scene.selection.all().copied().collect();
-                if selected.is_empty() {
-                    return;
-                }
-                for entity in selected {
-                    if self.core.game_world.hecs().contains(entity) {
-                        self.editor.scene.selection.remove(entity);
-                        despawn_recursive(self.core.game_world.hecs_mut(), entity);
+                if self.play_mode() == PlayMode::Edit {
+                    self.delete_selection_undoable("Delete");
+                } else {
+                    // Play mode: transient delete — snapshot restore discards it.
+                    let selected: Vec<_> = self.editor.scene.selection.all().copied().collect();
+                    for entity in selected {
+                        if self.core.game_world.hecs().contains(entity) {
+                            self.editor.scene.selection.remove(entity);
+                            despawn_recursive(self.core.game_world.hecs_mut(), entity);
+                        }
                     }
+                    self.editor
+                        .scene
+                        .hierarchy_panel
+                        .sync_root_order(self.core.game_world.hecs());
+                    self.editor.scene.command_history.mark_dirty();
                 }
-                self.editor
-                    .scene
-                    .hierarchy_panel
-                    .sync_root_order(self.core.game_world.hecs());
-                self.editor.scene.command_history.mark_dirty();
             }
             EditorAction::ToggleHierarchy => self.toggle_tab(EditorTab::Hierarchy),
             EditorAction::ToggleInspector => self.toggle_tab(EditorTab::Inspector),
@@ -2212,30 +2235,11 @@ impl App {
                 println!("Closing...");
                 std::process::exit(0);
             }
-            MenuAction::Undo => {
-                if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self
-                        .editor
-                        .scene
-                        .command_history
-                        .undo(self.core.game_world.hecs_mut())
-                    {
-                        println!("Undo: {}", desc);
-                    }
-                }
-            }
-            MenuAction::Redo => {
-                if self.play_mode() == PlayMode::Edit {
-                    if let Some(desc) = self
-                        .editor
-                        .scene
-                        .command_history
-                        .redo(self.core.game_world.hecs_mut())
-                    {
-                        println!("Redo: {}", desc);
-                    }
-                }
-            }
+            MenuAction::Undo => self.handle_editor_action(EditorAction::Undo),
+            MenuAction::Redo => self.handle_editor_action(EditorAction::Redo),
+            MenuAction::Cut => self.handle_editor_action(EditorAction::Cut),
+            MenuAction::Copy => self.handle_editor_action(EditorAction::Copy),
+            MenuAction::Paste => self.handle_editor_action(EditorAction::Paste),
             MenuAction::Duplicate => self.handle_editor_action(EditorAction::Duplicate),
             MenuAction::Delete => self.handle_editor_action(EditorAction::Delete),
             MenuAction::OpenEditorPreferences => {
@@ -3178,6 +3182,7 @@ impl App {
             );
             let theme = self.editor.services.theme.clone();
             let has_selection = !sel.is_empty();
+            let has_clipboard = !self.editor.scene.clipboard.is_empty();
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;
             let pending_floats = &mut self.pending_crusty_floats;
@@ -3221,6 +3226,7 @@ impl App {
                         icons,
                         theme: &theme,
                         has_selection,
+                        has_clipboard,
                         play_settings: &mut settings.prefs.play,
                     },
                 );
@@ -5329,6 +5335,120 @@ impl App {
         }
     }
 
+    /// Selected entities minus any whose ancestor is also selected —
+    /// subtree operations must not process nested selections twice.
+    fn topmost_selected_roots(&self) -> Vec<hecs::Entity> {
+        use rust_engine::engine::ecs::hierarchy::Parent;
+        let world = self.core.game_world.hecs();
+        let selected: std::collections::HashSet<_> =
+            self.editor.scene.selection.all().copied().collect();
+        selected
+            .iter()
+            .copied()
+            .filter(|&e| world.contains(e))
+            .filter(|&e| {
+                let mut cur = e;
+                while let Ok(parent) = world.get::<&Parent>(cur) {
+                    let parent = parent.0;
+                    if selected.contains(&parent) {
+                        return false;
+                    }
+                    cur = parent;
+                }
+                true
+            })
+            .collect()
+    }
+
+    /// Serialize the top-most selected subtrees into the entity clipboard.
+    /// Returns the number of copied subtree roots.
+    fn copy_selection_to_clipboard(&mut self) -> usize {
+        let roots = self.topmost_selected_roots();
+        if roots.is_empty() {
+            return 0;
+        }
+        let world = self.core.game_world.hecs();
+        self.editor.scene.clipboard = roots
+            .iter()
+            .flat_map(|&r| scene_serializer::serialize_subtree(world, r))
+            .collect();
+        roots.len()
+    }
+
+    /// Delete the selected subtrees as one undoable action ("Delete"/"Cut").
+    fn delete_selection_undoable(&mut self, verb: &str) {
+        let roots = self.topmost_selected_roots();
+        if roots.is_empty() {
+            return;
+        }
+        // Every selected entity is a root or lives inside a deleted subtree.
+        self.editor.scene.selection.clear();
+        let mut cmd = DeleteSubtreeCommand::new(self.core.game_world.hecs(), &roots, verb);
+        cmd.execute(self.core.game_world.hecs_mut());
+        let desc = cmd.description().to_string();
+        self.editor
+            .scene
+            .command_history
+            .push_executed(Box::new(cmd));
+        self.post_history_change();
+        self.editor.console.messages.push(LogMessage::info(desc));
+    }
+
+    /// Paste the entity clipboard as siblings of the primary selection
+    /// (scene roots when nothing is selected), undoable, and select the result.
+    fn paste_clipboard(&mut self) {
+        use rust_engine::engine::ecs::hierarchy::Parent;
+        if self.editor.scene.clipboard.is_empty() {
+            return;
+        }
+        let target_parent = self.editor.scene.selection.primary().and_then(|e| {
+            self.core
+                .game_world
+                .hecs()
+                .get::<&Parent>(e)
+                .ok()
+                .map(|p| p.0)
+        });
+        let mut cmd = PasteCommand::new(
+            self.core.game_world.hecs(),
+            self.editor.scene.clipboard.clone(),
+            target_parent,
+        );
+        cmd.execute(self.core.game_world.hecs_mut());
+        let pasted = cmd.roots(self.core.game_world.hecs());
+        let desc = cmd.description().to_string();
+        self.editor
+            .scene
+            .command_history
+            .push_executed(Box::new(cmd));
+        self.editor.scene.selection.clear();
+        for entity in pasted {
+            self.editor.scene.selection.add(entity);
+        }
+        self.post_history_change();
+        self.editor.console.messages.push(LogMessage::info(desc));
+    }
+
+    /// After any command that spawns/despawns entities (or its undo/redo):
+    /// re-sync hierarchy roots and drop dead entities from the selection.
+    fn post_history_change(&mut self) {
+        self.editor
+            .scene
+            .hierarchy_panel
+            .sync_root_order(self.core.game_world.hecs());
+        let dead: Vec<_> = self
+            .editor
+            .scene
+            .selection
+            .all()
+            .copied()
+            .filter(|&e| !self.core.game_world.hecs().contains(e))
+            .collect();
+        for entity in dead {
+            self.editor.scene.selection.remove(entity);
+        }
+    }
+
     fn handle_frame_input(
         &mut self,
         gui_result: &rust_engine::engine::gui::crusty::CrustyLayoutResult,
@@ -5343,28 +5463,26 @@ impl App {
             return;
         };
 
-        if self.play_mode() == PlayMode::Edit
-            && input_manager.is_winit_key_pressed(KeyCode::ControlLeft)
-        {
-            if input_manager.is_winit_key_just_pressed(KeyCode::KeyZ) {
-                if let Some(desc) = self
-                    .editor
-                    .scene
-                    .command_history
-                    .undo(self.core.game_world.hecs_mut())
-                {
-                    println!("Undo: {}", desc);
+        // Editor shortcuts — suppressed while a crusty text field owns the
+        // keyboard (Ctrl+C in a text edit must not copy entities).
+        if self.play_mode() == PlayMode::Edit && !gui_result.wants_keyboard {
+            if input_manager.is_winit_key_pressed(KeyCode::ControlLeft) {
+                let shortcuts = [
+                    (KeyCode::KeyZ, EditorAction::Undo),
+                    (KeyCode::KeyY, EditorAction::Redo),
+                    (KeyCode::KeyX, EditorAction::Cut),
+                    (KeyCode::KeyC, EditorAction::Copy),
+                    (KeyCode::KeyV, EditorAction::Paste),
+                    (KeyCode::KeyD, EditorAction::Duplicate),
+                ];
+                for (key, action) in shortcuts {
+                    if input_manager.is_winit_key_just_pressed(key) {
+                        self.handle_editor_action(action);
+                    }
                 }
             }
-            if input_manager.is_winit_key_just_pressed(KeyCode::KeyY) {
-                if let Some(desc) = self
-                    .editor
-                    .scene
-                    .command_history
-                    .redo(self.core.game_world.hecs_mut())
-                {
-                    println!("Redo: {}", desc);
-                }
+            if input_manager.is_winit_key_just_pressed(KeyCode::Delete) {
+                self.handle_editor_action(EditorAction::Delete);
             }
         }
 

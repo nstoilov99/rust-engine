@@ -23,7 +23,7 @@ pub mod asset_browser_crusty;
 pub mod build_dialog;
 #[cfg(feature = "editor")]
 pub mod command_palette_crusty;
-mod commands;
+pub mod commands;
 mod console;
 pub mod console_cmd;
 #[cfg(feature = "editor")]

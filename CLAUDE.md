@@ -119,6 +119,7 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M9 Multiplayer Packaging (net_config.ron, export/build-dialog targets standalone/mp-client/mp-server, build-id stamp + protocol v5, `scripts/host_local.ps1` play-test loop): **complete** (see `docs/roadmap/VULKANO-M9-MP-PACKAGING.md`)
 - M9.5 Packaged Co-op Verification (smoke script, load-sanity rerun, Maincloud publish + WAN two-client check, soak monitor + runbook): **complete** (see `docs/roadmap/VULKANO-M9.5-COOP-VERIFICATION.md`) — the two-machine hour soak itself is user-executed per `docs/roadmap/M9.5-COOP-RUNBOOK.md`
 - M9.6 Editor Net Play (server-announced `Config.world_scene` + protocol v6, deferred standalone world load with offline fallback, editor PlaySettings dropdown: Play As Client / Listen Server launcher / Number of Players): **complete** (see `docs/roadmap/VULKANO-M9.6-EDITOR-NET-PLAY.md`)
+- M10 Editor UX & Design System v1 (semantic theme tokens + 4 presets, widget state ladder + focus, settings windows, panel restyle, Edit menu with entity clipboard Cut/Copy/Paste + GUID remap, verb/object undo labels): **complete** (see `docs/roadmap/VULKANO-M10-EDITOR-UX.md`)
 - Next: two-machine hour co-op soak (user + friend, per `docs/roadmap/M9.5-COOP-RUNBOOK.md`), then next milestone per `docs/roadmap/ROADMAP.md`
 
 ## Patched Dependencies
