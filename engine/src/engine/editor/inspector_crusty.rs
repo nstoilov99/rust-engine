@@ -159,7 +159,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                             .show(ui);
                         return;
                     }
-                    render_components(ui, panel, world, entity, asset_browser, picker_icon);
+                    render_components(ui, panel, world, entity, asset_browser, picker_icon, icons);
                     ui.separator();
                     render_add_component(ui, panel, world, entity);
                 });
@@ -624,122 +624,574 @@ fn color_row(
     })
 }
 
-/// Searchable asset dropdown (no thumbnails; DnD from the
-/// asset browser is out of scope here, so selection is
-/// popup-only).
-fn asset_slot_row(
+// ── Asset reference field ────────────────────────────────────────────────
+
+/// 52px framed thumbnail with a 2px bottom type edge.
+const REF_THUMB: f32 = 52.0;
+/// Session-wide Copy/Paste Reference clipboard (path string).
+fn asset_ref_clipboard_id() -> Id {
+    Id::new("asset_ref_clipboard")
+}
+
+/// One entry the picker can offer.
+struct PickerEntry {
+    path: String,
+    name: String,
+    thumb: Option<TextureId>,
+}
+
+/// Asset reference field — one layout for every asset-typed property:
+/// framed live thumbnail with type edge, name dropdown opening the picker
+/// popover, and an 18px utility strip (use browser selection / locate in
+/// browser / reset). Missing refs read status-error on the name + a dot on
+/// the thumb; the field itself stays neutral.
+fn asset_ref_field(
     ui: &mut Ui,
     id_source: &str,
     label: &str,
     path: &mut String,
     allowed_types: &[AssetType],
     asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
 ) {
-    property_row(ui, label, |ui| {
-        let display = if path.is_empty() {
-            "None".to_string()
+    use super::asset_browser_crusty::{type_color, type_icon_stem};
+    use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+    use crusty_gui::paint::PaintCmd;
+    use crusty_gui::text::FontFamily;
+    use crusty_gui::widgets::Popup;
+
+    let style = ui.style();
+    let status = super::theme::Palette::invariant_status();
+    let primary_type = allowed_types[0];
+    let tcol = type_color(primary_type);
+    let type_icon = icons.get(type_icon_stem(primary_type)).copied();
+
+    // Resolve the current reference.
+    let is_primitive = PRIMITIVE_PATHS.contains(&path.as_str());
+    let meta = if path.is_empty() || is_primitive {
+        None
+    } else {
+        asset_browser
+            .registry
+            .get_by_path(std::path::Path::new(path.as_str()))
+            .cloned()
+    };
+    let missing = !path.is_empty() && !is_primitive && meta.is_none();
+    let thumb_tex = meta
+        .as_ref()
+        .and_then(|m| asset_browser.thumbnails.crusty_texture_id(m));
+
+    let avail_w = ui.available().width();
+    let row = ui.allocate(Vec2::new(avail_w, REF_THUMB));
+    ui.painter().text(
+        Pos2::new(row.min.x, row.min.y + 3.0),
+        label,
+        style.fonts.body,
+        style.palette.text_secondary,
+        None,
+    );
+
+    // Thumb: bg-window frame, live preview or typed icon, 2px type edge.
+    let thumb = Rect::from_min_size(
+        Pos2::new(row.min.x + PROP_LABEL_W, row.min.y),
+        Vec2::splat(REF_THUMB),
+    );
+    ui.painter().rect_filled(thumb, 3.0, style.palette.window);
+    ui.painter().rect_stroke(thumb, 3.0, 1.0, style.palette.stroke);
+    if let Some(tex) = thumb_tex {
+        let inner = Rect::from_min_max(
+            Pos2::new(thumb.min.x + 1.0, thumb.min.y + 1.0),
+            Pos2::new(thumb.max.x - 1.0, thumb.max.y - 1.0),
+        );
+        ui.ctx_mut().paint.push(PaintCmd::Image {
+            rect: inner,
+            uv_min: Pos2::new(0.0, 0.0),
+            uv_max: Pos2::new(1.0, 1.0),
+            tint: Color::WHITE,
+            texture: tex,
+        });
+    } else if let Some(tex) = type_icon {
+        let tint = if missing { tcol.with_alpha(0.45) } else { tcol };
+        ui.ctx_mut().paint.push(PaintCmd::Image {
+            rect: Rect::from_center_size(thumb.center(), Vec2::splat(24.0)),
+            uv_min: Pos2::new(0.0, 0.0),
+            uv_max: Pos2::new(1.0, 1.0),
+            tint,
+            texture: tex,
+        });
+    }
+    ui.painter().rect_filled(
+        Rect::from_min_max(
+            Pos2::new(thumb.min.x + 1.0, thumb.max.y - 3.0),
+            Pos2::new(thumb.max.x - 1.0, thumb.max.y - 1.0),
+        ),
+        0.0,
+        tcol,
+    );
+    if missing {
+        ui.painter().circle_filled(
+            Pos2::new(thumb.max.x - 7.0, thumb.min.y + 7.0),
+            3.5,
+            status.error,
+        );
+    }
+
+    // Name dropdown — the picker trigger.
+    let name_x = thumb.max.x + 6.0;
+    let name_w = (row.max.x - name_x).max(80.0);
+    let name_rect = Rect::from_min_size(Pos2::new(name_x, row.min.y), Vec2::new(name_w, FIELD_H));
+    let pid = Id::new("asset_ref_picker").with(id_source);
+    let open = Popup::is_open(ui, pid);
+    let trigger = ui.interact(pid.with("trigger"), name_rect);
+    ui.painter().rect_filled(name_rect, 3.0, style.palette.input);
+    let border = if open {
+        style.palette.focus_ring
+    } else {
+        style.palette.stroke
+    };
+    ui.painter().rect_stroke(name_rect, 3.0, 1.0, border);
+    let (display, name_col) = if path.is_empty() {
+        ("None".to_string(), style.palette.text_secondary)
+    } else {
+        let name = std::path::Path::new(path.as_str())
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        if missing {
+            (name, status.error)
         } else {
-            std::path::Path::new(path.as_str())
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone())
+            (name, style.palette.text)
+        }
+    };
+    let ty = name_rect.min.y + (FIELD_H - style.fonts.body * 1.25) * 0.5;
+    ui.painter().text(
+        Pos2::new(name_rect.min.x + 8.0, ty),
+        &display,
+        style.fonts.body,
+        name_col,
+        Some(name_w - 30.0),
+    );
+    if missing {
+        let nw = ui.painter().measure_text(&display, style.fonts.body, None).x;
+        ui.painter().text_family(
+            Pos2::new(name_rect.min.x + 8.0 + nw.min(name_w - 60.0) + 6.0, ty + 2.0),
+            "missing",
+            9.0,
+            style.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    let caret = if open { "\u{25B2}" } else { "\u{25BC}" };
+    let csz = ui.painter().measure_text(caret, 8.0, None);
+    ui.painter().text(
+        Pos2::new(
+            name_rect.max.x - 8.0 - csz.x,
+            name_rect.min.y + (FIELD_H - csz.y) * 0.5,
+        ),
+        caret,
+        8.0,
+        style.palette.text_secondary,
+        None,
+    );
+    if trigger.clicked {
+        Popup::toggle(ui, pid);
+        if !open {
+            // Fresh open: clear search, focus it next frame.
+            ui.ctx_mut().memory.data_insert(pid.with("search"), String::new());
+            ui.ctx_mut().memory.data_insert(pid.with("focus"), true);
+        }
+    }
+
+    // Utility strip: use-browser-selection / locate / reset.
+    let strip_y = name_rect.max.y + 4.0;
+    let browser_pick = asset_browser
+        .selection
+        .primary()
+        .and_then(|id| asset_browser.registry.get(id))
+        .filter(|m| allowed_types.contains(&m.asset_type))
+        .map(|m| m.path.to_string_lossy().to_string());
+    let mut bx = name_x;
+    let mut strip_btn =
+        |ui: &mut Ui, key: &str, icon: Option<TextureId>, mono: Option<&str>, enabled: bool| {
+            let r = Rect::from_min_size(Pos2::new(bx, strip_y), Vec2::new(22.0, 18.0));
+            bx += 26.0;
+            let resp = ui.interact(pid.with(key), r);
+            let style = ui.style();
+            let fill = if resp.hovered && enabled {
+                style.palette.hover
+            } else {
+                style.palette.elevated
+            };
+            ui.painter().rect_filled(r, 3.0, fill);
+            ui.painter().rect_stroke(r, 3.0, 1.0, style.palette.stroke);
+            let tint = if enabled {
+                style.palette.text_secondary
+            } else {
+                style.palette.text_disabled
+            };
+            if let Some(tex) = icon {
+                ui.ctx_mut().paint.push(PaintCmd::Image {
+                    rect: Rect::from_center_size(r.center(), Vec2::splat(10.0)),
+                    uv_min: Pos2::new(0.0, 0.0),
+                    uv_max: Pos2::new(1.0, 1.0),
+                    tint,
+                    texture: tex,
+                });
+            } else if let Some(t) = mono {
+                let sz = ui.painter().measure_text(t, 9.5, None);
+                ui.painter().text_family(
+                    Pos2::new(r.center().x - sz.x * 0.5, r.center().y - sz.y * 0.5),
+                    t,
+                    9.5,
+                    tint,
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            resp.clicked && enabled
         };
-        let combo_w = (ui.available_size().x - 8.0).clamp(80.0, 220.0);
-        ComboBox::new(format!("asset_slot_{id_source}"))
-            .selected_text(display)
-            .width(combo_w)
-            .show_ui(ui, |ui| {
-                let style = ui.style();
-                let dim = style.palette.text_secondary;
+    if strip_btn(
+        ui,
+        "use_sel",
+        icons.get("color-picker").copied(),
+        Some("\u{2299}"),
+        browser_pick.is_some(),
+    ) {
+        if let Some(p) = browser_pick {
+            *path = p;
+        }
+    }
+    if strip_btn(
+        ui,
+        "locate",
+        icons.get("folder-browser").copied(),
+        Some("\u{25A4}"),
+        meta.is_some(),
+    ) {
+        if let Some(m) = &meta {
+            asset_browser.selection.select(m.id);
+            if let Some(parent) = m.path.parent() {
+                asset_browser.current_folder = parent.to_path_buf();
+            }
+        }
+    }
+    if strip_btn(ui, "reset", None, Some("R"), !path.is_empty()) {
+        path.clear();
+    }
 
-                // Persistent search text for this slot.
-                let sid = Id::new("asset_slot_search").with(id_source);
-                let mut search = ui
-                    .ctx()
-                    .memory
-                    .data_get::<String>(sid)
-                    .cloned()
-                    .unwrap_or_default();
-                let w = (ui.available().width() - 8.0).max(60.0);
-                TextEdit::new(&mut search)
-                    .width(w)
-                    .height(18.0)
-                    .hint("Search...")
-                    .show_full(ui);
-                ui.ctx_mut().memory.data_insert(sid, search.clone());
-                let search_lower = search.to_lowercase();
+    // Picker popover (E3): search + type chip, list, actions, mono footer.
+    if Popup::is_open(ui, pid) {
+        asset_ref_picker(ui, pid, path, allowed_types, asset_browser, icons, name_rect);
+    }
+    ui.add_space(4.0);
+}
 
-                let mut chosen: Option<String> = None;
+/// The picker popover body. Search is auto-focused and pre-filtered to the
+/// property's type; current value = selection-fill row; actions for the
+/// reference sit under the list; footer = mono count + Esc.
+fn asset_ref_picker(
+    ui: &mut Ui,
+    pid: Id,
+    path: &mut String,
+    allowed_types: &[AssetType],
+    asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
+    anchor: Rect,
+) {
+    use super::asset_browser_crusty::{type_color, type_icon_stem};
+    use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
+    use crusty_gui::paint::PaintCmd;
+    use crusty_gui::text::FontFamily;
+    use crusty_gui::widgets::Popup;
 
-                let mut none_sel = path.is_empty();
-                if SelectableValue::new(&mut none_sel, true, "None")
-                    .show(ui)
-                    .clicked
-                {
-                    chosen = Some(String::new());
-                }
+    let primary_type = allowed_types[0];
+    let tcol = type_color(primary_type);
+    let type_icon = icons.get(type_icon_stem(primary_type)).copied();
+    let type_label = primary_type.display_name().to_uppercase();
+    let pop_w = anchor.width().max(220.0);
 
-                // Primitive meshes (mesh slots only).
-                let include_meshes = allowed_types.contains(&AssetType::Mesh)
-                    || allowed_types.contains(&AssetType::Model);
-                if include_meshes {
-                    use crate::engine::rendering::rendering_3d::mesh::PRIMITIVE_PATHS;
-                    let prims: Vec<&str> = PRIMITIVE_PATHS
-                        .iter()
-                        .filter(|p| search.is_empty() || p.to_lowercase().contains(&search_lower))
-                        .copied()
-                        .collect();
-                    if !prims.is_empty() {
-                        Label::new("Primitives")
-                            .size(style.fonts.small)
-                            .color(dim)
-                            .show(ui);
-                        for prim in prims {
-                            let name = prim.rsplit('/').next().unwrap_or(prim);
-                            let mut sel = path.as_str() == prim;
-                            if SelectableValue::new(&mut sel, true, name).show(ui).clicked {
-                                chosen = Some(prim.to_string());
-                            }
-                        }
-                    }
-                }
+    // Gather entries up front (borrow of asset_browser ends before the UI).
+    let sid = pid.with("search");
+    let search = ui
+        .ctx()
+        .memory
+        .data_get::<String>(sid)
+        .cloned()
+        .unwrap_or_default();
+    let search_lower = search.to_lowercase();
 
-                // Registry assets.
-                let filter = AssetFilter {
-                    search_text: if search.is_empty() {
-                        None
-                    } else {
-                        Some(search.clone())
-                    },
+    let include_prims = allowed_types.contains(&AssetType::Mesh)
+        || allowed_types.contains(&AssetType::Model);
+    let mut entries: Vec<PickerEntry> = Vec::new();
+    if include_prims {
+        for prim in PRIMITIVE_PATHS {
+            if search.is_empty() || prim.to_lowercase().contains(&search_lower) {
+                entries.push(PickerEntry {
+                    path: prim.to_string(),
+                    name: prim.rsplit('/').next().unwrap_or(prim).to_string(),
+                    thumb: None,
+                });
+            }
+        }
+    }
+    let filter = AssetFilter {
+        search_text: (!search.is_empty()).then(|| search.clone()),
+        asset_types: Some(allowed_types.to_vec()),
+        include_subfolders: true,
+        ..Default::default()
+    };
+    let metas: Vec<_> = asset_browser
+        .registry
+        .query(&filter)
+        .into_iter()
+        .cloned()
+        .collect();
+    let prim_total = if include_prims { PRIMITIVE_PATHS.len() } else { 0 };
+    let total = prim_total
+        + if search.is_empty() {
+            metas.len()
+        } else {
+            asset_browser
+                .registry
+                .query(&AssetFilter {
                     asset_types: Some(allowed_types.to_vec()),
                     include_subfolders: true,
                     ..Default::default()
-                };
-                let results = asset_browser.registry.query(&filter);
-                if !results.is_empty() {
-                    Label::new("Assets")
-                        .size(style.fonts.small)
-                        .color(dim)
-                        .show(ui);
-                    for meta in results {
-                        let asset_path = meta.path.to_string_lossy().to_string();
-                        let mut sel = path.as_str() == asset_path;
-                        if SelectableValue::new(&mut sel, true, meta.display_name.clone())
-                            .show(ui)
-                            .clicked
-                        {
-                            chosen = Some(asset_path);
-                        }
-                    }
-                } else if !include_meshes {
-                    Label::new("No assets found").color(dim).show(ui);
-                }
+                })
+                .len()
+        };
+    for m in &metas {
+        entries.push(PickerEntry {
+            path: m.path.to_string_lossy().to_string(),
+            name: m.display_name.clone(),
+            thumb: asset_browser.thumbnails.crusty_texture_id(m),
+        });
+    }
+    let shown = entries.len();
 
-                if let Some(c) = chosen {
-                    *path = c;
+    let mut chosen: Option<String> = None;
+    Popup::new(pid, anchor, pop_w).show(ui, |ui| {
+        let inner_w = ui.available().width();
+
+        // Search + locked type chip.
+        let chip_w = ui
+            .painter()
+            .measure_text_family(&type_label, 9.5, None, FontFamily::Mono)
+            .x
+            + 14.0;
+        let mut search_text = search.clone();
+        let focus = ui
+            .ctx()
+            .memory
+            .data_get::<bool>(pid.with("focus"))
+            .copied()
+            .unwrap_or(false);
+        ui.horizontal(|ui| {
+            TextEdit::new(&mut search_text)
+                .width(inner_w - chip_w - 6.0)
+                .height(FIELD_H)
+                .hint("Search...")
+                .request_focus(focus)
+                .show_full(ui);
+            let chip = ui.allocate(Vec2::new(chip_w, 20.0));
+            ui.painter().rect_filled(chip, 3.0, tcol.with_alpha(0.12));
+            ui.painter().rect_stroke(chip, 3.0, 1.0, tcol.with_alpha(0.45));
+            let sz = ui
+                .painter()
+                .measure_text_family(&type_label, 9.5, None, FontFamily::Mono);
+            ui.painter().text_family(
+                Pos2::new(chip.center().x - sz.x * 0.5, chip.center().y - sz.y * 0.5),
+                &type_label,
+                9.5,
+                tcol,
+                None,
+                FontFamily::Mono,
+            );
+        });
+        if focus {
+            ui.ctx_mut().memory.data_insert(pid.with("focus"), false);
+        }
+        ui.ctx_mut().memory.data_insert(sid, search_text);
+
+        // Entry rows: None first, then primitives + registry assets.
+        let row_h = 24.0;
+        let entry_row = |ui: &mut Ui,
+                             key: usize,
+                             name: &str,
+                             thumb: Option<TextureId>,
+                             is_current: bool,
+                             show_well: bool|
+         -> bool {
+            let r = ui.allocate(Vec2::new(inner_w, row_h));
+            let resp = ui.interact(pid.with(("entry", key)), r);
+            let style = ui.style();
+            if is_current {
+                ui.painter().rect_filled(r, 3.0, style.palette.selection_fill);
+            } else if resp.hovered {
+                ui.painter().rect_filled(r, 3.0, style.palette.hover);
+            }
+            let mut x = r.min.x + 6.0;
+            if show_well {
+                let well = Rect::from_center_size(
+                    Pos2::new(x + 9.0, r.center().y),
+                    Vec2::splat(18.0),
+                );
+                ui.painter().rect_filled(well, 2.0, style.palette.window);
+                ui.painter().rect_stroke(well, 2.0, 1.0, style.palette.stroke);
+                if let Some(tex) = thumb {
+                    ui.ctx_mut().paint.push(PaintCmd::Image {
+                        rect: well,
+                        uv_min: Pos2::new(0.0, 0.0),
+                        uv_max: Pos2::new(1.0, 1.0),
+                        tint: Color::WHITE,
+                        texture: tex,
+                    });
+                } else if let Some(tex) = type_icon {
+                    ui.ctx_mut().paint.push(PaintCmd::Image {
+                        rect: Rect::from_center_size(well.center(), Vec2::splat(10.0)),
+                        uv_min: Pos2::new(0.0, 0.0),
+                        uv_max: Pos2::new(1.0, 1.0),
+                        tint: tcol,
+                        texture: tex,
+                    });
                 }
-            });
+                ui.painter().rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(well.min.x, well.max.y - 2.0),
+                        Pos2::new(well.max.x, well.max.y),
+                    ),
+                    0.0,
+                    tcol,
+                );
+                x = well.max.x + 7.0;
+            }
+            let col = if is_current {
+                style.palette.selection_text
+            } else {
+                style.palette.text
+            };
+            let tsz = ui.painter().measure_text(name, style.fonts.body, None);
+            ui.painter().text(
+                Pos2::new(x, r.center().y - tsz.y * 0.5),
+                name,
+                style.fonts.body,
+                col,
+                Some(r.max.x - x - 50.0),
+            );
+            if is_current {
+                let tag = "current";
+                let sz = ui.painter().measure_text_family(tag, 9.0, None, FontFamily::Mono);
+                ui.painter().text_family(
+                    Pos2::new(r.max.x - 6.0 - sz.x, r.center().y - sz.y * 0.5),
+                    tag,
+                    9.0,
+                    style.palette.selection_text.with_alpha(0.75),
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            resp.clicked
+        };
+
+        let list = |ui: &mut Ui, chosen: &mut Option<String>| {
+            if entry_row(ui, 0, "None", None, path.is_empty(), false) {
+                *chosen = Some(String::new());
+            }
+            for (i, e) in entries.iter().enumerate() {
+                if entry_row(ui, i + 1, &e.name, e.thumb, path.as_str() == e.path, true) {
+                    *chosen = Some(e.path.clone());
+                }
+            }
+            if entries.is_empty() {
+                Label::new("No assets found")
+                    .color(ui.style().palette.text_secondary)
+                    .show(ui);
+            }
+        };
+        if shown > 9 {
+            ScrollArea::new(9.0 * row_h).show(ui, |ui| list(ui, &mut chosen));
+        } else {
+            list(ui, &mut chosen);
+        }
+
+        // Reference actions.
+        ui.separator();
+        let clip = ui
+            .ctx()
+            .memory
+            .data_get::<String>(asset_ref_clipboard_id())
+            .cloned();
+        let action_row = |ui: &mut Ui, key: &str, label: &str, enabled: bool| -> bool {
+            let r = ui.allocate(Vec2::new(inner_w, row_h));
+            let resp = ui.interact(pid.with(key), r);
+            let style = ui.style();
+            if resp.hovered && enabled {
+                ui.painter().rect_filled(r, 3.0, style.palette.hover);
+            }
+            let col = if enabled {
+                style.palette.text
+            } else {
+                style.palette.text_disabled
+            };
+            let sz = ui.painter().measure_text(label, style.fonts.body, None);
+            ui.painter().text(
+                Pos2::new(r.min.x + 8.0, r.center().y - sz.y * 0.5),
+                label,
+                style.fonts.body,
+                col,
+                None,
+            );
+            resp.clicked && enabled
+        };
+        if action_row(ui, "copy_ref", "Copy Reference", !path.is_empty()) {
+            let p = path.clone();
+            ui.ctx_mut().memory.data_insert(asset_ref_clipboard_id(), p);
+        }
+        if action_row(ui, "paste_ref", "Paste Reference", clip.is_some()) {
+            if let Some(c) = clip {
+                chosen = Some(c);
+            }
+        }
+        if action_row(ui, "clear_ref", "Clear", !path.is_empty()) {
+            chosen = Some(String::new());
+        }
+
+        // Footer: mono count + keys.
+        ui.separator();
+        let f = ui.allocate(Vec2::new(inner_w, 18.0));
+        let style = ui.style();
+        let plural = match primary_type {
+            AssetType::Mesh | AssetType::Model => "meshes",
+            AssetType::Material => "materials",
+            AssetType::Texture => "textures",
+            AssetType::Audio => "audio clips",
+            _ => "assets",
+        };
+        let count = format!("{shown} of {total} {plural}");
+        ui.painter().text_family(
+            Pos2::new(f.min.x + 6.0, f.min.y + 3.0),
+            &count,
+            9.5,
+            style.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+        let esc = "Esc";
+        let sz = ui.painter().measure_text_family(esc, 9.5, None, FontFamily::Mono);
+        ui.painter().text_family(
+            Pos2::new(f.max.x - 6.0 - sz.x, f.min.y + 3.0),
+            esc,
+            9.5,
+            style.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
     });
+    if let Some(c) = chosen {
+        *path = c;
+        ui.ctx_mut().memory.get_or_default(pid).bool_state = false;
+    }
 }
 
 // ── Component editors ────────────────────────────────────────────────────
@@ -751,6 +1203,7 @@ fn render_components(
     entity: Entity,
     asset_browser: &mut AssetBrowserPanel,
     picker_icon: Option<TextureId>,
+    icons: &std::collections::HashMap<String, TextureId>,
 ) {
     let mut action: Option<ComponentAction> = None;
     let p = panel.cached_presence;
@@ -785,7 +1238,7 @@ fn render_components(
         || panel.matches_filter("renderer")
         || panel.matches_filter("material"))
         && p.has(ComponentPresence::MESH_RENDERER)
-        && edit_mesh_renderer(ui, world, entity, asset_browser)
+        && edit_mesh_renderer(ui, world, entity, asset_browser, icons)
     {
         action = Some(ComponentAction::RemoveMeshRenderer);
     }
@@ -838,7 +1291,7 @@ fn render_components(
         || panel.matches_filter("sound")
         || panel.matches_filter("clip"))
         && p.has(ComponentPresence::AUDIO_EMITTER)
-        && edit_audio_emitter(ui, world, entity, asset_browser)
+        && edit_audio_emitter(ui, world, entity, asset_browser, icons)
     {
         action = Some(ComponentAction::RemoveAudioEmitter);
     }
@@ -1103,6 +1556,7 @@ fn edit_mesh_renderer(
     world: &mut World,
     entity: Entity,
     asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
 ) -> bool {
     let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) else {
         return false;
@@ -1110,13 +1564,14 @@ fn edit_mesh_renderer(
     component_section(ui, "Mesh Renderer", cats().materials, true, |ui| {
         checkbox_row(ui, "Visible", &mut renderer.visible);
 
-        asset_slot_row(
+        asset_ref_field(
             ui,
             "mesh_slot",
             "Mesh",
             &mut renderer.mesh_path,
             &[AssetType::Mesh, AssetType::Model],
             asset_browser,
+            icons,
         );
 
         if renderer.material_paths.is_empty() {
@@ -1127,15 +1582,16 @@ fn edit_mesh_renderer(
             let label = if slot_count == 1 {
                 "Material".to_string()
             } else {
-                format!("Material [{i}]")
+                format!("Material {i}")
             };
-            asset_slot_row(
+            asset_ref_field(
                 ui,
                 &format!("material_slot_{i}"),
                 &label,
                 &mut renderer.material_paths[i],
                 &[AssetType::Material],
                 asset_browser,
+                icons,
             );
         }
 
@@ -1490,19 +1946,21 @@ fn edit_audio_emitter(
     world: &mut World,
     entity: Entity,
     asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
 ) -> bool {
     let Ok(mut emitter) = world.get::<&mut AudioEmitter>(entity) else {
         return false;
     };
     let mut remove_button = false;
     let remove_menu = component_section(ui, "Audio Emitter", cats().audio, true, |ui| {
-        asset_slot_row(
+        asset_ref_field(
             ui,
             "audio_clip_slot",
             "Clip",
             &mut emitter.clip_path,
             &[AssetType::Audio],
             asset_browser,
+            icons,
         );
 
         property_row(ui, "Bus", |ui| {

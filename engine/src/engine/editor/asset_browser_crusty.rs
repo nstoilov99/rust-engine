@@ -82,7 +82,7 @@ fn hash_key<T: Hash>(t: &T) -> u64 {
 
 /// Asset types map onto the preset-invariant category palette (same 10-color
 /// system as component icons and inspector section bars).
-fn type_color(t: AssetType) -> Color {
+pub(super) fn type_color(t: AssetType) -> Color {
     let c = super::theme::Palette::invariant_type_colors();
     match t {
         AssetType::Texture | AssetType::Material => c.materials,
@@ -95,7 +95,7 @@ fn type_color(t: AssetType) -> Color {
     }
 }
 
-fn type_icon_stem(t: AssetType) -> &'static str {
+pub(super) fn type_icon_stem(t: AssetType) -> &'static str {
     match t {
         AssetType::Texture => "image-file",
         AssetType::Model | AssetType::Mesh => "file-mesh",
