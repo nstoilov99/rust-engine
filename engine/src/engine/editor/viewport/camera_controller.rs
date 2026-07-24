@@ -52,6 +52,8 @@ pub struct EditorCamera {
     pub fly_speed_multiplier: f32,
     /// Mouse sensitivity for rotation
     pub mouse_sensitivity: f32,
+    /// Invert vertical look (mouse up looks down)
+    pub invert_y: bool,
     /// Distance from camera to orbit target
     orbit_distance: f32,
 
@@ -77,6 +79,7 @@ impl EditorCamera {
             far: 1000.0,
             fly_speed_multiplier: 1.0,
             mouse_sensitivity: 0.003,
+            invert_y: false,
             orbit_distance: 10.0,
             current_mode: CameraControlMode::None,
             consumed_input: false,
@@ -281,6 +284,7 @@ impl EditorCamera {
         // Mouse look
         let (dx, dy) = input.mouse_delta();
         if dx != 0.0 || dy != 0.0 {
+            let dy = if self.invert_y { -dy } else { dy };
             self.rotate_view(-dx * self.mouse_sensitivity, -dy * self.mouse_sensitivity);
         }
 
@@ -308,6 +312,7 @@ impl EditorCamera {
         let mut pitch = (offset.y / distance).clamp(-0.999, 0.999).asin();
 
         yaw -= dx * self.mouse_sensitivity;
+        let dy = if self.invert_y { -dy } else { dy };
         pitch = (pitch - dy * self.mouse_sensitivity).clamp(-1.5, 1.5);
 
         // Reconstruct position

@@ -38,6 +38,14 @@ impl CommandHistory {
         }
     }
 
+    /// Change the history cap; trims the oldest entries if over it.
+    pub fn set_max_history(&mut self, max: usize) {
+        self.max_history = max.max(1);
+        while self.undo_stack.len() > self.max_history {
+            self.undo_stack.remove(0);
+        }
+    }
+
     /// Execute a command and add it to history
     pub fn execute(&mut self, mut command: Box<dyn Command>, world: &mut World) {
         command.execute(world);

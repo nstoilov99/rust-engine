@@ -55,14 +55,18 @@ pub mod menu_bar_crusty;
 pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
+pub mod editor_prefs;
 pub mod play_mode;
 pub mod play_settings;
 pub mod profiler;
+pub mod project_config;
 #[cfg(feature = "editor")]
 pub mod profiler_crusty;
 pub mod scene_tab;
 pub mod secondary_kind;
 mod selection;
+#[cfg(feature = "editor")]
+pub mod settings_crusty;
 #[cfg(feature = "editor")]
 pub mod status_bar_crusty;
 #[cfg(feature = "editor")]

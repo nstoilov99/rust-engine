@@ -201,6 +201,8 @@ pub struct EditorUIState {
     pub icons_loaded: bool,
     pub profiler_panel: ProfilerPanel,
     pub input_settings_panel: InputSettingsPanel,
+    /// Editor Preferences + Project Settings windows (M10 P7).
+    pub settings: rust_engine::engine::editor::settings_crusty::SettingsState,
 }
 
 /// Play-mode snapshots and build dialog.
@@ -233,6 +235,10 @@ pub struct App {
     pub core: CoreApp,
     pub editor: EditorApp,
     runtime_flags: EditorRuntimeFlags,
+    /// VSync mode last written to `window_config.ron`.
+    vsync_saved: rust_engine::engine::utils::window_config::VSyncMode,
+    /// Present mode active since startup — a differing saved mode needs restart.
+    vsync_active: rust_engine::engine::utils::window_config::VSyncMode,
     /// Net session (M5); `Some` when launched with `--connect`.
     net: Option<crate::net::NetSession>,
     /// M9.6 P4: pending listen-server launcher (spacetime start + publish
@@ -311,6 +317,9 @@ impl App {
         println!("Rust Game Engine - Starting up...");
 
         let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
+        let project_config =
+            rust_engine::engine::editor::project_config::ProjectConfig::load_or_default();
+        let startup_scene = project_config.startup_scene().to_string();
         let present_preference = window_config.vsync.as_present_preference();
         println!(
             "VSync = {:?} (present mode = {:?})",
@@ -335,7 +344,7 @@ impl App {
         let mut game_world = GameWorld::new();
 
         let (scene_loaded, root_entities) =
-            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], "scenes/main.scene")?;
+            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], &startup_scene)?;
 
         if !scene_loaded {
             game_setup::spawn_physics_test_objects(
@@ -358,6 +367,8 @@ impl App {
         game_world.resources_mut().insert(asset_manager.clone());
 
         let mut physics_world = PhysicsWorld::new();
+        physics_world.set_gravity(nalgebra_glm::vec3(0.0, 0.0, project_config.gravity_z));
+        physics_world.set_timestep(1.0 / project_config.fixed_timestep_hz.max(1.0));
         game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
         game_world.resources_mut().insert(physics_world);
         // Collision fills in below via `init_streaming_for_scene` (streamed
@@ -566,6 +577,10 @@ impl App {
             collision_debug_cache: None,
             world_streamer: {
                 let mut s = WorldStreamer::default();
+                s.config.r_load = project_config.stream_r_load;
+                s.config.r_unload = project_config.stream_r_unload;
+                s.config.budget_ms = project_config.stream_budget_ms;
+                s.config.max_in_flight = project_config.stream_max_in_flight;
                 // Editor default: keep the whole world resident. The Debug
                 // menu toggles ring streaming for testing.
                 s.full_world = true;
@@ -585,6 +600,29 @@ impl App {
         if !runtime_flags.benchmark_tools_enabled {
             asset_browser.set_hidden_paths([std::path::PathBuf::from(BENCHMARK_SCENE_RELATIVE)]);
         }
+
+        let crusty_dock =
+            rust_engine::engine::editor::dock_crusty::CrustyDockLayout::load_or_default();
+        let (mut editor_prefs, prefs_existed) =
+            rust_engine::engine::editor::editor_prefs::EditorPrefs::load();
+        if !prefs_existed {
+            // First run: adopt the play settings previously persisted in the
+            // dock layout (their pre-M10 home).
+            editor_prefs.play = crusty_dock.play_settings.clone();
+        }
+        let settings_state = rust_engine::engine::editor::settings_crusty::SettingsState::new(
+            editor_prefs,
+            project_config.clone(),
+            window_config.vsync,
+        );
+        let scene_display_name = if startup_scene == MAIN_SCENE_RELATIVE {
+            "Main Scene".to_string()
+        } else {
+            std::path::Path::new(&startup_scene)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| startup_scene.clone())
+        };
 
         let editor = EditorApp {
             services: EditorServices::new(),
@@ -620,8 +658,8 @@ impl App {
                 selection: Selection::new(),
                 command_history: CommandHistory::new(100),
                 asset_browser,
-                current_scene_relative: MAIN_SCENE_RELATIVE.to_string(),
-                current_scene_name: "Main Scene".to_string(),
+                current_scene_relative: startup_scene.clone(),
+                current_scene_name: scene_display_name,
                 active_dirty: false,
                 registry: SceneRegistry::new(SceneId(0)),
                 import_dialog: None,
@@ -631,18 +669,25 @@ impl App {
                 save_as_dialog: None,
             },
             ui: EditorUIState {
-                crusty_dock:
-                    rust_engine::engine::editor::dock_crusty::CrustyDockLayout::load_or_default(),
+                crusty_dock,
                 show_stat_fps: false,
                 show_profiler: false,
                 icons_loaded: false,
                 profiler_panel,
                 input_settings_panel: InputSettingsPanel::new(),
+                settings: settings_state,
             },
             play: PlayModeState {
                 snapshot: None,
                 pre_play_camera: None,
-                build_dialog: BuildDialog::new(),
+                build_dialog: {
+                    let mut bd = BuildDialog::new();
+                    bd.settings.target = project_config.build_target;
+                    bd.settings.output_dir = project_config.build_output_dir.clone();
+                    bd.settings.server_uri = project_config.net_host.clone();
+                    bd.settings.module = project_config.net_module.clone();
+                    bd
+                },
                 cursor_released: false,
                 net_scene_warned: false,
             },
@@ -666,6 +711,8 @@ impl App {
             core,
             editor,
             runtime_flags,
+            vsync_saved: window_config.vsync,
+            vsync_active: window_config.vsync,
             // M9.6 P3: in the editor a net session exists only between
             // play-enter and play-exit; `--connect` pre-fills the play
             // settings below instead of connecting at startup.
@@ -694,16 +741,17 @@ impl App {
             crusty_float_preview_cbs: Vec::new(),
         };
         if scene_loaded {
-            app.init_streaming_for_scene(MAIN_SCENE_RELATIVE);
+            app.init_streaming_for_scene(&startup_scene);
         }
         if let Some(addr) =
             crate::net::NetSession::parse_connect_args(&std::env::args().collect::<Vec<_>>())
         {
-            let ps = &mut app.editor.ui.crusty_dock.play_settings;
+            let ps = &mut app.editor.ui.settings.prefs.play;
             ps.mode = rust_engine::engine::editor::play_settings::NetPlayMode::Client;
             ps.host = addr.host;
             ps.module = addr.module;
         }
+        app.apply_editor_prefs(true);
         Ok(app)
     }
 
@@ -747,6 +795,124 @@ impl App {
         if let Err(e) = window_config.save_to_default() {
             eprintln!("Warning: Failed to save window config on exit: {}", e);
         }
+    }
+
+    /// Diff `settings.prefs` against the last-applied snapshot and push
+    /// changes into live editor state. Per-field guards keep session-only
+    /// edits (toolbar snap toggles, console chips, G-key grid) from being
+    /// stomped by unrelated pref fields.
+    fn apply_editor_prefs(&mut self, force: bool) {
+        let new = self.editor.ui.settings.prefs.clone();
+        let old = self.editor.ui.settings.prefs_applied.clone();
+        if !force && new == old {
+            return;
+        }
+
+        if force
+            || new.theme_preset != old.theme_preset
+            || new.popover_translucent != old.popover_translucent
+        {
+            let density = self.editor.services.theme.density;
+            let mut theme = new.theme_preset.theme().with_density(density);
+            if !new.popover_translucent {
+                theme.palette.popover_alpha = 1.0;
+            }
+            self.editor.services.theme = std::sync::Arc::new(theme);
+            self.crusty_gui.apply_theme(&self.editor.services.theme);
+            for fw in self.crusty_floats.values_mut() {
+                fw.gui.apply_theme(&self.editor.services.theme);
+            }
+        }
+
+        let vp = &mut self.editor.viewport;
+        if force || new.camera_speed != old.camera_speed {
+            vp.settings.camera_speed = new.camera_speed;
+        }
+        if force || new.camera_speed_scalar != old.camera_speed_scalar {
+            vp.settings.camera_speed_scalar = new.camera_speed_scalar;
+        }
+        if force || new.mouse_sensitivity != old.mouse_sensitivity {
+            vp.settings.mouse_sensitivity = new.mouse_sensitivity;
+            vp.camera.mouse_sensitivity = new.mouse_sensitivity;
+        }
+        if force || new.invert_y != old.invert_y {
+            vp.camera.invert_y = new.invert_y;
+        }
+        if force || new.fov_deg != old.fov_deg {
+            vp.camera.fov = new.fov_deg.to_radians();
+        }
+        if force || new.grid_visible != old.grid_visible {
+            vp.grid_visible = new.grid_visible;
+            vp.settings.grid_visible = new.grid_visible;
+        }
+        if force || new.gizmo_size != old.gizmo_size {
+            vp.gizmo_handler.gizmo_size = new.gizmo_size;
+        }
+        if force || new.grid_snap_enabled != old.grid_snap_enabled {
+            vp.settings.grid_snap_enabled = new.grid_snap_enabled;
+        }
+        if force || new.rotation_snap_enabled != old.rotation_snap_enabled {
+            vp.settings.rotation_snap_enabled = new.rotation_snap_enabled;
+        }
+        if force || new.scale_snap_enabled != old.scale_snap_enabled {
+            vp.settings.scale_snap_enabled = new.scale_snap_enabled;
+        }
+        if force || new.snap_translate != old.snap_translate {
+            vp.settings.snap_translate = new.snap_translate;
+        }
+        if force || new.snap_rotate != old.snap_rotate {
+            vp.settings.snap_rotate = new.snap_rotate;
+        }
+        if force || new.snap_scale != old.snap_scale {
+            vp.settings.snap_scale = new.snap_scale;
+        }
+
+        if force || new.undo_limit != old.undo_limit {
+            self.editor
+                .scene
+                .command_history
+                .set_max_history(new.undo_limit);
+        }
+        if force || new.thumbnail_size != old.thumbnail_size {
+            self.editor.scene.asset_browser.grid_item_size = new.thumbnail_size;
+        }
+        if force || new.console_max_lines != old.console_max_lines {
+            self.editor
+                .console
+                .messages
+                .set_max_messages(new.console_max_lines);
+        }
+        if force || new.console_show_info != old.console_show_info {
+            self.editor.console.log_filter.show_info = new.console_show_info;
+        }
+        if force || new.console_show_warning != old.console_show_warning {
+            self.editor.console.log_filter.show_warning = new.console_show_warning;
+        }
+        if force || new.console_show_error != old.console_show_error {
+            self.editor.console.log_filter.show_error = new.console_show_error;
+        }
+
+        let s = &mut self.editor.ui.settings;
+        if !force && new != old {
+            s.mark_prefs_dirty();
+        }
+        s.prefs_applied = new;
+    }
+
+    /// Persist a VSync change to `window_config.ron`. The swapchain present
+    /// mode is fixed at startup, so flag a restart when it now differs.
+    fn persist_vsync_change(&mut self) {
+        let s = &mut self.editor.ui.settings;
+        if s.vsync == self.vsync_saved {
+            return;
+        }
+        let mut wc = WindowConfig::load_or_default();
+        wc.vsync = s.vsync;
+        if let Err(e) = wc.save_to_default() {
+            eprintln!("Failed to save window config: {e}");
+        }
+        self.vsync_saved = s.vsync;
+        s.restart_pending = s.vsync != self.vsync_active;
     }
 
     /// Open an input action file as a dock tab (default behavior).
@@ -1187,7 +1353,7 @@ impl App {
     /// same-machine lesson). Prefers the packaged exe; falls back to
     /// `cargo run --release`. Killed on play-exit.
     fn spawn_extra_clients(&mut self, host: &str, module: &str) {
-        let count = self.editor.ui.crusty_dock.play_settings.player_count;
+        let count = self.editor.ui.settings.prefs.play.player_count;
         for i in 1..count {
             let exe = std::path::Path::new("build/export/game.exe");
             let mut cmd = if exe.exists() {
@@ -1228,7 +1394,7 @@ impl App {
         };
         match rx.try_recv() {
             Ok(Ok(())) => {
-                let ps = &self.editor.ui.crusty_dock.play_settings;
+                let ps = &self.editor.ui.settings.prefs.play;
                 let (host, module) = (ps.host.clone(), ps.module.clone());
                 self.editor.console.messages.push(LogMessage::info(format!(
                     "Listen Server ready: connecting to {host} / {module}"
@@ -2072,6 +2238,12 @@ impl App {
             }
             MenuAction::Duplicate => self.handle_editor_action(EditorAction::Duplicate),
             MenuAction::Delete => self.handle_editor_action(EditorAction::Delete),
+            MenuAction::OpenEditorPreferences => {
+                self.editor.ui.settings.prefs_open = true;
+            }
+            MenuAction::OpenProjectSettings => {
+                self.editor.ui.settings.project_open = true;
+            }
             MenuAction::SaveLayout => {
                 match self.editor.ui.crusty_dock.save_to_default() {
                     Ok(()) => println!(
@@ -3012,8 +3184,11 @@ impl App {
             let build_dialog = &mut self.editor.play.build_dialog;
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
             let status_error_count = console.messages.counts().2;
-            let unsaved_count =
-                dirty_tabs.len() + self.editor.services.dirty.dirty_asset_count();
+            let project_dirty = self.editor.ui.settings.project_dirty();
+            let unsaved_count = dirty_tabs.len()
+                + self.editor.services.dirty.dirty_asset_count()
+                + usize::from(project_dirty);
+            let settings = &mut self.editor.ui.settings;
             let toasts = &mut self.editor.services.toasts;
             let dialog_stack = &mut self.editor.services.dialogs;
             let command_palette = &mut self.editor.services.command_palette;
@@ -3046,6 +3221,7 @@ impl App {
                         icons,
                         theme: &theme,
                         has_selection,
+                        play_settings: &mut settings.prefs.play,
                     },
                 );
                 if status_bar_panel(
@@ -3266,6 +3442,11 @@ impl App {
                 if let Some(dlg) = save_as_dialog.as_mut() {
                     save_as_cancel = dialogs_crusty::save_as_dialog_panel(ui, dlg);
                 }
+                {
+                    use rust_engine::engine::editor::settings_crusty;
+                    settings_crusty::editor_prefs_window(ui, settings);
+                    settings_crusty::project_settings_window(ui, settings);
+                }
                 if is_hovering_files {
                     dialogs_crusty::file_drop_overlay(ui, crusty_screen_rect);
                 }
@@ -3303,6 +3484,11 @@ impl App {
         }
 
         self.handle_frame_input(&crusty_result);
+
+        // Live-apply + debounced autosave of editor preferences (M10 P7).
+        self.apply_editor_prefs(false);
+        self.editor.ui.settings.flush_prefs();
+        self.persist_vsync_change();
 
         // Attach crusty layout data to frame packet and send to render thread
         let mut packet = packet;
@@ -3980,6 +4166,36 @@ impl App {
                 )));
             }
         }
+
+        // Project settings ride along with Ctrl+S.
+        if self.editor.ui.settings.project_dirty() {
+            match self.editor.ui.settings.save_project() {
+                Ok(()) => {
+                    self.apply_project_settings();
+                    self.editor.console.messages.push(LogMessage::info(
+                        "Saved project settings: project.ron".to_string(),
+                    ));
+                }
+                Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to save project settings: {e}"
+                ))),
+            }
+        }
+    }
+
+    /// Push saved project settings into live engine state (physics constants
+    /// and streaming budgets; scene/build fields apply on next launch).
+    fn apply_project_settings(&mut self) {
+        let pc = self.editor.ui.settings.project.clone();
+        if let Some(physics) = self.core.game_world.resource_mut::<PhysicsWorld>() {
+            physics.set_gravity(nalgebra_glm::vec3(0.0, 0.0, pc.gravity_z));
+            physics.set_timestep(1.0 / pc.fixed_timestep_hz.max(1.0));
+        }
+        let cfg = &mut self.core.world_streamer.config;
+        cfg.r_load = pc.stream_r_load;
+        cfg.r_unload = pc.stream_r_unload;
+        cfg.budget_ms = pc.stream_budget_ms;
+        cfg.max_in_flight = pc.stream_max_in_flight;
     }
 
     /// Runs `f` with a `StreamingCtx` assembled from engine parts. The
@@ -4774,7 +4990,7 @@ impl App {
         // M9.6 P4: a listen server is by definition local — refuse before
         // any play state changes (use Play As Client for remote servers).
         {
-            let ps = &self.editor.ui.crusty_dock.play_settings;
+            let ps = &self.editor.ui.settings.prefs.play;
             if ps.mode == rust_engine::engine::editor::play_settings::NetPlayMode::ListenServer
                 && !crate::listen_server::is_local_host(&ps.host)
             {
@@ -4861,7 +5077,7 @@ impl App {
 
         // M9.6 P3/P4: the net session lives from play-enter to play-exit;
         // re-entering play reconnects fresh (M9.5 rejoin path).
-        let ps = &self.editor.ui.crusty_dock.play_settings;
+        let ps = &self.editor.ui.settings.prefs.play;
         match ps.mode {
             rust_engine::engine::editor::play_settings::NetPlayMode::Client => {
                 let (host, module) = (ps.host.clone(), ps.module.clone());

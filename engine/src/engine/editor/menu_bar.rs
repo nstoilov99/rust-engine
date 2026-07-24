@@ -25,6 +25,10 @@ pub enum MenuAction {
     Duplicate,
     /// Delete the selected entity
     Delete,
+    /// Open the Editor Preferences window (user-local settings)
+    OpenEditorPreferences,
+    /// Open the Project Settings window (project.ron)
+    OpenProjectSettings,
     /// Save the current layout
     SaveLayout,
     /// Reset dock layout to default

@@ -66,6 +66,7 @@ impl LogMessage {
 /// Capped console log with incrementally maintained per-level counts.
 pub struct ConsoleLog {
     messages: VecDeque<LogMessage>,
+    max_messages: usize,
     info_count: usize,
     warn_count: usize,
     error_count: usize,
@@ -75,16 +76,27 @@ impl ConsoleLog {
     pub fn new() -> Self {
         Self {
             messages: VecDeque::with_capacity(MAX_CONSOLE_MESSAGES),
+            max_messages: MAX_CONSOLE_MESSAGES,
             info_count: 0,
             warn_count: 0,
             error_count: 0,
         }
     }
 
+    /// Change the retention cap; evicts oldest messages if over it.
+    pub fn set_max_messages(&mut self, max: usize) {
+        self.max_messages = max.max(10);
+        while self.messages.len() > self.max_messages {
+            if let Some(evicted) = self.messages.pop_front() {
+                self.decrement(&evicted);
+            }
+        }
+    }
+
     pub fn push(&mut self, msg: LogMessage) {
         self.increment(&msg);
         self.messages.push_back(msg);
-        while self.messages.len() > MAX_CONSOLE_MESSAGES {
+        while self.messages.len() > self.max_messages {
             if let Some(evicted) = self.messages.pop_front() {
                 self.decrement(&evicted);
             }

@@ -1,0 +1,17 @@
+(
+    name: "rust-engine",
+    version: "0.1.0",
+    default_scene: "scenes/main.scene",
+    editor_startup_scene: "",
+    gravity_z: -9.81,
+    fixed_timestep_hz: 60.0,
+    net_host: "http://127.0.0.1:3000",
+    net_module: "rust-engine-dev",
+    net_auto_connect: true,
+    stream_r_load: 2,
+    stream_r_unload: 3,
+    stream_budget_ms: 1.0,
+    stream_max_in_flight: 2,
+    build_target: Standalone,
+    build_output_dir: "build/export",
+)

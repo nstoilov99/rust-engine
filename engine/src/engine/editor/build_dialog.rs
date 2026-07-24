@@ -31,7 +31,7 @@ impl BuildPlatform {
 
 /// UE-style build target (M9 D6). Same binary either way for client
 /// targets — the target is configuration; MP Server is a module publish.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BuildTarget {
     /// Exe + pak, no net config (deletes a stale one).
     Standalone,

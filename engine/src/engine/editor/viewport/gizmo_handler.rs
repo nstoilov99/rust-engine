@@ -50,6 +50,8 @@ pub struct GizmoHandler {
     pub snap_rotate: f32,
     /// Scale snap increment
     pub snap_scale: f32,
+    /// On-screen gizmo size in pixels (library default 75).
+    pub gizmo_size: f32,
     /// Whether gizmo is currently being dragged
     is_dragging: bool,
     /// Transform at drag start (for undo)
@@ -69,6 +71,7 @@ impl GizmoHandler {
             snap_translate: 1.0,
             snap_rotate: 15.0,
             snap_scale: 0.1,
+            gizmo_size: 75.0,
             is_dragging: false,
             drag_start_transform: None,
             drag_entity: None,
@@ -228,6 +231,8 @@ impl GizmoHandler {
             // Use default visuals from the forked library (already has correct Z-up colors)
             ..Default::default()
         };
+        let mut config = config;
+        config.visuals.gizmo_size = self.gizmo_size;
 
         // Update gizmo config
         self.gizmo.update_config(config);

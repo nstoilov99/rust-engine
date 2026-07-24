@@ -29,6 +29,7 @@ pub struct MenuBarCtx<'a> {
     pub icons: &'a HashMap<String, TextureId>,
     pub theme: &'a EditorTheme,
     pub has_selection: bool,
+    pub play_settings: &'a mut PlaySettings,
 }
 
 /// Brighten a status color for the hovered play-control state.
@@ -63,6 +64,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         icons,
         theme,
         has_selection,
+        play_settings,
         ..
     } = ctx;
 
@@ -140,10 +142,13 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
 
                 ui.separator();
                 ui.menu_group_header("Configuration");
-                // Settings windows arrive with P7; shortcuts/plugins later.
-                let _ = ui.menu_item_enabled("Editor Preferences\u{2026}", false);
+                if ui.menu_item("Editor Preferences\u{2026}") {
+                    action = MenuAction::OpenEditorPreferences;
+                }
                 let _ = ui.menu_item_enabled("Keyboard Shortcuts\u{2026}", false);
-                let _ = ui.menu_item_enabled("Project Settings\u{2026}", false);
+                if ui.menu_item("Project Settings\u{2026}") {
+                    action = MenuAction::OpenProjectSettings;
+                }
                 let _ = ui.menu_item_enabled("Plugins", false);
             });
 
@@ -214,7 +219,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 play_mode,
                 icons,
                 theme,
-                &mut dock_state.play_settings,
+                play_settings,
                 &mut action,
             );
         },
