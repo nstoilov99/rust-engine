@@ -848,7 +848,7 @@ fn draw_prefs_footer(ui: &mut Ui, footer: Rect, state: &mut SettingsState) {
     let btn_w = 74.0;
     ui.set_cursor(Pos2::new(footer.max.x - btn_w - 8.0, footer.min.y + 4.0));
     if Button::new("Reset All")
-        .danger()
+        .danger_outline()
         .min_size(Vec2::new(btn_w, 20.0))
         .show(ui)
         .clicked
