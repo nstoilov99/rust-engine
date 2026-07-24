@@ -4,6 +4,7 @@
 **/*.rs.bk
 *.pdb
 /docs/roadmap
+/docs/mockup
 
 # Cargo.lock  # <-- DON'T uncomment this for applications
 

@@ -1724,7 +1724,8 @@ The checkpoint is complete when **all** of the following are green:
 ---
 
 ### Task M1: Editor UX & Design System v1
-**Status:** 📋 Planned
+**Status:** 🔀 Superseded by **Task M10** (mockup-driven scope: full design-system
+restyle + settings windows — see `VULKANO-M10-EDITOR-UX.md`)
 **Duration:** ~2 weeks (hard time-box)
 **Prerequisites:** none (can overlap M0)
 
@@ -1896,6 +1897,31 @@ Default Map** analogue folded in:
   the launcher analogue)
 - **Number of Players**: spawn N−1 extra standalone client processes
   with `--connect`
+
+---
+
+### Task M10: Editor UX & Design System v1 (Crusty Theme Tokens)
+**Status:** 📋 Planned — see `VULKANO-M10-EDITOR-UX.md`
+**Duration:** ~3–4 weeks
+**Prerequisites:** M9.6 (absorbs superseded Task M1)
+
+Implements the Crusty Design System mockup (`docs/mockup/`, local) at ≥95%
+fidelity:
+
+- **Semantic token system**: 9 surfaces + 3 accents + invariant
+  selection/status/axis/type colors; four presets (Steel default, Tidepool,
+  Graphite, Rusty), live-switchable; zero hard-coded colors in panels
+- **Fonts**: bundled IBM Plex Sans + JetBrains Mono, multi-family text runs
+- **Widget state ladder + keyboard focus**: five states everywhere, focus
+  rings, Tab traversal; new primitives (toggle, chips, mixed checkbox,
+  structured tooltip, spinbox caps)
+- **Full Edit menu** (History / clipboard / Configuration) with entity
+  Cut/Copy/Paste
+- **Settings windows**: Editor Preferences (`editor_prefs.ron`, live-apply;
+  PlaySettings migrates here) + Project Settings (`project.ron`, checked in
+  — the file Task 39.8's plugin manifest later extends)
+- **Panel restyle**: chrome, hierarchy, inspector axis/asset-reference
+  fields, asset browser, console, profiler, status-bar command palette
 
 ---
 
