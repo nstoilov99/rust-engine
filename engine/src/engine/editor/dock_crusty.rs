@@ -257,7 +257,7 @@ pub fn new_tab_button(ui: &mut Ui, slot: &TabBarSlot) -> bool {
 
 /// Dim placeholder body for tabs whose panel isn't ported yet.
 pub fn placeholder_panel(ui: &mut Ui, text: &str) {
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     Label::new(text).color(dim).show(ui);
 }
 

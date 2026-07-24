@@ -153,7 +153,7 @@ fn disabled_screen(ui: &mut Ui, s: f32) {
     ui.add_space(10.0 * s);
     ui.horizontal_aligned(Align::Center, |ui| {
         Label::new("Press F12 to enable profiling")
-            .color(style.palette.text_dim)
+            .color(style.palette.text_secondary)
             .show(ui);
     });
     ui.add_space(10.0 * s);
@@ -267,7 +267,7 @@ fn toolbar(ui: &mut Ui, s: f32, state: &mut ProfilerState) -> ToolbarAnchors {
                 gray(160),
             );
         } else {
-            row_label(ui, "No frame selected", font, style.palette.text_dim);
+            row_label(ui, "No frame selected", font, style.palette.text_secondary);
         }
     });
 
@@ -606,7 +606,7 @@ fn selection_fill(accent: Color) -> Color {
 /// accent selection fill when active. Returns true on click.
 fn toggle_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label: &str) -> bool {
     let clicked = if *value == option {
-        let a = ui.style().palette.accent;
+        let a = ui.style().palette.accent_active;
         Button::new(label)
             .fill(selection_fill(a))
             .text_color(gray(255))
@@ -638,9 +638,9 @@ fn select_chip<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, option: T, label
     let selected = *value == option;
     if selected || resp.hovered {
         let fill = if selected {
-            selection_fill(style.palette.accent)
+            selection_fill(style.palette.accent_active)
         } else {
-            style.palette.surface_hover
+            style.palette.hover
         };
         ui.painter().rect_filled(rect, style.rounding.widget, fill);
     }
@@ -1364,7 +1364,7 @@ fn table_view(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
                 p.rect_filled(cell, Rounding::same(2.0 * s), rgba(255, 255, 255, 10));
             }
             let color = if sorted {
-                style.palette.accent
+                style.palette.accent_active
             } else {
                 gray(150)
             };
@@ -1628,7 +1628,7 @@ fn budget_body(ui: &mut Ui, s: f32, state: &mut ProfilerState) {
         for (i, (label, value)) in chunk.iter().enumerate() {
             let x = row.min.x + i as f32 * (card_w + gap);
             let card = Rect::from_min_size(Pos2::new(x, row.min.y), Vec2::new(card_w, card_h));
-            p.rect_filled(card, style.rounding.small, style.palette.surface);
+            p.rect_filled(card, style.rounding.small, style.palette.input);
             p.text(
                 Pos2::new(card.min.x + 8.0 * s, card.min.y + 4.0 * s),
                 label,

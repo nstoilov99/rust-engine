@@ -20,8 +20,6 @@ pub use crusty_gui::context::Ui;
 pub use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
-#[cfg(feature = "editor")]
-use crusty_gui::math::Rounding;
 pub use crusty_gui::paint::{Painter, TextureId};
 use crusty_gui::paint::{PaintCmd, TextureFilter};
 use crusty_gui::shell::input as shell_input;
@@ -57,24 +55,31 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     let sp = &theme.spacing;
     let ty = &theme.typography;
 
-    let mut style = Style::editor_dark();
+    // Total mapping: every color/font field of the crusty Style is fed from
+    // a theme token; metrics/rounding/motion keep crusty's Steel constants
+    // (the same design-system values).
+    let mut style = Style::steel();
 
-    style.palette.surface = p.field_bg;
-    style.palette.surface_hover = p.surface[3];
-    style.palette.surface_active = p.surface[4];
-    style.palette.accent = p.accent;
-    // Zero alpha disables crusty's hover glow — the reference hover is a
-    // plain 1px accent stroke, no shadow.
-    style.palette.accent_glow = p.accent.with_alpha(0.0);
-    style.palette.text = p.text_primary;
-    style.palette.text_dim = p.text_secondary;
-    style.palette.stroke = p.stroke;
-    style.palette.stroke_hover = p.accent;
-    style.palette.success = p.semantic.success;
-    // Dock chrome: panel bodies on surface[1], tab strip on the darker
-    // surface[0] so the active tab connects to its body.
-    style.palette.panel = p.surface[1];
-    style.palette.tab_bar = p.surface[0];
+    style.palette.input = p.surfaces.input;
+    style.palette.window = p.surfaces.window;
+    style.palette.panel = p.surfaces.panel;
+    style.palette.header = p.surfaces.header;
+    style.palette.elevated = p.surfaces.elevated;
+    style.palette.hover = p.surfaces.hover;
+    style.palette.active = p.surfaces.active;
+    style.palette.stroke = p.surfaces.stroke;
+    style.palette.stroke_strong = p.surfaces.stroke_strong;
+    style.palette.accent_active = p.accents.accent_active;
+    style.palette.focus_ring = p.accents.focus_ring;
+    style.palette.accent_soft = p.accents.accent_soft;
+    style.palette.selection_fill = p.selection.fill;
+    style.palette.selection_text = p.selection.text;
+    style.palette.text = p.text.primary;
+    style.palette.text_secondary = p.text.secondary;
+    style.palette.text_disabled = p.text.disabled;
+    style.palette.text_mono = p.text.mono;
+    style.palette.popover_alpha = p.popover_alpha;
+    style.palette.scrim_alpha = p.scrim_alpha;
 
     style.spacing.item = sp.item_spacing_y;
     style.spacing.padding = sp.window_margin;
@@ -85,10 +90,7 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     // `ui.heading` maps to `heading_large`.
     style.fonts.title = ty.heading_large;
     style.fonts.small = ty.caption;
-
-    style.rounding.panel = Rounding::same(6.0);
-    style.rounding.widget = Rounding::same(3.0);
-    style.rounding.small = Rounding::same(2.0);
+    style.fonts.mono = ty.mono;
 
     style
 }

@@ -302,7 +302,7 @@ fn settings_contents(
         if now - time < 3.0 {
             Label::new(msg.as_str())
                 .size(style.fonts.small)
-                .color(style.palette.text_dim)
+                .color(style.palette.text_secondary)
                 .show(ui);
         } else {
             clear_status = true;
@@ -868,7 +868,7 @@ fn editor_toolbar(ui: &mut Ui, dirty: bool, status: &mut Option<(String, f64)>) 
                 Pos2::new(right - w - 6.0, y),
                 &msg,
                 style.fonts.small,
-                style.palette.text_dim,
+                style.palette.text_secondary,
                 None,
             );
         } else {
@@ -886,7 +886,7 @@ fn file_path_bar(ui: &mut Ui, path: &std::path::Path) {
     ui.separator();
     Label::new(path.to_string_lossy().as_ref())
         .size(style.fonts.small)
-        .color(style.palette.text_dim)
+        .color(style.palette.text_secondary)
         .show(ui);
 }
 
@@ -1001,7 +1001,7 @@ pub fn input_action_panel(
                             ui,
                             &format!("({})", action.triggers.len()),
                             style.fonts.small,
-                            style.palette.text_dim,
+                            style.palette.text_secondary,
                         );
                     });
                     ui.add_space(2.0);
@@ -1021,7 +1021,7 @@ pub fn input_action_panel(
                             ui,
                             &format!("({})", action.modifiers.len()),
                             style.fonts.small,
-                            style.palette.text_dim,
+                            style.palette.text_secondary,
                         );
                     });
                     ui.add_space(2.0);
@@ -1152,7 +1152,7 @@ pub fn input_context_panel(
                             ui,
                             &format!("({})", mctx.entries.len()),
                             style.fonts.small,
-                            style.palette.text_dim,
+                            style.palette.text_secondary,
                         );
                     });
                     ui.add_space(2.0);
@@ -1198,7 +1198,7 @@ pub fn input_context_panel(
                                                 ui,
                                                 &format!("#{}", bi + 1),
                                                 style.fonts.small,
-                                                style.palette.text_dim,
+                                                style.palette.text_secondary,
                                             );
 
                                             if is_listening {
@@ -1252,7 +1252,7 @@ pub fn input_context_panel(
                                                     || !binding.triggers.is_empty(),
                                             )
                                             .text_size(style.fonts.small)
-                                            .text_color(style.palette.text_dim)
+                                            .text_color(style.palette.text_secondary)
                                             .fit_width(true)
                                             .show(ui, |ui| {
                                                 Label::new("Modifiers:")

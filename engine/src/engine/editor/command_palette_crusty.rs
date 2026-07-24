@@ -102,12 +102,12 @@ fn command_row(ui: &mut Ui, selected: bool, label: &str) -> bool {
     let fill = if selected {
         Color::from_srgb_u8(98, 59, 35, 255)
     } else if hovered {
-        style.palette.surface_hover
+        style.palette.hover
     } else {
         Color::TRANSPARENT
     };
     let text_color = if selected {
-        style.palette.accent
+        style.palette.accent_active
     } else {
         style.palette.text
     };

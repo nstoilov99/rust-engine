@@ -104,7 +104,7 @@ pub fn console_panel(ui: &mut Ui, tab_rect: Rect, ctx: ConsolePanelCtx) {
                     }
                     if shown == 0 {
                         Label::new("No messages")
-                            .color(style.palette.text_dim)
+                            .color(style.palette.text_secondary)
                             .show(ui);
                     }
                 });
@@ -116,7 +116,7 @@ pub fn console_panel(ui: &mut Ui, tab_rect: Rect, ctx: ConsolePanelCtx) {
                 .width(ui.available().width())
                 .hint("Enter command (type 'help' for available commands)")
                 .keep_focus_on_submit(true)
-                .fill(style.palette.surface)
+                .fill(style.palette.input)
                 .show_full(ui);
 
             if out.submitted {

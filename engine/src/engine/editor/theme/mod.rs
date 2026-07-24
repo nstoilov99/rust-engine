@@ -9,7 +9,9 @@ pub mod shadows;
 pub mod typography;
 
 pub use density::{Density, SpacingTokens};
-pub use palette::{ContrastIssue, Palette, SemanticColors};
+pub use palette::{
+    Accents, Axis, ContrastIssue, Palette, Selection, Status, Surfaces, TextColors, TypeColors,
+};
 pub use shadows::{ShadowSpec, ShadowTokens};
 pub use typography::Typography;
 
@@ -36,15 +38,36 @@ pub struct EditorTheme {
 }
 
 impl EditorTheme {
-    /// Build the default dark theme at the given density.
-    pub fn dark_default() -> Self {
+    /// Steel — the design system's default preset.
+    pub fn steel() -> Self {
+        Self::with_palette(Palette::steel())
+    }
+
+    pub fn tidepool() -> Self {
+        Self::with_palette(Palette::tidepool())
+    }
+
+    pub fn graphite() -> Self {
+        Self::with_palette(Palette::graphite())
+    }
+
+    pub fn rusty() -> Self {
+        Self::with_palette(Palette::rusty())
+    }
+
+    fn with_palette(palette: Palette) -> Self {
         Self {
-            palette: Palette::dark_default(),
+            palette,
             typography: Typography::comfortable(),
             spacing: SpacingTokens::comfortable(),
             shadows: ShadowTokens::dark_default(),
             density: Density::Comfortable,
         }
+    }
+
+    /// Default theme (Steel). Kept under the old name for existing callers.
+    pub fn dark_default() -> Self {
+        Self::steel()
     }
 
     /// Returns a new theme with the specified density applied.
@@ -73,13 +96,13 @@ impl EditorTheme {
     /// Map a `StateKind` to its corresponding semantic color.
     pub fn state_color(&self, kind: StateKind) -> crusty_gui::math::Color {
         match kind {
-            StateKind::Disabled => self.palette.text_disabled,
-            StateKind::Mixed => self.palette.semantic.mixed,
-            StateKind::Overridden => self.palette.semantic.overridden,
-            StateKind::Error => self.palette.semantic.error,
-            StateKind::Warning => self.palette.semantic.warning,
-            StateKind::Success => self.palette.semantic.success,
-            StateKind::Info => self.palette.semantic.info,
+            StateKind::Disabled => self.palette.text.disabled,
+            StateKind::Mixed => self.palette.status.mixed,
+            StateKind::Overridden => self.palette.status.overridden,
+            StateKind::Error => self.palette.status.error,
+            StateKind::Warning => self.palette.status.warning,
+            StateKind::Success => self.palette.status.success,
+            StateKind::Info => self.palette.status.info,
         }
     }
 }
@@ -116,11 +139,11 @@ mod tests {
         let theme = EditorTheme::dark_default();
         assert_eq!(
             theme.state_color(StateKind::Error),
-            theme.palette.semantic.error
+            theme.palette.status.error
         );
         assert_eq!(
             theme.state_color(StateKind::Success),
-            theme.palette.semantic.success
+            theme.palette.status.success
         );
     }
 }

@@ -445,9 +445,9 @@ fn icon_toggle(
 ) -> bool {
     let style = ui.style();
     let (surface, surface_hover, surface_active) = (
-        style.palette.surface,
-        style.palette.surface_hover,
-        style.palette.surface_active,
+        style.palette.input,
+        style.palette.hover,
+        style.palette.active,
     );
     let resp = if let Some(&tex) = icons.get(stem) {
         // Bg chip (idle too), white → gray icon tint.
@@ -531,7 +531,7 @@ fn render_toolbar(
         toolbar_vsep(ui);
 
         // Search: painted magnifier + text field + clear.
-        let dim = ui.style().palette.text_dim;
+        let dim = ui.style().palette.text_secondary;
         let glass = ui.allocate(Vec2::new(16.0, 18.0));
         let c = Pos2::new(glass.center().x - 2.0, glass.center().y - 2.0);
         ui.painter().circle_stroke(c, 4.0, 1.5, dim);
@@ -541,7 +541,7 @@ fn render_toolbar(
             1.5,
             dim,
         );
-        let field_bg = ui.style().palette.surface;
+        let field_bg = ui.style().palette.input;
         let out = TextEdit::new(&mut panel.search_text)
             .width(150.0)
             .height(20.0)
@@ -639,7 +639,7 @@ fn render_toolbar(
         panel.request_rescan();
     }
 
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     let small = ui.style().fonts.small;
     let count_text = format!("{asset_count} assets");
     let sz = ui.painter().measure_text(&count_text, small, None);
@@ -656,8 +656,8 @@ fn render_toolbar(
 
 fn crumb(ui: &mut Ui, id: Id, text: &str, selected: bool) -> bool {
     let body = ui.style().fonts.body;
-    let dim = ui.style().palette.text_dim;
-    let accent = ui.style().palette.accent;
+    let dim = ui.style().palette.text_secondary;
+    let accent = ui.style().palette.accent_active;
     let sz = ui.painter().measure_text(text, body, None);
     let rect = ui.allocate(Vec2::new(sz.x + 12.0, 20.0));
     let resp = ui.interact(id, rect);
@@ -692,7 +692,7 @@ fn render_breadcrumb(ui: &mut Ui, panel: &mut AssetBrowserPanel) {
 
         let mut accumulated = PathBuf::new();
         for (i, component) in current.components().enumerate() {
-            let dim = ui.style().palette.text_dim;
+            let dim = ui.style().palette.text_secondary;
             let small = ui.style().fonts.small;
             let slash = ui.allocate(Vec2::new(8.0, 20.0));
             let ssz = ui.painter().measure_text("/", small, None);
@@ -818,7 +818,7 @@ fn render_folder_pane(
     ui.add_space(8.0);
     let top = ui.cursor().y;
     let heading = ui.style().fonts.title;
-    let text_color = ui.style().palette.text_dim;
+    let text_color = ui.style().palette.text_secondary;
     let left = ui.available().min.x;
     ui.painter().text(
         Pos2::new(left + 6.0, top + 4.0),
@@ -1004,7 +1004,7 @@ fn render_folder_node(
             }
         } else {
             let body = ui.style().fonts.body;
-            let dim = ui.style().palette.text_dim;
+            let dim = ui.style().palette.text_secondary;
             let color = if is_selected { Color::WHITE } else { dim };
             let sz = ui.painter().measure_text(&node.name, body, None);
             ui.painter().text(
@@ -1226,7 +1226,7 @@ fn render_content(
     ui.add_space(8.0);
     if rows.is_empty() {
         let avail = ui.available();
-        let dim = ui.style().palette.text_dim;
+        let dim = ui.style().palette.text_secondary;
         let msg = "No assets found";
         let sz = ui.painter().measure_text(msg, 16.0, None);
         let cx = avail.center().x;
@@ -1490,7 +1490,7 @@ fn render_list(
     let header = ui.allocate(Vec2::new(ui.available().width(), 22.0));
     let body = ui.style().fonts.body;
     let text_color = ui.style().palette.text;
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     let mut x = header.min.x + 8.0;
     for (label, w, col) in LIST_COLS {
         let cell = Rect::from_min_max(Pos2::new(x, header.min.y), Pos2::new(x + w, header.max.y));
@@ -1597,7 +1597,7 @@ fn render_list_row(
 
     let body = ui.style().fonts.body;
     let small = ui.style().fonts.small;
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
 
     // Name (or rename editor).
     let name_x = left + 20.0;

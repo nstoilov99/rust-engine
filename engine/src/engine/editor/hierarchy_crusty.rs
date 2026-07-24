@@ -132,7 +132,7 @@ fn render_header(ui: &mut Ui, panel: &mut HierarchyPanel, world: &mut World, rea
     });
     if read_only {
         let style = ui.style();
-        let dim = style.palette.text_dim;
+        let dim = style.palette.text_secondary;
         let size = style.fonts.small;
         ui.painter().text(
             Pos2::new(row_top.x, row_top.y + 6.0),
@@ -146,7 +146,7 @@ fn render_header(ui: &mut Ui, panel: &mut HierarchyPanel, world: &mut World, rea
 
 fn render_search(ui: &mut Ui, panel: &mut HierarchyPanel) {
     ui.horizontal(|ui| {
-        let dim = ui.style().palette.text_dim;
+        let dim = ui.style().palette.text_secondary;
         Label::new("Search:").color(dim).show(ui);
         ui.add_space(8.0);
         let w = ui.available_size().x;
@@ -215,7 +215,7 @@ fn render_tree(
             }
             if total_rows == 0 {
                 if world_object.is_none() {
-                    let dim = ui.style().palette.text_dim;
+                    let dim = ui.style().palette.text_secondary;
                     Label::new("No entities in scene").color(dim).show(ui);
                 }
                 return;
@@ -323,7 +323,7 @@ fn render_world_row(
     let color = if is_selected {
         Color::WHITE
     } else {
-        style.palette.text_dim
+        style.palette.text_secondary
     };
     let size = style.fonts.body;
     let text_h = ui.painter().measure_text(name, size, None).y;
@@ -562,7 +562,7 @@ fn render_row(
         } else if is_selected {
             Color::WHITE
         } else {
-            style.palette.text_dim
+            style.palette.text_secondary
         };
         let size = style.fonts.body;
         let text_h = ui.painter().measure_text(&name, size, None).y;

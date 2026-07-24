@@ -219,7 +219,7 @@ const BUILD_LABEL_W: f32 = 64.0;
 fn build_row(ui: &mut Ui, label: &str, field: impl FnOnce(&mut Ui, f32)) {
     let style = ui.style();
     let font = style.fonts.body;
-    let dim = style.palette.text_dim;
+    let dim = style.palette.text_secondary;
     let row_h = font + 12.0; // combo trigger height; TextEdit is font + 10
     let field_w = ui.available().width() - BUILD_LABEL_W;
     let top = ui.cursor().y;

@@ -165,7 +165,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                     render_entity_info(ui, world, entity);
                     ui.separator();
                     if read_only {
-                        let dim = ui.style().palette.text_dim;
+                        let dim = ui.style().palette.text_secondary;
                         Label::new("Properties are locked during play mode")
                             .color(dim)
                             .show(ui);
@@ -181,7 +181,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
 
 fn render_header(ui: &mut Ui, selection: &Selection, read_only: bool) {
     let style = ui.style();
-    let dim = style.palette.text_dim;
+    let dim = style.palette.text_secondary;
     if read_only {
         Label::new("(Playing)")
             .size(style.fonts.small)
@@ -197,7 +197,7 @@ fn render_header(ui: &mut Ui, selection: &Selection, read_only: bool) {
 }
 
 fn render_empty_state(ui: &mut Ui) {
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     let font = ui.style().fonts.body;
     ui.add_space(50.0);
     let avail = ui.available().width();
@@ -217,7 +217,7 @@ fn render_empty_state(ui: &mut Ui) {
 fn render_world_info(ui: &mut Ui, info: &super::world_object::WorldObjectInfo) {
     let style = ui.style();
     let text = style.palette.text;
-    let dim = style.palette.text_dim;
+    let dim = style.palette.text_secondary;
     let width = ui.available().width();
 
     ui.add_space(6.0);
@@ -314,7 +314,7 @@ fn render_filter(ui: &mut Ui, panel: &mut InspectorPanel) {
         let out = TextEdit::new(&mut panel.search_filter)
             .width(w)
             .height(18.0)
-            .fill(style.palette.surface)
+            .fill(style.palette.input)
             .hint("Search components...")
             .show_full(ui);
         if out.cancelled {
@@ -341,7 +341,7 @@ fn render_entity_info(ui: &mut Ui, world: &World, entity: Entity) {
         Pos2::new(right - id_w - 6.0, row_top.y + 4.0),
         &id_text,
         style.fonts.small,
-        style.palette.text_dim,
+        style.palette.text_secondary,
         None,
     );
 }
@@ -389,7 +389,7 @@ fn component_section(
         .unwrap_or(true);
 
     let bg = if resp.hovered {
-        style.palette.surface_hover
+        style.palette.hover
     } else {
         HEADER_BG
     };
@@ -409,9 +409,9 @@ fn component_section(
     let center = Pos2::new(left + 13.0, (header_rect.min.y + header_rect.max.y) * 0.5);
     let s = 3.5;
     let chev = if resp.hovered {
-        style.palette.accent
+        style.palette.accent_active
     } else {
-        style.palette.text_dim
+        style.palette.text_secondary
     };
     let (a, m, b) = if open {
         (
@@ -480,7 +480,7 @@ fn component_section(
 /// Two-column property row: fixed-width dim label, then the value widgets.
 fn property_row<R>(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui) -> R) -> R {
     let style = ui.style();
-    let dim = style.palette.text_dim;
+    let dim = style.palette.text_secondary;
     let font = style.fonts.body;
     let top = ui.cursor().y;
     let r = ui.horizontal(|ui| {
@@ -510,7 +510,7 @@ fn vec3_row(
 ) -> bool {
     let style = ui.style();
     let font = style.fonts.body;
-    let dim = style.palette.text_dim;
+    let dim = style.palette.text_secondary;
     ui.horizontal(|ui| {
         let start = ui.cursor();
         ui.painter()
@@ -546,7 +546,7 @@ fn vec3_row(
                 .range(range.clone())
                 .width(field_w)
                 .height(FIELD_H)
-                .fill(style.palette.surface);
+                .fill(style.palette.input);
             if let Some(suffix) = suffix {
                 dv = dv.suffix(suffix);
             }
@@ -568,7 +568,7 @@ fn slider_row(
 ) {
     let span = *range.end() - *range.start();
     property_row(ui, label, |ui| {
-        let field_bg = ui.style().palette.surface;
+        let field_bg = ui.style().palette.input;
         let slider_w = 76.0;
         Slider::new(value, range.clone()).width(slider_w).show(ui);
         ui.add_space(6.0);
@@ -594,7 +594,7 @@ fn drag_row(
     suffix: &str,
 ) {
     property_row(ui, label, |ui| {
-        let field_bg = ui.style().palette.surface;
+        let field_bg = ui.style().palette.input;
         DragValue::new(value)
             .speed(speed)
             .range(range)
@@ -665,7 +665,7 @@ fn asset_slot_row(
             .width(combo_w)
             .show_ui(ui, |ui| {
                 let style = ui.style();
-                let dim = style.palette.text_dim;
+                let dim = style.palette.text_secondary;
 
                 // Persistent search text for this slot.
                 let sid = Id::new("asset_slot_search").with(id_source);
@@ -921,7 +921,7 @@ fn edit_name(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut name) = world.get::<&mut Name>(entity) {
         component_section(ui, "Name", CAT_CORE, false, |ui| {
             property_row(ui, "Name:", |ui| {
-                let field_bg = ui.style().palette.surface;
+                let field_bg = ui.style().palette.input;
                 // text_edit_width
                 let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
                 TextEdit::new(&mut name.0)
@@ -1099,7 +1099,7 @@ fn edit_camera(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut Pick
 
         let mut priority = camera.priority as f32;
         property_row(ui, "Priority", |ui| {
-            let field_bg = ui.style().palette.surface;
+            let field_bg = ui.style().palette.input;
             DragValue::new(&mut priority)
                 .speed(0.5)
                 .range(-100.0..=100.0)
@@ -1181,7 +1181,7 @@ fn edit_directional_light(
         }
         let mut dir = [light.direction.x, light.direction.y, light.direction.z];
         property_row(ui, "Direction", |ui| {
-            let field_bg = ui.style().palette.surface;
+            let field_bg = ui.style().palette.input;
             for (prefix, v) in ["X: ", "Y: ", "Z: "].into_iter().zip(dir.iter_mut()) {
                 DragValue::new(v)
                     .prefix(prefix)
@@ -1445,7 +1445,7 @@ fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
             if !skeleton.bones.is_empty() {
                 CollapsingHeader::new("Bone List").show(ui, |ui| {
                     let style = ui.style();
-                    let dim = style.palette.text_dim;
+                    let dim = style.palette.text_secondary;
                     for (i, bone) in skeleton.bones.iter().enumerate() {
                         let parent_str = bone
                             .parent_index
@@ -1731,7 +1731,7 @@ fn edit_particle_effect(
                 drag_row(ui, "Rate", &mut effect.emission_rate, 0.5, 0.0..=1000.0, "");
                 let mut burst = effect.burst_count as f32;
                 property_row(ui, "Burst Count", |ui| {
-                    let field_bg = ui.style().palette.surface;
+                    let field_bg = ui.style().palette.input;
                     DragValue::new(&mut burst)
                         .speed(1.0)
                         .range(0.0..=100000.0)
@@ -1916,7 +1916,7 @@ fn edit_particle_effect(
 
         CollapsingHeader::new("Rendering").show(ui, |ui| {
             property_row(ui, "Texture", |ui| {
-                let field_bg = ui.style().palette.surface;
+                let field_bg = ui.style().palette.input;
                 let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
                 TextEdit::new(&mut effect.texture_path)
                     .width(w)
@@ -1974,7 +1974,7 @@ fn render_add_component(
     ui.add_space(8.0);
 
     let mut added = false;
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     ComboBox::new("add_component")
         .selected_text("Add Component...")
         .width(127.0)

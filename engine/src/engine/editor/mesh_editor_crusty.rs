@@ -50,7 +50,7 @@ fn gray(v: u8) -> Color {
 /// Weak text: gamma-blended halfway toward the panel fill (`text_dim` alone
 /// is the *normal* label color, too bright here).
 fn weak(ui: &Ui) -> Color {
-    let t = ui.style().palette.text_dim.to_srgb_u8();
+    let t = ui.style().palette.text_secondary.to_srgb_u8();
     let p = ui.style().palette.panel.to_srgb_u8();
     Color::from_srgb_u8(
         (t[0] >> 1) + (p[0] >> 1),
@@ -225,7 +225,7 @@ fn details(
                 Pos2::new(row.min.x, row.center().y - font * 1.25 * 0.5),
                 &format!("Material Slots: {}", data.meta.material_slots.len()),
                 font,
-                style.palette.text_dim,
+                style.palette.text_secondary,
                 None,
             );
             let add_rect =
@@ -350,13 +350,13 @@ fn save_bar_ui(
     let resp = ui.interact(id, btn);
     let hovered = resp.hovered && enabled;
     let fill = if hovered {
-        style.palette.surface_hover
+        style.palette.hover
     } else {
-        style.palette.surface
+        style.palette.input
     };
     ui.painter().rect_filled(btn, 4.0, fill);
     let stroke = if enabled {
-        style.palette.accent
+        style.palette.accent_active
     } else {
         style.palette.stroke
     };
@@ -787,11 +787,11 @@ fn picker_row(
     let resp = ui.interact(id, rect);
 
     let fill = if selected {
-        let mut accent = style.palette.accent;
+        let mut accent = style.palette.accent_active;
         accent.a = 0.85;
         accent
     } else if resp.hovered {
-        style.palette.surface_hover
+        style.palette.hover
     } else {
         Color::TRANSPARENT
     };
@@ -884,14 +884,14 @@ fn icon_button_impl(
     let resp = ui.interact(id, rect);
     let hovered = resp.hovered && enabled;
     let fill = if hovered {
-        style.palette.surface_hover
+        style.palette.hover
     } else {
-        style.palette.surface
+        style.palette.input
     };
     ui.painter().rect_filled(rect, 4.0, fill);
     if on {
         ui.painter()
-            .rect_stroke(rect, 4.0, 1.0, style.palette.accent);
+            .rect_stroke(rect, 4.0, 1.0, style.palette.accent_active);
     } else if hovered {
         ui.painter().rect_stroke(rect, 4.0, 1.0, gray(100));
     }

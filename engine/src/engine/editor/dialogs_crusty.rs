@@ -137,7 +137,7 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
         format!("Import Model: {}", state.current_file_name())
     };
 
-    let dim = ui.style().palette.text_dim;
+    let dim = ui.style().palette.text_secondary;
     let dim_label = |ui: &mut Ui, text: String| {
         Label::new(text).color(dim).show(ui);
     };

@@ -533,7 +533,7 @@ fn caption_controls(ui: &mut Ui, win: Rect, tabs_end_x: f32, maximized: bool) ->
                 // Windows-convention red close hover.
                 Color::from_srgb_u8(196, 43, 28, 255)
             } else {
-                ctx.style.palette.surface_hover
+                ctx.style.palette.hover
             };
             ctx.paint
                 .push(PaintCmd::Rrect(RectShape::fill(rect, 0.0, fill)));
@@ -541,7 +541,7 @@ fn caption_controls(ui: &mut Ui, win: Rect, tabs_end_x: f32, maximized: bool) ->
         let col = if hovered {
             ctx.style.palette.text
         } else {
-            ctx.style.palette.text_dim
+            ctx.style.palette.text_secondary
         };
         let c = rect.center();
         let s = 4.5; // glyph half-extent
