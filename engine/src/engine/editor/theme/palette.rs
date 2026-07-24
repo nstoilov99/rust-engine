@@ -45,6 +45,8 @@ pub struct Accents {
     /// `accent_active` at 14-16% alpha: fill behind toggled tool buttons,
     /// active filter chips, segmented controls.
     pub accent_soft: Color,
+    /// Text/icons on top of `accent_active` fills (primary buttons).
+    pub on_accent: Color,
 }
 
 /// Preset-invariant selection tokens (UE-outliner-style calm neutral).
@@ -138,6 +140,7 @@ impl Palette {
                 accent_active: rgb(79, 163, 232),
                 focus_ring: rgb(122, 187, 240),
                 accent_soft: rgb(79, 163, 232).with_alpha(0.15),
+                on_accent: rgb(14, 21, 32),
             },
             ..Self::invariants()
         }
@@ -161,6 +164,7 @@ impl Palette {
                 accent_active: rgb(63, 193, 176),
                 focus_ring: rgb(106, 212, 197),
                 accent_soft: rgb(63, 193, 176).with_alpha(0.15),
+                on_accent: rgb(14, 21, 32),
             },
             ..Self::invariants()
         }
@@ -185,6 +189,7 @@ impl Palette {
                 accent_active: rgb(196, 203, 212),
                 focus_ring: rgb(154, 163, 174),
                 accent_soft: rgb(196, 203, 212).with_alpha(0.13),
+                on_accent: rgb(14, 21, 32),
             },
             ..Self::invariants()
         }
@@ -209,6 +214,7 @@ impl Palette {
                 accent_active: rgb(204, 107, 51),
                 focus_ring: rgb(224, 150, 104),
                 accent_soft: rgb(204, 107, 51).with_alpha(0.15),
+                on_accent: rgb(14, 21, 32),
             },
             ..Self::invariants()
         }
@@ -233,6 +239,7 @@ impl Palette {
                 accent_active: Color::WHITE,
                 focus_ring: Color::WHITE,
                 accent_soft: Color::WHITE,
+                on_accent: Color::BLACK,
             },
             selection: Selection {
                 fill: rgb(60, 70, 84),

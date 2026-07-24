@@ -72,6 +72,8 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.palette.accent_active = p.accents.accent_active;
     style.palette.focus_ring = p.accents.focus_ring;
     style.palette.accent_soft = p.accents.accent_soft;
+    style.palette.accent_text = p.accents.on_accent;
+    style.palette.danger = p.status.danger;
     style.palette.selection_fill = p.selection.fill;
     style.palette.selection_text = p.selection.text;
     style.palette.text = p.text.primary;
