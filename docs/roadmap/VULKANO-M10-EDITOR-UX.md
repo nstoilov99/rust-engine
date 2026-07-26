@@ -332,4 +332,12 @@ Remaining nits — deliberate deviations or UX-v2 items, not blockers:
   title-bar content API in crusty Window. UX v2.
 - Appearance lacks accent / UI scale / font-size rows — features don't
   exist engine-side yet; add rows when they do.
+- 2026-07-26 mockup "Editor tabs" section: hide-tabs (eye button → corner
+  triangle, per-leaf, persisted, drop-unhides) is implemented; tabs dock
+  into the scene strip (already generic). Still open from that section:
+  overflow "▾ N" chip + MRU menu, ⌘1–9 switching, F11 focus-viewport,
+  tab context menu (Hide/Close x/Split/Move), per-tab type icons, pinned
+  viewport (no ×), single-tab plain panel headers. Viewport cannot float
+  to a separate OS window — the scene renders only into the main
+  swapchain (renderer constraint; in-window dock/split/reorder all work).
 - ~~Undo/Redo verb+object labels → P9.~~ Landed in P9.

@@ -3257,6 +3257,7 @@ impl App {
                 });
                 let drag_released = ext.as_ref().is_some_and(|e| e.ghost && e.released);
                 let drop_pos = ext.as_ref().filter(|e| e.ghost).map(|e| e.pointer);
+                let dock_hidden_tabs = dock_crusty::hidden_tabs(&crusty_dock.tree);
                 let resp =
                     dock_crusty::DockArea::new(&mut crusty_dock.tree, &mut crusty_dock.state)
                         .titles(&titles)
@@ -3333,6 +3334,7 @@ impl App {
                                             command_history: vp_command_history,
                                             play_mode: current_play_mode,
                                             icons,
+                                            strip_hidden: dock_hidden_tabs.contains(tab),
                                             show_stat_fps: *show_stat_fps,
                                             fps,
                                             delta_ms,
@@ -3401,6 +3403,14 @@ impl App {
                 {
                     if dock_crusty::new_tab_button(ui, slot) {
                         crusty_menu_action = MenuAction::NewScene;
+                    }
+                }
+
+                // Eye button at the right end of every tab bar: hides that
+                // leaf's strip (the corner triangle restores it).
+                for slot in &resp.tab_bar_slots {
+                    if dock_crusty::hide_tabs_button(ui, slot, icons) {
+                        crusty_dock.tree.set_tabs_hidden(&slot.anchor, true);
                     }
                 }
 

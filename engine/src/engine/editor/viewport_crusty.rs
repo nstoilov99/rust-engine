@@ -47,6 +47,9 @@ pub struct ViewportPanelCtx<'a> {
     pub play_mode: PlayMode,
     /// SVG file stem → crusty texture id.
     pub icons: &'a HashMap<String, TextureId>,
+    /// The host leaf's tab strip is hidden — the corner triangle occupies
+    /// the toolbar's top-left, so its left padding steps 6 → 16px (mockup).
+    pub strip_hidden: bool,
     pub show_stat_fps: bool,
     pub fps: f32,
     pub delta_ms: f32,
@@ -93,6 +96,7 @@ fn panel_body(ui: &mut Ui, rect: Rect, s: f32, ctx: ViewportPanelCtx) {
         ctx.settings,
         ctx.camera.current_mode(),
         ctx.icons,
+        ctx.strip_hidden,
     );
 
     // ── scene image (raw paint, NOT a widget — camera input must pass through)
@@ -327,6 +331,7 @@ fn placeholder(ui: &mut Ui, rect: Rect, s: f32) {
 
 // ── toolbar ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn toolbar(
     ui: &mut Ui,
     rect: Rect,
@@ -334,11 +339,14 @@ fn toolbar(
     settings: &mut ViewportSettings,
     camera_mode: CameraControlMode,
     icons: &HashMap<String, TextureId>,
+    strip_hidden: bool,
 ) {
     let panel_fill = ui.style().palette.panel;
     ui.painter().rect_filled(rect, 0.0, panel_fill);
 
-    let mut x = rect.min.x + 6.0 * s;
+    // Step past the show-tabs corner triangle when the strip is hidden.
+    let left_pad = if strip_hidden { 16.0 } else { 6.0 };
+    let mut x = rect.min.x + left_pad * s;
     let y = rect.min.y + (rect.height() - BUTTON_H * s) * 0.5;
 
     // Transform tools

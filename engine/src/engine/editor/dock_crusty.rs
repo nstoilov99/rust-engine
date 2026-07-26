@@ -274,6 +274,70 @@ pub fn new_tab_button(ui: &mut Ui, slot: &TabBarSlot) -> bool {
     resp.clicked
 }
 
+/// Eye button at the right end of `slot`'s tab bar — hides the leaf's tab
+/// strip (restored via the corner triangle). Returns true on click.
+pub fn hide_tabs_button(
+    ui: &mut Ui,
+    slot: &TabBarSlot,
+    icons: &HashMap<String, crusty_gui::paint::TextureId>,
+) -> bool {
+    let bar = slot.bar_rect;
+    let size = Vec2::new(26.0, 24.0);
+    let rect = Rect::from_min_size(
+        Pos2::new(bar.max.x - 4.0 - size.x, bar.center().y - size.y * 0.5),
+        size,
+    );
+    // Don't draw over the tabs when the strip is packed.
+    if rect.min.x < slot.end_x + 4.0 {
+        return false;
+    }
+    let resp = ui.interact(Id::ROOT.with(("dock_hide_tabs", &slot.anchor)), rect);
+    let style = ui.style();
+    if resp.hovered {
+        ui.painter()
+            .rect_filled(rect, style.rounding.small, style.palette.hover);
+    }
+    let tint = if resp.hovered {
+        style.palette.text
+    } else {
+        style.palette.text_disabled
+    };
+    if let Some(&tex) = icons.get("visibility") {
+        ui.ctx_mut().paint.push(crusty_gui::paint::PaintCmd::Image {
+            rect: Rect::from_center_size(rect.center(), Vec2::splat(12.0)),
+            uv_min: Pos2::new(0.0, 0.0),
+            uv_max: Pos2::new(1.0, 1.0),
+            tint,
+            texture: tex,
+        });
+    }
+    if resp.hovered {
+        crusty_gui::widgets::show_tooltip_for(ui, rect, "Hide tabs");
+    }
+    resp.clicked
+}
+
+/// Every tab living in a leaf whose strip is hidden — panels use this to
+/// make room for the corner triangle.
+pub fn hidden_tabs(tree: &DockNode) -> std::collections::HashSet<String> {
+    fn walk(node: &DockNode, out: &mut std::collections::HashSet<String>) {
+        match node {
+            DockNode::Leaf(leaf) => {
+                if leaf.tabs_hidden {
+                    out.extend(leaf.tabs.iter().cloned());
+                }
+            }
+            DockNode::Split(s) => {
+                walk(&s.first, out);
+                walk(&s.second, out);
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(tree, &mut out);
+    out
+}
+
 /// Dim placeholder body for tabs whose panel isn't ported yet.
 pub fn placeholder_panel(ui: &mut Ui, text: &str) {
     let dim = ui.style().palette.text_secondary;
