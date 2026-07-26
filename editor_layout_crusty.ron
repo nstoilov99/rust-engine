@@ -1,24 +1,25 @@
 (
     tree: Split((
         direction: Horizontal,
-        ratio: 0.5738281,
+        ratio: 0.6136719,
         first: Split((
             direction: Vertical,
-            ratio: 0.56387,
+            ratio: 0.6270023,
             first: Leaf((
                 tabs: [
                     "viewport:0",
-                    "mesh:Defeated.mesh",
                 ],
-                active: 1,
+                active: 0,
+                tabs_hidden: false,
             )),
             second: Leaf((
                 tabs: [
-                    "console",
                     "assets",
+                    "console",
                     "profiler",
                 ],
-                active: 1,
+                active: 0,
+                tabs_hidden: false,
             )),
         )),
         second: Split((
@@ -29,16 +30,24 @@
                     "hierarchy",
                 ],
                 active: 0,
+                tabs_hidden: false,
             )),
             second: Leaf((
                 tabs: [
                     "inspector",
                 ],
                 active: 0,
+                tabs_hidden: false,
             )),
         )),
     )),
     state: (
-        focused_tab: Some("mesh:Defeated.mesh"),
+        focused_tab: Some("hierarchy"),
+    ),
+    play_settings: (
+        mode: ListenServer,
+        host: "http://127.0.0.1:3000",
+        module: "rust-engine-dev",
+        player_count: 2,
     ),
 )

@@ -5,5 +5,5 @@
     y: -8,
     maximized: true,
     fullscreen: false,
-    vsync: Off,
+    vsync: Mailbox,
 )

@@ -1,0 +1,8 @@
+(
+    scene: "demo",
+    format_version: 1,
+    cooker_hash: 1,
+    scene_hash: 16865131268148753024,
+    chunk_size: 64.0,
+    chunks: [],
+)
