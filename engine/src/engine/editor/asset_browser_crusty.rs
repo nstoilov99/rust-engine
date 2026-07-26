@@ -1270,9 +1270,13 @@ fn render_grid(
     // 96px wide at the default slider value, scaling with it.
     let item = panel.grid_item_size;
     let card_w = item;
-    let thumb_h = (item * (70.0 / 96.0)).round();
+    // Square thumbnail well (mockup aspect-ratio:1) — square thumbnails
+    // render undistorted.
+    let thumb_h = card_w - 2.0;
     let card_h = thumb_h + 2.0 + 32.0;
-    let spacing = 8.0;
+    // Mockup grid rhythm: 14px outer padding, 10px tile gaps.
+    let gap = 10.0;
+    let inset = 14.0;
 
     let avail_h = ui.available_size().y;
     ScrollArea::new(avail_h)
@@ -1281,9 +1285,9 @@ fn render_grid(
         .spacing(0.0)
         .show(ui, |ui| {
             let width = ui.available().width();
-            let cols = (((width - spacing) / (card_w + spacing)).floor() as usize).max(1);
+            let cols = (((width - inset * 2.0 + gap) / (card_w + gap)).floor() as usize).max(1);
             let grid_rows = rows.len().div_ceil(cols);
-            let total_h = grid_rows as f32 * (card_h + spacing) + spacing;
+            let total_h = grid_rows as f32 * (card_h + gap) - gap + inset * 2.0;
             let origin = ui.cursor();
             ui.allocate(Vec2::new(width, total_h));
             let clip = ui.clip_rect();
@@ -1292,8 +1296,8 @@ fn render_grid(
                 let r = i / cols;
                 let c = i % cols;
                 let min = Pos2::new(
-                    origin.x + spacing + c as f32 * (card_w + spacing),
-                    origin.y + spacing + r as f32 * (card_h + spacing),
+                    origin.x + inset + c as f32 * (card_w + gap),
+                    origin.y + inset + r as f32 * (card_h + gap),
                 );
                 let card = Rect::from_min_size(min, Vec2::new(card_w, card_h));
                 if card.max.y < clip.min.y || card.min.y > clip.max.y {

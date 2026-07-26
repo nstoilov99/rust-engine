@@ -3228,6 +3228,7 @@ impl App {
                         has_selection,
                         has_clipboard,
                         play_settings: &mut settings.prefs.play,
+                        scene_name: &current_scene_name,
                     },
                 );
                 if status_bar_panel(
@@ -3238,8 +3239,7 @@ impl App {
                         theme: &theme,
                         error_count: status_error_count,
                         unsaved_count,
-                        fps,
-                        delta_ms,
+                        icons,
                     },
                 ) {
                     command_palette.open();

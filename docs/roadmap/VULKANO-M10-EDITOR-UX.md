@@ -318,8 +318,11 @@ Reviewed vs mockup (codex round 1+2). Fixed: Reset All → new crusty
 `ButtonVariant::DangerOutline` (filled danger stays in confirm dialogs).
 Remaining nits — deliberate deviations or UX-v2 items, not blockers:
 
-- Centered "Main Scene — Crusty" chrome identity: superseded by scene
-  tabs (P4 decision; docking reality).
+- ~~Centered "Main Scene — Crusty" chrome identity: superseded by scene
+  tabs (P4 decision; docking reality).~~ The 2026-07-26 mockup update moved
+  the identity into the menu-bar row itself; implemented (post-M10 pass,
+  along with logo mark, mockup transport geometry, square asset thumbs,
+  status-chip icons, FPS removal from the status bar).
 - Toolbar mode control is icon-only, not the mockup's wide
   icon+label dropdown (P4 decision; toolbar density).
 - Settings shell keeps a fixed 780×560 window (stable across category

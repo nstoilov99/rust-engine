@@ -445,19 +445,21 @@ fn toolbar(
     if clicked {
         settings.scale_snap_enabled = !settings.scale_snap_enabled;
     }
-    x = next_x;
+    let _ = next_x;
 
-    x = separator(ui, rect, x, s);
-
+    // Right cluster (mockup): camera speed lives at the right edge, with the
+    // camera-mode indicator to its left.
+    let speed_w = 60.0 * s;
+    let speed_x = rect.max.x - 8.0 * s - speed_w;
     camera_speed_button(
         ui,
-        Pos2::new(x, y),
+        Pos2::new(speed_x, y),
         s,
         icons.get("camera-speed").copied(),
         settings,
     );
 
-    // Right-aligned camera mode indicator
+    // Camera mode indicator, left of the speed cluster
     let cam_status = super::theme::Palette::invariant_status();
     let cam_types = super::theme::Palette::invariant_type_colors();
     let (text, color) = match camera_mode {
@@ -474,7 +476,7 @@ fn toolbar(
     let tw = ui.painter().measure_text(&text, font, None).x;
     ui.painter().text(
         Pos2::new(
-            rect.max.x - 8.0 * s - tw,
+            speed_x - 8.0 * s - tw,
             rect.center().y - font * 1.25 * 0.5,
         ),
         &text,

@@ -416,6 +416,8 @@ impl CrustyRenderer {
                 "pause-fill.png",
                 "stop-fill.png",
                 "skip-forward-fill.png",
+                "caret-down.png",
+                "logo.png",
                 // Mesh editor material slots.
                 "save-check.svg",
                 "save-changes.svg",

@@ -6,6 +6,7 @@ use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::{PaintCmd, TextureId};
+use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{
     show_tooltip_for, Button, ComboBox, Label, Popup, SelectableValue, TextEdit,
 };
@@ -31,6 +32,8 @@ pub struct MenuBarCtx<'a> {
     pub has_selection: bool,
     pub has_clipboard: bool,
     pub play_settings: &'a mut PlaySettings,
+    /// Active scene name for the centered "<scene> — Crusty" identity.
+    pub scene_name: &'a str,
 }
 
 /// Brighten a status color for the hovered play-control state.
@@ -67,8 +70,34 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         has_selection,
         has_clipboard,
         play_settings,
+        scene_name,
         ..
     } = ctx;
+
+    // Opaque strip + centered "<scene> — Crusty" identity (mono, tertiary),
+    // per the mockup menu-bar row.
+    let strip_bg = ui.style().palette.window;
+    ui.painter().rect_filled(rect, 0.0, strip_bg);
+    {
+        let text = format!("{scene_name} \u{2014} Crusty");
+        let size = 11.0;
+        let tw = ui
+            .painter()
+            .measure_text_family(&text, size, None, FontFamily::Mono)
+            .x;
+        let color = ui.style().palette.text_disabled;
+        ui.painter().text_family(
+            Pos2::new(
+                rect.center().x - tw * 0.5,
+                rect.center().y - size * 1.25 * 0.5,
+            ),
+            &text,
+            size,
+            color,
+            None,
+            FontFamily::Mono,
+        );
+    }
 
     let opts = UiOptions {
         padding: Vec2::new(4.0 * s, 0.0),
@@ -80,6 +109,18 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         Id::new("crusty_menu_bar"),
         opts,
         |ui| {
+            // 16px logo mark ahead of the menus.
+            if let Some(&tex) = icons.get("logo") {
+                let slot = ui.allocate(Vec2::new(24.0, rect.height()));
+                let tint = ui.style().palette.text_secondary;
+                ui.ctx_mut().paint.push(PaintCmd::Image {
+                    rect: Rect::from_center_size(slot.center(), Vec2::splat(16.0)),
+                    uv_min: Pos2::new(0.0, 0.0),
+                    uv_max: Pos2::new(1.0, 1.0),
+                    tint,
+                    texture: tex,
+                });
+            }
             ui.menu_button("File", |ui| {
                 if ui.menu_item("Save Scene (Ctrl+S)") {
                     action = MenuAction::SaveScene;
@@ -426,15 +467,16 @@ fn render_play_controls(
     settings: &mut PlaySettings,
     action: &mut MenuAction,
 ) {
-    let size = 18.0 * s;
-    let gap = 4.0 * s;
-    // Four slots: play | pause | stop | settings chevron (UE-style).
-    let x0 = bar.max.x - 8.0 * s - (size * 4.0 + gap * 3.0);
-    let y0 = bar.min.y + (bar.height() - size) * 0.5;
+    // Mockup transport: three 26×22 buttons + 20×22 settings caret.
+    let _ = s;
+    let (bw, bh, gap, caret_w) = (26.0, 22.0, 2.0, 20.0);
+    let x0 = bar.max.x - 8.0 - (bw * 3.0 + gap * 3.0 + caret_w);
+    let y0 = bar.min.y + (bar.height() - bh) * 0.5;
     let slot = |i: usize| {
+        let w = if i == 3 { caret_w } else { bw };
         Rect::from_min_size(
-            Pos2::new(x0 + i as f32 * (size + gap), y0),
-            Vec2::new(size, size),
+            Pos2::new(x0 + i as f32 * (bw + gap), y0),
+            Vec2::new(w, bh),
         )
     };
 
@@ -544,7 +586,7 @@ fn render_play_settings_dropdown(
     settings: &mut PlaySettings,
 ) {
     let chevron = PlayButton {
-        icon: "chevron-down",
+        icon: "caret-down",
         fallback: "\u{25BE}",
         tint: ui.style().palette.text_secondary,
         hover: ui.style().palette.text,
@@ -630,11 +672,8 @@ fn play_icon_button(ui: &mut Ui, rect: Rect, icon: Option<TextureId>, b: &PlayBu
     let tint = if resp.hovered { b.hover } else { b.tint };
 
     if let Some(texture) = icon {
-        let inset = 1.0;
-        let img = Rect::from_min_max(
-            Pos2::new(rect.min.x + inset, rect.min.y + inset),
-            Pos2::new(rect.max.x - inset, rect.max.y - inset),
-        );
+        // 11px glyph centered in the slot, per the mockup transport.
+        let img = Rect::from_center_size(rect.center(), Vec2::splat(11.0));
         ui.painter().paint_mut().push(PaintCmd::Image {
             rect: img,
             uv_min: Pos2::new(0.0, 0.0),

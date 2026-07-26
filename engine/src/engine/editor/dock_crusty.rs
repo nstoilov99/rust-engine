@@ -7,11 +7,11 @@
 use super::dock_layout::EditorTab;
 use super::play_settings::PlaySettings;
 use super::scene_tab::{DormantScene, SceneId};
-use crusty_gui::context::{Direction, Ui, UiOptions};
+use crusty_gui::context::Ui;
 use crusty_gui::dock::{DockNode, DockState, Leaf};
 use crusty_gui::id::Id;
 pub use crusty_gui::math::{Pos2, Rect, Vec2};
-use crusty_gui::widgets::{Button, Label};
+use crusty_gui::widgets::Label;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -242,23 +242,36 @@ pub fn ghost_drag(ui: &Ui, tab_id: &str) -> ExternalDrag {
 /// "+" new-scene button drawn after the last tab of `slot`'s bar. Returns
 /// true on click.
 pub fn new_tab_button(ui: &mut Ui, slot: &TabBarSlot) -> bool {
-    let s = slot.bar_rect.height() - 8.0;
+    // Plain 24px glyph, no button chrome (mockup); hover gets a quiet fill.
+    let s = 24.0_f32.min(slot.bar_rect.height() - 4.0);
     let rect = Rect::from_min_size(
-        Pos2::new(slot.end_x + 4.0, slot.bar_rect.min.y + 4.0),
+        Pos2::new(slot.end_x + 4.0, slot.bar_rect.center().y - s * 0.5),
         Vec2::splat(s),
     );
-    let opts = UiOptions {
-        padding: Vec2::ZERO,
-        spacing: 0.0,
+    let resp = ui.interact(Id::ROOT.with("dock_new_tab"), rect);
+    let style = ui.style();
+    if resp.hovered {
+        ui.painter()
+            .rect_filled(rect, style.rounding.small, style.palette.hover);
+    }
+    let color = if resp.hovered {
+        style.palette.text
+    } else {
+        style.palette.text_disabled
     };
-    ui.run_at(
-        rect,
-        Direction::TopDown,
-        Id::ROOT.with("dock_new_tab"),
-        opts,
-        |ui| Button::new("+").min_size(Vec2::splat(s)).show(ui).clicked,
-    )
-    .0
+    let font = 14.0;
+    let tw = ui.painter().measure_text("+", font, None);
+    ui.painter().text(
+        Pos2::new(
+            rect.center().x - tw.x * 0.5,
+            rect.center().y - font * 1.25 * 0.5,
+        ),
+        "+",
+        font,
+        color,
+        None,
+    );
+    resp.clicked
 }
 
 /// Dim placeholder body for tabs whose panel isn't ported yet.

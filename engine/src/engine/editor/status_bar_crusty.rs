@@ -4,8 +4,11 @@
 //! clusters (unsaved count, FPS, ready state) separated by hairlines on the
 //! right.
 
+use std::collections::HashMap;
+
 use crusty_gui::context::Ui;
 use crusty_gui::math::{Pos2, Rect, Vec2};
+use crusty_gui::paint::{PaintCmd, TextureId};
 use crusty_gui::text::FontFamily;
 
 use super::dock_crusty::CrustyDockLayout;
@@ -19,8 +22,7 @@ pub struct StatusBarCtx<'a> {
     pub error_count: usize,
     /// Unsaved scenes/assets, warning-tinted when > 0.
     pub unsaved_count: usize,
-    pub fps: f32,
-    pub delta_ms: f32,
+    pub icons: &'a HashMap<String, TextureId>,
 }
 
 const CHIP_H: f32 = 22.0;
@@ -42,19 +44,19 @@ pub fn status_bar_panel(ui: &mut Ui, bar_rect: Rect, mut ctx: StatusBarCtx) -> b
     let chip_y = rect.min.y + (rect.height() - CHIP_H) * 0.5;
     let mut x = rect.min.x + 8.0;
 
-    // ── panel toggle chips
+    // ── panel toggle chips (11px icon + label, per the mockup)
     let chips = [
-        (EditorTab::Console, "Console"),
-        (EditorTab::AssetBrowser, "Assets"),
-        (EditorTab::Profiler, "Profiler"),
+        (EditorTab::Console, "Console", "list-view"),
+        (EditorTab::AssetBrowser, "Assets", "grid-view"),
+        (EditorTab::Profiler, "Profiler", "camera-speed"),
     ];
-    for (tab, label) in chips {
+    for (tab, label, icon) in chips {
         let errors = if tab == EditorTab::Console {
             ctx.error_count
         } else {
             0
         };
-        x = panel_chip(ui, &mut ctx, x, chip_y, &tab, label, errors);
+        x = panel_chip(ui, &mut ctx, x, chip_y, &tab, label, icon, errors);
     }
 
     // ── command field: `> cmd…`, 170×22, opens the command palette
@@ -95,18 +97,7 @@ pub fn status_bar_panel(ui: &mut Ui, bar_rect: Rect, mut ctx: StatusBarCtx) -> b
         ready_col,
     );
 
-    rx = hairline(ui, rx, cy);
-
-    let fps_text = format!("{:.0} FPS \u{00B7} {:.1} ms", ctx.fps, ctx.delta_ms);
-    let tw = mono_width(ui, &fps_text);
-    rx -= tw;
-    mono_text(
-        ui,
-        Pos2::new(rx, cy - MONO_SIZE * 1.25 * 0.5),
-        &fps_text,
-        style.palette.text_secondary,
-    );
-
+    // No FPS/frame-time cluster — perf lives in the Profiler panel (mockup).
     rx = hairline(ui, rx, cy);
 
     let unsaved_text = format!("{} unsaved", ctx.unsaved_count);
@@ -128,6 +119,7 @@ pub fn status_bar_panel(ui: &mut Ui, bar_rect: Rect, mut ctx: StatusBarCtx) -> b
 }
 
 /// One toggle chip; returns the next cursor x.
+#[allow(clippy::too_many_arguments)]
 fn panel_chip(
     ui: &mut Ui,
     ctx: &mut StatusBarCtx,
@@ -135,10 +127,13 @@ fn panel_chip(
     y: f32,
     tab: &EditorTab,
     label: &str,
+    icon: &str,
     errors: usize,
 ) -> f32 {
     let style = ui.style();
     let font = style.fonts.body;
+    let icon_tex = ctx.icons.get(icon).copied();
+    let icon_w = if icon_tex.is_some() { 17.0 } else { 0.0 };
     let label_w = ui.text_mut().measure(label, font, None).x;
 
     // Error pill (mono count on a translucent error fill).
@@ -154,7 +149,7 @@ fn panel_chip(
 
     let chip = Rect::from_min_size(
         Pos2::new(x, y),
-        Vec2::new(label_w + 18.0 + pill_w, CHIP_H),
+        Vec2::new(icon_w + label_w + 18.0 + pill_w, CHIP_H),
     );
     let id = ui.alloc_id(("status_chip", label));
     let resp = ui.interact(id, chip);
@@ -169,8 +164,23 @@ fn panel_chip(
     } else {
         style.palette.text_secondary
     };
+    if let Some(tex) = icon_tex {
+        ui.ctx_mut().paint.push(PaintCmd::Image {
+            rect: Rect::from_center_size(
+                Pos2::new(chip.min.x + 9.0 + 5.5, chip.center().y),
+                Vec2::splat(11.0),
+            ),
+            uv_min: Pos2::new(0.0, 0.0),
+            uv_max: Pos2::new(1.0, 1.0),
+            tint: text_col,
+            texture: tex,
+        });
+    }
     ui.painter().text(
-        Pos2::new(chip.min.x + 9.0, chip.center().y - font * 1.25 * 0.5),
+        Pos2::new(
+            chip.min.x + 9.0 + icon_w,
+            chip.center().y - font * 1.25 * 0.5,
+        ),
         label,
         font,
         text_col,
@@ -180,7 +190,10 @@ fn panel_chip(
     if let Some((count, w)) = pill {
         let err = ctx.theme.palette.status.error;
         let pr = Rect::from_min_size(
-            Pos2::new(chip.min.x + 9.0 + label_w + 6.0, chip.center().y - 7.0),
+            Pos2::new(
+                chip.min.x + 9.0 + icon_w + label_w + 6.0,
+                chip.center().y - 7.0,
+            ),
             Vec2::new(w, 14.0),
         );
         ui.painter().rect_filled(pr, 7.0, err.with_alpha(0.15));
