@@ -329,4 +329,4 @@ Remaining nits — deliberate deviations or UX-v2 items, not blockers:
   title-bar content API in crusty Window. UX v2.
 - Appearance lacks accent / UI scale / font-size rows — features don't
   exist engine-side yet; add rows when they do.
-- Undo/Redo verb+object labels → P9.
+- ~~Undo/Redo verb+object labels → P9.~~ Landed in P9.
