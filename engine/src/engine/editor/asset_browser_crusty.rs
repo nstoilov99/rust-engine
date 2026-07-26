@@ -120,14 +120,24 @@ fn format_date(t: SystemTime) -> String {
 }
 
 fn truncate_to_width(ui: &mut Ui, text: &str, size: f32, max_w: f32) -> String {
-    if ui.painter().measure_text(text, size, None).x <= max_w {
+    truncate_to_width_family(ui, text, size, max_w, crusty_gui::text::FontFamily::Ui)
+}
+
+fn truncate_to_width_family(
+    ui: &mut Ui,
+    text: &str,
+    size: f32,
+    max_w: f32,
+    family: crusty_gui::text::FontFamily,
+) -> String {
+    let measure = |ui: &mut Ui, t: &str| ui.painter().measure_text_family(t, size, None, family).x;
+    if measure(ui, text) <= max_w {
         return text.to_string();
     }
     let mut out = String::new();
     for ch in text.chars() {
         out.push(ch);
-        let w = ui.painter().measure_text(&format!("{out}…"), size, None).x;
-        if w > max_w {
+        if measure(ui, &format!("{out}…")) > max_w {
             out.pop();
             break;
         }
@@ -1429,6 +1439,13 @@ fn render_grid_card(
         } else {
             style.palette.text_secondary
         };
+        let type_text = truncate_to_width_family(
+            ui,
+            &type_text,
+            9.0,
+            label_rect.width(),
+            crusty_gui::text::FontFamily::Mono,
+        );
         ui.painter().text_family(
             Pos2::new(label_rect.min.x, label_rect.min.y + 14.0),
             &type_text,
