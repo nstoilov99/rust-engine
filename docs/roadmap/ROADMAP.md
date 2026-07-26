@@ -2800,6 +2800,39 @@ A small but fully playable scene that exercises all major systems together. Not 
 
 ---
 
+### Task 58.5: Multi-Window Viewport & Editor Tabs v2
+**Status:** 📋 Planned (after Task 58 — the extra swapchain + per-window record work wants the threading dust settled first)
+**Duration:** ~1-1.5 weeks
+**Prerequisites:** Task 58; M10 + the 2026-07-26 "Editor tabs" mockup pass (hide-tabs shipped there)
+
+**What you'll build:**
+- **Viewport floats to its own OS window**: render the scene into a second
+  surface/swapchain so a viewport tab can leave the main window like any
+  panel (today the scene presents only into the main swapchain and the
+  drop is forced back — `app.rs` "Viewports render only in the main
+  window"). This is the render-thread work item; everything below is UI.
+- Remaining "Editor tabs" mockup items:
+  - Overflow "▾ N" chip when tabs exceed the strip, with MRU-ordered
+    popup menu (dirty dots survive into the menu, ⌘-number hints)
+  - ⌘1–9 direct tab switching + Ctrl+Tab MRU cycling
+  - F11 focus-viewport (collapse every strip + docked panels; floating
+    "Esc to exit" chip, fades after 2s)
+  - Tab right-click menu: Hide Tabs / Close / Close Left-Right-Others /
+    Unpin / Split Right / Move to New Window
+  - Per-tab type icons (camera for viewport, type-tinted editor icons)
+  - Pinned viewport tab (first, no ×; reopen via Window ▸ Viewport / ⌘1)
+  - Single-tab dock slots draw a plain 24px header instead of a strip
+
+**Why after threading:**
+- A second presentation surface touches the render-thread contract
+  (`FramePacket`, serial `TargetRenderer` command buffers); do it once the
+  parallel scheduler has stabilized what crosses threads, not while it's
+  in flux.
+- The tab UX items are pure crusty-gui/editor work and can be cherry-picked
+  earlier if the editor needs them sooner.
+
+---
+
 ### Task 59: Networking Foundation (SpacetimeDB)
 **Status:** ⛔ Superseded by the Multiplayer Foundation phase (Tasks M0–M8), which expands this single task into a full arc with a spike gate. Kept below for reference.
 **Duration:** ~2-3 weeks
@@ -2954,6 +2987,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | **57** | **AI Behavior Tree Editor** | Production | Feature | **6th consumer** |
 | -- | 🔀 *Validation Milestone: Single-Player Vertical Slice (→ Networked Co-op Slice)* | -- | -- | |
 | 58 | 📋 Enable Parallel ECS Execution (deferred, no longer gates networking) | Threading | Performance | |
+| 58.5 | 📋 Multi-Window Viewport & Editor Tabs v2 | Editor | Feature | |
 | 59 | ⛔ Networking Foundation (superseded by M0–M8) | Multiplayer | Feature | |
 | 60 | Production Hardening & Ship a Game | Validation | Capstone | |
 

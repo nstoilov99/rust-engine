@@ -340,4 +340,6 @@ Remaining nits — deliberate deviations or UX-v2 items, not blockers:
   viewport (no ×), single-tab plain panel headers. Viewport cannot float
   to a separate OS window — the scene renders only into the main
   swapchain (renderer constraint; in-window dock/split/reorder all work).
+  All of the above tracked as ROADMAP Task 58.5 (Multi-Window Viewport &
+  Editor Tabs v2, scheduled after Task 58 parallel ECS).
 - ~~Undo/Redo verb+object labels → P9.~~ Landed in P9.
