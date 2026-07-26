@@ -317,6 +317,77 @@ pub fn hide_tabs_button(
     resp.clicked
 }
 
+/// Ordered tabs of the leaf containing `tab`, and `tab`'s index in it.
+pub fn leaf_tabs(tree: &DockNode, tab: &str) -> Option<(Vec<String>, usize)> {
+    match tree {
+        DockNode::Leaf(leaf) => leaf
+            .tabs
+            .iter()
+            .position(|t| t == tab)
+            .map(|i| (leaf.tabs.clone(), i)),
+        DockNode::Split(s) => {
+            leaf_tabs(&s.first, tab).or_else(|| leaf_tabs(&s.second, tab))
+        }
+    }
+}
+
+/// Actions committed from the tab context menu; the host applies them.
+#[derive(Default)]
+pub struct TabMenuActions {
+    /// Hide the strip of the leaf containing this tab.
+    pub hide_tabs: Option<String>,
+    /// Tabs to close (each goes through the host's close/veto path).
+    pub close: Vec<String>,
+}
+
+/// Right-click tab menu (mockup "Tab options"): Hide Tabs first, the close
+/// family, then rows shipping disabled until Task 58.5. `open` is this
+/// frame's dock report; `target` persists the subject tab across frames.
+pub fn tab_context_menu(
+    ui: &mut Ui,
+    open: Option<(String, Pos2)>,
+    target: &mut Option<String>,
+    tree: &DockNode,
+) -> TabMenuActions {
+    if let Some((tab, _)) = &open {
+        *target = Some(tab.clone());
+    }
+    let mut act = TabMenuActions::default();
+    let Some(tab) = target.clone() else {
+        return act;
+    };
+    let (tabs, idx) = leaf_tabs(tree, &tab).unwrap_or((vec![tab.clone()], 0));
+    let open_at = open.map(|(_, p)| p);
+    crusty_gui::widgets::context_menu_at(ui, "dock_tab_ctx", open_at, |ui| {
+        ui.menu_group_header("Tab Options");
+        if ui.menu_item("Hide Tabs") {
+            act.hide_tabs = Some(tab.clone());
+        }
+        if ui.menu_item("Close") {
+            act.close.push(tab.clone());
+        }
+        if ui.menu_item_enabled("Close Tabs to the Left", idx > 0) {
+            act.close.extend(tabs[..idx].iter().cloned());
+        }
+        if ui.menu_item_enabled("Close Tabs to the Right", idx + 1 < tabs.len()) {
+            act.close.extend(tabs[idx + 1..].iter().cloned());
+        }
+        if ui.menu_item_enabled("Close Other Tabs", tabs.len() > 1) {
+            act.close
+                .extend(tabs.iter().filter(|t| **t != tab).cloned());
+        }
+        ui.separator();
+        // Ship disabled until Task 58.5 (multi-window viewport & tabs v2);
+        // rows stay in place, dimmed, so the menu never changes shape.
+        let _ = ui.menu_item_enabled("Unpin Tab", false);
+        let _ = ui.menu_item_enabled("Split Right", false);
+        let _ = ui.menu_item_enabled("Move to New Window", false);
+        ui.separator();
+        let _ = ui.menu_item_enabled("Focus Viewport", false);
+    });
+    act
+}
+
 /// Every tab living in a leaf whose strip is hidden — panels use this to
 /// make room for the corner triangle.
 pub fn hidden_tabs(tree: &DockNode) -> std::collections::HashSet<String> {

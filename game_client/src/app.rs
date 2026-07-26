@@ -272,6 +272,9 @@ pub struct App {
     /// ghost until re-docked or dropped (spawning a float window).
     #[cfg(feature = "editor")]
     crusty_dock_drag: Option<String>,
+    /// Subject of the open tab context menu (right-clicked dock tab).
+    #[cfg(feature = "editor")]
+    crusty_tab_ctx: Option<String>,
     /// Tabs dropped outside any dock target — main.rs turns these into OS
     /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
     #[cfg(feature = "editor")]
@@ -734,6 +737,7 @@ impl App {
             crusty_menu_action: MenuAction::None,
             #[cfg(feature = "editor")]
             crusty_dock_drag: None,
+            crusty_tab_ctx: None,
             #[cfg(feature = "editor")]
             pending_crusty_floats: Vec::new(),
             #[cfg(feature = "editor")]
@@ -3076,6 +3080,7 @@ impl App {
         // `handle_frame_input` so its wants_* flags can gate game input
         // (camera, hotkeys) for the same frame.
         let mut crusty_close_tab: Option<String> = None;
+        let mut crusty_ctx_close: Vec<String> = Vec::new();
         let mut crusty_docked = false;
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
         let mut crusty_dialog_actions = Vec::new();
@@ -3185,6 +3190,7 @@ impl App {
             let has_clipboard = !self.editor.scene.clipboard.is_empty();
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;
+            let tab_ctx_target = &mut self.crusty_tab_ctx;
             let pending_floats = &mut self.pending_crusty_floats;
             let build_dialog = &mut self.editor.play.build_dialog;
             let benchmark_tools = self.runtime_flags.benchmark_tools_enabled;
@@ -3414,6 +3420,18 @@ impl App {
                     }
                 }
 
+                // Right-click tab menu: Hide Tabs + the close family.
+                let tab_menu = dock_crusty::tab_context_menu(
+                    ui,
+                    resp.tab_right_clicked.clone(),
+                    tab_ctx_target,
+                    &crusty_dock.tree,
+                );
+                if let Some(tab) = &tab_menu.hide_tabs {
+                    crusty_dock.tree.set_tabs_hidden(tab, true);
+                }
+                crusty_ctx_close = tab_menu.close;
+
                 // Tear-off: carry the tab as a cursor ghost until it re-docks;
                 // dropped on no dock target → spawn an OS float window there.
                 if let Some(det) = resp.detached {
@@ -3476,6 +3494,9 @@ impl App {
 
         // Commit (or veto) a crusty dock tab-close request.
         if let Some(tab) = crusty_close_tab.take() {
+            self.handle_crusty_tab_close(&tab);
+        }
+        for tab in std::mem::take(&mut crusty_ctx_close) {
             self.handle_crusty_tab_close(&tab);
         }
 
