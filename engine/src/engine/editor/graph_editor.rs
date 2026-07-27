@@ -13,8 +13,8 @@ use std::time::Instant;
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
-    load_graph, migrate_doc, save_graph, validate_doc, Edge, GraphDoc, GraphError, NodeInst,
-    NodeRegistry, PropValue, SUBGRAPH_TYPE_ID,
+    load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge, GraphDoc, GraphError,
+    GroupBox, NodeInst, NodeRegistry, PropValue, SUBGRAPH_TYPE_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,24 @@ pub enum GraphEdit {
     MoveNodes { ids: Vec<u64>, delta: [f32; 2] },
     /// A fragment (nodes + internal edges) was pasted/duplicated.
     Paste { nodes: Vec<NodeInst>, edges: Vec<Edge> },
+    // --- Annotations (P7). Comments/groups have no ids; index-based ops are
+    //     valid because the undo stack applies/reverts strictly LIFO. ---
+    /// A comment box was appended.
+    AddComment(CommentBox),
+    /// A comment box was removed from `index`.
+    RemoveComment { index: usize, comment: CommentBox },
+    /// A comment box's rect origin moved by a delta (drag-coalesced).
+    MoveComment { index: usize, delta: [f32; 2] },
+    /// A comment box's text changed.
+    SetCommentText { index: usize, old: String, new: String },
+    /// A group frame was appended.
+    AddGroup(GroupBox),
+    /// A group frame was removed from `index` (nodes are untouched).
+    RemoveGroup { index: usize, group: GroupBox },
+    /// A group moved by a delta, carrying the captured member nodes with it.
+    MoveGroup { index: usize, node_ids: Vec<u64>, delta: [f32; 2] },
+    /// A group's title changed.
+    SetGroupTitle { index: usize, old: String, new: String },
 }
 
 impl GraphEdit {
@@ -55,6 +73,25 @@ impl GraphEdit {
             GraphEdit::Paste { nodes, edges } => {
                 doc.nodes.extend(nodes.iter().cloned());
                 doc.edges.extend(edges.iter().cloned());
+            }
+            GraphEdit::AddComment(c) => doc.comments.push(c.clone()),
+            GraphEdit::RemoveComment { index, .. } => {
+                doc.comments.remove(*index);
+            }
+            GraphEdit::MoveComment { index, delta } => shift_rect(&mut doc.comments[*index].rect, *delta),
+            GraphEdit::SetCommentText { index, new, .. } => {
+                doc.comments[*index].text = new.clone()
+            }
+            GraphEdit::AddGroup(g) => doc.groups.push(g.clone()),
+            GraphEdit::RemoveGroup { index, .. } => {
+                doc.groups.remove(*index);
+            }
+            GraphEdit::MoveGroup { index, node_ids, delta } => {
+                shift_rect(&mut doc.groups[*index].rect, *delta);
+                move_nodes(doc, node_ids, *delta);
+            }
+            GraphEdit::SetGroupTitle { index, new, .. } => {
+                doc.groups[*index].title = new.clone()
             }
         }
     }
@@ -76,6 +113,31 @@ impl GraphEdit {
                 let ids: BTreeSet<u64> = nodes.iter().map(|n| n.id).collect();
                 doc.nodes.retain(|n| !ids.contains(&n.id));
                 doc.edges.retain(|e| !edges.contains(e));
+            }
+            GraphEdit::AddComment(_) => {
+                doc.comments.pop();
+            }
+            GraphEdit::RemoveComment { index, comment } => {
+                doc.comments.insert(*index, comment.clone())
+            }
+            GraphEdit::MoveComment { index, delta } => {
+                shift_rect(&mut doc.comments[*index].rect, [-delta[0], -delta[1]])
+            }
+            GraphEdit::SetCommentText { index, old, .. } => {
+                doc.comments[*index].text = old.clone()
+            }
+            GraphEdit::AddGroup(_) => {
+                doc.groups.pop();
+            }
+            GraphEdit::RemoveGroup { index, group } => {
+                doc.groups.insert(*index, group.clone())
+            }
+            GraphEdit::MoveGroup { index, node_ids, delta } => {
+                shift_rect(&mut doc.groups[*index].rect, [-delta[0], -delta[1]]);
+                move_nodes(doc, node_ids, [-delta[0], -delta[1]]);
+            }
+            GraphEdit::SetGroupTitle { index, old, .. } => {
+                doc.groups[*index].title = old.clone()
             }
         }
     }
@@ -102,6 +164,14 @@ impl GraphEdit {
             GraphEdit::Paste { nodes, .. } => {
                 format!("Paste {} Node{}", nodes.len(), plural(nodes.len()))
             }
+            GraphEdit::AddComment(_) => "Add Comment".to_string(),
+            GraphEdit::RemoveComment { .. } => "Delete Comment".to_string(),
+            GraphEdit::MoveComment { .. } => "Move Comment".to_string(),
+            GraphEdit::SetCommentText { .. } => "Edit Comment".to_string(),
+            GraphEdit::AddGroup(_) => "Add Group".to_string(),
+            GraphEdit::RemoveGroup { .. } => "Delete Group".to_string(),
+            GraphEdit::MoveGroup { .. } => "Move Group".to_string(),
+            GraphEdit::SetGroupTitle { .. } => "Edit Group".to_string(),
         }
     }
 }
@@ -113,6 +183,23 @@ fn move_nodes(doc: &mut GraphDoc, ids: &[u64], delta: [f32; 2]) {
             n.position[1] += delta[1];
         }
     }
+}
+
+/// Shift a world-space `[min_x, min_y, w, h]` rect's origin by `delta`.
+fn shift_rect(rect: &mut [f32; 4], delta: [f32; 2]) {
+    rect[0] += delta[0];
+    rect[1] += delta[1];
+}
+
+/// Node ids whose center (given as `(id, [cx, cy])`) falls inside a
+/// `[min_x, min_y, w, h]` world rect — the group-drag capture rule (P7).
+pub fn nodes_captured_by_rect(centers: &[(u64, [f32; 2])], rect: [f32; 4]) -> Vec<u64> {
+    let (x0, y0, x1, y1) = (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]);
+    centers
+        .iter()
+        .filter(|(_, c)| c[0] >= x0 && c[0] <= x1 && c[1] >= y0 && c[1] <= y1)
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// Doc-local undo/redo with saved-cursor dirty tracking.
@@ -281,6 +368,16 @@ pub struct GraphEditorState {
     pub create_menu_world: Option<[f32; 2]>,
     /// Search text of the node-create menu.
     pub create_menu_search: String,
+    /// Selected comment index (P7). Mutually exclusive with node/group select.
+    pub sel_comment: Option<usize>,
+    /// Selected group index (P7).
+    pub sel_group: Option<usize>,
+    /// In-flight comment/group drag (P7).
+    pub annotation_drag: Option<AnnotationDrag>,
+    /// Active inline text edit for a comment/group (P7).
+    pub editing: Option<AnnotationEdit>,
+    /// Minimap overlay visible (session-only, P7).
+    pub minimap_open: bool,
 }
 
 /// In-flight node drag: original positions so live movement is absolute
@@ -296,6 +393,31 @@ pub struct ConnectDrag {
     pub from_pin: String,
     /// True if the grabbed pin is an output (wire flows out); false = input.
     pub from_output: bool,
+}
+
+/// In-flight drag of a comment or group (P7). Groups carry captured member
+/// nodes; comments leave `captured` empty. Absolute-from-origin movement (no
+/// drift), recorded as one Move edit on release.
+pub struct AnnotationDrag {
+    pub is_group: bool,
+    pub index: usize,
+    pub origin_world: [f32; 2],
+    /// Rect origin at drag start.
+    pub rect_min0: [f32; 2],
+    /// Captured member nodes (group only): id + start position.
+    pub captured: Vec<(u64, [f32; 2])>,
+}
+
+/// In-flight inline text edit of a comment/group's text (P7).
+pub struct AnnotationEdit {
+    pub is_group: bool,
+    pub index: usize,
+    pub buffer: String,
+    pub original: String,
+    /// World top-left of the edited annotation (popup anchor).
+    pub anchor_world: [f32; 2],
+    /// Grab keyboard focus on the first frame only.
+    pub first_frame: bool,
 }
 
 impl GraphEditorState {
@@ -325,6 +447,11 @@ impl GraphEditorState {
             marquee: None,
             create_menu_world: None,
             create_menu_search: String::new(),
+            sel_comment: None,
+            sel_group: None,
+            annotation_drag: None,
+            editing: None,
+            minimap_open: false,
         })
     }
 
@@ -363,10 +490,68 @@ impl GraphEditorState {
         }
     }
 
-    /// Drop selection entries whose node no longer exists (after undo/redo/
-    /// delete).
+    /// Drop selection entries whose node no longer exists, and clear
+    /// annotation selection/drag/edit state whose indices an undo/redo may
+    /// have invalidated (P7).
     fn prune_selection(&mut self) {
         self.selection.retain(|id| self.doc.node(*id).is_some());
+        self.sel_comment = self.sel_comment.filter(|&i| i < self.doc.comments.len());
+        self.sel_group = self.sel_group.filter(|&i| i < self.doc.groups.len());
+        self.annotation_drag = None;
+        self.editing = None;
+    }
+
+    /// Add a comment box at `pos` (default size + placeholder text), select it.
+    pub fn add_comment(&mut self, pos: [f32; 2], registry: &NodeRegistry) {
+        let comment = CommentBox {
+            rect: [pos[0], pos[1], 220.0, 130.0],
+            text: "Comment".to_string(),
+        };
+        self.doc.comments.push(comment.clone());
+        self.clear_selection();
+        self.sel_comment = Some(self.doc.comments.len() - 1);
+        self.commit(GraphEdit::AddComment(comment), registry);
+    }
+
+    /// Add a group frame bounding the selected nodes (approximate extent +
+    /// padding), select it. No-op when nothing is selected.
+    pub fn add_group_around_selection(&mut self, registry: &NodeRegistry) {
+        // Rough per-node extent (real geometry lives in the panel); over-cover
+        // so the frame encloses the nodes.
+        const NODE_EXT: [f32; 2] = [168.0, 100.0];
+        const PAD: f32 = 24.0;
+        let mut it = self
+            .doc
+            .nodes
+            .iter()
+            .filter(|n| self.selection.contains(&n.id))
+            .map(|n| n.position);
+        let Some(first) = it.next() else {
+            return;
+        };
+        let (mut minx, mut miny, mut maxx, mut maxy) =
+            (first[0], first[1], first[0] + NODE_EXT[0], first[1] + NODE_EXT[1]);
+        for p in it {
+            minx = minx.min(p[0]);
+            miny = miny.min(p[1]);
+            maxx = maxx.max(p[0] + NODE_EXT[0]);
+            maxy = maxy.max(p[1] + NODE_EXT[1]);
+        }
+        let group = GroupBox {
+            rect: [minx - PAD, miny - PAD, (maxx - minx) + PAD * 2.0, (maxy - miny) + PAD * 2.0],
+            title: "Group".to_string(),
+        };
+        self.doc.groups.push(group.clone());
+        self.clear_selection();
+        self.sel_group = Some(self.doc.groups.len() - 1);
+        self.commit(GraphEdit::AddGroup(group), registry);
+    }
+
+    /// Clear node + annotation selection (a fresh single selection follows).
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.sel_comment = None;
+        self.sel_group = None;
     }
 
     /// Add a node of `type_id` at `pos` with descriptor input defaults as
@@ -418,8 +603,25 @@ impl GraphEditorState {
         self.commit(GraphEdit::AddNode(node), registry);
     }
 
-    /// Delete the current selection and its incident edges.
+    /// Delete the current selection: a selected comment or group frame (frame
+    /// only — member nodes stay), else the selected nodes and their edges.
     pub fn delete_selection(&mut self, registry: &NodeRegistry) {
+        if let Some(i) = self.sel_comment {
+            if i < self.doc.comments.len() {
+                let comment = self.doc.comments.remove(i);
+                self.sel_comment = None;
+                self.commit(GraphEdit::RemoveComment { index: i, comment }, registry);
+            }
+            return;
+        }
+        if let Some(i) = self.sel_group {
+            if i < self.doc.groups.len() {
+                let group = self.doc.groups.remove(i);
+                self.sel_group = None;
+                self.commit(GraphEdit::RemoveGroup { index: i, group }, registry);
+            }
+            return;
+        }
         if self.selection.is_empty() {
             return;
         }
@@ -580,6 +782,66 @@ mod tests {
             to_node: b,
             to_pin: "a".to_string(),
         }
+    }
+
+    fn comment(x: f32) -> CommentBox {
+        CommentBox { rect: [x, 0.0, 100.0, 60.0], text: "c".to_string() }
+    }
+
+    fn group(x: f32) -> GroupBox {
+        GroupBox { rect: [x, 0.0, 200.0, 200.0], title: "g".to_string() }
+    }
+
+    /// apply → revert round-trips every annotation edit variant (P7).
+    #[test]
+    fn annotation_edits_round_trip() {
+        let base = {
+            let mut d = GraphDoc::default();
+            d.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 10.0])];
+            d.comments = vec![comment(0.0), comment(300.0)];
+            d.groups = vec![group(0.0)];
+            d
+        };
+        let edits = [
+            GraphEdit::AddComment(comment(999.0)),
+            GraphEdit::RemoveComment { index: 1, comment: comment(300.0) },
+            GraphEdit::MoveComment { index: 0, delta: [12.0, -7.0] },
+            GraphEdit::SetCommentText {
+                index: 0,
+                old: "c".to_string(),
+                new: "hello".to_string(),
+            },
+            GraphEdit::AddGroup(group(500.0)),
+            GraphEdit::RemoveGroup { index: 0, group: group(0.0) },
+            GraphEdit::MoveGroup { index: 0, node_ids: vec![0, 1], delta: [5.0, 6.0] },
+            GraphEdit::SetGroupTitle {
+                index: 0,
+                old: "g".to_string(),
+                new: "renamed".to_string(),
+            },
+        ];
+        for e in edits {
+            let mut doc = base.clone();
+            e.apply(&mut doc);
+            assert_ne!(doc, base, "{}: apply should change the doc", e.description());
+            e.revert(&mut doc);
+            assert_eq!(doc, base, "{}: apply→revert must restore", e.description());
+        }
+    }
+
+    /// Group-drag capture selects exactly the nodes whose centers lie inside
+    /// the group rect (P7).
+    #[test]
+    fn group_drag_captures_nodes_by_center() {
+        // rect [0,0,100,100]. Centers inside → captured; on-edge included;
+        // outside → excluded.
+        let centers = [
+            (0u64, [50.0, 50.0]), // inside
+            (1, [100.0, 100.0]),  // exactly on the far corner (inclusive)
+            (2, [150.0, 20.0]),   // outside (x)
+            (3, [-1.0, 50.0]),    // outside (x)
+        ];
+        assert_eq!(nodes_captured_by_rect(&centers, [0.0, 0.0, 100.0, 100.0]), vec![0, 1]);
     }
 
     /// apply → undo round-trips the doc for every edit variant.

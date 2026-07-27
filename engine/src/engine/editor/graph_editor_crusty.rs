@@ -10,7 +10,8 @@
 //! gate); status colors use the theme's invariant status group, matching
 //! `console_crusty`.
 
-use crusty_gui::context::Ui;
+use crusty_gui::context::{Direction, Ui, UiOptions};
+use crusty_gui::id::Id;
 use crusty_gui::input::{Key, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::Painter;
@@ -18,7 +19,8 @@ use crusty_gui::style::Style;
 use crusty_gui::widgets::{Canvas, CanvasScope, TextEdit};
 
 use super::graph_editor::{
-    prop_display, ConnectDrag, GraphEdit, GraphEditorState, GraphFragment, NodeDrag,
+    nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag, GraphEdit,
+    GraphEditorState, GraphFragment, NodeDrag,
 };
 use super::theme::Palette;
 use crate::engine::node_graph::{
@@ -31,6 +33,13 @@ const HEADER_H: f32 = 22.0;
 const ROW_H: f32 = 18.0;
 const BODY_PAD: f32 = 6.0;
 const PIN_R: f32 = 4.5;
+// Annotation + minimap metrics (P7).
+const COMMENT_HEADER_H: f32 = 18.0;
+const GROUP_TITLE_H: f32 = 20.0;
+const MINIMAP_W: f32 = 180.0;
+const MINIMAP_H: f32 = 120.0;
+const MINIMAP_MARGIN: f32 = 10.0;
+const MINIMAP_BTN: f32 = 24.0;
 
 /// Everything the panel needs, bundled so the signature stays small.
 pub struct GraphEditorPanelCtx<'a> {
@@ -270,12 +279,27 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
+    let mut minimap_pan: Option<Vec2> = None;
     let out = Canvas::new().zoom_range(0.25, 2.5).show(ui, &mut view, |ui, scope| {
-        draw_and_interact(ui, scope, state, registry, resolver, &mut menu_open_at, open_subgraph);
+        draw_and_interact(
+            ui,
+            scope,
+            state,
+            registry,
+            resolver,
+            &mut menu_open_at,
+            open_subgraph,
+            &mut minimap_pan,
+        );
     });
+    // Minimap click re-centers the view (applied after the canvas ran).
+    if let Some(pan) = minimap_pan {
+        view.pan = pan;
+    }
     state.view = view;
 
     create_menu(ui, state, registry, subgraph_assets, menu_open_at);
+    edit_popup(ui, state, registry, out.rect);
     error_overlay(ui, out.rect, &state.errors, &state.ref_errors);
 }
 
@@ -339,6 +363,7 @@ fn draw_and_interact(
     resolver: &dyn GraphResolver,
     menu_open_at: &mut Option<Pos2>,
     open_subgraph: &mut Option<String>,
+    minimap_pan: &mut Option<Vec2>,
 ) {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -367,6 +392,65 @@ fn draw_and_interact(
                 1.0,
                 st.palette.stroke,
             );
+        }
+    }
+
+    // Group frames + comment boxes (behind nodes/wires) — P7.
+    {
+        let mut p = ui.painter();
+        for (i, g) in state.doc.groups.iter().enumerate() {
+            let wr = Rect::from_min_size(Pos2::new(g.rect[0], g.rect[1]), Vec2::new(g.rect[2], g.rect[3]));
+            if wr.intersect(vis).width() <= 0.0 || wr.intersect(vis).height() <= 0.0 {
+                continue;
+            }
+            let sr = scope.world_rect_to_screen(wr);
+            let sel = state.sel_group == Some(i);
+            let round = 4.0 * zoom;
+            p.rect_filled(sr, round, st.palette.panel.with_alpha(0.12));
+            p.rect_stroke(
+                sr,
+                round,
+                if sel { 2.0 } else { 1.0 } * zoom,
+                if sel { st.palette.selection_fill } else { st.palette.stroke_strong },
+            );
+            let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), GROUP_TITLE_H * zoom));
+            p.rect_filled(bar, round, st.palette.header);
+            if let Some(px) = scope.label_size(st.fonts.body) {
+                p.text(
+                    sr.min + Vec2::new(6.0 * zoom, (GROUP_TITLE_H * zoom - px) * 0.5),
+                    &g.title,
+                    px,
+                    st.palette.text,
+                    None,
+                );
+            }
+        }
+        for (i, c) in state.doc.comments.iter().enumerate() {
+            let wr = Rect::from_min_size(Pos2::new(c.rect[0], c.rect[1]), Vec2::new(c.rect[2], c.rect[3]));
+            if wr.intersect(vis).width() <= 0.0 || wr.intersect(vis).height() <= 0.0 {
+                continue;
+            }
+            let sr = scope.world_rect_to_screen(wr);
+            let sel = state.sel_comment == Some(i);
+            let round = 4.0 * zoom;
+            p.rect_filled(sr, round, st.palette.elevated.with_alpha(0.35));
+            p.rect_stroke(
+                sr,
+                round,
+                if sel { 2.0 } else { 1.0 } * zoom,
+                if sel { st.palette.selection_fill } else { st.palette.stroke },
+            );
+            let header = Rect::from_min_size(sr.min, Vec2::new(sr.width(), COMMENT_HEADER_H * zoom));
+            p.rect_filled(header, round, st.palette.header.with_alpha(0.6));
+            if let Some(px) = scope.label_size(st.fonts.small) {
+                p.text(
+                    sr.min + Vec2::new(6.0 * zoom, COMMENT_HEADER_H * zoom + 2.0 * zoom),
+                    &c.text,
+                    px,
+                    st.palette.text_secondary,
+                    Some((sr.width() - 12.0 * zoom).max(1.0)),
+                );
+            }
         }
     }
 
@@ -476,11 +560,19 @@ fn draw_and_interact(
 
     // Interactions.
     let pointer_world = scope.pointer_world(ui);
+    let pointer_pos = ui.ctx().input.pointer_pos;
     let pointer_down = ui.ctx().input.pointer_down;
     let pointer_pressed = ui.ctx().input.pointer_pressed;
     let released = ui.ctx().input.pointer_released;
     let right_pressed = ui.ctx().input.right_pressed;
     let shift = ui.ctx().input.modifiers.contains(Modifiers::SHIFT);
+
+    // Minimap/toggle screen rects (deterministic from the canvas rect); the
+    // overlay claims the pointer so it doesn't fall through to the canvas.
+    let (mm_btn, mm_rect) = minimap_rects(scope.rect(), state.minimap_open);
+    let over_overlay = pointer_pos
+        .map(|p| mm_btn.contains(p) || mm_rect.is_some_and(|r| r.contains(p)))
+        .unwrap_or(false);
 
     // Advance / finish a live node drag. Snapshot the drag data first so the
     // `node_drag` borrow ends before mutating the doc.
@@ -502,6 +594,33 @@ fn draw_and_interact(
         }
     }
 
+    // Advance / finish a live comment/group drag (P7).
+    let ann_snapshot = state.annotation_drag.as_ref().map(|d| {
+        (d.is_group, d.index, d.origin_world, d.rect_min0, d.captured.clone())
+    });
+    if let Some((is_group, index, origin, rect0, captured)) = ann_snapshot {
+        if let Some(pw) = pointer_world {
+            let (dx, dy) = (pw.x - origin[0], pw.y - origin[1]);
+            if is_group {
+                if let Some(g) = state.doc.groups.get_mut(index) {
+                    g.rect[0] = rect0[0] + dx;
+                    g.rect[1] = rect0[1] + dy;
+                }
+                for (id, start) in &captured {
+                    if let Some(n) = state.doc.node_mut(*id) {
+                        n.position = [start[0] + dx, start[1] + dy];
+                    }
+                }
+            } else if let Some(c) = state.doc.comments.get_mut(index) {
+                c.rect[0] = rect0[0] + dx;
+                c.rect[1] = rect0[1] + dy;
+            }
+        }
+        if !pointer_down {
+            finish_annotation_drag(state, registry);
+        }
+    }
+
     // Pins take precedence over the node body.
     let mut pin_claimed = false;
     for g in &geoms {
@@ -509,7 +628,11 @@ fn draw_and_interact(
             let wr = Rect::from_center_size(pin.center, Vec2::splat(PIN_R * 3.0));
             let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
             let resp = scope.interact(ui, id, wr);
-            if resp.pressed && state.connect_drag.is_none() && state.node_drag.is_none() {
+            if resp.pressed
+                && !over_overlay
+                && state.connect_drag.is_none()
+                && state.node_drag.is_none()
+            {
                 state.connect_drag = Some(ConnectDrag {
                     from_node: g.id,
                     from_pin: pin.slug.clone(),
@@ -522,10 +645,15 @@ fn draw_and_interact(
 
     // Node body: select + start drag.
     let mut begin_drag = false;
+    let mut node_pressed = false;
     for g in &geoms {
         let id = ui.alloc_id(("graph_node", g.id));
         let resp = scope.interact(ui, id, g.rect);
+        if resp.pressed && !over_overlay {
+            node_pressed = true;
+        }
         if resp.pressed
+            && !over_overlay
             && !pin_claimed
             && state.node_drag.is_none()
             && state.connect_drag.is_none()
@@ -533,7 +661,7 @@ fn draw_and_interact(
             && !shift
         {
             if !state.selection.contains(&g.id) {
-                state.selection.clear();
+                state.clear_selection();
                 state.selection.insert(g.id);
             }
             begin_drag = true;
@@ -560,6 +688,60 @@ fn draw_and_interact(
                 .filter_map(|id| state.doc.node(*id).map(|n| (*id, n.position)))
                 .collect();
             state.node_drag = Some(NodeDrag { origin_world: [pw.x, pw.y], originals });
+        }
+    }
+
+    // Group title bars + comment headers: select, drag, double-click to edit.
+    // Behind nodes, so only when no node/pin claimed the press this frame.
+    let ann_free = !node_pressed
+        && !pin_claimed
+        && !over_overlay
+        && state.node_drag.is_none()
+        && state.annotation_drag.is_none();
+    // Groups first (front-most annotation is the last drawn = highest index).
+    for i in (0..state.doc.groups.len()).rev() {
+        let r = state.doc.groups[i].rect;
+        let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], GROUP_TITLE_H));
+        let id = ui.alloc_id(("graph_group", i));
+        let resp = scope.interact(ui, id, bar);
+        if resp.double_clicked(ui) {
+            begin_annotation_edit(state, true, i);
+        } else if resp.pressed && ann_free && pointer_world.is_some() {
+            state.clear_selection();
+            state.sel_group = Some(i);
+            let pw = pointer_world.unwrap();
+            let captured = nodes_captured_by_rect(&node_centers(&geoms), r);
+            let originals = captured
+                .iter()
+                .filter_map(|id| state.doc.node(*id).map(|n| (*id, n.position)))
+                .collect();
+            state.annotation_drag = Some(AnnotationDrag {
+                is_group: true,
+                index: i,
+                origin_world: [pw.x, pw.y],
+                rect_min0: [r[0], r[1]],
+                captured: originals,
+            });
+        }
+    }
+    for i in (0..state.doc.comments.len()).rev() {
+        let r = state.doc.comments[i].rect;
+        let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], COMMENT_HEADER_H));
+        let id = ui.alloc_id(("graph_comment", i));
+        let resp = scope.interact(ui, id, bar);
+        if resp.double_clicked(ui) {
+            begin_annotation_edit(state, false, i);
+        } else if resp.pressed && ann_free && state.annotation_drag.is_none() && pointer_world.is_some() {
+            state.clear_selection();
+            state.sel_comment = Some(i);
+            let pw = pointer_world.unwrap();
+            state.annotation_drag = Some(AnnotationDrag {
+                is_group: false,
+                index: i,
+                origin_world: [pw.x, pw.y],
+                rect_min0: [r[0], r[1]],
+                captured: Vec::new(),
+            });
         }
     }
 
@@ -601,7 +783,8 @@ fn draw_and_interact(
         }
     }
 
-    // Marquee box-select on empty canvas.
+    // Marquee box-select on empty canvas (suppressed while an overlay/node/
+    // annotation owns the gesture).
     handle_marquee(
         ui,
         scope,
@@ -611,12 +794,12 @@ fn draw_and_interact(
         pointer_pressed,
         pointer_down,
         released,
-        pin_claimed,
+        pin_claimed || over_overlay || node_pressed,
         &st,
     );
 
     // Right-click empty space → open the create menu at the pointer.
-    if right_pressed {
+    if right_pressed && !over_overlay {
         if let Some(pw) = pointer_world {
             if pin_under(&geoms, pw).is_none() && node_under(&geoms, pw).is_none() {
                 state.create_menu_world = Some([pw.x, pw.y]);
@@ -625,6 +808,17 @@ fn draw_and_interact(
             }
         }
     }
+
+    // Minimap overlay + toggle button (drawn on top; interaction claimed above).
+    draw_minimap(ui, scope, state, &geoms, mm_btn, mm_rect, minimap_pan);
+}
+
+/// Node centers (world) for group capture / minimap.
+fn node_centers(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 2])> {
+    geoms
+        .iter()
+        .map(|g| (g.id, [g.rect.center().x, g.rect.center().y]))
+        .collect()
 }
 
 fn pin_ty(geoms: &[NodeGeom], node: u64, slug: &str, output: bool) -> Option<PinType> {
@@ -701,6 +895,253 @@ fn finish_node_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
     }
 }
 
+/// Finish a comment/group drag, recording one coalesced Move edit (P7).
+fn finish_annotation_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
+    let Some(d) = state.annotation_drag.take() else {
+        return;
+    };
+    let min = if d.is_group {
+        state.doc.groups.get(d.index).map(|g| [g.rect[0], g.rect[1]])
+    } else {
+        state.doc.comments.get(d.index).map(|c| [c.rect[0], c.rect[1]])
+    };
+    let Some(min) = min else {
+        return;
+    };
+    let delta = [min[0] - d.rect_min0[0], min[1] - d.rect_min0[1]];
+    if delta[0].abs() > f32::EPSILON || delta[1].abs() > f32::EPSILON {
+        let edit = if d.is_group {
+            GraphEdit::MoveGroup {
+                index: d.index,
+                node_ids: d.captured.iter().map(|(id, _)| *id).collect(),
+                delta,
+            }
+        } else {
+            GraphEdit::MoveComment { index: d.index, delta }
+        };
+        state.commit(edit, registry);
+    }
+}
+
+/// Open the inline text editor for a comment/group (P7).
+fn begin_annotation_edit(state: &mut GraphEditorState, is_group: bool, index: usize) {
+    let (text, anchor) = if is_group {
+        match state.doc.groups.get(index) {
+            Some(g) => (g.title.clone(), [g.rect[0], g.rect[1]]),
+            None => return,
+        }
+    } else {
+        match state.doc.comments.get(index) {
+            Some(c) => (c.text.clone(), [c.rect[0], c.rect[1]]),
+            None => return,
+        }
+    };
+    state.clear_selection();
+    if is_group {
+        state.sel_group = Some(index);
+    } else {
+        state.sel_comment = Some(index);
+    }
+    state.annotation_drag = None;
+    state.editing = Some(AnnotationEdit {
+        is_group,
+        index,
+        buffer: text.clone(),
+        original: text,
+        anchor_world: anchor,
+        first_frame: true,
+    });
+}
+
+/// Toggle-button and minimap screen rects, derived from the canvas rect.
+fn minimap_rects(canvas: Rect, open: bool) -> (Rect, Option<Rect>) {
+    let btn = Rect::from_min_size(
+        Pos2::new(
+            canvas.max.x - MINIMAP_MARGIN - MINIMAP_BTN,
+            canvas.max.y - MINIMAP_MARGIN - MINIMAP_BTN,
+        ),
+        Vec2::splat(MINIMAP_BTN),
+    );
+    let mm = open.then(|| {
+        Rect::from_min_size(
+            Pos2::new(canvas.max.x - MINIMAP_MARGIN - MINIMAP_W, btn.min.y - 6.0 - MINIMAP_H),
+            Vec2::new(MINIMAP_W, MINIMAP_H),
+        )
+    });
+    (btn, mm)
+}
+
+/// World-space bounding box `[min_x, min_y, w, h]` of all content, or `None`.
+fn doc_bbox(state: &GraphEditorState, geoms: &[NodeGeom]) -> Option<[f32; 4]> {
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut acc = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        minx = minx.min(x0);
+        miny = miny.min(y0);
+        maxx = maxx.max(x1);
+        maxy = maxy.max(y1);
+    };
+    for g in geoms {
+        acc(g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y);
+    }
+    for g in &state.doc.groups {
+        acc(g.rect[0], g.rect[1], g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
+    }
+    for c in &state.doc.comments {
+        acc(c.rect[0], c.rect[1], c.rect[0] + c.rect[2], c.rect[1] + c.rect[3]);
+    }
+    if maxx <= minx || maxy <= miny {
+        return None;
+    }
+    Some([minx, miny, maxx - minx, maxy - miny])
+}
+
+/// Toggle button (always) + minimap overlay (when open): node/group rects at a
+/// fitted transform, a current-view indicator, and click-to-recenter (P7).
+#[allow(clippy::too_many_arguments)]
+fn draw_minimap(
+    ui: &mut Ui,
+    scope: &CanvasScope,
+    state: &mut GraphEditorState,
+    geoms: &[NodeGeom],
+    btn: Rect,
+    mm: Option<Rect>,
+    minimap_pan: &mut Option<Vec2>,
+) {
+    let st = ui.style();
+    let btn_id = ui.alloc_id("graph_minimap_btn");
+    let btn_resp = ui.interact(btn_id, btn);
+    if btn_resp.clicked {
+        state.minimap_open = !state.minimap_open;
+    }
+    {
+        let mut p = ui.painter();
+        let fill = if btn_resp.hovered { st.palette.hover } else { st.palette.elevated };
+        p.rect_filled(btn, st.rounding.small, fill);
+        p.rect_stroke(btn, st.rounding.small, 1.0, st.palette.stroke_strong);
+        let inner = Rect::from_center_size(btn.center(), Vec2::splat(MINIMAP_BTN * 0.45));
+        let glyph = if state.minimap_open {
+            st.palette.accent_active
+        } else {
+            st.palette.text_secondary
+        };
+        p.rect_stroke(inner, 0.0, 1.0, glyph);
+    }
+
+    let Some(mm) = mm else {
+        return;
+    };
+    let bbox = doc_bbox(state, geoms).unwrap_or_else(|| {
+        let v = scope.visible_world_rect();
+        [v.min.x, v.min.y, v.width(), v.height()]
+    });
+    let pad = 6.0;
+    let area = Rect::from_min_max(mm.min + Vec2::splat(pad), mm.max - Vec2::splat(pad));
+    let scale = (area.width() / bbox[2]).min(area.height() / bbox[3]).max(f32::MIN_POSITIVE);
+    let ox = area.min.x + (area.width() - bbox[2] * scale) * 0.5;
+    let oy = area.min.y + (area.height() - bbox[3] * scale) * 0.5;
+    let to_mm = |wx: f32, wy: f32| Pos2::new(ox + (wx - bbox[0]) * scale, oy + (wy - bbox[1]) * scale);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(mm, st.rounding.small, st.palette.window.with_alpha(0.92));
+        p.rect_stroke(mm, st.rounding.small, 1.0, st.palette.stroke_strong);
+        for g in &state.doc.groups {
+            let a = to_mm(g.rect[0], g.rect[1]);
+            let b = to_mm(g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
+            p.rect_stroke(Rect::from_min_max(a, b), 0.0, 1.0, st.palette.stroke);
+        }
+        for g in geoms {
+            let a = to_mm(g.rect.min.x, g.rect.min.y);
+            let b = to_mm(g.rect.max.x, g.rect.max.y);
+            p.rect_filled(Rect::from_min_max(a, b), 0.0, st.palette.text_secondary);
+        }
+        let v = scope.visible_world_rect();
+        let a = to_mm(v.min.x, v.min.y);
+        let b = to_mm(v.max.x, v.max.y);
+        p.rect_stroke(Rect::from_min_max(a, b), 0.0, 1.0, st.palette.accent_active);
+    }
+    let mm_id = ui.alloc_id("graph_minimap");
+    let resp = ui.interact(mm_id, mm);
+    if resp.pressed {
+        if let Some(pp) = ui.ctx().input.pointer_pos {
+            let wx = bbox[0] + (pp.x - ox) / scale;
+            let wy = bbox[1] + (pp.y - oy) / scale;
+            let half = scope.rect().size() / (2.0 * scope.zoom());
+            *minimap_pan = Some(Vec2::new(wx - half.x, wy - half.y));
+        }
+    }
+}
+
+/// Inline text-edit popup for the annotation in `state.editing` (P7).
+fn edit_popup(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    canvas_rect: Rect,
+) {
+    let Some((is_group, index, anchor_world, first_frame, original)) = state
+        .editing
+        .as_ref()
+        .map(|e| (e.is_group, e.index, e.anchor_world, e.first_frame, e.original.clone()))
+    else {
+        return;
+    };
+    let view = state.view;
+    let screen = Pos2::new(
+        canvas_rect.min.x + (anchor_world[0] - view.pan.x) * view.zoom,
+        canvas_rect.min.y + (anchor_world[1] - view.pan.y) * view.zoom,
+    );
+    let rect = Rect::from_min_size(screen, Vec2::new(200.0, 26.0));
+    {
+        let st = ui.style();
+        let mut p = ui.painter();
+        p.rect_filled(rect, st.rounding.small, st.palette.elevated);
+        p.rect_stroke(rect, st.rounding.small, 1.0, st.palette.accent_active);
+    }
+    let mut buffer = state.editing.as_ref().map(|e| e.buffer.clone()).unwrap_or_default();
+    let (out, _) = ui.run_at(
+        rect,
+        Direction::TopDown,
+        Id::new(("graph_annot_edit", is_group, index)),
+        UiOptions { padding: Vec2::splat(2.0), spacing: 0.0 },
+        |ui| {
+            TextEdit::new(&mut buffer)
+                .width(196.0)
+                .request_focus(first_frame)
+                .show_full(ui)
+        },
+    );
+    if out.cancelled {
+        state.editing = None;
+        return;
+    }
+    let commit = out.submitted || (!out.focused && !first_frame);
+    if commit {
+        state.editing = None;
+        if buffer != original {
+            if is_group {
+                if let Some(g) = state.doc.groups.get_mut(index) {
+                    g.title = buffer.clone();
+                }
+                state.commit(
+                    GraphEdit::SetGroupTitle { index, old: original, new: buffer },
+                    registry,
+                );
+            } else {
+                if let Some(c) = state.doc.comments.get_mut(index) {
+                    c.text = buffer.clone();
+                }
+                state.commit(
+                    GraphEdit::SetCommentText { index, old: original, new: buffer },
+                    registry,
+                );
+            }
+        }
+    } else if let Some(e) = state.editing.as_mut() {
+        e.buffer = buffer;
+        e.first_frame = false;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_marquee(
     ui: &mut Ui,
@@ -717,6 +1158,7 @@ fn handle_marquee(
     if pointer_pressed
         && state.node_drag.is_none()
         && state.connect_drag.is_none()
+        && state.annotation_drag.is_none()
         && !pin_claimed
     {
         if let Some(pw) = pointer_world {
@@ -767,13 +1209,25 @@ fn create_menu(
     open_at: Option<Pos2>,
 ) {
     let world = state.create_menu_world;
+    let has_selection = !state.selection.is_empty();
     let search = &mut state.create_menu_search;
     let mut chosen: Option<String> = None;
     let mut chosen_subgraph: Option<String> = None;
+    let mut add_comment = false;
+    let mut add_group = false;
     crusty_gui::widgets::context_menu_at(ui, "graph_create_menu", open_at, |ui| {
         ui.menu_group_header("Add Node");
         TextEdit::new(search).hint("Search\u{2026}").width(170.0).show(ui);
         let needle = search.to_lowercase();
+        if needle.is_empty() {
+            ui.menu_group_header("Annotate");
+            if ui.menu_item("Add Comment") {
+                add_comment = true;
+            }
+            if ui.menu_item_enabled("Add Group around selection", has_selection) {
+                add_group = true;
+            }
+        }
         for (cat, descs) in registry.by_category() {
             let rows: Vec<_> = descs
                 .iter()
@@ -824,6 +1278,12 @@ fn create_menu(
             state.create_menu_world = None;
         } else if let Some(path) = chosen_subgraph {
             state.add_subgraph_node(&path, pos, registry);
+            state.create_menu_world = None;
+        } else if add_comment {
+            state.add_comment(pos, registry);
+            state.create_menu_world = None;
+        } else if add_group {
+            state.add_group_around_selection(registry);
             state.create_menu_world = None;
         }
     }
