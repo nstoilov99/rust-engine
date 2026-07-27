@@ -6,13 +6,15 @@
 //! [`GraphEditStack`] so undo/redo and saved-cursor dirty tracking stay
 //! coherent (plan D7). The drawing/interaction layer is `graph_editor_crusty`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::time::Instant;
 
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
     load_graph, migrate_doc, save_graph, validate_doc, Edge, GraphDoc, GraphError, NodeInst,
-    NodeRegistry, PropValue,
+    NodeRegistry, PropValue, SUBGRAPH_TYPE_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -255,8 +257,14 @@ pub struct GraphEditorState {
     pub doc: GraphDoc,
     /// Doc-local validation errors from the last edit/load (never fatal).
     pub errors: Vec<GraphError>,
+    /// Cross-asset (subgraph) validation errors, refreshed by the editor's
+    /// per-frame `validate_refs` pass (P6). Shown alongside `errors`.
+    pub ref_errors: Vec<GraphError>,
     /// Unsaved changes flag, kept in sync with the edit stack's saved cursor.
     pub dirty: bool,
+    /// Time of the last save through this editor — used by hot-reload to
+    /// suppress the watcher echo of our own write (P6).
+    pub last_saved_at: Option<Instant>,
     /// Pan/zoom canvas view (session-only — not persisted in the asset).
     pub view: CanvasView,
     /// Selected node ids.
@@ -306,7 +314,9 @@ impl GraphEditorState {
             path: content_rel_key.to_string(),
             doc,
             errors,
+            ref_errors: Vec::new(),
             dirty: false,
+            last_saved_at: None,
             view: CanvasView::default(),
             selection: BTreeSet::new(),
             stack: GraphEditStack::new(),
@@ -323,6 +333,7 @@ impl GraphEditorState {
         save_graph(abs_path, &self.doc).map_err(|e| e.to_string())?;
         self.stack.mark_saved();
         self.dirty = false;
+        self.last_saved_at = Some(Instant::now());
         Ok(())
     }
 
@@ -376,6 +387,29 @@ impl GraphEditorState {
             position: pos,
             properties,
             subgraph: None,
+        };
+        let id = node.id;
+        self.doc.nodes.push(node.clone());
+        self.selection.clear();
+        self.selection.insert(id);
+        self.commit(GraphEdit::AddNode(node), registry);
+    }
+
+    /// Add a subgraph-instance node referencing `subgraph_path` at `pos`
+    /// (its pins derive from the referenced asset's interface at draw time).
+    pub fn add_subgraph_node(
+        &mut self,
+        subgraph_path: &str,
+        pos: [f32; 2],
+        registry: &NodeRegistry,
+    ) {
+        let node = NodeInst {
+            id: self.doc.next_node_id(),
+            type_id: SUBGRAPH_TYPE_ID.to_string(),
+            type_version: 1,
+            position: pos,
+            properties: std::collections::BTreeMap::new(),
+            subgraph: Some(subgraph_path.to_string()),
         };
         let id = node.id;
         self.doc.nodes.push(node.clone());
@@ -477,6 +511,35 @@ impl GraphEditorState {
         self.selection = nodes.iter().map(|n| n.id).collect();
         self.commit(edit, registry);
     }
+}
+
+/// Build the transitive-closure document map used as a [`GraphResolver`]
+/// (P6): open editor docs win over disk (so unsaved edits validate against
+/// what the user sees), and every subgraph they reference — directly or
+/// transitively — is loaded from `content_root` and cached in the returned
+/// map. `BTreeMap<String, GraphDoc>` already implements `GraphResolver`, so
+/// the returned map is the resolver.
+pub fn build_resolver_docs<'a>(
+    open: impl Iterator<Item = (&'a str, &'a GraphDoc)>,
+    content_root: &Path,
+) -> BTreeMap<String, GraphDoc> {
+    let mut docs: BTreeMap<String, GraphDoc> =
+        open.map(|(k, d)| (k.to_string(), d.clone())).collect();
+    let mut frontier: Vec<String> = docs
+        .values()
+        .flat_map(|d| d.subgraph_refs().into_iter().map(str::to_string))
+        .collect();
+    while let Some(path) = frontier.pop() {
+        if docs.contains_key(&path) {
+            continue;
+        }
+        // Missing-on-disk refs are left absent → `MissingSubgraph` at validate.
+        if let Ok(d) = load_graph(&content_root.join(&path)) {
+            frontier.extend(d.subgraph_refs().into_iter().map(str::to_string));
+            docs.insert(path, d);
+        }
+    }
+    docs
 }
 
 /// Read-only display string for a stored input constant.
@@ -602,6 +665,57 @@ mod tests {
         // Undoing the new edit does NOT reach the (now-gone) save point.
         s.undo(&mut doc);
         assert!(s.is_dirty(), "truncated save point never re-cleans without save");
+    }
+
+    #[test]
+    fn resolver_prefers_open_and_loads_disk_closure() {
+        use crate::engine::node_graph::save_graph;
+        use crate::engine::node_graph::{GraphResolver, IfacePin, PinType};
+
+        // Disk: leaf.subgraph (float iface), mid.subgraph → references leaf.
+        let dir = std::env::temp_dir().join("rust_engine_graph_resolver_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let leaf = GraphDoc {
+            inputs: vec![IfacePin { slug: "x".into(), label: "X".into(), ty: PinType::Float }],
+            ..GraphDoc::default()
+        };
+        let mut mid = GraphDoc::default();
+        mid.nodes.push(NodeInst {
+            id: 0,
+            type_id: SUBGRAPH_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: std::collections::BTreeMap::new(),
+            subgraph: Some("lib/leaf.subgraph".to_string()),
+        });
+        save_graph(&dir.join("lib/leaf.subgraph"), &leaf).unwrap();
+        save_graph(&dir.join("lib/mid.subgraph"), &mid).unwrap();
+
+        // Open host references mid; its own open copy has an extra node so we
+        // can prove the open doc wins over any disk copy.
+        let mut host = GraphDoc::default();
+        host.nodes.push(NodeInst {
+            id: 9,
+            type_id: SUBGRAPH_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: std::collections::BTreeMap::new(),
+            subgraph: Some("lib/mid.subgraph".to_string()),
+        });
+
+        let open = [("main.graph", &host)];
+        let docs = build_resolver_docs(open.into_iter().map(|(k, d)| (k, d)), &dir);
+
+        // Open doc present verbatim (wins over disk), disk closure loaded.
+        assert_eq!(docs.resolve("main.graph").unwrap().nodes[0].id, 9);
+        assert!(docs.resolve("lib/mid.subgraph").is_some());
+        assert_eq!(
+            docs.resolve("lib/leaf.subgraph").unwrap().inputs.len(),
+            1,
+            "transitively-referenced leaf loaded from disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

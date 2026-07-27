@@ -21,7 +21,9 @@ use super::graph_editor::{
     prop_display, ConnectDrag, GraphEdit, GraphEditorState, GraphFragment, NodeDrag,
 };
 use super::theme::Palette;
-use crate::engine::node_graph::{Edge, GraphError, NodeRegistry, PinType, SUBGRAPH_TYPE_ID};
+use crate::engine::node_graph::{
+    Edge, GraphError, GraphResolver, NodeRegistry, PinType, SUBGRAPH_TYPE_ID,
+};
 
 // Node metrics, world-space units (≈ pixels at zoom 1.0).
 const NODE_W: f32 = 168.0;
@@ -35,6 +37,13 @@ pub struct GraphEditorPanelCtx<'a> {
     pub state: &'a mut GraphEditorState,
     pub registry: &'a NodeRegistry,
     pub clipboard: &'a mut Option<GraphFragment>,
+    /// Resolves subgraph references (open docs + disk) for pin derivation.
+    pub resolver: &'a dyn GraphResolver,
+    /// Content-relative paths of known `.subgraph` assets (create menu).
+    pub subgraph_assets: &'a [String],
+    /// Set to a content-relative path when a subgraph node is double-clicked;
+    /// the host opens it as a tab (P6 open-in-tab navigation).
+    pub open_subgraph: &'a mut Option<String>,
     /// This tab is the focused tab of its dock (gates keyboard editing).
     pub focused: bool,
     /// True in float windows (no menu/winit edit path) — the panel handles
@@ -72,7 +81,11 @@ impl NodeGeom {
     }
 }
 
-fn build_geoms(state: &GraphEditorState, registry: &NodeRegistry) -> Vec<NodeGeom> {
+fn build_geoms(
+    state: &GraphEditorState,
+    registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
+) -> Vec<NodeGeom> {
     state
         .doc
         .nodes
@@ -96,7 +109,19 @@ fn build_geoms(state: &GraphEditorState, registry: &NodeRegistry) -> Vec<NodeGeo
                     .and_then(|p| std::path::Path::new(p).file_stem())
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Subgraph".to_string());
-                (name, Some("Subgraph".to_string()), false, vec![], vec![])
+                // Pins derive from the referenced doc's declared interface;
+                // an unresolvable reference renders in the missing-node style.
+                match n.subgraph.as_deref().and_then(|p| resolver.resolve(p)) {
+                    Some(sub) => {
+                        let iface = |pins: &[crate::engine::node_graph::IfacePin]| {
+                            pins.iter()
+                                .map(|p| (p.slug.clone(), p.label.clone(), p.ty.clone()))
+                                .collect::<Vec<_>>()
+                        };
+                        (name, Some("Subgraph".to_string()), false, iface(&sub.inputs), iface(&sub.outputs))
+                    }
+                    None => (name, Some("Subgraph".to_string()), true, vec![], vec![]),
+                }
             } else if let Some(d) = desc {
                 let ins = d
                     .inputs
@@ -226,7 +251,16 @@ fn validate_connection(
 // ---------------------------------------------------------------------------
 
 pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
-    let GraphEditorPanelCtx { state, registry, clipboard, focused, handle_shortcuts } = ctx;
+    let GraphEditorPanelCtx {
+        state,
+        registry,
+        clipboard,
+        resolver,
+        subgraph_assets,
+        open_subgraph,
+        focused,
+        handle_shortcuts,
+    } = ctx;
 
     if handle_shortcuts && focused {
         handle_panel_keys(ui, state, registry, clipboard);
@@ -237,12 +271,12 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
     let out = Canvas::new().zoom_range(0.25, 2.5).show(ui, &mut view, |ui, scope| {
-        draw_and_interact(ui, scope, state, registry, &mut menu_open_at);
+        draw_and_interact(ui, scope, state, registry, resolver, &mut menu_open_at, open_subgraph);
     });
     state.view = view;
 
-    create_menu(ui, state, registry, menu_open_at);
-    error_overlay(ui, out.rect, &state.errors);
+    create_menu(ui, state, registry, subgraph_assets, menu_open_at);
+    error_overlay(ui, out.rect, &state.errors, &state.ref_errors);
 }
 
 fn handle_panel_keys(
@@ -296,17 +330,20 @@ fn handle_panel_keys(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_and_interact(
     ui: &mut Ui,
     scope: &CanvasScope,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
     menu_open_at: &mut Option<Pos2>,
+    open_subgraph: &mut Option<String>,
 ) {
     let st = ui.style();
     let zoom = scope.zoom();
     let vis = scope.visible_world_rect();
-    let geoms = build_geoms(state, registry);
+    let geoms = build_geoms(state, registry, resolver);
 
     // Background + world grid.
     {
@@ -506,6 +543,12 @@ fn draw_and_interact(
                 state.selection.remove(&g.id);
             } else {
                 state.selection.insert(g.id);
+            }
+        }
+        // Double-click a subgraph node → open its referenced doc as a tab.
+        if resp.double_clicked(ui) {
+            if let Some(path) = state.doc.node(g.id).and_then(|n| n.subgraph.clone()) {
+                *open_subgraph = Some(path);
             }
         }
     }
@@ -720,11 +763,13 @@ fn create_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    subgraph_assets: &[String],
     open_at: Option<Pos2>,
 ) {
     let world = state.create_menu_world;
     let search = &mut state.create_menu_search;
     let mut chosen: Option<String> = None;
+    let mut chosen_subgraph: Option<String> = None;
     crusty_gui::widgets::context_menu_at(ui, "graph_create_menu", open_at, |ui| {
         ui.menu_group_header("Add Node");
         TextEdit::new(search).hint("Search\u{2026}").width(170.0).show(ui);
@@ -748,16 +793,47 @@ fn create_menu(
                 }
             }
         }
+        // Subgraph assets (`.subgraph`) as instance nodes.
+        let subs: Vec<(&String, String)> = subgraph_assets
+            .iter()
+            .map(|p| {
+                let stem = std::path::Path::new(p)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.clone());
+                (p, stem)
+            })
+            .filter(|(p, stem)| {
+                needle.is_empty()
+                    || stem.to_lowercase().contains(&needle)
+                    || p.to_lowercase().contains(&needle)
+            })
+            .collect();
+        if !subs.is_empty() {
+            ui.menu_group_header("Subgraph");
+            for (path, stem) in subs {
+                if ui.menu_item(&stem) {
+                    chosen_subgraph = Some(path.clone());
+                }
+            }
+        }
     });
-    if let (Some(type_id), Some(pos)) = (chosen, world) {
-        state.add_node(&type_id, pos, registry);
-        state.create_menu_world = None;
+    if let Some(pos) = world {
+        if let Some(type_id) = chosen {
+            state.add_node(&type_id, pos, registry);
+            state.create_menu_world = None;
+        } else if let Some(path) = chosen_subgraph {
+            state.add_subgraph_node(&path, pos, registry);
+            state.create_menu_world = None;
+        }
     }
 }
 
-/// Compact validation summary pinned to the canvas's top-left corner.
-fn error_overlay(ui: &mut Ui, rect: Rect, errors: &[GraphError]) {
-    if errors.is_empty() {
+/// Compact validation summary pinned to the canvas's top-left corner. Shows
+/// doc-local and cross-asset (subgraph) errors together.
+fn error_overlay(ui: &mut Ui, rect: Rect, doc_errors: &[GraphError], ref_errors: &[GraphError]) {
+    let total = doc_errors.len() + ref_errors.len();
+    if total == 0 {
         return;
     }
     let st = ui.style();
@@ -767,12 +843,17 @@ fn error_overlay(ui: &mut Ui, rect: Rect, errors: &[GraphError]) {
     const MAX_LINES: usize = 3;
     let header = format!(
         "{} validation error{}",
-        errors.len(),
-        if errors.len() == 1 { "" } else { "s" }
+        total,
+        if total == 1 { "" } else { "s" }
     );
-    let mut lines: Vec<String> = errors.iter().take(MAX_LINES).map(|e| format!("{e}")).collect();
-    if errors.len() > MAX_LINES {
-        lines.push(format!("+{} more\u{2026}", errors.len() - MAX_LINES));
+    let mut lines: Vec<String> = doc_errors
+        .iter()
+        .chain(ref_errors.iter())
+        .take(MAX_LINES)
+        .map(|e| format!("{e}"))
+        .collect();
+    if total > MAX_LINES {
+        lines.push(format!("+{} more\u{2026}", total - MAX_LINES));
     }
 
     let mut p = ui.painter();

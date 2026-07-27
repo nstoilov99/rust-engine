@@ -1643,13 +1643,10 @@ impl App {
                     )));
                 }
                 ReloadEvent::GraphChanged { path } => {
-                    // Open graph editors + subgraph hosts refresh here once
-                    // the graph editor lands (Task 40 P4/P6): clean docs
-                    // reload, dirty docs warn, own-save echoes are filtered.
-                    self.editor
-                        .console
-                        .messages
-                        .push(LogMessage::info(format!("Graph changed: {}", path)));
+                    #[cfg(feature = "editor")]
+                    self.on_graph_changed(&path);
+                    #[cfg(not(feature = "editor"))]
+                    let _ = path;
                 }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
@@ -2593,41 +2590,13 @@ impl App {
                                 }
                             }
                         } else if asset_type == AssetType::Graph {
-                            // Open node graph editor tab (Task 40 P4).
+                            // Open node graph editor tab (Task 40 P4/P6).
                             let relative =
                                 asset_source::to_content_relative(&meta_path.to_string_lossy());
-                            if !self.editor.scene.graph_editors.contains_key(&relative) {
-                                let abs = std::path::Path::new("content").join(&relative);
-                                match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
-                                    &abs,
-                                    &relative,
-                                    &self.editor.scene.node_registry,
-                                ) {
-                                    Ok(state) => {
-                                        self.editor
-                                            .scene
-                                            .graph_editors
-                                            .insert(relative.clone(), state);
-                                        self.open_graph_as_tab(relative);
-                                    }
-                                    Err(e) => {
-                                        self.editor.console.messages.push(LogMessage::error(
-                                            format!("Failed to open graph '{relative}': {e}"),
-                                        ));
-                                    }
-                                }
-                            } else {
-                                // Already open: surface the docked tab. A tab
-                                // living in a float OS window stays there.
-                                #[cfg(feature = "editor")]
-                                let in_float =
-                                    self.crusty_float_hosts_tab(&format!("graph:{relative}"));
-                                #[cfg(not(feature = "editor"))]
-                                let in_float = false;
-                                if !in_float {
-                                    self.open_graph_as_tab(relative);
-                                }
-                            }
+                            #[cfg(feature = "editor")]
+                            self.open_graph_document(relative);
+                            #[cfg(not(feature = "editor"))]
+                            let _ = relative;
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
                             self.open_input_action_as_tab(full_path);
@@ -3209,6 +3178,10 @@ impl App {
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
         let mut crusty_dialog_actions = Vec::new();
         let mut crusty_import_action = ImportDialogAction::None;
+        // Subgraph node double-clicked in a docked graph this frame (P6);
+        // declared out here so it outlives the layout block and can be applied
+        // once the panel borrows are released.
+        let mut graph_open_request: Option<String> = None;
         let crusty_result = {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
@@ -3261,6 +3234,26 @@ impl App {
             for fw in self.crusty_floats.values_mut() {
                 fw.released = false;
             }
+            // P6: refresh subgraph cross-asset validation + build the resolver
+            // for the canvas panels; list `.subgraph` assets for the create
+            // menu. Both must precede the `&mut self.editor` panel bindings.
+            let graph_resolver_docs = self.revalidate_graph_refs();
+            let subgraph_assets: Vec<String> = {
+                let filter = rust_engine::engine::editor::AssetFilter {
+                    asset_types: Some(vec![AssetType::Graph]),
+                    include_subfolders: true,
+                    ..Default::default()
+                };
+                self.editor
+                    .scene
+                    .asset_browser
+                    .registry
+                    .query(&filter)
+                    .into_iter()
+                    .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some("subgraph"))
+                    .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
+                    .collect()
+            };
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -3573,6 +3566,9 @@ impl App {
                                                 state,
                                                 registry: graph_registry,
                                                 clipboard: graph_clipboard,
+                                                resolver: &graph_resolver_docs,
+                                                subgraph_assets: &subgraph_assets,
+                                                open_subgraph: &mut graph_open_request,
                                                 focused: graph_focused_tab.as_deref()
                                                     == Some(tab),
                                                 // Docked: keyboard editing runs
@@ -3684,6 +3680,11 @@ impl App {
             self.crusty_menu_action = crusty_menu_action;
             crusty_result
         };
+
+        // Subgraph node double-clicked in a docked graph → open its doc (P6).
+        if let Some(relative) = graph_open_request {
+            self.open_graph_document(relative);
+        }
 
         // Commit (or veto) a crusty dock tab-close request.
         if let Some(tab) = crusty_close_tab.take() {
@@ -4122,6 +4123,129 @@ impl App {
         self.editor.scene.graph_editors.remove(key);
     }
 
+    /// Open a graph document by content-relative key: focus it if already
+    /// open (unless it lives in a float window), else load it from the content
+    /// root and open a tab. Shared by the asset browser and subgraph
+    /// double-click navigation (P6).
+    #[cfg(feature = "editor")]
+    fn open_graph_document(&mut self, relative: String) {
+        if !self.editor.scene.graph_editors.contains_key(&relative) {
+            let abs = std::path::Path::new("content").join(&relative);
+            match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
+                &abs,
+                &relative,
+                &self.editor.scene.node_registry,
+            ) {
+                Ok(state) => {
+                    self.editor.scene.graph_editors.insert(relative.clone(), state);
+                    self.open_graph_as_tab(relative);
+                }
+                Err(e) => {
+                    self.editor
+                        .console
+                        .messages
+                        .push(LogMessage::error(format!("Failed to open graph '{relative}': {e}")));
+                }
+            }
+        } else {
+            let in_float = self.crusty_float_hosts_tab(&format!("graph:{relative}"));
+            if !in_float {
+                self.open_graph_as_tab(relative);
+            }
+        }
+    }
+
+    /// Rebuild the subgraph resolver from open docs + disk and refresh every
+    /// open graph's cross-asset (`ref_errors`) validation. Returns the
+    /// resolver doc map so callers can hand it to the canvas panels. Runs each
+    /// frame (cheap for a handful of open graphs) and after a subgraph reload.
+    #[cfg(feature = "editor")]
+    fn revalidate_graph_refs(
+        &mut self,
+    ) -> std::collections::BTreeMap<String, rust_engine::engine::node_graph::GraphDoc> {
+        use rust_engine::engine::editor::graph_editor::build_resolver_docs;
+        use rust_engine::engine::node_graph::validate_refs;
+        let scene = &mut self.editor.scene;
+        let docs = build_resolver_docs(
+            scene.graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
+            std::path::Path::new("content"),
+        );
+        for st in scene.graph_editors.values_mut() {
+            st.ref_errors = validate_refs(&st.doc, &st.path, &scene.node_registry, &docs);
+        }
+        docs
+    }
+
+    /// Hot-reload handler for a `.graph`/`.subgraph` write (P6): normalize the
+    /// watcher path, suppress our own save echo, reload a clean open doc (warn
+    /// if dirty), then refresh every host that references the changed subgraph.
+    #[cfg(feature = "editor")]
+    fn on_graph_changed(&mut self, abs_path: &str) {
+        use rust_engine::engine::editor::graph_editor::GraphEditorState;
+        use rust_engine::engine::node_graph::referencing_hosts;
+        let key = asset_source::to_content_relative(abs_path);
+
+        // Suppress the watcher echo of our own just-completed save (~1s guard).
+        let own_echo = self
+            .editor
+            .scene
+            .graph_editors
+            .get(&key)
+            .and_then(|s| s.last_saved_at)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+        if own_echo {
+            return;
+        }
+
+        // Reload the changed doc if it's open and clean; warn if dirty.
+        if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
+            if st.dirty {
+                self.editor.console.messages.push(LogMessage::warning(format!(
+                    "Graph '{key}' changed on disk; keeping your unsaved edits"
+                )));
+            } else {
+                let abs = std::path::Path::new("content").join(&key);
+                match GraphEditorState::open(&abs, &key, &self.editor.scene.node_registry) {
+                    Ok(mut fresh) => {
+                        // Preserve the view and any selection whose ids survive.
+                        fresh.view = st.view;
+                        fresh.selection = st
+                            .selection
+                            .iter()
+                            .copied()
+                            .filter(|id| fresh.doc.node(*id).is_some())
+                            .collect();
+                        *st = fresh;
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::info(format!("Graph reloaded: {key}")));
+                    }
+                    Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to reload graph '{key}': {e}"
+                    ))),
+                }
+            }
+        }
+
+        // Refresh hosts referencing the changed subgraph (derived pins + errors).
+        let hosts = referencing_hosts(
+            self.editor
+                .scene
+                .graph_editors
+                .iter()
+                .map(|(k, s)| (k.as_str(), &s.doc)),
+            &key,
+        );
+        let _ = self.revalidate_graph_refs();
+        if !hosts.is_empty() {
+            self.editor.console.messages.push(LogMessage::info(format!(
+                "Subgraph '{key}' changed; refreshed {} host graph(s)",
+                hosts.len()
+            )));
+        }
+    }
+
     /// Route a winit event to a torn-off float window. Returns true if the
     /// window id belongs to a float (event consumed).
     #[cfg(feature = "editor")]
@@ -4277,6 +4401,26 @@ impl App {
         let graph_editors = &mut editor.scene.graph_editors;
         let graph_registry = &editor.scene.node_registry;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
+        // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
+        let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
+            graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
+            std::path::Path::new("content"),
+        );
+        let subgraph_assets: Vec<String> = {
+            let filter = rust_engine::engine::editor::AssetFilter {
+                asset_types: Some(vec![AssetType::Graph]),
+                include_subfolders: true,
+                ..Default::default()
+            };
+            asset_browser
+                .registry
+                .query(&filter)
+                .into_iter()
+                .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some("subgraph"))
+                .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
+                .collect()
+        };
+        let mut graph_open_requests: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -4341,6 +4485,8 @@ impl App {
                 None,
                 &float_editor_dirty,
             );
+            // Subgraph double-click in this float → queued for the host to open.
+            let mut float_open_request: Option<String> = None;
             let res = fw.frame(
                 device.clone(),
                 queue.clone(),
@@ -4430,6 +4576,9 @@ impl App {
                                     state,
                                     registry: graph_registry,
                                     clipboard: graph_clipboard,
+                                    resolver: &graph_resolver_docs,
+                                    subgraph_assets: &subgraph_assets,
+                                    open_subgraph: &mut float_open_request,
                                     // A float window is a dedicated surface;
                                     // keys only arrive when it's OS-focused, so
                                     // the panel owns keyboard editing here.
@@ -4448,6 +4597,33 @@ impl App {
             );
             if let Err(e) = res {
                 eprintln!("crusty float window frame failed: {e}");
+            }
+            if let Some(path) = float_open_request {
+                graph_open_requests.push(path);
+            }
+        }
+
+        // Open any subgraphs double-clicked in float windows, as main-dock
+        // tabs. Uses the existing `graph_editors`/`graph_registry` bindings so
+        // it doesn't re-borrow `editor.scene` fields already held.
+        for relative in graph_open_requests {
+            if graph_editors.contains_key(&relative) {
+                editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
+            } else {
+                let abs = std::path::Path::new("content").join(&relative);
+                match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
+                    &abs,
+                    &relative,
+                    graph_registry,
+                ) {
+                    Ok(state) => {
+                        graph_editors.insert(relative.clone(), state);
+                        editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
+                    }
+                    Err(e) => editor.console.messages.push(LogMessage::error(format!(
+                        "Failed to open graph '{relative}': {e}"
+                    ))),
+                }
             }
         }
 
