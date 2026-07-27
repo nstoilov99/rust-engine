@@ -33,6 +33,7 @@ pub fn tab_id(tab: &EditorTab) -> String {
         EditorTab::Profiler => "profiler".to_string(),
         EditorTab::InputSettings => "input_settings".to_string(),
         EditorTab::MeshEditor(key) => format!("mesh:{key}"),
+        EditorTab::GraphEditor(key) => format!("graph:{key}"),
         EditorTab::InputActionEditor(key) => format!("ia:{key}"),
         EditorTab::InputContextEditor(key) => format!("mc:{key}"),
     }
@@ -44,6 +45,7 @@ pub fn parse_tab(id: &str) -> Option<EditorTab> {
         return match kind {
             "viewport" => key.parse().ok().map(|n| EditorTab::Viewport(SceneId(n))),
             "mesh" => Some(EditorTab::MeshEditor(key.to_string())),
+            "graph" => Some(EditorTab::GraphEditor(key.to_string())),
             "ia" => Some(EditorTab::InputActionEditor(key.to_string())),
             "mc" => Some(EditorTab::InputContextEditor(key.to_string())),
             _ => None,
@@ -176,8 +178,11 @@ impl CrustyDockLayout {
 
 /// Display titles for every tab in the tree; viewport tabs show their scene
 /// name. `extra` covers a tab currently torn off the tree (ghost drag) so its
-/// card still shows the display title. The second return value is the set of
-/// dirty tabs, shown as a warning dot in the tab strip.
+/// card still shows the display title. `editor_dirty` carries the tab ids of
+/// per-file editors (mesh, graph, …) with unsaved changes — their dirty dot is
+/// driven from the host's editor state rather than the scene registry. The
+/// second return value is the set of dirty tabs, shown as a warning dot in the
+/// tab strip.
 pub fn tab_titles(
     tree: &DockNode,
     active_id: SceneId,
@@ -185,6 +190,7 @@ pub fn tab_titles(
     active_dirty: bool,
     dormant: &[DormantScene],
     extra: Option<&str>,
+    editor_dirty: &std::collections::HashSet<String>,
 ) -> (HashMap<String, String>, std::collections::HashSet<String>) {
     let mut ids = Vec::new();
     tree.collect_tabs(&mut ids);
@@ -216,7 +222,14 @@ pub fn tab_titles(
                     }
                     name.to_string()
                 }
-                Some(tab) => tab.title_string(),
+                Some(tab) => {
+                    // Per-file editor tabs (mesh, graph) get their dirty dot
+                    // from the host's editor state, keyed by tab id.
+                    if editor_dirty.contains(&id) {
+                        dirty_set.insert(id.clone());
+                    }
+                    tab.title_string()
+                }
                 None => id.clone(),
             };
             (id, title)

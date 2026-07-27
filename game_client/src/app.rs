@@ -186,6 +186,14 @@ pub struct SceneEditorState {
     /// Open mesh editors keyed by content-relative mesh path.
     pub mesh_editors:
         std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
+    /// Open node graph editors keyed by content-relative graph path.
+    pub graph_editors: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    /// Node type registry (Task 40) — feeds graph load/validate; shared by
+    /// every open graph editor.
+    pub node_registry: rust_engine::engine::node_graph::NodeRegistry,
     /// Open input action editors (one per .inputaction file).
     pub input_action_editor: InputActionEditor,
     /// Open mapping context editors (one per .mappingcontext file).
@@ -671,6 +679,15 @@ impl App {
                 registry: SceneRegistry::new(SceneId(0)),
                 import_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
+                graph_editors: std::collections::HashMap::new(),
+                node_registry: {
+                    #[allow(unused_mut)]
+                    let mut reg = rust_engine::engine::node_graph::NodeRegistry::new();
+                    #[cfg(feature = "dev_nodes")]
+                    rust_engine::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg)
+                        .expect("dev_nodes registration");
+                    reg
+                },
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
                 save_as_dialog: None,
@@ -948,6 +965,12 @@ impl App {
         self.editor.ui.crusty_dock.open_tab(tab);
     }
 
+    /// Open a node graph file as a dock tab (default behavior).
+    pub fn open_graph_as_tab(&mut self, graph_key: String) {
+        let tab = EditorTab::GraphEditor(graph_key);
+        self.editor.ui.crusty_dock.open_tab(tab);
+    }
+
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
@@ -1026,6 +1049,12 @@ impl App {
                 if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
                     rust_engine::engine::editor::mesh_editor::MeshEditorPanel::save_sidecar(data)?;
                     data.dirty = false;
+                }
+            }
+            SecondaryWindowKind::Graph => {
+                if let Some(state) = self.editor.scene.graph_editors.get_mut(key) {
+                    let abs = std::path::Path::new("content").join(&state.path);
+                    state.save(&abs)?;
                 }
             }
             SecondaryWindowKind::InputAction => {
@@ -1322,6 +1351,11 @@ impl App {
                     SecondaryWindowKind::Mesh => {
                         if let Some(data) = self.editor.scene.mesh_editors.get_mut(&key) {
                             data.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::Graph => {
+                        if let Some(state) = self.editor.scene.graph_editors.get_mut(&key) {
+                            state.dirty = false;
                         }
                     }
                     SecondaryWindowKind::InputAction => {
@@ -2513,6 +2547,42 @@ impl App {
                                     self.open_mesh_as_tab(relative);
                                 }
                             }
+                        } else if asset_type == AssetType::Graph {
+                            // Open node graph editor tab (Task 40 P4).
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            if !self.editor.scene.graph_editors.contains_key(&relative) {
+                                let abs = std::path::Path::new("content").join(&relative);
+                                match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
+                                    &abs,
+                                    &relative,
+                                    &self.editor.scene.node_registry,
+                                ) {
+                                    Ok(state) => {
+                                        self.editor
+                                            .scene
+                                            .graph_editors
+                                            .insert(relative.clone(), state);
+                                        self.open_graph_as_tab(relative);
+                                    }
+                                    Err(e) => {
+                                        self.editor.console.messages.push(LogMessage::error(
+                                            format!("Failed to open graph '{relative}': {e}"),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // Already open: surface the docked tab. A tab
+                                // living in a float OS window stays there.
+                                #[cfg(feature = "editor")]
+                                let in_float =
+                                    self.crusty_float_hosts_tab(&format!("graph:{relative}"));
+                                #[cfg(not(feature = "editor"))]
+                                let in_float = false;
+                                if !in_float {
+                                    self.open_graph_as_tab(relative);
+                                }
+                            }
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
                             self.open_input_action_as_tab(full_path);
@@ -3113,6 +3183,7 @@ impl App {
             use rust_engine::engine::editor::mesh_editor_crusty::{
                 mesh_editor_panel, MeshEditorPanelCtx,
             };
+            use rust_engine::engine::editor::graph_editor_crusty::graph_editor_panel;
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
@@ -3183,9 +3254,24 @@ impl App {
             let mc_actions = input_context_editor.available_actions.as_slice();
             let sel = &mut self.editor.scene.selection;
             let mesh_editors = &mut self.editor.scene.mesh_editors;
+            let graph_editors = &mut self.editor.scene.graph_editors;
             let mesh_textures = &self.crusty_mesh_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
+            // Per-file editor dirty dots: build the set of dirty tab ids so
+            // mesh/graph tabs show the warning dot (scene tabs still route
+            // through the scene registry inside `tab_titles`).
+            let editor_dirty: std::collections::HashSet<String> = mesh_editors
+                .iter()
+                .filter(|(_, d)| d.dirty)
+                .map(|(k, _)| format!("mesh:{k}"))
+                .chain(
+                    graph_editors
+                        .iter()
+                        .filter(|(_, s)| s.dirty)
+                        .map(|(k, _)| format!("graph:{k}")),
+                )
+                .collect();
             let (titles, dirty_tabs) = dock_crusty::tab_titles(
                 &self.editor.ui.crusty_dock.tree,
                 active_scene_id,
@@ -3193,6 +3279,7 @@ impl App {
                 active_dirty,
                 &self.editor.scene.registry.dormant,
                 self.crusty_dock_drag.as_deref(),
+                &editor_dirty,
             );
             let theme = self.editor.services.theme.clone();
             let has_selection = !sel.is_empty();
@@ -3400,6 +3487,15 @@ impl App {
                                         None => {
                                             dock_crusty::placeholder_panel(ui, "Mesh not loaded.")
                                         }
+                                    }
+                                }
+                                Some(EditorTab::GraphEditor(key)) => {
+                                    match graph_editors.get_mut(&key) {
+                                        Some(state) => graph_editor_panel(ui, state),
+                                        None => dock_crusty::placeholder_panel(
+                                            ui,
+                                            "Graph not loaded.",
+                                        ),
                                     }
                                 }
                                 _ => dock_crusty::placeholder_panel(
@@ -3839,6 +3935,10 @@ impl App {
                 if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
                     data.open = false;
                 }
+            } else if let Some(key) = tab.strip_prefix("graph:") {
+                // Graph editors hold no GPU state; drop the doc on close.
+                // Reopen from the asset browser reloads it fresh.
+                self.editor.scene.graph_editors.remove(key);
             }
         }
     }
@@ -3949,6 +4049,7 @@ impl App {
         use rust_engine::engine::editor::mesh_editor_crusty::{
             mesh_editor_panel, MeshEditorPanelCtx,
         };
+        use rust_engine::engine::editor::graph_editor_crusty::graph_editor_panel;
         use rust_engine::engine::editor::profiler_crusty::profiler_panel;
 
         let device = self.core.renderer.gpu.device.clone();
@@ -3992,6 +4093,7 @@ impl App {
         let mc_states = &mut input_context_editor.open_contexts;
         let mc_actions = input_context_editor.available_actions.as_slice();
         let mesh_editors = &mut editor.scene.mesh_editors;
+        let graph_editors = &mut editor.scene.graph_editors;
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -4044,6 +4146,9 @@ impl App {
                 }
             }
 
+            // Float windows don't render dirty dots (DockArea here has no
+            // `.dirty_tabs`), so an empty set suffices.
+            let float_editor_dirty = std::collections::HashSet::new();
             let (titles, _) = dock_crusty::tab_titles(
                 &fw.tree,
                 active_scene_id,
@@ -4051,6 +4156,7 @@ impl App {
                 false,
                 dormant,
                 None,
+                &float_editor_dirty,
             );
             let res = fw.frame(
                 device.clone(),
@@ -4134,6 +4240,10 @@ impl App {
                             ),
                             None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
                         },
+                        Some(EditorTab::GraphEditor(key)) => match graph_editors.get_mut(&key) {
+                            Some(state) => graph_editor_panel(ui, state),
+                            None => dock_crusty::placeholder_panel(ui, "Graph not loaded."),
+                        },
                         _ => dock_crusty::placeholder_panel(
                             ui,
                             "This panel is not yet ported to crusty-gui.",
@@ -4157,6 +4267,9 @@ impl App {
                         if let Some(data) = mesh_editors.get_mut(key) {
                             data.open = false;
                         }
+                    } else if let Some(key) = tab.strip_prefix("graph:") {
+                        // Graph editors hold no GPU state; drop the doc.
+                        graph_editors.remove(key);
                     } else {
                         dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
                     }

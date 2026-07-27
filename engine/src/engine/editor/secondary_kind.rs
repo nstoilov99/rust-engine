@@ -13,6 +13,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecondaryWindowKind {
     Mesh,
+    Graph,
     Hierarchy,
     Inspector,
     AssetBrowser,

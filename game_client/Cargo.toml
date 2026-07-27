@@ -16,6 +16,9 @@ editor = ["rust_engine/editor"]
 # Alias kept for muscle memory — crusty-gui is the only editor UI.
 crusty = ["editor"]
 editor-debug = ["editor", "rust_engine/editor-debug"]
+# Registers the node_graph test/demo node set (Task 40) so the graph editor
+# is exercisable before consumer tasks ship real nodes.
+dev_nodes = ["rust_engine/dev_nodes"]
 tracy = ["rust_engine/tracy"]
 
 [dependencies]

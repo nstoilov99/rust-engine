@@ -30,6 +30,8 @@ pub enum EditorTab {
     InputSettings,
     /// Per-file mesh editor (keyed by content-relative mesh path)
     MeshEditor(String),
+    /// Per-file node graph editor (keyed by content-relative graph path)
+    GraphEditor(String),
     /// Per-file input action editor (keyed by file path)
     InputActionEditor(String),
     /// Per-file mapping context editor (keyed by file path)
@@ -53,6 +55,13 @@ impl EditorTab {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| key.clone());
                 format!("Mesh \u{2014} {}", name)
+            }
+            EditorTab::GraphEditor(key) => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Graph \u{2014} {}", name)
             }
             EditorTab::InputActionEditor(key) => {
                 let name = std::path::Path::new(key)
@@ -89,6 +98,7 @@ impl EditorTab {
             EditorTab::Profiler => "tab_profiler".to_string(),
             EditorTab::InputSettings => "tab_input_settings".to_string(),
             EditorTab::MeshEditor(key) => format!("tab_mesh_{}", key),
+            EditorTab::GraphEditor(key) => format!("tab_graph_{}", key),
             EditorTab::InputActionEditor(key) => format!("tab_ia_{}", key),
             EditorTab::InputContextEditor(key) => format!("tab_mc_{}", key),
         }
@@ -107,6 +117,7 @@ impl EditorTab {
             EditorTab::Profiler => Some((K::Profiler, String::new())),
             EditorTab::InputSettings => Some((K::InputSettings, String::new())),
             EditorTab::MeshEditor(key) => Some((K::Mesh, key.clone())),
+            EditorTab::GraphEditor(key) => Some((K::Graph, key.clone())),
             EditorTab::InputActionEditor(key) => Some((K::InputAction, key.clone())),
             EditorTab::InputContextEditor(key) => Some((K::InputContext, key.clone())),
         }

@@ -55,6 +55,9 @@ pub mod menu_bar_crusty;
 pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
+pub mod graph_editor;
+#[cfg(feature = "editor")]
+pub mod graph_editor_crusty;
 pub mod editor_prefs;
 pub mod play_mode;
 pub mod play_settings;

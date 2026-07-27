@@ -626,6 +626,8 @@ pub fn float_window_attrs(tab: &str) -> (String, u32, u32) {
         Some(EditorTab::AssetBrowser) => ("Assets".into(), 800, 500),
         Some(EditorTab::Console) => ("Console".into(), 700, 400),
         Some(EditorTab::Profiler) => ("Profiler".into(), 700, 500),
+        // Node canvas wants more room than the default asset editor.
+        Some(t @ EditorTab::GraphEditor(_)) => (t.title_string(), 900, 600),
         Some(tab) => (tab.title_string(), 600, 500),
         None => (tab.to_string(), 600, 500),
     }
