@@ -35,6 +35,10 @@ pub enum ReloadEvent {
     MaterialInstanceChanged {
         path: String,
     },
+    /// A node graph document (.graph / .subgraph) was modified.
+    GraphChanged {
+        path: String,
+    },
 }
 
 /// Watches asset files and triggers hot-reload
@@ -96,6 +100,18 @@ impl HotReloadWatcher {
                                         reload_sender.send(ReloadEvent::MaterialInstanceChanged {
                                             path: normalized_path.clone(),
                                         });
+                                    continue;
+                                }
+
+                                // Node graph documents likewise (open editors and
+                                // subgraph hosts refresh; consumer filters echoes
+                                // from its own saves).
+                                if normalized_path.ends_with(".graph")
+                                    || normalized_path.ends_with(".subgraph")
+                                {
+                                    let _ = reload_sender.send(ReloadEvent::GraphChanged {
+                                        path: normalized_path.clone(),
+                                    });
                                     continue;
                                 }
 

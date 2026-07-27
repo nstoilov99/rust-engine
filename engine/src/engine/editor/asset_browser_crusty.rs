@@ -90,7 +90,10 @@ pub(super) fn type_color(t: AssetType) -> Color {
         AssetType::Animation => c.animation,
         AssetType::Scene => c.lights,
         AssetType::Audio => c.audio,
-        AssetType::Shader | AssetType::InputAction | AssetType::InputMappingContext => c.scripting,
+        AssetType::Shader
+        | AssetType::InputAction
+        | AssetType::InputMappingContext
+        | AssetType::Graph => c.scripting,
         _ => c.geometry,
     }
 }

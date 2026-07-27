@@ -31,6 +31,8 @@ pub enum AssetType {
     InputAction,
     /// Input mapping context definitions (*.mappingcontext; legacy *.mappingcontext.ron)
     InputMappingContext,
+    /// Node graph documents (*.graph) and reusable subgraphs (*.subgraph)
+    Graph,
     /// Unknown or unsupported file type
     #[default]
     Unknown,
@@ -59,6 +61,7 @@ impl AssetType {
             "prefab" => AssetType::Prefab,
             "inputaction" => AssetType::InputAction,
             "mappingcontext" => AssetType::InputMappingContext,
+            "graph" | "subgraph" => AssetType::Graph,
             // Legacy RON files - refined by filename pattern in from_path
             "ron" => AssetType::Unknown,
             _ => AssetType::Unknown,
@@ -112,6 +115,7 @@ impl AssetType {
             AssetType::Prefab => "Prefab",
             AssetType::InputAction => "Input Action",
             AssetType::InputMappingContext => "Input Mapping Context",
+            AssetType::Graph => "Node Graph",
             AssetType::Unknown => "Unknown",
         }
     }
@@ -130,6 +134,7 @@ impl AssetType {
             AssetType::Prefab => &["prefab"],
             AssetType::InputAction => &["inputaction"],
             AssetType::InputMappingContext => &["mappingcontext"],
+            AssetType::Graph => &["graph", "subgraph"],
             AssetType::Unknown => &[],
         }
     }
@@ -148,6 +153,7 @@ impl AssetType {
             AssetType::Prefab,
             AssetType::InputAction,
             AssetType::InputMappingContext,
+            AssetType::Graph,
         ]
     }
 
@@ -229,6 +235,14 @@ mod tests {
         assert_eq!(
             AssetType::from_path(Path::new("input/default.mappingcontext")),
             AssetType::InputMappingContext
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("graphs/damage.graph")),
+            AssetType::Graph
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("graphs/lib/calc.subgraph")),
+            AssetType::Graph
         );
         // Mesh sidecars stay hidden; binary meshes classify as Mesh
         assert_eq!(

@@ -49,6 +49,9 @@ pub mod editor;
 // Math utilities (frustum culling, etc.)
 pub mod math;
 
+// Node graph framework (Task 40)
+pub mod node_graph;
+
 // Skeletal animation system
 pub mod animation;
 

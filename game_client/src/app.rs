@@ -1576,6 +1576,15 @@ impl App {
                         path,
                     )));
                 }
+                ReloadEvent::GraphChanged { path } => {
+                    // Open graph editors + subgraph hosts refresh here once
+                    // the graph editor lands (Task 40 P4/P6): clean docs
+                    // reload, dirty docs warn, own-save echoes are filtered.
+                    self.editor
+                        .console
+                        .messages
+                        .push(LogMessage::info(format!("Graph changed: {}", path)));
+                }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
 
