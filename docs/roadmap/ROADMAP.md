@@ -1857,7 +1857,7 @@ the "server build" is the WASM module plus a publish step.
 ---
 
 ### Task M9.5: Packaged Co-op Verification
-**Status:** ✅ Complete (automatable scope; two-machine hour soak pending, user-executed — see `VULKANO-M9.5-COOP-VERIFICATION.md` and `M9.5-COOP-RUNBOOK.md`)
+**Status:** ✅ Complete (two-machine hour soak skipped by decision, 2026-07 — runbook remains at `M9.5-COOP-RUNBOOK.md` if ever needed; see `VULKANO-M9.5-COOP-VERIFICATION.md`)
 **Duration:** ~2-3 days
 **Prerequisites:** M8, M9
 
@@ -1901,7 +1901,7 @@ Default Map** analogue folded in:
 ---
 
 ### Task M10: Editor UX & Design System v1 (Crusty Theme Tokens)
-**Status:** 📋 Planned — see `VULKANO-M10-EDITOR-UX.md`
+**Status:** ✅ Complete — see `VULKANO-M10-EDITOR-UX.md`
 **Duration:** ~3–4 weeks
 **Prerequisites:** M9.6 (absorbs superseded Task M1)
 
@@ -1926,6 +1926,7 @@ fidelity:
 ---
 
 ### 🎯 Milestone: Networked Co-op Slice
+**Status:** ✅ Achieved (M0–M10 complete; hour soak waived, 2026-07)
 **Replaces the old "Single-Player Vertical Slice" as the engine's first proof point.**
 
 A friend can join over the internet: both players traverse the greybox world (M3), see each other move smoothly (M6), fight mobs and each other with abilities (M7), disconnect and reconnect without ghosts (M5), while the server holds authority throughout — **running the packaged M9 builds, verified per M9.5**. Runs for an hour without desync, leak, or crash.
@@ -1972,7 +1973,7 @@ ABI, so dynamically loaded plugin binaries are ruled out; the model is Bevy's:
 **Deferred:** this phase and Phases 12–15 now run **after** the Multiplayer Foundation phase (M0–M8). Per-task annotations below mark what was absorbed into M-tasks.
 
 ### Task 40: Node Graph Framework & Custom Node SDK
-**Status:** 📋 Planned
+**Status:** 📋 Planned — plan: `VULKANO-40-NODE-GRAPH-FRAMEWORK.md`
 **Duration:** ~2-2.5 weeks
 **Prerequisites:** Refactor Checkpoint #5
 
