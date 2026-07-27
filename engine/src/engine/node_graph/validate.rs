@@ -26,6 +26,14 @@ pub enum GraphError {
     RealmViolation { node: u64, node_realm: NodeRealm, graph_realm: GraphRealm },
     /// A `Domain` pin type nobody registered with the registry.
     UnknownDomainPin { node: u64, pin: String, domain: String },
+    /// Subgraph node references an asset the resolver can't find
+    /// (`validate_refs`).
+    MissingSubgraph { node: u64, path: String },
+    /// Edge references a pin the referenced subgraph's interface no longer
+    /// declares (`validate_refs`).
+    SubgraphPinUnknown { node: u64, pin: String, output: bool },
+    /// The subgraph reference graph has a cycle (`validate_refs`).
+    SubgraphCycle { chain: Vec<String> },
 }
 
 impl std::fmt::Display for GraphError {
@@ -59,6 +67,17 @@ impl std::fmt::Display for GraphError {
             ),
             GraphError::UnknownDomainPin { node, pin, domain } => {
                 write!(f, "node {node}: pin '{pin}' uses unregistered domain type '{domain}'")
+            }
+            GraphError::MissingSubgraph { node, path } => {
+                write!(f, "node {node}: subgraph '{path}' not found")
+            }
+            GraphError::SubgraphPinUnknown { node, pin, output } => write!(
+                f,
+                "node {node}: subgraph interface has no {} pin '{pin}'",
+                if *output { "output" } else { "input" }
+            ),
+            GraphError::SubgraphCycle { chain } => {
+                write!(f, "subgraph reference cycle: {}", chain.join(" -> "))
             }
         }
     }

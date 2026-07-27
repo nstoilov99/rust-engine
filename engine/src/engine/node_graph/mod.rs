@@ -11,6 +11,7 @@ pub mod dev_nodes;
 pub mod io;
 pub mod migrate;
 pub mod registry;
+pub mod resolver;
 pub mod validate;
 
 pub use doc::{
@@ -22,4 +23,5 @@ pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};
 pub use registry::{
     MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, SUBGRAPH_TYPE_ID,
 };
+pub use resolver::{referencing_hosts, validate_refs, GraphResolver};
 pub use validate::{validate_doc, GraphError};
