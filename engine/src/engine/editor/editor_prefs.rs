@@ -78,6 +78,10 @@ pub struct EditorPrefs {
     // Editing
     pub undo_limit: usize,
 
+    // Graph editor (Task 40) — canvas zoom limits.
+    pub graph_zoom_min: f32,
+    pub graph_zoom_max: f32,
+
     // Asset browser
     pub thumbnail_size: f32,
 
@@ -110,6 +114,8 @@ impl Default for EditorPrefs {
             snap_rotate: 15.0,
             snap_scale: 0.1,
             undo_limit: 100,
+            graph_zoom_min: 0.25,
+            graph_zoom_max: 2.5,
             thumbnail_size: 96.0,
             console_max_lines: 2000,
             console_show_info: true,

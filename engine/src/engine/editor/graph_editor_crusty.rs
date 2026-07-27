@@ -53,6 +53,9 @@ pub struct GraphEditorPanelCtx<'a> {
     /// Set to a content-relative path when a subgraph node is double-clicked;
     /// the host opens it as a tab (P6 open-in-tab navigation).
     pub open_subgraph: &'a mut Option<String>,
+    /// Canvas zoom limits (EditorPrefs, P9).
+    pub zoom_min: f32,
+    pub zoom_max: f32,
     /// This tab is the focused tab of its dock (gates keyboard editing).
     pub focused: bool,
     /// True in float windows (no menu/winit edit path) — the panel handles
@@ -267,6 +270,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         resolver,
         subgraph_assets,
         open_subgraph,
+        zoom_min,
+        zoom_max,
         focused,
         handle_shortcuts,
     } = ctx;
@@ -275,12 +280,22 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         handle_panel_keys(ui, state, registry, clipboard);
     }
 
+    // Finalize a drag orphaned by a release that landed while this tab was not
+    // being drawn (e.g. the user switched tabs mid-drag): the pointer is
+    // already up on re-entry, so `draw_and_interact`'s in-body finish never
+    // ran. Finalizing (vs reverting) keeps the node/annotation where the user
+    // dragged it — the simpler correct choice. No-op when nothing is dragging.
+    if !ui.ctx().input.pointer_down {
+        finish_node_drag(state, registry);
+        finish_annotation_drag(state, registry);
+    }
+
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
     let mut minimap_pan: Option<Vec2> = None;
-    let out = Canvas::new().zoom_range(0.25, 2.5).show(ui, &mut view, |ui, scope| {
+    let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
             ui,
             scope,
@@ -1117,24 +1132,35 @@ fn edit_popup(
     let commit = out.submitted || (!out.focused && !first_frame);
     if commit {
         state.editing = None;
-        if buffer != original {
-            if is_group {
-                if let Some(g) = state.doc.groups.get_mut(index) {
+        // Only record the edit if the target still exists — the annotation may
+        // have been deleted while the editor was open (guard the index so
+        // undo/redo never indexes out of bounds).
+        let applied = if buffer == original {
+            false
+        } else if is_group {
+            match state.doc.groups.get_mut(index) {
+                Some(g) => {
                     g.title = buffer.clone();
+                    true
                 }
-                state.commit(
-                    GraphEdit::SetGroupTitle { index, old: original, new: buffer },
-                    registry,
-                );
-            } else {
-                if let Some(c) = state.doc.comments.get_mut(index) {
-                    c.text = buffer.clone();
-                }
-                state.commit(
-                    GraphEdit::SetCommentText { index, old: original, new: buffer },
-                    registry,
-                );
+                None => false,
             }
+        } else {
+            match state.doc.comments.get_mut(index) {
+                Some(c) => {
+                    c.text = buffer.clone();
+                    true
+                }
+                None => false,
+            }
+        };
+        if applied {
+            let edit = if is_group {
+                GraphEdit::SetGroupTitle { index, old: original, new: buffer }
+            } else {
+                GraphEdit::SetCommentText { index, old: original, new: buffer }
+            };
+            state.commit(edit, registry);
         }
     } else if let Some(e) = state.editing.as_mut() {
         e.buffer = buffer;

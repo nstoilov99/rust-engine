@@ -1417,6 +1417,28 @@ impl App {
                     self.close_graph_tab(&key);
                 }
             }
+            EditorAction::GraphSaveGraph => {
+                #[cfg(feature = "editor")]
+                match self.active_graph_key() {
+                    Some(key) => self.save_graph_editor(&key),
+                    None => self.editor.console.messages.push(LogMessage::info(
+                        "Graph: Save Graph — focus a graph tab first".to_string(),
+                    )),
+                }
+            }
+            EditorAction::GraphToggleMinimap => {
+                #[cfg(feature = "editor")]
+                match self.active_graph_key() {
+                    Some(key) => {
+                        if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
+                            st.minimap_open = !st.minimap_open;
+                        }
+                    }
+                    None => self.editor.console.messages.push(LogMessage::info(
+                        "Graph: Toggle Minimap — focus a graph tab first".to_string(),
+                    )),
+                }
+            }
         }
     }
 
@@ -3254,6 +3276,9 @@ impl App {
                     .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
                     .collect()
             };
+            // P9: graph canvas zoom limits from EditorPrefs.
+            let graph_zoom_min = self.editor.ui.settings.prefs.graph_zoom_min;
+            let graph_zoom_max = self.editor.ui.settings.prefs.graph_zoom_max;
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -3320,6 +3345,9 @@ impl App {
                             .unwrap_or_else(|| "Redo".to_string()),
                         can_redo: st.stack.can_redo(),
                         has_selection: !st.selection.is_empty(),
+                        has_deletable: !st.selection.is_empty()
+                            || st.sel_comment.is_some()
+                            || st.sel_group.is_some(),
                         has_clipboard: graph_clipboard.is_some(),
                     }
                 });
@@ -3569,6 +3597,8 @@ impl App {
                                                 resolver: &graph_resolver_docs,
                                                 subgraph_assets: &subgraph_assets,
                                                 open_subgraph: &mut graph_open_request,
+                                                zoom_min: graph_zoom_min,
+                                                zoom_max: graph_zoom_max,
                                                 focused: graph_focused_tab.as_deref()
                                                     == Some(tab),
                                                 // Docked: keyboard editing runs
@@ -4185,7 +4215,10 @@ impl App {
         use rust_engine::engine::node_graph::referencing_hosts;
         let key = asset_source::to_content_relative(abs_path);
 
-        // Suppress the watcher echo of our own just-completed save (~1s guard).
+        // Suppress the watcher echo of our own just-completed save: consume
+        // exactly one event per save (clear the stamp), so a genuine external
+        // write that arrives later — even within the same second — still
+        // reloads instead of being swallowed by a time window.
         let own_echo = self
             .editor
             .scene
@@ -4194,6 +4227,9 @@ impl App {
             .and_then(|s| s.last_saved_at)
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
         if own_echo {
+            if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
+                st.last_saved_at = None;
+            }
             return;
         }
 
@@ -4420,6 +4456,8 @@ impl App {
                 .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
                 .collect()
         };
+        let graph_zoom_min = editor.ui.settings.prefs.graph_zoom_min;
+        let graph_zoom_max = editor.ui.settings.prefs.graph_zoom_max;
         let mut graph_open_requests: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
@@ -4579,6 +4617,8 @@ impl App {
                                     resolver: &graph_resolver_docs,
                                     subgraph_assets: &subgraph_assets,
                                     open_subgraph: &mut float_open_request,
+                                    zoom_min: graph_zoom_min,
+                                    zoom_max: graph_zoom_max,
                                     // A float window is a dedicated surface;
                                     // keys only arrive when it's OS-focused, so
                                     // the panel owns keyboard editing here.

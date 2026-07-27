@@ -31,7 +31,11 @@ pub struct EditMenuOverride {
     pub can_undo: bool,
     pub redo_label: String,
     pub can_redo: bool,
+    /// Node selection — gates Cut/Copy/Duplicate (clipboard is node-only).
     pub has_selection: bool,
+    /// Anything deletable is selected (nodes *or* a comment/group) — gates
+    /// Delete, which handles annotations too.
+    pub has_deletable: bool,
     pub has_clipboard: bool,
 }
 
@@ -171,13 +175,15 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
             ui.menu_button_width("Edit", 250.0, |ui| {
                 // A focused document editor (graph tab) supplies its own
                 // history + clipboard state; otherwise use the scene's.
-                let (undo_desc, can_undo, redo_desc, can_redo, sel, clip) = match &edit_override {
+                let (undo_desc, can_undo, redo_desc, can_redo, sel, del, clip) = match &edit_override
+                {
                     Some(o) => (
                         Some(o.undo_label.clone()),
                         o.can_undo,
                         Some(o.redo_label.clone()),
                         o.can_redo,
                         o.has_selection,
+                        o.has_deletable,
                         o.has_clipboard,
                     ),
                     None => (
@@ -185,6 +191,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                         is_edit_mode && command_history.can_undo(),
                         command_history.redo_description().map(|d| format!("Redo {d}")),
                         is_edit_mode && command_history.can_redo(),
+                        is_edit_mode && has_selection,
                         is_edit_mode && has_selection,
                         is_edit_mode && has_clipboard,
                     ),
@@ -215,7 +222,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 if ui.menu_item_shortcut("Duplicate", "Ctrl+D", sel) {
                     action = MenuAction::Duplicate;
                 }
-                if ui.menu_item_shortcut("Delete", "Del", sel) {
+                if ui.menu_item_shortcut("Delete", "Del", del) {
                     action = MenuAction::Delete;
                 }
 

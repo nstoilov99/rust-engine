@@ -66,6 +66,10 @@ pub enum EditorAction {
     ReloadAllShaders,
     OpenSettings,
 
+    // --- Graph editor (Task 40) — act on the focused graph tab ---
+    GraphToggleMinimap,
+    GraphSaveGraph,
+
     // --- Editor window lifecycle ---
     SaveAndCloseEditor {
         kind: SecondaryWindowKind,

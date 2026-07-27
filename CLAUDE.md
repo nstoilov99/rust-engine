@@ -121,7 +121,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - M9.6 Editor Net Play (server-announced `Config.world_scene` + protocol v6, deferred standalone world load with offline fallback, editor PlaySettings dropdown: Play As Client / Listen Server launcher / Number of Players): **complete** (see `docs/roadmap/VULKANO-M9.6-EDITOR-NET-PLAY.md`)
 - M10 Editor UX & Design System v1 (semantic theme tokens + 4 presets, widget state ladder + focus, settings windows, panel restyle, Edit menu with entity clipboard Cut/Copy/Paste + GUID remap, verb/object undo labels): **complete** (see `docs/roadmap/VULKANO-M10-EDITOR-UX.md`)
 - 🎯 Networked Co-op Slice milestone: **achieved** (M0–M10; hour soak waived)
-- Next: post-M arc — Task 40 Readiness Subsection, then Task 40 (Node Graph Framework, owns registry design), then Task 39.8 (Plugin System, consumes it) — ordering decided 2026-07-26
+- Task 40 (Node Graph Framework & Custom Node SDK): **complete** — `engine/src/engine/node_graph/` (docs/registry/validation/migration/resolver), `crates/node_graph_macros`, graph editor on crusty-gui's `Canvas` primitive (see `docs/roadmap/VULKANO-40-NODE-GRAPH-FRAMEWORK.md`)
+- Next: Task 39.8 (Plugin System & Module Registry — implements against Task 40's registry contract), per `docs/roadmap/ROADMAP.md`
 
 ## Patched Dependencies
 

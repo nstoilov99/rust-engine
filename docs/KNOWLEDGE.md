@@ -297,6 +297,30 @@ pub struct EntityRef {
 }
 ```
 
+## Node Graph Patterns (Task 40)
+
+- **Stable slugs everywhere**: a node type's `id` and its pin `slug`s are
+  serialized identity — never rename them without registering a migration
+  step (`registry.register_migration(type_id, from_version, |ctx| ...)` and
+  bumping `NodeDescriptor::version`). Display `name`/`label` change freely.
+- **Pin renames are migrations**: use `MigrationCtx::rename_pin` — it moves
+  the stored constant *and* rewrites incident edges. A props-only edit will
+  silently orphan edges.
+- **Consumers must not evaluate graphs by mutating `&mut World` directly**:
+  when Tasks 41/45 build evaluators, node execution goes through
+  `CommandBuffer` and the executing system declares access via
+  `SystemDescriptor`, per the Task 32 contract (the Task 40 close-out
+  records this as a standing constraint — no executor exists in Task 40).
+- **Adding a node type**: prefer `#[derive(ScriptNode)]` (or a domain derive)
+  over hand-writing `NodeDescriptor`; add `auto_register` only if the node
+  should always exist — plugin-owned nodes register manually in
+  `Plugin::build`.
+- **Graph fixtures**: golden files live in `node_graph/fixtures/`;
+  `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine write_fixture` (and the
+  migration golden) regenerate them. Never hand-edit the `_expected` files.
+- **Editor keys are content-relative forward-slash paths** — same key shape
+  for tabs (`graph:{key}`), the resolver, and hot-reload matching.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing

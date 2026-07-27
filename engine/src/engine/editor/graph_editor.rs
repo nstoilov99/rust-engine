@@ -27,8 +27,9 @@ use crate::engine::node_graph::{
 pub enum GraphEdit {
     /// A node was added (apply = insert, revert = remove by id).
     AddNode(NodeInst),
-    /// Nodes and their incident edges were removed together.
-    RemoveNodes { nodes: Vec<NodeInst>, edges: Vec<Edge> },
+    /// Nodes and their incident edges were removed together. Each carries its
+    /// original index so undo restores the exact vec order (byte-stable saves).
+    RemoveNodes { nodes: Vec<(usize, NodeInst)>, edges: Vec<(usize, Edge)> },
     /// An edge was created.
     Connect(Edge),
     /// An edge was removed.
@@ -63,9 +64,9 @@ impl GraphEdit {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.push(n.clone()),
             GraphEdit::RemoveNodes { nodes, edges } => {
-                let ids: BTreeSet<u64> = nodes.iter().map(|n| n.id).collect();
+                let ids: BTreeSet<u64> = nodes.iter().map(|(_, n)| n.id).collect();
                 doc.nodes.retain(|n| !ids.contains(&n.id));
-                doc.edges.retain(|e| !edges.contains(e));
+                doc.edges.retain(|e| !edges.iter().any(|(_, re)| re == e));
             }
             GraphEdit::Connect(e) => doc.edges.push(e.clone()),
             GraphEdit::Disconnect(e) => doc.edges.retain(|x| x != e),
@@ -101,8 +102,10 @@ impl GraphEdit {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.retain(|x| x.id != n.id),
             GraphEdit::RemoveNodes { nodes, edges } => {
-                doc.nodes.extend(nodes.iter().cloned());
-                doc.edges.extend(edges.iter().cloned());
+                // Reinsert at original indices, ascending so each index still
+                // refers to the correct slot once earlier ones are back.
+                reinsert_indexed(&mut doc.nodes, nodes);
+                reinsert_indexed(&mut doc.edges, edges);
             }
             GraphEdit::Connect(e) => doc.edges.retain(|x| x != e),
             GraphEdit::Disconnect(e) => doc.edges.push(e.clone()),
@@ -182,6 +185,17 @@ fn move_nodes(doc: &mut GraphDoc, ids: &[u64], delta: [f32; 2]) {
             n.position[0] += delta[0];
             n.position[1] += delta[1];
         }
+    }
+}
+
+/// Reinsert `(index, value)` pairs into `v` at their original indices, in
+/// ascending index order so restoring one doesn't shift the next.
+fn reinsert_indexed<T: Clone>(v: &mut Vec<T>, items: &[(usize, T)]) {
+    let mut items: Vec<&(usize, T)> = items.iter().collect();
+    items.sort_by_key(|(i, _)| *i);
+    for (i, val) in items {
+        let at = (*i).min(v.len());
+        v.insert(at, val.clone());
     }
 }
 
@@ -497,8 +511,9 @@ impl GraphEditorState {
         self.selection.retain(|id| self.doc.node(*id).is_some());
         self.sel_comment = self.sel_comment.filter(|&i| i < self.doc.comments.len());
         self.sel_group = self.sel_group.filter(|&i| i < self.doc.groups.len());
-        self.annotation_drag = None;
-        self.editing = None;
+        // An in-flight drag holds pre-undo positions/indices; cancel it so the
+        // next frame doesn't overwrite the undone state or commit a bogus move.
+        self.cancel_interactions();
     }
 
     /// Add a comment box at `pos` (default size + placeholder text), select it.
@@ -575,7 +590,7 @@ impl GraphEditorState {
         };
         let id = node.id;
         self.doc.nodes.push(node.clone());
-        self.selection.clear();
+        self.clear_selection();
         self.selection.insert(id);
         self.commit(GraphEdit::AddNode(node), registry);
     }
@@ -598,7 +613,7 @@ impl GraphEditorState {
         };
         let id = node.id;
         self.doc.nodes.push(node.clone());
-        self.selection.clear();
+        self.clear_selection();
         self.selection.insert(id);
         self.commit(GraphEdit::AddNode(node), registry);
     }
@@ -606,6 +621,9 @@ impl GraphEditorState {
     /// Delete the current selection: a selected comment or group frame (frame
     /// only — member nodes stay), else the selected nodes and their edges.
     pub fn delete_selection(&mut self, registry: &NodeRegistry) {
+        // Any in-flight drag / inline edit targets an index this delete may
+        // shift or remove — cancel them so nothing commits against it.
+        self.cancel_interactions();
         if let Some(i) = self.sel_comment {
             if i < self.doc.comments.len() {
                 let comment = self.doc.comments.remove(i);
@@ -626,27 +644,39 @@ impl GraphEditorState {
             return;
         }
         let ids = self.selection.clone();
-        let nodes: Vec<NodeInst> = self
+        let nodes: Vec<(usize, NodeInst)> = self
             .doc
             .nodes
             .iter()
-            .filter(|n| ids.contains(&n.id))
-            .cloned()
+            .enumerate()
+            .filter(|(_, n)| ids.contains(&n.id))
+            .map(|(i, n)| (i, n.clone()))
             .collect();
         if nodes.is_empty() {
             return;
         }
-        let edges: Vec<Edge> = self
+        let edges: Vec<(usize, Edge)> = self
             .doc
             .edges
             .iter()
-            .filter(|e| ids.contains(&e.from_node) || ids.contains(&e.to_node))
-            .cloned()
+            .enumerate()
+            .filter(|(_, e)| ids.contains(&e.from_node) || ids.contains(&e.to_node))
+            .map(|(i, e)| (i, e.clone()))
             .collect();
         let edit = GraphEdit::RemoveNodes { nodes, edges };
         edit.apply(&mut self.doc);
         self.selection.clear();
         self.commit(edit, registry);
+    }
+
+    /// Cancel any in-flight drag / inline edit — indices they hold become
+    /// invalid on structural edits and on undo/redo.
+    pub fn cancel_interactions(&mut self) {
+        self.node_drag = None;
+        self.annotation_drag = None;
+        self.connect_drag = None;
+        self.marquee = None;
+        self.editing = None;
     }
 
     /// Copy the selection into `clipboard` (nodes + internal edges).
@@ -710,6 +740,9 @@ impl GraphEditorState {
         let (nodes, edges) = frag.instantiate(self.doc.next_node_id(), Self::PASTE_OFFSET);
         let edit = GraphEdit::Paste { nodes: nodes.clone(), edges: edges.clone() };
         edit.apply(&mut self.doc);
+        // Move selection to the pasted nodes; clear any annotation selection so
+        // a following Delete hits the pasted nodes, not an off-screen comment.
+        self.clear_selection();
         self.selection = nodes.iter().map(|n| n.id).collect();
         self.commit(edit, registry);
     }
@@ -856,8 +889,8 @@ mod tests {
         let edits = [
             GraphEdit::AddNode(node(2, [5.0, 5.0])),
             GraphEdit::RemoveNodes {
-                nodes: vec![node(1, [10.0, 10.0])],
-                edges: vec![edge(0, 1)],
+                nodes: vec![(1, node(1, [10.0, 10.0]))],
+                edges: vec![(0, edge(0, 1))],
             },
             GraphEdit::Connect(Edge {
                 from_node: 0,
@@ -879,6 +912,106 @@ mod tests {
             e.revert(&mut doc);
             assert_eq!(doc, base, "{}: apply→revert must restore", e.description());
         }
+    }
+
+    /// Regression (review finding 1): deleting a *middle* node and undoing
+    /// must restore the exact vec order, not append the node at the end —
+    /// otherwise the doc is logically equal but serializes to different bytes.
+    #[test]
+    fn remove_middle_node_undo_preserves_order() {
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [1.0, 1.0]), node(2, [2.0, 2.0])];
+        doc.edges = vec![edge(0, 1), edge(1, 2)];
+        let before = doc.clone();
+        // Remove the middle node (index 1) + its incident edges (indices 0, 1).
+        let edit = GraphEdit::RemoveNodes {
+            nodes: vec![(1, node(1, [1.0, 1.0]))],
+            edges: vec![(0, edge(0, 1)), (1, edge(1, 2))],
+        };
+        edit.apply(&mut doc);
+        assert_eq!(doc.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![0, 2]);
+        edit.revert(&mut doc);
+        // Exact structural equality *including order* (byte-stable save).
+        assert_eq!(doc, before);
+        assert_eq!(doc.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![0, 1, 2]);
+        let a = crate::engine::node_graph::serialize_graph(&before).unwrap();
+        let b = crate::engine::node_graph::serialize_graph(&doc).unwrap();
+        assert_eq!(a, b, "restored doc must serialize byte-identically");
+    }
+
+    fn bare_state() -> GraphEditorState {
+        GraphEditorState {
+            path: "t.graph".into(),
+            doc: GraphDoc::default(),
+            errors: vec![],
+            ref_errors: vec![],
+            dirty: false,
+            last_saved_at: None,
+            view: CanvasView::default(),
+            selection: BTreeSet::new(),
+            stack: GraphEditStack::new(),
+            node_drag: None,
+            connect_drag: None,
+            marquee: None,
+            create_menu_world: None,
+            create_menu_search: String::new(),
+            sel_comment: None,
+            sel_group: None,
+            annotation_drag: None,
+            editing: None,
+            minimap_open: false,
+        }
+    }
+
+    /// Regression (finding 3): undo/redo cancels a live drag so the next frame
+    /// can't overwrite the undone state or commit a bogus delta.
+    #[test]
+    fn undo_cancels_live_drag() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.doc.nodes[0].position = [50.0, 0.0];
+        st.stack.record(GraphEdit::MoveNodes { ids: vec![0], delta: [50.0, 0.0] });
+        st.node_drag = Some(NodeDrag { origin_world: [0.0, 0.0], originals: vec![(0, [0.0, 0.0])] });
+        st.undo(&reg);
+        assert!(st.node_drag.is_none(), "undo must cancel the live node drag");
+        assert_eq!(st.doc.nodes[0].position, [0.0, 0.0]);
+    }
+
+    /// Regression (finding 2): deleting the selected annotation while its
+    /// inline editor is open must clear `editing` (else a later commit records
+    /// against a removed index → OOB on undo/redo).
+    #[test]
+    fn delete_selection_clears_editing() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.comments = vec![comment(0.0)];
+        st.sel_comment = Some(0);
+        st.editing = Some(AnnotationEdit {
+            is_group: false,
+            index: 0,
+            buffer: "x".into(),
+            original: "c".into(),
+            anchor_world: [0.0, 0.0],
+            first_frame: true,
+        });
+        st.delete_selection(&reg);
+        assert!(st.editing.is_none(), "delete must clear the inline editor");
+        assert!(st.doc.comments.is_empty());
+    }
+
+    /// Regression (finding 5): paste moves selection to the pasted nodes and
+    /// clears annotation selection (so a following Delete hits the nodes).
+    #[test]
+    fn paste_clears_annotation_selection() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.comments = vec![comment(0.0)];
+        st.sel_comment = Some(0);
+        let frag = GraphFragment { nodes: vec![node(5, [0.0, 0.0])], edges: vec![] };
+        st.paste_clipboard(&Some(frag), &reg);
+        assert!(st.sel_comment.is_none(), "paste must clear annotation selection");
+        assert!(!st.selection.is_empty(), "pasted nodes become the selection");
     }
 
     #[test]

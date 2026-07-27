@@ -1,6 +1,6 @@
 # Task 40 — Node Graph Framework & Custom Node SDK
 
-**Status:** 📋 Plan (drafted 2026-07-27)
+**Status:** ✅ Implemented (2026-07-27) — close-out at the bottom of this doc.
 **Duration:** ~2–2.5 weeks (Phase A ~1.5 wk, Phase B ~3–4 days)
 **Prerequisites:** Networked Co-op Slice milestone (done). Absorbs the deferred
 "Task 40 Readiness Subsection" of Refactor Checkpoint #5 (ROADMAP.md:1669).
@@ -421,3 +421,24 @@ wires; any 39.8 plugin work beyond keeping D2 runtime-registerable.
    tune in P0's demo.
 5. Does P0 land in crusty-gui as "Phase 22 partial" with their roadmap
    updated accordingly? (Assumed yes.)
+
+## Close-out (2026-07-27)
+
+All packages shipped, one commit each (P6 split into P6a engine core +
+P6 editor wiring). crusty-gui: `debe592` (P0 Canvas primitive + demo +
+snapshot test). rust-engine: `6f1324b` P1, `eeb9e15` P2, `45fcade` P3,
+`d1352d2` P6a, `81c656b` P8, `058ed06` P4, `e31e531` P5, `cf7d6db` P6,
+`3c5e6aa` P7, + P9 close-out commit. Open questions resolved as the plan
+assumed (one `AssetType::Graph`, doc-local undo, `dev_nodes` feature,
+0.25–2.5 zoom / 7px label floor, crusty Phase 22 first bullet ticked).
+
+**Deliberately deferred** (small, non-blocking): pin drag-off reconnect
+(drag from a connected input currently no-ops), create-menu keyboard
+navigation, annotation resize handles, "Open Graph…" command-palette entry
+(needs an asset-picker flow the palette lacks), `EditorPrefs` grid-snap
+(no snapping shipped in v1). The readiness-subsection bullets all closed:
+graph save/load via the `<name>.<type>` scheme, `Vec<String>`-style path
+references verified by the graph→subgraph fixture, tab routing built on the
+real `EditorTab` mechanism (the 39.5 placeholder windows never existed),
+migration harness live with golden fixtures, and the command-only-mutation
+constraint for future evaluators recorded in KNOWLEDGE.md.

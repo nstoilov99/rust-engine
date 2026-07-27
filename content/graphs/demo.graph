@@ -1,0 +1,66 @@
+(
+    version: 1,
+    realm: Shared,
+    nodes: [
+        (
+            id: 0,
+            type_id: "test_event",
+            type_version: 1,
+            position: (60.0, 120.0),
+            properties: {},
+            subgraph: None,
+        ),
+        (
+            id: 1,
+            type_id: "test_damage",
+            type_version: 1,
+            position: (320.0, 100.0),
+            properties: {
+                "dps": Float(12.5),
+            },
+            subgraph: None,
+        ),
+        (
+            id: 2,
+            type_id: "test_add",
+            type_version: 1,
+            position: (60.0, 300.0),
+            properties: {
+                "a": Float(2.0),
+                "b": Float(3.0),
+            },
+            subgraph: None,
+        ),
+        (
+            id: 3,
+            type_id: "subgraph",
+            type_version: 1,
+            position: (320.0, 300.0),
+            properties: {},
+            subgraph: Some("graphs/lib/calc.subgraph"),
+        ),
+    ],
+    edges: [
+        (
+            from_node: 0,
+            from_pin: "exec_out",
+            to_node: 1,
+            to_pin: "exec_in",
+        ),
+        (
+            from_node: 2,
+            from_pin: "sum",
+            to_node: 3,
+            to_pin: "amount",
+        ),
+    ],
+    comments: [
+        (
+            rect: (40.0, 30.0, 420.0, 50.0),
+            text: "Task 40 demo graph — exec chain on top, data flow into a subgraph below.",
+        ),
+    ],
+    groups: [],
+    inputs: [],
+    outputs: [],
+)

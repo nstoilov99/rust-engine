@@ -1,0 +1,36 @@
+(
+    version: 1,
+    realm: Shared,
+    nodes: [
+        (
+            id: 0,
+            type_id: "test_add",
+            type_version: 1,
+            position: (120.0, 80.0),
+            properties: {},
+            subgraph: None,
+        ),
+    ],
+    edges: [],
+    comments: [
+        (
+            rect: (60.0, 200.0, 380.0, 50.0),
+            text: "Reusable subgraph: declares one Float input and one Float output.",
+        ),
+    ],
+    groups: [],
+    inputs: [
+        (
+            slug: "amount",
+            label: "Amount",
+            ty: Float,
+        ),
+    ],
+    outputs: [
+        (
+            slug: "result",
+            label: "Result",
+            ty: Float,
+        ),
+    ],
+)

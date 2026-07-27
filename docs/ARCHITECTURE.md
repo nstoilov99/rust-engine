@@ -395,6 +395,40 @@ Scenes are saved as RON (Rusty Object Notation):
 )
 ```
 
+## Node Graph Framework (Task 40)
+
+`engine/src/engine/node_graph/` is the domain-agnostic graph layer used by
+future animation/scripting/material/VFX/audio/AI tasks. No domain logic or
+evaluators live here — consumers bring their own node libraries and backends.
+
+- **Documents** (`doc.rs`): `GraphDoc` — plain data. Node *types* and *pins*
+  are stable string slugs, node *instances* are doc-local integer ids,
+  cross-asset references (subgraphs) are content-relative path strings.
+  Node positions live in the asset, not GUI memory. Serialized as RON
+  (`<name>.graph` / `<name>.subgraph`), byte-stable saves.
+- **IO** (`io.rs`): version-envelope parse — the container version is probed
+  before strict deserialization so container migrations can rewrite old
+  documents.
+- **Registry** (`registry.rs`): `NodeRegistry` — runtime `register()` is the
+  primary API (Task 39.8 plugins call it from `Plugin::build`; the derive
+  macros are just another caller). Descriptor-level invariants (pure vs exec
+  pins, unique slugs) are enforced at registration.
+- **Validation**: `validate_doc` (doc-local: edge types, exec rules, realm,
+  fan-in) + `validate_refs` (cross-asset via `GraphResolver`: subgraph
+  interface match, reference cycles). Unknown node types are errors but
+  never data loss — docs load, render as "missing node", and re-save intact.
+- **Migration** (`migrate.rs`): per-node-type version chains;
+  `MigrationCtx::rename_pin` rewrites stored constants *and* incident edges.
+  Golden fixtures under `node_graph/fixtures/` (`UPDATE_GRAPH_FIXTURES=1` to
+  regenerate).
+- **Macros** (`crates/node_graph_macros`): `#[derive(ScriptNode)]` /
+  `#[derive(AnimationNode)]` generate `NodeDescriptor`s; optional
+  `inventory`-based auto-registration backend (`register_inventory_nodes`).
+- **Editor**: `editor/graph_editor.rs` (state, doc-local `GraphEditStack`
+  undo with saved-cursor dirty) + `graph_editor_crusty.rs` (canvas UI on
+  crusty-gui's `Canvas` pan/zoom primitive). Graph tabs mirror the
+  MeshEditor pattern (`EditorTab::GraphEditor(key)`).
+
 ## Performance Profiling
 
 The engine integrates puffin and Tracy for profiling:

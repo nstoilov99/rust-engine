@@ -1973,7 +1973,7 @@ ABI, so dynamically loaded plugin binaries are ruled out; the model is Bevy's:
 **Deferred:** this phase and Phases 12–15 now run **after** the Multiplayer Foundation phase (M0–M8). Per-task annotations below mark what was absorbed into M-tasks.
 
 ### Task 40: Node Graph Framework & Custom Node SDK
-**Status:** 📋 Planned — plan: `VULKANO-40-NODE-GRAPH-FRAMEWORK.md`
+**Status:** ✅ Complete — plan + close-out: `VULKANO-40-NODE-GRAPH-FRAMEWORK.md` (all packages P0–P9 shipped, incl. minimap; crusty-gui gained the Phase 22 `Canvas` pan/zoom primitive)
 **Duration:** ~2-2.5 weeks
 **Prerequisites:** Refactor Checkpoint #5
 
