@@ -432,6 +432,10 @@ snapshot test). rust-engine: `6f1324b` P1, `eeb9e15` P2, `45fcade` P3,
 assumed (one `AssetType::Graph`, doc-local undo, `dev_nodes` feature,
 0.25–2.5 zoom / 7px label floor, crusty Phase 22 first bullet ticked).
 
+**Post-ship revision:** the minimap (P7) was cut after user hand-testing —
+replaced by `F` (frame selection) / `A` (frame all) canvas shortcuts, the
+standard DCC navigation pattern.
+
 **Deliberately deferred** (small, non-blocking): pin drag-off reconnect
 (drag from a connected input currently no-ops), create-menu keyboard
 navigation, annotation resize handles, "Open Graph…" command-palette entry

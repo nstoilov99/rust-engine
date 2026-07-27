@@ -1426,19 +1426,6 @@ impl App {
                     )),
                 }
             }
-            EditorAction::GraphToggleMinimap => {
-                #[cfg(feature = "editor")]
-                match self.active_graph_key() {
-                    Some(key) => {
-                        if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
-                            st.minimap_open = !st.minimap_open;
-                        }
-                    }
-                    None => self.editor.console.messages.push(LogMessage::info(
-                        "Graph: Toggle Minimap — focus a graph tab first".to_string(),
-                    )),
-                }
-            }
         }
     }
 

@@ -16,11 +16,11 @@ use crusty_gui::input::{Key, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::paint::Painter;
 use crusty_gui::style::Style;
-use crusty_gui::widgets::{Canvas, CanvasScope, TextEdit};
+use crusty_gui::widgets::{Canvas, CanvasScope, CanvasView, TextEdit};
 
 use super::graph_editor::{
-    nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag, GraphEdit,
-    GraphEditorState, GraphFragment, NodeDrag,
+    frame_view, nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag,
+    GraphEdit, GraphEditorState, GraphFragment, NodeDrag,
 };
 use super::theme::Palette;
 use crate::engine::node_graph::{
@@ -33,13 +33,9 @@ const HEADER_H: f32 = 22.0;
 const ROW_H: f32 = 18.0;
 const BODY_PAD: f32 = 6.0;
 const PIN_R: f32 = 4.5;
-// Annotation + minimap metrics (P7).
+// Annotation metrics (P7).
 const COMMENT_HEADER_H: f32 = 18.0;
 const GROUP_TITLE_H: f32 = 20.0;
-const MINIMAP_W: f32 = 180.0;
-const MINIMAP_H: f32 = 120.0;
-const MINIMAP_MARGIN: f32 = 10.0;
-const MINIMAP_BTN: f32 = 24.0;
 
 /// Everything the panel needs, bundled so the signature stays small.
 pub struct GraphEditorPanelCtx<'a> {
@@ -294,7 +290,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
-    let mut minimap_pan: Option<Vec2> = None;
+    let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
             ui,
@@ -304,12 +300,15 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             resolver,
             &mut menu_open_at,
             open_subgraph,
-            &mut minimap_pan,
+            zoom_min,
+            zoom_max,
+            &mut frame_request,
         );
     });
-    // Minimap click re-centers the view (applied after the canvas ran).
-    if let Some(pan) = minimap_pan {
-        view.pan = pan;
+    // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
+    // replaces this frame's pan/zoom rather than fighting the live transform).
+    if let Some(v) = frame_request {
+        view = v;
     }
     state.view = view;
 
@@ -378,7 +377,9 @@ fn draw_and_interact(
     resolver: &dyn GraphResolver,
     menu_open_at: &mut Option<Pos2>,
     open_subgraph: &mut Option<String>,
-    minimap_pan: &mut Option<Vec2>,
+    zoom_min: f32,
+    zoom_max: f32,
+    frame_request: &mut Option<CanvasView>,
 ) {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -575,19 +576,35 @@ fn draw_and_interact(
 
     // Interactions.
     let pointer_world = scope.pointer_world(ui);
-    let pointer_pos = ui.ctx().input.pointer_pos;
     let pointer_down = ui.ctx().input.pointer_down;
     let pointer_pressed = ui.ctx().input.pointer_pressed;
     let released = ui.ctx().input.pointer_released;
     let right_pressed = ui.ctx().input.right_pressed;
     let shift = ui.ctx().input.modifiers.contains(Modifiers::SHIFT);
 
-    // Minimap/toggle screen rects (deterministic from the canvas rect); the
-    // overlay claims the pointer so it doesn't fall through to the canvas.
-    let (mm_btn, mm_rect) = minimap_rects(scope.rect(), state.minimap_open);
-    let over_overlay = pointer_pos
-        .map(|p| mm_btn.contains(p) || mm_rect.is_some_and(|r| r.contains(p)))
-        .unwrap_or(false);
+    // Frame shortcuts (DCC F/A). Fire only while the pointer is over the canvas
+    // and no inline text edit is active, so typing in a comment/search field
+    // isn't hijacked — the simplest correct "canvas has focus" rule, and it
+    // works for both docked and float panels (both read this context's input).
+    if pointer_world.is_some() && state.editing.is_none() {
+        let (frame_all, frame_sel) = {
+            let input = &ui.ctx().input;
+            (input.key_pressed(Key::Char('a')), input.key_pressed(Key::Char('f')))
+        };
+        if frame_all || frame_sel {
+            let bbox = if frame_all {
+                content_bbox(state, &geoms)
+            } else if state.selection.is_empty() {
+                geoms_bbox(geoms.iter())
+            } else {
+                geoms_bbox(geoms.iter().filter(|g| state.selection.contains(&g.id)))
+            };
+            if let Some((min, max)) = bbox {
+                *frame_request =
+                    Some(frame_view(min, max, scope.rect().size(), zoom_min, zoom_max));
+            }
+        }
+    }
 
     // Advance / finish a live node drag. Snapshot the drag data first so the
     // `node_drag` borrow ends before mutating the doc.
@@ -643,11 +660,7 @@ fn draw_and_interact(
             let wr = Rect::from_center_size(pin.center, Vec2::splat(PIN_R * 3.0));
             let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
             let resp = scope.interact(ui, id, wr);
-            if resp.pressed
-                && !over_overlay
-                && state.connect_drag.is_none()
-                && state.node_drag.is_none()
-            {
+            if resp.pressed && state.connect_drag.is_none() && state.node_drag.is_none() {
                 state.connect_drag = Some(ConnectDrag {
                     from_node: g.id,
                     from_pin: pin.slug.clone(),
@@ -664,11 +677,10 @@ fn draw_and_interact(
     for g in &geoms {
         let id = ui.alloc_id(("graph_node", g.id));
         let resp = scope.interact(ui, id, g.rect);
-        if resp.pressed && !over_overlay {
+        if resp.pressed {
             node_pressed = true;
         }
         if resp.pressed
-            && !over_overlay
             && !pin_claimed
             && state.node_drag.is_none()
             && state.connect_drag.is_none()
@@ -710,7 +722,6 @@ fn draw_and_interact(
     // Behind nodes, so only when no node/pin claimed the press this frame.
     let ann_free = !node_pressed
         && !pin_claimed
-        && !over_overlay
         && state.node_drag.is_none()
         && state.annotation_drag.is_none();
     // Groups first (front-most annotation is the last drawn = highest index).
@@ -809,12 +820,12 @@ fn draw_and_interact(
         pointer_pressed,
         pointer_down,
         released,
-        pin_claimed || over_overlay || node_pressed,
+        pin_claimed || node_pressed,
         &st,
     );
 
     // Right-click empty space → open the create menu at the pointer.
-    if right_pressed && !over_overlay {
+    if right_pressed {
         if let Some(pw) = pointer_world {
             if pin_under(&geoms, pw).is_none() && node_under(&geoms, pw).is_none() {
                 state.create_menu_world = Some([pw.x, pw.y]);
@@ -823,12 +834,9 @@ fn draw_and_interact(
             }
         }
     }
-
-    // Minimap overlay + toggle button (drawn on top; interaction claimed above).
-    draw_minimap(ui, scope, state, &geoms, mm_btn, mm_rect, minimap_pan);
 }
 
-/// Node centers (world) for group capture / minimap.
+/// Node centers (world) for group capture.
 fn node_centers(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 2])> {
     geoms
         .iter()
@@ -968,122 +976,40 @@ fn begin_annotation_edit(state: &mut GraphEditorState, is_group: bool, index: us
     });
 }
 
-/// Toggle-button and minimap screen rects, derived from the canvas rect.
-fn minimap_rects(canvas: Rect, open: bool) -> (Rect, Option<Rect>) {
-    let btn = Rect::from_min_size(
-        Pos2::new(
-            canvas.max.x - MINIMAP_MARGIN - MINIMAP_BTN,
-            canvas.max.y - MINIMAP_MARGIN - MINIMAP_BTN,
-        ),
-        Vec2::splat(MINIMAP_BTN),
-    );
-    let mm = open.then(|| {
-        Rect::from_min_size(
-            Pos2::new(canvas.max.x - MINIMAP_MARGIN - MINIMAP_W, btn.min.y - 6.0 - MINIMAP_H),
-            Vec2::new(MINIMAP_W, MINIMAP_H),
-        )
-    });
-    (btn, mm)
+/// World bbox `(min, max)` of the given node geoms, or `None` if empty (used
+/// by the F/A frame shortcuts).
+fn geoms_bbox<'a>(gs: impl Iterator<Item = &'a NodeGeom>) -> Option<(Vec2, Vec2)> {
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut any = false;
+    for g in gs {
+        minx = minx.min(g.rect.min.x);
+        miny = miny.min(g.rect.min.y);
+        maxx = maxx.max(g.rect.max.x);
+        maxy = maxy.max(g.rect.max.y);
+        any = true;
+    }
+    any.then_some((Vec2::new(minx, miny), Vec2::new(maxx, maxy)))
 }
 
-/// World-space bounding box `[min_x, min_y, w, h]` of all content, or `None`.
-fn doc_bbox(state: &GraphEditorState, geoms: &[NodeGeom]) -> Option<[f32; 4]> {
-    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    let mut acc = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        minx = minx.min(x0);
-        miny = miny.min(y0);
-        maxx = maxx.max(x1);
-        maxy = maxy.max(y1);
+/// World bbox `(min, max)` of the whole graph — nodes + groups + comments.
+fn content_bbox(state: &GraphEditorState, geoms: &[NodeGeom]) -> Option<(Vec2, Vec2)> {
+    let mut b = geoms_bbox(geoms.iter());
+    let mut fold = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        b = Some(match b {
+            Some((mn, mx)) => (
+                Vec2::new(mn.x.min(x0), mn.y.min(y0)),
+                Vec2::new(mx.x.max(x1), mx.y.max(y1)),
+            ),
+            None => (Vec2::new(x0, y0), Vec2::new(x1, y1)),
+        });
     };
-    for g in geoms {
-        acc(g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y);
-    }
     for g in &state.doc.groups {
-        acc(g.rect[0], g.rect[1], g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
+        fold(g.rect[0], g.rect[1], g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
     }
     for c in &state.doc.comments {
-        acc(c.rect[0], c.rect[1], c.rect[0] + c.rect[2], c.rect[1] + c.rect[3]);
+        fold(c.rect[0], c.rect[1], c.rect[0] + c.rect[2], c.rect[1] + c.rect[3]);
     }
-    if maxx <= minx || maxy <= miny {
-        return None;
-    }
-    Some([minx, miny, maxx - minx, maxy - miny])
-}
-
-/// Toggle button (always) + minimap overlay (when open): node/group rects at a
-/// fitted transform, a current-view indicator, and click-to-recenter (P7).
-#[allow(clippy::too_many_arguments)]
-fn draw_minimap(
-    ui: &mut Ui,
-    scope: &CanvasScope,
-    state: &mut GraphEditorState,
-    geoms: &[NodeGeom],
-    btn: Rect,
-    mm: Option<Rect>,
-    minimap_pan: &mut Option<Vec2>,
-) {
-    let st = ui.style();
-    let btn_id = ui.alloc_id("graph_minimap_btn");
-    let btn_resp = ui.interact(btn_id, btn);
-    if btn_resp.clicked {
-        state.minimap_open = !state.minimap_open;
-    }
-    {
-        let mut p = ui.painter();
-        let fill = if btn_resp.hovered { st.palette.hover } else { st.palette.elevated };
-        p.rect_filled(btn, st.rounding.small, fill);
-        p.rect_stroke(btn, st.rounding.small, 1.0, st.palette.stroke_strong);
-        let inner = Rect::from_center_size(btn.center(), Vec2::splat(MINIMAP_BTN * 0.45));
-        let glyph = if state.minimap_open {
-            st.palette.accent_active
-        } else {
-            st.palette.text_secondary
-        };
-        p.rect_stroke(inner, 0.0, 1.0, glyph);
-    }
-
-    let Some(mm) = mm else {
-        return;
-    };
-    let bbox = doc_bbox(state, geoms).unwrap_or_else(|| {
-        let v = scope.visible_world_rect();
-        [v.min.x, v.min.y, v.width(), v.height()]
-    });
-    let pad = 6.0;
-    let area = Rect::from_min_max(mm.min + Vec2::splat(pad), mm.max - Vec2::splat(pad));
-    let scale = (area.width() / bbox[2]).min(area.height() / bbox[3]).max(f32::MIN_POSITIVE);
-    let ox = area.min.x + (area.width() - bbox[2] * scale) * 0.5;
-    let oy = area.min.y + (area.height() - bbox[3] * scale) * 0.5;
-    let to_mm = |wx: f32, wy: f32| Pos2::new(ox + (wx - bbox[0]) * scale, oy + (wy - bbox[1]) * scale);
-    {
-        let mut p = ui.painter();
-        p.rect_filled(mm, st.rounding.small, st.palette.window.with_alpha(0.92));
-        p.rect_stroke(mm, st.rounding.small, 1.0, st.palette.stroke_strong);
-        for g in &state.doc.groups {
-            let a = to_mm(g.rect[0], g.rect[1]);
-            let b = to_mm(g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
-            p.rect_stroke(Rect::from_min_max(a, b), 0.0, 1.0, st.palette.stroke);
-        }
-        for g in geoms {
-            let a = to_mm(g.rect.min.x, g.rect.min.y);
-            let b = to_mm(g.rect.max.x, g.rect.max.y);
-            p.rect_filled(Rect::from_min_max(a, b), 0.0, st.palette.text_secondary);
-        }
-        let v = scope.visible_world_rect();
-        let a = to_mm(v.min.x, v.min.y);
-        let b = to_mm(v.max.x, v.max.y);
-        p.rect_stroke(Rect::from_min_max(a, b), 0.0, 1.0, st.palette.accent_active);
-    }
-    let mm_id = ui.alloc_id("graph_minimap");
-    let resp = ui.interact(mm_id, mm);
-    if resp.pressed {
-        if let Some(pp) = ui.ctx().input.pointer_pos {
-            let wx = bbox[0] + (pp.x - ox) / scale;
-            let wy = bbox[1] + (pp.y - oy) / scale;
-            let half = scope.rect().size() / (2.0 * scope.zoom());
-            *minimap_pan = Some(Vec2::new(wx - half.x, wy - half.y));
-        }
-    }
+    b
 }
 
 /// Inline text-edit popup for the annotation in `state.editing` (P7).

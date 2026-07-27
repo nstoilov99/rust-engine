@@ -267,12 +267,6 @@ impl CommandRegistry {
                 "Engine: Open Settings",
                 EditorAction::OpenSettings,
             ),
-            Command::new(
-                "graph.toggle_minimap",
-                "Graph: Toggle Minimap",
-                EditorAction::GraphToggleMinimap,
-            )
-            .with_keywords(["node", "overview"]),
             Command::new("graph.save", "Graph: Save Graph", EditorAction::GraphSaveGraph)
                 .with_keywords(["node"]),
         ];

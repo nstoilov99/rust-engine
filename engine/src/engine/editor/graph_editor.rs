@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
 
+use crusty_gui::math::Vec2;
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
@@ -390,8 +391,6 @@ pub struct GraphEditorState {
     pub annotation_drag: Option<AnnotationDrag>,
     /// Active inline text edit for a comment/group (P7).
     pub editing: Option<AnnotationEdit>,
-    /// Minimap overlay visible (session-only, P7).
-    pub minimap_open: bool,
 }
 
 /// In-flight node drag: original positions so live movement is absolute
@@ -465,7 +464,6 @@ impl GraphEditorState {
             sel_group: None,
             annotation_drag: None,
             editing: None,
-            minimap_open: false,
         })
     }
 
@@ -777,6 +775,34 @@ pub fn build_resolver_docs<'a>(
     docs
 }
 
+/// Fit a [`CanvasView`] so the world-space box `[bbox_min, bbox_max]` fills the
+/// viewport with a small margin, centered. Framing never magnifies past 1.0×
+/// (a single node frames at 100%, not the max zoom), then clamps into the pref
+/// zoom range. `viewport_size` is in screen pixels; `pan` is the world point at
+/// the canvas top-left (`CanvasView` convention). Used by the F/A shortcuts.
+pub fn frame_view(
+    bbox_min: Vec2,
+    bbox_max: Vec2,
+    viewport_size: Vec2,
+    zoom_min: f32,
+    zoom_max: f32,
+) -> CanvasView {
+    const PAD: f32 = 0.9;
+    let w = (bbox_max.x - bbox_min.x).max(1.0);
+    let h = (bbox_max.y - bbox_min.y).max(1.0);
+    let fit = (viewport_size.x / w).min(viewport_size.y / h) * PAD;
+    // Cap at 1.0 so framing never zooms *in* past 100% (single node → 1.0×,
+    // not max), then clamp into the configured range.
+    let zoom = fit.min(1.0).clamp(zoom_min, zoom_max);
+    let cx = (bbox_min.x + bbox_max.x) * 0.5;
+    let cy = (bbox_min.y + bbox_max.y) * 0.5;
+    let pan = Vec2::new(
+        cx - viewport_size.x / (2.0 * zoom),
+        cy - viewport_size.y / (2.0 * zoom),
+    );
+    CanvasView { pan, zoom }
+}
+
 /// Read-only display string for a stored input constant.
 pub fn prop_display(v: &PropValue) -> String {
     match v {
@@ -959,7 +985,6 @@ mod tests {
             sel_group: None,
             annotation_drag: None,
             editing: None,
-            minimap_open: false,
         }
     }
 
@@ -1012,6 +1037,35 @@ mod tests {
         st.paste_clipboard(&Some(frag), &reg);
         assert!(st.sel_comment.is_none(), "paste must clear annotation selection");
         assert!(!st.selection.is_empty(), "pasted nodes become the selection");
+    }
+
+    /// `frame_view` fits + centers the bbox and never magnifies past 1.0×.
+    #[test]
+    fn frame_view_fits_and_centers() {
+        // 400x300 bbox in an 800x600 viewport: raw fit = 1.8, capped at 1.0×.
+        let v = frame_view(
+            Vec2::new(0.0, 0.0),
+            Vec2::new(400.0, 300.0),
+            Vec2::new(800.0, 600.0),
+            0.25,
+            2.5,
+        );
+        assert!((v.zoom - 1.0).abs() < 1e-4, "capped at 1.0x, got {}", v.zoom);
+        // bbox center (200,150) must land at the viewport center (400,300):
+        // screen = rect.min + (world - pan) * zoom.
+        let sx = (200.0 - v.pan.x) * v.zoom;
+        let sy = (150.0 - v.pan.y) * v.zoom;
+        assert!((sx - 400.0).abs() < 1e-3 && (sy - 300.0).abs() < 1e-3);
+    }
+
+    /// `frame_view` clamps: huge bbox → zoom_min; a single node → 1.0× (not max).
+    #[test]
+    fn frame_view_clamps_zoom() {
+        let vp = Vec2::new(800.0, 600.0);
+        let big = frame_view(Vec2::new(0.0, 0.0), Vec2::new(1.0e5, 1.0e5), vp, 0.25, 2.5);
+        assert!((big.zoom - 0.25).abs() < 1e-4, "huge bbox clamps to zoom_min");
+        let one = frame_view(Vec2::new(0.0, 0.0), Vec2::new(168.0, 60.0), vp, 0.25, 2.5);
+        assert!((one.zoom - 1.0).abs() < 1e-4, "single node frames at 1.0x, got {}", one.zoom);
     }
 
     #[test]
