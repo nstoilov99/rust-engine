@@ -1,3 +1,7 @@
+// Lets the node graph derive macros (`node_graph_macros`) reference engine
+// types via `::rust_engine::...` even when applied inside this crate.
+extern crate self as rust_engine;
+
 pub mod engine;
 
 pub use engine::*;

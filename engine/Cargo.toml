@@ -106,6 +106,10 @@ arc-swap = "1"
 # Shared gameplay types
 game_shared = { path = "../game_shared" }
 
+# Node graph derive macros (Task 40 P8) + inventory auto-registration backend
+node_graph_macros = { path = "../crates/node_graph_macros" }
+inventory = "0.3"
+
 # Desktop-wide color sampling for the crusty eyedropper (editor only)
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", optional = true, features = [
