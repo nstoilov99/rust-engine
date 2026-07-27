@@ -194,6 +194,8 @@ pub struct SceneEditorState {
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: rust_engine::engine::node_graph::NodeRegistry,
+    /// Shared graph editor clipboard (copy/paste across open graphs).
+    pub graph_clipboard: Option<rust_engine::engine::editor::graph_editor::GraphFragment>,
     /// Open input action editors (one per .inputaction file).
     pub input_action_editor: InputActionEditor,
     /// Open mapping context editors (one per .mappingcontext file).
@@ -688,6 +690,7 @@ impl App {
                         .expect("dev_nodes registration");
                     reg
                 },
+                graph_clipboard: None,
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
                 save_as_dialog: None,
@@ -1093,6 +1096,25 @@ impl App {
     }
 
     fn handle_editor_action(&mut self, action: EditorAction) {
+        // Route document edit actions to the focused graph tab, if any
+        // (Task 40 P5 edit-target focus routing). Docked graphs only — a graph
+        // in a float window handles its own keyboard.
+        #[cfg(feature = "editor")]
+        if matches!(
+            action,
+            EditorAction::Undo
+                | EditorAction::Redo
+                | EditorAction::Cut
+                | EditorAction::Copy
+                | EditorAction::Paste
+                | EditorAction::Duplicate
+                | EditorAction::Delete
+        ) {
+            if let Some(key) = self.active_graph_key() {
+                self.graph_edit(&key, action);
+                return;
+            }
+        }
         match action {
             EditorAction::NewScene => {
                 let _ = self.create_new_scene();
@@ -1339,7 +1361,13 @@ impl App {
             }
             EditorAction::SaveAndCloseEditor { kind, key } => {
                 match self.save_secondary_editor(kind, &key) {
-                    Ok(()) => self.set_secondary_editor_open(kind, &key, false),
+                    Ok(()) => {
+                        self.set_secondary_editor_open(kind, &key, false);
+                        #[cfg(feature = "editor")]
+                        if kind == SecondaryWindowKind::Graph {
+                            self.close_graph_tab(&key);
+                        }
+                    }
                     Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                         "Failed to save '{}': {}",
                         key, error
@@ -1384,6 +1412,10 @@ impl App {
                 }
                 self.editor.services.dirty.clear_asset(&key);
                 self.set_secondary_editor_open(kind, &key, false);
+                #[cfg(feature = "editor")]
+                if kind == SecondaryWindowKind::Graph {
+                    self.close_graph_tab(&key);
+                }
             }
         }
     }
@@ -1746,7 +1778,20 @@ impl App {
                             .resource::<InputManager>()
                             .is_some_and(|im| im.is_winit_key_pressed(KeyCode::ControlLeft))
                     {
-                        self.save_active_scene();
+                        // Ctrl+S saves the focused graph tab when one has focus,
+                        // otherwise the active scene.
+                        #[cfg(feature = "editor")]
+                        let saved_graph = if let Some(key) = self.active_graph_key() {
+                            self.save_graph_editor(&key);
+                            true
+                        } else {
+                            false
+                        };
+                        #[cfg(not(feature = "editor"))]
+                        let saved_graph = false;
+                        if !saved_graph {
+                            self.save_active_scene();
+                        }
                     }
                 }
                 if let Some(im) = self.core.game_world.resource_mut::<InputManager>() {
@@ -3183,7 +3228,9 @@ impl App {
             use rust_engine::engine::editor::mesh_editor_crusty::{
                 mesh_editor_panel, MeshEditorPanelCtx,
             };
-            use rust_engine::engine::editor::graph_editor_crusty::graph_editor_panel;
+            use rust_engine::engine::editor::graph_editor_crusty::{
+                graph_editor_panel, GraphEditorPanelCtx,
+            };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
@@ -3255,6 +3302,34 @@ impl App {
             let sel = &mut self.editor.scene.selection;
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
+            let graph_registry = &self.editor.scene.node_registry;
+            let graph_clipboard = &mut self.editor.scene.graph_clipboard;
+            let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
+            // Edit-menu override when a docked graph tab has focus (P5 routing).
+            let graph_edit_override = graph_focused_tab
+                .as_deref()
+                .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
+                .and_then(|ft| ft.strip_prefix("graph:"))
+                .and_then(|k| graph_editors.get(k))
+                .map(|st| {
+                    use rust_engine::engine::editor::menu_bar_crusty::EditMenuOverride;
+                    EditMenuOverride {
+                        undo_label: st
+                            .stack
+                            .undo_description()
+                            .map(|d| format!("Undo {d}"))
+                            .unwrap_or_else(|| "Undo".to_string()),
+                        can_undo: st.stack.can_undo(),
+                        redo_label: st
+                            .stack
+                            .redo_description()
+                            .map(|d| format!("Redo {d}"))
+                            .unwrap_or_else(|| "Redo".to_string()),
+                        can_redo: st.stack.can_redo(),
+                        has_selection: !st.selection.is_empty(),
+                        has_clipboard: graph_clipboard.is_some(),
+                    }
+                });
             let mesh_textures = &self.crusty_mesh_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
@@ -3321,6 +3396,7 @@ impl App {
                     MenuBarCtx {
                         dock_state: crusty_dock,
                         command_history: &*vp_command_history,
+                        edit_override: graph_edit_override.clone(),
                         play_mode: current_play_mode,
                         build_dialog,
                         console_messages: &mut console.messages,
@@ -3491,7 +3567,19 @@ impl App {
                                 }
                                 Some(EditorTab::GraphEditor(key)) => {
                                     match graph_editors.get_mut(&key) {
-                                        Some(state) => graph_editor_panel(ui, state),
+                                        Some(state) => graph_editor_panel(
+                                            ui,
+                                            GraphEditorPanelCtx {
+                                                state,
+                                                registry: graph_registry,
+                                                clipboard: graph_clipboard,
+                                                focused: graph_focused_tab.as_deref()
+                                                    == Some(tab),
+                                                // Docked: keyboard editing runs
+                                                // through the main menu/winit path.
+                                                handle_shortcuts: false,
+                                            },
+                                        ),
                                         None => dock_crusty::placeholder_panel(
                                             ui,
                                             "Graph not loaded.",
@@ -3927,6 +4015,33 @@ impl App {
                 }
             }
             self.editor.scene.registry.drop_dormant(id);
+        } else if let Some(key) = tab.strip_prefix("graph:") {
+            // Dirty graph → veto the close and confirm save/discard first.
+            if self
+                .editor
+                .scene
+                .graph_editors
+                .get(key)
+                .is_some_and(|s| s.dirty)
+            {
+                let key = key.to_string();
+                let msg = format!("Save changes to '{key}' before closing?");
+                self.editor.services.dialogs.save_discard_cancel(
+                    format!("graph_close:{key}"),
+                    "Unsaved Graph",
+                    msg,
+                    EditorAction::SaveAndCloseEditor {
+                        kind: SecondaryWindowKind::Graph,
+                        key: key.clone(),
+                    },
+                    EditorAction::DiscardAndCloseEditor {
+                        kind: SecondaryWindowKind::Graph,
+                        key,
+                    },
+                );
+                return;
+            }
+            self.close_graph_tab(key);
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
             if let Some(key) = tab.strip_prefix("mesh:") {
@@ -3935,12 +4050,76 @@ impl App {
                 if let Some(data) = self.editor.scene.mesh_editors.get_mut(key) {
                     data.open = false;
                 }
-            } else if let Some(key) = tab.strip_prefix("graph:") {
-                // Graph editors hold no GPU state; drop the doc on close.
-                // Reopen from the asset browser reloads it fresh.
-                self.editor.scene.graph_editors.remove(key);
             }
         }
+    }
+
+    /// Content-relative key of the graph tab that currently has focus in the
+    /// *main* dock, if any. Returns `None` when the focused tab isn't a graph,
+    /// or the graph is torn off into a float window (that window owns its
+    /// keyboard editing). Drives edit-action focus routing (Task 40 P5).
+    #[cfg(feature = "editor")]
+    fn active_graph_key(&self) -> Option<String> {
+        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
+        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
+            return None;
+        }
+        let key = ft.strip_prefix("graph:")?.to_string();
+        self.editor
+            .scene
+            .graph_editors
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    /// Apply a document edit action to the graph editor `key`.
+    #[cfg(feature = "editor")]
+    fn graph_edit(&mut self, key: &str, action: EditorAction) {
+        let scene = &mut self.editor.scene;
+        let Some(st) = scene.graph_editors.get_mut(key) else {
+            return;
+        };
+        let reg = &scene.node_registry;
+        let clip = &mut scene.graph_clipboard;
+        match action {
+            EditorAction::Undo => st.undo(reg),
+            EditorAction::Redo => st.redo(reg),
+            EditorAction::Delete => st.delete_selection(reg),
+            EditorAction::Copy => st.copy_selection(clip),
+            EditorAction::Cut => {
+                st.copy_selection(clip);
+                st.delete_selection(reg);
+            }
+            EditorAction::Paste => st.paste_clipboard(clip, reg),
+            EditorAction::Duplicate => st.duplicate_selection(reg),
+            _ => {}
+        }
+    }
+
+    /// Save the graph editor `key` to disk, reporting failures to the console.
+    #[cfg(feature = "editor")]
+    fn save_graph_editor(&mut self, key: &str) {
+        if let Some(st) = self.editor.scene.graph_editors.get_mut(key) {
+            let abs = std::path::Path::new("content").join(&st.path);
+            if let Err(e) = st.save(&abs) {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Failed to save graph '{key}': {e}")));
+            }
+        }
+    }
+
+    /// Close a graph tab everywhere (main dock + any float window) and drop
+    /// its document.
+    #[cfg(feature = "editor")]
+    fn close_graph_tab(&mut self, key: &str) {
+        let tab = format!("graph:{key}");
+        self.editor.ui.crusty_dock.tree.close_tab(&tab);
+        for fw in self.crusty_floats.values_mut() {
+            fw.tree.close_tab(&tab);
+        }
+        self.editor.scene.graph_editors.remove(key);
     }
 
     /// Route a winit event to a torn-off float window. Returns true if the
@@ -4049,7 +4228,9 @@ impl App {
         use rust_engine::engine::editor::mesh_editor_crusty::{
             mesh_editor_panel, MeshEditorPanelCtx,
         };
-        use rust_engine::engine::editor::graph_editor_crusty::graph_editor_panel;
+        use rust_engine::engine::editor::graph_editor_crusty::{
+            graph_editor_panel, GraphEditorPanelCtx,
+        };
         use rust_engine::engine::editor::profiler_crusty::profiler_panel;
 
         let device = self.core.renderer.gpu.device.clone();
@@ -4094,6 +4275,8 @@ impl App {
         let mc_actions = input_context_editor.available_actions.as_slice();
         let mesh_editors = &mut editor.scene.mesh_editors;
         let graph_editors = &mut editor.scene.graph_editors;
+        let graph_registry = &editor.scene.node_registry;
+        let graph_clipboard = &mut editor.scene.graph_clipboard;
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -4241,7 +4424,19 @@ impl App {
                             None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
                         },
                         Some(EditorTab::GraphEditor(key)) => match graph_editors.get_mut(&key) {
-                            Some(state) => graph_editor_panel(ui, state),
+                            Some(state) => graph_editor_panel(
+                                ui,
+                                GraphEditorPanelCtx {
+                                    state,
+                                    registry: graph_registry,
+                                    clipboard: graph_clipboard,
+                                    // A float window is a dedicated surface;
+                                    // keys only arrive when it's OS-focused, so
+                                    // the panel owns keyboard editing here.
+                                    focused: true,
+                                    handle_shortcuts: true,
+                                },
+                            ),
                             None => dock_crusty::placeholder_panel(ui, "Graph not loaded."),
                         },
                         _ => dock_crusty::placeholder_panel(
@@ -4260,6 +4455,31 @@ impl App {
             let mut tabs = Vec::new();
             fw.tree.collect_tabs(&mut tabs);
             if fw.close_requested {
+                // Dirty graph → veto: confirm via the main dialog stack and
+                // keep the window open (the dialog's Save/Discard drives the
+                // actual close through `close_graph_tab`, emptying this window).
+                let dirty_graph = tabs.iter().find_map(|t| {
+                    let key = t.strip_prefix("graph:")?;
+                    graph_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
+                });
+                if let Some(key) = dirty_graph {
+                    let msg = format!("Save changes to '{key}' before closing?");
+                    editor.services.dialogs.save_discard_cancel(
+                        format!("graph_close:{key}"),
+                        "Unsaved Graph",
+                        msg,
+                        EditorAction::SaveAndCloseEditor {
+                            kind: SecondaryWindowKind::Graph,
+                            key: key.clone(),
+                        },
+                        EditorAction::DiscardAndCloseEditor {
+                            kind: SecondaryWindowKind::Graph,
+                            key,
+                        },
+                    );
+                    fw.close_requested = false;
+                    return true;
+                }
                 for tab in tabs {
                     if let Some(key) = tab.strip_prefix("mesh:") {
                         // Asset editors close with their window (`open = false`
@@ -4268,7 +4488,7 @@ impl App {
                             data.open = false;
                         }
                     } else if let Some(key) = tab.strip_prefix("graph:") {
-                        // Graph editors hold no GPU state; drop the doc.
+                        // Clean graph: drop the doc.
                         graph_editors.remove(key);
                     } else {
                         dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);

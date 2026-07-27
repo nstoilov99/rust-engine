@@ -20,9 +20,26 @@ use super::theme::EditorTheme;
 use super::{CommandHistory, EditorTab};
 use crate::engine::ecs::resources::PlayMode;
 
+/// Overrides the Edit menu's history + clipboard state when a document editor
+/// (e.g. a graph tab) owns the active edit target instead of the scene
+/// (Task 40 P5). When `Some`, Undo/Redo labels and the Cut/Copy/Paste/Delete
+/// enablement read from here; the actions still flow through `MenuAction` and
+/// are routed to the focused editor by the host.
+#[derive(Clone)]
+pub struct EditMenuOverride {
+    pub undo_label: String,
+    pub can_undo: bool,
+    pub redo_label: String,
+    pub can_redo: bool,
+    pub has_selection: bool,
+    pub has_clipboard: bool,
+}
+
 pub struct MenuBarCtx<'a> {
     pub dock_state: &'a mut CrustyDockLayout,
     pub command_history: &'a CommandHistory,
+    /// Active document-editor edit target (graph tab), when one has focus.
+    pub edit_override: Option<EditMenuOverride>,
     pub play_mode: PlayMode,
     pub build_dialog: &'a mut BuildDialog,
     pub console_messages: &'a mut ConsoleLog,
@@ -62,6 +79,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
     let MenuBarCtx {
         dock_state,
         command_history,
+        edit_override,
         play_mode,
         build_dialog,
         show_benchmark_tools,
@@ -151,27 +169,33 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
 
             let is_edit_mode = play_mode == PlayMode::Edit;
             ui.menu_button_width("Edit", 250.0, |ui| {
+                // A focused document editor (graph tab) supplies its own
+                // history + clipboard state; otherwise use the scene's.
+                let (undo_desc, can_undo, redo_desc, can_redo, sel, clip) = match &edit_override {
+                    Some(o) => (
+                        Some(o.undo_label.clone()),
+                        o.can_undo,
+                        Some(o.redo_label.clone()),
+                        o.can_redo,
+                        o.has_selection,
+                        o.has_clipboard,
+                    ),
+                    None => (
+                        command_history.undo_description().map(|d| format!("Undo {d}")),
+                        is_edit_mode && command_history.can_undo(),
+                        command_history.redo_description().map(|d| format!("Redo {d}")),
+                        is_edit_mode && command_history.can_redo(),
+                        is_edit_mode && has_selection,
+                        is_edit_mode && has_clipboard,
+                    ),
+                };
                 ui.menu_group_header("History");
-                let undo_label = command_history
-                    .undo_description()
-                    .map(|d| format!("Undo {d}"))
-                    .unwrap_or_else(|| "Undo".to_string());
-                if ui.menu_item_shortcut(
-                    undo_label,
-                    "Ctrl+Z",
-                    is_edit_mode && command_history.can_undo(),
-                ) {
+                let undo_label = undo_desc.unwrap_or_else(|| "Undo".to_string());
+                if ui.menu_item_shortcut(undo_label, "Ctrl+Z", can_undo) {
                     action = MenuAction::Undo;
                 }
-                let redo_label = command_history
-                    .redo_description()
-                    .map(|d| format!("Redo {d}"))
-                    .unwrap_or_else(|| "Redo".to_string());
-                if ui.menu_item_shortcut(
-                    redo_label,
-                    "Ctrl+Y",
-                    is_edit_mode && command_history.can_redo(),
-                ) {
+                let redo_label = redo_desc.unwrap_or_else(|| "Redo".to_string());
+                if ui.menu_item_shortcut(redo_label, "Ctrl+Y", can_redo) {
                     action = MenuAction::Redo;
                 }
                 // Ships disabled until the undo-history browser lands (post-M10).
@@ -179,20 +203,19 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
 
                 ui.separator();
                 ui.menu_group_header("Edit");
-                let can_edit_sel = is_edit_mode && has_selection;
-                if ui.menu_item_shortcut("Cut", "Ctrl+X", can_edit_sel) {
+                if ui.menu_item_shortcut("Cut", "Ctrl+X", sel) {
                     action = MenuAction::Cut;
                 }
-                if ui.menu_item_shortcut("Copy", "Ctrl+C", can_edit_sel) {
+                if ui.menu_item_shortcut("Copy", "Ctrl+C", sel) {
                     action = MenuAction::Copy;
                 }
-                if ui.menu_item_shortcut("Paste", "Ctrl+V", is_edit_mode && has_clipboard) {
+                if ui.menu_item_shortcut("Paste", "Ctrl+V", clip) {
                     action = MenuAction::Paste;
                 }
-                if ui.menu_item_shortcut("Duplicate", "Ctrl+D", can_edit_sel) {
+                if ui.menu_item_shortcut("Duplicate", "Ctrl+D", sel) {
                     action = MenuAction::Duplicate;
                 }
-                if ui.menu_item_shortcut("Delete", "Del", can_edit_sel) {
+                if ui.menu_item_shortcut("Delete", "Del", sel) {
                     action = MenuAction::Delete;
                 }
 
