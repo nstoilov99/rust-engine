@@ -16,6 +16,9 @@ editor = ["hud", "dep:windows-sys", "dep:transform-gizmo", "dep:arboard", "dep:n
 # Alias kept for muscle memory — crusty-gui is the only editor UI.
 crusty = ["editor"]
 editor-debug = ["editor"]
+# Registers the node_graph test/demo node set in the editor (Task 40) —
+# lets the graph editor be exercised before consumer tasks ship real nodes.
+dev_nodes = []
 tracy = ["tracy-client"]
 
 [dependencies]
