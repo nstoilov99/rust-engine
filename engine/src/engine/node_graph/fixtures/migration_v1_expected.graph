@@ -1,0 +1,38 @@
+(
+    version: 1,
+    realm: Shared,
+    nodes: [
+        (
+            id: 0,
+            type_id: "test_add",
+            type_version: 1,
+            position: (0.0, 0.0),
+            properties: {
+                "a": Float(2.0),
+            },
+            subgraph: None,
+        ),
+        (
+            id: 1,
+            type_id: "mig_damage",
+            type_version: 2,
+            position: (200.0, 0.0),
+            properties: {
+                "damage_per_second": Float(42.0),
+            },
+            subgraph: None,
+        ),
+    ],
+    edges: [
+        (
+            from_node: 0,
+            from_pin: "sum",
+            to_node: 1,
+            to_pin: "damage_per_second",
+        ),
+    ],
+    comments: [],
+    groups: [],
+    inputs: [],
+    outputs: [],
+)

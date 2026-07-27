@@ -92,12 +92,17 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
-/// Registry of node types and consumer domain pin types. `BTreeMap` keeps
-/// iteration deterministic (stable search-menu ordering, stable tests).
+/// A single migration step for one node type, from one version to the next.
+pub type MigrationFn = Box<dyn Fn(&mut super::migrate::MigrationCtx) + Send + Sync>;
+
+/// Registry of node types, consumer domain pin types, and migration chains.
+/// `BTreeMap` keeps iteration deterministic (stable search-menu ordering,
+/// stable tests).
 #[derive(Default)]
 pub struct NodeRegistry {
     nodes: BTreeMap<String, NodeDescriptor>,
     domain_pins: BTreeSet<String>,
+    migrations: BTreeMap<(String, u32), MigrationFn>,
 }
 
 impl NodeRegistry {
@@ -159,6 +164,23 @@ impl NodeRegistry {
             out.entry(d.category.as_str()).or_default().push(d);
         }
         out
+    }
+
+    /// Register the migration step for `type_id` from `from_version` to
+    /// `from_version + 1`. Steps chain: an instance at v1 with the type at
+    /// v3 runs the 1→2 then 2→3 steps in order.
+    pub fn register_migration(
+        &mut self,
+        type_id: &str,
+        from_version: u32,
+        step: impl Fn(&mut super::migrate::MigrationCtx) + Send + Sync + 'static,
+    ) {
+        self.migrations
+            .insert((type_id.to_string(), from_version), Box::new(step));
+    }
+
+    pub fn migration(&self, type_id: &str, from_version: u32) -> Option<&MigrationFn> {
+        self.migrations.get(&(type_id.to_string(), from_version))
     }
 
     /// Register a consumer domain pin type (e.g. `"shader"` for Task 50) so

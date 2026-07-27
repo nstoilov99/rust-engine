@@ -9,6 +9,7 @@ pub mod doc;
 #[cfg(any(test, feature = "dev_nodes"))]
 pub mod dev_nodes;
 pub mod io;
+pub mod migrate;
 pub mod registry;
 pub mod validate;
 
@@ -17,7 +18,8 @@ pub use doc::{
     PropValue, GRAPH_DOC_VERSION,
 };
 pub use io::{load_graph, parse_graph, save_graph, serialize_graph, GraphIoError};
+pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};
 pub use registry::{
-    NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, SUBGRAPH_TYPE_ID,
+    MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, SUBGRAPH_TYPE_ID,
 };
 pub use validate::{validate_doc, GraphError};
