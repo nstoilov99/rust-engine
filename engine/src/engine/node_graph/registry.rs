@@ -14,6 +14,15 @@ use super::doc::{NodeRealm, PinType, PropValue};
 /// the referenced `.subgraph` asset's interface, not from a descriptor.
 pub const SUBGRAPH_TYPE_ID: &str = "subgraph";
 
+/// Reserved node-type slug for reroute nodes — a one-in, many-out pass-through
+/// whose pin type is *inferred* from whatever it is wired to, so it has no
+/// descriptor and cannot be registered.
+pub const REROUTE_TYPE_ID: &str = "reroute";
+
+/// The two pin slugs every reroute has.
+pub const REROUTE_IN: &str = "in";
+pub const REROUTE_OUT: &str = "out";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinDescriptor {
     /// Stable pin slug — serialized in edges and properties.
@@ -126,6 +135,9 @@ impl NodeRegistry {
         };
         if desc.id == SUBGRAPH_TYPE_ID {
             return invalid("slug is reserved for subgraph instances");
+        }
+        if desc.id == REROUTE_TYPE_ID {
+            return invalid("slug is reserved for reroute nodes");
         }
         if desc.pure && desc.has_exec_pin() {
             return invalid("pure nodes may not have exec pins");
@@ -278,6 +290,13 @@ mod tests {
         let mut reserved = pure_add();
         reserved.id = SUBGRAPH_TYPE_ID.into();
         assert!(reg.register(reserved).is_err());
+
+        let mut reroute = pure_add();
+        reroute.id = REROUTE_TYPE_ID.into();
+        assert!(
+            reg.register(reroute).is_err(),
+            "the reroute slug is reserved: it has no descriptor by design"
+        );
     }
 
     #[test]

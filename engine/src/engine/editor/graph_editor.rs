@@ -14,8 +14,9 @@ use crusty_gui::math::Vec2;
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
-    load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge, GraphDoc, GraphError,
-    GroupBox, NodeInst, NodeRegistry, PropValue, SUBGRAPH_TYPE_ID,
+    endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge, GraphDoc,
+    GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, REROUTE_IN, REROUTE_OUT,
+    REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,10 @@ pub enum GraphEdit {
         old: Option<u64>,
         new: Option<u64>,
     },
+    /// Several edits that must undo as one gesture — inserting a reroute
+    /// (one edge out, a node and two edges in) is the motivating case.
+    /// Applied in order, reverted in reverse.
+    Composite { label: String, edits: Vec<GraphEdit> },
 }
 
 /// Which annotation an edit targets. Comments and groups have no ids, so
@@ -174,6 +179,11 @@ impl GraphEdit {
                     c.anchor = *new;
                 }
             }
+            GraphEdit::Composite { edits, .. } => {
+                for e in edits {
+                    e.apply(doc);
+                }
+            }
         }
     }
 
@@ -234,6 +244,11 @@ impl GraphEdit {
                     c.anchor = *old;
                 }
             }
+            GraphEdit::Composite { edits, .. } => {
+                for e in edits.iter().rev() {
+                    e.revert(doc);
+                }
+            }
         }
     }
 
@@ -287,6 +302,7 @@ impl GraphEdit {
             GraphEdit::SetCommentAnchor { new, .. } => {
                 if new.is_some() { "Anchor Comment" } else { "Un-anchor Comment" }.to_string()
             }
+            GraphEdit::Composite { label, .. } => label.clone(),
         }
     }
 }
@@ -599,6 +615,13 @@ pub struct GraphEditorState {
     pub annotation_resize: Option<AnnotationResize>,
     /// Annotation whose context menu is open (tint / collapse / anchor).
     pub annotation_menu: Option<Annotation>,
+    /// Cursor into the anchored-error list, advanced by the count chip.
+    /// `F8` / `Shift+F8` will drive the same cursor.
+    pub error_cursor: usize,
+    /// Compiler-row popover (document-level errors) is showing.
+    pub error_popover: bool,
+    /// Wire whose context menu is open, with the world point clicked.
+    pub wire_menu: Option<(Edge, [f32; 2])>,
 }
 
 /// Which edge or corner of an annotation a resize drag grabbed.
@@ -758,6 +781,9 @@ impl GraphEditorState {
             editing: None,
             annotation_resize: None,
             annotation_menu: None,
+            error_cursor: 0,
+            error_popover: false,
+            wire_menu: None,
         })
     }
 
@@ -1004,6 +1030,13 @@ impl GraphEditorState {
         if self.selection.is_empty() {
             return;
         }
+        // A lone reroute heals the wire it sits on instead of severing it.
+        if self.selection.len() == 1 {
+            let id = *self.selection.iter().next().expect("len 1");
+            if self.delete_reroute(id, registry) {
+                return;
+            }
+        }
         let ids = self.selection.clone();
         let nodes: Vec<(usize, NodeInst)> = self
             .doc
@@ -1149,6 +1182,121 @@ impl GraphEditorState {
             GraphEdit::ResizeAnnotation { target: r.target, old: r.rect0, new: now },
             registry,
         );
+    }
+
+    /// Insert a reroute in the middle of `edge`, at `pos`. One transaction:
+    /// the original edge goes, a reroute node arrives, and two edges replace
+    /// it. A reroute has no descriptor — its type is inferred from whatever
+    /// feeds it — so nothing needs registering.
+    pub fn insert_reroute(&mut self, edge: &Edge, pos: [f32; 2], registry: &NodeRegistry) {
+        let Some(index) = self.doc.edges.iter().position(|e| e == edge) else {
+            return;
+        };
+        let id = self.doc.next_node_id();
+        let node = NodeInst {
+            id,
+            type_id: REROUTE_TYPE_ID.to_string(),
+            type_version: 1,
+            position: pos,
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+        };
+        let edit = GraphEdit::Composite {
+            label: "Add Reroute".to_string(),
+            edits: vec![
+                GraphEdit::Disconnect { edges: vec![(index, edge.clone())] },
+                GraphEdit::AddNode(node),
+                GraphEdit::Connect(Edge {
+                    from_node: edge.from_node,
+                    from_pin: edge.from_pin.clone(),
+                    to_node: id,
+                    to_pin: REROUTE_IN.to_string(),
+                }),
+                GraphEdit::Connect(Edge {
+                    from_node: id,
+                    from_pin: REROUTE_OUT.to_string(),
+                    to_node: edge.to_node,
+                    to_pin: edge.to_pin.clone(),
+                }),
+            ],
+        };
+        edit.apply(&mut self.doc);
+        self.select_only(id);
+        self.commit(edit, registry);
+    }
+
+    /// Delete a reroute, healing the wire through it. Every downstream branch
+    /// is reconnected to the upstream source (a reroute is one-in, many-out),
+    /// as one transaction. Falls back to a plain node delete when there is no
+    /// upstream to heal from.
+    pub fn delete_reroute(&mut self, id: u64, registry: &NodeRegistry) -> bool {
+        let Some(n) = self.doc.node(id) else {
+            return false;
+        };
+        if n.type_id != REROUTE_TYPE_ID {
+            return false;
+        }
+        let upstream = self
+            .doc
+            .edges
+            .iter()
+            .find(|e| e.to_node == id && e.to_pin == REROUTE_IN)
+            .cloned();
+        // Heal unless the types are *known* to differ. "Cannot be determined"
+        // (an unregistered node type, a subgraph interface) is not the same
+        // claim as "they disagree", and refusing to reconnect on a shrug
+        // would silently sever a wire the user only meant to simplify.
+        let up_ty = upstream.as_ref().and_then(|e| {
+            endpoint_type(&self.doc, registry, e.from_node, &e.from_pin, true)
+        });
+
+        let mut removed: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.from_node == id || e.to_node == id)
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        removed.sort_by_key(|(i, _)| *i);
+
+        let node_index = self.doc.nodes.iter().position(|x| x.id == id);
+        let Some(node_index) = node_index else {
+            return false;
+        };
+        let inst = self.doc.nodes[node_index].clone();
+
+        let mut edits = vec![GraphEdit::RemoveNodes {
+            nodes: vec![(node_index, inst)],
+            edges: removed.clone(),
+            comments: anchored_comments(&self.doc, &[id].into_iter().collect())
+                .into_iter()
+                .map(|i| (i, self.doc.comments[i].clone()))
+                .collect(),
+        }];
+        if let Some(up) = upstream.as_ref() {
+            for (_, e) in removed.iter().filter(|(_, e)| e.from_node == id) {
+                let down_ty =
+                    endpoint_type(&self.doc, registry, e.to_node, &e.to_pin, false);
+                if let (Some(a), Some(b)) = (up_ty.as_ref(), down_ty.as_ref()) {
+                    if a != b {
+                        continue; // known mismatch: drop this branch instead
+                    }
+                }
+                edits.push(GraphEdit::Connect(Edge {
+                    from_node: up.from_node,
+                    from_pin: up.from_pin.clone(),
+                    to_node: e.to_node,
+                    to_pin: e.to_pin.clone(),
+                }));
+            }
+        }
+        let edit = GraphEdit::Composite { label: "Delete Reroute".to_string(), edits };
+        edit.apply(&mut self.doc);
+        self.selection.remove(&id);
+        self.commit(edit, registry);
+        true
     }
 
     /// Cancel any in-flight drag / inline edit — indices they hold become
@@ -1560,6 +1708,111 @@ mod tests {
         assert!(!old_g.collapsed);
     }
 
+    /// Inserting a reroute is one transaction: the edge goes, a node and two
+    /// edges arrive, and undo puts the graph back byte-identically.
+    #[test]
+    fn reroute_insert_and_delete_round_trip() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1)];
+        let before = st.doc.clone();
+
+        st.insert_reroute(&edge(0, 1), [200.0, 10.0], &reg);
+        assert_eq!(st.doc.nodes.len(), 3, "a reroute node arrived");
+        assert_eq!(st.doc.edges.len(), 2, "the edge became two");
+        let rr = st.doc.nodes[2].id;
+        assert_eq!(st.doc.nodes[2].type_id, REROUTE_TYPE_ID);
+        assert!(st
+            .doc
+            .edges
+            .iter()
+            .any(|e| e.to_node == rr && e.to_pin == REROUTE_IN));
+        assert!(st
+            .doc
+            .edges
+            .iter()
+            .any(|e| e.from_node == rr && e.from_pin == REROUTE_OUT));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Add Reroute"));
+
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture, one undo");
+        let a = crate::engine::node_graph::serialize_graph(&before).unwrap();
+        let b = crate::engine::node_graph::serialize_graph(&st.doc).unwrap();
+        assert_eq!(a, b, "restored doc must serialize byte-identically");
+
+        // Redo, then delete the reroute: the wire heals end to end.
+        st.redo(&reg);
+        let rr = st.doc.nodes[2].id;
+        assert!(st.delete_reroute(rr, &reg));
+        assert_eq!(st.doc.nodes.len(), 2);
+        assert_eq!(st.doc.edges.len(), 1, "the through-edge was restored");
+        assert_eq!(st.doc.edges[0].from_node, 0);
+        assert_eq!(st.doc.edges[0].to_node, 1);
+        st.undo(&reg);
+        assert_eq!(st.doc.nodes.len(), 3, "undo brings the reroute back");
+        assert_eq!(st.doc.edges.len(), 2);
+    }
+
+    /// A reroute fans out: deleting it reconnects every branch to the source.
+    #[test]
+    fn deleting_a_reroute_heals_every_branch() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![
+            node(0, [0.0, 0.0]),
+            node(1, [400.0, 0.0]),
+            node(2, [400.0, 100.0]),
+        ];
+        st.doc.nodes.push(NodeInst {
+            id: 9,
+            type_id: REROUTE_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [200.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+        });
+        st.doc.edges = vec![
+            Edge { from_node: 0, from_pin: "sum".into(), to_node: 9, to_pin: REROUTE_IN.into() },
+            Edge { from_node: 9, from_pin: REROUTE_OUT.into(), to_node: 1, to_pin: "a".into() },
+            Edge { from_node: 9, from_pin: REROUTE_OUT.into(), to_node: 2, to_pin: "a".into() },
+        ];
+        st.delete_reroute(9, &reg);
+        assert_eq!(st.doc.edges.len(), 2, "both branches survived");
+        assert!(st.doc.edges.iter().all(|e| e.from_node == 0 && e.from_pin == "sum"));
+        assert!(st.doc.nodes.iter().all(|n| n.type_id != REROUTE_TYPE_ID));
+
+        // Deleting a non-reroute through this path is refused, so the caller
+        // falls back to the ordinary node delete.
+        assert!(!st.delete_reroute(0, &reg));
+    }
+
+    /// A `Composite` reverts its parts in reverse order — otherwise an edit
+    /// that depends on an earlier one in the same gesture corrupts the doc.
+    #[test]
+    fn composite_reverts_in_reverse_order() {
+        let base = {
+            let mut d = GraphDoc::default();
+            d.nodes = vec![node(0, [0.0, 0.0])];
+            d
+        };
+        let mut doc = base.clone();
+        let e = GraphEdit::Composite {
+            label: "Two Steps".into(),
+            edits: vec![
+                GraphEdit::AddNode(node(1, [10.0, 0.0])),
+                GraphEdit::Connect(edge(0, 1)),
+            ],
+        };
+        e.apply(&mut doc);
+        assert_eq!(doc.nodes.len(), 2);
+        assert_eq!(doc.edges.len(), 1);
+        assert_eq!(e.description(), "Two Steps");
+        e.revert(&mut doc);
+        assert_eq!(doc, base, "reverse order restores exactly");
+    }
+
     /// Group-drag capture selects exactly the nodes whose centers lie inside
     /// the group rect (P7).
     #[test]
@@ -1794,6 +2047,9 @@ mod tests {
             editing: None,
             annotation_resize: None,
             annotation_menu: None,
+            error_cursor: 0,
+            error_popover: false,
+            wire_menu: None,
         }
     }
 

@@ -15,6 +15,8 @@
 //! one [`ZoomLod`] value derived once per frame, never by scattered zoom
 //! comparisons.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::input::{Key, Modifiers};
@@ -39,8 +41,8 @@ use super::theme::{
 };
 use super::widgets::segmented_control;
 use crate::engine::node_graph::{
-    Edge, GraphError, GraphResolver, NodeDescriptor, NodeRegistry, PinType, PropValue,
-    SUBGRAPH_TYPE_ID,
+    reroute_type, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeRegistry,
+    PinType, PropValue, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,69 @@ impl ZoomLod {
 }
 
 // ---------------------------------------------------------------------------
+// Error anchoring
+// ---------------------------------------------------------------------------
+
+/// This frame's errors, resolved to the thing each one is *about*. Built once
+/// from `state.errors` + `state.ref_errors` and read by both the geometry
+/// pass (ghost rows change a node's shape) and the paint pass.
+#[derive(Default)]
+struct ErrorIndex {
+    /// Nodes carrying a border + gutter badge.
+    nodes: BTreeSet<u64>,
+    /// Pins carrying an error ring, keyed `(node, slug, is_output)`.
+    pins: BTreeSet<(u64, String, bool)>,
+    /// Edges drawn in `status.error` with an x at their midpoint.
+    edges: BTreeSet<Edge>,
+    /// Ghost rows to append, `node -> [(slug, is_output)]`.
+    ghosts: BTreeMap<u64, Vec<(String, bool)>>,
+    /// Errors with nowhere on the canvas to live — the compiler rows.
+    document: Vec<GraphError>,
+    /// Every error, in a stable order, for the count chip's cycle.
+    ordered: Vec<GraphError>,
+}
+
+impl ErrorIndex {
+    fn build(doc_errors: &[GraphError], ref_errors: &[GraphError]) -> Self {
+        let mut ix = ErrorIndex::default();
+        for e in doc_errors.iter().chain(ref_errors.iter()) {
+            match e.anchor() {
+                ErrorAnchor::Node(id) => {
+                    ix.nodes.insert(id);
+                }
+                ErrorAnchor::Pin { node, pin, output } => {
+                    ix.pins.insert((node, pin, output));
+                }
+                ErrorAnchor::Edge(edge) => {
+                    ix.edges.insert(edge);
+                }
+                ErrorAnchor::GhostPin { node, pin, output } => {
+                    let rows = ix.ghosts.entry(node).or_default();
+                    if !rows.iter().any(|(s, o)| *s == pin && *o == output) {
+                        rows.push((pin, output));
+                    }
+                }
+                ErrorAnchor::Document => ix.document.push(e.clone()),
+            }
+            ix.ordered.push(e.clone());
+        }
+        ix
+    }
+
+    fn total(&self) -> usize {
+        self.ordered.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    fn ghosts_for(&self, node: u64) -> &[(String, bool)] {
+        self.ghosts.get(&node).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolved metrics
 // ---------------------------------------------------------------------------
 
@@ -235,6 +300,11 @@ impl GraphMetrics {
             comment_bar: BASE_COMMENT_BAR * s,
             group_bar: BASE_GROUP_BAR * s,
         }
+    }
+
+    /// Diameter of a reroute's dot, world units.
+    fn reroute_d(&self) -> f32 {
+        self.pin_r * 3.2
     }
 
     /// Where a pin's label column starts, measured from the node border.
@@ -325,6 +395,9 @@ struct PinGeom {
     connected: bool,
     /// Inline constant on an unconnected input, if any.
     inline: Option<InlineKind>,
+    /// A dashed placeholder for a pin the descriptor no longer declares, so
+    /// the edge pointing at it has somewhere to land instead of vanishing.
+    ghost: bool,
 }
 
 struct NodeGeom {
@@ -339,6 +412,10 @@ struct NodeGeom {
     /// Per-node ramp-index override for the 2px edge.
     tint: Option<u8>,
     missing: bool,
+    /// Carries a validation error: error border + one gutter badge.
+    errored: bool,
+    /// A reroute: a bare typed dot, no header, no rows.
+    reroute: bool,
     pins: Vec<PinGeom>,
 }
 
@@ -450,6 +527,7 @@ fn build_geoms(
     state: &GraphEditorState,
     registry: &NodeRegistry,
     resolver: &dyn GraphResolver,
+    errors: &ErrorIndex,
     m: &GraphMetrics,
     st: &Style,
     p: &mut Painter,
@@ -461,10 +539,56 @@ fn build_geoms(
         .doc
         .nodes
         .iter()
-        .map(|n| {
+        .map(|n| -> NodeGeom {
             let min = Pos2::new(n.position[0], n.position[1]);
             let is_sub = n.type_id == SUBGRAPH_TYPE_ID;
-            let desc = (!is_sub).then(|| registry.get(&n.type_id)).flatten();
+            let is_reroute = n.type_id == REROUTE_TYPE_ID;
+            let desc = (!is_sub && !is_reroute)
+                .then(|| registry.get(&n.type_id))
+                .flatten();
+
+            // A reroute is a bare pass-through: one in, one out, no header,
+            // no rows, and a type inferred from whatever feeds it.
+            if is_reroute {
+                let d = m.reroute_d();
+                let rect = Rect::from_min_size(min, Vec2::splat(d));
+                let ty = reroute_type(&state.doc, registry, n.id)
+                    .unwrap_or(PinType::Domain(String::new()));
+                let c = Pos2::new(min.x + d * 0.5, min.y + d * 0.5);
+                let pin = |slug: &str, output: bool, x: f32| PinGeom {
+                    slug: slug.to_string(),
+                    label: String::new(),
+                    ty: ty.clone(),
+                    output,
+                    row: 0,
+                    wire_anchor: Pos2::new(x, c.y),
+                    dot_center: c,
+                    connected: state.doc.edges.iter().any(|e| {
+                        if output {
+                            e.from_node == n.id && e.from_pin == slug
+                        } else {
+                            e.to_node == n.id && e.to_pin == slug
+                        }
+                    }),
+                    inline: None,
+                    ghost: false,
+                };
+                return NodeGeom {
+                    id: n.id,
+                    rect,
+                    title: String::new(),
+                    tag: String::new(),
+                    category: None,
+                    tint: n.tint,
+                    missing: false,
+                    errored: errors.nodes.contains(&n.id),
+                    reroute: true,
+                    pins: vec![
+                        pin(REROUTE_IN, false, min.x),
+                        pin(REROUTE_OUT, true, min.x + d),
+                    ],
+                };
+            }
             #[allow(clippy::type_complexity)]
             let (title, category, missing, inputs, outputs): (
                 String,
@@ -539,9 +663,18 @@ fn build_geoms(
                 n.properties.get(slug).map(InlineKind::of)
             };
 
-            let rows = inputs.len().max(outputs.len()).max(1);
+            // Ghost rows for pins an edge names but the descriptor no longer
+            // declares. They append after the real pins on their side, so an
+            // otherwise-orphaned wire has somewhere to land.
+            let ghosts = errors.ghosts_for(n.id);
+            let ghost_in = ghosts.iter().filter(|(_, o)| !*o).count();
+            let ghost_out = ghosts.iter().filter(|(_, o)| *o).count();
+
+            let rows = (inputs.len() + ghost_in)
+                .max(outputs.len() + ghost_out)
+                .max(1);
             let mut content_w: f32 = header_w;
-            for i in 0..rows {
+            for i in 0..rows.min(inputs.len().max(outputs.len()).max(1)) {
                 let left = inputs
                     .get(i)
                     .map(|(slug, label, _)| {
@@ -572,6 +705,7 @@ fn build_geoms(
             let row_y = |i: usize| min.y + m.header_h + i as f32 * m.row_h + m.row_h * 0.5;
 
             let mut pins = Vec::new();
+            let (in_count, out_count) = (inputs.len(), outputs.len());
             for (i, (slug, label, ty)) in inputs.into_iter().enumerate() {
                 let y = row_y(i);
                 let inline = inline_of(&slug);
@@ -589,6 +723,7 @@ fn build_geoms(
                     output: false,
                     row: i,
                     inline,
+                    ghost: false,
                 });
             }
             for (i, (slug, label, ty)) in outputs.into_iter().enumerate() {
@@ -607,7 +742,34 @@ fn build_geoms(
                     output: true,
                     row: i,
                     inline: None,
+                    ghost: false,
                 });
+            }
+            // Ghost rows last, one per side, continuing that side's rows.
+            let (mut gi, mut go) = (in_count, out_count);
+            for (slug, output) in ghosts {
+                let row = if *output { &mut go } else { &mut gi };
+                let y = row_y(*row);
+                let x = if *output { min.x + width } else { min.x };
+                let dot = if *output {
+                    min.x + width - m.pin_inset
+                } else {
+                    min.x + m.pin_inset
+                };
+                pins.push(PinGeom {
+                    slug: slug.clone(),
+                    label: slug.clone(),
+                    // A ghost has no declared type — neutral, never a guess.
+                    ty: PinType::Domain(String::new()),
+                    output: *output,
+                    row: *row,
+                    wire_anchor: Pos2::new(x, y),
+                    dot_center: Pos2::new(dot, y),
+                    connected: true,
+                    inline: None,
+                    ghost: true,
+                });
+                *row += 1;
             }
             NodeGeom {
                 id: n.id,
@@ -617,6 +779,8 @@ fn build_geoms(
                 category,
                 tint: n.tint,
                 missing,
+                errored: errors.nodes.contains(&n.id),
+                reroute: is_reroute,
                 pins,
             }
         })
@@ -631,6 +795,13 @@ fn build_geoms(
 /// hues exceed comfortable deuteranopia separation, so shape + label carry
 /// the difference where hue cannot.
 fn draw_pin(p: &mut Painter, pin: &PinGeom, c: Pos2, zoom: f32, m: &GraphMetrics, st: &Style, reg: &NodeRegistry) {
+    if pin.ghost {
+        // A ghost has no declared type, so it draws neutral and dashed — the
+        // wire lands somewhere, and the row says plainly that it should not.
+        let r = m.pin_r * zoom;
+        dashed_circle(p, c, r, (m.ring_w * zoom).max(1.0), st.palette.text_disabled);
+        return;
+    }
     let col = pin_color(Some(reg), &pin.ty);
     let filled = pin.connected;
     let ring = (m.ring_w * zoom).max(1.0);
@@ -681,6 +852,37 @@ fn draw_pin(p: &mut Painter, pin: &PinGeom, c: Pos2, zoom: f32, m: &GraphMetrics
                 p.circle_stroke(c, r - ring * 0.5, ring, col);
             }
         }
+    }
+}
+
+/// A dashed ring — the ghost-row marker. crusty has no dash support, so the
+/// segments are emitted directly.
+fn dashed_circle(p: &mut Painter, c: Pos2, r: f32, w: f32, color: Color) {
+    const SEGS: usize = 12;
+    for i in (0..SEGS).step_by(2) {
+        let a0 = i as f32 / SEGS as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / SEGS as f32 * std::f32::consts::TAU;
+        p.line_segment(
+            Pos2::new(c.x + r * a0.cos(), c.y + r * a0.sin()),
+            Pos2::new(c.x + r * a1.cos(), c.y + r * a1.sin()),
+            w,
+            color,
+        );
+    }
+}
+
+/// A dashed horizontal rule under a ghost row.
+fn dashed_line(p: &mut Painter, a: Pos2, b: Pos2, w: f32, color: Color) {
+    let n = ((b.x - a.x).abs() / (w * 4.0).max(2.0)).clamp(2.0, 64.0) as usize;
+    for i in (0..n).step_by(2) {
+        let t0 = i as f32 / n as f32;
+        let t1 = ((i + 1) as f32 / n as f32).min(1.0);
+        p.line_segment(
+            Pos2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0),
+            Pos2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1),
+            w,
+            color,
+        );
     }
 }
 
@@ -785,6 +987,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
     let mut annotation_menu_at: Option<Pos2> = None;
+    let mut wire_menu_at: Option<Pos2> = None;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
@@ -795,6 +998,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             resolver,
             &mut menu_open_at,
             &mut annotation_menu_at,
+            &mut wire_menu_at,
             open_subgraph,
             selection_outline,
             &wire_prefs,
@@ -812,8 +1016,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 
     create_menu(ui, state, registry, subgraph_assets, menu_open_at);
     annotation_menu(ui, state, registry, annotation_menu_at);
+    wire_menu(ui, state, registry, wire_menu_at);
     edit_popup(ui, state, registry, out.rect);
-    error_overlay(ui, out.rect, &state.errors, &state.ref_errors);
+
 }
 
 fn handle_panel_keys(
@@ -876,6 +1081,7 @@ fn draw_and_interact(
     resolver: &dyn GraphResolver,
     menu_open_at: &mut Option<Pos2>,
     annotation_menu_at: &mut Option<Pos2>,
+    wire_menu_at: &mut Option<Pos2>,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
@@ -888,13 +1094,16 @@ fn draw_and_interact(
     let lod = ZoomLod::from_zoom(zoom);
     let m = GraphMetrics::new(&st);
     let vis = scope.visible_world_rect();
+    // Errors are resolved to their anchors before geometry, because ghost
+    // rows change a node's shape.
+    let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
     let geoms = {
         let mut p = ui.painter();
-        build_geoms(state, registry, resolver, &m, &st, &mut p)
+        build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
     };
 
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
-    let wires = build_wires(state, &geoms, &node_rects, wire_prefs, scope, vis);
+    let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis);
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
 
     draw_grid(ui, scope, &st, vis, zoom);
@@ -910,6 +1119,7 @@ fn draw_and_interact(
         state,
         registry,
         &geoms,
+        &errors,
         &st,
         &m,
         vis,
@@ -1282,6 +1492,7 @@ fn draw_and_interact(
                 ty: src_ty.clone().unwrap_or(PinType::Exec),
                 screen: wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope),
                 selected: false,
+                mismatched: false,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
@@ -1333,12 +1544,31 @@ fn draw_and_interact(
         }
     }
 
+    // Validation chrome last, so it paints over the canvas it describes.
+    error_chip(
+        ui,
+        scope.rect(),
+        state,
+        &errors,
+        &geoms,
+        scope.rect().size(),
+        zoom_min,
+        zoom_max,
+        frame_request,
+        open_subgraph,
+    );
+
     // Right-click: an annotation gets its own menu (tint / collapse / anchor
     // / delete); empty canvas gets the create menu.
     if right_pressed {
         if let Some(pw) = pointer_world {
             let on_annotation = annotation_at(state, &m, pw);
-            if let Some(target) = on_annotation {
+            if let Some(i) = hovered_wire {
+                // Right-clicking a wire offers the one thing that belongs to
+                // a wire: splitting it.
+                state.wire_menu = state.doc.edges.get(i).cloned().map(|e| (e, [pw.x, pw.y]));
+                *wire_menu_at = ui.ctx().input.pointer_pos;
+            } else if let Some(target) = on_annotation {
                 match target {
                     Annotation::Comment(i) => {
                         state.clear_selection();
@@ -1353,7 +1583,6 @@ fn draw_and_interact(
                 *annotation_menu_at = ui.ctx().input.pointer_pos;
             } else if pin_under(&geoms, pw, hit_w).is_none()
                 && node_under(&geoms, pw, lod, &m).is_none()
-                && hovered_wire.is_none()
             {
                 state.create_menu_world = Some([pw.x, pw.y]);
                 state.create_menu_search.clear();
@@ -1402,6 +1631,34 @@ fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option
         }
     }
     None
+}
+
+/// The wire context menu — a wire owns exactly one action: splitting it with
+/// a reroute at the click point. Breaking is Delete (and, from Phase 6, the
+/// ⌥-click and slash-cut gestures).
+fn wire_menu(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    open_at: Option<Pos2>,
+) {
+    let Some((edge, pos)) = state.wire_menu.clone() else {
+        return;
+    };
+    let mut add = false;
+    crusty_gui::widgets::context_menu_at(ui, "graph_wire_menu", open_at, |ui| {
+        ui.menu_group_header("Wire");
+        if ui.menu_item("Add reroute") {
+            add = true;
+        }
+    });
+    if add {
+        // Center the dot on the click point rather than starting it there.
+        let st = ui.style();
+        let d = GraphMetrics::new(&st).reroute_d() * 0.5;
+        state.insert_reroute(&edge, [pos[0] - d, pos[1] - d], registry);
+        state.wire_menu = None;
+    }
 }
 
 /// Context menu for the annotation under the pointer: the 12 deep-tone
@@ -2147,6 +2404,8 @@ struct WireGeom {
     /// Routed + rounded polyline, already in screen space.
     screen: Vec<Pos2>,
     selected: bool,
+    /// `TypeMismatch` — the only error that colors a wire.
+    mismatched: bool,
 }
 
 impl WireGeom {
@@ -2167,10 +2426,12 @@ impl WireGeom {
 /// Route every visible edge once per frame. Routing happens in **graph
 /// space** — the router never sees zoom — and only the finished polyline is
 /// transformed, which is what keeps a wire's shape identical at 40% and 200%.
+#[allow(clippy::too_many_arguments)]
 fn build_wires(
     state: &GraphEditorState,
     geoms: &[NodeGeom],
     node_rects: &[Rect],
+    errors: &ErrorIndex,
     prefs: &WirePrefs,
     scope: &CanvasScope,
     vis: Rect,
@@ -2215,6 +2476,7 @@ fn build_wires(
             ty,
             screen: wire_screen_points(a, b, prefs, &meta, scope),
             selected: state.selected_edges.contains(e),
+            mismatched: errors.edges.contains(e),
         });
     }
     out
@@ -2261,9 +2523,14 @@ fn draw_wires(
                 .iter()
                 .filter(|w| w.selected || hovered == Some(w.edge_index)),
         );
+    let status = Palette::invariant_status();
     for w in order {
         let is_hovered = hovered == Some(w.edge_index);
-        let color = if w.selected {
+        // TypeMismatch is the ONLY error that colors a wire, and it outranks
+        // hover — a broken wire should not look merely interesting.
+        let color = if w.mismatched {
+            status.error
+        } else if w.selected {
             selection_outline
         } else if is_hovered {
             st.palette.focus_ring
@@ -2273,7 +2540,50 @@ fn draw_wires(
         // L4 collapses every wire to a hairline.
         let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
         stroke_wire(&mut p, w, prefs, scope, width, color);
+        if w.mismatched && lod.rows() {
+            if let Some(mid) = arc_length_midpoint(&w.screen) {
+                let r = width * 2.2;
+                p.line_segment(
+                    Pos2::new(mid.x - r, mid.y - r),
+                    Pos2::new(mid.x + r, mid.y + r),
+                    width,
+                    status.error,
+                );
+                p.line_segment(
+                    Pos2::new(mid.x + r, mid.y - r),
+                    Pos2::new(mid.x - r, mid.y + r),
+                    width,
+                    status.error,
+                );
+            }
+        }
     }
+}
+
+/// The point halfway along a polyline **by arc length**, not the midpoint of
+/// its endpoints — on an L-shaped route the latter is off the wire entirely.
+fn arc_length_midpoint(pts: &[Pos2]) -> Option<Pos2> {
+    if pts.len() < 2 {
+        return pts.first().copied();
+    }
+    let total: f32 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+    if total <= f32::EPSILON {
+        return pts.first().copied();
+    }
+    let half = total * 0.5;
+    let mut walked = 0.0;
+    for w in pts.windows(2) {
+        let seg = (w[1] - w[0]).length();
+        if walked + seg >= half {
+            let t = if seg <= f32::EPSILON { 0.0 } else { (half - walked) / seg };
+            return Some(Pos2::new(
+                w[0].x + (w[1].x - w[0].x) * t,
+                w[0].y + (w[1].y - w[0].y) * t,
+            ));
+        }
+        walked += seg;
+    }
+    pts.last().copied()
 }
 
 /// Stroke one wire: a single cubic for Spline, a single polyline for the
@@ -2323,6 +2633,7 @@ fn draw_nodes(
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
     geoms: &[NodeGeom],
+    errors: &ErrorIndex,
     st: &Style,
     m: &GraphMetrics,
     vis: Rect,
@@ -2348,6 +2659,32 @@ fn draw_nodes(
         let edge_col = if g.missing { status.error } else { g.edge_color() };
 
         let mut p = ui.painter();
+
+        // A reroute is drawn as what it is: a typed dot on the wire.
+        if g.reroute {
+            let c = scope.world_to_screen(g.rect.center());
+            let r = m.reroute_d() * 0.5 * zoom;
+            let col = if g.errored {
+                status.error
+            } else {
+                pin_color(Some(registry), &g.pins[0].ty)
+            };
+            p.circle_filled(c, r, col);
+            p.circle_stroke(c, r, m.border, st.palette.stroke);
+            if selected {
+                p.circle_stroke(
+                    c,
+                    r + m.edge,
+                    m.edge,
+                    selection_outline.with_alpha(if state.primary == Some(g.id) {
+                        1.0
+                    } else {
+                        SELECTION_REST_ALPHA
+                    }),
+                );
+            }
+            continue;
+        }
 
         // L4: the node is a bar of its type color, nothing more.
         if lod.bar_only() {
@@ -2380,12 +2717,13 @@ fn draw_nodes(
             Rounding { nw: round.nw, ne: round.ne, sw: 0.0, se: 0.0 },
             edge_col,
         );
-        // 1px border — hairline, never scaled away.
+        // 1px border — hairline, never scaled away. Status color reaches the
+        // border on a node: there is no row to tint.
         p.rect_stroke(
             srect,
             round,
             m.border,
-            if g.missing { status.error } else { st.palette.stroke },
+            if g.missing || g.errored { status.error } else { st.palette.stroke },
         );
 
         // Selection: the node keeps its fill and gains an offset outline in
@@ -2407,8 +2745,30 @@ fn draw_nodes(
 
         if lod.glyphs() {
             let title_px = st.fonts.body * zoom;
+            // Badges never stack: one glyph in the header's left gutter, by
+            // precedence. Only errors exist so far — breakpoints and warnings
+            // join the ladder when they land.
+            let gutter = if g.errored || g.missing {
+                let r = m.pin_r * zoom * 0.8;
+                let c = Pos2::new(
+                    srect.min.x + m.pad_x * zoom + r,
+                    srect.min.y + m.header_h * zoom * 0.5,
+                );
+                p.circle_filled(c, r, status.error);
+                p.text(
+                    Pos2::new(c.x - title_px * 0.16, c.y - title_px * 0.52),
+                    "!",
+                    title_px * 0.9,
+                    st.palette.elevated,
+                    None,
+                );
+                r * 2.0 + m.label_gap * zoom
+            } else {
+                0.0
+            };
             p.text(
-                srect.min + Vec2::new(m.pad_x * zoom, (m.header_h * zoom - title_px) * 0.5),
+                srect.min
+                    + Vec2::new(m.pad_x * zoom + gutter, (m.header_h * zoom - title_px) * 0.5),
                 &g.title,
                 title_px,
                 st.palette.text,
@@ -2440,6 +2800,25 @@ fn draw_nodes(
         for pin in &g.pins {
             let c = scope.world_to_screen(pin.dot_center);
             draw_pin(&mut p, pin, c, zoom, m, st, registry);
+            // Pin-level errors ring the pin itself.
+            if errors
+                .pins
+                .contains(&(g.id, pin.slug.clone(), pin.output))
+            {
+                p.circle_stroke(c, m.pin_r * zoom * 1.8, m.border, status.error);
+            }
+            // A ghost row gets a dashed rule so it reads as absent, not as a
+            // pin someone forgot to label.
+            if pin.ghost {
+                let y = c.y + m.row_h * zoom * 0.45;
+                dashed_line(
+                    &mut p,
+                    Pos2::new(srect.min.x + m.pad_x * zoom, y),
+                    Pos2::new(srect.max.x - m.pad_x * zoom, y),
+                    m.border,
+                    st.palette.text_disabled,
+                );
+            }
             if !lod.pin_labels() {
                 continue;
             }
@@ -2460,7 +2839,11 @@ fn draw_nodes(
                         Pos2::new(x, c.y - label_px * 0.5),
                         &label,
                         label_px,
-                        st.palette.text_secondary,
+                        if pin.ghost {
+                            st.palette.text_disabled
+                        } else {
+                            st.palette.text_secondary
+                        },
                         None,
                     )
                     .x;
@@ -3122,52 +3505,206 @@ fn create_menu(
     }
 }
 
-/// Compact validation summary pinned to the canvas's top-left corner. Shows
-/// doc-local and cross-asset (subgraph) errors together.
-fn error_overlay(ui: &mut Ui, rect: Rect, doc_errors: &[GraphError], ref_errors: &[GraphError]) {
-    let total = doc_errors.len() + ref_errors.len();
-    if total == 0 {
+/// The validation **count chip**, pinned to the canvas' top-left corner.
+///
+/// Errors are anchored to the thing that is wrong — node border + badge, pin
+/// ring, or the wire — so the corner is demoted to a count, per the spec.
+/// Clicking the count cycles the anchored errors (framing and selecting each
+/// anchor, which is the mechanism `F8` will reuse); the `n docs` segment
+/// opens the compiler rows for the errors nothing on the canvas can own.
+///
+/// Returns a request to open another graph tab, if a cycle breadcrumb was
+/// clicked in the popover.
+#[allow(clippy::too_many_arguments)]
+fn error_chip(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &mut GraphEditorState,
+    errors: &ErrorIndex,
+    geoms: &[NodeGeom],
+    viewport: Vec2,
+    zoom_min: f32,
+    zoom_max: f32,
+    frame_request: &mut Option<CanvasView>,
+    open_subgraph: &mut Option<String>,
+) {
+    if errors.is_empty() {
+        state.error_popover = false;
         return;
     }
     let st = ui.style();
     let status = Palette::invariant_status();
-    let font = st.fonts.small;
     let pad = st.spacing.padding * 0.75;
-    const MAX_LINES: usize = 3;
-    let header = format!(
-        "{} validation error{}",
-        total,
-        if total == 1 { "" } else { "s" }
+    let font = st.fonts.small;
+    let h = st.metrics.control_height;
+
+    let count = format!("{}", errors.total());
+    let mut cw = ui.painter().measure_text_family(&count, font, None, FontFamily::Mono).x;
+    cw += pad * 2.0 + font;
+    let chip = Rect::from_min_size(
+        rect.min + Vec2::splat(st.spacing.padding),
+        Vec2::new(cw, h),
     );
-    let mut lines: Vec<String> = doc_errors
-        .iter()
-        .chain(ref_errors.iter())
-        .take(MAX_LINES)
-        .map(|e| format!("{e}"))
-        .collect();
-    if total > MAX_LINES {
-        lines.push(format!("+{} more\u{2026}", total - MAX_LINES));
+    let id = ui.alloc_id("graph_error_chip");
+    let resp = ui.interact(id, chip);
+    {
+        let mut p = ui.painter();
+        // Count chips are filters: status tint fill, status border, a dot.
+        p.rect_filled(chip, st.rounding.small, status.error.with_alpha(0.13));
+        p.rect_stroke(chip, st.rounding.small, st.metrics.border, status.error);
+        p.circle_filled(
+            Pos2::new(chip.min.x + pad, chip.center().y),
+            font * 0.22,
+            status.error,
+        );
+        p.text_family(
+            Pos2::new(chip.min.x + pad + font * 0.5, chip.center().y - font * 0.62),
+            &count,
+            font,
+            status.error,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    if resp.hovered {
+        ui.tooltip_for(chip, "Click to cycle validation errors");
+    }
+    if resp.clicked {
+        cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request);
     }
 
-    let mut p = ui.painter();
-    let mut w = p.measure_text(&header, font, None).x;
-    for l in &lines {
-        w = w.max(p.measure_text(l, font, None).x);
+    // Doc-level errors have no canvas anchor, so they get compiler rows.
+    if errors.document.is_empty() {
+        state.error_popover = false;
+        return;
     }
-    let line_h = font * 1.35;
-    let box_h = pad * 2.0 + line_h * (lines.len() as f32 + 1.0);
-    let box_rect = Rect::from_min_size(
-        rect.min + Vec2::splat(st.spacing.padding),
-        Vec2::new(w + pad * 2.0, box_h),
+    let label = format!("{} doc", errors.document.len());
+    let lw = ui.painter().measure_text_family(&label, font, None, FontFamily::Mono).x
+        + pad * 2.0;
+    let more = Rect::from_min_size(
+        Pos2::new(chip.max.x + st.spacing.item, chip.min.y),
+        Vec2::new(lw, h),
     );
-    p.rect_filled(box_rect, st.rounding.small, st.palette.elevated);
-    p.rect_stroke(box_rect, st.rounding.small, st.metrics.border, status.error);
-    let mut y = box_rect.min.y + pad;
-    p.text(Pos2::new(box_rect.min.x + pad, y), &header, font, status.error, None);
-    y += line_h;
-    for l in &lines {
-        p.text(Pos2::new(box_rect.min.x + pad, y), l, font, st.palette.text_secondary, None);
+    let mid = ui.alloc_id("graph_error_docs");
+    let mresp = ui.interact(mid, more);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(more, st.rounding.small, st.palette.elevated);
+        p.rect_stroke(more, st.rounding.small, st.metrics.border, st.palette.stroke_strong);
+        p.text_family(
+            Pos2::new(more.min.x + pad, more.center().y - font * 0.62),
+            &label,
+            font,
+            st.palette.text_secondary,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    if mresp.clicked {
+        state.error_popover = !state.error_popover;
+    }
+    if !state.error_popover {
+        return;
+    }
+
+    // Compiler rows. Document errors only — reference errors already drew on
+    // the node that pulled them in, and the two stay visually separate.
+    let mut rows: Vec<String> = Vec::new();
+    for e in &errors.document {
+        rows.push(format!("{e}"));
+    }
+    let mut w: f32 = 0.0;
+    for r in &rows {
+        w = w.max(ui.painter().measure_text_family(r, font, None, FontFamily::Mono).x);
+    }
+    let line_h = font * 1.7;
+    let panel = Rect::from_min_size(
+        Pos2::new(chip.min.x, more.max.y + st.spacing.item),
+        Vec2::new(w + pad * 2.0, line_h * rows.len() as f32 + pad * 2.0),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut y = panel.min.y + pad;
+    for (i, e) in errors.document.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(panel.min.x + pad, y),
+            Vec2::new(panel.width() - pad * 2.0, line_h),
+        );
+        // A cycle is a clickable mono breadcrumb: each hop opens that graph.
+        if let Some(chain) = e.cycle_chain() {
+            let rid = ui.alloc_id(("graph_cycle_row", i));
+            let r = ui.interact(rid, row);
+            if r.hovered {
+                ui.painter().rect_filled(row, st.rounding.small, st.palette.hover);
+            }
+            if r.clicked {
+                if let Some(first) = chain.first() {
+                    *open_subgraph = Some(first.clone());
+                }
+            }
+        }
+        ui.painter().text_family(
+            Pos2::new(row.min.x, row.center().y - font * 0.62),
+            &rows[i],
+            font,
+            if e.cycle_chain().is_some() {
+                st.palette.accent_active
+            } else {
+                st.palette.text_secondary
+            },
+            None,
+            FontFamily::Mono,
+        );
         y += line_h;
+    }
+}
+
+/// Step to the next anchored error, selecting and framing whatever it is
+/// about. This is the mechanism `F8` / `⇧F8` will drive.
+fn cycle_error(
+    state: &mut GraphEditorState,
+    errors: &ErrorIndex,
+    geoms: &[NodeGeom],
+    viewport: Vec2,
+    zoom_min: f32,
+    zoom_max: f32,
+    frame_request: &mut Option<CanvasView>,
+) {
+    if errors.ordered.is_empty() {
+        return;
+    }
+    // Skip the doc-level ones: there is nothing on the canvas to frame.
+    let anchored: Vec<&GraphError> = errors
+        .ordered
+        .iter()
+        .filter(|e| e.anchor() != ErrorAnchor::Document)
+        .collect();
+    if anchored.is_empty() {
+        state.error_popover = true;
+        return;
+    }
+    let i = state.error_cursor % anchored.len();
+    state.error_cursor = (state.error_cursor + 1) % anchored.len();
+
+    let node = match anchored[i].anchor() {
+        ErrorAnchor::Node(id) => Some(id),
+        ErrorAnchor::Pin { node, .. } | ErrorAnchor::GhostPin { node, .. } => Some(node),
+        ErrorAnchor::Edge(edge) => {
+            state.selected_edges.clear();
+            state.selected_edges.insert(edge.clone());
+            Some(edge.to_node)
+        }
+        ErrorAnchor::Document => None,
+    };
+    let Some(node) = node else { return };
+    if !matches!(anchored[i].anchor(), ErrorAnchor::Edge(_)) {
+        state.select_only(node);
+    }
+    if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == node)) {
+        *frame_request = Some(frame_view(mn, mx, viewport, zoom_min, zoom_max));
     }
 }
 
@@ -3259,6 +3796,7 @@ mod tests {
             ty,
             output: false,
             row: 0,
+            ghost: false,
             wire_anchor: Pos2::ZERO,
             dot_center: Pos2::ZERO,
             connected: false,
@@ -3312,6 +3850,8 @@ mod tests {
             category: Some("Math".into()),
             tint: None,
             missing: false,
+            errored: false,
+            reroute: false,
             pins: vec![],
         };
         assert_eq!(g.body_rect(ZoomLod::L2, &m).height(), 120.0);
@@ -3330,6 +3870,8 @@ mod tests {
             category: Some("Math".into()),
             tint: None,
             missing: false,
+            errored: false,
+            reroute: false,
             pins: vec![],
         };
         assert_eq!(g.edge_color(), category_color("Math"));
