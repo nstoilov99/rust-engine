@@ -14,7 +14,8 @@ use crusty_gui::math::Vec2;
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
-    endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge, GraphDoc,
+    endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
+    GraphDoc, IfacePin,
     GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
@@ -384,6 +385,22 @@ fn move_nodes(doc: &mut GraphDoc, ids: &[u64], delta: [f32; 2]) {
     }
 }
 
+/// A slug not already used by `taken`, suffixed `_2`, `_3`, ... A fan-out
+/// from one source pin collapses to one interface pin; two *different* pins
+/// that happen to share a slug do not.
+fn uniquify(base: &str, taken: &[IfacePin]) -> String {
+    if !taken.iter().any(|p| p.slug == base) {
+        return base.to_string();
+    }
+    for n in 2..1000u32 {
+        let candidate = format!("{base}_{n}");
+        if !taken.iter().any(|p| p.slug == candidate) {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
 /// Indices of the comments anchored to any of `ids` — the collateral a node
 /// delete has to carry.
 pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
@@ -622,6 +639,53 @@ pub struct GraphEditorState {
     pub error_popover: bool,
     /// Wire whose context menu is open, with the world point clicked.
     pub wire_menu: Option<(Edge, [f32; 2])>,
+    /// View bookmarks, session-only for now (the user-local sidecar that
+    /// persists them across sessions is a later item).
+    pub bookmarks: [Option<CanvasView>; BOOKMARK_SLOTS],
+    /// Next slot `Ctrl+B` will write, cycling 1..=5.
+    pub bookmark_next: usize,
+    /// Nodes a pending purge would remove — the confirm step's payload.
+    pub purge_confirm: Option<Vec<u64>>,
+}
+
+/// How many view bookmarks a graph keeps.
+pub const BOOKMARK_SLOTS: usize = 5;
+
+/// The align & distribute operations offered for 3+ selected nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    DistributeHorizontally,
+    DistributeVertically,
+}
+
+impl AlignMode {
+    pub const ALL: [AlignMode; 6] = [
+        AlignMode::Left,
+        AlignMode::Right,
+        AlignMode::Top,
+        AlignMode::Bottom,
+        AlignMode::DistributeHorizontally,
+        AlignMode::DistributeVertically,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AlignMode::Left => "Align Left",
+            AlignMode::Right => "Align Right",
+            AlignMode::Top => "Align Top",
+            AlignMode::Bottom => "Align Bottom",
+            AlignMode::DistributeHorizontally => "Distribute Horizontally",
+            AlignMode::DistributeVertically => "Distribute Vertically",
+        }
+    }
+
+    fn horizontal(self) -> bool {
+        matches!(self, AlignMode::DistributeHorizontally)
+    }
 }
 
 /// Which edge or corner of an annotation a resize drag grabbed.
@@ -784,6 +848,9 @@ impl GraphEditorState {
             error_cursor: 0,
             error_popover: false,
             wire_menu: None,
+            bookmarks: [None; BOOKMARK_SLOTS],
+            bookmark_next: 0,
+            purge_confirm: None,
         })
     }
 
@@ -1299,6 +1366,366 @@ impl GraphEditorState {
         true
     }
 
+    // -- Organization ---------------------------------------------------
+
+    /// Align or evenly distribute the selection. `rects` carries each node's
+    /// *world* rect (`[x, y, w, h]`) because sizes are auto-fitted at draw
+    /// time and the document does not know them.
+    ///
+    /// Recorded as one `Composite` of per-node `MoveNodes` rather than a new
+    /// bulk variant: it reuses the move path verbatim, so anchored notes
+    /// travel with their nodes here exactly as they do on a drag.
+    pub fn align_nodes(
+        &mut self,
+        rects: &[(u64, [f32; 4])],
+        mode: AlignMode,
+        registry: &NodeRegistry,
+    ) {
+        if rects.len() < 3 {
+            return;
+        }
+        let mut deltas: Vec<(u64, [f32; 2])> = Vec::new();
+        match mode {
+            AlignMode::Left => {
+                let x = rects.iter().map(|(_, r)| r[0]).fold(f32::MAX, f32::min);
+                deltas.extend(rects.iter().map(|(id, r)| (*id, [x - r[0], 0.0])));
+            }
+            AlignMode::Right => {
+                let x = rects.iter().map(|(_, r)| r[0] + r[2]).fold(f32::MIN, f32::max);
+                deltas.extend(rects.iter().map(|(id, r)| (*id, [x - (r[0] + r[2]), 0.0])));
+            }
+            AlignMode::Top => {
+                let y = rects.iter().map(|(_, r)| r[1]).fold(f32::MAX, f32::min);
+                deltas.extend(rects.iter().map(|(id, r)| (*id, [0.0, y - r[1]])));
+            }
+            AlignMode::Bottom => {
+                let y = rects.iter().map(|(_, r)| r[1] + r[3]).fold(f32::MIN, f32::max);
+                deltas.extend(rects.iter().map(|(id, r)| (*id, [0.0, y - (r[1] + r[3])])));
+            }
+            AlignMode::DistributeHorizontally | AlignMode::DistributeVertically => {
+                let h = mode.horizontal();
+                // Even *gaps*, not even centers: equal whitespace is what
+                // reads as distributed when the nodes are different sizes.
+                let mut order: Vec<&(u64, [f32; 4])> = rects.iter().collect();
+                order.sort_by(|a, b| {
+                    let (x, y) = if h { (a.1[0], b.1[0]) } else { (a.1[1], b.1[1]) };
+                    x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let first = order[0].1;
+                let last = order[order.len() - 1].1;
+                let (start, end) = if h {
+                    (first[0], last[0] + last[2])
+                } else {
+                    (first[1], last[1] + last[3])
+                };
+                let extent: f32 = order
+                    .iter()
+                    .map(|(_, r)| if h { r[2] } else { r[3] })
+                    .sum();
+                let gap = ((end - start) - extent) / (order.len() - 1) as f32;
+                let mut cursor = start;
+                for (id, r) in &order {
+                    let want = cursor;
+                    let now = if h { r[0] } else { r[1] };
+                    deltas.push((*id, if h { [want - now, 0.0] } else { [0.0, want - now] }));
+                    cursor += (if h { r[2] } else { r[3] }) + gap;
+                }
+            }
+        }
+        let edits: Vec<GraphEdit> = deltas
+            .into_iter()
+            .filter(|(_, d)| d[0].abs() > f32::EPSILON || d[1].abs() > f32::EPSILON)
+            .map(|(id, delta)| GraphEdit::MoveNodes { ids: vec![id], delta })
+            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        let edit = GraphEdit::Composite { label: mode.label().to_string(), edits };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
+    /// Collapse the selection into a new `.subgraph` asset and replace it
+    /// with a single subgraph node wired to the same neighbours.
+    ///
+    /// **Path convention** (prompt-free by design — naming a thing is a
+    /// separate decision from making it): the asset lands in a `subgraphs/`
+    /// folder beside the host graph, named `<host stem>_<n>.subgraph`, with
+    /// `n` the first free integer from 1. `content/graphs/ai.graph` therefore
+    /// yields `content/graphs/subgraphs/ai_1.subgraph`.
+    ///
+    /// **Interface**: edges crossing the boundary become the interface —
+    /// inbound edges become inputs, outbound become outputs, each slug taken
+    /// from its *source* pin and de-duplicated. Multiple boundary edges from
+    /// one source pin therefore share one interface pin, which is what a fan-
+    /// out means.
+    ///
+    /// **Undo** reverses the host document only; the created asset stays on
+    /// disk. Deleting a file the user may already have opened or edited on an
+    /// undo risks data loss, and an orphaned asset costs nothing.
+    ///
+    /// Returns the content-relative path written, or an error string.
+    pub fn collapse_to_subgraph(
+        &mut self,
+        content_root: &Path,
+        registry: &NodeRegistry,
+    ) -> Result<String, String> {
+        if self.selection.len() < 2 {
+            return Err("select at least two nodes to collapse".into());
+        }
+        let inside = self.selection.clone();
+        let nodes: Vec<NodeInst> = self
+            .doc
+            .nodes
+            .iter()
+            .filter(|n| inside.contains(&n.id))
+            .cloned()
+            .collect();
+
+        // Boundary edges, split by direction. Slugs come from the source pin
+        // and de-duplicate: a fan-out is one interface pin, not three.
+        let mut inputs: Vec<IfacePin> = Vec::new();
+        let mut outputs: Vec<IfacePin> = Vec::new();
+        let mut inbound: Vec<(Edge, String)> = Vec::new();
+        let mut outbound: Vec<(Edge, String)> = Vec::new();
+        for e in &self.doc.edges {
+            let (f_in, t_in) = (inside.contains(&e.from_node), inside.contains(&e.to_node));
+            if f_in == t_in {
+                continue;
+            }
+            let slug = uniquify(&e.from_pin, if f_in { &outputs } else { &inputs });
+            let ty = endpoint_type(&self.doc, registry, e.from_node, &e.from_pin, true)
+                .unwrap_or(crate::engine::node_graph::PinType::Float);
+            let pin = IfacePin { slug: slug.clone(), label: slug.clone(), ty };
+            if f_in {
+                outputs.push(pin);
+                outbound.push((e.clone(), slug));
+            } else {
+                inputs.push(pin);
+                inbound.push((e.clone(), slug));
+            }
+        }
+
+        // The new asset. Internal edges come along; the boundary ones are
+        // replaced by the interface declaration.
+        let sub = GraphDoc {
+            realm: self.doc.realm,
+            nodes: nodes.clone(),
+            edges: self
+                .doc
+                .edges
+                .iter()
+                .filter(|e| inside.contains(&e.from_node) && inside.contains(&e.to_node))
+                .cloned()
+                .collect(),
+            inputs,
+            outputs,
+            ..GraphDoc::default()
+        };
+        let rel = self.next_subgraph_path(content_root);
+        let abs = content_root.join(&rel);
+        if let Some(dir) = abs.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        save_graph(&abs, &sub).map_err(|e| e.to_string())?;
+
+        // Host side, one transaction: the selection and its edges go, a
+        // subgraph node arrives, and the boundary edges reattach to it.
+        let anchor = nodes
+            .iter()
+            .fold([f32::MAX, f32::MAX], |a, n| {
+                [a[0].min(n.position[0]), a[1].min(n.position[1])]
+            });
+        let id = self.doc.next_node_id();
+        let removed_nodes: Vec<(usize, NodeInst)> = self
+            .doc
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| inside.contains(&n.id))
+            .map(|(i, n)| (i, n.clone()))
+            .collect();
+        let removed_edges: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| inside.contains(&e.from_node) || inside.contains(&e.to_node))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        let mut edits = vec![
+            GraphEdit::RemoveNodes {
+                nodes: removed_nodes,
+                edges: removed_edges,
+                comments: anchored_comments(&self.doc, &inside)
+                    .into_iter()
+                    .map(|i| (i, self.doc.comments[i].clone()))
+                    .collect(),
+            },
+            GraphEdit::AddNode(NodeInst {
+                id,
+                type_id: SUBGRAPH_TYPE_ID.to_string(),
+                type_version: 1,
+                position: anchor,
+                properties: Default::default(),
+                subgraph: Some(rel.clone()),
+                tint: None,
+            }),
+        ];
+        for (e, slug) in inbound {
+            edits.push(GraphEdit::Connect(Edge {
+                from_node: e.from_node,
+                from_pin: e.from_pin,
+                to_node: id,
+                to_pin: slug,
+            }));
+        }
+        for (e, slug) in outbound {
+            edits.push(GraphEdit::Connect(Edge {
+                from_node: id,
+                from_pin: slug,
+                to_node: e.to_node,
+                to_pin: e.to_pin,
+            }));
+        }
+        let edit = GraphEdit::Composite {
+            label: "Collapse to Subgraph".to_string(),
+            edits,
+        };
+        edit.apply(&mut self.doc);
+        self.select_only(id);
+        self.commit(edit, registry);
+        Ok(rel)
+    }
+
+    /// First free `subgraphs/<host stem>_<n>.subgraph` beside the host.
+    fn next_subgraph_path(&self, content_root: &Path) -> String {
+        let dir = Path::new(&self.path)
+            .parent()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("{p}/subgraphs"))
+            .unwrap_or_else(|| "subgraphs".to_string());
+        let stem = Path::new(&self.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "graph".to_string());
+        for n in 1..10_000u32 {
+            let rel = format!("{dir}/{stem}_{n}.subgraph");
+            if !content_root.join(&rel).exists() {
+                return rel;
+            }
+        }
+        format!("{dir}/{stem}_overflow.subgraph")
+    }
+
+    /// Store the current view in the next bookmark slot, cycling 1..=5.
+    /// Returns the 1-based slot written.
+    pub fn store_bookmark(&mut self) -> usize {
+        let slot = self.bookmark_next;
+        self.bookmarks[slot] = Some(self.view);
+        self.bookmark_next = (slot + 1) % BOOKMARK_SLOTS;
+        slot + 1
+    }
+
+    /// Recall a 1-based bookmark slot. `false` when the slot is empty.
+    pub fn recall_bookmark(&mut self, slot: usize) -> bool {
+        let Some(v) = slot
+            .checked_sub(1)
+            .and_then(|i| self.bookmarks.get(i))
+            .copied()
+            .flatten()
+        else {
+            return false;
+        };
+        self.view = v;
+        true
+    }
+
+    /// Nodes with no path to any impure (side-effecting) node — the ones a
+    /// purge would remove.
+    ///
+    /// Reachability runs **backwards** from every impure node over both exec
+    /// and data edges: a node earns its place by feeding something that acts.
+    /// Subgraph instances count as impure (their contents are opaque here, so
+    /// assuming they act is the safe direction); reroutes never seed, they
+    /// only pass reachability along. A graph with no impure nodes at all is
+    /// pure computation with no output — there is nothing to reach, so the
+    /// purge is a no-op rather than a wipe.
+    pub fn unused_nodes(&self, registry: &NodeRegistry) -> Vec<u64> {
+        let seeds: BTreeSet<u64> = self
+            .doc
+            .nodes
+            .iter()
+            .filter(|n| {
+                if n.type_id == SUBGRAPH_TYPE_ID {
+                    return true;
+                }
+                if n.type_id == REROUTE_TYPE_ID {
+                    return false;
+                }
+                // An unregistered type is not evidence of uselessness.
+                registry.get(&n.type_id).map(|d| !d.pure).unwrap_or(true)
+            })
+            .map(|n| n.id)
+            .collect();
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+        let mut reached = seeds.clone();
+        let mut frontier: Vec<u64> = seeds.into_iter().collect();
+        while let Some(at) = frontier.pop() {
+            for e in self.doc.edges.iter().filter(|e| e.to_node == at) {
+                if reached.insert(e.from_node) {
+                    frontier.push(e.from_node);
+                }
+            }
+        }
+        self.doc
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .filter(|id| !reached.contains(id))
+            .collect()
+    }
+
+    /// Remove `ids` and their incident edges as one transaction.
+    pub fn purge_nodes(&mut self, ids: &[u64], registry: &NodeRegistry) {
+        let set: BTreeSet<u64> = ids.iter().copied().collect();
+        if set.is_empty() {
+            return;
+        }
+        self.cancel_interactions();
+        let nodes: Vec<(usize, NodeInst)> = self
+            .doc
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| set.contains(&n.id))
+            .map(|(i, n)| (i, n.clone()))
+            .collect();
+        let edges: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| set.contains(&e.from_node) || set.contains(&e.to_node))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        let comments: Vec<(usize, CommentBox)> = anchored_comments(&self.doc, &set)
+            .into_iter()
+            .map(|i| (i, self.doc.comments[i].clone()))
+            .collect();
+        let n = nodes.len();
+        let edit = GraphEdit::Composite {
+            label: format!("Purge {n} Node{}", if n == 1 { "" } else { "s" }),
+            edits: vec![GraphEdit::RemoveNodes { nodes, edges, comments }],
+        };
+        edit.apply(&mut self.doc);
+        self.selection.retain(|id| !set.contains(id));
+        self.commit(edit, registry);
+    }
+
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
     pub fn cancel_interactions(&mut self) {
@@ -1459,6 +1886,7 @@ pub fn prop_display(v: &PropValue) -> String {
 mod tests {
     use super::*;
     use crate::engine::node_graph::doc::GraphDoc;
+    use crate::engine::node_graph::NodeDescriptor;
 
     fn node(id: u64, pos: [f32; 2]) -> NodeInst {
         NodeInst {
@@ -1813,6 +2241,235 @@ mod tests {
         assert_eq!(doc, base, "reverse order restores exactly");
     }
 
+    /// Align snaps every node to the extreme edge; distribute leaves equal
+    /// *gaps* (not equal centers) and never moves the two outer nodes.
+    #[test]
+    fn align_and_distribute_are_one_undoable_gesture() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![
+            node(0, [0.0, 0.0]),
+            node(1, [50.0, 30.0]),
+            node(2, [200.0, 90.0]),
+        ];
+        st.selection = [0u64, 1, 2].into_iter().collect();
+        let before = st.doc.clone();
+        // Deliberately different widths, so "even gaps" and "even centers"
+        // would disagree.
+        let rects = vec![
+            (0u64, [0.0f32, 0.0, 100.0, 40.0]),
+            (1, [50.0, 30.0, 60.0, 40.0]),
+            (2, [200.0, 90.0, 140.0, 40.0]),
+        ];
+
+        st.align_nodes(&rects, AlignMode::Left, &reg);
+        assert!(st.doc.nodes.iter().all(|n| n.position[0] == 0.0));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Align Left"));
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture, one undo entry");
+
+        st.align_nodes(&rects, AlignMode::Bottom, &reg);
+        // Bottom edge = max(y + h) = 130; each node's y becomes 130 - h.
+        assert!(st.doc.nodes.iter().all(|n| (n.position[1] - 90.0).abs() < 1e-3));
+        st.undo(&reg);
+
+        st.align_nodes(&rects, AlignMode::DistributeHorizontally, &reg);
+        let xs: Vec<f32> = st.doc.nodes.iter().map(|n| n.position[0]).collect();
+        // Outer nodes are the span and must not move.
+        assert!((xs[0] - 0.0).abs() < 1e-3);
+        assert!((xs[2] - 200.0).abs() < 1e-3);
+        // Gaps: 0..100, then g, then 60 wide, then g, then 200..340.
+        let g1 = xs[1] - 100.0;
+        let g2 = 200.0 - (xs[1] + 60.0);
+        assert!((g1 - g2).abs() < 1e-3, "gaps uneven: {g1} vs {g2}");
+        st.undo(&reg);
+        assert_eq!(st.doc, before);
+
+        // Fewer than three is not a distribution.
+        st.align_nodes(&rects[..2], AlignMode::Left, &reg);
+        assert!(!st.stack.can_undo());
+    }
+
+    /// Bookmarks cycle 1..=5 and recall only what was stored.
+    #[test]
+    fn bookmarks_cycle_and_recall() {
+        let mut st = bare_state();
+        assert!(!st.recall_bookmark(1), "an empty slot recalls nothing");
+        assert!(!st.recall_bookmark(99), "an out-of-range slot is not a panic");
+
+        for expect in 1..=BOOKMARK_SLOTS {
+            st.view = CanvasView { pan: Vec2::new(expect as f32 * 10.0, 0.0), zoom: 1.0 };
+            assert_eq!(st.store_bookmark(), expect);
+        }
+        // The sixth store wraps back onto slot 1.
+        st.view = CanvasView { pan: Vec2::new(999.0, 0.0), zoom: 1.0 };
+        assert_eq!(st.store_bookmark(), 1);
+
+        st.view = CanvasView::default();
+        assert!(st.recall_bookmark(3));
+        assert_eq!(st.view.pan.x, 30.0);
+        assert!(st.recall_bookmark(1));
+        assert_eq!(st.view.pan.x, 999.0, "slot 1 was overwritten by the wrap");
+    }
+
+    /// Purge keeps anything feeding a side-effecting node and drops the rest;
+    /// a graph with no impure nodes is left alone rather than wiped.
+    #[test]
+    fn purge_keeps_what_feeds_an_impure_node() {
+        let mut reg = NodeRegistry::new();
+        reg.register(NodeDescriptor {
+            id: "pure_add".into(),
+            name: "Add".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "a",
+                "A",
+                crate::engine::node_graph::PinType::Float,
+            )],
+            outputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "sum",
+                "Sum",
+                crate::engine::node_graph::PinType::Float,
+            )],
+            pure: true,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+        })
+        .unwrap();
+        reg.register(NodeDescriptor {
+            id: "sink".into(),
+            name: "Sink".into(),
+            category: "Gameplay".into(),
+            version: 1,
+            inputs: vec![
+                crate::engine::node_graph::PinDescriptor::new(
+                    "exec_in",
+                    "",
+                    crate::engine::node_graph::PinType::Exec,
+                ),
+                crate::engine::node_graph::PinDescriptor::new(
+                    "a",
+                    "A",
+                    crate::engine::node_graph::PinType::Float,
+                ),
+            ],
+            outputs: vec![],
+            pure: false,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+        })
+        .unwrap();
+
+        let mut st = bare_state();
+        let mk = |id: u64, ty: &str| NodeInst {
+            id,
+            type_id: ty.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+        };
+        // 0 -> 1 -> 2(sink); 3 is an orphan; 4 feeds only the orphan.
+        st.doc.nodes = vec![
+            mk(0, "pure_add"),
+            mk(1, "pure_add"),
+            mk(2, "sink"),
+            mk(3, "pure_add"),
+            mk(4, "pure_add"),
+        ];
+        st.doc.edges = vec![
+            Edge { from_node: 0, from_pin: "sum".into(), to_node: 1, to_pin: "a".into() },
+            Edge { from_node: 1, from_pin: "sum".into(), to_node: 2, to_pin: "a".into() },
+            Edge { from_node: 4, from_pin: "sum".into(), to_node: 3, to_pin: "a".into() },
+        ];
+        let unused = st.unused_nodes(&reg);
+        assert_eq!(unused, vec![3, 4], "only the orphan branch is unused");
+
+        let before = st.doc.clone();
+        st.purge_nodes(&unused, &reg);
+        assert_eq!(st.doc.nodes.len(), 3);
+        assert_eq!(st.doc.edges.len(), 2);
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Purge 2 Nodes"));
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "purge undoes as one transaction");
+
+        // A graph of pure computation has nothing to reach: purging is a
+        // no-op, not a wipe.
+        let mut pure_only = bare_state();
+        pure_only.doc.nodes = vec![mk(0, "pure_add"), mk(1, "pure_add")];
+        assert!(pure_only.unused_nodes(&reg).is_empty());
+    }
+
+    /// Collapse writes the asset, derives the interface from boundary edges,
+    /// and replaces the selection with one wired subgraph node.
+    #[test]
+    fn collapse_to_subgraph_derives_its_interface() {
+        let reg = NodeRegistry::new();
+        let dir = std::env::temp_dir().join("rust_engine_collapse_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("graphs")).unwrap();
+
+        let mut st = bare_state();
+        st.path = "graphs/host.graph".into();
+        st.doc.nodes = vec![
+            node(0, [0.0, 0.0]),   // outside, feeds in
+            node(1, [200.0, 0.0]), // inside
+            node(2, [400.0, 0.0]), // inside
+            node(3, [600.0, 0.0]), // outside, fed from inside
+        ];
+        st.doc.edges = vec![
+            edge(0, 1), // boundary in
+            edge(1, 2), // internal
+            edge(2, 3), // boundary out
+        ];
+        st.selection = [1u64, 2].into_iter().collect();
+        let before = st.doc.clone();
+
+        let rel = st.collapse_to_subgraph(&dir, &reg).expect("collapse");
+        assert_eq!(rel, "graphs/subgraphs/host_1.subgraph");
+        assert!(dir.join(&rel).exists(), "the asset was written");
+
+        // Host: the two nodes became one subgraph node, still wired both ways.
+        assert_eq!(st.doc.nodes.len(), 3);
+        let sub = st.doc.nodes.iter().find(|n| n.subgraph.is_some()).unwrap();
+        assert_eq!(sub.subgraph.as_deref(), Some(rel.as_str()));
+        assert_eq!(st.doc.edges.len(), 2, "one edge in, one out");
+        assert!(st.doc.edges.iter().any(|e| e.from_node == 0 && e.to_node == sub.id));
+        assert!(st.doc.edges.iter().any(|e| e.from_node == sub.id && e.to_node == 3));
+
+        // Asset: internal edge kept, interface derived from the cut edges.
+        let written =
+            crate::engine::node_graph::load_graph(&dir.join(&rel)).expect("reload");
+        assert_eq!(written.nodes.len(), 2);
+        assert_eq!(written.edges.len(), 1, "only the internal edge came along");
+        assert_eq!(written.inputs.len(), 1);
+        assert_eq!(written.outputs.len(), 1);
+        assert_eq!(written.inputs[0].slug, "sum", "input slug comes from its source pin");
+        assert_eq!(written.outputs[0].slug, "sum");
+
+        // Undo restores the host exactly; the asset deliberately stays.
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "the host document reverts");
+        assert!(
+            dir.join(&rel).exists(),
+            "the created asset survives undo on purpose - deleting a file the \
+             user may have opened risks data loss"
+        );
+
+        // A second collapse picks the next free name.
+        st.selection = [1u64, 2].into_iter().collect();
+        let rel2 = st.collapse_to_subgraph(&dir, &reg).expect("second collapse");
+        assert_eq!(rel2, "graphs/subgraphs/host_2.subgraph");
+
+        // Fewer than two nodes is not a subgraph.
+        st.clear_selection();
+        assert!(st.collapse_to_subgraph(&dir, &reg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Group-drag capture selects exactly the nodes whose centers lie inside
     /// the group rect (P7).
     #[test]
@@ -2050,6 +2707,9 @@ mod tests {
             error_cursor: 0,
             error_popover: false,
             wire_menu: None,
+            bookmarks: [None; BOOKMARK_SLOTS],
+            bookmark_next: 0,
+            purge_confirm: None,
         }
     }
 

@@ -24,12 +24,15 @@ use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
 use crusty_gui::paint::Painter;
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
-use crusty_gui::widgets::{Canvas, CanvasScope, CanvasView, Checkbox, DragValue, TextEdit};
+use crusty_gui::widgets::{
+    Button, Canvas, CanvasScope, CanvasView, Checkbox, DragValue, TextEdit,
+};
 
 use super::graph_editor::{
-    anchored_comments, frame_view, nodes_captured_by_rect, prop_display, Annotation,
+    anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
     GraphFragment, MarqueeMode, NodeDrag, ResizeHandle, ANNOTATION_MIN_H, ANNOTATION_MIN_W,
+    BOOKMARK_SLOTS,
 };
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -988,6 +991,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut menu_open_at: Option<Pos2> = None;
     let mut annotation_menu_at: Option<Pos2> = None;
     let mut wire_menu_at: Option<Pos2> = None;
+    let mut collapse_request = false;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
@@ -999,13 +1003,14 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut menu_open_at,
             &mut annotation_menu_at,
             &mut wire_menu_at,
+            &mut collapse_request,
             open_subgraph,
             selection_outline,
             &wire_prefs,
             zoom_min,
             zoom_max,
             &mut frame_request,
-        );
+        )
     });
     // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
     // replaces this frame's pan/zoom rather than fighting the live transform).
@@ -1014,11 +1019,19 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     }
     state.view = view;
 
-    create_menu(ui, state, registry, subgraph_assets, menu_open_at);
+    create_menu(ui, state, registry, &out.inner, subgraph_assets, menu_open_at);
     annotation_menu(ui, state, registry, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
     edit_popup(ui, state, registry, out.rect);
+    purge_confirm(ui, out.rect, state, registry);
 
+    // Ctrl+G writes a new asset, so it runs outside the draw pass.
+    if collapse_request {
+        match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
+            Ok(rel) => println!("graph: collapsed selection into {rel}"),
+            Err(e) => println!("graph: collapse to subgraph failed: {e}"),
+        }
+    }
 }
 
 fn handle_panel_keys(
@@ -1082,13 +1095,14 @@ fn draw_and_interact(
     menu_open_at: &mut Option<Pos2>,
     annotation_menu_at: &mut Option<Pos2>,
     wire_menu_at: &mut Option<Pos2>,
+    collapse_request: &mut bool,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
-) {
+) -> Vec<NodeGeom> {
     let st = ui.style();
     let zoom = scope.zoom();
     let lod = ZoomLod::from_zoom(zoom);
@@ -1610,6 +1624,128 @@ fn draw_and_interact(
                 state.add_comment([pw.x, pw.y], registry);
             }
         }
+
+        let input = &ui.ctx().input;
+        let ctrl_only = input.modifiers == Modifiers::CTRL;
+        let ctrl_alt = input.modifiers == Modifiers::CTRL | Modifiers::ALT;
+        let alt_only = input.modifiers == Modifiers::ALT;
+
+        // Ctrl+G — collapse the selection into a new .subgraph asset.
+        if ctrl_only && input.key_pressed(Key::Char('g')) {
+            *collapse_request = true;
+        }
+        // Ctrl+B — store the view in the next bookmark slot (cycles 1..=5).
+        if ctrl_only && input.key_pressed(Key::Char('b')) {
+            let slot = state.store_bookmark();
+            println!("graph: view bookmarked in slot {slot} (Shift+{slot} to recall)");
+        }
+        // Shift+1..5 — recall. Ctrl+1..5 belongs to the dock's tabs and bare
+        // digits to the renderer's debug views, so Shift is the free row.
+        if shift_only {
+            for slot in 1..=BOOKMARK_SLOTS {
+                let ch = char::from_digit(slot as u32, 10).unwrap_or('1');
+                if input.key_pressed(Key::Char(ch)) && state.recall_bookmark(slot) {
+                    *frame_request = Some(state.view);
+                }
+            }
+        }
+        // Ctrl+Alt+K — purge unused, via a confirm step.
+        if ctrl_alt && input.key_pressed(Key::Char('k')) {
+            let unused = state.unused_nodes(registry);
+            state.purge_confirm = (!unused.is_empty()).then_some(unused);
+            if state.purge_confirm.is_none() {
+                println!("graph: purge unused found nothing to remove");
+            }
+        }
+        // Alt+A — align & distribute, offered through the canvas menu.
+        if alt_only && input.key_pressed(Key::Char('a')) && state.selection.len() >= 3 {
+            if let Some(pw) = pointer_world {
+                state.create_menu_world = Some([pw.x, pw.y]);
+                state.create_menu_search.clear();
+                *menu_open_at = ui.ctx().input.pointer_pos;
+            }
+        }
+    }
+
+    geoms
+}
+
+/// World rects of the selected nodes, for align & distribute — node sizes are
+/// auto-fitted at draw time, so only the geometry pass knows them.
+fn selected_rects(state: &GraphEditorState, geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
+    geoms
+        .iter()
+        .filter(|g| state.selection.contains(&g.id))
+        .map(|g| {
+            (
+                g.id,
+                [g.rect.min.x, g.rect.min.y, g.rect.width(), g.rect.height()],
+            )
+        })
+        .collect()
+}
+
+/// The purge confirm step. Destructive actions confirm with a count; the
+/// filled danger button lives in the dialog, per the design system.
+fn purge_confirm(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState, registry: &NodeRegistry) {
+    let Some(ids) = state.purge_confirm.clone() else {
+        return;
+    };
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let n = ids.len();
+    let text = format!(
+        "Purge {n} unused node{}?",
+        if n == 1 { "" } else { "s" }
+    );
+    let font = st.fonts.body;
+    let w = ui.painter().measure_text(&text, font, None).x + pad * 2.0;
+    let panel = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.min.y + rect.height() * 0.3),
+        Vec2::new(w.max(240.0), st.metrics.control_height * 2.0 + pad * 3.0),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled(rect, Rounding::ZERO, Color::BLACK.with_alpha(st.palette.scrim_alpha));
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+        p.text(
+            Pos2::new(panel.min.x + pad, panel.min.y + pad),
+            &text,
+            font,
+            st.palette.text,
+            None,
+        );
+    }
+    let bw = 84.0;
+    let by = panel.max.y - pad - st.metrics.control_height;
+    let (mut purge, mut cancel) = (false, false);
+    ui.run_at(
+        Rect::from_min_size(
+            Pos2::new(panel.max.x - pad - bw * 2.0 - st.spacing.item, by),
+            Vec2::new(bw * 2.0 + st.spacing.item, st.metrics.control_height),
+        ),
+        Direction::LeftToRight,
+        Id::new("graph_purge_confirm"),
+        UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item },
+        |ui| {
+            cancel = Button::new("Cancel")
+                .exact_size(Vec2::new(bw, st.metrics.control_height))
+                .show(ui)
+                .clicked;
+            purge = Button::new("Purge")
+                .danger()
+                .exact_size(Vec2::new(bw, st.metrics.control_height))
+                .show(ui)
+                .clicked;
+        },
+    );
+    if purge {
+        state.purge_nodes(&ids, registry);
+        println!("graph: purged {n} unused node{}", if n == 1 { "" } else { "s" });
+        state.purge_confirm = None;
+    } else if cancel {
+        state.purge_confirm = None;
     }
 }
 
@@ -3421,11 +3557,15 @@ fn create_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    geoms: &[NodeGeom],
     subgraph_assets: &[String],
     open_at: Option<Pos2>,
 ) {
     let world = state.create_menu_world;
     let has_selection = !state.selection.is_empty();
+    let align_ready = state.selection.len() >= 3;
+    let align_rects = selected_rects(state, geoms);
+    let mut align: Option<AlignMode> = None;
     let search = &mut state.create_menu_search;
     let mut chosen: Option<String> = None;
     let mut chosen_subgraph: Option<String> = None;
@@ -3435,6 +3575,16 @@ fn create_menu(
         ui.menu_group_header("Add Node");
         TextEdit::new(search).hint("Search\u{2026}").width(170.0).show(ui);
         let needle = search.to_lowercase();
+        if needle.is_empty() && align_ready {
+            // Align & distribute only makes sense for 3+ nodes, so the
+            // section is absent rather than dimmed below that.
+            ui.menu_group_header("Align & Distribute");
+            for mode in AlignMode::ALL {
+                if ui.menu_item(mode.label()) {
+                    align = Some(mode);
+                }
+            }
+        }
         if needle.is_empty() {
             ui.menu_group_header("Annotate");
             if ui.menu_item("Add Comment") {
@@ -3488,6 +3638,11 @@ fn create_menu(
             }
         }
     });
+    if let Some(mode) = align {
+        state.align_nodes(&align_rects, mode, registry);
+        state.create_menu_world = None;
+        return;
+    }
     if let Some(pos) = world {
         if let Some(type_id) = chosen {
             state.add_node(&type_id, pos, registry);
