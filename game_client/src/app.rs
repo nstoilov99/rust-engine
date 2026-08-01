@@ -25,6 +25,7 @@ use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::commands::Command as _;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
+use rust_engine::engine::editor::graph_prefs::WireStyle;
 use rust_engine::engine::editor::theme::Density;
 use rust_engine::engine::editor::{
     AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory,
@@ -3198,6 +3199,10 @@ impl App {
         // declared out here so it outlives the layout block and can be applied
         // once the panel borrows are released.
         let mut graph_open_request: Option<String> = None;
+        // Toolbar quick-switch: the panel reports a style pick, the host
+        // writes it into the same pref the Preferences window edits, so it
+        // shows the overridden dot there and rides the debounced autosave.
+        let mut graph_style_request: Option<WireStyle> = None;
         let crusty_result = {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
@@ -3595,6 +3600,7 @@ impl App {
                                                 open_subgraph: &mut graph_open_request,
                                                 selection_outline: graph_sel_outline,
                                                 wire_prefs: graph_prefs.wires,
+                                                wire_style_request: &mut graph_style_request,
                                                 zoom_min: graph_prefs.zoom_min,
                                                 zoom_max: graph_prefs.zoom_max,
                                                 focused: graph_focused_tab.as_deref()
@@ -3710,6 +3716,9 @@ impl App {
         };
 
         // Subgraph node double-clicked in a docked graph → open its doc (P6).
+        if let Some(style) = graph_style_request {
+            self.editor.ui.settings.prefs.graph.wires.style = style;
+        }
         if let Some(relative) = graph_open_request {
             self.open_graph_document(relative);
         }
@@ -4457,6 +4466,7 @@ impl App {
         let graph_prefs = editor.ui.settings.prefs.graph;
         let graph_sel_outline = editor.services.theme.palette.selection.outline;
         let mut graph_open_requests: Vec<String> = Vec::new();
+        let mut graph_style_request: Option<WireStyle> = None;
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -4617,6 +4627,7 @@ impl App {
                                     open_subgraph: &mut float_open_request,
                                     selection_outline: graph_sel_outline,
                                     wire_prefs: graph_prefs.wires,
+                                    wire_style_request: &mut graph_style_request,
                                     zoom_min: graph_prefs.zoom_min,
                                     zoom_max: graph_prefs.zoom_max,
                                     // A float window is a dedicated surface;
@@ -4646,6 +4657,9 @@ impl App {
         // Open any subgraphs double-clicked in float windows, as main-dock
         // tabs. Uses the existing `graph_editors`/`graph_registry` bindings so
         // it doesn't re-borrow `editor.scene` fields already held.
+        if let Some(style) = graph_style_request {
+            editor.ui.settings.prefs.graph.wires.style = style;
+        }
         for relative in graph_open_requests {
             if graph_editors.contains_key(&relative) {
                 editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));

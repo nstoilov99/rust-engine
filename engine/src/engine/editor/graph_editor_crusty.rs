@@ -28,7 +28,7 @@ use super::graph_editor::{
     frame_view, nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag,
     GraphEdit, GraphEditorState, GraphFragment, MarqueeMode, NodeDrag,
 };
-use super::graph_prefs::WirePrefs;
+use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
     self as router, point_polyline_distance, RouteMeta,
 };
@@ -36,6 +36,7 @@ use super::theme::{
     category_color, category_tag_color, grid_major, grid_minor, pin_color, ramp, wire_color,
     Palette, GRID_MAJOR_STEP, GRID_MINOR_MIN_ZOOM, GRID_MINOR_STEP,
 };
+use super::widgets::segmented_control;
 use crate::engine::node_graph::{
     Edge, GraphError, GraphResolver, NodeDescriptor, NodeRegistry, PinType, PropValue,
     SUBGRAPH_TYPE_ID,
@@ -253,6 +254,10 @@ pub struct GraphEditorPanelCtx<'a> {
     pub selection_outline: Color,
     /// Wire routing + appearance, the `graph.wires` prefs section.
     pub wire_prefs: WirePrefs,
+    /// Set when the toolbar's segmented control picks a different wire style;
+    /// the host writes it back to `prefs.graph.wires.style`, which is what
+    /// makes it show the overridden dot in Preferences and autosave.
+    pub wire_style_request: &'a mut Option<WireStyle>,
     /// Canvas zoom limits (EditorPrefs, P9).
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -735,6 +740,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         open_subgraph,
         selection_outline,
         wire_prefs,
+        wire_style_request,
         zoom_min,
         zoom_max,
         focused,
@@ -755,6 +761,12 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         finish_annotation_drag(state, registry);
         state.flush_prop_edit(registry);
     }
+
+    // The graph toolbar sits above the canvas and takes its row out of the
+    // available space, so the canvas shrinks by exactly the toolbar height and
+    // everything measured off the canvas rect (F/A framing, the error overlay)
+    // follows automatically.
+    graph_toolbar(ui, state, wire_prefs.style, wire_style_request);
 
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
@@ -1213,6 +1225,95 @@ fn draw_and_interact(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar
+// ---------------------------------------------------------------------------
+
+/// Height of the graph toolbar row, base units at ui_scale 1.0.
+const TOOLBAR_H: f32 = 30.0;
+/// Width of the 3-way wire-style segmented control, base units.
+const TOOLBAR_SEG_W: f32 = 168.0;
+
+/// The graph tab's toolbar: a 3-way wire-style quick switch on the left and
+/// the document's realm as a read-only mono chip on the right.
+///
+/// **Nothing else goes here.** A second control from the Preferences ▸ Graph
+/// sections would become a competing settings surface — the panels doc's
+/// explicit rule. The segmented control is the documented toggled-tool
+/// treatment (`accent_soft` fill + accent border), one of the few approved
+/// accent spends on this surface.
+fn graph_toolbar(
+    ui: &mut Ui,
+    state: &GraphEditorState,
+    style_now: WireStyle,
+    request: &mut Option<WireStyle>,
+) {
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let w = ui.available().width();
+    let rect = ui.allocate(Vec2::new(w, TOOLBAR_H * s));
+    ui.painter().rect_filled(rect, Rounding::ZERO, st.palette.window);
+    ui.painter().line_segment(
+        Pos2::new(rect.min.x, rect.max.y),
+        Pos2::new(rect.max.x, rect.max.y),
+        st.metrics.border,
+        st.palette.stroke,
+    );
+
+    let pad = BASE_PAD_X * s;
+    let seg_h = st.metrics.control_height.min(rect.height() - 6.0 * s);
+    let seg = Rect::from_min_size(
+        Pos2::new(rect.min.x + pad, rect.center().y - seg_h * 0.5),
+        Vec2::new(TOOLBAR_SEG_W * s, seg_h),
+    );
+    let active = WireStyle::ALL
+        .iter()
+        .position(|x| *x == style_now)
+        .unwrap_or(0);
+    if let Some(i) = segmented_control(
+        ui,
+        "graph_toolbar_style",
+        seg,
+        &["Spline", "Manhattan", "Subway"],
+        active,
+        true,
+    ) {
+        if WireStyle::ALL[i] != style_now {
+            *request = Some(WireStyle::ALL[i]);
+        }
+    }
+
+    // Realm chip. A *node's* Shared realm prints nothing; the graph's realm
+    // always shows — it is the document's authority statement, not a
+    // per-node annotation.
+    let label = state.doc.realm.label();
+    let px = st.fonts.small;
+    let tw = ui
+        .painter()
+        .measure_text_family(label, px, None, FontFamily::Mono)
+        .x;
+    let chip = Rect::from_min_size(
+        Pos2::new(rect.max.x - pad - tw - pad * 2.0, rect.center().y - seg_h * 0.5),
+        Vec2::new(tw + pad * 2.0, seg_h),
+    );
+    ui.painter()
+        .rect_filled(chip, st.rounding.small, st.palette.header);
+    ui.painter().rect_stroke(
+        chip,
+        st.rounding.small,
+        st.metrics.border,
+        st.palette.stroke,
+    );
+    ui.painter().text_family(
+        Pos2::new(chip.min.x + pad, chip.center().y - px * 0.62),
+        label,
+        px,
+        st.palette.text_secondary,
+        None,
+        FontFamily::Mono,
+    );
 }
 
 // ---------------------------------------------------------------------------

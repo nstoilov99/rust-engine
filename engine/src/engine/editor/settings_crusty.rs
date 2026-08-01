@@ -19,7 +19,11 @@ use crusty_gui::widgets::{
 
 use super::build_dialog::BuildTarget;
 use super::editor_prefs::{EditorPrefs, ThemePreset, PREFS_FILE};
-use super::theme::{Density, UI_SCALE_MAX, UI_SCALE_MIN};
+use super::graph_prefs::{CrossingStyle, ExecWirePrefs, TurnAnchor, TurnPriority, WireStyle};
+use super::graph_wire_router::{self as router, RouteMeta};
+use super::theme::{wire_color, Density, UI_SCALE_MAX, UI_SCALE_MIN};
+use super::widgets::segmented_control;
+use crate::engine::node_graph::PinType;
 use super::play_settings::NetPlayMode;
 use super::project_config::{ProjectConfig, PROJECT_FILE, SERVER_WORLD_SCENE};
 use crate::engine::utils::window_config::VSyncMode;
@@ -65,7 +69,39 @@ const PREFS_CATS: &[(&str, &[&str])] = &[
         &["Play mode", "Server host", "Module name", "Player count"],
     ),
     ("Performance", &["VSync"]),
-    ("Graph Editor", &["Min zoom", "Max zoom"]),
+    (
+        "Graph",
+        &[
+            // Wires
+            "Wire style",
+            "Horizontal offset",
+            "Turn anchor",
+            "Corner radius",
+            "Turn priority",
+            "Disable pin offset",
+            // Execution wires
+            "Override style for exec wires",
+            // Bundling
+            "Bundle overlapping wires",
+            "Bundle offset",
+            "Merge offset",
+            "Push outside",
+            "Max wires per lane",
+            // Crossings
+            "Crossing style",
+            "Crossing size",
+            // Flow bubbles
+            "Show flow bubbles",
+            "Exec wires only",
+            "Selected nodes only",
+            "Size",
+            "Speed",
+            "Spacing",
+            // Canvas
+            "Min zoom",
+            "Max zoom",
+        ],
+    ),
 ];
 
 const PROJECT_CATS: &[(&str, &[&str])] = &[
@@ -479,6 +515,195 @@ fn drag(ui: &mut Ui, value: &mut f32, speed: f64, range: std::ops::RangeInclusiv
         .show(ui);
 }
 
+// ── Editor Preferences ▸ Graph helpers ───────────────────────────────────
+
+/// Width of a segmented choice control in a settings row.
+const SEG_W: f32 = 186.0;
+/// Live preview strip, base units (scaled by the theme's ui_scale).
+const PREVIEW_W: f32 = 300.0;
+const PREVIEW_H: f32 = 120.0;
+
+/// The strip's three demonstrations, as `(from, to, target pin row)` in
+/// strip-local units. Pinned here (and asserted in tests) because each exists
+/// to show a *specific* router behaviour, and a casual coordinate nudge could
+/// silently turn it into an ordinary route:
+///
+/// - `[0]` a normal forward span (drawn exec, so both stroke weights show);
+/// - `[1]`/`[2]` two wires into adjacent pins of one node from sources at
+///   different distances — acceptance test 1, parallelism, made visible;
+/// - `[3]` the residual stub (`|dx| < 24` and `|dy| < 20`), which draws
+///   straight in every orthogonal mode. It leans slightly *backward* because
+///   that is the only place the stub is reachable in Manhattan *and* Subway.
+///   (The panels doc asked for "a span just under `min_dist`"; `min_dist` is
+///   deleted, and this is the exception that actually exists.)
+const PREVIEW_SAMPLES: [([f32; 2], [f32; 2], usize); 4] = [
+    ([24.0, 14.0], [276.0, 40.0], 0),
+    ([24.0, 50.0], [276.0, 74.0], 0),
+    ([150.0, 60.0], [276.0, 96.0], 1),
+    ([220.0, 110.0], [208.0, 114.0], 0),
+];
+
+/// A settings row that can be **disabled rather than hidden** (the Edit-menu
+/// rule). A disabled row keeps its exact height and label column so the list
+/// never reflows as the user changes wire style; it just greys, drops its
+/// reset affordance, and swallows interaction.
+#[allow(clippy::too_many_arguments)]
+fn gated_row(
+    ui: &mut Ui,
+    filter: &Filter,
+    label: &str,
+    modified: bool,
+    hint: Option<&str>,
+    enabled: bool,
+    control: impl FnOnce(&mut Ui, bool),
+) -> bool {
+    // A disabled row shows neither the modified dot nor the R reset: it is
+    // not addressable right now, so offering to reset it would lie.
+    let reset = setting_row(
+        ui,
+        filter,
+        label,
+        modified && enabled,
+        hint.filter(|_| enabled),
+        false,
+        |ui| control(ui, enabled),
+    );
+    reset && enabled
+}
+
+/// The disabled stand-in for a numeric field — same 64x18 footprint as the
+/// live `DragValue`, so nothing moves when a row greys out.
+fn dead_value(ui: &mut Ui, text: &str) {
+    let style = ui.style();
+    let rect = ui.allocate(Vec2::new(64.0, FIELD_H));
+    ui.painter()
+        .rect_filled(rect, style.rounding.widget, style.palette.header);
+    ui.painter().rect_stroke(
+        rect,
+        style.rounding.widget,
+        style.metrics.border,
+        style.palette.stroke.with_alpha(0.5),
+    );
+    ui.painter().text_family(
+        Pos2::new(rect.min.x + 6.0, rect.center().y - 5.0),
+        text,
+        10.0,
+        style.palette.text_disabled,
+        None,
+        FontFamily::Mono,
+    );
+}
+
+/// Numeric row body: the live drag-value when enabled, the grey stand-in when
+/// not. Mono value, `px`-style suffix — no new widgets, per the panels doc.
+fn num_body(
+    ui: &mut Ui,
+    enabled: bool,
+    value: &mut f32,
+    speed: f64,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+) {
+    if enabled {
+        drag(ui, value, speed, range, suffix);
+    } else {
+        dead_value(ui, &format!("{}{suffix}", fmt_f(*value)));
+    }
+}
+
+/// Segmented-choice row body over a small enum.
+fn choice_body<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    id: &str,
+    enabled: bool,
+    value: &mut T,
+    options: &[T],
+    labels: &[&str],
+) {
+    let rect = Rect::from_min_size(ui.cursor(), Vec2::new(SEG_W, FIELD_H + 2.0));
+    let active = options.iter().position(|o| o == value).unwrap_or(0);
+    if let Some(i) = segmented_control(ui, id, rect, labels, active, enabled) {
+        *value = options[i];
+    }
+    ui.allocate(rect.size());
+}
+
+/// The live preview strip: three fixed sample wires drawn through the **real**
+/// router, so it can never drift from what the canvas does.
+///
+/// (a) a normal forward span · (b) a pair from adjacent pins to targets at
+/// different distances, which is acceptance test 1 (parallelism / anchoring)
+/// made visible · (c) the residual stub case, `|dx| < 24` and `|dy| < 20`,
+/// which is the documented straight-line exception made visible. (The panels
+/// doc's third sample was "just under min_dist"; `min_dist` is deleted, and
+/// the residual stub is the exception that actually exists.)
+fn wire_preview(ui: &mut Ui, prefs: &super::graph_prefs::WirePrefs) {
+    let style = ui.style();
+    let s = (style.metrics.row_height / 22.0).max(0.1);
+    let rect = ui.allocate(Vec2::new(PREVIEW_W * s, PREVIEW_H * s));
+    ui.painter()
+        .rect_filled(rect, style.rounding.widget, style.palette.input);
+    ui.painter().rect_stroke(
+        rect,
+        style.rounding.widget,
+        style.metrics.border,
+        style.palette.stroke,
+    );
+
+    // Sample geometry in preview-local space, then offset into the strip.
+    // Endpoints are pin positions; the rects are the notional nodes they sit
+    // on, so the router sees the same shape of input the canvas gives it.
+    let node = |x: f32, y: f32| {
+        Rect::from_min_max(
+            Pos2::new(x - 40.0 * s, y - 14.0 * s),
+            Pos2::new(x + 40.0 * s, y + 14.0 * s),
+        )
+    };
+    let p = |x: f32, y: f32| Pos2::new(rect.min.x + x * s, rect.min.y + y * s);
+
+    let ty = [PinType::Exec, PinType::Float, PinType::Float, PinType::Float];
+    let samples: Vec<(Pos2, Pos2, usize, PinType)> = PREVIEW_SAMPLES
+        .iter()
+        .zip(ty)
+        .map(|((a, b, bi), t)| (p(a[0], a[1]), p(b[0], b[1]), *bi, t))
+        .collect();
+    let rects: Vec<Rect> = samples
+        .iter()
+        .flat_map(|(a, b, _, _)| [node(a.x, a.y), node(b.x, b.y)])
+        .collect();
+
+    let mut painter = ui.painter();
+    for (a, b, bi, ty) in samples {
+        let meta = RouteMeta {
+            src_rect: Some(node(a.x, a.y)),
+            dst_rect: Some(node(b.x, b.y)),
+            target_pin_index: bi,
+            node_rects: &rects,
+        };
+        let color = wire_color(None, &ty);
+        let width = if ty == PinType::Exec { 2.4 } else { 1.9 };
+        if prefs.style.is_orthogonal() {
+            let pts = router::round_corners(
+                &router::route(a, b, prefs, &meta),
+                prefs.corner_radius * s,
+            );
+            painter.polyline(&pts, width, color);
+        } else {
+            let (c1, c2) = router::spline_controls(a, b, prefs.curve);
+            painter.bezier_cubic(a, c1, c2, b, width, color);
+        }
+        // Pin dots, so the strip reads as wires between pins.
+        for (end, filled) in [(a, true), (b, false)] {
+            if filled {
+                painter.circle_filled(end, 3.0 * s, color);
+            } else {
+                painter.circle_stroke(end, 3.0 * s, 1.5, color);
+            }
+        }
+    }
+    ui.add_space(4.0);
+}
+
 // ── Editor Preferences ───────────────────────────────────────────────────
 
 pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
@@ -522,7 +747,7 @@ pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
                     || p.console_show_error != d.console_show_error,
                 p.play != super::play_settings::PlaySettings::default(),
                 state.vsync != VSyncMode::default(),
-                p.graph.zoom_min != d.graph.zoom_min || p.graph.zoom_max != d.graph.zoom_max,
+                p.graph != d.graph,
             ];
 
             let (content, footer, filter) = shell_chrome(
@@ -865,21 +1090,322 @@ fn draw_prefs_rows(
     }
 
     if vis(8) {
-        section_bar(ui, "Graph Editor");
-        let hint = format!("default {}", fmt_f(d.graph.zoom_min));
-        let m = p.graph.zoom_min != d.graph.zoom_min;
-        if setting_row(ui, f, "Min zoom", m, Some(&hint), false, |ui| {
-            drag(ui, &mut p.graph.zoom_min, 0.01, 0.1..=1.0, "\u{00d7}");
-        }) {
-            p.graph.zoom_min = d.graph.zoom_min;
-        }
-        let hint = format!("default {}", fmt_f(d.graph.zoom_max));
-        let m = p.graph.zoom_max != d.graph.zoom_max;
-        if setting_row(ui, f, "Max zoom", m, Some(&hint), false, |ui| {
-            drag(ui, &mut p.graph.zoom_max, 0.1, 1.0..=8.0, "\u{00d7}");
-        }) {
-            p.graph.zoom_max = d.graph.zoom_max;
-        }
+        draw_graph_rows(ui, f, p, &d);
+    }
+}
+
+/// Editor Preferences > Graph. Five wire sections in the panels doc's order,
+/// then the canvas prefs the doc calls their "natural later neighbours".
+///
+/// **Rows disable by style, never hide.** With Spline active, everything
+/// below Wire style in Wires - plus the whole Execution wires and Bundling
+/// sections - greys to the standard disabled state; Crossings and Flow
+/// bubbles stay live, because a hop symbol is span-agnostic and reads on a
+/// curve just as well as on a polyline. The list never reflows as the style
+/// changes: a disabled row keeps its height, its label column and its
+/// control footprint.
+fn draw_graph_rows(ui: &mut Ui, f: &Filter, p: &mut EditorPrefs, d: &EditorPrefs) {
+    let dw = d.graph.wires;
+    // Orthogonal-only rows. Spline has no turns, no lanes and no bundles.
+    let ortho = p.graph.wires.style.is_orthogonal();
+
+    // -- Wires ------------------------------------------------------------
+    section_bar(ui, "Wires");
+    if f.matches("Wire style") {
+        wire_preview(ui, &p.graph.wires);
+    }
+
+    let m = p.graph.wires.style != dw.style;
+    let hint = format!("default {}", dw.style.label());
+    if setting_row(ui, f, "Wire style", m, Some(&hint), false, |ui| {
+        choice_body(
+            ui,
+            "gp_style",
+            true,
+            &mut p.graph.wires.style,
+            &WireStyle::ALL,
+            &["Spline", "Manhattan", "Subway"],
+        );
+    }) {
+        p.graph.wires.style = dw.style;
+    }
+
+    let m = p.graph.wires.horizontal_offset != dw.horizontal_offset;
+    let hint = format!("default {}px", fmt_f(dw.horizontal_offset));
+    if gated_row(ui, f, "Horizontal offset", m, Some(&hint), ortho, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.horizontal_offset, 0.25, 0.0..=64.0, "px");
+    }) {
+        p.graph.wires.horizontal_offset = dw.horizontal_offset;
+    }
+
+    let m = p.graph.wires.turn_anchor != dw.turn_anchor;
+    let hint = format!("default {}", dw.turn_anchor.label());
+    if gated_row(ui, f, "Turn anchor", m, Some(&hint), ortho, |ui, on| {
+        choice_body(
+            ui,
+            "gp_anchor",
+            on,
+            &mut p.graph.wires.turn_anchor,
+            &TurnAnchor::ALL,
+            &["Target", "Source"],
+        );
+    }) {
+        p.graph.wires.turn_anchor = dw.turn_anchor;
+    }
+
+    let m = p.graph.wires.corner_radius != dw.corner_radius;
+    let hint = format!("default {}px", fmt_f(dw.corner_radius));
+    if gated_row(ui, f, "Corner radius", m, Some(&hint), ortho, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.corner_radius, 0.25, 0.0..=32.0, "px");
+    }) {
+        p.graph.wires.corner_radius = dw.corner_radius;
+    }
+
+    let m = p.graph.wires.priority != dw.priority;
+    let hint = format!("default {}", dw.priority.label());
+    if gated_row(ui, f, "Turn priority", m, Some(&hint), ortho, |ui, on| {
+        choice_body(
+            ui,
+            "gp_priority",
+            on,
+            &mut p.graph.wires.priority,
+            &TurnPriority::ALL,
+            &["None", "Node", "Pin"],
+        );
+    }) {
+        p.graph.wires.priority = dw.priority;
+    }
+
+    let m = p.graph.wires.disable_pin_offset != dw.disable_pin_offset;
+    if gated_row(ui, f, "Disable pin offset", m, Some("default off"), ortho, |ui, on| {
+        Checkbox::new(&mut p.graph.wires.disable_pin_offset, "")
+            .enabled(on)
+            .show(ui);
+    }) {
+        p.graph.wires.disable_pin_offset = dw.disable_pin_offset;
+    }
+
+    // -- Execution wires --------------------------------------------------
+    section_bar(ui, "Execution wires");
+    let m = p.graph.wires.exec_overwrite.is_some() != dw.exec_overwrite.is_some();
+    let mut override_on = p.graph.wires.exec_overwrite.is_some();
+    if gated_row(
+        ui,
+        f,
+        "Override style for exec wires",
+        m,
+        Some("default off"),
+        ortho,
+        |ui, on| {
+            if Checkbox::new(&mut override_on, "").enabled(on).show(ui).clicked && on {
+                p.graph.wires.exec_overwrite = override_on.then(ExecWirePrefs::default);
+            }
+        },
+    ) {
+        p.graph.wires.exec_overwrite = dw.exec_overwrite;
+    }
+    // The rule nests: these disable while Override is off (and, above that,
+    // while the base style is Spline).
+    let exec_on = ortho && p.graph.wires.exec_overwrite.is_some();
+    let mut exec = p.graph.wires.exec_overwrite.unwrap_or_default();
+    let de = ExecWirePrefs::default();
+
+    let m = exec.style != de.style;
+    let hint = format!("default {}", de.style.label());
+    if gated_row(ui, f, "Wire style", m, Some(&hint), exec_on, |ui, on| {
+        choice_body(
+            ui,
+            "gp_exec_style",
+            on,
+            &mut exec.style,
+            &WireStyle::ALL,
+            &["Spline", "Manhattan", "Subway"],
+        );
+    }) {
+        exec.style = de.style;
+    }
+
+    let m = exec.turn_anchor != de.turn_anchor;
+    let hint = format!("default {}", de.turn_anchor.label());
+    if gated_row(ui, f, "Turn anchor", m, Some(&hint), exec_on, |ui, on| {
+        choice_body(
+            ui,
+            "gp_exec_anchor",
+            on,
+            &mut exec.turn_anchor,
+            &TurnAnchor::ALL,
+            &["Target", "Source"],
+        );
+    }) {
+        exec.turn_anchor = de.turn_anchor;
+    }
+
+    let m = exec.priority != de.priority;
+    let hint = format!("default {}", de.priority.label());
+    if gated_row(ui, f, "Turn priority", m, Some(&hint), exec_on, |ui, on| {
+        choice_body(
+            ui,
+            "gp_exec_priority",
+            on,
+            &mut exec.priority,
+            &TurnPriority::ALL,
+            &["None", "Node", "Pin"],
+        );
+    }) {
+        exec.priority = de.priority;
+    }
+    // Only write back while the override is live, so editing the sub-rows can
+    // never resurrect a disabled override.
+    if exec_on && p.graph.wires.exec_overwrite != Some(exec) {
+        p.graph.wires.exec_overwrite = Some(exec);
+    }
+
+    // -- Bundling ---------------------------------------------------------
+    section_bar(ui, "Bundling");
+    let m = p.graph.wires.bundle_enabled != dw.bundle_enabled;
+    if gated_row(ui, f, "Bundle overlapping wires", m, Some("default on"), ortho, |ui, on| {
+        Checkbox::new(&mut p.graph.wires.bundle_enabled, "")
+            .enabled(on)
+            .show(ui);
+    }) {
+        p.graph.wires.bundle_enabled = dw.bundle_enabled;
+    }
+    // Same nesting rule again: the parameters follow their own toggle.
+    let bundle_on = ortho && p.graph.wires.bundle_enabled;
+
+    let m = p.graph.wires.bundle_offset != dw.bundle_offset;
+    let hint = format!("default {}px", fmt_f(dw.bundle_offset));
+    if gated_row(ui, f, "Bundle offset", m, Some(&hint), bundle_on, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.bundle_offset, 0.1, 0.0..=16.0, "px");
+    }) {
+        p.graph.wires.bundle_offset = dw.bundle_offset;
+    }
+
+    let m = p.graph.wires.bundle_merge_offset != dw.bundle_merge_offset;
+    let hint = format!("default {}px", fmt_f(dw.bundle_merge_offset));
+    if gated_row(ui, f, "Merge offset", m, Some(&hint), bundle_on, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.bundle_merge_offset, 0.25, 0.0..=64.0, "px");
+    }) {
+        p.graph.wires.bundle_merge_offset = dw.bundle_merge_offset;
+    }
+
+    let m = p.graph.wires.bundle_push_outside != dw.bundle_push_outside;
+    if gated_row(ui, f, "Push outside", m, Some("default off"), bundle_on, |ui, on| {
+        Checkbox::new(&mut p.graph.wires.bundle_push_outside, "")
+            .enabled(on)
+            .show(ui);
+    }) {
+        p.graph.wires.bundle_push_outside = dw.bundle_push_outside;
+    }
+
+    let m = p.graph.wires.bundle_max != dw.bundle_max;
+    let hint = format!("default {}", dw.bundle_max);
+    if gated_row(ui, f, "Max wires per lane", m, Some(&hint), bundle_on, |ui, on| {
+        let mut v = p.graph.wires.bundle_max as f32;
+        num_body(ui, on, &mut v, 0.1, 1.0..=32.0, "");
+        p.graph.wires.bundle_max = v.round().max(1.0) as u32;
+    }) {
+        p.graph.wires.bundle_max = dw.bundle_max;
+    }
+
+    // -- Crossings --------------------------------------------------------
+    // Stays live on Spline: the hop symbol is span-agnostic and reads on a
+    // curve just as well as on a polyline.
+    section_bar(ui, "Crossings");
+    let m = p.graph.wires.crossing != dw.crossing;
+    let hint = format!("default {}", dw.crossing.label());
+    if setting_row(ui, f, "Crossing style", m, Some(&hint), false, |ui| {
+        choice_body(
+            ui,
+            "gp_crossing",
+            true,
+            &mut p.graph.wires.crossing,
+            &CrossingStyle::ALL,
+            &["None", "Gap", "Arc", "Circle"],
+        );
+    }) {
+        p.graph.wires.crossing = dw.crossing;
+    }
+
+    let cross_on = p.graph.wires.crossing != CrossingStyle::None;
+    let m = p.graph.wires.crossing_size != dw.crossing_size;
+    let hint = format!("default {}px", fmt_f(dw.crossing_size));
+    if gated_row(ui, f, "Crossing size", m, Some(&hint), cross_on, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.crossing_size, 0.1, 1.0..=16.0, "px");
+    }) {
+        p.graph.wires.crossing_size = dw.crossing_size;
+    }
+
+    // -- Flow bubbles -----------------------------------------------------
+    section_bar(ui, "Flow bubbles");
+    let db = dw.bubbles;
+    let m = p.graph.wires.bubbles.enabled != db.enabled;
+    if setting_row(ui, f, "Show flow bubbles", m, Some("default on"), false, |ui| {
+        Checkbox::new(&mut p.graph.wires.bubbles.enabled, "").show(ui);
+    }) {
+        p.graph.wires.bubbles.enabled = db.enabled;
+    }
+    let bub = p.graph.wires.bubbles.enabled;
+
+    let m = p.graph.wires.bubbles.exec_only != db.exec_only;
+    if gated_row(ui, f, "Exec wires only", m, Some("default on"), bub, |ui, on| {
+        Checkbox::new(&mut p.graph.wires.bubbles.exec_only, "")
+            .enabled(on)
+            .show(ui);
+    }) {
+        p.graph.wires.bubbles.exec_only = db.exec_only;
+    }
+
+    let m = p.graph.wires.bubbles.selected_only != db.selected_only;
+    if gated_row(ui, f, "Selected nodes only", m, Some("default off"), bub, |ui, on| {
+        Checkbox::new(&mut p.graph.wires.bubbles.selected_only, "")
+            .enabled(on)
+            .show(ui);
+    }) {
+        p.graph.wires.bubbles.selected_only = db.selected_only;
+    }
+
+    let m = p.graph.wires.bubbles.size != db.size;
+    let hint = format!("default {}px", fmt_f(db.size));
+    if gated_row(ui, f, "Size", m, Some(&hint), bub, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.bubbles.size, 0.1, 1.0..=12.0, "px");
+    }) {
+        p.graph.wires.bubbles.size = db.size;
+    }
+
+    let m = p.graph.wires.bubbles.speed != db.speed;
+    let hint = format!("default {}", fmt_f(db.speed));
+    if gated_row(ui, f, "Speed", m, Some(&hint), bub, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.bubbles.speed, 1.0, 10.0..=600.0, "px/s");
+    }) {
+        p.graph.wires.bubbles.speed = db.speed;
+    }
+
+    let m = p.graph.wires.bubbles.spacing != db.spacing;
+    let hint = format!("default {}px", fmt_f(db.spacing));
+    if gated_row(ui, f, "Spacing", m, Some(&hint), bub, |ui, on| {
+        num_body(ui, on, &mut p.graph.wires.bubbles.spacing, 0.5, 8.0..=200.0, "px");
+    }) {
+        p.graph.wires.bubbles.spacing = db.spacing;
+    }
+
+    // -- Canvas -----------------------------------------------------------
+    // The wire sections come first by touch frequency; the canvas prefs are
+    // the "natural later neighbours" the panels doc anticipates.
+    section_bar(ui, "Canvas");
+    let hint = format!("default {}", fmt_f(d.graph.zoom_min));
+    let m = p.graph.zoom_min != d.graph.zoom_min;
+    if setting_row(ui, f, "Min zoom", m, Some(&hint), false, |ui| {
+        drag(ui, &mut p.graph.zoom_min, 0.01, 0.05..=1.0, "\u{00d7}");
+    }) {
+        p.graph.zoom_min = d.graph.zoom_min;
+    }
+    let hint = format!("default {}", fmt_f(d.graph.zoom_max));
+    let m = p.graph.zoom_max != d.graph.zoom_max;
+    if setting_row(ui, f, "Max zoom", m, Some(&hint), false, |ui| {
+        drag(ui, &mut p.graph.zoom_max, 0.1, 1.0..=8.0, "\u{00d7}");
+    }) {
+        p.graph.zoom_max = d.graph.zoom_max;
     }
 }
 
@@ -1243,5 +1769,124 @@ fn draw_project_footer(ui: &mut Ui, footer: Rect, state: &mut SettingsState) {
         let w = ui.painter().measure_text(text, 11.0, None).x;
         ui.painter()
             .text(Pos2::new(footer.max.x - 8.0 - w, cy - 5.5), text, 11.0, status.success, None);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crusty_gui::math::Pos2;
+    use super::super::graph_prefs::WirePrefs;
+
+    fn route_sample(i: usize, style: WireStyle) -> Vec<Pos2> {
+        let prefs = WirePrefs { style, ..Default::default() };
+        let (a, b, bi) = PREVIEW_SAMPLES[i];
+        let rects = [];
+        router::route(
+            Pos2::new(a[0], a[1]),
+            Pos2::new(b[0], b[1]),
+            &prefs,
+            &RouteMeta {
+                src_rect: None,
+                dst_rect: None,
+                target_pin_index: bi,
+                node_rects: &rects,
+            },
+        )
+    }
+
+    /// The preview strip must demonstrate what it claims to. Each sample is
+    /// checked against the *real* router, so a coordinate nudge that turned a
+    /// sample into an ordinary route fails here rather than quietly making
+    /// the strip lie about the router.
+    #[test]
+    fn preview_samples_demonstrate_their_documented_cases() {
+        for style in [WireStyle::Manhattan, WireStyle::Subway] {
+            // [0..2] are real routes with turns, not the near-horizontal
+            // shortcut (which would collapse them to a 2-point line).
+            for i in 0..3 {
+                let pts = route_sample(i, style);
+                assert!(
+                    pts.len() > 2,
+                    "{style:?}: preview sample {i} collapsed to a straight line"
+                );
+            }
+            // [3] is the residual stub: straight, in both orthogonal modes.
+            assert_eq!(
+                route_sample(3, style).len(),
+                2,
+                "{style:?}: preview sample 3 is no longer the residual stub"
+            );
+        }
+
+        let turn = |p: &[Pos2]| p[p.len() - 2].x;
+        // [1] and [2] arrive at adjacent pins of one node from sources at
+        // different distances. Subway anchors both turns at the same x...
+        let s1 = route_sample(1, WireStyle::Subway);
+        let s2 = route_sample(2, WireStyle::Subway);
+        assert!(
+            (turn(&s1) - turn(&s2)).abs() < 1e-3,
+            "the parallelism sample stopped being parallel"
+        );
+        // ...and Manhattan staggers them by a bundle_offset, which is the
+        // other half of what the pair is there to show.
+        let m1 = route_sample(1, WireStyle::Manhattan);
+        let m2 = route_sample(2, WireStyle::Manhattan);
+        let d = WirePrefs::default();
+        assert!(
+            (turn(&m1) - turn(&m2)).abs() >= d.bundle_offset - 1e-3,
+            "the Manhattan stagger is no longer visible in the preview"
+        );
+    }
+
+    /// Every sample stays inside the strip, so nothing draws outside the box.
+    #[test]
+    fn preview_samples_fit_the_strip() {
+        for (i, (a, b, _)) in PREVIEW_SAMPLES.iter().enumerate() {
+            for q in [a, b] {
+                assert!(
+                    q[0] >= 0.0 && q[0] <= PREVIEW_W && q[1] >= 0.0 && q[1] <= PREVIEW_H,
+                    "preview sample {i} endpoint {q:?} escapes the strip"
+                );
+            }
+        }
+    }
+
+    /// Every row the Graph category draws is reachable by search, and the
+    /// deleted min-dist rows have not crept back in.
+    #[test]
+    fn graph_category_search_index_is_complete() {
+        let rows = PREFS_CATS
+            .iter()
+            .find(|(name, _)| *name == "Graph")
+            .expect("Graph category")
+            .1;
+        for label in [
+            "Wire style",
+            "Horizontal offset",
+            "Turn anchor",
+            "Corner radius",
+            "Turn priority",
+            "Disable pin offset",
+            "Override style for exec wires",
+            "Bundle overlapping wires",
+            "Bundle offset",
+            "Merge offset",
+            "Push outside",
+            "Max wires per lane",
+            "Crossing style",
+            "Crossing size",
+            "Show flow bubbles",
+            "Exec wires only",
+            "Selected nodes only",
+            "Size",
+            "Speed",
+            "Spacing",
+            "Min zoom",
+            "Max zoom",
+        ] {
+            assert!(rows.contains(&label), "'{label}' is missing from the search index");
+        }
+        assert!(!rows.iter().any(|r| r.to_lowercase().contains("minimum distance")));
+        assert!(!rows.iter().any(|r| r.to_lowercase().contains("below minimum")));
     }
 }

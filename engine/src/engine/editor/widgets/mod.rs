@@ -684,3 +684,97 @@ impl IconRegistry {
         }
     }
 }
+
+// ── Segmented control ────────────────────────────────────────────────────
+
+/// A 3-ish-way segmented choice: one flat group, the active segment carrying
+/// the design system's **toggled-tool** treatment (`accent_soft` fill +
+/// `accent_active` border and text). That is an approved accent spend — the
+/// active tool is state, not decoration.
+///
+/// Returns the index that was clicked, if any. Shared by Editor Preferences
+/// ▸ Graph and the graph toolbar so the two can never drift apart.
+///
+/// `enabled = false` renders the standard disabled state (header fill, half
+/// -strength border, disabled text) and swallows clicks — rows disable, they
+/// never hide, and they must not change size doing it.
+pub fn segmented_control(
+    ui: &mut crusty_gui::context::Ui,
+    id_source: &str,
+    rect: crusty_gui::math::Rect,
+    labels: &[&str],
+    active: usize,
+    enabled: bool,
+) -> Option<usize> {
+    use crusty_gui::math::{Pos2, Rect, Vec2};
+
+    let style = ui.style();
+    let pal = style.palette;
+    let rounding = style.rounding.small;
+    let n = labels.len().max(1);
+    let seg_w = rect.width() / n as f32;
+    let mut clicked = None;
+
+    ui.painter().rect_filled(rect, rounding, pal.header);
+
+    for (i, label) in labels.iter().enumerate() {
+        let seg = Rect::from_min_size(
+            Pos2::new(rect.min.x + seg_w * i as f32, rect.min.y),
+            Vec2::new(seg_w, rect.height()),
+        );
+        let resp = if enabled {
+            let id = ui.alloc_id((id_source, i));
+            Some(ui.interact(id, seg))
+        } else {
+            None
+        };
+        let hovered = resp.as_ref().is_some_and(|r| r.hovered);
+        let is_active = i == active;
+
+        if is_active && enabled {
+            ui.painter().rect_filled(seg, rounding, pal.accent_soft);
+            ui.painter()
+                .rect_stroke(seg, rounding, style.metrics.border, pal.accent_active);
+        } else if is_active {
+            ui.painter()
+                .rect_stroke(seg, rounding, style.metrics.border, pal.stroke);
+        } else if hovered {
+            ui.painter().rect_filled(seg, rounding, pal.hover);
+        }
+
+        let text_color = if !enabled {
+            pal.text_disabled
+        } else if is_active {
+            pal.accent_active
+        } else if hovered {
+            pal.text
+        } else {
+            pal.text_secondary
+        };
+        let px = style.fonts.small;
+        let tw = ui.painter().measure_text(label, px, None).x;
+        ui.painter().text(
+            Pos2::new(
+                seg.center().x - tw * 0.5,
+                seg.center().y - px * 0.62,
+            ),
+            label,
+            px,
+            text_color,
+            None,
+        );
+
+        if resp.is_some_and(|r| r.clicked) {
+            clicked = Some(i);
+        }
+    }
+
+    // One border around the whole group, so it reads as a single control.
+    ui.painter().rect_stroke(
+        rect,
+        rounding,
+        style.metrics.border,
+        if enabled { pal.stroke } else { pal.stroke.with_alpha(0.5) },
+    );
+    clicked
+}

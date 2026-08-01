@@ -166,6 +166,8 @@ pub struct BubblePrefs {
     pub spacing: f32,
     /// Exec wires only (the default) vs. every wire.
     pub exec_only: bool,
+    /// Restrict bubbles to wires touching the selection.
+    pub selected_only: bool,
 }
 
 impl Default for BubblePrefs {
@@ -176,6 +178,7 @@ impl Default for BubblePrefs {
             speed: 150.0,
             spacing: 40.0,
             exec_only: true,
+            selected_only: false,
         }
     }
 }
@@ -199,6 +202,11 @@ pub struct WirePrefs {
     /// Below this `dx` the wire takes the backward lane. Negative, and named
     /// rather than a magic `-24` buried in the router.
     pub backward_lane_threshold: f32,
+    /// Bundling is mandatory for Manhattan, not optional polish — without it
+    /// six wires into one node render as a single thick bus. The toggle
+    /// exists so the settings surface can state that; turning it off is a
+    /// deliberate choice, not a default.
+    pub bundle_enabled: bool,
     /// Manhattan stagger per target pin row, so N wires into one node render
     /// as N distinguishable verticals instead of one thick bus.
     pub bundle_offset: f32,
@@ -206,7 +214,11 @@ pub struct WirePrefs {
     pub bundle_merge_offset: f32,
     /// Above this many shared-lane wires, draw coincident. Not consumed yet.
     pub bundle_max: u32,
+    /// Force bundled ribbons to the outside of the lane. Not consumed yet.
+    pub bundle_push_outside: bool,
     pub crossing: CrossingStyle,
+    /// Gap / arc / circle size where wires cross. Not consumed yet.
+    pub crossing_size: f32,
     pub exec_overwrite: Option<ExecWirePrefs>,
     pub bubbles: BubblePrefs,
     /// Spline tangent shape. Tuned; the spec says do not retune it.
@@ -223,10 +235,13 @@ impl Default for WirePrefs {
             priority: TurnPriority::None,
             disable_pin_offset: false,
             backward_lane_threshold: -24.0,
+            bundle_enabled: true,
             bundle_offset: 4.0,
             bundle_merge_offset: 20.0,
             bundle_max: 8,
+            bundle_push_outside: false,
             crossing: CrossingStyle::None,
+            crossing_size: 4.0,
             exec_overwrite: None,
             bubbles: BubblePrefs::default(),
             curve: 0.55,
@@ -282,7 +297,10 @@ mod tests {
         assert_eq!(w.bundle_offset, 4.0);
         assert_eq!(w.bundle_merge_offset, 20.0);
         assert_eq!(w.bundle_max, 8);
+        assert!(w.bundle_enabled);
+        assert!(!w.bundle_push_outside);
         assert_eq!(w.crossing, CrossingStyle::None);
+        assert_eq!(w.crossing_size, 4.0);
         assert_eq!(w.exec_overwrite, None);
         assert_eq!(w.curve, 0.55);
         assert!(!w.disable_pin_offset);
@@ -291,6 +309,8 @@ mod tests {
         let b = w.bubbles;
         assert_eq!((b.size, b.speed, b.spacing), (4.0, 150.0, 40.0));
         assert!(b.exec_only);
+        assert!(!b.selected_only);
+        assert!(b.enabled);
     }
 
     #[test]

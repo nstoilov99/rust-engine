@@ -25,6 +25,20 @@ pub enum GraphRealm {
     Shared,
 }
 
+impl GraphRealm {
+    /// Lowercase mono label for the graph toolbar's realm chip. Unlike a
+    /// *node's* realm — where `Shared` prints nothing — the graph's realm
+    /// chip is always shown: it is the document's authority statement.
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphRealm::Editor => "editor",
+            GraphRealm::Client => "client",
+            GraphRealm::Server => "server",
+            GraphRealm::Shared => "shared",
+        }
+    }
+}
+
 /// Where a node type may execute (descriptor metadata).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeRealm {
