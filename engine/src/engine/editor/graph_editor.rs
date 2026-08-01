@@ -39,6 +39,15 @@ pub enum GraphEdit {
     MoveNodes { ids: Vec<u64>, delta: [f32; 2] },
     /// A fragment (nodes + internal edges) was pasted/duplicated.
     Paste { nodes: Vec<NodeInst>, edges: Vec<Edge> },
+    /// An inline input constant changed (P2 canvas widgets). `None` on either
+    /// side means "no stored property", so setting a first value and clearing
+    /// one back to the descriptor default are both round-trippable.
+    SetProperty {
+        node: u64,
+        key: String,
+        old: Option<PropValue>,
+        new: Option<PropValue>,
+    },
     // --- Annotations (P7). Comments/groups have no ids; index-based ops are
     //     valid because the undo stack applies/reverts strictly LIFO. ---
     /// A comment box was appended.
@@ -76,6 +85,7 @@ impl GraphEdit {
                 doc.nodes.extend(nodes.iter().cloned());
                 doc.edges.extend(edges.iter().cloned());
             }
+            GraphEdit::SetProperty { node, key, new, .. } => set_prop(doc, *node, key, new),
             GraphEdit::AddComment(c) => doc.comments.push(c.clone()),
             GraphEdit::RemoveComment { index, .. } => {
                 doc.comments.remove(*index);
@@ -118,6 +128,7 @@ impl GraphEdit {
                 doc.nodes.retain(|n| !ids.contains(&n.id));
                 doc.edges.retain(|e| !edges.contains(e));
             }
+            GraphEdit::SetProperty { node, key, old, .. } => set_prop(doc, *node, key, old),
             GraphEdit::AddComment(_) => {
                 doc.comments.pop();
             }
@@ -168,6 +179,7 @@ impl GraphEdit {
             GraphEdit::Paste { nodes, .. } => {
                 format!("Paste {} Node{}", nodes.len(), plural(nodes.len()))
             }
+            GraphEdit::SetProperty { key, .. } => format!("Set {key}"),
             GraphEdit::AddComment(_) => "Add Comment".to_string(),
             GraphEdit::RemoveComment { .. } => "Delete Comment".to_string(),
             GraphEdit::MoveComment { .. } => "Move Comment".to_string(),
@@ -176,6 +188,22 @@ impl GraphEdit {
             GraphEdit::RemoveGroup { .. } => "Delete Group".to_string(),
             GraphEdit::MoveGroup { .. } => "Move Group".to_string(),
             GraphEdit::SetGroupTitle { .. } => "Edit Group".to_string(),
+        }
+    }
+}
+
+/// Write (or clear) one node property. Missing nodes are ignored — an edit
+/// may outlive its node across an undo branch.
+fn set_prop(doc: &mut GraphDoc, node: u64, key: &str, value: &Option<PropValue>) {
+    let Some(n) = doc.node_mut(node) else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            n.properties.insert(key.to_string(), v.clone());
+        }
+        None => {
+            n.properties.remove(key);
         }
     }
 }
@@ -371,6 +399,10 @@ pub struct GraphEditorState {
     pub view: CanvasView,
     /// Selected node ids.
     pub selection: BTreeSet<u64>,
+    /// Last-clicked node of the selection — draws its `selection.outline` at
+    /// 100% while the rest of the set draws at 55% (DESIGN-nodegraph
+    /// ▸ Selection). `None` when the selection came from a marquee.
+    pub primary: Option<u64>,
     /// Doc-local undo/redo.
     pub stack: GraphEditStack,
     /// In-flight node drag (session-only).
@@ -379,6 +411,13 @@ pub struct GraphEditorState {
     pub connect_drag: Option<ConnectDrag>,
     /// In-flight marquee box-select origin, world space (session-only).
     pub marquee: Option<[f32; 2]>,
+    /// How the in-flight marquee combines with the existing selection,
+    /// captured at press time so releasing the modifier mid-drag can't change
+    /// the gesture's meaning.
+    pub marquee_mode: MarqueeMode,
+    /// In-flight inline property edit (canvas widgets). Coalesces a whole
+    /// drag/toggle into one undo entry, flushed on pointer release.
+    pub prop_edit: Option<PropEdit>,
     /// World position captured when the node-create menu opened.
     pub create_menu_world: Option<[f32; 2]>,
     /// Search text of the node-create menu.
@@ -398,6 +437,25 @@ pub struct GraphEditorState {
 pub struct NodeDrag {
     pub origin_world: [f32; 2],
     pub originals: Vec<(u64, [f32; 2])>,
+}
+
+/// How a marquee gesture combines with the existing selection. Captured when
+/// the drag starts (AUDIT ruling #2: Windows keys — ⇧ adds, ⌥→Alt subtracts).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MarqueeMode {
+    #[default]
+    Replace,
+    Add,
+    Subtract,
+}
+
+/// An inline property edit in progress: the value as it stood *before* the
+/// gesture, so the whole drag commits as one reversible edit.
+#[derive(Debug, Clone)]
+pub struct PropEdit {
+    pub node: u64,
+    pub key: String,
+    pub old: Option<PropValue>,
 }
 
 /// In-flight connection drag from a source pin toward the pointer.
@@ -454,10 +512,13 @@ impl GraphEditorState {
             last_saved_at: None,
             view: CanvasView::default(),
             selection: BTreeSet::new(),
+            primary: None,
             stack: GraphEditStack::new(),
             node_drag: None,
             connect_drag: None,
             marquee: None,
+            marquee_mode: MarqueeMode::default(),
+            prop_edit: None,
             create_menu_world: None,
             create_menu_search: String::new(),
             sel_comment: None,
@@ -507,6 +568,7 @@ impl GraphEditorState {
     /// have invalidated (P7).
     fn prune_selection(&mut self) {
         self.selection.retain(|id| self.doc.node(*id).is_some());
+        self.primary = self.primary.filter(|id| self.selection.contains(id));
         self.sel_comment = self.sel_comment.filter(|&i| i < self.doc.comments.len());
         self.sel_group = self.sel_group.filter(|&i| i < self.doc.groups.len());
         // An in-flight drag holds pre-undo positions/indices; cancel it so the
@@ -563,8 +625,67 @@ impl GraphEditorState {
     /// Clear node + annotation selection (a fresh single selection follows).
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+        self.primary = None;
         self.sel_comment = None;
         self.sel_group = None;
+    }
+
+    /// Select exactly `id` and make it the primary (last-clicked) node.
+    pub fn select_only(&mut self, id: u64) {
+        self.clear_selection();
+        self.selection.insert(id);
+        self.primary = Some(id);
+    }
+
+    /// Toggle `id` in the selection (⇧-click). Adding makes it primary;
+    /// removing the primary demotes to "no primary" rather than guessing.
+    pub fn toggle_selected(&mut self, id: u64) {
+        if self.selection.remove(&id) {
+            if self.primary == Some(id) {
+                self.primary = None;
+            }
+        } else {
+            self.selection.insert(id);
+            self.primary = Some(id);
+        }
+    }
+
+    /// Begin (or continue) an inline property edit on `node.key`, remembering
+    /// the pre-gesture value exactly once so the whole drag is one undo entry.
+    pub fn begin_prop_edit(&mut self, node: u64, key: &str, registry: &NodeRegistry) {
+        if self
+            .prop_edit
+            .as_ref()
+            .is_some_and(|p| p.node == node && p.key == key)
+        {
+            return;
+        }
+        // A different target: the previous gesture is over.
+        self.flush_prop_edit(registry);
+        let old = self
+            .doc
+            .node(node)
+            .and_then(|n| n.properties.get(key).cloned());
+        self.prop_edit = Some(PropEdit { node, key: key.to_string(), old });
+    }
+
+    /// Commit the in-flight inline edit as one `SetProperty`. No-op when
+    /// nothing is pending or the value ended where it started.
+    pub fn flush_prop_edit(&mut self, registry: &NodeRegistry) {
+        let Some(p) = self.prop_edit.take() else {
+            return;
+        };
+        let new = self
+            .doc
+            .node(p.node)
+            .and_then(|n| n.properties.get(&p.key).cloned());
+        if new == p.old {
+            return;
+        }
+        self.commit(
+            GraphEdit::SetProperty { node: p.node, key: p.key, old: p.old, new },
+            registry,
+        );
     }
 
     /// Add a node of `type_id` at `pos` with descriptor input defaults as
@@ -585,11 +706,11 @@ impl GraphEditorState {
             position: pos,
             properties,
             subgraph: None,
-        };
+        
+        tint: None,};
         let id = node.id;
         self.doc.nodes.push(node.clone());
-        self.clear_selection();
-        self.selection.insert(id);
+        self.select_only(id);
         self.commit(GraphEdit::AddNode(node), registry);
     }
 
@@ -608,11 +729,11 @@ impl GraphEditorState {
             position: pos,
             properties: std::collections::BTreeMap::new(),
             subgraph: Some(subgraph_path.to_string()),
-        };
+        
+        tint: None,};
         let id = node.id;
         self.doc.nodes.push(node.clone());
-        self.clear_selection();
-        self.selection.insert(id);
+        self.select_only(id);
         self.commit(GraphEdit::AddNode(node), registry);
     }
 
@@ -674,7 +795,10 @@ impl GraphEditorState {
         self.annotation_drag = None;
         self.connect_drag = None;
         self.marquee = None;
+        self.marquee_mode = MarqueeMode::Replace;
         self.editing = None;
+        // Dropped, not flushed: the value it references may already be gone.
+        self.prop_edit = None;
     }
 
     /// Copy the selection into `clipboard` (nodes + internal edges).
@@ -742,6 +866,7 @@ impl GraphEditorState {
         // a following Delete hits the pasted nodes, not an off-screen comment.
         self.clear_selection();
         self.selection = nodes.iter().map(|n| n.id).collect();
+        self.primary = nodes.last().map(|n| n.id);
         self.commit(edit, registry);
     }
 }
@@ -831,7 +956,8 @@ mod tests {
             position: pos,
             properties: std::collections::BTreeMap::new(),
             subgraph: None,
-        }
+        
+        tint: None,}
     }
 
     fn edge(a: u64, b: u64) -> Edge {
@@ -930,6 +1056,13 @@ mod tests {
                 nodes: vec![node(7, [1.0, 1.0]), node(8, [2.0, 2.0])],
                 edges: vec![edge(7, 8)],
             },
+            // Set a first value where none was stored…
+            GraphEdit::SetProperty {
+                node: 0,
+                key: "a".to_string(),
+                old: None,
+                new: Some(PropValue::Float(3.5)),
+            },
         ];
         for e in edits {
             let mut doc = base.clone();
@@ -938,6 +1071,71 @@ mod tests {
             e.revert(&mut doc);
             assert_eq!(doc, base, "{}: apply→revert must restore", e.description());
         }
+    }
+
+    /// `SetProperty` round-trips in all three shapes — set a first value,
+    /// change an existing one, and clear one back to "no stored property" —
+    /// and a whole widget gesture coalesces into exactly one undo entry.
+    #[test]
+    fn set_property_round_trips_and_coalesces() {
+        let reg = NodeRegistry::new();
+
+        let base = {
+            let mut d = GraphDoc::default();
+            let mut n = node(0, [0.0, 0.0]);
+            n.properties.insert("a".into(), PropValue::Float(1.0));
+            d.nodes = vec![n];
+            d
+        };
+        let edits = [
+            // change an existing value
+            GraphEdit::SetProperty {
+                node: 0,
+                key: "a".into(),
+                old: Some(PropValue::Float(1.0)),
+                new: Some(PropValue::Float(9.0)),
+            },
+            // clear back to the descriptor default
+            GraphEdit::SetProperty {
+                node: 0,
+                key: "a".into(),
+                old: Some(PropValue::Float(1.0)),
+                new: None,
+            },
+            // set a value that was never stored
+            GraphEdit::SetProperty {
+                node: 0,
+                key: "b".into(),
+                old: None,
+                new: Some(PropValue::Bool(true)),
+            },
+        ];
+        for e in edits {
+            let mut doc = base.clone();
+            e.apply(&mut doc);
+            assert_ne!(doc, base, "{}: apply should change the doc", e.description());
+            e.revert(&mut doc);
+            assert_eq!(doc, base, "{}: apply→revert must restore", e.description());
+        }
+
+        // A drag: many live writes, one undo entry, and undo restores the
+        // value as it stood before the gesture.
+        let mut st = bare_state();
+        st.doc = base.clone();
+        for v in [2.0, 3.0, 4.0_f32] {
+            st.begin_prop_edit(0, "a", &reg);
+            st.doc.node_mut(0).unwrap().properties.insert("a".into(), PropValue::Float(v));
+        }
+        st.flush_prop_edit(&reg);
+        assert!(st.stack.can_undo());
+        st.undo(&reg);
+        assert_eq!(st.doc, base, "one gesture = one undo entry back to the start");
+        assert!(!st.stack.can_undo(), "no second entry was recorded");
+
+        // A gesture that ends where it started records nothing.
+        st.begin_prop_edit(0, "a", &reg);
+        st.flush_prop_edit(&reg);
+        assert!(!st.stack.can_undo(), "a no-op gesture must not dirty the stack");
     }
 
     /// Regression (review finding 1): deleting a *middle* node and undoing
@@ -975,10 +1173,13 @@ mod tests {
             last_saved_at: None,
             view: CanvasView::default(),
             selection: BTreeSet::new(),
+            primary: None,
             stack: GraphEditStack::new(),
             node_drag: None,
             connect_drag: None,
             marquee: None,
+            marquee_mode: MarqueeMode::default(),
+            prop_edit: None,
             create_menu_world: None,
             create_menu_search: String::new(),
             sel_comment: None,
@@ -1137,7 +1338,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: std::collections::BTreeMap::new(),
             subgraph: Some("lib/leaf.subgraph".to_string()),
-        });
+        
+        tint: None,});
         save_graph(&dir.join("lib/leaf.subgraph"), &leaf).unwrap();
         save_graph(&dir.join("lib/mid.subgraph"), &mid).unwrap();
 
@@ -1151,7 +1353,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: std::collections::BTreeMap::new(),
             subgraph: Some("lib/mid.subgraph".to_string()),
-        });
+        
+        tint: None,});
 
         let open = [("main.graph", &host)];
         let docs = build_resolver_docs(open.into_iter().map(|(k, d)| (k, d)), &dir);

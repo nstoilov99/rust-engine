@@ -22,8 +22,9 @@ pub mod typography;
 pub use density::{Density, SpacingTokens};
 pub use tokens::{
     asset_color, asset_deep_color, category_color, category_tag_color, contrast_ratio,
-    domain_ramp_index, neutral, pin_color, ramp, wire_color, Accents, Axis, ContrastIssue, Hue,
-    Metrics, Motion, Palette, Palettes, Selection, Status, Surfaces, TextColors, PALETTES,
+    domain_ramp_index, grid_major, grid_minor, neutral, pin_color, ramp, wire_color, Accents, Axis,
+    ContrastIssue, Hue, Metrics, Motion, Palette, Palettes, Selection, Status, Surfaces,
+    TextColors, GRID_MAJOR_STEP, GRID_MINOR_MIN_ZOOM, GRID_MINOR_STEP, PALETTES,
 };
 pub use typography::Typography;
 

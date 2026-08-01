@@ -249,6 +249,29 @@ pub fn wire_color(registry: Option<&NodeRegistry>, ty: &PinType) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Graph canvas grid (DESIGN-nodegraph ▸ Canvas)
+// ---------------------------------------------------------------------------
+
+/// Minor grid pitch, world units.
+pub const GRID_MINOR_STEP: f32 = 16.0;
+/// Major grid pitch, world units.
+pub const GRID_MAJOR_STEP: f32 = 128.0;
+/// The minor grid stops being drawn below this zoom (it turns to mush).
+pub const GRID_MINOR_MIN_ZOOM: f32 = 0.40;
+
+/// Grid lines are white at a fixed alpha — not a surface token, because the
+/// grid must read identically on every preset's canvas. Named here so widget
+/// code never spells the value (and never spells a hex).
+pub fn grid_minor() -> Color {
+    Color::WHITE.with_alpha(0.05)
+}
+
+/// Major grid line: same white, 9%.
+pub fn grid_major() -> Color {
+    Color::WHITE.with_alpha(0.09)
+}
+
+// ---------------------------------------------------------------------------
 // Surfaces / accents / invariants
 // ---------------------------------------------------------------------------
 

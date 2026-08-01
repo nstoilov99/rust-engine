@@ -107,6 +107,11 @@ pub struct NodeInst {
     /// on subgraph nodes.
     #[serde(default)]
     pub subgraph: Option<String>,
+    /// Per-node color override: an index into the theme's 12-hue ramp, never
+    /// a hex. Replaces the category 2px top edge (deep tone); the derived tag
+    /// keeps the category's color. `None` = take the category's slot.
+    #[serde(default)]
+    pub tint: Option<u8>,
 }
 
 /// A connection between two pins. Pin *slugs*, not indices — pins can be

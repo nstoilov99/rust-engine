@@ -222,7 +222,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: BTreeMap::new(),
             subgraph: None,
-        });
+        
+        tint: None,});
         assert_eq!(
             migrate_doc(&mut doc, &reg),
             Err(MigrationError::MissingStep { type_id: "gappy".into(), from: 2, current: 3 })
@@ -240,7 +241,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: BTreeMap::new(),
             subgraph: None,
-        });
+        
+        tint: None,});
         // Unknown type: not an error here (validate_doc reports it), and
         // the instance is untouched.
         assert_eq!(migrate_doc(&mut doc, &reg).unwrap(), vec![]);

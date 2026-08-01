@@ -210,7 +210,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: BTreeMap::new(),
             subgraph: None,
-        }
+        
+        tint: None,}
     }
 
     fn edge(from: u64, fp: &str, to: u64, tp: &str) -> Edge {

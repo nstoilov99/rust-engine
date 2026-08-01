@@ -3273,6 +3273,9 @@ impl App {
             // P9: graph canvas zoom limits from EditorPrefs.
             let graph_zoom_min = self.editor.ui.settings.prefs.graph_zoom_min;
             let graph_zoom_max = self.editor.ui.settings.prefs.graph_zoom_max;
+            // Graph selection outline: preset-invariant except for Graphite's
+            // achromatic carve-out, so it must come from the live theme.
+            let graph_sel_outline = self.editor.services.theme.palette.selection.outline;
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -3591,6 +3594,7 @@ impl App {
                                                 resolver: &graph_resolver_docs,
                                                 subgraph_assets: &subgraph_assets,
                                                 open_subgraph: &mut graph_open_request,
+                                                selection_outline: graph_sel_outline,
                                                 zoom_min: graph_zoom_min,
                                                 zoom_max: graph_zoom_max,
                                                 focused: graph_focused_tab.as_deref()
@@ -4452,6 +4456,7 @@ impl App {
         };
         let graph_zoom_min = editor.ui.settings.prefs.graph_zoom_min;
         let graph_zoom_max = editor.ui.settings.prefs.graph_zoom_max;
+        let graph_sel_outline = editor.services.theme.palette.selection.outline;
         let mut graph_open_requests: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
@@ -4611,6 +4616,7 @@ impl App {
                                     resolver: &graph_resolver_docs,
                                     subgraph_assets: &subgraph_assets,
                                     open_subgraph: &mut float_open_request,
+                                    selection_outline: graph_sel_outline,
                                     zoom_min: graph_zoom_min,
                                     zoom_max: graph_zoom_max,
                                     // A float window is a dedicated surface;

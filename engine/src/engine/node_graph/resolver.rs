@@ -181,7 +181,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: Default::default(),
             subgraph: Some(path.to_string()),
-        }
+        
+        tint: None,}
     }
 
     fn plain_node(id: u64, type_id: &str) -> NodeInst {
@@ -192,7 +193,8 @@ mod tests {
             position: [0.0, 0.0],
             properties: Default::default(),
             subgraph: None,
-        }
+        
+        tint: None,}
     }
 
     fn calc_subgraph() -> GraphDoc {

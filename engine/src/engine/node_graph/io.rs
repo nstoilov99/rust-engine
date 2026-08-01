@@ -93,7 +93,8 @@ mod tests {
                     position: [40.0, 80.0],
                     properties: BTreeMap::new(),
                     subgraph: None,
-                },
+                
+                tint: None,},
                 NodeInst {
                     id: 1,
                     type_id: "test_damage".to_string(),
@@ -101,7 +102,8 @@ mod tests {
                     position: [260.0, 80.0],
                     properties: props,
                     subgraph: None,
-                },
+                
+                tint: None,},
             ],
             edges: vec![Edge {
                 from_node: 0,
@@ -169,7 +171,8 @@ mod tests {
             position: [500.0, 80.0],
             properties: BTreeMap::new(),
             subgraph: Some("graphs/lib/calc.subgraph".to_string()),
-        });
+        
+        tint: None,});
 
         let dir = std::env::temp_dir().join("rust_engine_graph_io_test");
         std::fs::create_dir_all(&dir).unwrap();
