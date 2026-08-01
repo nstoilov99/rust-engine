@@ -32,15 +32,32 @@ pub struct PinDescriptor {
     pub ty: PinType,
     /// Constant shown/stored when the pin is unconnected (input pins only).
     pub default: Option<PropValue>,
+    /// One line explaining what the pin is for, shown in its hover tooltip.
+    /// Descriptors are never serialized, so this needs no serde treatment —
+    /// it lives with the code that registers the node.
+    pub doc: Option<String>,
 }
 
 impl PinDescriptor {
     pub fn new(slug: &str, label: &str, ty: PinType) -> Self {
-        Self { slug: slug.to_string(), label: label.to_string(), ty, default: None }
+        Self {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            ty,
+            default: None,
+            doc: None,
+        }
     }
 
     pub fn with_default(mut self, v: PropValue) -> Self {
         self.default = Some(v);
+        self
+    }
+
+    /// One line, shown on hover. Keep it to a line: a tooltip that needs
+    /// scrolling is documentation in the wrong place.
+    pub fn with_doc(mut self, doc: &str) -> Self {
+        self.doc = Some(doc.to_string());
         self
     }
 }
@@ -63,6 +80,8 @@ pub struct NodeDescriptor {
     pub realm: NodeRealm,
     /// Same inputs always produce same outputs (networking/replay relevant).
     pub deterministic: bool,
+    /// One line explaining what the node does, shown when hovering its header.
+    pub doc: Option<String>,
 }
 
 impl NodeDescriptor {
@@ -242,6 +261,7 @@ mod tests {
             pure: true,
             realm: NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         }
     }
 

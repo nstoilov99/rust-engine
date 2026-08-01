@@ -13,7 +13,7 @@
 //!        pure = false, realm = "shared", deterministic = true,
 //!        version = 1, auto_register)]
 //! pub struct DamageZone {
-//!     #[input(pin = "exec")] exec_in: ExecPin,
+//!     #[input(pin = "exec", doc = "Runs when this fires")] exec_in: ExecPin,
 //!     #[input(label = "DPS", default = 10.0)] dps: f32,
 //!     #[input(label = "Radius")] radius: f32,
 //!     #[output(pin = "exec")] exec_out: ExecPin,
@@ -61,6 +61,7 @@ struct NodeMeta {
     deterministic: bool,
     version: u32,
     auto_register: bool,
+    doc: Option<String>,
 }
 
 fn build(ast: &DeriveInput) -> syn::Result<TokenStream2> {
@@ -106,6 +107,10 @@ fn build(ast: &DeriveInput) -> syn::Result<TokenStream2> {
         meta.deterministic,
         meta.version,
     );
+    let doc = match &meta.doc {
+        Some(d) => quote! { ::std::option::Option::Some(#d.to_string()) },
+        None => quote! { ::std::option::Option::None },
+    };
 
     let descriptor = quote! {
         impl #ident {
@@ -123,6 +128,7 @@ fn build(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     pure: #pure,
                     realm: #realm,
                     deterministic: #deterministic,
+                    doc: #doc,
                 }
             }
         }
@@ -161,6 +167,7 @@ fn parse_node_attr(ast: &DeriveInput) -> syn::Result<NodeMeta> {
     let mut deterministic = None;
     let mut version: u32 = 1;
     let mut auto_register = false;
+    let mut doc: Option<String> = None;
 
     attr.parse_nested_meta(|meta| {
         let key = meta
@@ -203,6 +210,10 @@ fn parse_node_attr(ast: &DeriveInput) -> syn::Result<NodeMeta> {
                 version = lit.base10_parse()?;
                 Ok(())
             }
+            "doc" => {
+                doc = Some(lit_string(&meta)?);
+                Ok(())
+            }
             other => Err(meta.error(format!("unknown #[node] key `{other}`"))),
         }
     })?;
@@ -217,6 +228,7 @@ fn parse_node_attr(ast: &DeriveInput) -> syn::Result<NodeMeta> {
         deterministic: deterministic.ok_or_else(|| missing("deterministic"))?,
         version,
         auto_register,
+        doc,
     })
 }
 
@@ -259,6 +271,7 @@ fn parse_field(field: &syn::Field) -> syn::Result<(Side, TokenStream2)> {
     let mut label: Option<String> = None;
     let mut pin_kind: Option<String> = None;
     let mut default_lit: Option<Lit> = None;
+    let mut doc: Option<String> = None;
 
     // An attribute with no args (e.g. `#[output]`) has no meta list to parse.
     if !matches!(attr.meta, syn::Meta::Path(_)) {
@@ -282,6 +295,10 @@ fn parse_field(field: &syn::Field) -> syn::Result<(Side, TokenStream2)> {
                     default_lit = Some(value.parse()?);
                     Ok(())
                 }
+                "doc" => {
+                    doc = Some(lit_string(&meta)?);
+                    Ok(())
+                }
                 other => Err(meta.error(format!("unknown #[input]/#[output] key `{other}`"))),
             }
         })?;
@@ -298,8 +315,13 @@ fn parse_field(field: &syn::Field) -> syn::Result<(Side, TokenStream2)> {
         None => quote! {},
     };
 
+    let doc_tokens = match doc {
+        Some(d) => quote! { .with_doc(#d) },
+        None => quote! {},
+    };
+
     let pin = quote! {
-        PinDescriptor::new(#slug, #label, #pin_ty) #default_tokens
+        PinDescriptor::new(#slug, #label, #pin_ty) #default_tokens #doc_tokens
     };
     Ok((side, pin))
 }

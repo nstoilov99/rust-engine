@@ -160,6 +160,7 @@ mod tests {
             pure: true,
             realm: NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         })
         .unwrap();
         reg.register_migration("mig_damage", 1, |ctx| {
@@ -211,6 +212,7 @@ mod tests {
             pure: true,
             realm: NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         })
         .unwrap();
         reg.register_migration("gappy", 1, |_| {});

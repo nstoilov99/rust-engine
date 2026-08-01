@@ -21,19 +21,20 @@ use node_graph_macros::{AnimationNode, ScriptNode};
     pure = false,
     realm = "shared",
     deterministic = true,
-    version = 1
+    version = 1,
+    doc = "Applies radial damage over time"
 )]
 #[allow(dead_code)]
 pub struct DamageZone {
     #[input(pin = "exec")]
     exec_in: ExecPin,
-    #[input(label = "DPS", default = 10.0)]
+    #[input(label = "DPS", default = 10.0, doc = "Damage per second")]
     dps: f32,
     #[input(label = "Radius")]
     radius: f32,
     #[output(pin = "exec")]
     exec_out: ExecPin,
-    #[output(label = "Entities Hit")]
+    #[output(label = "Entities Hit", doc = "Entities the pulse reached")]
     hit_count: f32,
 }
 
@@ -46,16 +47,19 @@ fn hand_written_damage_zone() -> NodeDescriptor {
         inputs: vec![
             PinDescriptor::new("exec_in", "Exec In", PinType::Exec),
             PinDescriptor::new("dps", "DPS", PinType::Float)
-                .with_default(PropValue::Float(10.0)),
+                .with_default(PropValue::Float(10.0))
+                .with_doc("Damage per second"),
             PinDescriptor::new("radius", "Radius", PinType::Float),
         ],
         outputs: vec![
             PinDescriptor::new("exec_out", "Exec Out", PinType::Exec),
-            PinDescriptor::new("hit_count", "Entities Hit", PinType::Float),
+            PinDescriptor::new("hit_count", "Entities Hit", PinType::Float)
+                .with_doc("Entities the pulse reached"),
         ],
         pure: false,
         realm: NodeRealm::Shared,
         deterministic: true,
+        doc: Some("Applies radial damage over time".into()),
     }
 }
 

@@ -16,7 +16,7 @@ use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
     endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
-    GraphDoc, IfacePin,
+    GraphDoc, IfacePin, PinType,
     GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
@@ -126,8 +126,9 @@ impl Annotation {
 }
 
 impl GraphEdit {
-    /// Redo direction — the edit as originally performed.
-    fn apply(&self, doc: &mut GraphDoc) {
+    /// Redo direction — the edit as originally performed. Public so the
+    /// panel can apply a composite it just built before recording it.
+    pub fn apply(&self, doc: &mut GraphDoc) {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.push(n.clone()),
             GraphEdit::RemoveNodes { nodes, edges, comments } => {
@@ -761,6 +762,63 @@ pub struct GraphEditorState {
     pub cut_path: Option<Vec<[f32; 2]>>,
     /// Node whose context menu is open.
     pub node_menu: Option<u64>,
+    /// The add-node palette, when open.
+    pub palette: Option<PaletteState>,
+    /// Find-in-graph overlay (session-only).
+    pub find: Option<FindState>,
+}
+
+/// The add-node palette's session state.
+#[derive(Debug, Clone)]
+pub struct PaletteState {
+    /// Where a picked node lands, world space.
+    pub world: [f32; 2],
+    /// Screen anchor for the popover.
+    pub screen: [f32; 2],
+    pub search: String,
+    /// Highlighted row, for Up/Down + Enter.
+    pub cursor: usize,
+    /// Present when the palette was opened by releasing a pin drag: the type
+    /// to filter by, and the pin a pick would wire back to.
+    pub from: Option<PaletteDragSource>,
+    /// Grab focus on the first frame only.
+    pub first_frame: bool,
+}
+
+/// The pin a type-filtered palette came off.
+#[derive(Debug, Clone)]
+pub struct PaletteDragSource {
+    pub node: u64,
+    pub pin: String,
+    /// The source pin is an output, so a picked node needs a matching input.
+    pub output: bool,
+    pub ty: PinType,
+    /// The source pin's label, for the auto-connect name tie-break.
+    pub label: String,
+}
+
+/// Find-in-graph: a filter over node titles/type ids plus a cycle cursor.
+#[derive(Debug, Clone, Default)]
+pub struct FindState {
+    pub query: String,
+    pub cursor: usize,
+    pub first_frame: bool,
+}
+
+impl FindState {
+    /// Does this node match? Substring, case-insensitive, over the display
+    /// title and the type id — the two things a user would think to type.
+    pub fn matches(&self, title: &str, type_id: &str) -> bool {
+        let q = self.query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        title.to_lowercase().contains(&q) || type_id.to_lowercase().contains(&q)
+    }
+
+    pub fn active(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
 }
 
 /// The prototype's cap on the cut path — a slash is a gesture, not a drawing,
@@ -985,6 +1043,8 @@ impl GraphEditorState {
             toasts: Vec::new(),
             cut_path: None,
             node_menu: None,
+            palette: None,
+            find: None,
         })
     }
 
@@ -1409,6 +1469,89 @@ impl GraphEditorState {
         edit.apply(&mut self.doc);
         self.select_only(id);
         self.commit(edit, registry);
+    }
+
+    /// Splice an existing node into `edge`: the edge is replaced by two, one
+    /// into `in_pin` and one out of `out_pin`. One transaction — the reroute
+    /// insert machinery generalized, since a reroute is just the degenerate
+    /// case of "a node with one compatible input and output".
+    ///
+    /// Returns false when the edge is gone or the node is one of its
+    /// endpoints (splicing a wire into itself is not a thing).
+    pub fn splice_node_into(
+        &mut self,
+        edge: &Edge,
+        node: u64,
+        in_pin: &str,
+        out_pin: &str,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let Some(index) = self.doc.edges.iter().position(|e| e == edge) else {
+            return false;
+        };
+        if edge.from_node == node || edge.to_node == node {
+            return false;
+        }
+        let edit = GraphEdit::Composite {
+            label: "Splice Node".to_string(),
+            edits: vec![
+                GraphEdit::Disconnect { edges: vec![(index, edge.clone())] },
+                GraphEdit::Connect(Edge {
+                    from_node: edge.from_node,
+                    from_pin: edge.from_pin.clone(),
+                    to_node: node,
+                    to_pin: in_pin.to_string(),
+                }),
+                GraphEdit::Connect(Edge {
+                    from_node: node,
+                    from_pin: out_pin.to_string(),
+                    to_node: edge.to_node,
+                    to_pin: edge.to_pin.clone(),
+                }),
+            ],
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        self.toast("Spliced into wire");
+        true
+    }
+
+    /// The input/output pin pair a node would splice into `edge` with, if it
+    /// has a compatible one on **both** sides. A node that can only take the
+    /// type cannot be spliced — the wire has to come out the other end.
+    pub fn splice_pins(
+        &self,
+        edge: &Edge,
+        node: u64,
+        registry: &NodeRegistry,
+    ) -> Option<(String, String)> {
+        if edge.from_node == node || edge.to_node == node {
+            return None;
+        }
+        let ty = endpoint_type(&self.doc, registry, edge.from_node, &edge.from_pin, true)?;
+        let n = self.doc.node(node)?;
+        let desc = registry.get(&n.type_id)?;
+        let input = desc.inputs.iter().find(|p| p.ty == ty)?;
+        let output = desc.outputs.iter().find(|p| p.ty == ty)?;
+        Some((input.slug.clone(), output.slug.clone()))
+    }
+
+    /// Insert a reroute at the wire's midpoint and hand it straight to a drag,
+    /// so grabbing the handle and moving it is one gesture.
+    pub fn grab_wire_midpoint(
+        &mut self,
+        edge: &Edge,
+        at: [f32; 2],
+        registry: &NodeRegistry,
+    ) -> Option<u64> {
+        self.insert_reroute(edge, at, registry);
+        let id = self.doc.nodes.last().map(|n| n.id)?;
+        self.node_drag = Some(NodeDrag {
+            origin_world: at,
+            originals: vec![(id, self.doc.node(id)?.position)],
+            anchored: Vec::new(),
+        });
+        Some(id)
     }
 
     /// Delete a reroute, healing the wire through it. Every downstream branch
@@ -2666,6 +2809,7 @@ mod tests {
             pure: true,
             realm: crate::engine::node_graph::NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         })
         .unwrap();
         reg.register(NodeDescriptor {
@@ -2689,6 +2833,7 @@ mod tests {
             pure: false,
             realm: crate::engine::node_graph::NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         })
         .unwrap();
 
@@ -3011,6 +3156,84 @@ mod tests {
         assert_eq!(st.cut_path.as_ref().unwrap().len(), before);
     }
 
+    /// Splicing a node into a wire is one transaction and reverts exactly.
+    #[test]
+    fn splice_into_wire_round_trips() {
+        let mut reg = NodeRegistry::new();
+        reg.register(NodeDescriptor {
+            id: "test_add".into(),
+            name: "Add".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "a",
+                "A",
+                crate::engine::node_graph::PinType::Float,
+            )],
+            outputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "sum",
+                "Sum",
+                crate::engine::node_graph::PinType::Float,
+            )],
+            pure: true,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+        })
+        .unwrap();
+
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0]), node(2, [200.0, 80.0])];
+        st.doc.edges = vec![edge(0, 1)];
+        let before = st.doc.clone();
+
+        // Node 2 has a Float in and a Float out, so it can sit on the wire.
+        let (in_pin, out_pin) = st.splice_pins(&edge(0, 1), 2, &reg).expect("splice pins");
+        assert_eq!((in_pin.as_str(), out_pin.as_str()), ("a", "sum"));
+
+        assert!(st.splice_node_into(&edge(0, 1), 2, &in_pin, &out_pin, &reg));
+        assert_eq!(st.doc.edges.len(), 2, "the wire became two");
+        assert!(st.doc.edges.iter().any(|e| e.from_node == 0 && e.to_node == 2));
+        assert!(st.doc.edges.iter().any(|e| e.from_node == 2 && e.to_node == 1));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Splice Node"));
+        assert_eq!(st.toasts.last().unwrap().text, "Spliced into wire");
+
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture, one undo");
+        let a = crate::engine::node_graph::serialize_graph(&before).unwrap();
+        let b = crate::engine::node_graph::serialize_graph(&st.doc).unwrap();
+        assert_eq!(a, b, "restored doc must serialize byte-identically");
+
+        // A wire's own endpoints cannot splice into it.
+        assert!(st.splice_pins(&edge(0, 1), 0, &reg).is_none());
+        assert!(st.splice_pins(&edge(0, 1), 1, &reg).is_none());
+        assert!(!st.splice_node_into(&edge(0, 1), 0, "a", "sum", &reg));
+        // Neither can a node the registry does not know.
+        assert!(st.splice_pins(&edge(0, 1), 99, &reg).is_none());
+    }
+
+    /// Grabbing a wire's midpoint inserts a reroute and hands it to a drag,
+    /// so the handle is a grab rather than a two-step.
+    #[test]
+    fn wire_midpoint_grab_inserts_and_drags() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1)];
+
+        let id = st.grab_wire_midpoint(&edge(0, 1), [200.0, 0.0], &reg).expect("grab");
+        assert_eq!(st.doc.nodes.len(), 3);
+        assert_eq!(st.doc.edges.len(), 2);
+        let drag = st.node_drag.as_ref().expect("a drag is live");
+        assert_eq!(drag.originals.len(), 1);
+        assert_eq!(drag.originals[0].0, id, "the new reroute is what is dragging");
+
+        // Undo removes the reroute; the drag was cancelled with it.
+        st.undo(&reg);
+        assert_eq!(st.doc.edges.len(), 1);
+        assert!(st.node_drag.is_none(), "undo cancels the live drag");
+    }
+
     /// Group-drag capture selects exactly the nodes whose centers lie inside
     /// the group rect (P7).
     #[test]
@@ -3254,6 +3477,8 @@ mod tests {
             toasts: Vec::new(),
             cut_path: None,
             node_menu: None,
+            palette: None,
+            find: None,
         }
     }
 

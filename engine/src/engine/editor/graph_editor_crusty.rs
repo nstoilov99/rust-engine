@@ -32,8 +32,9 @@ use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
     GraphFragment, MarqueeMode, NodeDrag, ResizeHandle, ANNOTATION_MIN_H, ANNOTATION_MIN_W,
-    BOOKMARK_SLOTS, TOAST_MS,
+    FindState, PaletteDragSource, PaletteState, BOOKMARK_SLOTS, TOAST_MS,
 };
+use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
     self as router, point_polyline_distance, RouteMeta,
@@ -84,8 +85,14 @@ const L4_BAR_H: f32 = 4.0;
 const ANNOTATION_FLOOR_PX: f32 = 7.0;
 /// Middle truncation keeps this fraction of the head (DESIGN-panels ▸ names).
 const TRUNCATE_HEAD: f32 = 0.60;
+/// How close a dragged node's centre must come to a wire to splice into it.
+const SPLICE_SNAP_PX: f32 = 24.0;
+/// Wire midpoint handle radius, screen px.
+const MIDPOINT_R: f32 = 5.0;
 /// Slash-cut stroke, screen px.
 const CUT_STROKE: f32 = 1.5;
+/// Non-matching nodes dim to this while a find is active.
+const FIND_DIM: f32 = 0.45;
 /// Marquee fill alpha (1px accent border + 8% accent fill).
 const MARQUEE_FILL_ALPHA: f32 = 0.08;
 /// Non-primary members of a multi-selection draw their outline at 55%.
@@ -995,6 +1002,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut wire_menu_at: Option<Pos2> = None;
     let mut node_menu_at: Option<Pos2> = None;
     let mut collapse_request = false;
+    let mut cycle_error_request: Option<bool> = None;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
@@ -1008,6 +1016,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut wire_menu_at,
             &mut node_menu_at,
             &mut collapse_request,
+            &mut cycle_error_request,
             open_subgraph,
             selection_outline,
             &wire_prefs,
@@ -1023,6 +1032,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     }
     state.view = view;
 
+    palette_popover(ui, state, registry, subgraph_assets);
+    find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
     create_menu(ui, state, registry, &out.inner, subgraph_assets, menu_open_at);
     annotation_menu(ui, state, registry, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
@@ -1030,6 +1041,36 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     draw_toasts(ui, out.rect, state);
+
+    // F8 / Shift+F8 walk the anchored errors. The chip's own cursor drives
+    // it, so clicking and keying stay in step.
+    if let Some(forward) = cycle_error_request {
+        let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
+        if !forward {
+            // Backwards = step back two, then forward one.
+            let n = errors
+                .ordered
+                .iter()
+                .filter(|e| e.anchor() != ErrorAnchor::Document)
+                .count();
+            if n > 0 {
+                state.error_cursor = (state.error_cursor + n.saturating_sub(2)) % n;
+            }
+        }
+        let mut req = None;
+        cycle_error(
+            state,
+            &errors,
+            &out.inner,
+            out.rect.size(),
+            zoom_min,
+            zoom_max,
+            &mut req,
+        );
+        if let Some(v) = req {
+            state.view = v;
+        }
+    }
 
     // Ctrl+G writes a new asset, so it runs outside the draw pass.
     if collapse_request {
@@ -1109,6 +1150,7 @@ fn draw_and_interact(
     wire_menu_at: &mut Option<Pos2>,
     node_menu_at: &mut Option<Pos2>,
     collapse_request: &mut bool,
+    cycle_error_request: &mut Option<bool>,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
@@ -1136,13 +1178,38 @@ fn draw_and_interact(
     // so the preview and the release can never disagree.
     let cut_preview: BTreeSet<usize> = crossed_indices(state, &wires, scope);
 
+    // A single node dragged over a wire it could sit on: the wire highlights
+    // and a drop splices it in.
+    let splice_target: Option<usize> = state
+        .node_drag
+        .as_ref()
+        .filter(|d| d.originals.len() == 1)
+        .and_then(|d| {
+            let id = d.originals[0].0;
+            let g = geoms.iter().find(|g| g.id == id)?;
+            let centre = scope.world_to_screen(g.rect.center());
+            wires
+                .iter()
+                .filter(|w| w.edge_index != usize::MAX)
+                .find(|w| {
+                    point_polyline_distance(centre, &w.screen) <= SPLICE_SNAP_PX
+                        && state
+                            .doc
+                            .edges
+                            .get(w.edge_index)
+                            .is_some_and(|e| state.splice_pins(e, id, registry).is_some())
+                })
+                .map(|w| w.edge_index)
+        });
+
+
     draw_grid(ui, scope, &st, vis, zoom);
     draw_annotations(ui, scope, state, &st, &m, vis, zoom, lod);
     draw_wires(
         ui,
         scope,
         &wires,
-        hovered_wire,
+        hovered_wire.or(splice_target),
         &cut_preview,
         wire_prefs,
         &st,
@@ -1231,7 +1298,25 @@ fn draw_and_interact(
             }
         }
         if !pointer_down {
-            finish_node_drag(state, registry);
+            // Dropped on a wire, with a node that can sit on it? Splice.
+            let dragged = (originals.len() == 1).then(|| originals[0].0);
+            let spliced = dragged.zip(splice_target).is_some_and(
+                |(id, ei)| {
+                    let Some(edge) = state.doc.edges.get(ei).cloned() else {
+                        return false;
+                    };
+                    match state.splice_pins(&edge, id, registry) {
+                        Some((i, o)) => {
+                            finish_node_drag(state, registry);
+                            state.splice_node_into(&edge, id, &i, &o, registry)
+                        }
+                        None => false,
+                    }
+                },
+            );
+            if !spliced {
+                finish_node_drag(state, registry);
+            }
         }
     }
 
@@ -1294,9 +1379,49 @@ fn draw_and_interact(
         }
     }
 
+    // Midpoint handle: hovering a wire offers a grab at its arc-length
+    // midpoint. Taking it inserts a reroute *and* hands it straight to a
+    // drag, so grabbing the wire and moving it is one gesture rather than
+    // insert-then-find-the-thing-you-just-made.
+    let mut midpoint_grab: Option<(Edge, [f32; 2])> = None;
+    if let Some(i) = hovered_wire {
+        if let Some(w) = wires.iter().find(|w| w.edge_index == i) {
+            if let Some(mid) = arc_length_midpoint(&w.screen) {
+                let r = MIDPOINT_R;
+                let handle = Rect::from_center_size(mid, Vec2::splat(r * 2.0));
+                let id = ui.alloc_id(("graph_wire_mid", i));
+                let resp = ui.interact(id, handle);
+                {
+                    let mut p = ui.painter();
+                    p.circle_filled(
+                        mid,
+                        if resp.hovered { r } else { r * 0.7 },
+                        st.palette.focus_ring,
+                    );
+                    p.circle_stroke(mid, r, m.border, st.palette.elevated);
+                }
+                if resp.hovered {
+                    ui.tooltip_for(handle, "Drag to insert a reroute");
+                }
+                if resp.pressed {
+                    if let (Some(edge), Some(pw)) =
+                        (state.doc.edges.get(i).cloned(), pointer_world)
+                    {
+                        midpoint_grab = Some((edge, [pw.x, pw.y]));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((edge, at)) = midpoint_grab {
+        let d = m.reroute_d() * 0.5;
+        state.grab_wire_midpoint(&edge, [at[0] - d, at[1] - d], registry);
+    }
+    let midpoint_claimed = state.node_drag.is_some() && hovered_wire.is_some();
+
     // Wire selection. A wire is behind every node and pin, so it only claims
     // a press nothing in front of it wanted.
-    let mut wire_claimed = false;
+    let mut wire_claimed = midpoint_claimed;
     if pointer_pressed && state.connect_drag.is_none() && state.node_drag.is_none() {
         if let (Some(i), Some(pw)) = (hovered_wire, pointer_world) {
             let free = node_under(&geoms, pw, lod, &m).is_none();
@@ -1323,6 +1448,21 @@ fn draw_and_interact(
                 let wr = Rect::from_center_size(pin.dot_center, Vec2::splat(hit_w));
                 let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
                 let resp = scope.interact(ui, id, wr);
+                // Pin hover docs: type name always, descriptor line when the
+                // node type bothered to write one. Removes an inspector
+                // round-trip exactly when the user is wiring.
+                if resp.hovered && state.connect_drag.is_none() {
+                    let mut tip = format!(
+                        "{}  {}",
+                        pin.label,
+                        graph_palette::type_tag(&pin.ty)
+                    );
+                    if let Some(doc) = pin_doc(registry, state, g.id, &pin.slug, pin.output) {
+                        tip.push('\n');
+                        tip.push_str(&doc);
+                    }
+                    ui.tooltip_for(scope.world_rect_to_screen(wr), &tip);
+                }
                 if !resp.pressed {
                     continue;
                 }
@@ -1353,9 +1493,22 @@ fn draw_and_interact(
     let mut break_node: Option<u64> = None;
     for g in &geoms {
         let id = ui.alloc_id(("graph_node", g.id));
-        let resp = scope.interact(ui, id, g.body_rect(lod, &m));
+        let body = g.body_rect(lod, &m);
+        let resp = scope.interact(ui, id, body);
         if resp.pressed {
             node_pressed = true;
+        }
+        // Node header hover: the node's own doc line.
+        if resp.hovered && !g.reroute && state.node_drag.is_none() {
+            let header = Rect::from_min_size(
+                g.rect.min,
+                Vec2::new(g.rect.width(), m.header_h),
+            );
+            if pointer_world.is_some_and(|p| header.contains(p)) {
+                if let Some(doc) = node_doc(registry, state, g.id) {
+                    ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
+                }
+            }
         }
         // Alt-click the header breaks every link the node has — the pin
         // gesture, extended to the whole node.
@@ -1567,7 +1720,44 @@ fn draw_and_interact(
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
         if released {
-            resolve_connection(state, &geoms, pointer_world, hit_w, registry);
+            let landed = resolve_connection(state, &geoms, pointer_world, hit_w, registry);
+            if !landed {
+                if let Some(pw) = pointer_world {
+                    let src_ty = pin_ty(&geoms, from_node, &from_pin, from_output);
+                    let label = geoms
+                        .iter()
+                        .find(|g| g.id == from_node)
+                        .and_then(|g| {
+                            g.pins
+                                .iter()
+                                .find(|q| q.output == from_output && q.slug == from_pin)
+                        })
+                        .map(|q| q.label.clone())
+                        .unwrap_or_default();
+                    if let Some(ty) = src_ty {
+                        let src = PaletteDragSource {
+                            node: from_node,
+                            pin: from_pin.clone(),
+                            output: from_output,
+                            ty: ty.clone(),
+                            label: label.clone(),
+                        };
+                        // Released on a node body: auto-connect to its best
+                        // compatible pin, no palette. Released on empty
+                        // canvas: the type-filtered palette.
+                        match node_under(&geoms, pw, lod, &m) {
+                            Some(target) if target != from_node => {
+                                auto_connect(state, registry, &src, target);
+                            }
+                            _ => {
+                                if let Some(sp) = ui.ctx().input.pointer_pos {
+                                    open_palette(state, [pw.x, pw.y], [sp.x, sp.y], Some(src));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             state.connect_drag = None;
         } else if !pointer_down {
             state.connect_drag = None;
@@ -1645,6 +1835,22 @@ fn draw_and_interact(
         &m,
         &st,
     );
+
+    // Double-click empty canvas also opens the palette — the same gesture
+    // that opens an asset picker anywhere else in the editor.
+    if !node_pressed && !pin_claimed && !wire_claimed && state.palette.is_none() {
+        let id = ui.alloc_id("graph_canvas_bg");
+        let resp = scope.interact(ui, id, vis);
+        if resp.double_clicked(ui) {
+            if let (Some(pw), Some(sp)) = (pointer_world, ui.ctx().input.pointer_pos) {
+                if node_under(&geoms, pw, lod, &m).is_none()
+                    && annotation_at(state, &m, pw).is_none()
+                {
+                    open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
+                }
+            }
+        }
+    }
 
     // `#node` chips in comment bodies: click selects and frames that node.
     // The reference is resolved at click time, so a renamed or deleted node
@@ -1726,9 +1932,9 @@ fn draw_and_interact(
             } else if pin_under(&geoms, pw, hit_w).is_none()
                 && node_under(&geoms, pw, lod, &m).is_none()
             {
-                state.create_menu_world = Some([pw.x, pw.y]);
-                state.create_menu_search.clear();
-                *menu_open_at = ui.ctx().input.pointer_pos;
+                if let Some(sp) = ui.ctx().input.pointer_pos {
+                    open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
+                }
             }
         }
     }
@@ -1792,6 +1998,23 @@ fn draw_and_interact(
                 state.create_menu_search.clear();
                 *menu_open_at = ui.ctx().input.pointer_pos;
             }
+        }
+        // Tab — the palette, unfiltered. The discoverable route is
+        // right-click; this is the one you keep.
+        if no_mods && input.key_pressed(Key::Tab) && state.palette.is_none() {
+            if let (Some(pw), Some(sp)) = (pointer_world, ui.ctx().input.pointer_pos) {
+                open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
+            }
+        }
+        // Ctrl+F — find in graph.
+        if ctrl_only && input.key_pressed(Key::Char('f')) {
+            state.find = Some(FindState { first_frame: true, ..Default::default() });
+        }
+        // F8 / Shift+F8 — walk the anchored errors, newest first. Same
+        // cursor the count chip drives, so the two never disagree.
+        let f8 = input.key_pressed(Key::F(8));
+        if f8 && (no_mods || shift_only) {
+            *cycle_error_request = Some(!shift_only);
         }
     }
 
@@ -1862,6 +2085,93 @@ fn draw_toasts(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState) {
             None,
         );
         y -= h + st.spacing.item;
+    }
+}
+
+/// Find-in-graph: a small field at the canvas' top edge. Non-matching nodes
+/// dim to 45%; `Enter` cycles the matches, framing each; `Esc` closes and
+/// clears the dim. Session-only — a search is a thought, not a document.
+fn find_overlay(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &mut GraphEditorState,
+    geoms: &[NodeGeom],
+    zoom_min: f32,
+    zoom_max: f32,
+) {
+    let Some(find) = state.find.clone() else {
+        return;
+    };
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let w = (rect.width() * 0.32).clamp(180.0, 360.0);
+    let panel = Rect::from_min_size(
+        Pos2::new(rect.center().x - w * 0.5, rect.min.y + pad),
+        Vec2::new(w, st.metrics.control_height + pad),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.widget, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut query = find.query.clone();
+    let (mut submitted, mut cancelled) = (false, false);
+    ui.run_at(
+        Rect::from_min_size(
+            Pos2::new(panel.min.x + pad * 0.5, panel.min.y + pad * 0.5),
+            Vec2::new(w - pad, st.metrics.control_height),
+        ),
+        Direction::TopDown,
+        Id::new("graph_find_field"),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            let out = TextEdit::new(&mut query)
+                .hint("Find in graph\u{2026}")
+                .width(w - pad)
+                .request_focus(find.first_frame)
+                .show_full(ui);
+            submitted = out.submitted;
+            cancelled = out.cancelled;
+        },
+    );
+    if cancelled || ui.ctx().input.key_pressed(Key::Escape) {
+        state.find = None;
+        return;
+    }
+
+    let matches: Vec<u64> = geoms
+        .iter()
+        .filter(|g| find.matches(&g.title, &g.title))
+        .map(|g| g.id)
+        .collect();
+    // Mono count, the same convention the palette footer uses.
+    if find.active() {
+        ui.painter().text_family(
+            Pos2::new(panel.max.x - pad * 4.0, panel.center().y - st.fonts.small * 0.62),
+            &format!("{}", matches.len()),
+            st.fonts.small,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+    }
+
+    let mut cursor = find.cursor;
+    if submitted && !matches.is_empty() {
+        let id = matches[cursor % matches.len()];
+        cursor = (cursor + 1) % matches.len();
+        state.select_only(id);
+        if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == id)) {
+            // Pan only, like error cycling — a find should not also rescale
+            // the canvas out from under the reader.
+            let v = frame_view(mn, mx, rect.size(), zoom_min, zoom_max);
+            state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+        }
+    }
+    if let Some(fs) = state.find.as_mut() {
+        fs.query = query;
+        fs.cursor = cursor;
+        fs.first_frame = false;
     }
 }
 
@@ -2209,6 +2519,333 @@ fn tint_menu_row(ui: &mut Ui, current: Option<u8>) -> Option<Option<u8>> {
         }
     }
     picked
+}
+
+// ---------------------------------------------------------------------------
+// Add-node palette
+// ---------------------------------------------------------------------------
+
+/// Palette popover metrics, base units.
+const PALETTE_W: f32 = 260.0;
+const PALETTE_ROWS: usize = 9;
+/// Incompatible rows stay listed at 45% — never hidden.
+const PALETTE_DIM: f32 = 0.45;
+
+/// Open the palette at a screen/world point, optionally filtered by the pin a
+/// drag came off.
+fn open_palette(
+    state: &mut GraphEditorState,
+    world: [f32; 2],
+    screen: [f32; 2],
+    from: Option<PaletteDragSource>,
+) {
+    state.palette = Some(PaletteState {
+        world,
+        screen,
+        search: String::new(),
+        cursor: 0,
+        from,
+        first_frame: true,
+    });
+}
+
+/// The add-node palette — the asset-picker shell at E3: translucent
+/// `elevated` fill, `stroke_strong` border, auto-focused search, mono count in
+/// the footer.
+///
+/// With no query the rows are grouped by category (plus Annotate and Subgraph
+/// sections); typing switches to a flat ranked list. A pin drag filters by
+/// type but **never hides** a row: incompatible nodes stay at 45% carrying the
+/// type they do take, because "where did my node go" teaches nothing.
+fn palette_popover(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    subgraph_assets: &[String],
+) {
+    let Some(p) = state.palette.clone() else {
+        return;
+    };
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let w = PALETTE_W * s;
+    let row_h = st.metrics.row_height;
+    let pad = st.spacing.padding;
+
+    let filter = p.from.as_ref().map(|f| PinFilter {
+        ty: f.ty.clone(),
+        need_input: f.output,
+    });
+    let entries = graph_palette::build_entries(registry, &p.search, filter.as_ref());
+    let searching = !p.search.trim().is_empty();
+
+    // Extra rows the unfiltered palette offers beyond node types.
+    let extras: Vec<(&str, PaletteExtra)> = if searching || p.from.is_some() {
+        Vec::new()
+    } else {
+        let mut v = vec![("Add Comment", PaletteExtra::Comment)];
+        if !state.selection.is_empty() {
+            v.push(("Add Group around selection", PaletteExtra::Group));
+        }
+        v.extend(
+            subgraph_assets
+                .iter()
+                .map(|path| (path.as_str(), PaletteExtra::Subgraph(path.clone()))),
+        );
+        v
+    };
+
+    let total = entries.len() + extras.len();
+    let shown = total.min(PALETTE_ROWS);
+    let list_h = row_h * shown.max(1) as f32;
+    let head_h = st.metrics.control_height + pad;
+    let foot_h = st.fonts.small * 2.0;
+    let rect = Rect::from_min_size(
+        Pos2::new(p.screen[0], p.screen[1]),
+        Vec2::new(w, head_h + list_h + foot_h + pad * 2.0),
+    );
+
+    // E3: translucent only here, simple alpha, no blur.
+    {
+        let mut pt = ui.painter();
+        pt.rect_filled(
+            rect,
+            st.rounding.panel,
+            st.palette.elevated.with_alpha(st.palette.popover_alpha),
+        );
+        pt.rect_stroke(rect, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+    }
+
+    // Search field, focused on open.
+    let mut search = p.search.clone();
+    let mut submitted = false;
+    let mut cancelled = false;
+    ui.run_at(
+        Rect::from_min_size(
+            Pos2::new(rect.min.x + pad, rect.min.y + pad),
+            Vec2::new(w - pad * 2.0, st.metrics.control_height),
+        ),
+        Direction::TopDown,
+        Id::new("graph_palette_search"),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            let out = TextEdit::new(&mut search)
+                .hint("Search nodes\u{2026}")
+                .width(w - pad * 2.0)
+                .request_focus(p.first_frame)
+                .show_full(ui);
+            submitted = out.submitted;
+            cancelled = out.cancelled;
+        },
+    );
+
+    // Keyboard navigation. Up/Down move the highlight, Enter takes it, Esc
+    // closes — the picker idiom, not a new pattern.
+    let (up, down, esc) = {
+        let input = &ui.ctx().input;
+        (
+            input.key_pressed(Key::ArrowUp),
+            input.key_pressed(Key::ArrowDown),
+            input.key_pressed(Key::Escape),
+        )
+    };
+    let mut cursor = p.cursor.min(total.saturating_sub(1));
+    if down && total > 0 {
+        cursor = (cursor + 1) % total;
+    }
+    if up && total > 0 {
+        cursor = (cursor + total - 1) % total;
+    }
+    if esc || cancelled {
+        state.palette = None;
+        return;
+    }
+
+    // Rows: a window of PALETTE_ROWS around the cursor.
+    let first = cursor.saturating_sub(PALETTE_ROWS - 1);
+    let mut picked: Option<usize> = None;
+    let mut y = rect.min.y + head_h + pad;
+    {
+        let mut pt = ui.painter();
+        for i in first..total.min(first + PALETTE_ROWS) {
+            let row = Rect::from_min_size(
+                Pos2::new(rect.min.x + pad, y),
+                Vec2::new(w - pad * 2.0, row_h),
+            );
+            let hot = i == cursor;
+            if hot {
+                pt.rect_filled(row, st.rounding.small, st.palette.selection_fill);
+            }
+            let (label, tag, dim) = if i < entries.len() {
+                let e = &entries[i];
+                let dim = !e.fit.is_compatible();
+                let tag = match &e.fit {
+                    graph_palette::PinFit::Incompatible { type_tag } => type_tag.clone(),
+                    _ => searching.then(|| e.category.clone()),
+                };
+                (e.name.clone(), tag, dim)
+            } else {
+                (extras[i - entries.len()].0.to_string(), None, false)
+            };
+            let alpha = if dim { PALETTE_DIM } else { 1.0 };
+            let color = if hot {
+                st.palette.selection_text
+            } else {
+                st.palette.text
+            };
+            pt.text(
+                Pos2::new(row.min.x + pad * 0.5, row.center().y - st.fonts.body * 0.62),
+                &label,
+                st.fonts.body,
+                color.with_alpha(alpha),
+                None,
+            );
+            if let Some(tag) = tag {
+                let tw = pt
+                    .measure_text_family(&tag, st.fonts.small, None, FontFamily::Mono)
+                    .x;
+                pt.text_family(
+                    Pos2::new(row.max.x - pad * 0.5 - tw, row.center().y - st.fonts.small * 0.62),
+                    &tag,
+                    st.fonts.small,
+                    st.palette.text_secondary.with_alpha(alpha),
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            y += row_h;
+        }
+        // Footer: mono count, the picker shell's convention.
+        pt.text_family(
+            Pos2::new(rect.min.x + pad, rect.max.y - pad - st.fonts.small),
+            &format!("{total} node{}", if total == 1 { "" } else { "s" }),
+            st.fonts.small,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+    }
+
+    // Mouse picking over the same window.
+    let mut yy = rect.min.y + head_h + pad;
+    for i in first..total.min(first + PALETTE_ROWS) {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.min.x + pad, yy),
+            Vec2::new(w - pad * 2.0, row_h),
+        );
+        let id = ui.alloc_id(("graph_palette_row", i));
+        let resp = ui.interact(id, row);
+        if resp.hovered {
+            cursor = i;
+        }
+        if resp.clicked {
+            picked = Some(i);
+        }
+        yy += row_h;
+    }
+    if submitted && total > 0 {
+        picked = Some(cursor);
+    }
+
+    // Write the (possibly moved) cursor and search back.
+    if let Some(ps) = state.palette.as_mut() {
+        ps.search = search;
+        ps.cursor = cursor;
+        ps.first_frame = false;
+    }
+
+    let Some(i) = picked else {
+        return;
+    };
+    state.palette = None;
+    if i >= entries.len() {
+        match &extras[i - entries.len()].1 {
+            PaletteExtra::Comment => state.add_comment(p.world, registry),
+            PaletteExtra::Group => state.add_group_around_selection(registry),
+            PaletteExtra::Subgraph(path) => state.add_subgraph_node(path, p.world, registry),
+        }
+        return;
+    }
+    let entry = &entries[i];
+    place_palette_pick(state, registry, entry, &p);
+}
+
+/// The non-node rows the unfiltered palette also offers.
+#[derive(Clone)]
+enum PaletteExtra {
+    Comment,
+    Group,
+    Subgraph(String),
+}
+
+/// Spawn a picked node and, when the palette was type-filtered, wire it up.
+///
+/// A compatible pick lands with its *wired pin* on the drop point rather than
+/// its corner: the wire then ends where the user let go, which is the whole
+/// point of dragging off a pin. An incompatible pick just lands there
+/// unconnected.
+fn place_palette_pick(
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    entry: &PaletteEntry,
+    p: &PaletteState,
+) {
+    let slug = match (&entry.fit, &p.from) {
+        (graph_palette::PinFit::Compatible(slug), Some(_)) => Some(slug.clone()),
+        _ => None,
+    };
+    let mut pos = p.world;
+    if let (Some(slug), Some(from)) = (slug.as_ref(), p.from.as_ref()) {
+        // Offset so the pin we are about to wire lands on the drop point.
+        if let Some(desc) = registry.get(&entry.id) {
+            let side = if from.output { &desc.inputs } else { &desc.outputs };
+            let row = side.iter().position(|q| &q.slug == slug).unwrap_or(0);
+            pos[1] -= BASE_HEADER_H + BASE_ROW_H * (row as f32 + 0.5);
+            if !from.output {
+                // Wiring our *output* back to their input: the pin is on the
+                // node's right edge, so shift the body left of the drop.
+                pos[0] -= BASE_MIN_W;
+            }
+        }
+    }
+    // Nudge clear of anything already there — the palette's drop rule.
+    for _ in 0..32 {
+        let clash = state
+            .doc
+            .nodes
+            .iter()
+            .any(|n| (n.position[0] - pos[0]).abs() < 1.0 && (n.position[1] - pos[1]).abs() < 1.0);
+        if !clash {
+            break;
+        }
+        pos[0] += 8.0;
+        pos[1] += 8.0;
+    }
+
+    state.add_node(&entry.id, pos, registry);
+    let Some(new_id) = state.doc.nodes.last().map(|n| n.id) else {
+        return;
+    };
+    let (Some(slug), Some(from)) = (slug, p.from.as_ref()) else {
+        return;
+    };
+    let edge = if from.output {
+        Edge {
+            from_node: from.node,
+            from_pin: from.pin.clone(),
+            to_node: new_id,
+            to_pin: slug,
+        }
+    } else {
+        Edge {
+            from_node: new_id,
+            from_pin: slug,
+            to_node: from.node,
+            to_pin: from.pin.clone(),
+        }
+    };
+    state.doc.edges.push(edge.clone());
+    state.commit(GraphEdit::Connect(edge), registry);
 }
 
 // ---------------------------------------------------------------------------
@@ -3060,6 +3697,13 @@ fn draw_nodes(
         let selected = state.selection.contains(&g.id);
         let round = Rounding::same(m.radius * zoom);
         let edge_col = if g.missing { status.error } else { g.edge_color() };
+        // Find-in-graph dims what does not match, rather than hiding it —
+        // context is what makes a search result mean anything.
+        let dim = state
+            .find
+            .as_ref()
+            .filter(|f| f.active())
+            .map_or(1.0, |f| if f.matches(&g.title, &g.title) { 1.0 } else { FIND_DIM });
 
         let mut p = ui.painter();
 
@@ -3102,13 +3746,13 @@ fn draw_nodes(
         // Body on `header`, header block on `elevated` — flat, no fill-tinted
         // title bar (the one thing both Blender and Unreal do that does not
         // survive this system's density).
-        p.rect_filled(srect, round, st.palette.header);
+        p.rect_filled(srect, round, st.palette.header.with_alpha(dim));
         let header_rect =
             Rect::from_min_size(srect.min, Vec2::new(srect.width(), m.header_h * zoom));
         p.rect_filled(
             header_rect,
             Rounding { nw: round.nw, ne: round.ne, sw: 0.0, se: 0.0 },
-            st.palette.elevated,
+            st.palette.elevated.with_alpha(dim),
         );
         // Category identity: the reserved 2px top edge, deep tone.
         let edge_rect = Rect::from_min_size(
@@ -3436,6 +4080,26 @@ fn inline_widget(
 // Hit-testing helpers
 // ---------------------------------------------------------------------------
 
+/// A pin's descriptor doc line, if the node type declares one.
+fn pin_doc(
+    registry: &NodeRegistry,
+    state: &GraphEditorState,
+    node: u64,
+    slug: &str,
+    output: bool,
+) -> Option<String> {
+    let n = state.doc.node(node)?;
+    let d = registry.get(&n.type_id)?;
+    let side = if output { &d.outputs } else { &d.inputs };
+    side.iter().find(|p| p.slug == slug)?.doc.clone()
+}
+
+/// A node type's doc line, if it declares one.
+fn node_doc(registry: &NodeRegistry, state: &GraphEditorState, node: u64) -> Option<String> {
+    let n = state.doc.node(node)?;
+    registry.get(&n.type_id)?.doc.clone()
+}
+
 /// Node centers (world) for group capture.
 fn node_centers(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 2])> {
     geoms
@@ -3477,34 +4141,100 @@ fn node_under(geoms: &[NodeGeom], pw: Pos2, lod: ZoomLod, m: &GraphMetrics) -> O
         .map(|g| g.id)
 }
 
+/// Resolve a released pin drag onto another pin. Returns whether it landed —
+/// `false` hands the release to the palette / auto-connect path.
 fn resolve_connection(
     state: &mut GraphEditorState,
     geoms: &[NodeGeom],
     pointer_world: Option<Pos2>,
     hit_w: f32,
     registry: &NodeRegistry,
-) {
+) -> bool {
     let Some((from_node, from_pin, from_output)) = state
         .connect_drag
         .as_ref()
         .map(|d| (d.from_node, d.from_pin.clone(), d.from_output))
     else {
-        return;
+        return false;
     };
     let (Some(pw), Some(src_ty)) =
         (pointer_world, pin_ty(geoms, from_node, &from_pin, from_output))
     else {
-        return;
+        return false;
     };
     let Some((tn, ts, tty, to)) = pin_under(geoms, pw, hit_w) else {
-        return;
+        return false;
     };
     if let Some(edge) = validate_connection(
         state, from_node, &from_pin, from_output, &src_ty, tn, &ts, to, &tty,
     ) {
         state.doc.edges.push(edge.clone());
         state.commit(GraphEdit::Connect(edge), registry);
+        return true;
     }
+    // A refused drop on a real pin is still a landing: opening the palette
+    // over it would read as the editor ignoring what the user aimed at.
+    true
+}
+
+/// Release on a node body wires to that node's best compatible pin — the
+/// right type first, then the closest name.
+fn auto_connect(
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    src: &PaletteDragSource,
+    target: u64,
+) {
+    let Some(n) = state.doc.node(target) else {
+        return;
+    };
+    let Some(desc) = registry.get(&n.type_id) else {
+        return;
+    };
+    let filter = PinFilter { ty: src.ty.clone(), need_input: src.output };
+    let Some(pin) = graph_palette::auto_connect_pin(desc, &filter, &src.label) else {
+        state.toast("No compatible pin");
+        return;
+    };
+    let edge = if src.output {
+        Edge {
+            from_node: src.node,
+            from_pin: src.pin.clone(),
+            to_node: target,
+            to_pin: pin.slug.clone(),
+        }
+    } else {
+        Edge {
+            from_node: target,
+            from_pin: pin.slug.clone(),
+            to_node: src.node,
+            to_pin: src.pin.clone(),
+        }
+    };
+    // An input takes one edge; a second drop replaces it.
+    let existing: Vec<Edge> = state
+        .doc
+        .edges
+        .iter()
+        .filter(|e| e.to_node == edge.to_node && e.to_pin == edge.to_pin)
+        .cloned()
+        .collect();
+    let mut edits: Vec<GraphEdit> = Vec::new();
+    if !existing.is_empty() {
+        let indexed: Vec<(usize, Edge)> = state
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| existing.contains(e))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        edits.push(GraphEdit::Disconnect { edges: indexed });
+    }
+    edits.push(GraphEdit::Connect(edge));
+    let edit = GraphEdit::Composite { label: "Connect".to_string(), edits };
+    edit.apply(&mut state.doc);
+    state.commit(edit, registry);
 }
 
 fn finish_node_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
@@ -4193,6 +4923,7 @@ mod tests {
             pure,
             realm: NodeRealm::Shared,
             deterministic: true,
+            doc: None,
         };
 
         // SUB beats everything, even a pure descriptor.
