@@ -1,5 +1,33 @@
 # AUDIT.md — Crusty node graph: spec vs implementation
 
+## CLOSE-OUT (2026-08-01) — implemented, Phases 1–7
+
+All seven phases shipped, one-or-more reviewable commits each:
+Phase 1 tokens/lint `6a2eee2` · Phase 2 node/pins/LOD `d9311ff` · Phase 3
+router `a30ef3a` · Phase 4 settings `b53d5bd` · Phase 5 annotations/errors/
+organization `74e5832`+`8fbe6e3`+`a5f8c87` · Phase 6 clipboard/breaking
+`987a718` · Phase 7 palette/nav/layout/etc `09ea082`+`432b695`. 456 engine
+tests green (the one pre-existing render_thread failure excepted), design
+lint in CI, spec docs amended per the rulings (error-set wording, min_dist
+removal, status legend refreshed in DESIGN-nodegraph.md).
+
+**Deferred ledger** (📐 remaining, with blockers): crossings rendering (prefs
++ derived `CROSSING_SEGMENT_CAP` land; broadphase unwritten — pure remaining
+work) · flow bubbles + debug visuals (blocked on Task 45-A's evaluator; inert
+breakpoint marks could land earlier) · bundling proper (ruling #5 — v0
+stagger shipped) · `preserved` distinct visual (unknown types render
+missing-red with intact data) · Vec2/3/4 two-line axis fields · L1 value edit
+popup (needs text→PropValue parse) · on-canvas color picker · collapse-to-
+subgraph inner wiring (45-A `graph_input`/`graph_output`) · pinned nodes
+(no pinning concept) · full asset-reference field on canvas (panels scope).
+Post-ship note: edges are not sort-canonicalized (nodes are) — next
+diff-noise source if it bites. Visual review remains user-side (agent
+sessions cannot capture the Vulkan swapchain).
+
+The requirements tables below are the *pre-implementation* audit snapshot,
+kept for traceability; the status legend in DESIGN-nodegraph.md is now the
+live record.
+
 Phase 0 gap audit, 2026-08-01. Sources: `DESIGN.md` v1.2 · `DESIGN-nodegraph.md`
 v1.2 (status legend v1.2.2) · `DESIGN-panels.md` v1.1 · `theme.rs` v1.1(+v1.2
 notes) · `theme.json` · `Crusty Node Graph.dc.html` (prose lines ~22–978, live
