@@ -22,7 +22,7 @@ use super::graph_editor::{
     frame_view, nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag,
     GraphEdit, GraphEditorState, GraphFragment, NodeDrag,
 };
-use super::theme::Palette;
+use super::theme::{category_color, pin_color, Palette};
 use crate::engine::node_graph::{
     Edge, GraphError, GraphResolver, NodeRegistry, PinType, SUBGRAPH_TYPE_ID,
 };
@@ -167,48 +167,6 @@ fn build_geoms(
             NodeGeom { id: n.id, rect, header, category, missing, pins }
         })
         .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Colors (theme-only)
-// ---------------------------------------------------------------------------
-
-fn pin_color(st: &Style, ty: &PinType) -> Color {
-    let tc = Palette::invariant_type_colors();
-    match ty {
-        PinType::Exec => st.palette.text,
-        PinType::Float => tc.physics,
-        PinType::Vec2 | PinType::Vec3 | PinType::Vec4 => tc.geometry,
-        PinType::Color => tc.materials,
-        PinType::Bool => tc.scripting,
-        PinType::Enum => tc.animation,
-        PinType::Texture => tc.vfx,
-        PinType::Mesh => tc.lights,
-        PinType::Entity => tc.cameras,
-        PinType::Domain(_) => tc.ui,
-    }
-}
-
-/// Deterministic header tint per category, drawn from the invariant type
-/// colors (stable across presets, zero literals).
-fn category_color(category: &str) -> Color {
-    let tc = Palette::invariant_type_colors();
-    let palette = [
-        tc.geometry,
-        tc.lights,
-        tc.cameras,
-        tc.vfx,
-        tc.audio,
-        tc.animation,
-        tc.materials,
-        tc.scripting,
-        tc.physics,
-        tc.ui,
-    ];
-    let h = category
-        .bytes()
-        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
-    palette[(h as usize) % palette.len()]
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +494,7 @@ fn draw_and_interact(
         let label_px = scope.label_size(st.fonts.small);
         for pin in &g.pins {
             let c = scope.world_to_screen(pin.center);
-            p.circle_filled(c, PIN_R * zoom, pin_color(&st, &pin.ty));
+            p.circle_filled(c, PIN_R * zoom, pin_color(Some(registry), &pin.ty));
             let Some(px) = label_px else {
                 continue;
             };

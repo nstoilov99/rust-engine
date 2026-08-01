@@ -921,7 +921,7 @@ pub fn input_action_panel(
                 ui.add_space(4.0);
 
                 group(ui, "ia_props", |ui| {
-                    Label::new("Properties").color(super::theme::Palette::invariant_type_colors().cameras).show(ui);
+                    Label::new("Properties").color(super::theme::asset_color("cameras")).show(ui);
                     ui.add_space(2.0);
                     Grid::new("ia_props_grid")
                         .spacing(Vec2::new(8.0, 4.0))
@@ -985,7 +985,7 @@ pub fn input_action_panel(
 
                 group(ui, "ia_triggers", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Triggers", style.fonts.body, super::theme::Palette::invariant_type_colors().physics);
+                        row_label(ui, "Triggers", style.fonts.body, super::theme::asset_color("physics"));
                         row_label(
                             ui,
                             &format!("({})", action.triggers.len()),
@@ -1005,7 +1005,7 @@ pub fn input_action_panel(
 
                 group(ui, "ia_modifiers", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Modifiers", style.fonts.body, super::theme::Palette::invariant_type_colors().animation);
+                        row_label(ui, "Modifiers", style.fonts.body, super::theme::asset_color("animation"));
                         row_label(
                             ui,
                             &format!("({})", action.modifiers.len()),
@@ -1093,7 +1093,7 @@ pub fn input_context_panel(
 
                 group(ui, "mc_props", |ui| {
                     Label::new("Context Properties")
-                        .color(super::theme::Palette::invariant_type_colors().cameras)
+                        .color(super::theme::asset_color("cameras"))
                         .show(ui);
                     ui.add_space(2.0);
                     Grid::new("mc_props_grid")
@@ -1136,7 +1136,7 @@ pub fn input_context_panel(
 
                 group(ui, "mc_entries", |ui| {
                     ui.horizontal(|ui| {
-                        row_label(ui, "Action Mappings", style.fonts.body, super::theme::Palette::invariant_type_colors().physics);
+                        row_label(ui, "Action Mappings", style.fonts.body, super::theme::asset_color("physics"));
                         row_label(
                             ui,
                             &format!("({})", mctx.entries.len()),

@@ -18,6 +18,8 @@ use crusty_gui::context::{Context, CursorIcon};
 // Re-exported so downstream HUD code can draw without a direct crusty-gui dep.
 pub use crusty_gui::context::Ui;
 pub use crusty_gui::math::{Color, Pos2, Rect, Vec2};
+#[cfg(feature = "editor")]
+use crusty_gui::math::Rounding;
 use crusty_gui::input::{Event, RawInput};
 pub use crusty_gui::input::{Key, Modifiers, Shortcut};
 pub use crusty_gui::paint::{Painter, TextureId};
@@ -48,16 +50,23 @@ pub type SharedTextRenderer = Arc<Mutex<TextRenderer>>;
 
 /// Map the engine's [`EditorTheme`] tokens onto a crusty-gui [`Style`]. The
 /// runtime pixels_per_point is 1.0, so theme point values map 1:1 to
-/// crusty's physical pixels — no pre-scaling.
+/// crusty's physical pixels — the only scaling is the design system's own
+/// `metrics.ui_scale` (DESIGN.md ▸ Metrics & density: every metric is a base
+/// value × `ui_scale`, resolved at draw time). The theme carries *base*
+/// spacing/typography, so this is the single place the factor is applied —
+/// nothing downstream may scale again.
 #[cfg(feature = "editor")]
 pub fn style_from_theme(theme: &EditorTheme) -> Style {
     let p = &theme.palette;
+    let m = &theme.metrics;
     let sp = &theme.spacing;
     let ty = &theme.typography;
+    let s = |base: f32| m.scaled(base);
 
-    // Total mapping: every color/font field of the crusty Style is fed from
-    // a theme token; metrics/rounding/motion keep crusty's Steel constants
-    // (the same design-system values).
+    // Total mapping: every color, font, metric and radius of the crusty
+    // Style is fed from a theme token. Only `motion` keeps crusty's Steel
+    // constants (crusty models it as half-lives, the design system as
+    // durations — reconciled in a later phase).
     let mut style = Style::steel();
 
     style.palette.input = p.surfaces.input;
@@ -80,19 +89,40 @@ pub fn style_from_theme(theme: &EditorTheme) -> Style {
     style.palette.text_secondary = p.text.secondary;
     style.palette.text_disabled = p.text.disabled;
     style.palette.text_mono = p.text.mono;
-    style.palette.popover_alpha = p.popover_alpha;
-    style.palette.scrim_alpha = p.scrim_alpha;
+    style.palette.popover_alpha = m.popover_alpha;
+    style.palette.scrim_alpha = m.scrim_alpha;
 
-    style.spacing.item = sp.item_spacing_y;
-    style.spacing.padding = sp.window_margin;
-    style.spacing.button_padding = Vec2::new(sp.button_padding_x, sp.button_padding_y);
-    style.spacing.box_label_gap = 6.0;
+    style.spacing.item = s(sp.item_spacing_y);
+    style.spacing.padding = s(sp.window_margin);
+    style.spacing.button_padding =
+        Vec2::new(s(sp.button_padding_x), s(sp.button_padding_y));
+    style.spacing.box_label_gap = s(m.spacing[2]);
 
-    style.fonts.body = ty.body;
+    // Metric tokens: `border` and `edge_accent` are hairlines that must stay
+    // crisp, so they do NOT scale; everything geometric does.
+    style.metrics.border = m.border;
+    style.metrics.edge_accent = m.edge_accent;
+    style.metrics.row_height = s(m.row_height);
+    style.metrics.control_height = s(m.control_height);
+    style.metrics.indent = s(m.indent);
+
+    style.rounding.small = Rounding::same(s(m.radius_small));
+    style.rounding.widget = Rounding::same(s(m.radius_widget));
+    style.rounding.panel = Rounding::same(s(m.radius_panel));
+
+    style.fonts.body = s(ty.body);
     // `ui.heading` maps to `heading_large`.
-    style.fonts.title = ty.heading_large;
-    style.fonts.small = ty.caption;
-    style.fonts.mono = ty.mono;
+    style.fonts.title = s(ty.heading_large);
+    style.fonts.small = s(ty.caption);
+    style.fonts.mono = s(ty.mono);
+
+    style.sizes.checkbox = s(style.sizes.checkbox);
+    style.sizes.radio = s(style.sizes.radio);
+    style.sizes.slider_height = s(style.sizes.slider_height);
+    style.sizes.slider_track = s(style.sizes.slider_track);
+    style.sizes.slider_default_width = s(style.sizes.slider_default_width);
+    style.sizes.progress_height = s(style.sizes.progress_height);
+    style.sizes.progress_default_width = s(style.sizes.progress_default_width);
 
     style
 }

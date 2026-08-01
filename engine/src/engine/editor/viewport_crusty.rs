@@ -469,15 +469,18 @@ fn toolbar(
 
     // Camera mode indicator, left of the speed cluster
     let cam_status = super::theme::Palette::invariant_status();
-    let cam_types = super::theme::Palette::invariant_type_colors();
+    // Small typed marks: the assets map's bright tone, same slots the modes
+    // always used (cameras / vfx / materials).
     let (text, color) = match camera_mode {
         CameraControlMode::Fly => (
             format!("Fly {:.1}x", settings.camera_speed),
             cam_status.success,
         ),
-        CameraControlMode::Orbit => ("Orbit".to_string(), cam_types.cameras),
-        CameraControlMode::Pan => ("Pan".to_string(), cam_types.vfx),
-        CameraControlMode::LookDrag => ("Look".to_string(), cam_types.materials),
+        CameraControlMode::Orbit => ("Orbit".to_string(), super::theme::asset_color("cameras")),
+        CameraControlMode::Pan => ("Pan".to_string(), super::theme::asset_color("vfx")),
+        CameraControlMode::LookDrag => {
+            ("Look".to_string(), super::theme::asset_color("materials"))
+        }
         CameraControlMode::None => return,
     };
     let font = 11.0 * s;

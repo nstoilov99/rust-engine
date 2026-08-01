@@ -1,37 +1,54 @@
-//! Density scaling for the editor theme.
+//! Density presets for the editor theme.
 //!
-//! Two density modes: Compact (tighter for small screens / power users)
-//! and Comfortable (default, more spacious).
+//! DESIGN.md ▸ Metrics & density: density is not its own set of factors — it
+//! is a named value of the one master knob, `Metrics::ui_scale`. Compact
+//! 0.85 / Comfortable 1.0 / Spacious 1.15; OS display scaling multiplies on
+//! top. Everything geometric (spacing, fonts, row heights, radii) derives
+//! from it at draw time, so a preset can never scale fonts and spacing by
+//! two different amounts again.
 
-/// Density mode controlling spacing and font scale.
+/// Density mode — a named `ui_scale`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Density {
-    /// Tighter spacing: spacing × 0.75, font × 0.93
+    /// ui_scale 0.85 — tighter, for small screens / power users.
     Compact,
-    /// Default spacing: spacing × 1.00, font × 1.00
+    /// ui_scale 1.00 — the design system baseline.
     #[default]
     Comfortable,
+    /// ui_scale 1.15 — roomier, for large or high-DPI displays.
+    Spacious,
 }
 
 impl Density {
-    /// Spacing multiplier relative to the Comfortable baseline.
-    pub fn spacing_factor(self) -> f32 {
+    /// The single scale factor this preset stands for.
+    pub fn ui_scale(self) -> f32 {
         match self {
-            Density::Compact => 0.75,
+            Density::Compact => 0.85,
             Density::Comfortable => 1.0,
+            Density::Spacious => 1.15,
         }
     }
 
-    /// Font size multiplier relative to the Comfortable baseline.
-    pub fn font_factor(self) -> f32 {
+    pub fn label(self) -> &'static str {
         match self {
-            Density::Compact => 0.93,
-            Density::Comfortable => 1.0,
+            Density::Compact => "Compact",
+            Density::Comfortable => "Comfortable",
+            Density::Spacious => "Spacious",
         }
+    }
+
+    pub const ALL: [Density; 3] = [Density::Compact, Density::Comfortable, Density::Spacious];
+
+    /// The preset whose `ui_scale` a raw slider value corresponds to, if any.
+    pub fn from_ui_scale(scale: f32) -> Option<Density> {
+        Self::ALL
+            .into_iter()
+            .find(|d| (d.ui_scale() - scale).abs() < 1e-4)
     }
 }
 
-/// Spacing tokens scaled by density.
+/// Base spacing tokens (Comfortable). Scaled by `ui_scale` at the crusty
+/// seam — see `theme::mod`'s scale-model note.
 #[derive(Clone, Debug)]
 pub struct SpacingTokens {
     /// Horizontal gap between adjacent widgets
@@ -82,22 +99,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compact_factors() {
-        assert_eq!(Density::Compact.spacing_factor(), 0.75);
-        assert_eq!(Density::Compact.font_factor(), 0.93);
+    fn density_presets_are_the_documented_scales() {
+        assert_eq!(Density::Compact.ui_scale(), 0.85);
+        assert_eq!(Density::Comfortable.ui_scale(), 1.0);
+        assert_eq!(Density::Spacious.ui_scale(), 1.15);
+        assert_eq!(Density::default(), Density::Comfortable);
     }
 
     #[test]
-    fn comfortable_factors() {
-        assert_eq!(Density::Comfortable.spacing_factor(), 1.0);
-        assert_eq!(Density::Comfortable.font_factor(), 1.0);
+    fn round_trips_through_ui_scale() {
+        for d in Density::ALL {
+            assert_eq!(Density::from_ui_scale(d.ui_scale()), Some(d));
+        }
+        assert_eq!(Density::from_ui_scale(1.07), None);
     }
 
     #[test]
     fn spacing_scales_correctly() {
         let base = SpacingTokens::comfortable();
-        let compact = base.scaled(Density::Compact.spacing_factor());
-        assert!((compact.item_spacing_x - 6.0).abs() < 0.01);
-        assert!((compact.interact_size_y - 16.5).abs() < 0.01);
+        let compact = base.scaled(Density::Compact.ui_scale());
+        assert!((compact.item_spacing_x - 6.8).abs() < 0.01);
+        assert!((compact.interact_size_y - 18.7).abs() < 0.01);
     }
 }

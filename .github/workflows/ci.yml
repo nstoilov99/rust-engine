@@ -54,6 +54,25 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+  # Crusty design-system lint: no raw hex outside the token module, 2px
+  # reserved for the active-tab / type edge. Fixture-tested (DESIGN.md ▸
+  # Lint: "the job must pass on a clean tree and fail on a seeded violation,
+  # and the fixture pair lives beside it").
+  design_lint:
+    name: Design lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Lint (clean tree must pass)
+        run: bash scripts/lint_design.sh
+
+      - name: Selftest (fixtures must fail, near-misses must not)
+        run: bash scripts/lint_design.sh --selftest
+
   # game_shared must stay compatible with the server WASM target (M2/M5) —
   # catches accidental std/engine dependency creep early.
   wasm32:

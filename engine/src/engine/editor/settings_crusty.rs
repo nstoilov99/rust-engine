@@ -19,6 +19,7 @@ use crusty_gui::widgets::{
 
 use super::build_dialog::BuildTarget;
 use super::editor_prefs::{EditorPrefs, ThemePreset, PREFS_FILE};
+use super::theme::{Density, UI_SCALE_MAX, UI_SCALE_MIN};
 use super::play_settings::NetPlayMode;
 use super::project_config::{ProjectConfig, PROJECT_FILE, SERVER_WORLD_SCENE};
 use crate::engine::utils::window_config::VSyncMode;
@@ -36,7 +37,10 @@ const FIELD_H: f32 = 18.0;
 
 /// Categories: (sidebar label, row labels for search matching).
 const PREFS_CATS: &[(&str, &[&str])] = &[
-    ("Appearance", &["Theme preset", "Translucent popovers"]),
+    (
+        "Appearance",
+        &["Theme preset", "Translucent popovers", "UI scale", "Density"],
+    ),
     (
         "Viewport",
         &[
@@ -494,7 +498,9 @@ pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
             let d = EditorPrefs::default();
             let p = &state.prefs;
             let cat_mod = [
-                p.theme_preset != d.theme_preset || p.popover_translucent != d.popover_translucent,
+                p.theme_preset != d.theme_preset
+                    || p.popover_translucent != d.popover_translucent
+                    || p.ui_scale != d.ui_scale,
                 p.camera_speed != d.camera_speed
                     || p.camera_speed_scalar != d.camera_speed_scalar
                     || p.mouse_sensitivity != d.mouse_sensitivity
@@ -581,7 +587,8 @@ fn draw_prefs_rows(
                 .selected_text(p.theme_preset.label())
                 .width(140.0)
                 .show_ui(ui, |ui| {
-                    for t in ThemePreset::ALL {
+                    // Rusty is brand-demo only — never offered here.
+                    for t in ThemePreset::USER_SELECTABLE {
                         SelectableValue::new(&mut p.theme_preset, t, t.label()).show(ui);
                     }
                 });
@@ -593,6 +600,33 @@ fn draw_prefs_rows(
             Toggle::new(&mut p.popover_translucent, "").show(ui);
         }) {
             p.popover_translucent = d.popover_translucent;
+        }
+        // One master knob: every editor metric is a base value × ui_scale.
+        // The density presets below are named values of this same field.
+        let hint = format!("default {}", fmt_f(d.ui_scale));
+        let m = p.ui_scale != d.ui_scale;
+        if setting_row(ui, f, "UI scale", m, Some(&hint), false, |ui| {
+            slider_drag(ui, &mut p.ui_scale, UI_SCALE_MIN..=UI_SCALE_MAX, "x");
+        }) {
+            p.ui_scale = d.ui_scale;
+        }
+        let m = Density::from_ui_scale(p.ui_scale) != Some(Density::default());
+        if setting_row(ui, f, "Density", m, Some("default Comfortable"), false, |ui| {
+            let picked = Density::from_ui_scale(p.ui_scale);
+            let mut den = picked.unwrap_or_default();
+            ComboBox::new("prefs_density")
+                .selected_text(picked.map(|d| d.label()).unwrap_or("Custom"))
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for d2 in Density::ALL {
+                        SelectableValue::new(&mut den, d2, d2.label()).show(ui);
+                    }
+                });
+            if picked != Some(den) {
+                p.ui_scale = den.ui_scale();
+            }
+        }) {
+            p.ui_scale = Density::default().ui_scale();
         }
     }
 

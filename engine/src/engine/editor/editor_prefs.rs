@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::play_settings::PlaySettings;
-use super::theme::EditorTheme;
+use super::theme::{EditorTheme, UI_SCALE_MAX, UI_SCALE_MIN};
 
 pub const PREFS_FILE: &str = "editor_prefs.ron";
 
@@ -21,12 +21,20 @@ pub enum ThemePreset {
 }
 
 impl ThemePreset {
-    pub const ALL: [ThemePreset; 4] = [
+    /// Presets offered in the Editor Preferences picker. Rusty is
+    /// deliberately absent (DESIGN.md ▸ Presets): it is a brand-demo preset
+    /// for splash/about/marketing shots — orange survives in exactly one
+    /// place, the brand mark. The constructor stays for those surfaces.
+    pub const USER_SELECTABLE: [ThemePreset; 3] = [
         ThemePreset::Steel,
         ThemePreset::Tidepool,
         ThemePreset::Graphite,
-        ThemePreset::Rusty,
     ];
+
+    /// True for presets a user may pick in the preferences window.
+    pub fn user_selectable(self) -> bool {
+        Self::USER_SELECTABLE.contains(&self)
+    }
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -55,6 +63,9 @@ pub struct EditorPrefs {
     // Appearance
     pub theme_preset: ThemePreset,
     pub popover_translucent: bool,
+    /// Global UI scale (DESIGN.md's `ui_scale`): every editor metric is a
+    /// base value × this. Density presets are named values of it.
+    pub ui_scale: f32,
 
     // Viewport — camera
     pub camera_speed: f32,
@@ -100,6 +111,7 @@ impl Default for EditorPrefs {
         Self {
             theme_preset: ThemePreset::Steel,
             popover_translucent: true,
+            ui_scale: 1.0,
             camera_speed: 1.0,
             camera_speed_scalar: 1.0,
             mouse_sensitivity: 0.003,
@@ -135,17 +147,66 @@ impl EditorPrefs {
     /// yields defaults so the caller can seed migrated values.
     pub fn load() -> (Self, bool) {
         match std::fs::read_to_string(Self::path()) {
-            Ok(s) => match ron::from_str(&s) {
-                Ok(p) => (p, true),
+            Ok(s) => match ron::from_str::<Self>(&s) {
+                Ok(mut p) => {
+                    p.normalize();
+                    (p, true)
+                }
                 Err(_) => (Self::default(), false),
             },
             Err(_) => (Self::default(), false),
         }
     }
 
+    /// Repair values a stored file may hold that the current build no longer
+    /// offers. Never fails — a pref file is not worth a crash.
+    fn normalize(&mut self) {
+        if !self.theme_preset.user_selectable() {
+            // Rusty was pickable before it became brand-demo-only.
+            println!(
+                "editor prefs: theme preset '{}' is no longer user-selectable \
+                 (brand-demo only) — falling back to Steel",
+                self.theme_preset.label()
+            );
+            self.theme_preset = ThemePreset::Steel;
+        }
+        if !self.ui_scale.is_finite() {
+            self.ui_scale = 1.0;
+        }
+        self.ui_scale = self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+    }
+
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let ron_str = ron::ser::to_string_pretty(self, Default::default())?;
         std::fs::write(Self::path(), ron_str)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rusty_is_not_user_selectable() {
+        assert!(!ThemePreset::Rusty.user_selectable());
+        assert_eq!(ThemePreset::USER_SELECTABLE.len(), 3);
+        for t in ThemePreset::USER_SELECTABLE {
+            assert!(t.user_selectable());
+        }
+        // The constructor stays for brand surfaces.
+        let _ = ThemePreset::Rusty.theme();
+    }
+
+    #[test]
+    fn stored_rusty_falls_back_to_steel() {
+        let mut p = EditorPrefs {
+            theme_preset: ThemePreset::Rusty,
+            ui_scale: 12.0,
+            ..EditorPrefs::default()
+        };
+        p.normalize();
+        assert_eq!(p.theme_preset, ThemePreset::Steel);
+        assert_eq!(p.ui_scale, UI_SCALE_MAX);
     }
 }

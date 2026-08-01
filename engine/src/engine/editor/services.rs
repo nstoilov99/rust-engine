@@ -57,10 +57,6 @@ impl EditorServices {
         self.icons = Arc::new(IconRegistry::empty_with_default_palette());
     }
 
-    /// Switch density (crusty path — no UI context needed).
-    pub fn set_density_crusty(&mut self, density: super::theme::Density) {
-        self.theme = Arc::new(self.theme.with_density(density));
-    }
 }
 
 impl Default for EditorServices {

@@ -41,15 +41,15 @@ pub fn scope_color(duration_ms: f64, settings: &ProfilerSettings) -> Color {
 fn scope_color_srgb(duration_ms: f64, settings: &ProfilerSettings) -> Srgba {
     if duration_ms < settings.fast_threshold_ms as f64 {
         // Fast - light pink
-        srgb(0xFF, 0xC4, 0xD3) // #FFC4D3
+        srgb(0xFF, 0xC4, 0xD3)
     } else if duration_ms < settings.warning_threshold_ms as f64 {
         // Normal to Warning - lerp light pink → salmon
         let t = ((duration_ms - settings.fast_threshold_ms as f64)
             / (settings.warning_threshold_ms - settings.fast_threshold_ms) as f64)
             .clamp(0.0, 1.0) as f32;
         lerp_srgb(
-            srgb(0xFF, 0xA1, 0xDC), // #FFA1DC pink
-            srgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
+            srgb(0xFF, 0xA1, 0xDC), // pink
+            srgb(0xFF, 0x8C, 0x80), // salmon
             t,
         )
     } else if duration_ms < settings.slow_threshold_ms as f64 {
@@ -58,8 +58,8 @@ fn scope_color_srgb(duration_ms: f64, settings: &ProfilerSettings) -> Srgba {
             / (settings.slow_threshold_ms - settings.warning_threshold_ms) as f64)
             .clamp(0.0, 1.0) as f32;
         lerp_srgb(
-            srgb(0xFF, 0x8C, 0x80), // #FF8C80 salmon
-            srgb(0xFF, 0x82, 0x52), // #FF8252 orange
+            srgb(0xFF, 0x8C, 0x80), // salmon
+            srgb(0xFF, 0x82, 0x52), // orange
             t,
         )
     } else if duration_ms < settings.slow_threshold_ms as f64 * 2.0 {
@@ -68,13 +68,13 @@ fn scope_color_srgb(duration_ms: f64, settings: &ProfilerSettings) -> Srgba {
             / settings.slow_threshold_ms as f64)
             .clamp(0.0, 1.0) as f32;
         lerp_srgb(
-            srgb(0xFF, 0x82, 0x52), // #FF8252 orange
-            srgb(0xFF, 0x52, 0x52), // #FF5252 red
+            srgb(0xFF, 0x82, 0x52), // orange
+            srgb(0xFF, 0x52, 0x52), // red
             t,
         )
     } else {
         // Blocking/clogging - very dark red (engine is stalling)
-        srgb(0x70, 0x00, 0x00) // #700000
+        srgb(0x70, 0x00, 0x00)
     }
 }
 

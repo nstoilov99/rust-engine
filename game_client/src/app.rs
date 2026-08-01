@@ -25,6 +25,7 @@ use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
 use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::commands::Command as _;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
+use rust_engine::engine::editor::theme::Density;
 use rust_engine::engine::editor::{
     AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory,
     ConsoleCommandSystem, ConsoleLog, DeleteSubtreeCommand, DormantScene, EditorAction,
@@ -840,11 +841,15 @@ impl App {
         if force
             || new.theme_preset != old.theme_preset
             || new.popover_translucent != old.popover_translucent
+            || new.ui_scale != old.ui_scale
         {
-            let density = self.editor.services.theme.density;
-            let mut theme = new.theme_preset.theme().with_density(density);
+            // `ui_scale` is the one master knob; density presets are named
+            // values of it, so prefs are the single source of truth.
+            let mut theme = new.theme_preset.theme().with_ui_scale(new.ui_scale);
+            theme.density = Density::from_ui_scale(theme.metrics.ui_scale)
+                .unwrap_or(theme.density);
             if !new.popover_translucent {
-                theme.palette.popover_alpha = 1.0;
+                theme.metrics.popover_alpha = 1.0;
             }
             self.editor.services.theme = std::sync::Arc::new(theme);
             self.crusty_gui.apply_theme(&self.editor.services.theme);
@@ -1251,8 +1256,10 @@ impl App {
                     .push(LogMessage::info("Layout reset to default".to_string()));
             }
             EditorAction::SwitchDensity(density) => {
-                self.editor.services.set_density_crusty(density);
-                self.crusty_gui.apply_theme(&self.editor.services.theme);
+                // Density writes the same pref field the Appearance slider
+                // does, so the two can never disagree.
+                self.editor.ui.settings.prefs.ui_scale = density.ui_scale();
+                self.apply_editor_prefs(false);
             }
             EditorAction::ToggleDevShowcase => {
                 self.push_action_unavailable(

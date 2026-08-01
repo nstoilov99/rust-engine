@@ -158,6 +158,11 @@ impl CommandRegistry {
                 EditorAction::SwitchDensity(Density::Comfortable),
             ),
             Command::new(
+                "view.density_spacious",
+                "View: Density Spacious",
+                EditorAction::SwitchDensity(Density::Spacious),
+            ),
+            Command::new(
                 "view.widget_showcase",
                 "View: Widget Showcase",
                 EditorAction::ToggleDevShowcase,

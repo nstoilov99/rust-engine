@@ -35,10 +35,12 @@ use crate::engine::ecs::{
 };
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType, StaticCollision};
 
-/// Section accent stripes use the preset-invariant per-component-category
-/// colors (Transform = geometry grey, Mesh Renderer = materials, …).
-fn cats() -> super::theme::TypeColors {
-    super::theme::Palette::invariant_type_colors()
+/// Section accent stripes: the 2px left bar is one of DESIGN.md's named
+/// **deep**-tone jobs ("inspector section left bars"), resolved through the
+/// assets map on the component's category slug (Transform = geometry,
+/// Mesh Renderer = materials, …). Preset-invariant, index-based.
+fn cat(kind: &str) -> Color {
+    super::theme::asset_deep_color(kind)
 }
 
 const PROP_LABEL_W: f32 = 90.0;
@@ -1357,7 +1359,7 @@ fn render_components(
 
 fn edit_name(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut name) = world.get::<&mut Name>(entity) {
-        component_section(ui, "Name", cats().geometry, false, |ui| {
+        component_section(ui, "Name", cat("geometry"), false, |ui| {
             property_row(ui, "Name:", |ui| {
                 let field_bg = ui.style().palette.input;
                 // text_edit_width
@@ -1377,7 +1379,7 @@ fn edit_transform(ui: &mut Ui, panel: &mut InspectorPanel, world: &mut World, en
 
     if let Ok(mut transform) = world.get::<&mut Transform>(entity) {
         let euler_cache = &mut panel.euler_cache;
-        component_section(ui, "Transform", cats().geometry, false, |ui| {
+        component_section(ui, "Transform", cat("geometry"), false, |ui| {
             let mut position = [
                 transform.position.x,
                 transform.position.y,
@@ -1467,7 +1469,7 @@ fn edit_camera(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut Pick
     let Ok(mut camera) = world.get::<&mut Camera>(entity) else {
         return false;
     };
-    component_section(ui, "Camera", cats().cameras, true, |ui| {
+    component_section(ui, "Camera", cat("cameras"), true, |ui| {
         checkbox_row(ui, "Active", &mut camera.active);
 
         #[derive(PartialEq, Copy, Clone)]
@@ -1561,7 +1563,7 @@ fn edit_mesh_renderer(
     let Ok(mut renderer) = world.get::<&mut MeshRenderer>(entity) else {
         return false;
     };
-    component_section(ui, "Mesh Renderer", cats().materials, true, |ui| {
+    component_section(ui, "Mesh Renderer", cat("materials"), true, |ui| {
         checkbox_row(ui, "Visible", &mut renderer.visible);
 
         asset_ref_field(
@@ -1610,7 +1612,7 @@ fn edit_directional_light(
     let Ok(mut light) = world.get::<&mut DirectionalLight>(entity) else {
         return false;
     };
-    component_section(ui, "Directional Light", cats().lights, true, |ui| {
+    component_section(ui, "Directional Light", cat("lights"), true, |ui| {
         if !light.direction.x.is_finite() {
             light.direction.x = 0.0;
         }
@@ -1669,7 +1671,7 @@ fn edit_point_light(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut
     let Ok(mut light) = world.get::<&mut PointLight>(entity) else {
         return false;
     };
-    component_section(ui, "Point Light", cats().lights, true, |ui| {
+    component_section(ui, "Point Light", cat("lights"), true, |ui| {
         if !light.intensity.is_finite() {
             light.intensity = 1.0;
         }
@@ -1711,7 +1713,7 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     let Ok(mut rb) = world.get::<&mut RigidBody>(entity) else {
         return false;
     };
-    component_section(ui, "Rigid Body", cats().physics, true, |ui| {
+    component_section(ui, "Rigid Body", cat("physics"), true, |ui| {
         if !rb.mass.is_finite() {
             rb.mass = 1.0;
         }
@@ -1787,7 +1789,7 @@ fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     let Ok(mut collider) = world.get::<&mut Collider>(entity) else {
         return false;
     };
-    component_section(ui, "Collider", cats().physics, true, |ui| {
+    component_section(ui, "Collider", cat("physics"), true, |ui| {
         #[derive(PartialEq, Copy, Clone)]
         enum Shape {
             Cuboid,
@@ -1874,7 +1876,7 @@ fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
 
 fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut skeleton) = world.get::<&mut SkeletonInstance>(entity) {
-        component_section(ui, "Skeleton", cats().animation, false, |ui| {
+        component_section(ui, "Skeleton", cat("animation"), false, |ui| {
             property_row(ui, "Bones", |ui| {
                 Label::new(format!("{}", skeleton.bones.len())).show(ui);
             });
@@ -1902,7 +1904,7 @@ fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
 
 fn edit_animation_player(ui: &mut Ui, world: &mut World, entity: Entity) {
     if let Ok(mut player) = world.get::<&mut AnimationPlayer>(entity) {
-        component_section(ui, "Animation Player", cats().animation, false, |ui| {
+        component_section(ui, "Animation Player", cat("animation"), false, |ui| {
             property_row(ui, "Clip", |ui| {
                 Label::new(player.clip.name.clone()).show(ui);
             });
@@ -1952,7 +1954,7 @@ fn edit_audio_emitter(
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Audio Emitter", cats().audio, true, |ui| {
+    let remove_menu = component_section(ui, "Audio Emitter", cat("audio"), true, |ui| {
         asset_ref_field(
             ui,
             "audio_clip_slot",
@@ -2020,7 +2022,7 @@ fn edit_audio_listener(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Audio Listener", cats().audio, true, |ui| {
+    let remove_menu = component_section(ui, "Audio Listener", cat("audio"), true, |ui| {
         Checkbox::new(&mut listener.active, "Active").show(ui);
         ui.add_space(4.0);
         if Button::new("Remove")
@@ -2039,7 +2041,7 @@ fn edit_static_collision(ui: &mut Ui, world: &mut World, entity: Entity) -> bool
         return false;
     }
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Static Collision", cats().physics, true, |ui| {
+    let remove_menu = component_section(ui, "Static Collision", cat("physics"), true, |ui| {
         Label::new("Static collision source (cooked)").show(ui);
         ui.add_space(4.0);
         if Button::new("Remove")
@@ -2063,7 +2065,7 @@ fn edit_particle_effect(
         return false;
     };
     let mut remove_button = false;
-    let remove_menu = component_section(ui, "Particle Effect", cats().vfx, true, |ui| {
+    let remove_menu = component_section(ui, "Particle Effect", cat("vfx"), true, |ui| {
         property_row(ui, "Preset", |ui| {
             let mut chosen: Option<fn() -> ParticleEffect> = None;
             ComboBox::new("pe_preset")

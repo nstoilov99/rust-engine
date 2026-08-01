@@ -101,7 +101,10 @@ pub type MigrationFn = Box<dyn Fn(&mut super::migrate::MigrationCtx) + Send + Sy
 #[derive(Default)]
 pub struct NodeRegistry {
     nodes: BTreeMap<String, NodeDescriptor>,
-    domain_pins: BTreeSet<String>,
+    /// slug -> optional explicit ramp index. `None` = registered but unkeyed
+    /// (the theme hashes the slug); absent = not registered (theme renders
+    /// `neutral`, the only unknown-color case).
+    domain_pins: BTreeMap<String, Option<u8>>,
     migrations: BTreeMap<(String, u32), MigrationFn>,
 }
 
@@ -184,13 +187,26 @@ impl NodeRegistry {
     }
 
     /// Register a consumer domain pin type (e.g. `"shader"` for Task 50) so
-    /// validation accepts `PinType::Domain("shader")`.
+    /// validation accepts `PinType::Domain("shader")`. Unkeyed: the theme
+    /// derives a stable ramp hue by hashing the slug.
     pub fn register_domain_pin(&mut self, slug: &str) {
-        self.domain_pins.insert(slug.to_string());
+        self.domain_pins.insert(slug.to_string(), None);
+    }
+
+    /// Same, but pins the domain to an explicit ramp index (0..12) so a
+    /// consumer can choose its own hue instead of taking the hash.
+    pub fn register_domain_pin_keyed(&mut self, slug: &str, ramp_index: u8) {
+        self.domain_pins.insert(slug.to_string(), Some(ramp_index));
+    }
+
+    /// Theme-side lookup: outer `Option` = registered?, inner = explicit key.
+    /// The three cases drive `theme::tokens::domain_ramp_index`.
+    pub fn domain_registration(&self, slug: &str) -> Option<Option<u8>> {
+        self.domain_pins.get(slug).copied()
     }
 
     pub fn domain_pin_registered(&self, slug: &str) -> bool {
-        self.domain_pins.contains(slug)
+        self.domain_pins.contains_key(slug)
     }
 }
 
@@ -262,5 +278,24 @@ mod tests {
         let mut reserved = pure_add();
         reserved.id = SUBGRAPH_TYPE_ID.into();
         assert!(reg.register(reserved).is_err());
+    }
+
+    #[test]
+    fn domain_registration_three_cases() {
+        let mut reg = NodeRegistry::new();
+        reg.register_domain_pin("shader");
+        reg.register_domain_pin_keyed("curve", 7);
+
+        assert_eq!(reg.domain_registration("shader"), Some(None));
+        assert_eq!(reg.domain_registration("curve"), Some(Some(7)));
+        assert_eq!(reg.domain_registration("missing"), None);
+
+        assert!(reg.domain_pin_registered("shader"));
+        assert!(reg.domain_pin_registered("curve"));
+        assert!(!reg.domain_pin_registered("missing"));
+
+        // Re-registering unkeyed clears an explicit key (last write wins).
+        reg.register_domain_pin("curve");
+        assert_eq!(reg.domain_registration("curve"), Some(None));
     }
 }

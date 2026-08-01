@@ -80,22 +80,22 @@ fn hash_key<T: Hash>(t: &T) -> u64 {
     h.finish()
 }
 
-/// Asset types map onto the preset-invariant category palette (same 10-color
-/// system as component icons and inspector section bars).
+/// Asset types map onto the design system's **assets** map (ramp indices,
+/// bright tone) — tile type edges and typed icons. Same slot assignments the
+/// browser always used, now resolved by key instead of by field.
 pub(super) fn type_color(t: AssetType) -> Color {
-    let c = super::theme::Palette::invariant_type_colors();
-    match t {
-        AssetType::Texture | AssetType::Material => c.materials,
-        AssetType::Model | AssetType::Mesh | AssetType::Prefab => c.geometry,
-        AssetType::Animation => c.animation,
-        AssetType::Scene => c.lights,
-        AssetType::Audio => c.audio,
+    super::theme::asset_color(match t {
+        AssetType::Texture | AssetType::Material => "materials",
+        AssetType::Model | AssetType::Mesh | AssetType::Prefab => "geometry",
+        AssetType::Animation => "animation",
+        AssetType::Scene => "lights",
+        AssetType::Audio => "audio",
         AssetType::Shader
         | AssetType::InputAction
         | AssetType::InputMappingContext
-        | AssetType::Graph => c.scripting,
-        _ => c.geometry,
-    }
+        | AssetType::Graph => "scripting",
+        _ => "geometry",
+    })
 }
 
 pub(super) fn type_icon_stem(t: AssetType) -> &'static str {
@@ -967,9 +967,9 @@ fn render_folder_node(
         };
         let icon_x = left + indent + FOLDER_INDENT + 2.0;
         let icon_rect = Rect::from_min_size(Pos2::new(icon_x, center_y - 8.0), Vec2::splat(16.0));
-        // Open folder keeps its yellow even when selected (design system).
+        // Open folder keeps its gold even when selected (design system).
         let tint = if is_expanded && has_children {
-            super::theme::Palette::invariant_type_colors().lights
+            super::theme::asset_color("lights")
         } else if is_selected {
             style.palette.selection_text
         } else {
