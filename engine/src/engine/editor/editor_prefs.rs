@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::graph_prefs::GraphPrefs;
 use super::play_settings::PlaySettings;
 use super::theme::{EditorTheme, UI_SCALE_MAX, UI_SCALE_MIN};
 
@@ -89,9 +90,17 @@ pub struct EditorPrefs {
     // Editing
     pub undo_limit: usize,
 
-    // Graph editor (Task 40) — canvas zoom limits.
-    pub graph_zoom_min: f32,
-    pub graph_zoom_max: f32,
+    // Graph editor (Task 40) — canvas zoom limits and wire routing.
+    pub graph: GraphPrefs,
+    /// Pre-Phase-3 flat zoom fields. Read once on load, folded into `graph`
+    /// by [`EditorPrefs::normalize`], never written back — so an existing
+    /// prefs file keeps its canvas limits across the nesting change. `0.0`
+    /// means "absent"; the old files stored a bare float, so these cannot be
+    /// `Option` (RON wants `Some(..)` syntax for that).
+    #[serde(rename = "graph_zoom_min", skip_serializing)]
+    legacy_graph_zoom_min: f32,
+    #[serde(rename = "graph_zoom_max", skip_serializing)]
+    legacy_graph_zoom_max: f32,
 
     // Asset browser
     pub thumbnail_size: f32,
@@ -126,8 +135,9 @@ impl Default for EditorPrefs {
             snap_rotate: 15.0,
             snap_scale: 0.1,
             undo_limit: 100,
-            graph_zoom_min: 0.25,
-            graph_zoom_max: 2.5,
+            graph: GraphPrefs::default(),
+            legacy_graph_zoom_min: 0.0,
+            legacy_graph_zoom_max: 0.0,
             thumbnail_size: 96.0,
             console_max_lines: 2000,
             console_show_info: true,
@@ -174,6 +184,22 @@ impl EditorPrefs {
             self.ui_scale = 1.0;
         }
         self.ui_scale = self.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+        // Fold the pre-nesting flat zoom fields into the `graph` section.
+        if self.legacy_graph_zoom_min > 0.0 {
+            self.graph.zoom_min = std::mem::take(&mut self.legacy_graph_zoom_min);
+        }
+        if self.legacy_graph_zoom_max > 0.0 {
+            self.graph.zoom_max = std::mem::take(&mut self.legacy_graph_zoom_max);
+        }
+        let sane_zoom = self.graph.zoom_min.is_finite()
+            && self.graph.zoom_max.is_finite()
+            && self.graph.zoom_min > 0.0
+            && self.graph.zoom_max > self.graph.zoom_min;
+        if !sane_zoom {
+            let d = GraphPrefs::default();
+            self.graph.zoom_min = d.zoom_min;
+            self.graph.zoom_max = d.zoom_max;
+        }
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -196,6 +222,28 @@ mod tests {
         }
         // The constructor stays for brand surfaces.
         let _ = ThemePreset::Rusty.theme();
+    }
+
+    /// A prefs file written before the `graph` section existed keeps its
+    /// canvas zoom limits — they migrate into the nested struct rather than
+    /// silently resetting.
+    #[test]
+    fn legacy_flat_zoom_fields_migrate_into_the_graph_section() {
+        let mut p: EditorPrefs =
+            ron::from_str("(graph_zoom_min: 0.4, graph_zoom_max: 1.8)").expect("legacy parse");
+        p.normalize();
+        assert_eq!(p.graph.zoom_min, 0.4);
+        assert_eq!(p.graph.zoom_max, 1.8);
+        assert_eq!(p.graph.wires, super::super::graph_prefs::WirePrefs::default());
+        // …and the legacy keys are not written back out.
+        let text = ron::ser::to_string_pretty(&p, Default::default()).unwrap();
+        assert!(!text.contains("graph_zoom_min"), "legacy key was re-serialized");
+        assert!(text.contains("graph:"), "graph section missing from output");
+        // A nonsense range falls back to the defaults instead of breaking the
+        // canvas.
+        let mut bad = EditorPrefs { graph: GraphPrefs { zoom_min: 0.0, zoom_max: 0.0, ..GraphPrefs::default() }, ..EditorPrefs::default() };
+        bad.normalize();
+        assert_eq!(bad.graph.zoom_min, GraphPrefs::default().zoom_min);
     }
 
     #[test]

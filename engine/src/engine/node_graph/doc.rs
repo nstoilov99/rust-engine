@@ -116,7 +116,10 @@ pub struct NodeInst {
 
 /// A connection between two pins. Pin *slugs*, not indices — pins can be
 /// reordered or added without breaking saved edges.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Ord` makes the edge itself usable as a selection key: an index into
+/// `doc.edges` shifts under every insert/remove, the tuple does not.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Edge {
     pub from_node: u64,
     pub from_pin: String,

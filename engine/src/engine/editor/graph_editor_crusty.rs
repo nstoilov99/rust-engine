@@ -28,9 +28,13 @@ use super::graph_editor::{
     frame_view, nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag,
     GraphEdit, GraphEditorState, GraphFragment, MarqueeMode, NodeDrag,
 };
+use super::graph_prefs::WirePrefs;
+use super::graph_wire_router::{
+    self as router, point_polyline_distance, RouteMeta,
+};
 use super::theme::{
-    category_color, category_tag_color, grid_major, grid_minor, pin_color, ramp, Palette,
-    GRID_MAJOR_STEP, GRID_MINOR_MIN_ZOOM, GRID_MINOR_STEP,
+    category_color, category_tag_color, grid_major, grid_minor, pin_color, ramp, wire_color,
+    Palette, GRID_MAJOR_STEP, GRID_MINOR_MIN_ZOOM, GRID_MINOR_STEP,
 };
 use crate::engine::node_graph::{
     Edge, GraphError, GraphResolver, NodeDescriptor, NodeRegistry, PinType, PropValue,
@@ -79,6 +83,17 @@ const MARQUEE_FILL_ALPHA: f32 = 0.08;
 const SELECTION_REST_ALPHA: f32 = 0.55;
 /// Hollow (unconnected) pin ring width, world units at ui_scale 1.0.
 const BASE_RING_W: f32 = 1.5;
+
+// --- Wire strokes. Screen pixels, deliberately zoom-INVARIANT: the routed
+// geometry scales with the view, the stroke does not, so a wire is legible
+// (and grabbable) at 15% and not a slab at 220%.
+const WIRE_DATA: f32 = 1.9;
+const WIRE_EXEC: f32 = 2.4;
+const WIRE_DATA_SELECTED: f32 = 2.6;
+const WIRE_EXEC_SELECTED: f32 = 3.0;
+/// A wire must never be harder to grab than a pin: 9 screen px each side, at
+/// every zoom (the pin's hit radius is also 9).
+const WIRE_HOVER_PX: f32 = 9.0;
 
 // ---------------------------------------------------------------------------
 // Zoom LOD ladder — derived once, consumed everywhere.
@@ -236,6 +251,8 @@ pub struct GraphEditorPanelCtx<'a> {
     /// `selection.outline` from the live theme. Passed in because crusty's
     /// `Style` has no counterpart and Graphite overrides the invariant.
     pub selection_outline: Color,
+    /// Wire routing + appearance, the `graph.wires` prefs section.
+    pub wire_prefs: WirePrefs,
     /// Canvas zoom limits (EditorPrefs, P9).
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -282,6 +299,8 @@ struct PinGeom {
     label: String,
     ty: PinType,
     output: bool,
+    /// Row index within its column — the Manhattan bundle stagger.
+    row: usize,
     /// Row center on the node *border* — where a wire terminates.
     wire_anchor: Pos2,
     /// Drawn dot center, `pin_inset` inside the border.
@@ -312,6 +331,15 @@ impl NodeGeom {
             .iter()
             .find(|p| p.output == output && p.slug == slug)
             .map(|p| p.wire_anchor)
+    }
+
+    /// Row index of a pin, for the router's bundle stagger. Unknown pins
+    /// answer 0 — the unstaggered lane, which is the safe default.
+    fn pin_row(&self, slug: &str, output: bool) -> usize {
+        self.pins
+            .iter()
+            .find(|p| p.output == output && p.slug == slug)
+            .map_or(0, |p| p.row)
     }
 
     /// The box actually drawn (and hit-tested) at this detail level: below
@@ -542,6 +570,7 @@ fn build_geoms(
                     label,
                     ty,
                     output: false,
+                    row: i,
                     inline,
                 });
             }
@@ -559,6 +588,7 @@ fn build_geoms(
                     label,
                     ty,
                     output: true,
+                    row: i,
                     inline: None,
                 });
             }
@@ -704,6 +734,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         subgraph_assets,
         open_subgraph,
         selection_outline,
+        wire_prefs,
         zoom_min,
         zoom_max,
         focused,
@@ -740,6 +771,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut menu_open_at,
             open_subgraph,
             selection_outline,
+            &wire_prefs,
             zoom_min,
             zoom_max,
             &mut frame_request,
@@ -818,6 +850,7 @@ fn draw_and_interact(
     menu_open_at: &mut Option<Pos2>,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
+    wire_prefs: &WirePrefs,
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
@@ -832,9 +865,13 @@ fn draw_and_interact(
         build_geoms(state, registry, resolver, &m, &st, &mut p)
     };
 
+    let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
+    let wires = build_wires(state, &geoms, &node_rects, wire_prefs, scope, vis);
+    let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
+
     draw_grid(ui, scope, &st, vis, zoom);
     draw_annotations(ui, scope, state, &st, &m, vis, zoom, lod);
-    draw_wires(ui, scope, state, &geoms, zoom, lod, st.palette.accent_active);
+    draw_wires(ui, scope, &wires, hovered_wire, wire_prefs, &st, lod, selection_outline);
 
     // Nodes, pins and inline widgets. `widget_rects` records the screen boxes
     // owned by embedded controls so the node-drag pass can yield to them.
@@ -944,6 +981,25 @@ fn draw_and_interact(
         state.flush_prop_edit(registry);
     }
 
+    // Wire selection. A wire is behind every node and pin, so it only claims
+    // a press nothing in front of it wanted.
+    let mut wire_claimed = false;
+    if pointer_pressed && state.connect_drag.is_none() && state.node_drag.is_none() {
+        if let (Some(i), Some(pw)) = (hovered_wire, pointer_world) {
+            let free = node_under(&geoms, pw, lod, &m).is_none();
+            if free {
+                if let Some(edge) = state.doc.edges.get(i).cloned() {
+                    if shift {
+                        state.toggle_edge_selected(&edge);
+                    } else {
+                        state.select_only_edge(&edge);
+                    }
+                    wire_claimed = true;
+                }
+            }
+        }
+    }
+
     // Pins take precedence over the node body. Only where rows are drawn.
     let hit_w = m.pin_hit_w(zoom);
     let mut pin_claimed = false;
@@ -977,6 +1033,7 @@ fn draw_and_interact(
         if resp.pressed
             && !pin_claimed
             && !widget_claimed
+            && !wire_claimed
             && state.node_drag.is_none()
             && state.connect_drag.is_none()
             && !begin_drag
@@ -1015,6 +1072,7 @@ fn draw_and_interact(
     let ann_free = !node_pressed
         && !pin_claimed
         && !widget_claimed
+        && !wire_claimed
         && state.node_drag.is_none()
         && state.annotation_drag.is_none();
     // Groups first (front-most annotation is the last drawn = highest index).
@@ -1092,15 +1150,26 @@ fn draw_and_interact(
                 }
                 _ => st.palette.accent_active,
             };
+            // The ghost takes the same route as the finished wire will —
+            // rect-less meta, so the backward lane uses its pin-relative
+            // fallback (there is no target node yet).
+            let ghost_meta = RouteMeta {
+                src_rect: geoms.iter().find(|g| g.id == from_node).map(|g| g.rect),
+                dst_rect: None,
+                target_pin_index: 0,
+                node_rects: &node_rects,
+            };
+            let width = if lod.bar_only() { 1.0 } else { WIRE_DATA };
             let mut p = ui.painter();
-            draw_wire(
-                &mut p,
-                scope.world_to_screen(src),
-                scope.world_to_screen(pw),
-                zoom,
-                lod,
-                tint,
-            );
+            let ghost = WireGeom {
+                edge_index: usize::MAX,
+                a: src,
+                b: pw,
+                ty: src_ty.clone().unwrap_or(PinType::Exec),
+                screen: wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope),
+                selected: false,
+            };
+            stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
         if released {
             resolve_connection(state, &geoms, pointer_world, hit_w, registry);
@@ -1122,7 +1191,7 @@ fn draw_and_interact(
             pointer_pressed,
             pointer_down,
             released,
-            blocked: pin_claimed || node_pressed || widget_claimed,
+            blocked: pin_claimed || node_pressed || widget_claimed || wire_claimed,
             mods,
             lod,
             hit_w,
@@ -1134,7 +1203,10 @@ fn draw_and_interact(
     // Right-click empty space → open the create menu at the pointer.
     if right_pressed {
         if let Some(pw) = pointer_world {
-            if pin_under(&geoms, pw, hit_w).is_none() && node_under(&geoms, pw, lod, &m).is_none() {
+            if pin_under(&geoms, pw, hit_w).is_none()
+                && node_under(&geoms, pw, lod, &m).is_none()
+                && hovered_wire.is_none()
+            {
                 state.create_menu_world = Some([pw.x, pw.y]);
                 state.create_menu_search.clear();
                 *menu_open_at = ui.ctx().input.pointer_pos;
@@ -1280,36 +1352,185 @@ fn draw_annotations(
     }
 }
 
+/// One wire's resolved geometry for this frame: the endpoints the router
+/// needs, the routed screen polyline, and everything the paint pass reads.
+struct WireGeom {
+    edge_index: usize,
+    /// Graph-space endpoints (source pin border -> target pin border).
+    a: Pos2,
+    b: Pos2,
+    /// Source pin type — a wire takes the color of what flows through it.
+    ty: PinType,
+    /// Routed + rounded polyline, already in screen space.
+    screen: Vec<Pos2>,
+    selected: bool,
+}
+
+impl WireGeom {
+    fn is_exec(&self) -> bool {
+        self.ty == PinType::Exec
+    }
+
+    fn width(&self, hovered: bool) -> f32 {
+        match (self.is_exec(), self.selected || hovered) {
+            (true, true) => WIRE_EXEC_SELECTED,
+            (true, false) => WIRE_EXEC,
+            (false, true) => WIRE_DATA_SELECTED,
+            (false, false) => WIRE_DATA,
+        }
+    }
+}
+
+/// Route every visible edge once per frame. Routing happens in **graph
+/// space** — the router never sees zoom — and only the finished polyline is
+/// transformed, which is what keeps a wire's shape identical at 40% and 200%.
+fn build_wires(
+    state: &GraphEditorState,
+    geoms: &[NodeGeom],
+    node_rects: &[Rect],
+    prefs: &WirePrefs,
+    scope: &CanvasScope,
+    vis: Rect,
+) -> Vec<WireGeom> {
+    let mut out = Vec::with_capacity(state.doc.edges.len());
+    for (edge_index, e) in state.doc.edges.iter().enumerate() {
+        let src = geoms.iter().find(|g| g.id == e.from_node);
+        let dst = geoms.iter().find(|g| g.id == e.to_node);
+        let (Some(src), Some(dst)) = (src, dst) else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (
+            src.wire_anchor(&e.from_pin, true),
+            dst.wire_anchor(&e.to_pin, false),
+        ) else {
+            continue;
+        };
+        let meta = RouteMeta {
+            src_rect: Some(src.rect),
+            dst_rect: Some(dst.rect),
+            target_pin_index: dst.pin_row(&e.to_pin, false),
+            node_rects,
+        };
+        // Cull on the wire's own bounds, not the endpoints' box — a backward
+        // lane or a spline bow reaches well outside it.
+        if let Some(bounds) = router::wire_bounds(a, b, prefs, &meta) {
+            let clip = bounds.intersect(vis);
+            if clip.width() < 0.0 || clip.height() < 0.0 {
+                continue;
+            }
+        }
+        let ty = src
+            .pins
+            .iter()
+            .find(|p| p.output && p.slug == e.from_pin)
+            .map(|p| p.ty.clone())
+            .unwrap_or(PinType::Exec);
+        out.push(WireGeom {
+            edge_index,
+            a,
+            b,
+            ty,
+            screen: wire_screen_points(a, b, prefs, &meta, scope),
+            selected: state.selected_edges.contains(e),
+        });
+    }
+    out
+}
+
+/// Route in graph space, round the corners there (so the radius scales with
+/// the view like the rest of the geometry), then transform to screen.
+fn wire_screen_points(
+    a: Pos2,
+    b: Pos2,
+    prefs: &WirePrefs,
+    meta: &RouteMeta,
+    scope: &CanvasScope,
+) -> Vec<Pos2> {
+    // Spline is drawn as a real cubic; these samples exist so hover-testing
+    // and culling see the same shape the user does.
+    let pts = if prefs.style.is_orthogonal() {
+        router::round_corners(&router::route(a, b, prefs, meta), prefs.corner_radius)
+    } else {
+        router::sample(a, b, prefs, meta)
+    };
+    pts.into_iter().map(|p| scope.world_to_screen(p)).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_wires(
     ui: &mut Ui,
     scope: &CanvasScope,
-    state: &GraphEditorState,
-    geoms: &[NodeGeom],
-    zoom: f32,
+    wires: &[WireGeom],
+    hovered: Option<usize>,
+    prefs: &WirePrefs,
+    st: &Style,
     lod: ZoomLod,
-    color: Color,
+    selection_outline: Color,
 ) {
     let mut p = ui.painter();
-    for e in &state.doc.edges {
-        let from = geoms
-            .iter()
-            .find(|g| g.id == e.from_node)
-            .and_then(|g| g.wire_anchor(&e.from_pin, true));
-        let to = geoms
-            .iter()
-            .find(|g| g.id == e.to_node)
-            .and_then(|g| g.wire_anchor(&e.to_pin, false));
-        if let (Some(a), Some(b)) = (from, to) {
-            draw_wire(
-                &mut p,
-                scope.world_to_screen(a),
-                scope.world_to_screen(b),
-                zoom,
-                lod,
-                color,
-            );
-        }
+    // Selected and hovered wires paint last so they are never buried under a
+    // neighbour they cross.
+    let order = wires
+        .iter()
+        .filter(|w| !w.selected && hovered != Some(w.edge_index))
+        .chain(
+            wires
+                .iter()
+                .filter(|w| w.selected || hovered == Some(w.edge_index)),
+        );
+    for w in order {
+        let is_hovered = hovered == Some(w.edge_index);
+        let color = if w.selected {
+            selection_outline
+        } else if is_hovered {
+            st.palette.focus_ring
+        } else {
+            wire_color(None, &w.ty)
+        };
+        // L4 collapses every wire to a hairline.
+        let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
+        stroke_wire(&mut p, w, prefs, scope, width, color);
     }
+}
+
+/// Stroke one wire: a single cubic for Spline, a single polyline for the
+/// orthogonal modes (one call, so the corner joins are continuous).
+fn stroke_wire(
+    p: &mut Painter,
+    w: &WireGeom,
+    prefs: &WirePrefs,
+    scope: &CanvasScope,
+    width: f32,
+    color: Color,
+) {
+    if prefs.style.is_orthogonal() {
+        if w.screen.len() >= 2 {
+            p.polyline(&w.screen, width, color);
+        }
+        return;
+    }
+    let (c1, c2) = router::spline_controls(w.a, w.b, prefs.curve);
+    p.bezier_cubic(
+        scope.world_to_screen(w.a),
+        scope.world_to_screen(c1),
+        scope.world_to_screen(c2),
+        scope.world_to_screen(w.b),
+        width,
+        color,
+    );
+}
+
+/// The wire under the pointer, if any — per-segment distance in **screen**
+/// space so a wire is exactly as easy to grab at 15% as at 220%.
+fn wire_under(wires: &[WireGeom], pointer: Option<Pos2>) -> Option<usize> {
+    let p = pointer?;
+    wires
+        .iter()
+        .filter(|w| w.screen.len() >= 2)
+        .map(|w| (w.edge_index, point_polyline_distance(p, &w.screen)))
+        .filter(|(_, d)| *d <= WIRE_HOVER_PX)
+        .min_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2012,6 +2233,10 @@ fn handle_marquee(
             MarqueeMode::Replace => {
                 state.selection = hits.into_iter().collect();
                 state.primary = None;
+                // A replace-marquee is "select exactly this", so it drops any
+                // wire selection too — including the empty-canvas click that
+                // deselects everything.
+                state.selected_edges.clear();
             }
             MarqueeMode::Add => state.selection.extend(hits),
             MarqueeMode::Subtract => {
@@ -2024,16 +2249,6 @@ fn handle_marquee(
         state.marquee = None;
         state.marquee_mode = MarqueeMode::Replace;
     }
-}
-
-/// Wire stroke: zoom-invariant width (geometry scales, the stroke does not),
-/// collapsing to a hairline at L4.
-fn draw_wire(p: &mut Painter, a: Pos2, b: Pos2, zoom: f32, lod: ZoomLod, color: Color) {
-    let dx = ((b.x - a.x).abs() * 0.5)
-        .max((b.y - a.y).abs() * 0.4)
-        .max(24.0 * zoom);
-    let width = if lod.bar_only() { 1.0 } else { 2.0 };
-    p.bezier_cubic(a, a + Vec2::new(dx, 0.0), b - Vec2::new(dx, 0.0), b, width, color);
 }
 
 fn create_menu(
@@ -2260,6 +2475,7 @@ mod tests {
             label: "Position".into(),
             ty,
             output: false,
+            row: 0,
             wire_anchor: Pos2::ZERO,
             dot_center: Pos2::ZERO,
             connected: false,

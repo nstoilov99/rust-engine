@@ -522,7 +522,7 @@ pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
                     || p.console_show_error != d.console_show_error,
                 p.play != super::play_settings::PlaySettings::default(),
                 state.vsync != VSyncMode::default(),
-                p.graph_zoom_min != d.graph_zoom_min || p.graph_zoom_max != d.graph_zoom_max,
+                p.graph.zoom_min != d.graph.zoom_min || p.graph.zoom_max != d.graph.zoom_max,
             ];
 
             let (content, footer, filter) = shell_chrome(
@@ -866,19 +866,19 @@ fn draw_prefs_rows(
 
     if vis(8) {
         section_bar(ui, "Graph Editor");
-        let hint = format!("default {}", fmt_f(d.graph_zoom_min));
-        let m = p.graph_zoom_min != d.graph_zoom_min;
+        let hint = format!("default {}", fmt_f(d.graph.zoom_min));
+        let m = p.graph.zoom_min != d.graph.zoom_min;
         if setting_row(ui, f, "Min zoom", m, Some(&hint), false, |ui| {
-            drag(ui, &mut p.graph_zoom_min, 0.01, 0.1..=1.0, "\u{00d7}");
+            drag(ui, &mut p.graph.zoom_min, 0.01, 0.1..=1.0, "\u{00d7}");
         }) {
-            p.graph_zoom_min = d.graph_zoom_min;
+            p.graph.zoom_min = d.graph.zoom_min;
         }
-        let hint = format!("default {}", fmt_f(d.graph_zoom_max));
-        let m = p.graph_zoom_max != d.graph_zoom_max;
+        let hint = format!("default {}", fmt_f(d.graph.zoom_max));
+        let m = p.graph.zoom_max != d.graph.zoom_max;
         if setting_row(ui, f, "Max zoom", m, Some(&hint), false, |ui| {
-            drag(ui, &mut p.graph_zoom_max, 0.1, 1.0..=8.0, "\u{00d7}");
+            drag(ui, &mut p.graph.zoom_max, 0.1, 1.0..=8.0, "\u{00d7}");
         }) {
-            p.graph_zoom_max = d.graph_zoom_max;
+            p.graph.zoom_max = d.graph.zoom_max;
         }
     }
 }

@@ -3271,8 +3271,7 @@ impl App {
                     .collect()
             };
             // P9: graph canvas zoom limits from EditorPrefs.
-            let graph_zoom_min = self.editor.ui.settings.prefs.graph_zoom_min;
-            let graph_zoom_max = self.editor.ui.settings.prefs.graph_zoom_max;
+            let graph_prefs = self.editor.ui.settings.prefs.graph;
             // Graph selection outline: preset-invariant except for Graphite's
             // achromatic carve-out, so it must come from the live theme.
             let graph_sel_outline = self.editor.services.theme.palette.selection.outline;
@@ -3595,8 +3594,9 @@ impl App {
                                                 subgraph_assets: &subgraph_assets,
                                                 open_subgraph: &mut graph_open_request,
                                                 selection_outline: graph_sel_outline,
-                                                zoom_min: graph_zoom_min,
-                                                zoom_max: graph_zoom_max,
+                                                wire_prefs: graph_prefs.wires,
+                                                zoom_min: graph_prefs.zoom_min,
+                                                zoom_max: graph_prefs.zoom_max,
                                                 focused: graph_focused_tab.as_deref()
                                                     == Some(tab),
                                                 // Docked: keyboard editing runs
@@ -4454,8 +4454,7 @@ impl App {
                 .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
                 .collect()
         };
-        let graph_zoom_min = editor.ui.settings.prefs.graph_zoom_min;
-        let graph_zoom_max = editor.ui.settings.prefs.graph_zoom_max;
+        let graph_prefs = editor.ui.settings.prefs.graph;
         let graph_sel_outline = editor.services.theme.palette.selection.outline;
         let mut graph_open_requests: Vec<String> = Vec::new();
 
@@ -4617,8 +4616,9 @@ impl App {
                                     subgraph_assets: &subgraph_assets,
                                     open_subgraph: &mut float_open_request,
                                     selection_outline: graph_sel_outline,
-                                    zoom_min: graph_zoom_min,
-                                    zoom_max: graph_zoom_max,
+                                    wire_prefs: graph_prefs.wires,
+                                    zoom_min: graph_prefs.zoom_min,
+                                    zoom_max: graph_prefs.zoom_max,
                                     // A float window is a dedicated surface;
                                     // keys only arrive when it's OS-focused, so
                                     // the panel owns keyboard editing here.

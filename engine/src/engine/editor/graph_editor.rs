@@ -33,8 +33,10 @@ pub enum GraphEdit {
     RemoveNodes { nodes: Vec<(usize, NodeInst)>, edges: Vec<(usize, Edge)> },
     /// An edge was created.
     Connect(Edge),
-    /// An edge was removed.
-    Disconnect(Edge),
+    /// Edges were removed together (wire selection + Delete). Each carries
+    /// its original index so undo restores the exact vec order — a graph must
+    /// serialize byte-identically after an undo.
+    Disconnect { edges: Vec<(usize, Edge)> },
     /// Nodes moved by a fixed world-space delta (drag-coalesced).
     MoveNodes { ids: Vec<u64>, delta: [f32; 2] },
     /// A fragment (nodes + internal edges) was pasted/duplicated.
@@ -79,7 +81,9 @@ impl GraphEdit {
                 doc.edges.retain(|e| !edges.iter().any(|(_, re)| re == e));
             }
             GraphEdit::Connect(e) => doc.edges.push(e.clone()),
-            GraphEdit::Disconnect(e) => doc.edges.retain(|x| x != e),
+            GraphEdit::Disconnect { edges } => {
+                doc.edges.retain(|x| !edges.iter().any(|(_, e)| e == x))
+            }
             GraphEdit::MoveNodes { ids, delta } => move_nodes(doc, ids, *delta),
             GraphEdit::Paste { nodes, edges } => {
                 doc.nodes.extend(nodes.iter().cloned());
@@ -119,7 +123,7 @@ impl GraphEdit {
                 reinsert_indexed(&mut doc.edges, edges);
             }
             GraphEdit::Connect(e) => doc.edges.retain(|x| x != e),
-            GraphEdit::Disconnect(e) => doc.edges.push(e.clone()),
+            GraphEdit::Disconnect { edges } => reinsert_indexed(&mut doc.edges, edges),
             GraphEdit::MoveNodes { ids, delta } => {
                 move_nodes(doc, ids, [-delta[0], -delta[1]])
             }
@@ -172,7 +176,9 @@ impl GraphEdit {
                 format!("Delete {} Node{}", nodes.len(), plural(nodes.len()))
             }
             GraphEdit::Connect(_) => "Connect".to_string(),
-            GraphEdit::Disconnect(_) => "Disconnect".to_string(),
+            GraphEdit::Disconnect { edges } => {
+                format!("Break {} Link{}", edges.len(), plural(edges.len()))
+            }
             GraphEdit::MoveNodes { ids, .. } => {
                 format!("Move {} Node{}", ids.len(), plural(ids.len()))
             }
@@ -403,6 +409,9 @@ pub struct GraphEditorState {
     /// 100% while the rest of the set draws at 55% (DESIGN-nodegraph
     /// ▸ Selection). `None` when the selection came from a marquee.
     pub primary: Option<u64>,
+    /// Selected wires, keyed by the edge itself rather than by index (indices
+    /// shift under every insert/remove; the slug tuple is stable).
+    pub selected_edges: BTreeSet<Edge>,
     /// Doc-local undo/redo.
     pub stack: GraphEditStack,
     /// In-flight node drag (session-only).
@@ -513,6 +522,7 @@ impl GraphEditorState {
             view: CanvasView::default(),
             selection: BTreeSet::new(),
             primary: None,
+            selected_edges: BTreeSet::new(),
             stack: GraphEditStack::new(),
             node_drag: None,
             connect_drag: None,
@@ -569,6 +579,7 @@ impl GraphEditorState {
     fn prune_selection(&mut self) {
         self.selection.retain(|id| self.doc.node(*id).is_some());
         self.primary = self.primary.filter(|id| self.selection.contains(id));
+        self.selected_edges.retain(|e| self.doc.edges.contains(e));
         self.sel_comment = self.sel_comment.filter(|&i| i < self.doc.comments.len());
         self.sel_group = self.sel_group.filter(|&i| i < self.doc.groups.len());
         // An in-flight drag holds pre-undo positions/indices; cancel it so the
@@ -626,6 +637,7 @@ impl GraphEditorState {
     pub fn clear_selection(&mut self) {
         self.selection.clear();
         self.primary = None;
+        self.selected_edges.clear();
         self.sel_comment = None;
         self.sel_group = None;
     }
@@ -743,6 +755,11 @@ impl GraphEditorState {
         // Any in-flight drag / inline edit targets an index this delete may
         // shift or remove — cancel them so nothing commits against it.
         self.cancel_interactions();
+        // Wires first: a wire selection is always explicit, so Delete means
+        // the wires even when nodes happen to still be selected behind them.
+        if self.break_selected_links(registry) {
+            return;
+        }
         if let Some(i) = self.sel_comment {
             if i < self.doc.comments.len() {
                 let comment = self.doc.comments.remove(i);
@@ -786,6 +803,47 @@ impl GraphEditorState {
         edit.apply(&mut self.doc);
         self.selection.clear();
         self.commit(edit, registry);
+    }
+
+    /// Add/remove a wire from the selection (⇧-click extends).
+    pub fn toggle_edge_selected(&mut self, edge: &Edge) {
+        if !self.selected_edges.remove(edge) {
+            self.selected_edges.insert(edge.clone());
+        }
+    }
+
+    /// Select exactly this wire, dropping any node/annotation selection.
+    pub fn select_only_edge(&mut self, edge: &Edge) {
+        self.clear_selection();
+        self.selected_edges.insert(edge.clone());
+    }
+
+    /// Remove every selected wire as **one** undo transaction. Returns how
+    /// many were broken (0 = nothing was selected, caller falls through).
+    pub fn break_selected_links(&mut self, registry: &NodeRegistry) -> bool {
+        if self.selected_edges.is_empty() {
+            return false;
+        }
+        let doomed = std::mem::take(&mut self.selected_edges);
+        let edges: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| doomed.contains(e))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        if edges.is_empty() {
+            return false;
+        }
+        let n = edges.len();
+        let edit = GraphEdit::Disconnect { edges };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        // The toast system lands with the rest of the break gestures; until
+        // then the count still gets reported.
+        println!("graph: broke {n} link{}", if n == 1 { "" } else { "s" });
+        true
     }
 
     /// Cancel any in-flight drag / inline edit — indices they hold become
@@ -1050,7 +1108,7 @@ mod tests {
                 to_node: 1,
                 to_pin: "b".to_string(),
             }),
-            GraphEdit::Disconnect(edge(0, 1)),
+            GraphEdit::Disconnect { edges: vec![(0, edge(0, 1))] },
             GraphEdit::MoveNodes { ids: vec![0, 1], delta: [3.0, -4.0] },
             GraphEdit::Paste {
                 nodes: vec![node(7, [1.0, 1.0]), node(8, [2.0, 2.0])],
@@ -1138,6 +1196,63 @@ mod tests {
         assert!(!st.stack.can_undo(), "a no-op gesture must not dirty the stack");
     }
 
+    /// Breaking a wire selection is one undo transaction, and undo restores
+    /// the edges at their original indices so the doc still serializes
+    /// byte-identically.
+    #[test]
+    fn breaking_selected_links_is_one_reversible_transaction() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 0.0]), node(2, [20.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1), edge(1, 2), edge(0, 2)];
+        let before = st.doc.clone();
+
+        // Nothing selected: falls through so Delete can mean "the nodes".
+        assert!(!st.break_selected_links(&reg));
+
+        // Select the first and last wire, leaving the middle one alone.
+        st.select_only_edge(&edge(0, 1));
+        st.toggle_edge_selected(&edge(0, 2));
+        assert_eq!(st.selected_edges.len(), 2);
+        assert!(st.break_selected_links(&reg));
+        assert_eq!(st.doc.edges, vec![edge(1, 2)]);
+        assert!(st.selected_edges.is_empty(), "selection is consumed by the break");
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Break 2 Links"));
+
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "undo must restore the exact edge order");
+        let a = crate::engine::node_graph::serialize_graph(&before).unwrap();
+        let b = crate::engine::node_graph::serialize_graph(&st.doc).unwrap();
+        assert_eq!(a, b, "restored doc must serialize byte-identically");
+
+        // ⇧-click toggles back off.
+        st.toggle_edge_selected(&edge(1, 2));
+        st.toggle_edge_selected(&edge(1, 2));
+        assert!(st.selected_edges.is_empty());
+    }
+
+    /// A wire selection survives unrelated edits but is pruned when its edge
+    /// stops existing (undo/redo across a delete).
+    #[test]
+    fn wire_selection_is_pruned_when_its_edge_goes_away() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1)];
+        st.select_only_edge(&edge(0, 1));
+        // Delete the nodes out from under it, then undo.
+        st.selected_edges.clear();
+        st.selection = [0, 1].into_iter().collect();
+        st.delete_selection(&reg);
+        st.select_only_edge(&edge(0, 1)); // stale key
+        st.undo(&reg);
+        st.redo(&reg);
+        assert!(
+            st.selected_edges.is_empty(),
+            "a selection keyed on a removed edge must be pruned"
+        );
+    }
+
     /// Regression (review finding 1): deleting a *middle* node and undoing
     /// must restore the exact vec order, not append the node at the end —
     /// otherwise the doc is logically equal but serializes to different bytes.
@@ -1174,6 +1289,7 @@ mod tests {
             view: CanvasView::default(),
             selection: BTreeSet::new(),
             primary: None,
+            selected_edges: BTreeSet::new(),
             stack: GraphEditStack::new(),
             node_drag: None,
             connect_drag: None,
