@@ -32,7 +32,7 @@ use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
     GraphFragment, MarqueeMode, NodeDrag, ResizeHandle, ANNOTATION_MIN_H, ANNOTATION_MIN_W,
-    BOOKMARK_SLOTS,
+    BOOKMARK_SLOTS, TOAST_MS,
 };
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -84,6 +84,8 @@ const L4_BAR_H: f32 = 4.0;
 const ANNOTATION_FLOOR_PX: f32 = 7.0;
 /// Middle truncation keeps this fraction of the head (DESIGN-panels ▸ names).
 const TRUNCATE_HEAD: f32 = 0.60;
+/// Slash-cut stroke, screen px.
+const CUT_STROKE: f32 = 1.5;
 /// Marquee fill alpha (1px accent border + 8% accent fill).
 const MARQUEE_FILL_ALPHA: f32 = 0.08;
 /// Non-primary members of a multi-selection draw their outline at 55%.
@@ -991,6 +993,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut menu_open_at: Option<Pos2> = None;
     let mut annotation_menu_at: Option<Pos2> = None;
     let mut wire_menu_at: Option<Pos2> = None;
+    let mut node_menu_at: Option<Pos2> = None;
     let mut collapse_request = false;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
@@ -1003,6 +1006,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut menu_open_at,
             &mut annotation_menu_at,
             &mut wire_menu_at,
+            &mut node_menu_at,
             &mut collapse_request,
             open_subgraph,
             selection_outline,
@@ -1022,8 +1026,10 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     create_menu(ui, state, registry, &out.inner, subgraph_assets, menu_open_at);
     annotation_menu(ui, state, registry, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
+    node_menu(ui, state, registry, node_menu_at);
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
+    draw_toasts(ui, out.rect, state);
 
     // Ctrl+G writes a new asset, so it runs outside the draw pass.
     if collapse_request {
@@ -1072,7 +1078,13 @@ fn handle_panel_keys(
         state.copy_selection(clipboard);
     }
     if ctrl && v {
-        state.paste_clipboard(clipboard, registry);
+        // Paste lands at the cursor when the pointer is over this canvas;
+        // otherwise (menu-driven) it falls back to the view centre.
+        let at = ui.ctx().input.pointer_pos.map(|p| {
+            let v = state.view;
+            [v.pan.x + p.x / v.zoom, v.pan.y + p.y / v.zoom]
+        });
+        state.paste_clipboard(clipboard, at, registry);
     }
     if ctrl && d {
         state.duplicate_selection(registry);
@@ -1095,6 +1107,7 @@ fn draw_and_interact(
     menu_open_at: &mut Option<Pos2>,
     annotation_menu_at: &mut Option<Pos2>,
     wire_menu_at: &mut Option<Pos2>,
+    node_menu_at: &mut Option<Pos2>,
     collapse_request: &mut bool,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
@@ -1119,10 +1132,23 @@ fn draw_and_interact(
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
     let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis);
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
+    // What the in-flight cut would take, tested against the drawn polylines
+    // so the preview and the release can never disagree.
+    let cut_preview: BTreeSet<usize> = crossed_indices(state, &wires, scope);
 
     draw_grid(ui, scope, &st, vis, zoom);
     draw_annotations(ui, scope, state, &st, &m, vis, zoom, lod);
-    draw_wires(ui, scope, &wires, hovered_wire, wire_prefs, &st, lod, selection_outline);
+    draw_wires(
+        ui,
+        scope,
+        &wires,
+        hovered_wire,
+        &cut_preview,
+        wire_prefs,
+        &st,
+        lod,
+        selection_outline,
+    );
 
     // Nodes, pins and inline widgets. `widget_rects` records the screen boxes
     // owned by embedded controls so the node-drag pass can yield to them.
@@ -1152,6 +1178,8 @@ fn draw_and_interact(
     let right_pressed = ui.ctx().input.right_pressed;
     let mods = ui.ctx().input.modifiers;
     let shift = mods.contains(Modifiers::SHIFT);
+    let alt = mods.contains(Modifiers::ALT);
+    let ctrl = mods.contains(Modifiers::CTRL);
     let widget_claimed = pointer_screen
         .is_some_and(|p| widget_rects.iter().any(|r| r.contains(p)));
 
@@ -1288,13 +1316,23 @@ fn draw_and_interact(
     // Pins take precedence over the node body. Only where rows are drawn.
     let hit_w = m.pin_hit_w(zoom);
     let mut pin_claimed = false;
+    let mut break_pin: Option<(u64, String, bool)> = None;
     if lod.rows() {
         for g in &geoms {
             for pin in &g.pins {
                 let wr = Rect::from_center_size(pin.dot_center, Vec2::splat(hit_w));
                 let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
                 let resp = scope.interact(ui, id, wr);
-                if resp.pressed && state.connect_drag.is_none() && state.node_drag.is_none() {
+                if !resp.pressed {
+                    continue;
+                }
+                // Alt-click breaks instead of connecting (Unreal's gesture).
+                // It claims the press so no drag starts and selection is left
+                // exactly as it was.
+                if alt {
+                    break_pin = Some((g.id, pin.slug.clone(), pin.output));
+                    pin_claimed = true;
+                } else if state.connect_drag.is_none() && state.node_drag.is_none() {
                     state.connect_drag = Some(ConnectDrag {
                         from_node: g.id,
                         from_pin: pin.slug.clone(),
@@ -1305,17 +1343,32 @@ fn draw_and_interact(
             }
         }
     }
+    if let Some((node, pin, output)) = break_pin {
+        state.break_pin_links(node, &pin, output, registry);
+    }
 
     // Node body: select + start drag.
     let mut begin_drag = false;
     let mut node_pressed = false;
+    let mut break_node: Option<u64> = None;
     for g in &geoms {
         let id = ui.alloc_id(("graph_node", g.id));
         let resp = scope.interact(ui, id, g.body_rect(lod, &m));
         if resp.pressed {
             node_pressed = true;
         }
-        if resp.pressed
+        // Alt-click the header breaks every link the node has — the pin
+        // gesture, extended to the whole node.
+        if resp.pressed && alt && !pin_claimed {
+            let header = Rect::from_min_size(
+                g.rect.min,
+                Vec2::new(g.rect.width(), m.header_h),
+            );
+            if pointer_world.is_some_and(|p| header.contains(p)) || g.reroute {
+                break_node = Some(g.id);
+            }
+        }
+        if resp.pressed && !alt
             && !pin_claimed
             && !widget_claimed
             && !wire_claimed
@@ -1331,7 +1384,7 @@ fn draw_and_interact(
             }
             begin_drag = true;
         }
-        if resp.clicked && shift {
+        if resp.clicked && shift && !alt {
             state.toggle_selected(g.id);
         }
         // Double-click a subgraph node → open its referenced doc as a tab.
@@ -1340,6 +1393,9 @@ fn draw_and_interact(
                 *open_subgraph = Some(path);
             }
         }
+    }
+    if let Some(id) = break_node {
+        state.break_node_links(id, registry);
     }
     if begin_drag {
         if let Some(pw) = pointer_world {
@@ -1518,6 +1574,52 @@ fn draw_and_interact(
         }
     }
 
+    // Ctrl-drag slash cut. Arms only on an empty-canvas press, so Ctrl-drag
+    // over a node keeps whatever meaning that has; the wheel's Ctrl+scroll
+    // zoom is a different input entirely and never conflicts.
+    let mut cut_now: Vec<Edge> = Vec::new();
+    {
+        let esc = ui.ctx().input.key_pressed(Key::Escape);
+        if pointer_pressed
+            && ctrl
+            && state.cut_path.is_none()
+            && !pin_claimed
+            && !node_pressed
+            && !wire_claimed
+            && !widget_claimed
+            && state.annotation_resize.is_none()
+        {
+            if let Some(pw) = pointer_world {
+                if node_under(&geoms, pw, lod, &m).is_none()
+                    && pin_under(&geoms, pw, hit_w).is_none()
+                    && annotation_at(state, &m, pw).is_none()
+                {
+                    state.cut_path = Some(vec![[pw.x, pw.y]]);
+                }
+            }
+        }
+        if state.cut_path.is_some() {
+            if esc {
+                // Esc abandons the cut with nothing changed.
+                state.cut_path = None;
+                state.toast("Cut cancelled");
+            } else {
+                if let Some(pw) = pointer_world {
+                    state.push_cut_point([pw.x, pw.y]);
+                }
+                if !pointer_down {
+                    cut_now = crossed_by_cut(state, &wires, scope);
+                    state.cut_path = None;
+                }
+            }
+        }
+    }
+    if !cut_now.is_empty() {
+        state.break_links(&cut_now, "Cut", registry);
+    }
+    // Marquee is plain-LMB, so it must yield while a cut is armed.
+    let cutting = state.cut_path.is_some();
+
     // Marquee box-select on empty canvas (suppressed while an overlay/node/
     // annotation/widget owns the gesture).
     handle_marquee(
@@ -1530,7 +1632,12 @@ fn draw_and_interact(
             pointer_pressed,
             pointer_down,
             released,
-            blocked: pin_claimed || node_pressed || widget_claimed || wire_claimed,
+            blocked: pin_claimed
+                || node_pressed
+                || widget_claimed
+                || wire_claimed
+                || cutting
+                || ctrl,
             mods,
             lod,
             hit_w,
@@ -1558,6 +1665,20 @@ fn draw_and_interact(
         }
     }
 
+    // The cut path itself: dashed error-red, thin, drawn over everything it
+    // is about to sever.
+    if let Some(path) = state.cut_path.clone() {
+        let status = Palette::invariant_status();
+        let mut p = ui.painter();
+        let pts: Vec<Pos2> = path
+            .iter()
+            .map(|q| scope.world_to_screen(Pos2::new(q[0], q[1])))
+            .collect();
+        for w in pts.windows(2) {
+            dashed_line(&mut p, w[0], w[1], CUT_STROKE, status.error);
+        }
+    }
+
     // Validation chrome last, so it paints over the canvas it describes.
     error_chip(
         ui,
@@ -1577,11 +1698,18 @@ fn draw_and_interact(
     if right_pressed {
         if let Some(pw) = pointer_world {
             let on_annotation = annotation_at(state, &m, pw);
+            let on_node = node_under(&geoms, pw, lod, &m);
             if let Some(i) = hovered_wire {
                 // Right-clicking a wire offers the one thing that belongs to
                 // a wire: splitting it.
                 state.wire_menu = state.doc.edges.get(i).cloned().map(|e| (e, [pw.x, pw.y]));
                 *wire_menu_at = ui.ctx().input.pointer_pos;
+            } else if let Some(id) = on_node.filter(|_| on_annotation.is_none()) {
+                if !state.selection.contains(&id) {
+                    state.select_only(id);
+                }
+                state.node_menu = Some(id);
+                *node_menu_at = ui.ctx().input.pointer_pos;
             } else if let Some(target) = on_annotation {
                 match target {
                     Annotation::Comment(i) => {
@@ -1685,6 +1813,58 @@ fn selected_rects(state: &GraphEditorState, geoms: &[NodeGeom]) -> Vec<(u64, [f3
         .collect()
 }
 
+/// Transient canvas messages, stacked bottom-centre and fading out. Every
+/// gesture that changes something off-screen — a break, a cut, a paste that
+/// dropped links — says what it did here rather than in a log the user is not
+/// reading.
+fn draw_toasts(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState) {
+    state
+        .toasts
+        .retain(|t| t.at.elapsed().as_millis() < TOAST_MS);
+    if state.toasts.is_empty() {
+        return;
+    }
+    let st = ui.style();
+    let font = st.fonts.small;
+    let pad = st.spacing.padding;
+    let h = st.metrics.control_height;
+    let mut y = rect.max.y - pad - h;
+    // Newest nearest the canvas edge, older ones stacked above it.
+    let toasts: Vec<(String, f32)> = state
+        .toasts
+        .iter()
+        .rev()
+        .map(|t| {
+            let age = t.at.elapsed().as_millis() as f32 / TOAST_MS as f32;
+            // Hold, then fade over the last third.
+            (t.text.clone(), (1.0 - (age - 0.66) / 0.34).clamp(0.0, 1.0))
+        })
+        .collect();
+    let mut p = ui.painter();
+    for (text, alpha) in toasts {
+        let w = p.measure_text(&text, font, None).x + pad * 2.0;
+        let chip = Rect::from_min_size(
+            Pos2::new(rect.center().x - w * 0.5, y),
+            Vec2::new(w, h),
+        );
+        p.rect_filled(chip, st.rounding.small, st.palette.elevated.with_alpha(alpha));
+        p.rect_stroke(
+            chip,
+            st.rounding.small,
+            st.metrics.border,
+            st.palette.stroke_strong.with_alpha(alpha),
+        );
+        p.text(
+            Pos2::new(chip.min.x + pad, chip.center().y - font * 0.62),
+            &text,
+            font,
+            st.palette.text.with_alpha(alpha),
+            None,
+        );
+        y -= h + st.spacing.item;
+    }
+}
+
 /// The purge confirm step. Destructive actions confirm with a count; the
 /// filled danger button lives in the dialog, per the design system.
 fn purge_confirm(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState, registry: &NodeRegistry) {
@@ -1769,6 +1949,38 @@ fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option
     None
 }
 
+/// The node context menu. Every break path is also reachable here — the
+/// gesture is the fast route, the menu is the discoverable one.
+fn node_menu(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    open_at: Option<Pos2>,
+) {
+    let Some(id) = state.node_menu else {
+        return;
+    };
+    let links = state.edges_on_node(id).len();
+    let mut brk = false;
+    let mut del = false;
+    crusty_gui::widgets::context_menu_at(ui, "graph_node_menu", open_at, |ui| {
+        ui.menu_group_header("Node");
+        if ui.menu_item_enabled(format!("Break all links ({links})"), links > 0) {
+            brk = true;
+        }
+        if ui.menu_item("Delete") {
+            del = true;
+        }
+    });
+    if brk {
+        state.break_node_links(id, registry);
+        state.node_menu = None;
+    } else if del {
+        state.delete_selection(registry);
+        state.node_menu = None;
+    }
+}
+
 /// The wire context menu — a wire owns exactly one action: splitting it with
 /// a reroute at the click point. Breaking is Delete (and, from Phase 6, the
 /// ⌥-click and slash-cut gestures).
@@ -1782,12 +1994,21 @@ fn wire_menu(
         return;
     };
     let mut add = false;
+    let mut brk = false;
     crusty_gui::widgets::context_menu_at(ui, "graph_wire_menu", open_at, |ui| {
         ui.menu_group_header("Wire");
         if ui.menu_item("Add reroute") {
             add = true;
         }
+        if ui.menu_item("Break link") {
+            brk = true;
+        }
     });
+    if brk {
+        state.break_links(std::slice::from_ref(&edge), "Broke", registry);
+        state.wire_menu = None;
+        return;
+    }
     if add {
         // Center the dot on the click point rather than starting it there.
         let st = ui.style();
@@ -2643,6 +2864,7 @@ fn draw_wires(
     scope: &CanvasScope,
     wires: &[WireGeom],
     hovered: Option<usize>,
+    cut_preview: &BTreeSet<usize>,
     prefs: &WirePrefs,
     st: &Style,
     lod: ZoomLod,
@@ -2675,6 +2897,14 @@ fn draw_wires(
         };
         // L4 collapses every wire to a hairline.
         let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
+        // A wire the cut is about to take goes red-dashed *during* the drag,
+        // so the gesture is previewed and Esc-abortable.
+        if cut_preview.contains(&w.edge_index) {
+            for seg in w.screen.windows(2) {
+                dashed_line(&mut p, seg[0], seg[1], width.max(CUT_STROKE), status.error);
+            }
+            continue;
+        }
         stroke_wire(&mut p, w, prefs, scope, width, color);
         if w.mismatched && lod.rows() {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
@@ -2747,6 +2977,43 @@ fn stroke_wire(
         width,
         color,
     );
+}
+
+/// Edge indices whose routed polyline the in-flight cut path crosses. Exact
+/// segment-segment tests against the *drawn* polyline, so what the preview
+/// highlights is exactly what the release cuts.
+fn crossed_indices(
+    state: &GraphEditorState,
+    wires: &[WireGeom],
+    scope: &CanvasScope,
+) -> BTreeSet<usize> {
+    let Some(path) = state.cut_path.as_ref() else {
+        return BTreeSet::new();
+    };
+    if path.len() < 2 {
+        return BTreeSet::new();
+    }
+    let screen: Vec<Pos2> = path
+        .iter()
+        .map(|q| scope.world_to_screen(Pos2::new(q[0], q[1])))
+        .collect();
+    wires
+        .iter()
+        .filter(|w| router::path_crosses_polyline(&screen, &w.screen))
+        .map(|w| w.edge_index)
+        .collect()
+}
+
+/// The edges the in-flight cut would take, resolved to real `Edge` values.
+fn crossed_by_cut(
+    state: &GraphEditorState,
+    wires: &[WireGeom],
+    scope: &CanvasScope,
+) -> Vec<Edge> {
+    crossed_indices(state, wires, scope)
+        .into_iter()
+        .filter_map(|i| state.doc.edges.get(i).cloned())
+        .collect()
 }
 
 /// The wire under the pointer, if any — per-segment distance in **screen**

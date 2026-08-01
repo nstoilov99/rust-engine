@@ -4128,7 +4128,9 @@ impl App {
                 st.copy_selection(clip);
                 st.delete_selection(reg);
             }
-            EditorAction::Paste => st.paste_clipboard(clip, reg),
+            // Menu-driven paste has no cursor to land on, so it falls back
+            // to the fragment's own offset.
+            EditorAction::Paste => st.paste_clipboard(clip, None, reg),
             EditorAction::Duplicate => st.duplicate_selection(reg),
             _ => {}
         }

@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crusty_gui::math::Vec2;
+use serde::{Deserialize, Serialize};
 use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
@@ -524,23 +525,95 @@ impl GraphEditStack {
 // Clipboard fragment.
 // ---------------------------------------------------------------------------
 
-/// A copied slice of a graph: nodes plus the edges internal to them. Ids are
-/// remapped on paste, so a fragment can be pasted into any document.
-#[derive(Debug, Clone, Default)]
+/// What a fragment is tagged as on the system clipboard, so arbitrary text
+/// that happens to parse as RON is never mistaken for a graph.
+pub const FRAGMENT_KIND: &str = "crusty.graph.fragment";
+/// Fragment schema version. Bump when the shape changes; older payloads are
+/// rejected rather than half-read.
+pub const FRAGMENT_VERSION: u32 = 1;
+
+/// A copied slice of a graph: nodes, the edges internal to them, and the
+/// annotations that came along. Ids are remapped on paste, so a fragment can
+/// be pasted into any document.
+///
+/// This is a **RON subset, not an internal pointer set** — that is what lets
+/// a paste survive both a tab switch and a whole editor session.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GraphFragment {
     pub nodes: Vec<NodeInst>,
     pub edges: Vec<Edge>,
+    pub comments: Vec<CommentBox>,
+    pub groups: Vec<GroupBox>,
+}
+
+/// The clipboard envelope: a kind tag and a version around the payload, so
+/// pasting someone else's RON is a no-op rather than a surprise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FragmentEnvelope {
+    kind: String,
+    version: u32,
+    fragment: GraphFragment,
 }
 
 impl GraphFragment {
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.nodes.is_empty() && self.comments.is_empty() && self.groups.is_empty()
+    }
+
+    /// Serialize for the system clipboard.
+    pub fn to_ron(&self) -> Result<String, String> {
+        ron::ser::to_string_pretty(
+            &FragmentEnvelope {
+                kind: FRAGMENT_KIND.to_string(),
+                version: FRAGMENT_VERSION,
+                fragment: self.clone(),
+            },
+            Default::default(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Parse clipboard text. Defensive by construction: anything that is not
+    /// one of our fragments — arbitrary text, other RON, a future version —
+    /// returns `None` instead of erroring or panicking.
+    pub fn from_ron(text: &str) -> Option<Self> {
+        let env: FragmentEnvelope = ron::from_str(text).ok()?;
+        (env.kind == FRAGMENT_KIND && env.version == FRAGMENT_VERSION).then_some(env.fragment)
+    }
+
+    /// World-space top-left of everything in the fragment — the anchor a
+    /// cursor-relative paste is measured from.
+    pub fn bbox_min(&self) -> [f32; 2] {
+        let mut min = [f32::MAX, f32::MAX];
+        let mut fold = |x: f32, y: f32| {
+            min[0] = min[0].min(x);
+            min[1] = min[1].min(y);
+        };
+        for n in &self.nodes {
+            fold(n.position[0], n.position[1]);
+        }
+        for c in &self.comments {
+            fold(c.rect[0], c.rect[1]);
+        }
+        for g in &self.groups {
+            fold(g.rect[0], g.rect[1]);
+        }
+        if min[0] == f32::MAX {
+            [0.0, 0.0]
+        } else {
+            min
+        }
     }
 
     /// Produce a copy with fresh ids (starting at `first_id`) and positions
-    /// offset by `offset`. Returns the remapped nodes + edges (edges keep only
-    /// those whose both endpoints are in the fragment).
-    fn instantiate(&self, first_id: u64, offset: [f32; 2]) -> (Vec<NodeInst>, Vec<Edge>) {
+    /// offset by `offset`.
+    ///
+    /// Edges remap **by pin slug** — the existing edge-identity rule — so a
+    /// descriptor that reordered its pins still reconnects. Edges with an
+    /// endpoint outside the fragment are dropped, and counted: silent loss is
+    /// fine, unreported loss is not.
+    fn instantiate(&self, first_id: u64, offset: [f32; 2]) -> Instantiated {
         use std::collections::BTreeMap;
         let mut remap: BTreeMap<u64, u64> = BTreeMap::new();
         let mut nodes = Vec::with_capacity(self.nodes.len());
@@ -553,7 +626,8 @@ impl GraphFragment {
             c.position[1] += offset[1];
             nodes.push(c);
         }
-        let edges = self
+        let before = self.edges.len();
+        let edges: Vec<Edge> = self
             .edges
             .iter()
             .filter_map(|e| {
@@ -565,8 +639,43 @@ impl GraphFragment {
                 })
             })
             .collect();
-        (nodes, edges)
+        let dropped = before - edges.len();
+
+        let comments = self
+            .comments
+            .iter()
+            .map(|c| {
+                let mut c = c.clone();
+                c.rect[0] += offset[0];
+                c.rect[1] += offset[1];
+                // An anchor pointing outside the fragment would tie the copy
+                // to the original's node; remap it or cut it loose.
+                c.anchor = c.anchor.and_then(|a| remap.get(&a).copied());
+                c
+            })
+            .collect();
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| {
+                let mut g = g.clone();
+                g.rect[0] += offset[0];
+                g.rect[1] += offset[1];
+                g
+            })
+            .collect();
+        Instantiated { nodes, edges, comments, groups, dropped }
     }
+}
+
+/// One instantiation of a fragment, ready to apply.
+struct Instantiated {
+    nodes: Vec<NodeInst>,
+    edges: Vec<Edge>,
+    comments: Vec<CommentBox>,
+    groups: Vec<GroupBox>,
+    /// Boundary edges that could not come along.
+    dropped: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +755,29 @@ pub struct GraphEditorState {
     pub bookmark_next: usize,
     /// Nodes a pending purge would remove — the confirm step's payload.
     pub purge_confirm: Option<Vec<u64>>,
+    /// Transient canvas messages, newest last.
+    pub toasts: Vec<CanvasToast>,
+    /// In-flight Ctrl-drag slash cut: the path drawn so far, world space.
+    pub cut_path: Option<Vec<[f32; 2]>>,
+    /// Node whose context menu is open.
+    pub node_menu: Option<u64>,
 }
+
+/// The prototype's cap on the cut path — a slash is a gesture, not a drawing,
+/// and an unbounded buffer would make the preview's per-segment test quadratic
+/// in mouse samples.
+pub const CUT_PATH_MAX: usize = 40;
+
+/// A transient canvas message. Every gesture that changes something the user
+/// cannot immediately see says so — "Broke 3 links", "Pasted 6 nodes".
+#[derive(Debug, Clone)]
+pub struct CanvasToast {
+    pub text: String,
+    pub at: Instant,
+}
+
+/// How long a toast stays up before it has fully faded.
+pub const TOAST_MS: u128 = 1800;
 
 /// How many view bookmarks a graph keeps.
 pub const BOOKMARK_SLOTS: usize = 5;
@@ -851,6 +982,9 @@ impl GraphEditorState {
             bookmarks: [None; BOOKMARK_SLOTS],
             bookmark_next: 0,
             purge_confirm: None,
+            toasts: Vec::new(),
+            cut_path: None,
+            node_menu: None,
         })
     }
 
@@ -1153,26 +1287,10 @@ impl GraphEditorState {
         if self.selected_edges.is_empty() {
             return false;
         }
-        let doomed = std::mem::take(&mut self.selected_edges);
-        let edges: Vec<(usize, Edge)> = self
-            .doc
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| doomed.contains(e))
-            .map(|(i, e)| (i, e.clone()))
+        let doomed: Vec<Edge> = std::mem::take(&mut self.selected_edges)
+            .into_iter()
             .collect();
-        if edges.is_empty() {
-            return false;
-        }
-        let n = edges.len();
-        let edit = GraphEdit::Disconnect { edges };
-        edit.apply(&mut self.doc);
-        self.commit(edit, registry);
-        // The toast system lands with the rest of the break gestures; until
-        // then the count still gets reported.
-        println!("graph: broke {n} link{}", if n == 1 { "" } else { "s" });
-        true
+        self.break_links(&doomed, "Broke", registry) > 0
     }
 
     /// Read an annotation's stored rect, if it still exists.
@@ -1364,6 +1482,106 @@ impl GraphEditorState {
         self.selection.remove(&id);
         self.commit(edit, registry);
         true
+    }
+
+    /// Post a transient canvas message and drop any that have expired.
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.toasts
+            .retain(|t| t.at.elapsed().as_millis() < TOAST_MS);
+        self.toasts.push(CanvasToast { text: text.into(), at: Instant::now() });
+    }
+
+    // -- Breaking connections --------------------------------------------
+
+    /// Break every listed edge as one transaction, reporting the count.
+    /// Shared by all three break paths so they can never diverge.
+    pub fn break_links(&mut self, doomed: &[Edge], verb: &str, registry: &NodeRegistry) -> usize {
+        let edges: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| doomed.contains(e))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        let n = edges.len();
+        if n == 0 {
+            return 0;
+        }
+        let edit = GraphEdit::Disconnect { edges };
+        edit.apply(&mut self.doc);
+        self.selected_edges.retain(|e| !doomed.contains(e));
+        self.commit(edit, registry);
+        self.toast(format!("{verb} {n} link{}", if n == 1 { "" } else { "s" }));
+        n
+    }
+
+    /// Every edge touching one pin.
+    pub fn edges_on_pin(&self, node: u64, pin: &str, output: bool) -> Vec<Edge> {
+        self.doc
+            .edges
+            .iter()
+            .filter(|e| {
+                if output {
+                    e.from_node == node && e.from_pin == pin
+                } else {
+                    e.to_node == node && e.to_pin == pin
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Every edge touching one node, either side.
+    pub fn edges_on_node(&self, node: u64) -> Vec<Edge> {
+        self.doc
+            .edges
+            .iter()
+            .filter(|e| e.from_node == node || e.to_node == node)
+            .cloned()
+            .collect()
+    }
+
+    /// Alt-click a pin: break its links, or say why nothing happened.
+    pub fn break_pin_links(
+        &mut self,
+        node: u64,
+        pin: &str,
+        output: bool,
+        registry: &NodeRegistry,
+    ) {
+        let doomed = self.edges_on_pin(node, pin, output);
+        if doomed.is_empty() {
+            self.toast("Pin has no links");
+            return;
+        }
+        self.break_links(&doomed, "Broke", registry);
+    }
+
+    /// Alt-click a node header: break every link the node has.
+    pub fn break_node_links(&mut self, node: u64, registry: &NodeRegistry) {
+        let doomed = self.edges_on_node(node);
+        if doomed.is_empty() {
+            self.toast("Node has no links");
+            return;
+        }
+        self.break_links(&doomed, "Broke", registry);
+    }
+
+    /// Extend the in-flight cut path, capped at [`CUT_PATH_MAX`] points.
+    pub fn push_cut_point(&mut self, p: [f32; 2]) {
+        let path = self.cut_path.get_or_insert_with(Vec::new);
+        // Skip samples that add nothing — a still pointer must not eat the cap.
+        if path
+            .last()
+            .is_some_and(|q| (q[0] - p[0]).abs() < 0.5 && (q[1] - p[1]).abs() < 0.5)
+        {
+            return;
+        }
+        if path.len() >= CUT_PATH_MAX {
+            path.remove(0);
+        }
+        path.push(p);
     }
 
     // -- Organization ---------------------------------------------------
@@ -1734,24 +1952,43 @@ impl GraphEditorState {
         self.connect_drag = None;
         self.marquee = None;
         self.marquee_mode = MarqueeMode::Replace;
+        self.cut_path = None;
         self.editing = None;
         self.annotation_resize = None;
         // Dropped, not flushed: the value it references may already be gone.
         self.prop_edit = None;
     }
 
-    /// Copy the selection into `clipboard` (nodes + internal edges).
-    pub fn copy_selection(&self, clipboard: &mut Option<GraphFragment>) {
+    /// Copy the selection to the **system** clipboard as RON (so a paste
+    /// survives a restart), keeping the in-memory copy as a fallback for when
+    /// the platform clipboard is unavailable.
+    pub fn copy_selection(&mut self, clipboard: &mut Option<GraphFragment>) {
+        let Some(frag) = self.selection_fragment() else {
+            return;
+        };
+        match frag.to_ron() {
+            Ok(text) => crusty_gui::clipboard::set_text(text),
+            Err(e) => println!("graph: clipboard serialize failed: {e}"),
+        }
+        let n = frag.nodes.len();
+        *clipboard = Some(frag);
+        self.toast(format!("Copied {n} node{}", if n == 1 { "" } else { "s" }));
+    }
+
+    /// The in-memory half of copy, without touching the OS clipboard.
+    pub fn copy_selection_local(&mut self, clipboard: &mut Option<GraphFragment>) {
         if let Some(frag) = self.selection_fragment() {
             *clipboard = Some(frag);
         }
     }
 
-    /// Build a fragment from the current selection, or `None` if empty.
-    fn selection_fragment(&self) -> Option<GraphFragment> {
-        if self.selection.is_empty() {
-            return None;
-        }
+    /// Build a fragment from the current selection, or `None` if there is
+    /// nothing to copy.
+    ///
+    /// Annotations come along: the selected comment/group, plus every comment
+    /// *anchored* to a copied node — an anchored note explains that node, so
+    /// copying the node without it would copy half the thought.
+    pub fn selection_fragment(&self) -> Option<GraphFragment> {
         let nodes: Vec<NodeInst> = self
             .doc
             .nodes
@@ -1759,9 +1996,6 @@ impl GraphEditorState {
             .filter(|n| self.selection.contains(&n.id))
             .cloned()
             .collect();
-        if nodes.is_empty() {
-            return None;
-        }
         let edges: Vec<Edge> = self
             .doc
             .edges
@@ -1771,42 +2005,139 @@ impl GraphEditorState {
             })
             .cloned()
             .collect();
-        Some(GraphFragment { nodes, edges })
+
+        let anchored: BTreeSet<usize> = anchored_comments(&self.doc, &self.selection)
+            .into_iter()
+            .collect();
+        let mut comments: Vec<CommentBox> = Vec::new();
+        for (i, c) in self.doc.comments.iter().enumerate() {
+            if anchored.contains(&i) || self.sel_comment == Some(i) {
+                comments.push(c.clone());
+            }
+        }
+        let groups: Vec<GroupBox> = self
+            .sel_group
+            .and_then(|i| self.doc.groups.get(i))
+            .cloned()
+            .into_iter()
+            .collect();
+
+        let frag = GraphFragment { nodes, edges, comments, groups };
+        (!frag.is_empty()).then_some(frag)
     }
 
-    /// Paste `clipboard` at a fixed offset, selecting the new nodes.
+    /// Paste at `at` (world space) preserving the fragment's relative layout.
+    ///
+    /// The system clipboard wins when it holds one of our fragments — that is
+    /// what makes paste work across sessions — and the in-memory copy is the
+    /// fallback. Text that is not ours is a no-op with a note, never a panic.
     pub fn paste_clipboard(
         &mut self,
         clipboard: &Option<GraphFragment>,
+        at: Option<[f32; 2]>,
         registry: &NodeRegistry,
     ) {
-        if let Some(frag) = clipboard {
-            self.paste_fragment(frag, registry);
-        }
+        let from_os = crusty_gui::clipboard::get_text()
+            .as_deref()
+            .and_then(GraphFragment::from_ron);
+        let frag = match (from_os, clipboard) {
+            (Some(f), _) => f,
+            (None, Some(f)) => f.clone(),
+            (None, None) => {
+                println!("graph: clipboard holds nothing this editor can paste");
+                return;
+            }
+        };
+        self.paste_fragment(&frag, at, registry);
     }
 
-    /// Duplicate the selection in place (does not touch the shared clipboard).
+    /// Duplicate the selection in place. Deliberately does **not** touch the
+    /// clipboard: duplicating should not cost you what you copied earlier.
     pub fn duplicate_selection(&mut self, registry: &NodeRegistry) {
         if let Some(frag) = self.selection_fragment() {
-            self.paste_fragment(&frag, registry);
+            let min = frag.bbox_min();
+            let at = [min[0] + Self::DUPLICATE_OFFSET, min[1] + Self::DUPLICATE_OFFSET];
+            self.paste_fragment(&frag, Some(at), registry);
         }
     }
 
-    const PASTE_OFFSET: [f32; 2] = [30.0, 30.0];
+    /// `Ctrl+D` lands the copy just off its original, close enough to read as
+    /// a duplicate rather than a new thought.
+    const DUPLICATE_OFFSET: f32 = 16.0;
+    /// Nudge step used to walk a paste clear of what is already there.
+    const NUDGE: f32 = 8.0;
+    /// Give up nudging rather than walking off the canvas forever.
+    const MAX_NUDGES: usize = 64;
 
-    fn paste_fragment(&mut self, frag: &GraphFragment, registry: &NodeRegistry) {
+    /// Paste a fragment we already hold, at `at` (world). Separate from
+    /// [`paste_clipboard`](Self::paste_clipboard) so nothing but the actual
+    /// clipboard path touches the OS clipboard — reaching for it is a
+    /// process-global, single-threaded-only operation, and a unit test has no
+    /// business depending on what the machine happens to have copied.
+    pub fn paste_fragment(
+        &mut self,
+        frag: &GraphFragment,
+        at: Option<[f32; 2]>,
+        registry: &NodeRegistry,
+    ) {
         if frag.is_empty() {
             return;
         }
-        let (nodes, edges) = frag.instantiate(self.doc.next_node_id(), Self::PASTE_OFFSET);
-        let edit = GraphEdit::Paste { nodes: nodes.clone(), edges: edges.clone() };
+        // Anchor the fragment's top-left at the target and keep every
+        // internal offset, so a pasted cluster arrives shaped as it was.
+        let min = frag.bbox_min();
+        let target = at.unwrap_or([min[0] + Self::DUPLICATE_OFFSET, min[1] + Self::DUPLICATE_OFFSET]);
+        let mut offset = [target[0] - min[0], target[1] - min[1]];
+
+        // Nudge until the landing spot is clear — the palette's drop rule.
+        for _ in 0..Self::MAX_NUDGES {
+            let clash = frag.nodes.iter().any(|n| {
+                let p = [n.position[0] + offset[0], n.position[1] + offset[1]];
+                self.doc
+                    .nodes
+                    .iter()
+                    .any(|e| (e.position[0] - p[0]).abs() < 1.0 && (e.position[1] - p[1]).abs() < 1.0)
+            });
+            if !clash {
+                break;
+            }
+            offset[0] += Self::NUDGE;
+            offset[1] += Self::NUDGE;
+        }
+
+        let out = frag.instantiate(self.doc.next_node_id(), offset);
+        let (n, dropped) = (out.nodes.len(), out.dropped);
+        let mut edits = vec![GraphEdit::Paste {
+            nodes: out.nodes.clone(),
+            edges: out.edges,
+        }];
+        for c in out.comments {
+            edits.push(GraphEdit::AddComment(c));
+        }
+        for g in out.groups {
+            edits.push(GraphEdit::AddGroup(g));
+        }
+        let edit = GraphEdit::Composite {
+            label: format!("Paste {n} Node{}", if n == 1 { "" } else { "s" }),
+            edits,
+        };
         edit.apply(&mut self.doc);
         // Move selection to the pasted nodes; clear any annotation selection so
         // a following Delete hits the pasted nodes, not an off-screen comment.
         self.clear_selection();
-        self.selection = nodes.iter().map(|n| n.id).collect();
-        self.primary = nodes.last().map(|n| n.id);
+        self.selection = out.nodes.iter().map(|x| x.id).collect();
+        self.primary = out.nodes.last().map(|x| x.id);
         self.commit(edit, registry);
+
+        if dropped > 0 {
+            self.toast(format!(
+                "Pasted {n} node{}, {dropped} link{} dropped",
+                if n == 1 { "" } else { "s" },
+                if dropped == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.toast(format!("Pasted {n} node{}", if n == 1 { "" } else { "s" }));
+        }
     }
 }
 
@@ -1886,7 +2217,7 @@ pub fn prop_display(v: &PropValue) -> String {
 mod tests {
     use super::*;
     use crate::engine::node_graph::doc::GraphDoc;
-    use crate::engine::node_graph::NodeDescriptor;
+    use crate::engine::node_graph::{GraphError, NodeDescriptor};
 
     fn node(id: u64, pos: [f32; 2]) -> NodeInst {
         NodeInst {
@@ -2470,6 +2801,216 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The clipboard is a RON subset, not a pointer set — that is what makes
+    /// a paste survive a restart. Annotations and unknown node types both
+    /// round-trip verbatim.
+    #[test]
+    fn fragment_ron_round_trips_including_annotations_and_unknown_types() {
+        let mut unknown = node(7, [10.0, 20.0]);
+        unknown.type_id = "plugin.not_installed".into();
+        unknown
+            .properties
+            .insert("weird".into(), PropValue::Raw("(a:1,b:[2,3])".into()));
+        unknown.tint = Some(9);
+
+        let mut anchored = comment(50.0);
+        anchored.anchor = Some(7);
+        anchored.tint = Some(3);
+        anchored.font_scale = 1.75;
+        anchored.collapsed = true;
+
+        let frag = GraphFragment {
+            nodes: vec![node(0, [0.0, 0.0]), unknown],
+            edges: vec![edge(0, 7)],
+            comments: vec![anchored],
+            groups: vec![group(0.0)],
+        };
+
+        let text = frag.to_ron().expect("serialize");
+        let back = GraphFragment::from_ron(&text).expect("parse");
+        assert_eq!(back, frag, "a fragment must survive a full round trip");
+        // Forward-compat data is preserved untouched (the Raw philosophy).
+        assert_eq!(
+            back.nodes[1].properties.get("weird"),
+            Some(&PropValue::Raw("(a:1,b:[2,3])".into()))
+        );
+
+        // Anything that is not one of our fragments is a no-op, never a panic.
+        assert!(GraphFragment::from_ron("").is_none());
+        assert!(GraphFragment::from_ron("hello, clipboard").is_none());
+        assert!(GraphFragment::from_ron("(kind: \"something.else\", version: 1, fragment: ())").is_none());
+        let bumped = text.replace("version: 1", "version: 99");
+        assert!(
+            GraphFragment::from_ron(&bumped).is_none(),
+            "a future version is rejected, not half-read"
+        );
+    }
+
+    /// Copy takes the selected annotation and every note anchored to a copied
+    /// node — copying a node without its explanation copies half the thought.
+    #[test]
+    fn copy_includes_selected_and_anchored_annotations() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 0.0])];
+        st.doc.comments = vec![comment(0.0), comment(300.0), comment(600.0)];
+        st.doc.comments[0].anchor = Some(0); // anchored to a copied node
+        st.doc.comments[1].anchor = Some(1); // anchored to a node NOT copied
+        st.doc.groups = vec![group(0.0)];
+        st.selection = [0u64].into_iter().collect();
+        st.sel_comment = Some(2); // explicitly selected
+
+        let frag = st.selection_fragment().expect("fragment");
+        assert_eq!(frag.nodes.len(), 1);
+        assert_eq!(frag.comments.len(), 2, "the anchored one and the selected one");
+        assert!(frag.groups.is_empty(), "no group was selected");
+
+        // Nothing selected at all is nothing to copy.
+        let empty = bare_state();
+        assert!(empty.selection_fragment().is_none());
+    }
+
+    /// Paste anchors the fragment's top-left at the cursor, preserves the
+    /// internal layout, and nudges clear of what is already there.
+    #[test]
+    fn paste_lands_at_the_cursor_and_nudges_clear() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        let frag = GraphFragment {
+            nodes: vec![node(0, [100.0, 100.0]), node(1, [140.0, 180.0])],
+            edges: vec![edge(0, 1)],
+            ..Default::default()
+        };
+
+        st.paste_fragment(&frag, Some([500.0, 300.0]), &reg);
+        assert_eq!(st.doc.nodes.len(), 2);
+        // Top-left lands on the cursor; the relative offset is preserved.
+        assert_eq!(st.doc.nodes[0].position, [500.0, 300.0]);
+        assert_eq!(st.doc.nodes[1].position, [540.0, 380.0]);
+        assert_eq!(st.doc.edges.len(), 1, "the internal edge came along");
+
+        // Pasting again at the same spot walks clear in 8px steps.
+        st.paste_fragment(&frag, Some([500.0, 300.0]), &reg);
+        assert_eq!(st.doc.nodes[2].position, [508.0, 308.0], "nudged clear");
+
+        // No target = the duplicate offset, so a menu paste still lands.
+        let mut st2 = bare_state();
+        st2.paste_fragment(&frag, None, &reg);
+        assert_eq!(st2.doc.nodes[0].position, [116.0, 116.0]);
+    }
+
+    /// Boundary edges drop, and the drop is reported rather than silent.
+    #[test]
+    fn paste_reports_dropped_boundary_links() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        // The fragment claims two edges; only one is internal to it.
+        let frag = GraphFragment {
+            nodes: vec![node(0, [0.0, 0.0]), node(1, [50.0, 0.0])],
+            edges: vec![edge(0, 1), edge(0, 99), edge(98, 1)],
+            ..Default::default()
+        };
+        st.paste_fragment(&frag, Some([0.0, 0.0]), &reg);
+        assert_eq!(st.doc.edges.len(), 1, "only the internal edge survives");
+        let last = st.toasts.last().expect("a toast reports the drop");
+        assert_eq!(last.text, "Pasted 2 nodes, 2 links dropped");
+    }
+
+    /// Duplicate offsets by 16 and leaves the clipboard alone.
+    #[test]
+    fn duplicate_offsets_by_16_and_spares_the_clipboard() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [200.0, 100.0])];
+        st.selection = [0u64].into_iter().collect();
+        let clipboard: Option<GraphFragment> = None;
+
+        st.duplicate_selection(&reg);
+        assert_eq!(st.doc.nodes.len(), 2);
+        assert_eq!(st.doc.nodes[1].position, [216.0, 116.0]);
+        assert!(clipboard.is_none(), "duplicate must not touch the clipboard");
+    }
+
+    /// An unregistered type pastes and stays: it renders missing-red and its
+    /// properties survive, rather than vanishing on the way in.
+    #[test]
+    fn unknown_types_paste_as_preserved_placeholders() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        let mut unknown = node(3, [0.0, 0.0]);
+        unknown.type_id = "plugin.gone".into();
+        unknown
+            .properties
+            .insert("k".into(), PropValue::Raw("(x:1)".into()));
+        let frag = GraphFragment { nodes: vec![unknown], ..Default::default() };
+
+        st.paste_fragment(&frag, Some([0.0, 0.0]), &reg);
+        assert_eq!(st.doc.nodes.len(), 1, "the node was kept, not dropped");
+        assert_eq!(st.doc.nodes[0].type_id, "plugin.gone");
+        assert_eq!(
+            st.doc.nodes[0].properties.get("k"),
+            Some(&PropValue::Raw("(x:1)".into())),
+            "properties survive verbatim"
+        );
+        // …and validation anchors the error to it, with no special paste code.
+        let errs = crate::engine::node_graph::validate_doc(&st.doc, &reg);
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphError::UnknownNodeType { .. })));
+    }
+
+    /// All three break paths funnel through one transaction + one report.
+    #[test]
+    fn break_paths_share_one_transaction_and_report() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 0.0]), node(2, [20.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1), edge(0, 2), edge(1, 2)];
+        let before = st.doc.clone();
+
+        // Pin: only that pin's edges.
+        st.break_pin_links(0, "sum", true, &reg);
+        assert_eq!(st.doc.edges.len(), 1);
+        assert_eq!(st.toasts.last().unwrap().text, "Broke 2 links");
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture, one undo");
+
+        // Node: everything touching it.
+        st.break_node_links(1, &reg);
+        assert_eq!(st.doc.edges.len(), 1);
+        assert_eq!(st.toasts.last().unwrap().text, "Broke 2 links");
+        st.undo(&reg);
+        assert_eq!(st.doc, before);
+
+        // Empty cases say so and record nothing.
+        let undo_depth = st.stack.can_undo();
+        st.break_pin_links(2, "sum", true, &reg);
+        assert_eq!(st.toasts.last().unwrap().text, "Pin has no links");
+        assert_eq!(st.stack.can_undo(), undo_depth);
+        let mut lonely = bare_state();
+        lonely.doc.nodes = vec![node(0, [0.0, 0.0])];
+        lonely.break_node_links(0, &reg);
+        assert_eq!(lonely.toasts.last().unwrap().text, "Node has no links");
+        assert!(!lonely.stack.can_undo());
+    }
+
+    /// The cut path is capped and never records a still pointer.
+    #[test]
+    fn cut_path_is_capped_and_deduped() {
+        let mut st = bare_state();
+        for i in 0..(CUT_PATH_MAX * 2) {
+            st.push_cut_point([i as f32 * 4.0, 0.0]);
+        }
+        let path = st.cut_path.as_ref().unwrap();
+        assert_eq!(path.len(), CUT_PATH_MAX, "the buffer is capped");
+        // The cap drops the oldest, so the newest sample is always present.
+        assert_eq!(path.last().unwrap()[0], (CUT_PATH_MAX * 2 - 1) as f32 * 4.0);
+
+        // A pointer that has not moved does not consume the cap.
+        let before = st.cut_path.as_ref().unwrap().len();
+        st.push_cut_point([(CUT_PATH_MAX * 2 - 1) as f32 * 4.0, 0.0]);
+        assert_eq!(st.cut_path.as_ref().unwrap().len(), before);
+    }
+
     /// Group-drag capture selects exactly the nodes whose centers lie inside
     /// the group rect (P7).
     #[test]
@@ -2710,6 +3251,9 @@ mod tests {
             bookmarks: [None; BOOKMARK_SLOTS],
             bookmark_next: 0,
             purge_confirm: None,
+            toasts: Vec::new(),
+            cut_path: None,
+            node_menu: None,
         }
     }
 
@@ -2762,8 +3306,11 @@ mod tests {
         let mut st = bare_state();
         st.doc.comments = vec![comment(0.0)];
         st.sel_comment = Some(0);
-        let frag = GraphFragment { nodes: vec![node(5, [0.0, 0.0])], edges: vec![] };
-        st.paste_clipboard(&Some(frag), &reg);
+        let frag = GraphFragment {
+            nodes: vec![node(5, [0.0, 0.0])],
+            ..Default::default()
+        };
+        st.paste_fragment(&frag, Some([0.0, 0.0]), &reg);
         assert!(st.sel_comment.is_none(), "paste must clear annotation selection");
         assert!(!st.selection.is_empty(), "pasted nodes become the selection");
     }

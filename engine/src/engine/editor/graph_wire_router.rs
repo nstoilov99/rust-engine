@@ -320,6 +320,32 @@ fn subdivide(pts: &[Pos2], n: usize) -> Vec<Pos2> {
     out
 }
 
+/// Do segments `a`-`b` and `c`-`d` cross? Exact parametric test, ported from
+/// the prototype's `segHit` — the slash-cut must test every segment, not
+/// bounding boxes, or a cut "through" an L-shaped wire misses the wire.
+///
+/// Parallel and collinear segments report `false`: a cut that runs exactly
+/// along a wire is not a crossing, and treating it as one makes the gesture
+/// fire on near-misses.
+pub fn segments_intersect(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
+    let den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+    if den.abs() <= f32::EPSILON {
+        return false;
+    }
+    let t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+    let u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
+}
+
+/// Does any segment of `path` cross any segment of `poly`?
+pub fn path_crosses_polyline(path: &[Pos2], poly: &[Pos2]) -> bool {
+    if path.len() < 2 || poly.len() < 2 {
+        return false;
+    }
+    path.windows(2)
+        .any(|p| poly.windows(2).any(|q| segments_intersect(p[0], p[1], q[0], q[1])))
+}
+
 /// Shortest distance from `p` to the segment `a`-`b`.
 pub fn point_segment_distance(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
@@ -1001,6 +1027,42 @@ mod tests {
                 "{style:?}: sample missed the target pin"
             );
         }
+    }
+
+    #[test]
+    fn segment_intersection_is_exact() {
+        let a = Pos2::new(0.0, 0.0);
+        let b = Pos2::new(10.0, 0.0);
+        // Crossing.
+        assert!(segments_intersect(a, b, Pos2::new(5.0, -5.0), Pos2::new(5.0, 5.0)));
+        // Touching an endpoint counts.
+        assert!(segments_intersect(a, b, Pos2::new(10.0, -5.0), Pos2::new(10.0, 5.0)));
+        // Beyond the end does not.
+        assert!(!segments_intersect(a, b, Pos2::new(11.0, -5.0), Pos2::new(11.0, 5.0)));
+        // Parallel and collinear are not crossings.
+        assert!(!segments_intersect(a, b, Pos2::new(0.0, 3.0), Pos2::new(10.0, 3.0)));
+        assert!(!segments_intersect(a, b, Pos2::new(2.0, 0.0), Pos2::new(8.0, 0.0)));
+    }
+
+    /// The cut preview must test every segment, not a bounding box: a slash
+    /// through the *hole* of an L-shaped route crosses its bbox but no wire.
+    #[test]
+    fn path_crossing_tests_segments_not_bounding_boxes() {
+        // An L: right along the top, then down the right side.
+        let poly = [
+            Pos2::new(0.0, 0.0),
+            Pos2::new(100.0, 0.0),
+            Pos2::new(100.0, 100.0),
+        ];
+        // Inside the bbox, through the empty quadrant: no crossing.
+        let miss = [Pos2::new(10.0, 40.0), Pos2::new(60.0, 90.0)];
+        assert!(!path_crosses_polyline(&miss, &poly));
+        // Across the vertical leg: a crossing.
+        let hit = [Pos2::new(80.0, 50.0), Pos2::new(120.0, 50.0)];
+        assert!(path_crosses_polyline(&hit, &poly));
+        // Degenerate inputs are never a crossing.
+        assert!(!path_crosses_polyline(&[Pos2::ZERO], &poly));
+        assert!(!path_crosses_polyline(&hit, &[Pos2::ZERO]));
     }
 
     #[test]
