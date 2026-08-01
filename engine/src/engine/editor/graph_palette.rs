@@ -232,6 +232,7 @@ mod tests {
             realm: NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         }
     }
 

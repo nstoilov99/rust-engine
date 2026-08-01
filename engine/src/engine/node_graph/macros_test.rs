@@ -60,6 +60,7 @@ fn hand_written_damage_zone() -> NodeDescriptor {
         realm: NodeRealm::Shared,
         deterministic: true,
         doc: Some("Applies radial damage over time".into()),
+        preview: None,
     }
 }
 

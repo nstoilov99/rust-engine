@@ -9,6 +9,7 @@
             position: (40.0, 80.0),
             properties: {},
             subgraph: None,
+            tint: None,
         ),
         (
             id: 1,
@@ -20,6 +21,7 @@
                 "label": Enum("burn"),
             },
             subgraph: None,
+            tint: None,
         ),
     ],
     edges: [

@@ -25,7 +25,8 @@ use crusty_gui::paint::Painter;
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{
-    Button, Canvas, CanvasScope, CanvasView, Checkbox, DragValue, TextEdit,
+    Button, Canvas, CanvasScope, CanvasView, Checkbox, ComboBox, DragValue, SelectableValue,
+    TextEdit,
 };
 
 use super::graph_editor::{
@@ -91,6 +92,50 @@ const SPLICE_SNAP_PX: f32 = 24.0;
 const MIDPOINT_R: f32 = 5.0;
 /// Slash-cut stroke, screen px.
 const CUT_STROKE: f32 = 1.5;
+// --- Auto-layout spacing, base units. Generous on purpose: a layered graph
+// that touches itself is harder to read than one that needs a scroll.
+const BASE_LAYOUT_COL_GAP: f32 = 48.0;
+const BASE_LAYOUT_ROW_GAP: f32 = 24.0;
+
+// --- Performance budget -------------------------------------------------
+//
+// The stated target is **60fps at 2,000 nodes / 5,000 edges**. Three things
+// keep that honest, and every cap below is derived from it rather than picked:
+//
+//  * the LOD ladder governs detail *per node*, not node count;
+//  * everything is culled against the viewport before it is routed, drawn or
+//    registered for hit-testing — a node off-screen costs a rect intersection;
+//  * the two unbounded-by-nature features are capped outright.
+//
+// At the budget, a full-screen view holds on the order of a hundred nodes; the
+// rest is culled. The crossing broadphase is the one pass whose cost scales
+// with *visible segments* rather than visible nodes, so it gets an explicit
+// ceiling: ~4 segments per visible wire across ~500 visible wires.
+/// Hard ceiling on segments the (future) crossing broadphase may consider.
+pub const CROSSING_SEGMENT_CAP: usize = 2_000;
+/// Preview slots actually rendered per frame, round-robin by frame index, so
+/// 200 opted-in nodes cost a fixed budget rather than 200 render targets.
+pub const PREVIEW_BUDGET_PER_FRAME: usize = 8;
+/// Preview slot side, base units.
+const BASE_PREVIEW_SIDE: f32 = 64.0;
+
+/// Which of `count` preview slots this frame is allowed to render.
+///
+/// Round-robin by frame index: every slot is refreshed within
+/// `ceil(count / budget)` frames, and no frame pays for more than the budget.
+/// Pure so the rotation is testable without a canvas.
+pub fn preview_slice(count: usize, frame: u64, budget: usize) -> (usize, usize) {
+    if count == 0 || budget == 0 {
+        return (0, 0);
+    }
+    if count <= budget {
+        return (0, count);
+    }
+    let windows = count.div_ceil(budget);
+    let start = (frame as usize % windows) * budget;
+    (start, budget.min(count - start))
+}
+
 /// Non-matching nodes dim to this while a find is active.
 const FIND_DIM: f32 = 0.45;
 /// Marquee fill alpha (1px accent border + 8% accent fill).
@@ -314,6 +359,11 @@ impl GraphMetrics {
         }
     }
 
+    /// Per-node preview slot side, world units.
+    fn preview_side(&self) -> f32 {
+        BASE_PREVIEW_SIDE * self.scale
+    }
+
     /// Diameter of a reroute's dot, world units.
     fn reroute_d(&self) -> f32 {
         self.pin_r * 3.2
@@ -375,19 +425,32 @@ enum InlineKind {
     Bool(bool),
     /// Painted swatch + hex; not yet editable.
     Color([f32; 4]),
-    /// Painted mono chip (asset path, enum variant, vector tuple).
+    /// An `Enum` pin whose descriptor declares its legal values — a real
+    /// dropdown at L0. `ok` is false when the stored value is not one of
+    /// them: shown in `status.warning` rather than reported as an error,
+    /// because the `GraphError` set is closed (recorded ruling) and stale
+    /// enum data is something to fix, not a broken document.
+    Enum { value: String, variants: Vec<String>, ok: bool },
+    /// Painted mono chip (asset path, free-string enum, vector tuple).
     Chip(String),
     /// Forward-compat data: warning-dashed `preserved` chip, never a blank.
     Raw(String),
 }
 
 impl InlineKind {
-    fn of(v: &PropValue) -> Self {
+    /// `variants` comes from the pin's descriptor; empty means "free string",
+    /// which stays a plain chip rather than a dropdown over nothing.
+    fn of(v: &PropValue, variants: &[String]) -> Self {
         match v {
             PropValue::Float(x) => InlineKind::Float(*x),
             PropValue::Bool(b) => InlineKind::Bool(*b),
             PropValue::Color(c) => InlineKind::Color(*c),
             PropValue::Raw(s) => InlineKind::Raw(s.clone()),
+            PropValue::Enum(e) if !variants.is_empty() => InlineKind::Enum {
+                value: e.clone(),
+                variants: variants.to_vec(),
+                ok: variants.iter().any(|v| v == e),
+            },
             other => InlineKind::Chip(prop_display(other)),
         }
     }
@@ -428,6 +491,8 @@ struct NodeGeom {
     errored: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
+    /// Opt-in preview slot; `None` — the common case — costs nothing.
+    preview: Option<crate::engine::node_graph::PreviewKind>,
     pins: Vec<PinGeom>,
 }
 
@@ -595,6 +660,7 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
+                    preview: None,
                     pins: vec![
                         pin(REROUTE_IN, false, min.x),
                         pin(REROUTE_OUT, true, min.x + d),
@@ -635,6 +701,9 @@ fn build_geoms(
                     None => (name, Some("Subgraph".to_string()), true, vec![], vec![]),
                 }
             } else if let Some(d) = desc {
+                // The three clones per pin are the one unavoidable copy: a
+                // `PinGeom` outlives the registry borrow. Everything else in
+                // this pass borrows.
                 let pins = |v: &[crate::engine::node_graph::PinDescriptor]| {
                     v.iter()
                         .map(|q| (q.slug.clone(), q.label.clone(), q.ty.clone()))
@@ -663,16 +732,32 @@ fn build_geoms(
                 + tag_w
                 + m.pad_x;
 
+            // One pass over the incident edges instead of a scan per pin:
+            // this was O(pins x edges) per node per frame, which is the churn
+            // that shows up first on a large graph.
+            let incoming: BTreeSet<&str> = state
+                .doc
+                .edges
+                .iter()
+                .filter(|e| e.to_node == n.id)
+                .map(|e| e.to_pin.as_str())
+                .collect();
+            let outgoing: BTreeSet<&str> = state
+                .doc
+                .edges
+                .iter()
+                .filter(|e| e.from_node == n.id)
+                .map(|e| e.from_pin.as_str())
+                .collect();
             let inline_of = |slug: &str| -> Option<InlineKind> {
-                let connected = state
-                    .doc
-                    .edges
-                    .iter()
-                    .any(|e| e.to_node == n.id && e.to_pin == slug);
-                if connected {
+                if incoming.contains(slug) {
                     return None;
                 }
-                n.properties.get(slug).map(InlineKind::of)
+                let variants = desc
+                    .and_then(|d| d.input(slug))
+                    .map(|p| p.variants.as_slice())
+                    .unwrap_or(&[]);
+                n.properties.get(slug).map(|v| InlineKind::of(v, variants))
             };
 
             // Ghost rows for pins an edge names but the descriptor no longer
@@ -712,7 +797,10 @@ fn build_geoms(
             let title_avail = width - m.pad_x * 2.0 - tag_w - m.col_gap;
             let title = middle_truncate(p, &title, title_px, title_avail);
 
-            let height = m.header_h + rows as f32 * m.row_h + m.body_pad;
+            let preview_h = desc
+                .and_then(|d| d.preview)
+                .map_or(0.0, |_| m.preview_side() + m.body_pad);
+            let height = m.header_h + rows as f32 * m.row_h + preview_h + m.body_pad;
             let rect = Rect::from_min_size(min, Vec2::new(width, height));
             let row_y = |i: usize| min.y + m.header_h + i as f32 * m.row_h + m.row_h * 0.5;
 
@@ -722,11 +810,7 @@ fn build_geoms(
                 let y = row_y(i);
                 let inline = inline_of(&slug);
                 pins.push(PinGeom {
-                    connected: state
-                        .doc
-                        .edges
-                        .iter()
-                        .any(|e| e.to_node == n.id && e.to_pin == slug),
+                    connected: incoming.contains(slug.as_str()),
                     wire_anchor: Pos2::new(min.x, y),
                     dot_center: Pos2::new(min.x + m.pin_inset, y),
                     slug,
@@ -741,11 +825,7 @@ fn build_geoms(
             for (i, (slug, label, ty)) in outputs.into_iter().enumerate() {
                 let y = row_y(i);
                 pins.push(PinGeom {
-                    connected: state
-                        .doc
-                        .edges
-                        .iter()
-                        .any(|e| e.from_node == n.id && e.from_pin == slug),
+                    connected: outgoing.contains(slug.as_str()),
                     wire_anchor: Pos2::new(min.x + width, y),
                     dot_center: Pos2::new(min.x + width - m.pin_inset, y),
                     slug,
@@ -793,6 +873,7 @@ fn build_geoms(
                 missing,
                 errored: errors.nodes.contains(&n.id),
                 reroute: is_reroute,
+                preview: desc.and_then(|d| d.preview),
                 pins,
             }
         })
@@ -997,11 +1078,11 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
-    let mut menu_open_at: Option<Pos2> = None;
     let mut annotation_menu_at: Option<Pos2> = None;
     let mut wire_menu_at: Option<Pos2> = None;
     let mut node_menu_at: Option<Pos2> = None;
     let mut collapse_request = false;
+    let mut layout_request = false;
     let mut cycle_error_request: Option<bool> = None;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
@@ -1011,11 +1092,11 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             state,
             registry,
             resolver,
-            &mut menu_open_at,
             &mut annotation_menu_at,
             &mut wire_menu_at,
             &mut node_menu_at,
             &mut collapse_request,
+            &mut layout_request,
             &mut cycle_error_request,
             open_subgraph,
             selection_outline,
@@ -1034,10 +1115,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 
     palette_popover(ui, state, registry, subgraph_assets);
     find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
-    create_menu(ui, state, registry, &out.inner, subgraph_assets, menu_open_at);
     annotation_menu(ui, state, registry, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
-    node_menu(ui, state, registry, node_menu_at);
+    node_menu(ui, state, registry, &out.inner, node_menu_at);
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     draw_toasts(ui, out.rect, state);
@@ -1070,6 +1150,12 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         if let Some(v) = req {
             state.view = v;
         }
+    }
+
+    if layout_request {
+        let rects = all_rects(&out.inner);
+        let sp = layout_spacing(&ui.style());
+        state.auto_layout(&rects, sp, registry);
     }
 
     // Ctrl+G writes a new asset, so it runs outside the draw pass.
@@ -1145,11 +1231,11 @@ fn draw_and_interact(
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
     resolver: &dyn GraphResolver,
-    menu_open_at: &mut Option<Pos2>,
     annotation_menu_at: &mut Option<Pos2>,
     wire_menu_at: &mut Option<Pos2>,
     node_menu_at: &mut Option<Pos2>,
     collapse_request: &mut bool,
+    layout_request: &mut bool,
     cycle_error_request: &mut Option<bool>,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
@@ -1171,6 +1257,16 @@ fn draw_and_interact(
         build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
     };
 
+    state.frame = state.frame.wrapping_add(1);
+    let frame = state.frame;
+    // A graph opened with no remembered view frames its content once, on the
+    // first draw — that is the only point the geometry is known.
+    if state.frame_all_on_open {
+        state.frame_all_on_open = false;
+        if let Some((mn, mx)) = content_bbox(state, &geoms) {
+            *frame_request = Some(frame_view(mn, mx, scope.rect().size(), zoom_min, zoom_max));
+        }
+    }
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
     let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis);
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
@@ -1232,6 +1328,7 @@ fn draw_and_interact(
         vis,
         zoom,
         lod,
+        frame,
         selection_outline,
         &mut widget_rects,
     );
@@ -1443,7 +1540,10 @@ fn draw_and_interact(
     let mut pin_claimed = false;
     let mut break_pin: Option<(u64, String, bool)> = None;
     if lod.rows() {
-        for g in &geoms {
+        // Register interaction only for what is on screen: an off-canvas node
+        // costs one rect intersection instead of a widget-memory entry and a
+        // hit-test per pin, which is what keeps the stated budget reachable.
+        for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
             for pin in &g.pins {
                 let wr = Rect::from_center_size(pin.dot_center, Vec2::splat(hit_w));
                 let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
@@ -1491,7 +1591,7 @@ fn draw_and_interact(
     let mut begin_drag = false;
     let mut node_pressed = false;
     let mut break_node: Option<u64> = None;
-    for g in &geoms {
+    for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
         let id = ui.alloc_id(("graph_node", g.id));
         let body = g.body_rect(lod, &m);
         let resp = scope.interact(ui, id, body);
@@ -1617,6 +1717,9 @@ fn draw_and_interact(
     for i in (0..state.doc.groups.len()).rev() {
         let r = state.doc.groups[i].rect;
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], m.group_bar));
+        if !overlaps(bar, vis) {
+            continue;
+        }
         let id = ui.alloc_id(("graph_group", i));
         let resp = scope.interact(ui, id, bar);
         // The fold caret shares the bar; it claims the press before the drag.
@@ -1646,6 +1749,9 @@ fn draw_and_interact(
         let r = state.doc.comments[i].rect;
         let bar_h = m.comment_bar * state.doc.comments[i].clamped_font_scale();
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], bar_h));
+        if !overlaps(bar, vis) {
+            continue;
+        }
         let id = ui.alloc_id(("graph_comment", i));
         let resp = scope.interact(ui, id, bar);
         let caret = caret_zone(bar, &m, zoom);
@@ -1991,13 +2097,15 @@ fn draw_and_interact(
                 println!("graph: purge unused found nothing to remove");
             }
         }
-        // Alt+A — align & distribute, offered through the canvas menu.
+        // Alt+A — align & distribute. Alt+L — auto layout. Both are
+        // selection operations, so they live in the node menu; the keys open
+        // it rather than duplicating the rows somewhere else.
         if alt_only && input.key_pressed(Key::Char('a')) && state.selection.len() >= 3 {
-            if let Some(pw) = pointer_world {
-                state.create_menu_world = Some([pw.x, pw.y]);
-                state.create_menu_search.clear();
-                *menu_open_at = ui.ctx().input.pointer_pos;
-            }
+            state.node_menu = state.primary.or_else(|| state.selection.iter().copied().next());
+            *node_menu_at = ui.ctx().input.pointer_pos;
+        }
+        if alt_only && input.key_pressed(Key::Char('l')) {
+            *layout_request = true;
         }
         // Tab — the palette, unfiltered. The discoverable route is
         // right-click; this is the one you keep.
@@ -2019,6 +2127,41 @@ fn draw_and_interact(
     }
 
     geoms
+}
+
+/// Does this node's drawn box reach the viewport?
+fn visible(g: &NodeGeom, lod: ZoomLod, m: &GraphMetrics, vis: Rect) -> bool {
+    overlaps(g.body_rect(lod, m), vis)
+}
+
+/// Rect overlap that treats a shared edge as visible (`Rect::intersect`
+/// returns a degenerate rect there, and clipping those out makes a node
+/// scrolling into view pop rather than slide).
+fn overlaps(a: Rect, b: Rect) -> bool {
+    let i = a.intersect(b);
+    i.width() >= 0.0 && i.height() >= 0.0
+}
+
+/// Layout spacing from the theme, so a denser UI lays out denser too.
+fn layout_spacing(st: &Style) -> super::graph_layout::LayoutSpacing {
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    super::graph_layout::LayoutSpacing {
+        column_gap: BASE_LAYOUT_COL_GAP * s,
+        row_gap: BASE_LAYOUT_ROW_GAP * s,
+    }
+}
+
+/// World rects of every node, for auto-layout.
+fn all_rects(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
+    geoms
+        .iter()
+        .map(|g| {
+            (
+                g.id,
+                [g.rect.min.x, g.rect.min.y, g.rect.width(), g.rect.height()],
+            )
+        })
+        .collect()
 }
 
 /// World rects of the selected nodes, for align & distribute — node sizes are
@@ -2265,14 +2408,18 @@ fn node_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    geoms: &[NodeGeom],
     open_at: Option<Pos2>,
 ) {
     let Some(id) = state.node_menu else {
         return;
     };
     let links = state.edges_on_node(id).len();
+    let align_ready = state.selection.len() >= 3;
     let mut brk = false;
     let mut del = false;
+    let mut align: Option<AlignMode> = None;
+    let mut do_layout = false;
     crusty_gui::widgets::context_menu_at(ui, "graph_node_menu", open_at, |ui| {
         ui.menu_group_header("Node");
         if ui.menu_item_enabled(format!("Break all links ({links})"), links > 0) {
@@ -2281,7 +2428,32 @@ fn node_menu(
         if ui.menu_item("Delete") {
             del = true;
         }
+        // Selection operations: the node menu is where they belong, since
+        // both act on what is selected rather than on where you clicked.
+        ui.menu_group_header("Arrange");
+        if ui.menu_item("Auto Layout") {
+            do_layout = true;
+        }
+        if align_ready {
+            for mode in AlignMode::ALL {
+                if ui.menu_item(mode.label()) {
+                    align = Some(mode);
+                }
+            }
+        }
     });
+    if let Some(mode) = align {
+        let rects = selected_rects(state, geoms);
+        state.align_nodes(&rects, mode, registry);
+        state.node_menu = None;
+        return;
+    }
+    if do_layout {
+        let rects = all_rects(geoms);
+        state.auto_layout(&rects, layout_spacing(&ui.style()), registry);
+        state.node_menu = None;
+        return;
+    }
     if brk {
         state.break_node_links(id, registry);
         state.node_menu = None;
@@ -3449,13 +3621,17 @@ fn build_wires(
             target_pin_index: dst.pin_row(&e.to_pin, false),
             node_rects,
         };
-        // Cull on the wire's own bounds, not the endpoints' box — a backward
-        // lane or a spline bow reaches well outside it.
-        if let Some(bounds) = router::wire_bounds(a, b, prefs, &meta) {
-            let clip = bounds.intersect(vis);
-            if clip.width() < 0.0 || clip.height() < 0.0 {
-                continue;
-            }
+        // Cull **before** routing: `wire_bounds` is cheap (a branch decision
+        // plus a min/max over at most six points, or the spline's control
+        // hull) where the full route plus corner tessellation plus the
+        // world→screen transform is not. Bounds, not the endpoints' box — a
+        // backward lane or a spline bow reaches well outside it.
+        let Some(bounds) = router::wire_bounds(a, b, prefs, &meta) else {
+            continue;
+        };
+        let clip = bounds.intersect(vis);
+        if clip.width() < 0.0 || clip.height() < 0.0 {
+            continue;
         }
         let ty = src
             .pins
@@ -3679,6 +3855,7 @@ fn draw_nodes(
     vis: Rect,
     zoom: f32,
     lod: ZoomLod,
+    frame: u64,
     selection_outline: Color,
     widget_rects: &mut Vec<Rect>,
 ) {
@@ -3906,7 +4083,11 @@ fn draw_nodes(
                         ),
                         Vec2::new(m.value_w * zoom, m.row_h * zoom * 0.8),
                     );
-                    if lod.inline_widgets() && matches!(kind, InlineKind::Float(_) | InlineKind::Bool(_))
+                    if lod.inline_widgets()
+                        && matches!(
+                            kind,
+                            InlineKind::Float(_) | InlineKind::Bool(_) | InlineKind::Enum { .. }
+                        )
                     {
                         pending_widgets.push((g.id, pin.slug.clone(), cell, kind.clone()));
                     } else if lod.values() {
@@ -3914,6 +4095,51 @@ fn draw_nodes(
                     }
                 }
             }
+        }
+    }
+
+    // Per-node previews: a 64x64 well below the rows, L0 only, and only for
+    // this frame's slice of the budget. The well is a labeled placeholder —
+    // real render-target / curve content arrives with Tasks 50 and 41; the
+    // geometry, the LOD gate and the budget land now so they do not have to
+    // be retrofitted around live content.
+    if lod.inline_widgets() {
+        let slots: Vec<&NodeGeom> = geoms
+            .iter()
+            .filter(|g| g.preview.is_some() && g.rect.intersect(vis).width() > 0.0)
+            .collect();
+        let (start, take) =
+            preview_slice(slots.len(), frame, PREVIEW_BUDGET_PER_FRAME);
+        let mut p = ui.painter();
+        for g in slots.iter().skip(start).take(take) {
+            let Some(kind) = g.preview else { continue };
+            let srect = scope.world_rect_to_screen(g.rect);
+            let side = m.preview_side() * zoom;
+            let well = Rect::from_min_size(
+                Pos2::new(
+                    srect.min.x + m.pad_x * zoom,
+                    srect.max.y - m.body_pad * zoom - side,
+                ),
+                Vec2::splat(side),
+            );
+            p.rect_filled(well, Rounding::same(m.radius * zoom), st.palette.input);
+            p.rect_stroke(
+                well,
+                Rounding::same(m.radius * zoom),
+                m.border,
+                st.palette.stroke,
+            );
+            let px = m.tag_px * zoom;
+            let label = kind.label();
+            let tw = p.measure_text_family(label, px, None, FontFamily::Mono).x;
+            p.text_family(
+                Pos2::new(well.center().x - tw * 0.5, well.center().y - px * 0.62),
+                label,
+                px,
+                st.palette.text_disabled,
+                None,
+                FontFamily::Mono,
+            );
         }
     }
 
@@ -3961,6 +4187,24 @@ fn draw_inline_readonly(
                 &text,
                 px,
                 status.warning,
+                None,
+                FontFamily::Mono,
+            );
+        }
+        InlineKind::Enum { value, ok, .. } => {
+            // Out-of-list values read as a warning, not an error.
+            let col = if *ok { st.palette.text_mono } else { status.warning };
+            p.rect_filled(cell, round, st.palette.input);
+            if !*ok {
+                p.rect_stroke(cell, round, m.border, status.warning);
+            }
+            let w = cell.width() - m.label_gap * 2.0 * zoom;
+            let text = clip_text(p, value, px, w);
+            p.text_family(
+                Pos2::new(cell.min.x + m.label_gap * zoom, cell.center().y - px * 0.5),
+                &text,
+                px,
+                col,
                 None,
                 FontFamily::Mono,
             );
@@ -4061,6 +4305,25 @@ fn inline_widget(
                 Checkbox::new(&mut b, "").show(ui);
                 if b != *v {
                     changed = Some(PropValue::Bool(b));
+                }
+            }
+            InlineKind::Enum { value, variants, .. } => {
+                // `SelectableValue` wants a `Copy` value, so the selection is
+                // carried as an index and mapped back to the string.
+                let now = variants.iter().position(|v| v == value);
+                let mut picked = now.unwrap_or(usize::MAX);
+                ComboBox::new("graph_enum")
+                    .selected_text(value.as_str())
+                    .width(cell.width())
+                    .show_ui(ui, |ui| {
+                        for (i, v) in variants.iter().enumerate() {
+                            SelectableValue::new(&mut picked, i, v.as_str()).show(ui);
+                        }
+                    });
+                if picked != now.unwrap_or(usize::MAX) {
+                    if let Some(v) = variants.get(picked) {
+                        changed = Some(PropValue::Enum(v.clone()));
+                    }
                 }
             }
             _ => {}
@@ -4550,113 +4813,6 @@ fn handle_marquee(
     }
 }
 
-fn create_menu(
-    ui: &mut Ui,
-    state: &mut GraphEditorState,
-    registry: &NodeRegistry,
-    geoms: &[NodeGeom],
-    subgraph_assets: &[String],
-    open_at: Option<Pos2>,
-) {
-    let world = state.create_menu_world;
-    let has_selection = !state.selection.is_empty();
-    let align_ready = state.selection.len() >= 3;
-    let align_rects = selected_rects(state, geoms);
-    let mut align: Option<AlignMode> = None;
-    let search = &mut state.create_menu_search;
-    let mut chosen: Option<String> = None;
-    let mut chosen_subgraph: Option<String> = None;
-    let mut add_comment = false;
-    let mut add_group = false;
-    crusty_gui::widgets::context_menu_at(ui, "graph_create_menu", open_at, |ui| {
-        ui.menu_group_header("Add Node");
-        TextEdit::new(search).hint("Search\u{2026}").width(170.0).show(ui);
-        let needle = search.to_lowercase();
-        if needle.is_empty() && align_ready {
-            // Align & distribute only makes sense for 3+ nodes, so the
-            // section is absent rather than dimmed below that.
-            ui.menu_group_header("Align & Distribute");
-            for mode in AlignMode::ALL {
-                if ui.menu_item(mode.label()) {
-                    align = Some(mode);
-                }
-            }
-        }
-        if needle.is_empty() {
-            ui.menu_group_header("Annotate");
-            if ui.menu_item("Add Comment") {
-                add_comment = true;
-            }
-            if ui.menu_item_enabled("Add Group around selection", has_selection) {
-                add_group = true;
-            }
-        }
-        for (cat, descs) in registry.by_category() {
-            let rows: Vec<_> = descs
-                .iter()
-                .filter(|d| {
-                    needle.is_empty()
-                        || d.name.to_lowercase().contains(&needle)
-                        || d.id.to_lowercase().contains(&needle)
-                })
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            ui.menu_group_header(cat);
-            for d in rows {
-                if ui.menu_item(&d.name) {
-                    chosen = Some(d.id.clone());
-                }
-            }
-        }
-        // Subgraph assets (`.subgraph`) as instance nodes.
-        let subs: Vec<(&String, String)> = subgraph_assets
-            .iter()
-            .map(|p| {
-                let stem = std::path::Path::new(p)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| p.clone());
-                (p, stem)
-            })
-            .filter(|(p, stem)| {
-                needle.is_empty()
-                    || stem.to_lowercase().contains(&needle)
-                    || p.to_lowercase().contains(&needle)
-            })
-            .collect();
-        if !subs.is_empty() {
-            ui.menu_group_header("Subgraph");
-            for (path, stem) in subs {
-                if ui.menu_item(&stem) {
-                    chosen_subgraph = Some(path.clone());
-                }
-            }
-        }
-    });
-    if let Some(mode) = align {
-        state.align_nodes(&align_rects, mode, registry);
-        state.create_menu_world = None;
-        return;
-    }
-    if let Some(pos) = world {
-        if let Some(type_id) = chosen {
-            state.add_node(&type_id, pos, registry);
-            state.create_menu_world = None;
-        } else if let Some(path) = chosen_subgraph {
-            state.add_subgraph_node(&path, pos, registry);
-            state.create_menu_world = None;
-        } else if add_comment {
-            state.add_comment(pos, registry);
-            state.create_menu_world = None;
-        } else if add_group {
-            state.add_group_around_selection(registry);
-            state.create_menu_world = None;
-        }
-    }
-}
-
 /// The validation **count chip**, pinned to the canvas' top-left corner.
 ///
 /// Errors are anchored to the thing that is wrong — node border + badge, pin
@@ -4924,6 +5080,7 @@ mod tests {
             realm: NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         };
 
         // SUB beats everything, even a pure descriptor.
@@ -5005,6 +5162,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            preview: None,
             pins: vec![],
         };
         assert_eq!(g.body_rect(ZoomLod::L2, &m).height(), 120.0);
@@ -5025,6 +5183,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            preview: None,
             pins: vec![],
         };
         assert_eq!(g.edge_color(), category_color("Math"));
@@ -5038,14 +5197,15 @@ mod tests {
 
     #[test]
     fn inline_kind_covers_every_prop_value() {
-        assert!(matches!(InlineKind::of(&PropValue::Float(1.0)), InlineKind::Float(_)));
-        assert!(matches!(InlineKind::of(&PropValue::Bool(true)), InlineKind::Bool(_)));
+        let none: &[String] = &[];
+        assert!(matches!(InlineKind::of(&PropValue::Float(1.0), none), InlineKind::Float(_)));
+        assert!(matches!(InlineKind::of(&PropValue::Bool(true), none), InlineKind::Bool(_)));
         assert!(matches!(
-            InlineKind::of(&PropValue::Color([0.0; 4])),
+            InlineKind::of(&PropValue::Color([0.0; 4]), none),
             InlineKind::Color(_)
         ));
         assert!(matches!(
-            InlineKind::of(&PropValue::Raw("(x:1)".into())),
+            InlineKind::of(&PropValue::Raw("(x:1)".into()), none),
             InlineKind::Raw(_)
         ));
         // Everything else falls back to a read-only chip.
@@ -5056,7 +5216,58 @@ mod tests {
             PropValue::Enum("Variant".into()),
             PropValue::Asset("textures/a.png".into()),
         ] {
-            assert!(matches!(InlineKind::of(&v), InlineKind::Chip(_)), "{v:?}");
+            assert!(matches!(InlineKind::of(&v, none), InlineKind::Chip(_)), "{v:?}");
         }
+    }
+
+    /// An `Enum` pin becomes a dropdown only when its descriptor says what
+    /// the legal values are; an out-of-list value is flagged, not rejected.
+    #[test]
+    fn enum_pins_become_dropdowns_only_with_declared_variants() {
+        let variants = vec!["Idle".to_string(), "Run".to_string()];
+        match InlineKind::of(&PropValue::Enum("Run".into()), &variants) {
+            InlineKind::Enum { value, ok, variants: v } => {
+                assert_eq!(value, "Run");
+                assert!(ok);
+                assert_eq!(v.len(), 2);
+            }
+            other => panic!("expected a dropdown, got {other:?}"),
+        }
+        // Stale data: still editable, shown as a warning.
+        match InlineKind::of(&PropValue::Enum("Sprint".into()), &variants) {
+            InlineKind::Enum { ok, .. } => assert!(!ok),
+            other => panic!("expected a dropdown, got {other:?}"),
+        }
+        // No declared variants = a free string, so a plain chip.
+        assert!(matches!(
+            InlineKind::of(&PropValue::Enum("anything".into()), &[]),
+            InlineKind::Chip(_)
+        ));
+    }
+
+    /// The preview budget rotates: every slot gets refreshed within
+    /// `ceil(count / budget)` frames and no frame pays for more than the cap.
+    #[test]
+    fn preview_budget_rotates_and_caps() {
+        // Under budget: everything, every frame.
+        assert_eq!(preview_slice(5, 0, 8), (0, 5));
+        assert_eq!(preview_slice(5, 99, 8), (0, 5));
+
+        // Over budget: a moving window that covers everything in 3 frames.
+        let mut seen = vec![false; 20];
+        for frame in 0..3u64 {
+            let (start, take) = preview_slice(20, frame, 8);
+            assert!(take <= 8, "the cap is never exceeded");
+            for i in start..start + take {
+                seen[i] = true;
+            }
+        }
+        assert!(seen.iter().all(|s| *s), "every slot refreshed within 3 frames");
+        // …and it keeps cycling.
+        assert_eq!(preview_slice(20, 3, 8), preview_slice(20, 0, 8));
+
+        // Degenerate inputs are not a panic.
+        assert_eq!(preview_slice(0, 0, 8), (0, 0));
+        assert_eq!(preview_slice(10, 0, 0), (0, 0));
     }
 }

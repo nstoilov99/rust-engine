@@ -766,6 +766,11 @@ pub struct GraphEditorState {
     pub palette: Option<PaletteState>,
     /// Find-in-graph overlay (session-only).
     pub find: Option<FindState>,
+    /// Frames drawn, for round-robin budgets (preview slots today).
+    pub frame: u64,
+    /// Set when a graph opened with no remembered view: the first draw frames
+    /// all its content instead of landing at the origin at 100%.
+    pub frame_all_on_open: bool,
 }
 
 /// The add-node palette's session state.
@@ -1045,6 +1050,8 @@ impl GraphEditorState {
             node_menu: None,
             palette: None,
             find: None,
+            frame: 0,
+            frame_all_on_open: false,
         })
     }
 
@@ -1980,6 +1987,130 @@ impl GraphEditorState {
         format!("{dir}/{stem}_overflow.subgraph")
     }
 
+    /// Lay the graph out in layers, left to right. `rects` carries each
+    /// node's drawn size (the document does not know them). With 2+ nodes
+    /// selected only those move; otherwise the whole graph does.
+    ///
+    /// One `Composite` of per-node moves, so anchored notes ride along for
+    /// free and the whole thing is a single undo. Group frames re-fit
+    /// afterwards, since their members have moved out from under them.
+    ///
+    /// Future: the spec's "pinned nodes never move" waits on a pinning
+    /// concept, which does not exist yet — every node is fair game today.
+    pub fn auto_layout(
+        &mut self,
+        rects: &[(u64, [f32; 4])],
+        spacing: super::graph_layout::LayoutSpacing,
+        registry: &NodeRegistry,
+    ) {
+        use super::graph_layout::{layout, LayoutEdge, LayoutNode};
+
+        let scope: BTreeSet<u64> = if self.selection.len() >= 2 {
+            self.selection.clone()
+        } else {
+            self.doc.nodes.iter().map(|n| n.id).collect()
+        };
+        if scope.len() < 2 {
+            return;
+        }
+        let nodes: Vec<LayoutNode> = rects
+            .iter()
+            .filter(|(id, _)| scope.contains(id))
+            .map(|(id, r)| LayoutNode { id: *id, width: r[2], height: r[3] })
+            .collect();
+        if nodes.len() < 2 {
+            return;
+        }
+        let edges: Vec<LayoutEdge> = self
+            .doc
+            .edges
+            .iter()
+            .filter(|e| scope.contains(&e.from_node) && scope.contains(&e.to_node))
+            .map(|e| LayoutEdge { from: e.from_node, to: e.to_node })
+            .collect();
+
+        // Anchor on the selection's existing top-left, so a layout does not
+        // also teleport the work away from where the author was looking.
+        let origin = rects
+            .iter()
+            .filter(|(id, _)| scope.contains(id))
+            .fold([f32::MAX, f32::MAX], |a, (_, r)| [a[0].min(r[0]), a[1].min(r[1])]);
+
+        let placed = layout(&nodes, &edges, origin, spacing);
+        let edits: Vec<GraphEdit> = placed
+            .into_iter()
+            .filter_map(|(id, p)| {
+                let now = self.doc.node(id)?.position;
+                let delta = [p[0] - now[0], p[1] - now[1]];
+                (delta[0].abs() > f32::EPSILON || delta[1].abs() > f32::EPSILON)
+                    .then_some(GraphEdit::MoveNodes { ids: vec![id], delta })
+            })
+            .collect();
+        if edits.is_empty() {
+            return;
+        }
+        let n = edits.len();
+        let edit = GraphEdit::Composite { label: "Auto Layout".to_string(), edits };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        self.refit_groups(registry);
+        self.toast(format!("Laid out {n} node{}", if n == 1 { "" } else { "s" }));
+    }
+
+    /// Re-fit every group frame around whatever now sits inside it. Groups
+    /// are fixed containers, so after a layout the frame has to follow.
+    fn refit_groups(&mut self, registry: &NodeRegistry) {
+        const PAD: f32 = 24.0;
+        const NODE_EXT: [f32; 2] = [168.0, 100.0];
+        let mut edits = Vec::new();
+        for (i, g) in self.doc.groups.iter().enumerate() {
+            let members = nodes_captured_by_rect(
+                &self
+                    .doc
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.id,
+                            [
+                                n.position[0] + NODE_EXT[0] * 0.5,
+                                n.position[1] + NODE_EXT[1] * 0.5,
+                            ],
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                g.rect,
+            );
+            if members.is_empty() {
+                continue;
+            }
+            let (mut x0, mut y0, mut x1, mut y1) =
+                (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for id in &members {
+                if let Some(n) = self.doc.node(*id) {
+                    x0 = x0.min(n.position[0]);
+                    y0 = y0.min(n.position[1]);
+                    x1 = x1.max(n.position[0] + NODE_EXT[0]);
+                    y1 = y1.max(n.position[1] + NODE_EXT[1]);
+                }
+            }
+            let want = [x0 - PAD, y0 - PAD, (x1 - x0) + PAD * 2.0, (y1 - y0) + PAD * 2.0];
+            if want != g.rect {
+                edits.push(GraphEdit::ResizeAnnotation {
+                    target: Annotation::Group(i),
+                    old: g.rect,
+                    new: want,
+                });
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        let edit = GraphEdit::Composite { label: "Fit Groups".to_string(), edits };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
     /// Store the current view in the next bookmark slot, cycling 1..=5.
     /// Returns the 1-based slot written.
     pub fn store_bookmark(&mut self) -> usize {
@@ -2810,6 +2941,7 @@ mod tests {
             realm: crate::engine::node_graph::NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         })
         .unwrap();
         reg.register(NodeDescriptor {
@@ -2834,6 +2966,7 @@ mod tests {
             realm: crate::engine::node_graph::NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         })
         .unwrap();
 
@@ -3179,6 +3312,7 @@ mod tests {
             realm: crate::engine::node_graph::NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         })
         .unwrap();
 
@@ -3232,6 +3366,48 @@ mod tests {
         st.undo(&reg);
         assert_eq!(st.doc.edges.len(), 1);
         assert!(st.node_drag.is_none(), "undo cancels the live drag");
+    }
+
+    /// Auto-layout is one undo, respects a selection, and leaves a lone node
+    /// alone.
+    #[test]
+    fn auto_layout_is_one_transaction_and_scoped() {
+        use super::super::graph_layout::LayoutSpacing;
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![
+            node(0, [500.0, 500.0]),
+            node(1, [10.0, 10.0]),
+            node(2, [900.0, 30.0]),
+        ];
+        st.doc.edges = vec![edge(0, 1), edge(1, 2)];
+        let rects: Vec<(u64, [f32; 4])> = st
+            .doc
+            .nodes
+            .iter()
+            .map(|n| (n.id, [n.position[0], n.position[1], 100.0, 40.0]))
+            .collect();
+        let before = st.doc.clone();
+
+        st.auto_layout(&rects, LayoutSpacing::default(), &reg);
+        // Ranked left to right by the edges, not by where they started.
+        let x = |id: u64| st.doc.node(id).unwrap().position[0];
+        assert!(x(0) < x(1) && x(1) < x(2), "layout follows the edges");
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Auto Layout"));
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture, one undo");
+
+        // A 2+ selection scopes it: node 2 must not move.
+        st.selection = [0u64, 1].into_iter().collect();
+        let pinned = st.doc.node(2).unwrap().position;
+        st.auto_layout(&rects, LayoutSpacing::default(), &reg);
+        assert_eq!(st.doc.node(2).unwrap().position, pinned, "outside the selection");
+
+        // Fewer than two nodes is not a layout.
+        let mut lone = bare_state();
+        lone.doc.nodes = vec![node(0, [0.0, 0.0])];
+        lone.auto_layout(&[(0, [0.0, 0.0, 100.0, 40.0])], LayoutSpacing::default(), &reg);
+        assert!(!lone.stack.can_undo());
     }
 
     /// Group-drag capture selects exactly the nodes whose centers lie inside
@@ -3479,6 +3655,8 @@ mod tests {
             node_menu: None,
             palette: None,
             find: None,
+            frame: 0,
+            frame_all_on_open: false,
         }
     }
 

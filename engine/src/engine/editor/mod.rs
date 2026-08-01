@@ -56,7 +56,9 @@ pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
 pub mod graph_editor;
+pub mod graph_layout;
 pub mod graph_palette;
+pub mod graph_state_store;
 pub mod graph_prefs;
 pub mod graph_wire_router;
 #[cfg(feature = "editor")]

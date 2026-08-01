@@ -18,6 +18,7 @@ pub fn register_dev_nodes(reg: &mut NodeRegistry) -> Result<(), RegistryError> {
         realm: NodeRealm::Shared,
         deterministic: false,
         doc: Some("Entry point for a fixture graph".into()),
+        preview: None,
     })?;
     reg.register(NodeDescriptor {
         id: "test_damage".into(),
@@ -42,6 +43,7 @@ pub fn register_dev_nodes(reg: &mut NodeRegistry) -> Result<(), RegistryError> {
         realm: NodeRealm::Shared,
         deterministic: true,
         doc: Some("Applies radial damage — fixture node, not a shipping ability".into()),
+        preview: None,
     })?;
     reg.register(NodeDescriptor {
         id: "test_add".into(),
@@ -63,6 +65,7 @@ pub fn register_dev_nodes(reg: &mut NodeRegistry) -> Result<(), RegistryError> {
         realm: NodeRealm::Shared,
         deterministic: true,
         doc: Some("Adds two floats".into()),
+        preview: None,
     })?;
     reg.register(NodeDescriptor {
         id: "test_editor_note".into(),
@@ -75,6 +78,7 @@ pub fn register_dev_nodes(reg: &mut NodeRegistry) -> Result<(), RegistryError> {
         realm: NodeRealm::Editor,
         deterministic: true,
         doc: Some("Prints a note to the editor console — Editor realm only".into()),
+        preview: None,
     })?;
     Ok(())
 }

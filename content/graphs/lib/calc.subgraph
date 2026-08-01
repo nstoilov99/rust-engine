@@ -9,6 +9,7 @@
             position: (120.0, 80.0),
             properties: {},
             subgraph: None,
+            tint: None,
         ),
     ],
     edges: [],
@@ -16,6 +17,10 @@
         (
             rect: (60.0, 200.0, 380.0, 50.0),
             text: "Reusable subgraph: declares one Float input and one Float output.",
+            tint: None,
+            font_scale: 1.0,
+            anchor: None,
+            collapsed: false,
         ),
     ],
     groups: [],

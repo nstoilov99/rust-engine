@@ -23,6 +23,35 @@ pub const REROUTE_TYPE_ID: &str = "reroute";
 pub const REROUTE_IN: &str = "in";
 pub const REROUTE_OUT: &str = "out";
 
+/// What a node type can render as a per-node preview. Opting in costs the
+/// common case nothing: a node without one draws no slot at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewKind {
+    /// A render target — material/shader nodes (Task 50).
+    RenderTarget,
+    /// A curve strip — animation nodes (Task 41).
+    CurveStrip,
+}
+
+impl PreviewKind {
+    /// Mono label for the placeholder well, until the real content lands.
+    pub fn label(self) -> &'static str {
+        match self {
+            PreviewKind::RenderTarget => "RENDER",
+            PreviewKind::CurveStrip => "CURVE",
+        }
+    }
+
+    /// Parse the macro's `preview = "..."` spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "render_target" => Some(PreviewKind::RenderTarget),
+            "curve_strip" => Some(PreviewKind::CurveStrip),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinDescriptor {
     /// Stable pin slug — serialized in edges and properties.
@@ -36,6 +65,9 @@ pub struct PinDescriptor {
     /// Descriptors are never serialized, so this needs no serde treatment —
     /// it lives with the code that registers the node.
     pub doc: Option<String>,
+    /// Legal values for an `Enum` pin. Empty means "any string": the inline
+    /// widget stays a free chip rather than becoming a dropdown over nothing.
+    pub variants: Vec<String>,
 }
 
 impl PinDescriptor {
@@ -46,6 +78,7 @@ impl PinDescriptor {
             ty,
             default: None,
             doc: None,
+            variants: Vec::new(),
         }
     }
 
@@ -59,6 +92,24 @@ impl PinDescriptor {
     pub fn with_doc(mut self, doc: &str) -> Self {
         self.doc = Some(doc.to_string());
         self
+    }
+
+    /// Declare the legal values of an `Enum` pin. A stored value outside the
+    /// list is *shown* as a warning rather than reported as an error — the
+    /// `GraphError` set is closed (recorded ruling), and an out-of-list enum
+    /// is stale data to fix, not a broken document.
+    pub fn with_variants<I, S>(mut self, variants: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.variants = variants.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Is `value` legal for this pin? Always true when no list is declared.
+    pub fn accepts_variant(&self, value: &str) -> bool {
+        self.variants.is_empty() || self.variants.iter().any(|v| v == value)
     }
 }
 
@@ -82,6 +133,8 @@ pub struct NodeDescriptor {
     pub deterministic: bool,
     /// One line explaining what the node does, shown when hovering its header.
     pub doc: Option<String>,
+    /// Opt-in per-node preview. `None` — the common case — costs nothing.
+    pub preview: Option<PreviewKind>,
 }
 
 impl NodeDescriptor {
@@ -262,6 +315,7 @@ mod tests {
             realm: NodeRealm::Shared,
             deterministic: true,
             doc: None,
+            preview: None,
         }
     }
 

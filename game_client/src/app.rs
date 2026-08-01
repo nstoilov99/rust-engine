@@ -26,6 +26,7 @@ use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
 use rust_engine::engine::editor::commands::Command as _;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::graph_prefs::WireStyle;
+use rust_engine::engine::editor::graph_state_store::GraphStateStore;
 use rust_engine::engine::editor::theme::Density;
 use rust_engine::engine::editor::{
     AssetBrowserEvent, AssetBrowserPanel, BuildDialog, CommandHistory,
@@ -932,6 +933,23 @@ impl App {
             s.mark_prefs_dirty();
         }
         s.prefs_applied = new;
+    }
+
+    /// Write every open graph's view + bookmarks to the user-local sidecar,
+    /// on the same debounce as the prefs autosave. Doing it here rather than
+    /// on tab close also covers an editor exit that never closes tabs.
+    fn flush_graph_ui_state(&mut self) {
+        if !self.editor.ui.settings.prefs_saving() {
+            return;
+        }
+        let root = std::path::Path::new("content");
+        let mut store = GraphStateStore::load(root);
+        for (rel, st) in self.editor.scene.graph_editors.iter() {
+            store.store(rel, st.view, &st.bookmarks);
+        }
+        if let Err(e) = store.save() {
+            eprintln!("Warning: failed to save graph UI state: {e}");
+        }
     }
 
     /// Persist a VSync change to `window_config.ron`. The swapchain present
@@ -3756,6 +3774,7 @@ impl App {
         // Live-apply + debounced autosave of editor preferences (M10 P7).
         self.apply_editor_prefs(false);
         self.editor.ui.settings.flush_prefs();
+        self.flush_graph_ui_state();
         self.persist_vsync_change();
 
         // Attach crusty layout data to frame packet and send to render thread
@@ -4175,7 +4194,8 @@ impl App {
                 &relative,
                 &self.editor.scene.node_registry,
             ) {
-                Ok(state) => {
+                Ok(mut state) => {
+                    restore_graph_ui_state(&mut state, &relative);
                     self.editor.scene.graph_editors.insert(relative.clone(), state);
                     self.open_graph_as_tab(relative);
                 }
@@ -4672,7 +4692,8 @@ impl App {
                     &relative,
                     graph_registry,
                 ) {
-                    Ok(state) => {
+                    Ok(mut state) => {
+                        restore_graph_ui_state(&mut state, &relative);
                         graph_editors.insert(relative.clone(), state);
                         editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
                     }
@@ -6173,5 +6194,21 @@ impl App {
 
         // Re-insert InputManager into resources
         self.core.game_world.resources_mut().insert(input_manager);
+    }
+}
+
+/// Restore a graph's remembered pan/zoom and bookmarks from the user-local
+/// sidecar. With no entry the tab frames its own content on the first draw —
+/// landing on an empty corner of a graph you have never opened is a worse
+/// default than seeing all of it.
+fn restore_graph_ui_state(
+    state: &mut rust_engine::engine::editor::graph_editor::GraphEditorState,
+    relative: &str,
+) {
+    let store = GraphStateStore::load(std::path::Path::new("content"));
+    state.bookmarks = store.bookmarks_for(relative);
+    match store.view_for(relative) {
+        Some(v) => state.view = v,
+        None => state.frame_all_on_open = true,
     }
 }
