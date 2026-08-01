@@ -155,13 +155,73 @@ pub struct IfacePin {
 pub struct CommentBox {
     pub rect: [f32; 4],
     pub text: String,
+    /// Ramp index (never a hex). Paints the NOTE bar's fill and a 1px left
+    /// edge; the body stays opaque `elevated` and is never washed — that is
+    /// what tells a comment apart from a group at any zoom.
+    #[serde(default)]
+    pub tint: Option<u8>,
+    /// Scales the NOTE bar and the body text together; the bar height grows
+    /// with it. Clamped to [`COMMENT_FONT_SCALE_MIN`, `..._MAX`] on load.
+    #[serde(default = "one")]
+    pub font_scale: f32,
+    /// Anchored notes move with the node they explain and are deleted with
+    /// it. Free-floating is the default — anchoring is what stops notes
+    /// drifting stale.
+    #[serde(default)]
+    pub anchor: Option<u64>,
+    /// Folded to its NOTE bar.
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// The `font_scale` range. A note may be a heading or fine print, but not a
+/// billboard: past 3x it stops being an annotation and starts being chrome.
+pub const COMMENT_FONT_SCALE_MIN: f32 = 0.75;
+pub const COMMENT_FONT_SCALE_MAX: f32 = 3.0;
+
+fn one() -> f32 {
+    1.0
+}
+
+impl CommentBox {
+    /// `font_scale` as it may actually be used — a hand-edited asset does not
+    /// get to make a note 40x.
+    pub fn clamped_font_scale(&self) -> f32 {
+        if self.font_scale.is_finite() {
+            self.font_scale
+                .clamp(COMMENT_FONT_SCALE_MIN, COMMENT_FONT_SCALE_MAX)
+        } else {
+            1.0
+        }
+    }
+}
+
+impl Default for CommentBox {
+    fn default() -> Self {
+        Self {
+            rect: [0.0, 0.0, 220.0, 130.0],
+            text: String::new(),
+            tint: None,
+            font_scale: 1.0,
+            anchor: None,
+            collapsed: false,
+        }
+    }
 }
 
 /// Visual group frame around a region of nodes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GroupBox {
     pub rect: [f32; 4],
     pub title: String,
+    /// Ramp index. Paints a 6% body wash plus a 45% border — a group is a
+    /// translucent region *containing* things, where a comment is an opaque
+    /// card *next to* them.
+    #[serde(default)]
+    pub tint: Option<u8>,
+    /// Folded to its title bar.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// A graph document — the serialized form of `.graph` and `.subgraph`

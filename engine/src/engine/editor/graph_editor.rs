@@ -29,8 +29,14 @@ pub enum GraphEdit {
     /// A node was added (apply = insert, revert = remove by id).
     AddNode(NodeInst),
     /// Nodes and their incident edges were removed together. Each carries its
-    /// original index so undo restores the exact vec order (byte-stable saves).
-    RemoveNodes { nodes: Vec<(usize, NodeInst)>, edges: Vec<(usize, Edge)> },
+    /// original index so undo restores the exact vec order (byte-stable
+    /// saves). `comments` is the anchored-note collateral: a note anchored to
+    /// a deleted node dies with it, and comes back with it.
+    RemoveNodes {
+        nodes: Vec<(usize, NodeInst)>,
+        edges: Vec<(usize, Edge)>,
+        comments: Vec<(usize, CommentBox)>,
+    },
     /// An edge was created.
     Connect(Edge),
     /// Edges were removed together (wire selection + Delete). Each carries
@@ -68,6 +74,48 @@ pub enum GraphEdit {
     MoveGroup { index: usize, node_ids: Vec<u64>, delta: [f32; 2] },
     /// A group's title changed.
     SetGroupTitle { index: usize, old: String, new: String },
+    /// An annotation's tint slot changed (a ramp index, never a hex).
+    SetAnnotationTint {
+        target: Annotation,
+        old: Option<u8>,
+        new: Option<u8>,
+    },
+    /// An annotation folded to (or unfolded from) its bar.
+    SetAnnotationCollapsed { target: Annotation, new: bool },
+    /// An annotation was resized — drag-coalesced like a move, storing both
+    /// rects so a gesture reverts exactly.
+    ResizeAnnotation {
+        target: Annotation,
+        old: [f32; 4],
+        new: [f32; 4],
+    },
+    /// A comment's anchor node changed. An anchored note follows the node it
+    /// explains and dies with it.
+    SetCommentAnchor {
+        index: usize,
+        old: Option<u64>,
+        new: Option<u64>,
+    },
+}
+
+/// Which annotation an edit targets. Comments and groups have no ids, so
+/// index-based addressing is used — valid because the undo stack applies and
+/// reverts strictly LIFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Annotation {
+    Comment(usize),
+    Group(usize),
+}
+
+impl Annotation {
+    pub fn is_group(self) -> bool {
+        matches!(self, Annotation::Group(_))
+    }
+    pub fn index(self) -> usize {
+        match self {
+            Annotation::Comment(i) | Annotation::Group(i) => i,
+        }
+    }
 }
 
 impl GraphEdit {
@@ -75,10 +123,17 @@ impl GraphEdit {
     fn apply(&self, doc: &mut GraphDoc) {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.push(n.clone()),
-            GraphEdit::RemoveNodes { nodes, edges } => {
+            GraphEdit::RemoveNodes { nodes, edges, comments } => {
                 let ids: BTreeSet<u64> = nodes.iter().map(|(_, n)| n.id).collect();
                 doc.nodes.retain(|n| !ids.contains(&n.id));
                 doc.edges.retain(|e| !edges.iter().any(|(_, re)| re == e));
+                let doomed: BTreeSet<usize> = comments.iter().map(|(i, _)| *i).collect();
+                let mut i = 0;
+                doc.comments.retain(|_| {
+                    let keep = !doomed.contains(&i);
+                    i += 1;
+                    keep
+                });
             }
             GraphEdit::Connect(e) => doc.edges.push(e.clone()),
             GraphEdit::Disconnect { edges } => {
@@ -109,6 +164,16 @@ impl GraphEdit {
             GraphEdit::SetGroupTitle { index, new, .. } => {
                 doc.groups[*index].title = new.clone()
             }
+            GraphEdit::SetAnnotationTint { target, new, .. } => set_tint(doc, *target, *new),
+            GraphEdit::SetAnnotationCollapsed { target, new } => {
+                set_collapsed(doc, *target, *new)
+            }
+            GraphEdit::ResizeAnnotation { target, new, .. } => set_rect(doc, *target, *new),
+            GraphEdit::SetCommentAnchor { index, new, .. } => {
+                if let Some(c) = doc.comments.get_mut(*index) {
+                    c.anchor = *new;
+                }
+            }
         }
     }
 
@@ -116,11 +181,12 @@ impl GraphEdit {
     fn revert(&self, doc: &mut GraphDoc) {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.retain(|x| x.id != n.id),
-            GraphEdit::RemoveNodes { nodes, edges } => {
+            GraphEdit::RemoveNodes { nodes, edges, comments } => {
                 // Reinsert at original indices, ascending so each index still
                 // refers to the correct slot once earlier ones are back.
                 reinsert_indexed(&mut doc.nodes, nodes);
                 reinsert_indexed(&mut doc.edges, edges);
+                reinsert_indexed(&mut doc.comments, comments);
             }
             GraphEdit::Connect(e) => doc.edges.retain(|x| x != e),
             GraphEdit::Disconnect { edges } => reinsert_indexed(&mut doc.edges, edges),
@@ -158,6 +224,16 @@ impl GraphEdit {
             GraphEdit::SetGroupTitle { index, old, .. } => {
                 doc.groups[*index].title = old.clone()
             }
+            GraphEdit::SetAnnotationTint { target, old, .. } => set_tint(doc, *target, *old),
+            GraphEdit::SetAnnotationCollapsed { target, new } => {
+                set_collapsed(doc, *target, !*new)
+            }
+            GraphEdit::ResizeAnnotation { target, old, .. } => set_rect(doc, *target, *old),
+            GraphEdit::SetCommentAnchor { index, old, .. } => {
+                if let Some(c) = doc.comments.get_mut(*index) {
+                    c.anchor = *old;
+                }
+            }
         }
     }
 
@@ -194,6 +270,68 @@ impl GraphEdit {
             GraphEdit::RemoveGroup { .. } => "Delete Group".to_string(),
             GraphEdit::MoveGroup { .. } => "Move Group".to_string(),
             GraphEdit::SetGroupTitle { .. } => "Edit Group".to_string(),
+            GraphEdit::SetAnnotationTint { target, new, .. } => format!(
+                "{} {}",
+                if new.is_some() { "Tint" } else { "Clear Tint on" },
+                if target.is_group() { "Group" } else { "Comment" }
+            ),
+            GraphEdit::SetAnnotationCollapsed { target, new } => format!(
+                "{} {}",
+                if *new { "Collapse" } else { "Expand" },
+                if target.is_group() { "Group" } else { "Comment" }
+            ),
+            GraphEdit::ResizeAnnotation { target, .. } => format!(
+                "Resize {}",
+                if target.is_group() { "Group" } else { "Comment" }
+            ),
+            GraphEdit::SetCommentAnchor { new, .. } => {
+                if new.is_some() { "Anchor Comment" } else { "Un-anchor Comment" }.to_string()
+            }
+        }
+    }
+}
+
+fn set_tint(doc: &mut GraphDoc, target: Annotation, v: Option<u8>) {
+    match target {
+        Annotation::Comment(i) => {
+            if let Some(c) = doc.comments.get_mut(i) {
+                c.tint = v;
+            }
+        }
+        Annotation::Group(i) => {
+            if let Some(g) = doc.groups.get_mut(i) {
+                g.tint = v;
+            }
+        }
+    }
+}
+
+fn set_collapsed(doc: &mut GraphDoc, target: Annotation, v: bool) {
+    match target {
+        Annotation::Comment(i) => {
+            if let Some(c) = doc.comments.get_mut(i) {
+                c.collapsed = v;
+            }
+        }
+        Annotation::Group(i) => {
+            if let Some(g) = doc.groups.get_mut(i) {
+                g.collapsed = v;
+            }
+        }
+    }
+}
+
+fn set_rect(doc: &mut GraphDoc, target: Annotation, r: [f32; 4]) {
+    match target {
+        Annotation::Comment(i) => {
+            if let Some(c) = doc.comments.get_mut(i) {
+                c.rect = r;
+            }
+        }
+        Annotation::Group(i) => {
+            if let Some(g) = doc.groups.get_mut(i) {
+                g.rect = r;
+            }
         }
     }
 }
@@ -221,6 +359,24 @@ fn move_nodes(doc: &mut GraphDoc, ids: &[u64], delta: [f32; 2]) {
             n.position[1] += delta[1];
         }
     }
+    // An anchored note explains a specific node, so it travels with it. Both
+    // directions go through here, so undo carries the note back too.
+    for c in doc.comments.iter_mut() {
+        if c.anchor.is_some_and(|a| ids.contains(&a)) {
+            shift_rect(&mut c.rect, delta);
+        }
+    }
+}
+
+/// Indices of the comments anchored to any of `ids` — the collateral a node
+/// delete has to carry.
+pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
+    doc.comments
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.anchor.is_some_and(|a| ids.contains(&a)))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Reinsert `(index, value)` pairs into `v` at their original indices, in
@@ -439,13 +595,78 @@ pub struct GraphEditorState {
     pub annotation_drag: Option<AnnotationDrag>,
     /// Active inline text edit for a comment/group (P7).
     pub editing: Option<AnnotationEdit>,
+    /// In-flight annotation resize (session-only), coalesced into one edit.
+    pub annotation_resize: Option<AnnotationResize>,
+    /// Annotation whose context menu is open (tint / collapse / anchor).
+    pub annotation_menu: Option<Annotation>,
 }
+
+/// Which edge or corner of an annotation a resize drag grabbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeHandle {
+    /// Every handle, corners first so a corner wins a hit-test over the two
+    /// edges it overlaps.
+    pub const ALL: [ResizeHandle; 8] = [
+        ResizeHandle::TopLeft,
+        ResizeHandle::TopRight,
+        ResizeHandle::BottomLeft,
+        ResizeHandle::BottomRight,
+        ResizeHandle::Left,
+        ResizeHandle::Right,
+        ResizeHandle::Top,
+        ResizeHandle::Bottom,
+    ];
+
+    pub fn moves_left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+    pub fn moves_right(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+    pub fn moves_top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+    pub fn moves_bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+/// In-flight annotation resize. Absolute-from-origin like the move drags, so
+/// the gesture cannot drift, and recorded as one `ResizeAnnotation` on release.
+pub struct AnnotationResize {
+    pub target: Annotation,
+    pub handle: ResizeHandle,
+    pub origin_world: [f32; 2],
+    /// Rect at grab time.
+    pub rect0: [f32; 4],
+    /// Smallest height the content allows (comments never auto-shrink below
+    /// their wrapped text); 0 for groups.
+    pub min_h: f32,
+}
+
+/// Smallest an annotation may be dragged to, world units.
+pub const ANNOTATION_MIN_W: f32 = 80.0;
+pub const ANNOTATION_MIN_H: f32 = 40.0;
 
 /// In-flight node drag: original positions so live movement is absolute
 /// (no drift) and the net delta is recorded once on release.
 pub struct NodeDrag {
     pub origin_world: [f32; 2],
     pub originals: Vec<(u64, [f32; 2])>,
+    /// Comments anchored to the dragged nodes: index + rect origin at drag
+    /// start, so the note tracks its node live instead of snapping on release.
+    pub anchored: Vec<(usize, [f32; 2])>,
 }
 
 /// How a marquee gesture combines with the existing selection. Captured when
@@ -535,6 +756,8 @@ impl GraphEditorState {
             sel_group: None,
             annotation_drag: None,
             editing: None,
+            annotation_resize: None,
+            annotation_menu: None,
         })
     }
 
@@ -592,6 +815,7 @@ impl GraphEditorState {
         let comment = CommentBox {
             rect: [pos[0], pos[1], 220.0, 130.0],
             text: "Comment".to_string(),
+            ..CommentBox::default()
         };
         self.doc.comments.push(comment.clone());
         self.clear_selection();
@@ -626,6 +850,7 @@ impl GraphEditorState {
         let group = GroupBox {
             rect: [minx - PAD, miny - PAD, (maxx - minx) + PAD * 2.0, (maxy - miny) + PAD * 2.0],
             title: "Group".to_string(),
+            ..GroupBox::default()
         };
         self.doc.groups.push(group.clone());
         self.clear_selection();
@@ -799,7 +1024,11 @@ impl GraphEditorState {
             .filter(|(_, e)| ids.contains(&e.from_node) || ids.contains(&e.to_node))
             .map(|(i, e)| (i, e.clone()))
             .collect();
-        let edit = GraphEdit::RemoveNodes { nodes, edges };
+        let comments: Vec<(usize, CommentBox)> = anchored_comments(&self.doc, &ids)
+            .into_iter()
+            .map(|i| (i, self.doc.comments[i].clone()))
+            .collect();
+        let edit = GraphEdit::RemoveNodes { nodes, edges, comments };
         edit.apply(&mut self.doc);
         self.selection.clear();
         self.commit(edit, registry);
@@ -846,6 +1075,82 @@ impl GraphEditorState {
         true
     }
 
+    /// Read an annotation's stored rect, if it still exists.
+    pub fn annotation_rect(&self, target: Annotation) -> Option<[f32; 4]> {
+        match target {
+            Annotation::Comment(i) => self.doc.comments.get(i).map(|c| c.rect),
+            Annotation::Group(i) => self.doc.groups.get(i).map(|g| g.rect),
+        }
+    }
+
+    /// Set an annotation's tint slot (a ramp index, never a hex), undoably.
+    pub fn set_annotation_tint(
+        &mut self,
+        target: Annotation,
+        tint: Option<u8>,
+        registry: &NodeRegistry,
+    ) {
+        let old = match target {
+            Annotation::Comment(i) => self.doc.comments.get(i).map(|c| c.tint),
+            Annotation::Group(i) => self.doc.groups.get(i).map(|g| g.tint),
+        };
+        let Some(old) = old else { return };
+        if old == tint {
+            return;
+        }
+        let edit = GraphEdit::SetAnnotationTint { target, old, new: tint };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
+    /// Fold/unfold an annotation to its bar, undoably.
+    pub fn toggle_annotation_collapsed(&mut self, target: Annotation, registry: &NodeRegistry) {
+        let now = match target {
+            Annotation::Comment(i) => self.doc.comments.get(i).map(|c| c.collapsed),
+            Annotation::Group(i) => self.doc.groups.get(i).map(|g| g.collapsed),
+        };
+        let Some(now) = now else { return };
+        let edit = GraphEdit::SetAnnotationCollapsed { target, new: !now };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
+    /// Anchor (or un-anchor) a comment to a node, undoably.
+    pub fn set_comment_anchor(
+        &mut self,
+        index: usize,
+        node: Option<u64>,
+        registry: &NodeRegistry,
+    ) {
+        let Some(c) = self.doc.comments.get(index) else {
+            return;
+        };
+        let old = c.anchor;
+        if old == node {
+            return;
+        }
+        let edit = GraphEdit::SetCommentAnchor { index, old, new: node };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
+    /// Commit an in-flight resize as one edit. No-op if nothing moved.
+    pub fn finish_annotation_resize(&mut self, registry: &NodeRegistry) {
+        let Some(r) = self.annotation_resize.take() else {
+            return;
+        };
+        let Some(now) = self.annotation_rect(r.target) else {
+            return;
+        };
+        if now == r.rect0 {
+            return;
+        }
+        self.commit(
+            GraphEdit::ResizeAnnotation { target: r.target, old: r.rect0, new: now },
+            registry,
+        );
+    }
+
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
     pub fn cancel_interactions(&mut self) {
@@ -855,6 +1160,7 @@ impl GraphEditorState {
         self.marquee = None;
         self.marquee_mode = MarqueeMode::Replace;
         self.editing = None;
+        self.annotation_resize = None;
         // Dropped, not flushed: the value it references may already be gone.
         self.prop_edit = None;
     }
@@ -1028,11 +1334,11 @@ mod tests {
     }
 
     fn comment(x: f32) -> CommentBox {
-        CommentBox { rect: [x, 0.0, 100.0, 60.0], text: "c".to_string() }
+        CommentBox { rect: [x, 0.0, 100.0, 60.0], text: "c".to_string(), ..Default::default() }
     }
 
     fn group(x: f32) -> GroupBox {
-        GroupBox { rect: [x, 0.0, 200.0, 200.0], title: "g".to_string() }
+        GroupBox { rect: [x, 0.0, 200.0, 200.0], title: "g".to_string(), ..Default::default() }
     }
 
     /// apply → revert round-trips every annotation edit variant (P7).
@@ -1046,8 +1352,32 @@ mod tests {
             d
         };
         let edits = [
+            GraphEdit::SetAnnotationTint {
+                target: Annotation::Comment(0),
+                old: None,
+                new: Some(9),
+            },
+            GraphEdit::SetAnnotationTint {
+                target: Annotation::Group(0),
+                old: None,
+                new: Some(4),
+            },
+            GraphEdit::SetAnnotationCollapsed { target: Annotation::Comment(1), new: true },
+            GraphEdit::SetAnnotationCollapsed { target: Annotation::Group(0), new: true },
+            GraphEdit::ResizeAnnotation {
+                target: Annotation::Comment(0),
+                old: [0.0, 0.0, 100.0, 60.0],
+                new: [0.0, 0.0, 260.0, 180.0],
+            },
+            GraphEdit::ResizeAnnotation {
+                target: Annotation::Group(0),
+                old: [0.0, 0.0, 200.0, 200.0],
+                new: [-20.0, -20.0, 240.0, 240.0],
+            },
+            GraphEdit::SetCommentAnchor { index: 0, old: None, new: Some(1) },
             GraphEdit::AddComment(comment(999.0)),
             GraphEdit::RemoveComment { index: 1, comment: comment(300.0) },
+            GraphEdit::MoveNodes { ids: vec![0], delta: [9.0, -3.0] },
             GraphEdit::MoveComment { index: 0, delta: [12.0, -7.0] },
             GraphEdit::SetCommentText {
                 index: 0,
@@ -1070,6 +1400,164 @@ mod tests {
             e.revert(&mut doc);
             assert_eq!(doc, base, "{}: apply→revert must restore", e.description());
         }
+    }
+
+    /// An anchored note travels with the node it explains, in both
+    /// directions — a move that undoes must carry the note back too.
+    #[test]
+    fn anchored_comment_follows_and_unfollows_its_node() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 0.0])];
+        st.doc.comments = vec![comment(10.0), comment(400.0)];
+        st.doc.comments[0].anchor = Some(0);
+        let before = st.doc.clone();
+
+        // Moving the anchored node carries its note; the free-floating one
+        // stays put.
+        let edit = GraphEdit::MoveNodes { ids: vec![0], delta: [30.0, -12.0] };
+        edit.apply(&mut st.doc);
+        assert_eq!(st.doc.comments[0].rect[0], 40.0);
+        assert_eq!(st.doc.comments[0].rect[1], -12.0);
+        assert_eq!(st.doc.comments[1].rect[0], 400.0, "a free note must not move");
+        edit.revert(&mut st.doc);
+        assert_eq!(st.doc, before, "the note must come back with its node");
+
+        // Moving the *other* node touches nothing.
+        let other = GraphEdit::MoveNodes { ids: vec![1], delta: [50.0, 50.0] };
+        other.apply(&mut st.doc);
+        assert_eq!(st.doc.comments[0].rect[0], 10.0);
+        other.revert(&mut st.doc);
+        assert_eq!(st.doc, before);
+    }
+
+    /// Deleting a node takes its anchored notes with it, index-carrying, and
+    /// undo restores both at their exact positions.
+    #[test]
+    fn deleting_a_node_takes_its_anchored_notes() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 0.0])];
+        st.doc.comments = vec![comment(0.0), comment(300.0), comment(600.0)];
+        st.doc.comments[1].anchor = Some(0); // dies with node 0
+        st.doc.comments[2].anchor = Some(1); // survives
+        let before = st.doc.clone();
+
+        st.selection = [0u64].into_iter().collect();
+        st.delete_selection(&reg);
+        assert_eq!(st.doc.nodes.len(), 1);
+        assert_eq!(
+            st.doc.comments.len(),
+            2,
+            "only the note anchored to the deleted node goes"
+        );
+        assert_eq!(st.doc.comments[1].anchor, Some(1), "the survivor kept its anchor");
+
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "undo restores the note at its original index");
+        let a = crate::engine::node_graph::serialize_graph(&before).unwrap();
+        let b = crate::engine::node_graph::serialize_graph(&st.doc).unwrap();
+        assert_eq!(a, b, "restored doc must serialize byte-identically");
+    }
+
+    /// Tint, collapse and anchor go through the undo stack, and a no-op
+    /// change records nothing.
+    #[test]
+    fn annotation_field_edits_are_undoable_and_skip_no_ops() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.doc.comments = vec![comment(0.0)];
+        st.doc.groups = vec![group(0.0)];
+
+        st.set_annotation_tint(Annotation::Comment(0), Some(9), &reg);
+        assert_eq!(st.doc.comments[0].tint, Some(9));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Tint Comment"));
+        // Setting the same value again is not an edit.
+        st.set_annotation_tint(Annotation::Comment(0), Some(9), &reg);
+        st.undo(&reg);
+        assert_eq!(st.doc.comments[0].tint, None);
+
+        st.toggle_annotation_collapsed(Annotation::Group(0), &reg);
+        assert!(st.doc.groups[0].collapsed);
+        st.undo(&reg);
+        assert!(!st.doc.groups[0].collapsed);
+
+        st.set_comment_anchor(0, Some(0), &reg);
+        assert_eq!(st.doc.comments[0].anchor, Some(0));
+        st.set_comment_anchor(0, Some(0), &reg); // no-op
+        st.undo(&reg);
+        assert_eq!(st.doc.comments[0].anchor, None);
+
+        // An out-of-range target is ignored rather than panicking.
+        st.set_annotation_tint(Annotation::Comment(99), Some(1), &reg);
+        st.toggle_annotation_collapsed(Annotation::Group(99), &reg);
+    }
+
+    /// A resize gesture coalesces into one entry and reverts exactly.
+    #[test]
+    fn resize_coalesces_into_one_entry() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.comments = vec![comment(0.0)];
+        let before = st.doc.clone();
+        let rect0 = st.doc.comments[0].rect;
+
+        st.annotation_resize = Some(AnnotationResize {
+            target: Annotation::Comment(0),
+            handle: ResizeHandle::BottomRight,
+            origin_world: [0.0, 0.0],
+            rect0,
+            min_h: 0.0,
+        });
+        // Live frames write the rect directly; only the release records.
+        for w in [120.0f32, 160.0, 210.0] {
+            st.doc.comments[0].rect[2] = w;
+        }
+        st.finish_annotation_resize(&reg);
+        assert_eq!(st.doc.comments[0].rect[2], 210.0);
+        assert!(st.stack.can_undo());
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one gesture = one undo entry");
+        assert!(!st.stack.can_undo());
+
+        // A gesture that ends where it started records nothing.
+        st.annotation_resize = Some(AnnotationResize {
+            target: Annotation::Comment(0),
+            handle: ResizeHandle::Left,
+            origin_world: [0.0, 0.0],
+            rect0,
+            min_h: 0.0,
+        });
+        st.finish_annotation_resize(&reg);
+        assert!(!st.stack.can_undo());
+    }
+
+    /// `font_scale` is clamped on read, so a hand-edited asset cannot make a
+    /// note 40x — and a missing field still reads as 1.0.
+    #[test]
+    fn comment_font_scale_is_clamped() {
+        use crate::engine::node_graph::{COMMENT_FONT_SCALE_MAX, COMMENT_FONT_SCALE_MIN};
+        let mut c = comment(0.0);
+        assert_eq!(c.clamped_font_scale(), 1.0);
+        c.font_scale = 40.0;
+        assert_eq!(c.clamped_font_scale(), COMMENT_FONT_SCALE_MAX);
+        c.font_scale = 0.01;
+        assert_eq!(c.clamped_font_scale(), COMMENT_FONT_SCALE_MIN);
+        c.font_scale = f32::NAN;
+        assert_eq!(c.clamped_font_scale(), 1.0);
+
+        // A pre-Phase-5 comment (no tint/font_scale/anchor/collapsed) parses
+        // and renders pixel-identically to before.
+        let old: crate::engine::node_graph::CommentBox =
+            ron::from_str(r#"(rect: (1.0, 2.0, 3.0, 4.0), text: "hi")"#).expect("legacy comment");
+        assert_eq!(old.font_scale, 1.0);
+        assert_eq!(old.tint, None);
+        assert_eq!(old.anchor, None);
+        assert!(!old.collapsed);
+        let old_g: crate::engine::node_graph::GroupBox =
+            ron::from_str(r#"(rect: (1.0, 2.0, 3.0, 4.0), title: "g")"#).expect("legacy group");
+        assert_eq!(old_g.tint, None);
+        assert!(!old_g.collapsed);
     }
 
     /// Group-drag capture selects exactly the nodes whose centers lie inside
@@ -1101,6 +1589,7 @@ mod tests {
             GraphEdit::RemoveNodes {
                 nodes: vec![(1, node(1, [10.0, 10.0]))],
                 edges: vec![(0, edge(0, 1))],
+                comments: vec![],
             },
             GraphEdit::Connect(Edge {
                 from_node: 0,
@@ -1266,6 +1755,7 @@ mod tests {
         let edit = GraphEdit::RemoveNodes {
             nodes: vec![(1, node(1, [1.0, 1.0]))],
             edges: vec![(0, edge(0, 1)), (1, edge(1, 2))],
+            comments: vec![],
         };
         edit.apply(&mut doc);
         assert_eq!(doc.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![0, 2]);
@@ -1302,6 +1792,8 @@ mod tests {
             sel_group: None,
             annotation_drag: None,
             editing: None,
+            annotation_resize: None,
+            annotation_menu: None,
         }
     }
 
@@ -1314,7 +1806,11 @@ mod tests {
         st.doc.nodes = vec![node(0, [0.0, 0.0])];
         st.doc.nodes[0].position = [50.0, 0.0];
         st.stack.record(GraphEdit::MoveNodes { ids: vec![0], delta: [50.0, 0.0] });
-        st.node_drag = Some(NodeDrag { origin_world: [0.0, 0.0], originals: vec![(0, [0.0, 0.0])] });
+        st.node_drag = Some(NodeDrag {
+            origin_world: [0.0, 0.0],
+            originals: vec![(0, [0.0, 0.0])],
+            anchored: Vec::new(),
+        });
         st.undo(&reg);
         assert!(st.node_drag.is_none(), "undo must cancel the live node drag");
         assert_eq!(st.doc.nodes[0].position, [0.0, 0.0]);

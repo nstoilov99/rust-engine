@@ -21,7 +21,7 @@ mod macros_test;
 
 pub use doc::{
     CommentBox, Edge, GraphDoc, GraphRealm, GroupBox, IfacePin, NodeInst, NodeRealm, PinType,
-    PropValue, GRAPH_DOC_VERSION,
+    PropValue, COMMENT_FONT_SCALE_MAX, COMMENT_FONT_SCALE_MIN, GRAPH_DOC_VERSION,
 };
 pub use io::{load_graph, parse_graph, save_graph, serialize_graph, GraphIoError};
 pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};

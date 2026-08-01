@@ -25,8 +25,9 @@ use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{Canvas, CanvasScope, CanvasView, Checkbox, DragValue, TextEdit};
 
 use super::graph_editor::{
-    frame_view, nodes_captured_by_rect, prop_display, AnnotationDrag, AnnotationEdit, ConnectDrag,
-    GraphEdit, GraphEditorState, GraphFragment, MarqueeMode, NodeDrag,
+    anchored_comments, frame_view, nodes_captured_by_rect, prop_display, Annotation,
+    AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
+    GraphFragment, MarqueeMode, NodeDrag, ResizeHandle, ANNOTATION_MIN_H, ANNOTATION_MIN_W,
 };
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -84,6 +85,17 @@ const MARQUEE_FILL_ALPHA: f32 = 0.08;
 const SELECTION_REST_ALPHA: f32 = 0.55;
 /// Hollow (unconnected) pin ring width, world units at ui_scale 1.0.
 const BASE_RING_W: f32 = 1.5;
+
+// --- Annotation tints. A group is a translucent region *containing* things
+// (6% body wash + 45% border); a comment is an opaque card *next to* them, so
+// its tint only reaches the NOTE bar and a 1px left edge. Distinguishable at
+// any zoom, and both can carry color.
+const GROUP_WASH_ALPHA: f32 = 0.06;
+const GROUP_BORDER_ALPHA: f32 = 0.45;
+/// An untinted group keeps its original neutral wash.
+const GROUP_UNTINTED_WASH_ALPHA: f32 = 0.12;
+/// Screen-space grab band for annotation resize handles.
+const RESIZE_GRAB_PX: f32 = 8.0;
 
 // --- Wire strokes. Screen pixels, deliberately zoom-INVARIANT: the routed
 // geometry scales with the view, the stroke does not, so a wire is legible
@@ -772,6 +784,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
     let mut menu_open_at: Option<Pos2> = None;
+    let mut annotation_menu_at: Option<Pos2> = None;
     let mut frame_request: Option<CanvasView> = None;
     let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
         draw_and_interact(
@@ -781,6 +794,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             registry,
             resolver,
             &mut menu_open_at,
+            &mut annotation_menu_at,
             open_subgraph,
             selection_outline,
             &wire_prefs,
@@ -797,6 +811,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     state.view = view;
 
     create_menu(ui, state, registry, subgraph_assets, menu_open_at);
+    annotation_menu(ui, state, registry, annotation_menu_at);
     edit_popup(ui, state, registry, out.rect);
     error_overlay(ui, out.rect, &state.errors, &state.ref_errors);
 }
@@ -860,6 +875,7 @@ fn draw_and_interact(
     registry: &NodeRegistry,
     resolver: &dyn GraphResolver,
     menu_open_at: &mut Option<Pos2>,
+    annotation_menu_at: &mut Option<Pos2>,
     open_subgraph: &mut Option<String>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
@@ -946,13 +962,19 @@ fn draw_and_interact(
     let drag_snapshot = state
         .node_drag
         .as_ref()
-        .map(|d| (d.origin_world, d.originals.clone()));
-    if let Some((origin, originals)) = drag_snapshot {
+        .map(|d| (d.origin_world, d.originals.clone(), d.anchored.clone()));
+    if let Some((origin, originals, anchored)) = drag_snapshot {
         if let Some(pw) = pointer_world {
             let (dx, dy) = (pw.x - origin[0], pw.y - origin[1]);
             for (id, start) in &originals {
                 if let Some(n) = state.doc.node_mut(*id) {
                     n.position = [start[0] + dx, start[1] + dy];
+                }
+            }
+            for (i, start) in &anchored {
+                if let Some(c) = state.doc.comments.get_mut(*i) {
+                    c.rect[0] = start[0] + dx;
+                    c.rect[1] = start[1] + dy;
                 }
             }
         }
@@ -991,6 +1013,33 @@ fn draw_and_interact(
     // An inline widget gesture ends on release.
     if !pointer_down {
         state.flush_prop_edit(registry);
+    }
+
+    // Advance / finish a live annotation resize.
+    let resize_snapshot = state
+        .annotation_resize
+        .as_ref()
+        .map(|r| (r.target, r.handle, r.origin_world, r.rect0, r.min_h));
+    let resizing = resize_snapshot.is_some();
+    if let Some((target, handle, origin, rect0, min_h)) = resize_snapshot {
+        if let Some(pw) = pointer_world {
+            let next = apply_resize(rect0, handle, pw.x - origin[0], pw.y - origin[1], min_h);
+            match target {
+                Annotation::Comment(i) => {
+                    if let Some(c) = state.doc.comments.get_mut(i) {
+                        c.rect = next;
+                    }
+                }
+                Annotation::Group(i) => {
+                    if let Some(g) = state.doc.groups.get_mut(i) {
+                        g.rect = next;
+                    }
+                }
+            }
+        }
+        if !pointer_down {
+            state.finish_annotation_resize(registry);
+        }
     }
 
     // Wire selection. A wire is behind every node and pin, so it only claims
@@ -1070,12 +1119,20 @@ fn draw_and_interact(
     }
     if begin_drag {
         if let Some(pw) = pointer_world {
-            let originals = state
+            let originals: Vec<(u64, [f32; 2])> = state
                 .selection
                 .iter()
                 .filter_map(|id| state.doc.node(*id).map(|n| (*id, n.position)))
                 .collect();
-            state.node_drag = Some(NodeDrag { origin_world: [pw.x, pw.y], originals });
+            // Anchored notes track their node live, not on release.
+            let ids: std::collections::BTreeSet<u64> =
+                originals.iter().map(|(id, _)| *id).collect();
+            let anchored = anchored_comments(&state.doc, &ids)
+                .into_iter()
+                .map(|i| (i, [state.doc.comments[i].rect[0], state.doc.comments[i].rect[1]]))
+                .collect();
+            state.node_drag =
+                Some(NodeDrag { origin_world: [pw.x, pw.y], originals, anchored });
         }
     }
 
@@ -1087,18 +1144,57 @@ fn draw_and_interact(
         && !wire_claimed
         && state.node_drag.is_none()
         && state.annotation_drag.is_none();
+    // Resize handles come first: they sit on the border, which the bar and
+    // body drags would otherwise swallow. Only on the selected annotation, so
+    // a dense canvas does not become a minefield of invisible grab zones.
+    if ann_free && !resizing && pointer_pressed {
+        if let Some(pw) = pointer_world {
+            let selected: Option<(Annotation, Rect, f32)> = if let Some(i) = state.sel_group {
+                state
+                    .doc
+                    .groups
+                    .get(i)
+                    .map(|g| (Annotation::Group(i), group_rect(g, &m), 0.0))
+            } else {
+                state.sel_comment.and_then(|i| {
+                    state.doc.comments.get(i).map(|c| {
+                        (Annotation::Comment(i), comment_rect(c, &m), comment_min_h(c, &m))
+                    })
+                })
+            };
+            if let Some((target, rect, min_h)) = selected {
+                if let Some(handle) = resize_handle_at(rect, pw, zoom) {
+                    if let Some(rect0) = state.annotation_rect(target) {
+                        state.annotation_resize = Some(AnnotationResize {
+                            target,
+                            handle,
+                            origin_world: [pw.x, pw.y],
+                            rect0,
+                            min_h,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let resize_claimed = state.annotation_resize.is_some();
+    let ann_free = ann_free && !resize_claimed;
+
     // Groups first (front-most annotation is the last drawn = highest index).
     for i in (0..state.doc.groups.len()).rev() {
         let r = state.doc.groups[i].rect;
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], m.group_bar));
         let id = ui.alloc_id(("graph_group", i));
         let resp = scope.interact(ui, id, bar);
-        if resp.double_clicked(ui) {
+        // The fold caret shares the bar; it claims the press before the drag.
+        let caret = caret_zone(bar, &m, zoom);
+        if resp.pressed && ann_free && pointer_world.is_some_and(|p| caret.contains(p)) {
+            state.toggle_annotation_collapsed(Annotation::Group(i), registry);
+        } else if resp.double_clicked(ui) {
             begin_annotation_edit(state, true, i);
-        } else if resp.pressed && ann_free && pointer_world.is_some() {
+        } else if let (true, Some(pw)) = (resp.pressed && ann_free, pointer_world) {
             state.clear_selection();
             state.sel_group = Some(i);
-            let pw = pointer_world.unwrap();
             let captured = nodes_captured_by_rect(&node_centers(&geoms), r);
             let originals = captured
                 .iter()
@@ -1115,15 +1211,21 @@ fn draw_and_interact(
     }
     for i in (0..state.doc.comments.len()).rev() {
         let r = state.doc.comments[i].rect;
-        let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], m.comment_bar));
+        let bar_h = m.comment_bar * state.doc.comments[i].clamped_font_scale();
+        let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], bar_h));
         let id = ui.alloc_id(("graph_comment", i));
         let resp = scope.interact(ui, id, bar);
-        if resp.double_clicked(ui) {
+        let caret = caret_zone(bar, &m, zoom);
+        if resp.pressed && ann_free && pointer_world.is_some_and(|p| caret.contains(p)) {
+            state.toggle_annotation_collapsed(Annotation::Comment(i), registry);
+        } else if resp.double_clicked(ui) {
             begin_annotation_edit(state, false, i);
-        } else if resp.pressed && ann_free && state.annotation_drag.is_none() && pointer_world.is_some() {
+        } else if let (true, Some(pw)) = (
+            resp.pressed && ann_free && state.annotation_drag.is_none(),
+            pointer_world,
+        ) {
             state.clear_selection();
             state.sel_comment = Some(i);
-            let pw = pointer_world.unwrap();
             state.annotation_drag = Some(AnnotationDrag {
                 is_group: false,
                 index: i,
@@ -1212,10 +1314,44 @@ fn draw_and_interact(
         &st,
     );
 
-    // Right-click empty space → open the create menu at the pointer.
+    // `#node` chips in comment bodies: click selects and frames that node.
+    // The reference is resolved at click time, so a renamed or deleted node
+    // just stops resolving rather than corrupting the stored text.
+    if pointer_pressed && !node_pressed && !pin_claimed && !wire_claimed && !resize_claimed {
+        if let Some(pw) = pointer_world {
+            if let Some(token) = comment_ref_at(state, &m, pw, &st, zoom, ui) {
+                if let Some(id) = resolve_node_ref(state, &geoms, &token) {
+                    state.select_only(id);
+                    if let Some((mn, mx)) =
+                        geoms_bbox(geoms.iter().filter(|g| g.id == id))
+                    {
+                        *frame_request =
+                            Some(frame_view(mn, mx, scope.rect().size(), zoom_min, zoom_max));
+                    }
+                }
+            }
+        }
+    }
+
+    // Right-click: an annotation gets its own menu (tint / collapse / anchor
+    // / delete); empty canvas gets the create menu.
     if right_pressed {
         if let Some(pw) = pointer_world {
-            if pin_under(&geoms, pw, hit_w).is_none()
+            let on_annotation = annotation_at(state, &m, pw);
+            if let Some(target) = on_annotation {
+                match target {
+                    Annotation::Comment(i) => {
+                        state.clear_selection();
+                        state.sel_comment = Some(i);
+                    }
+                    Annotation::Group(i) => {
+                        state.clear_selection();
+                        state.sel_group = Some(i);
+                    }
+                }
+                state.annotation_menu = Some(target);
+                *annotation_menu_at = ui.ctx().input.pointer_pos;
+            } else if pin_under(&geoms, pw, hit_w).is_none()
                 && node_under(&geoms, pw, lod, &m).is_none()
                 && hovered_wire.is_none()
             {
@@ -1225,6 +1361,240 @@ fn draw_and_interact(
             }
         }
     }
+
+    // Organization keys (Windows mapping): C groups the selection, Shift+C
+    // drops a note at the pointer. Canvas-hovered only, and never while an
+    // inline editor owns the keyboard.
+    if pointer_world.is_some() && state.editing.is_none() {
+        let (c_key, shift_only, no_mods) = {
+            let input = &ui.ctx().input;
+            (
+                input.key_pressed(Key::Char('c')),
+                input.modifiers == Modifiers::SHIFT,
+                input.modifiers.is_empty(),
+            )
+        };
+        if c_key && no_mods {
+            state.add_group_around_selection(registry);
+        } else if c_key && shift_only {
+            if let Some(pw) = pointer_world {
+                state.add_comment([pw.x, pw.y], registry);
+            }
+        }
+    }
+}
+
+/// The front-most annotation under a world point — comments sit above groups,
+/// so they are tested first.
+fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option<Annotation> {
+    for (i, c) in state.doc.comments.iter().enumerate().rev() {
+        if comment_rect(c, m).contains(pw) {
+            return Some(Annotation::Comment(i));
+        }
+    }
+    for (i, g) in state.doc.groups.iter().enumerate().rev() {
+        // A group is a frame, not a surface: only its title bar takes the
+        // click, or right-clicking anywhere inside one would shadow the
+        // canvas menu over a large area.
+        let r = group_rect(g, m);
+        if Rect::from_min_size(r.min, Vec2::new(r.width(), m.group_bar)).contains(pw) {
+            return Some(Annotation::Group(i));
+        }
+    }
+    None
+}
+
+/// Context menu for the annotation under the pointer: the 12 deep-tone
+/// swatches, collapse, anchoring, delete.
+fn annotation_menu(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    open_at: Option<Pos2>,
+) {
+    let Some(target) = state.annotation_menu else {
+        return;
+    };
+    let is_comment = !target.is_group();
+    let i = target.index();
+    let current = match target {
+        Annotation::Comment(i) => state.doc.comments.get(i).map(|c| c.tint),
+        Annotation::Group(i) => state.doc.groups.get(i).map(|g| g.tint),
+    };
+    let Some(current) = current else {
+        state.annotation_menu = None;
+        return;
+    };
+    let collapsed = match target {
+        Annotation::Comment(i) => state.doc.comments.get(i).map(|c| c.collapsed),
+        Annotation::Group(i) => state.doc.groups.get(i).map(|g| g.collapsed),
+    }
+    .unwrap_or(false);
+    let anchored = is_comment
+        && state.doc.comments.get(i).and_then(|c| c.anchor).is_some();
+    let one_node = state.selection.len() == 1;
+
+    let mut picked: Option<Option<u8>> = None;
+    let mut toggle = false;
+    let mut anchor_to: Option<Option<u64>> = None;
+    let mut delete = false;
+    crusty_gui::widgets::context_menu_at(ui, "graph_annotation_menu", open_at, |ui| {
+        ui.menu_group_header("Tint");
+        picked = tint_menu_row(ui, current);
+        ui.menu_group_header(if is_comment { "Comment" } else { "Group" });
+        if ui.menu_item(if collapsed { "Expand" } else { "Collapse" }) {
+            toggle = true;
+        }
+        if is_comment {
+            if anchored {
+                if ui.menu_item("Un-anchor") {
+                    anchor_to = Some(None);
+                }
+            } else if ui.menu_item_enabled("Anchor to selected node", one_node) {
+                anchor_to = Some(None); // resolved below from the selection
+            }
+        }
+        if ui.menu_item("Delete") {
+            delete = true;
+        }
+    });
+
+    if let Some(t) = picked {
+        state.set_annotation_tint(target, t, registry);
+        state.annotation_menu = None;
+    }
+    if toggle {
+        state.toggle_annotation_collapsed(target, registry);
+        state.annotation_menu = None;
+    }
+    if let Some(a) = anchor_to {
+        let node = if anchored { None } else { a.or_else(|| state.selection.iter().copied().next()) };
+        state.set_comment_anchor(i, node, registry);
+        state.annotation_menu = None;
+    }
+    if delete {
+        state.delete_selection(registry);
+        state.annotation_menu = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Annotation interaction
+// ---------------------------------------------------------------------------
+
+/// Which resize handle a world point grabs on `rect`, using a screen-space
+/// band so a handle is equally grabbable at every zoom.
+fn resize_handle_at(rect: Rect, pw: Pos2, zoom: f32) -> Option<ResizeHandle> {
+    let band = RESIZE_GRAB_PX / zoom.max(0.01);
+    let outer = Rect::from_min_max(
+        Pos2::new(rect.min.x - band, rect.min.y - band),
+        Pos2::new(rect.max.x + band, rect.max.y + band),
+    );
+    if !outer.contains(pw) {
+        return None;
+    }
+    let (l, r) = ((pw.x - rect.min.x).abs() <= band, (pw.x - rect.max.x).abs() <= band);
+    let (t, b) = ((pw.y - rect.min.y).abs() <= band, (pw.y - rect.max.y).abs() <= band);
+    // Corners first: a corner overlaps two edges and must win.
+    Some(match (l, r, t, b) {
+        (true, _, true, _) => ResizeHandle::TopLeft,
+        (_, true, true, _) => ResizeHandle::TopRight,
+        (true, _, _, true) => ResizeHandle::BottomLeft,
+        (_, true, _, true) => ResizeHandle::BottomRight,
+        (true, ..) => ResizeHandle::Left,
+        (_, true, ..) => ResizeHandle::Right,
+        (_, _, true, _) => ResizeHandle::Top,
+        (_, _, _, true) => ResizeHandle::Bottom,
+        _ => return None,
+    })
+}
+
+/// Apply a resize drag. Width is author-set in both directions; height has a
+/// floor — a comment never auto-shrinks below its own wrapped text.
+fn apply_resize(rect0: [f32; 4], h: ResizeHandle, dx: f32, dy: f32, min_h: f32) -> [f32; 4] {
+    let (mut x, mut y, mut w, mut hh) = (rect0[0], rect0[1], rect0[2], rect0[3]);
+    let floor_h = ANNOTATION_MIN_H.max(min_h);
+    if h.moves_left() {
+        let nw = (w - dx).max(ANNOTATION_MIN_W);
+        x += w - nw;
+        w = nw;
+    }
+    if h.moves_right() {
+        w = (w + dx).max(ANNOTATION_MIN_W);
+    }
+    if h.moves_top() {
+        let nh = (hh - dy).max(floor_h);
+        y += hh - nh;
+        hh = nh;
+    }
+    if h.moves_bottom() {
+        hh = (hh + dy).max(floor_h);
+    }
+    [x, y, w, hh]
+}
+
+/// Handle marks on the selected annotation, so the affordance is visible
+/// rather than something the user has to discover by hovering the border.
+fn draw_resize_handles(p: &mut Painter, sr: Rect, st: &Style, m: &GraphMetrics) {
+    let d = m.edge * 1.5;
+    for c in [
+        Pos2::new(sr.min.x, sr.min.y),
+        Pos2::new(sr.max.x, sr.min.y),
+        Pos2::new(sr.min.x, sr.max.y),
+        Pos2::new(sr.max.x, sr.max.y),
+    ] {
+        p.rect_filled(
+            Rect::from_center_size(c, Vec2::splat(d * 2.0)),
+            Rounding::same(m.border),
+            st.palette.focus_ring,
+        );
+    }
+}
+
+/// The 12 deep-tone swatches plus "None" — never a free picker. A hand-picked
+/// color that reads on Steel vanishes on Graphite, breaks the no-hex lint and
+/// survives no re-skin; the ramp index survives all three.
+fn tint_menu_row(ui: &mut Ui, current: Option<u8>) -> Option<Option<u8>> {
+    let st = ui.style();
+    let sw = st.metrics.control_height * 0.7;
+    let cols = 13.0;
+    let rect = ui.allocate(Vec2::new(sw * cols + 8.0, sw + 6.0));
+    let mut picked = None;
+    for i in 0..13usize {
+        let cell = Rect::from_min_size(
+            Pos2::new(rect.min.x + 4.0 + sw * i as f32, rect.min.y + 3.0),
+            Vec2::splat(sw - 2.0),
+        );
+        let slot = (i < 12).then_some(i as u8);
+        let color = match slot {
+            Some(t) => ramp()[t as usize].deep,
+            None => st.palette.header,
+        };
+        let id = ui.alloc_id(("graph_tint", i));
+        let resp = ui.interact(id, cell);
+        ui.painter().rect_filled(cell, st.rounding.small, color);
+        if slot.is_none() {
+            // "None" reads as an empty well, not a 13th color.
+            ui.painter().line_segment(
+                cell.min,
+                cell.max,
+                st.metrics.border,
+                st.palette.text_disabled,
+            );
+        }
+        if slot == current || resp.hovered {
+            ui.painter().rect_stroke(
+                cell,
+                st.rounding.small,
+                st.metrics.border,
+                if slot == current { st.palette.accent_active } else { st.palette.focus_ring },
+            );
+        }
+        if resp.clicked {
+            picked = Some(slot);
+        }
+    }
+    picked
 }
 
 // ---------------------------------------------------------------------------
@@ -1375,82 +1745,394 @@ fn draw_annotations(
 ) {
     let mut p = ui.painter();
     let round = Rounding::same(m.radius * zoom);
-    // Titles keep rendering below L2 at a floor size.
+    // Annotation titles are the one text exempt from the LOD glyph cut: on a
+    // graph too big to read, they are the only wayfinding left.
     let annotation_px = |base: f32| (base * zoom).max(ANNOTATION_FLOOR_PX);
 
+    // Groups first — a group is a region that *contains* things, so it sits
+    // below comments, which sit below nodes.
     for (i, g) in state.doc.groups.iter().enumerate() {
-        let wr = Rect::from_min_size(
-            Pos2::new(g.rect[0], g.rect[1]),
-            Vec2::new(g.rect[2], g.rect[3]),
-        );
+        let wr = group_rect(g, m);
         let clip = wr.intersect(vis);
         if clip.width() <= 0.0 || clip.height() <= 0.0 {
             continue;
         }
         let sr = scope.world_rect_to_screen(wr);
         let sel = state.sel_group == Some(i);
-        p.rect_filled(sr, round, st.palette.panel.with_alpha(0.12));
+        // Tint paints a 6% body wash and a 45% border — translucent region.
+        let (wash, border) = match g.tint {
+            Some(t) => {
+                let deep = ramp()[(t % 12) as usize].deep;
+                (deep.with_alpha(GROUP_WASH_ALPHA), deep.with_alpha(GROUP_BORDER_ALPHA))
+            }
+            None => (
+                st.palette.panel.with_alpha(GROUP_UNTINTED_WASH_ALPHA),
+                if sel { st.palette.stroke_strong } else { st.palette.stroke },
+            ),
+        };
+        p.rect_filled(sr, round, wash);
         p.rect_stroke(
             sr,
             round,
             m.border,
-            if sel { st.palette.stroke_strong } else { st.palette.stroke },
+            if sel { st.palette.stroke_strong } else { border },
         );
-        let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), m.group_bar * zoom));
+        let bar_h = m.group_bar * zoom;
+        let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), bar_h));
         p.rect_filled(bar, round, st.palette.header);
         let px = annotation_px(st.fonts.body);
+        let tx = collapse_caret(&mut p, bar, g.collapsed, st, zoom, m);
         p.text(
-            sr.min + Vec2::new(m.pad_x * zoom, (m.group_bar * zoom - px) * 0.5),
+            Pos2::new(tx, sr.min.y + (bar_h - px) * 0.5),
             &g.title,
             px,
             st.palette.text,
             None,
         );
+        if sel && !g.collapsed {
+            draw_resize_handles(&mut p, sr, st, m);
+        }
     }
 
     for (i, c) in state.doc.comments.iter().enumerate() {
-        let wr = Rect::from_min_size(
-            Pos2::new(c.rect[0], c.rect[1]),
-            Vec2::new(c.rect[2], c.rect[3]),
-        );
+        let wr = comment_rect(c, m);
         let clip = wr.intersect(vis);
         if clip.width() <= 0.0 || clip.height() <= 0.0 {
             continue;
         }
         let sr = scope.world_rect_to_screen(wr);
         let sel = state.sel_comment == Some(i);
-        // Opaque `elevated` body — a comment is a card next to things, never
-        // a wash over them (that is the group's job).
+        let fs = c.clamped_font_scale();
+        let bar_h = m.comment_bar * fs * zoom;
+
+        // The body is opaque `elevated` and is NEVER washed — that is exactly
+        // what tells a comment from a group at any zoom.
         p.rect_filled(sr, round, st.palette.elevated);
         p.rect_stroke(
             sr,
             round,
             m.border,
-            if sel { st.palette.stroke_strong } else { st.palette.stroke },
+            if sel { st.palette.focus_ring } else { st.palette.stroke_strong },
         );
-        let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), m.comment_bar * zoom));
-        p.rect_filled(bar, round, st.palette.header);
-        let bar_px = annotation_px(st.fonts.small);
+
+        // Tint paints the NOTE bar's fill plus a 1px left edge, nothing else.
+        let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), bar_h));
+        let (bar_fill, label_col) = match c.tint {
+            Some(t) => (
+                ramp()[(t % 12) as usize].deep,
+                ramp()[(t % 12) as usize].bright,
+            ),
+            None => (st.palette.header, st.palette.text_secondary),
+        };
+        p.rect_filled(bar, round, bar_fill);
+        if let Some(t) = c.tint {
+            p.rect_filled(
+                Rect::from_min_size(sr.min, Vec2::new(m.border, sr.height())),
+                Rounding::ZERO,
+                ramp()[(t % 12) as usize].deep,
+            );
+        }
+        let bar_px = annotation_px(st.fonts.small * fs);
+        let tx = collapse_caret(&mut p, bar, c.collapsed, st, zoom, m);
         p.text_family(
-            sr.min + Vec2::new(m.pad_x * zoom, (m.comment_bar * zoom - bar_px) * 0.5),
+            Pos2::new(tx, sr.min.y + (bar_h - bar_px) * 0.5),
             "NOTE",
             bar_px,
-            st.palette.text_secondary,
+            label_col,
             None,
             FontFamily::Mono,
         );
-        // The body text itself is ordinary canvas text and follows the ladder.
-        if lod.glyphs() {
-            let px = st.fonts.small * zoom;
-            p.text(
-                sr.min + Vec2::new(m.pad_x * zoom, m.comment_bar * zoom + m.label_gap * zoom),
-                &c.text,
-                px,
-                st.palette.text_secondary,
-                Some((sr.width() - m.pad_x * 2.0 * zoom).max(1.0)),
+        // An anchored note says so: it is not free-floating, and that is the
+        // difference between a live annotation and a stale one.
+        if c.anchor.is_some() {
+            let d = m.pin_r * zoom;
+            p.circle_filled(
+                Pos2::new(sr.max.x - m.pad_x * zoom, sr.min.y + bar_h * 0.5),
+                d * 0.6,
+                label_col,
             );
         }
+
+        if sel && !c.collapsed {
+            draw_resize_handles(&mut p, sr, st, m);
+        }
+        if c.collapsed || !lod.glyphs() {
+            continue;
+        }
+        // Body text: plain, stored verbatim, with `#node` references drawn as
+        // chips (see `draw_comment_body`).
+        draw_comment_body(&mut p, st, m, sr, bar_h, c, fs, zoom);
     }
+}
+
+/// The `▾` / `▸` fold affordance at the left of an annotation bar. Returns the
+/// x where the bar's label should start.
+fn collapse_caret(
+    p: &mut Painter,
+    bar: Rect,
+    collapsed: bool,
+    st: &Style,
+    zoom: f32,
+    m: &GraphMetrics,
+) -> f32 {
+    let s = (m.pin_r * 0.8 * zoom).max(2.0);
+    let c = Pos2::new(bar.min.x + m.pad_x * zoom, bar.center().y);
+    let col = st.palette.text_secondary;
+    if collapsed {
+        // ▸
+        p.triangle(
+            Pos2::new(c.x - s * 0.5, c.y - s),
+            Pos2::new(c.x - s * 0.5, c.y + s),
+            Pos2::new(c.x + s * 0.7, c.y),
+            col,
+        );
+    } else {
+        // ▾
+        p.triangle(
+            Pos2::new(c.x - s, c.y - s * 0.5),
+            Pos2::new(c.x + s, c.y - s * 0.5),
+            Pos2::new(c.x, c.y + s * 0.7),
+            col,
+        );
+    }
+    bar.min.x + m.pad_x * zoom + s * 2.0
+}
+
+/// Comment body text with `#node` references rendered as inline chips.
+///
+/// The body is stored verbatim (the `Raw` philosophy — never reformat an
+/// author's text on load); the chips are a *rendering* of a reference, so a
+/// renamed or deleted node just stops resolving instead of corrupting text.
+#[allow(clippy::too_many_arguments)]
+fn draw_comment_body(
+    p: &mut Painter,
+    st: &Style,
+    m: &GraphMetrics,
+    sr: Rect,
+    bar_h: f32,
+    c: &crate::engine::node_graph::CommentBox,
+    fs: f32,
+    zoom: f32,
+) {
+    let px = st.fonts.small * fs * zoom;
+    let pad = m.pad_x * zoom;
+    let mut x = sr.min.x + pad;
+    let mut y = sr.min.y + bar_h + m.label_gap * zoom;
+    let line_h = px * 1.35;
+    let max_x = sr.max.x - pad;
+
+    for token in tokenize_comment(&c.text) {
+        match token {
+            CommentToken::Break => {
+                x = sr.min.x + pad;
+                y += line_h;
+                continue;
+            }
+            CommentToken::Text(t) => {
+                let w = p.measure_text(t, px, None).x;
+                if x + w > max_x && x > sr.min.x + pad {
+                    x = sr.min.x + pad;
+                    y += line_h;
+                }
+                if y + line_h > sr.max.y {
+                    return;
+                }
+                p.text(Pos2::new(x, y), t, px, st.palette.text_secondary, None);
+                x += w + p.measure_text(" ", px, None).x;
+            }
+            CommentToken::NodeRef(t) => {
+                let label = format!("#{t}");
+                let w = p.measure_text(&label, px, None).x + pad;
+                if x + w > max_x && x > sr.min.x + pad {
+                    x = sr.min.x + pad;
+                    y += line_h;
+                }
+                if y + line_h > sr.max.y {
+                    return;
+                }
+                let chip = Rect::from_min_size(
+                    Pos2::new(x, y - px * 0.15),
+                    Vec2::new(w, px * 1.25),
+                );
+                p.rect_filled(chip, Rounding::same(px * 0.3), st.palette.accent_soft);
+                p.text(
+                    Pos2::new(x + pad * 0.5, y),
+                    &label,
+                    px,
+                    st.palette.accent_active,
+                    None,
+                );
+                x += w + p.measure_text(" ", px, None).x;
+            }
+        }
+    }
+}
+
+/// A run of comment body text: plain words, `#node` references, and line
+/// breaks. Splitting is presentation-only — the stored text never changes.
+enum CommentToken<'a> {
+    Text(&'a str),
+    NodeRef(&'a str),
+    Break,
+}
+
+fn tokenize_comment(text: &str) -> Vec<CommentToken<'_>> {
+    let mut out = Vec::new();
+    for (li, line) in text.split('\n').enumerate() {
+        if li > 0 {
+            out.push(CommentToken::Break);
+        }
+        for word in line.split_whitespace() {
+            match word.strip_prefix('#') {
+                // `#` alone, or `#` followed by nothing usable, stays text.
+                Some(rest) if !rest.is_empty() => out.push(CommentToken::NodeRef(rest)),
+                _ => out.push(CommentToken::Text(word)),
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a `#node` reference: a node id, else the first node whose title
+/// slugifies to it. Unresolvable references simply do nothing when clicked.
+fn resolve_node_ref(state: &GraphEditorState, geoms: &[NodeGeom], token: &str) -> Option<u64> {
+    if let Ok(id) = token.parse::<u64>() {
+        if state.doc.node(id).is_some() {
+            return Some(id);
+        }
+    }
+    let want = token.to_lowercase();
+    geoms
+        .iter()
+        .find(|g| slugify(&g.title) == want)
+        .map(|g| g.id)
+}
+
+/// Lowercase, non-alphanumerics to `-` — the same shape a `#node-slug`
+/// reference is written in.
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut dash = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            for c in ch.to_lowercase() {
+                out.push(c);
+            }
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// The bar's fold-caret zone, in world space. It shares the bar with the drag
+/// gesture, so it claims the press first.
+fn caret_zone(bar: Rect, m: &GraphMetrics, zoom: f32) -> Rect {
+    let w = (m.pad_x + m.pin_r * 2.4).max(RESIZE_GRAB_PX / zoom.max(0.01));
+    Rect::from_min_size(bar.min, Vec2::new(w, bar.height()))
+}
+
+/// The height a comment's wrapped body needs. A comment auto-grows to its
+/// text and never shrinks below it; the width stays author-set.
+fn comment_min_h(c: &crate::engine::node_graph::CommentBox, m: &GraphMetrics) -> f32 {
+    let fs = c.clamped_font_scale();
+    let bar = m.comment_bar * fs;
+    // Cheap estimate rather than a text measurement: this is a *floor*, and
+    // the drawing pass clips to the box anyway. Roughly 1.9 chars per px of
+    // body font at the wrap width.
+    let px = BASE_TAG_PX * m.scale * fs * 1.2;
+    let cols = ((c.rect[2] - m.pad_x * 2.0) / (px * 0.52)).max(1.0);
+    let lines: f32 = c
+        .text
+        .split('\n')
+        .map(|l| (l.chars().count() as f32 / cols).ceil().max(1.0))
+        .sum();
+    bar + lines * px * 1.35 + m.body_pad * 2.0
+}
+
+/// The `#node` token under a world point, if the pointer is over a comment's
+/// body chip. Re-runs the body layout to find it, so the hit box can never
+/// disagree with what was drawn.
+fn comment_ref_at(
+    state: &GraphEditorState,
+    m: &GraphMetrics,
+    pw: Pos2,
+    st: &Style,
+    zoom: f32,
+    ui: &mut Ui,
+) -> Option<String> {
+    for c in state.doc.comments.iter().rev() {
+        if c.collapsed {
+            continue;
+        }
+        let wr = comment_rect(c, m);
+        if !wr.contains(pw) {
+            continue;
+        }
+        let fs = c.clamped_font_scale();
+        let bar_h = m.comment_bar * fs;
+        let px = st.fonts.small * fs;
+        let pad = m.pad_x;
+        let mut x = wr.min.x + pad;
+        let mut y = wr.min.y + bar_h + m.label_gap;
+        let line_h = px * 1.35;
+        let max_x = wr.max.x - pad;
+        let mut p = ui.painter();
+        let space = p.measure_text(" ", px * zoom, None).x / zoom.max(0.01);
+        for token in tokenize_comment(&c.text) {
+            match token {
+                CommentToken::Break => {
+                    x = wr.min.x + pad;
+                    y += line_h;
+                }
+                CommentToken::Text(t) => {
+                    let w = p.measure_text(t, px * zoom, None).x / zoom.max(0.01);
+                    if x + w > max_x && x > wr.min.x + pad {
+                        x = wr.min.x + pad;
+                        y += line_h;
+                    }
+                    x += w + space;
+                }
+                CommentToken::NodeRef(t) => {
+                    let label = format!("#{t}");
+                    let w = p.measure_text(&label, px * zoom, None).x / zoom.max(0.01) + pad;
+                    if x + w > max_x && x > wr.min.x + pad {
+                        x = wr.min.x + pad;
+                        y += line_h;
+                    }
+                    let chip = Rect::from_min_size(
+                        Pos2::new(x, y - px * 0.15),
+                        Vec2::new(w, px * 1.25),
+                    );
+                    if chip.contains(pw) {
+                        return Some(t.to_string());
+                    }
+                    x += w + space;
+                }
+            }
+        }
+        // The pointer was inside this comment; nothing behind it can match.
+        return None;
+    }
+    None
+}
+
+/// A comment's drawn rect: collapsed folds it to its NOTE bar.
+fn comment_rect(c: &crate::engine::node_graph::CommentBox, m: &GraphMetrics) -> Rect {
+    let h = if c.collapsed {
+        m.comment_bar * c.clamped_font_scale()
+    } else {
+        c.rect[3]
+    };
+    Rect::from_min_size(Pos2::new(c.rect[0], c.rect[1]), Vec2::new(c.rect[2], h))
+}
+
+/// A group's drawn rect: collapsed folds it to its title bar.
+fn group_rect(g: &crate::engine::node_graph::GroupBox, m: &GraphMetrics) -> Rect {
+    let h = if g.collapsed { m.group_bar } else { g.rect[3] };
+    Rect::from_min_size(Pos2::new(g.rect[0], g.rect[1]), Vec2::new(g.rect[2], h))
 }
 
 /// One wire's resolved geometry for this frame: the endpoints the router
