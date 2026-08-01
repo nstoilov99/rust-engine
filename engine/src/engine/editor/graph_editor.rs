@@ -145,7 +145,19 @@ impl GraphEdit {
             }
             GraphEdit::Connect(e) => doc.edges.push(e.clone()),
             GraphEdit::Disconnect { edges } => {
-                doc.edges.retain(|x| !edges.iter().any(|(_, e)| e == x))
+                // By recorded index, not by equality: two edges can share a
+                // from/to tuple (an output fans out, and an identical pair is
+                // representable), and removing by value would take both while
+                // undo restores one.
+                let mut doomed: Vec<usize> = edges
+                    .iter()
+                    .filter(|(i, e)| doc.edges.get(*i) == Some(e))
+                    .map(|(i, _)| *i)
+                    .collect();
+                doomed.sort_unstable();
+                for i in doomed.into_iter().rev() {
+                    doc.edges.remove(i);
+                }
             }
             GraphEdit::MoveNodes { ids, delta } => move_nodes(doc, ids, *delta),
             GraphEdit::Paste { nodes, edges } => {
@@ -387,6 +399,28 @@ fn move_nodes(doc: &mut GraphDoc, ids: &[u64], delta: [f32; 2]) {
     }
 }
 
+/// Round every position and annotation rect to whole pixels, in place and
+/// **without reordering anything**. The disk form additionally sorts nodes by
+/// id; that part stays out of memory because undo indexes into these vecs.
+fn snap_positions(doc: &mut GraphDoc) {
+    fn px(v: f32) -> f32 {
+        if v.is_finite() {
+            v.round()
+        } else {
+            0.0
+        }
+    }
+    for n in doc.nodes.iter_mut() {
+        n.position = [px(n.position[0]), px(n.position[1])];
+    }
+    for c in doc.comments.iter_mut() {
+        c.rect = c.rect.map(px);
+    }
+    for g in doc.groups.iter_mut() {
+        g.rect = g.rect.map(px);
+    }
+}
+
 /// A slug not already used by `taken`, suffixed `_2`, `_3`, ... A fan-out
 /// from one source pin collapses to one interface pin; two *different* pins
 /// that happen to share a slug do not.
@@ -532,6 +566,9 @@ pub const FRAGMENT_KIND: &str = "crusty.graph.fragment";
 /// Fragment schema version. Bump when the shape changes; older payloads are
 /// rejected rather than half-read.
 pub const FRAGMENT_VERSION: u32 = 1;
+/// Largest clipboard payload worth parsing. A real fragment is kilobytes;
+/// this only exists so arbitrary clipboard content cannot cost real time.
+pub const MAX_CLIPBOARD_BYTES: usize = 4 * 1024 * 1024;
 
 /// A copied slice of a graph: nodes, the edges internal to them, and the
 /// annotations that came along. Ids are remapped on paste, so a fragment can
@@ -579,6 +616,20 @@ impl GraphFragment {
     /// one of our fragments — arbitrary text, other RON, a future version —
     /// returns `None` instead of erroring or panicking.
     pub fn from_ron(text: &str) -> Option<Self> {
+        // The system clipboard is arbitrary input. Cap it before parsing:
+        // a graph fragment is small, and a paste should not be able to make
+        // the editor chew through a hundred megabytes of someone else's
+        // text. (Nesting depth is already bounded — `ron` inherits serde's
+        // recursion limit of 128, so a deeply-nested payload errors out
+        // rather than blowing the stack; size is the part left to us.)
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            println!(
+                "graph: ignoring a {} MB clipboard payload (cap is {} MB)",
+                text.len() / 1_000_000,
+                MAX_CLIPBOARD_BYTES / 1_000_000
+            );
+            return None;
+        }
         let env: FragmentEnvelope = ron::from_str(text).ok()?;
         (env.kind == FRAGMENT_KIND && env.version == FRAGMENT_VERSION).then_some(env.fragment)
     }
@@ -766,6 +817,10 @@ pub struct GraphEditorState {
     pub palette: Option<PaletteState>,
     /// Find-in-graph overlay (session-only).
     pub find: Option<FindState>,
+    /// Screen rect of whichever overlay (palette / find) drew last frame, as
+    /// `[x, y, w, h]`. Overlays paint after the canvas, so the canvas pass
+    /// reads last frame's rect to know not to claim a press underneath one.
+    pub overlay_rect: Option<[f32; 4]>,
     /// Frames drawn, for round-robin budgets (preview slots today).
     pub frame: u64,
     /// Set when a graph opened with no remembered view: the first draw frames
@@ -945,6 +1000,11 @@ pub const ANNOTATION_MIN_H: f32 = 40.0;
 pub struct NodeDrag {
     pub origin_world: [f32; 2],
     pub originals: Vec<(u64, [f32; 2])>,
+    /// An edit already applied to the doc but **not yet recorded**, waiting
+    /// to be folded into this gesture's single undo entry. Grabbing a wire's
+    /// midpoint inserts a reroute and drags it: that is one gesture, so it is
+    /// one entry. Cancelling reverts it instead of recording it.
+    pub pending: Option<GraphEdit>,
     /// Comments anchored to the dragged nodes: index + rect origin at drag
     /// start, so the note tracks its node live instead of snapping on release.
     pub anchored: Vec<(usize, [f32; 2])>,
@@ -1050,6 +1110,7 @@ impl GraphEditorState {
             node_menu: None,
             palette: None,
             find: None,
+            overlay_rect: None,
             frame: 0,
             frame_all_on_open: false,
         })
@@ -1057,6 +1118,15 @@ impl GraphEditorState {
 
     /// Serialize and write the doc back to disk, clearing the dirty flag.
     pub fn save(&mut self, abs_path: &std::path::Path) -> Result<(), String> {
+        // Snap positions in memory to what actually went to disk. Saving
+        // writes a rounded clone, so leaving sub-pixel values in memory means
+        // "clean" would describe content the file does not contain — undo,
+        // redo, or a later save would silently disagree with the disk.
+        //
+        // Only the positions are snapped, never the vec order: the undo stack
+        // addresses nodes and edges by index, and `canonical_form`'s sort is
+        // a serialization concern that must not reach the live document.
+        snap_positions(&mut self.doc);
         save_graph(abs_path, &self.doc).map_err(|e| e.to_string())?;
         self.stack.mark_saved();
         self.dirty = false;
@@ -1077,17 +1147,35 @@ impl GraphEditorState {
     }
 
     pub fn undo(&mut self, registry: &NodeRegistry) {
+        // Abandon any half-finished gesture first. Its edits are either
+        // un-recorded (a midpoint grab's insert) or about to be recorded
+        // against state undo is rewriting; either way "undo" should mean
+        // "take back what I am doing" before it means "take back what I did".
+        let had_gesture = self.gesture_in_flight();
+        self.cancel_interactions();
         if self.stack.undo(&mut self.doc).is_some() {
             self.prune_selection();
+            self.after_edit(registry);
+        } else if had_gesture {
             self.after_edit(registry);
         }
     }
 
     pub fn redo(&mut self, registry: &NodeRegistry) {
+        self.cancel_interactions();
         if self.stack.redo(&mut self.doc).is_some() {
             self.prune_selection();
             self.after_edit(registry);
         }
+    }
+
+    /// Is a gesture mid-flight — one whose edits are not on the stack yet?
+    pub fn gesture_in_flight(&self) -> bool {
+        self.node_drag.is_some()
+            || self.annotation_drag.is_some()
+            || self.annotation_resize.is_some()
+            || self.prop_edit.is_some()
+            || self.cut_path.is_some()
     }
 
     /// Drop selection entries whose node no longer exists, and clear
@@ -1441,9 +1529,18 @@ impl GraphEditorState {
     /// it. A reroute has no descriptor — its type is inferred from whatever
     /// feeds it — so nothing needs registering.
     pub fn insert_reroute(&mut self, edge: &Edge, pos: [f32; 2], registry: &NodeRegistry) {
-        let Some(index) = self.doc.edges.iter().position(|e| e == edge) else {
+        let Some(edit) = self.reroute_insert_edit(edge, pos) else {
             return;
         };
+        edit.apply(&mut self.doc);
+        let id = self.doc.nodes.last().map(|n| n.id).unwrap_or_default();
+        self.select_only(id);
+        self.commit(edit, registry);
+    }
+
+    /// Build (but do not apply) the reroute-insert transaction.
+    fn reroute_insert_edit(&self, edge: &Edge, pos: [f32; 2]) -> Option<GraphEdit> {
+        let index = self.doc.edges.iter().position(|e| e == edge)?;
         let id = self.doc.next_node_id();
         let node = NodeInst {
             id,
@@ -1454,7 +1551,7 @@ impl GraphEditorState {
             subgraph: None,
             tint: None,
         };
-        let edit = GraphEdit::Composite {
+        Some(GraphEdit::Composite {
             label: "Add Reroute".to_string(),
             edits: vec![
                 GraphEdit::Disconnect { edges: vec![(index, edge.clone())] },
@@ -1472,10 +1569,7 @@ impl GraphEditorState {
                     to_pin: edge.to_pin.clone(),
                 }),
             ],
-        };
-        edit.apply(&mut self.doc);
-        self.select_only(id);
-        self.commit(edit, registry);
+        })
     }
 
     /// Splice an existing node into `edge`: the edge is replaced by two, one
@@ -1499,10 +1593,25 @@ impl GraphEditorState {
         if edge.from_node == node || edge.to_node == node {
             return false;
         }
+        // The chosen input may already be taken; a second drop replaces the
+        // edge rather than fanning in. Both removals go in the same
+        // Composite, highest index first so neither shifts the other.
+        let mut doomed: Vec<(usize, Edge)> = vec![(index, edge.clone())];
+        doomed.extend(
+            self.doc
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(i, e)| {
+                    *i != index && e.to_node == node && e.to_pin == in_pin
+                })
+                .map(|(i, e)| (i, e.clone())),
+        );
+        doomed.sort_by_key(|(i, _)| *i);
         let edit = GraphEdit::Composite {
             label: "Splice Node".to_string(),
             edits: vec![
-                GraphEdit::Disconnect { edges: vec![(index, edge.clone())] },
+                GraphEdit::Disconnect { edges: doomed },
                 GraphEdit::Connect(Edge {
                     from_node: edge.from_node,
                     from_pin: edge.from_pin.clone(),
@@ -1538,7 +1647,20 @@ impl GraphEditorState {
         let ty = endpoint_type(&self.doc, registry, edge.from_node, &edge.from_pin, true)?;
         let n = self.doc.node(node)?;
         let desc = registry.get(&n.type_id)?;
-        let input = desc.inputs.iter().find(|p| p.ty == ty)?;
+        // An input takes exactly one edge, so prefer a free one; only fall
+        // back to an occupied pin, whose existing edge the splice replaces.
+        // Picking blind would emit `InputMultiplyConnected` — an illegal
+        // graph produced by a gesture the user thought was a convenience.
+        let occupied = |slug: &str| {
+            self.doc
+                .edges
+                .iter()
+                .any(|e| e.to_node == node && e.to_pin == slug)
+        };
+        let typed = || desc.inputs.iter().filter(|p| p.ty == ty);
+        let input = typed()
+            .find(|p| !occupied(&p.slug))
+            .or_else(|| typed().next())?;
         let output = desc.outputs.iter().find(|p| p.ty == ty)?;
         Some((input.slug.clone(), output.slug.clone()))
     }
@@ -1551,14 +1673,29 @@ impl GraphEditorState {
         at: [f32; 2],
         registry: &NodeRegistry,
     ) -> Option<u64> {
-        self.insert_reroute(edge, at, registry);
+        let insert = self.reroute_insert_edit(edge, at)?;
+        insert.apply(&mut self.doc);
         let id = self.doc.nodes.last().map(|n| n.id)?;
+        self.select_only(id);
+        self.after_edit(registry);
+        // Applied but not recorded: `finish_node_drag` folds it together with
+        // the move into one entry, so grab-and-move is one undo.
         self.node_drag = Some(NodeDrag {
             origin_world: at,
             originals: vec![(id, self.doc.node(id)?.position)],
             anchored: Vec::new(),
+            pending: Some(insert),
         });
         Some(id)
+    }
+
+    /// Revert a drag's un-recorded edit, if it has one. Called when a gesture
+    /// is abandoned rather than finished — an applied-but-unrecorded edit
+    /// would otherwise be invisible to undo.
+    fn revert_pending_drag(&mut self) {
+        if let Some(pending) = self.node_drag.as_mut().and_then(|d| d.pending.take()) {
+            pending.revert(&mut self.doc);
+        }
     }
 
     /// Delete a reroute, healing the wire through it. Every downstream branch
@@ -2221,6 +2358,7 @@ impl GraphEditorState {
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
     pub fn cancel_interactions(&mut self) {
+        self.revert_pending_drag();
         self.node_drag = None;
         self.annotation_drag = None;
         self.connect_drag = None;
@@ -2487,11 +2625,23 @@ pub fn prop_display(v: &PropValue) -> String {
     }
 }
 
+/// Test-only helpers that reach into the panel's gesture finishers, so a
+/// state-level test can exercise a whole drag without a `Ui`.
+#[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    /// The panel's `finish_node_drag`, in the one shape a state test needs.
+    pub fn finish_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
+        super::super::graph_editor_crusty::finish_node_drag_for_test(state, registry);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::node_graph::doc::GraphDoc;
-    use crate::engine::node_graph::{GraphError, NodeDescriptor};
+    use crate::engine::node_graph::{validate_doc, GraphError, NodeDescriptor};
 
     fn node(id: u64, pos: [f32; 2]) -> NodeInst {
         NodeInst {
@@ -3361,8 +3511,15 @@ mod tests {
         let drag = st.node_drag.as_ref().expect("a drag is live");
         assert_eq!(drag.originals.len(), 1);
         assert_eq!(drag.originals[0].0, id, "the new reroute is what is dragging");
+        assert!(
+            drag.pending.is_some(),
+            "the insert is applied but held back until the gesture ends"
+        );
 
-        // Undo removes the reroute; the drag was cancelled with it.
+        // Undoing mid-gesture cancels the drag and takes the un-recorded
+        // insert with it — grab-and-move is one gesture, so a half-finished
+        // one leaves nothing behind. (The completed-gesture case is
+        // `midpoint_grab_and_drag_is_one_undo_entry`.)
         st.undo(&reg);
         assert_eq!(st.doc.edges.len(), 1);
         assert!(st.node_drag.is_none(), "undo cancels the live drag");
@@ -3408,6 +3565,204 @@ mod tests {
         lone.doc.nodes = vec![node(0, [0.0, 0.0])];
         lone.auto_layout(&[(0, [0.0, 0.0, 100.0, 40.0])], LayoutSpacing::default(), &reg);
         assert!(!lone.stack.can_undo());
+    }
+
+    /// Review finding 5 (HIGH). `Disconnect` must remove the *recorded
+    /// indices*, not everything that compares equal: two edges can carry the
+    /// same from/to tuple, and removing by value took both while undo
+    /// restored one.
+    #[test]
+    fn disconnect_removes_by_index_not_by_value() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [10.0, 0.0])];
+        // Two identical tuples — representable, if degenerate.
+        st.doc.edges = vec![edge(0, 1), edge(0, 1), edge(1, 0)];
+        let before = st.doc.clone();
+
+        let edit = GraphEdit::Disconnect { edges: vec![(0, edge(0, 1))] };
+        edit.apply(&mut st.doc);
+        assert_eq!(st.doc.edges.len(), 2, "exactly one edge was removed");
+        assert_eq!(st.doc.edges[0], edge(0, 1), "the duplicate survived");
+        edit.revert(&mut st.doc);
+        assert_eq!(st.doc, before, "and undo restores exactly one");
+
+        // A stale index whose tuple no longer matches is skipped rather than
+        // removing whatever now sits there.
+        let stale = GraphEdit::Disconnect { edges: vec![(2, edge(0, 1))] };
+        stale.apply(&mut st.doc);
+        assert_eq!(st.doc.edges.len(), 3, "a mismatched index removes nothing");
+        let _ = reg;
+    }
+
+    /// Review finding 2 (HIGH). Saving writes rounded positions; leaving
+    /// sub-pixel values in memory made "clean" describe content the file does
+    /// not contain.
+    #[test]
+    fn save_snaps_positions_so_clean_means_clean() {
+        let dir = std::env::temp_dir().join("rust_engine_save_snap_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("g.graph");
+
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [10.4, -3.6]), node(1, [0.5, 0.5])];
+        st.doc.comments = vec![comment(2.7)];
+        st.save(&path).unwrap();
+
+        // In memory now matches what went to disk, exactly.
+        assert_eq!(st.doc.nodes[0].position, [10.0, -4.0]);
+        assert_eq!(st.doc.nodes[1].position, [1.0, 1.0]);
+        assert_eq!(st.doc.comments[0].rect[0], 3.0);
+        let on_disk = crate::engine::node_graph::load_graph(&path).unwrap();
+        assert_eq!(
+            crate::engine::node_graph::serialize_graph(&on_disk).unwrap(),
+            crate::engine::node_graph::serialize_graph(&st.doc).unwrap(),
+            "a clean document must serialize to what the file holds"
+        );
+        assert!(!st.dirty);
+        // Order is untouched — the undo stack indexes into these vecs.
+        assert_eq!(st.doc.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![0, 1]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review finding 3 (HIGH). Dropping a node on a wire must never produce
+    /// input fan-in: a free pin is preferred, and an occupied one has its
+    /// existing edge replaced inside the same transaction.
+    #[test]
+    fn splice_never_creates_input_fan_in() {
+        use crate::engine::node_graph::{PinDescriptor, PinType};
+        let mut reg = NodeRegistry::new();
+        // The wire's source needs a known type too, or the splice cannot
+        // resolve what flows through it.
+        reg.register(NodeDescriptor {
+            id: "test_add".into(),
+            name: "Add".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![PinDescriptor::new("a", "A", PinType::Float)],
+            outputs: vec![PinDescriptor::new("sum", "Sum", PinType::Float)],
+            pure: true,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+        reg.register(NodeDescriptor {
+            id: "two_in".into(),
+            name: "Two In".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![
+                PinDescriptor::new("a", "A", PinType::Float),
+                PinDescriptor::new("b", "B", PinType::Float),
+            ],
+            outputs: vec![PinDescriptor::new("sum", "Sum", PinType::Float)],
+            pure: true,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+
+        let mut st = bare_state();
+        st.doc.nodes = vec![
+            node(0, [0.0, 0.0]),
+            node(1, [400.0, 0.0]),
+            node(2, [200.0, 80.0]),
+            node(3, [0.0, 200.0]),
+        ];
+        st.doc.nodes[2].type_id = "two_in".into();
+        // Pin "a" of the splice target is already fed by node 3.
+        st.doc.edges = vec![
+            edge(0, 1),
+            Edge { from_node: 3, from_pin: "sum".into(), to_node: 2, to_pin: "a".into() },
+        ];
+
+        // The free pin is chosen, so nothing has to be replaced.
+        let (i, o) = st.splice_pins(&edge(0, 1), 2, &reg).unwrap();
+        assert_eq!(i, "b", "an unconnected input is preferred");
+        assert!(st.splice_node_into(&edge(0, 1), 2, &i, &o, &reg));
+        assert!(
+            validate_doc(&st.doc, &reg)
+                .iter()
+                .all(|e| !matches!(e, GraphError::InputMultiplyConnected { .. })),
+            "{:?}",
+            validate_doc(&st.doc, &reg)
+        );
+        st.undo(&reg);
+
+        // With every matching input taken, the splice replaces rather than
+        // fanning in — still one transaction.
+        st.doc.edges.push(Edge {
+            from_node: 3,
+            from_pin: "sum".into(),
+            to_node: 2,
+            to_pin: "b".into(),
+        });
+        let before = st.doc.clone();
+        let (i, o) = st.splice_pins(&edge(0, 1), 2, &reg).unwrap();
+        assert!(st.splice_node_into(&edge(0, 1), 2, &i, &o, &reg));
+        let errs = validate_doc(&st.doc, &reg);
+        assert!(
+            errs.iter().all(|e| !matches!(e, GraphError::InputMultiplyConnected { .. })),
+            "splice fanned in: {errs:?}"
+        );
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "still one undo entry");
+
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("nothing"));
+    }
+
+    /// Review finding 6 (MED). Grabbing a wire's midpoint and dragging is one
+    /// gesture, so it is one undo entry — and abandoning it leaves nothing
+    /// behind.
+    #[test]
+    fn midpoint_grab_and_drag_is_one_undo_entry() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1)];
+        let before = st.doc.clone();
+
+        let id = st.grab_wire_midpoint(&edge(0, 1), [200.0, 0.0], &reg).unwrap();
+        // The insert is applied but not yet recorded.
+        assert!(!st.stack.can_undo(), "nothing is recorded mid-gesture");
+        assert_eq!(st.doc.nodes.len(), 3);
+
+        // Move it, then release.
+        st.doc.node_mut(id).unwrap().position = [220.0, 40.0];
+        crate::engine::editor::graph_editor::tests_support::finish_drag(&mut st, &reg);
+        assert!(st.stack.can_undo());
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "insert + move undo together");
+        assert!(!st.stack.can_undo(), "and there is no second entry");
+
+        // Abandoning the gesture reverts the applied-but-unrecorded insert.
+        st.grab_wire_midpoint(&edge(0, 1), [200.0, 0.0], &reg).unwrap();
+        assert_eq!(st.doc.nodes.len(), 3);
+        st.cancel_interactions();
+        assert_eq!(st.doc, before, "a cancelled grab leaves nothing behind");
+        assert!(!st.stack.can_undo());
+    }
+
+    /// Review finding 12 (LOW). An oversized clipboard payload is refused
+    /// before it is parsed.
+    #[test]
+    fn oversized_clipboard_payload_is_refused() {
+        let huge = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert!(GraphFragment::from_ron(&huge).is_none());
+        // A real fragment is nowhere near the cap and still parses.
+        let frag = GraphFragment {
+            nodes: vec![node(0, [0.0, 0.0])],
+            ..Default::default()
+        };
+        let text = frag.to_ron().unwrap();
+        assert!(text.len() < MAX_CLIPBOARD_BYTES);
+        assert_eq!(GraphFragment::from_ron(&text), Some(frag));
     }
 
     /// Group-drag capture selects exactly the nodes whose centers lie inside
@@ -3655,6 +4010,7 @@ mod tests {
             node_menu: None,
             palette: None,
             find: None,
+            overlay_rect: None,
             frame: 0,
             frame_all_on_open: false,
         }
@@ -3673,6 +4029,7 @@ mod tests {
             origin_world: [0.0, 0.0],
             originals: vec![(0, [0.0, 0.0])],
             anchored: Vec::new(),
+            pending: None,
         });
         st.undo(&reg);
         assert!(st.node_drag.is_none(), "undo must cancel the live node drag");

@@ -4138,6 +4138,16 @@ impl App {
         };
         let reg = &scene.node_registry;
         let clip = &mut scene.graph_clipboard;
+        // Never act across a half-finished gesture: undo/redo/save would
+        // otherwise skip an untracked mutation, or mark a save cursor over
+        // content the file does not have. `undo`/`redo` abandon a live
+        // gesture themselves; everything else here wants it committed.
+        if !matches!(action, EditorAction::Undo | EditorAction::Redo)
+            && st.gesture_in_flight()
+        {
+            st.flush_prop_edit(reg);
+            st.cancel_interactions();
+        }
         match action {
             EditorAction::Undo => st.undo(reg),
             EditorAction::Redo => st.redo(reg),
@@ -4158,7 +4168,17 @@ impl App {
     /// Save the graph editor `key` to disk, reporting failures to the console.
     #[cfg(feature = "editor")]
     fn save_graph_editor(&mut self, key: &str) {
+        // A save is also a natural point to remember where the author is
+        // looking, and costs nothing next to the file write.
+        self.persist_graph_ui_state(key);
         if let Some(st) = self.editor.scene.graph_editors.get_mut(key) {
+            // A save cursor must describe committed content, so any live
+            // gesture is settled before the write.
+            if st.gesture_in_flight() {
+                let reg = &self.editor.scene.node_registry;
+                st.flush_prop_edit(reg);
+                st.cancel_interactions();
+            }
             let abs = std::path::Path::new("content").join(&st.path);
             if let Err(e) = st.save(&abs) {
                 self.editor
@@ -4178,7 +4198,25 @@ impl App {
         for fw in self.crusty_floats.values_mut() {
             fw.tree.close_tab(&tab);
         }
+        // Persist the view and bookmarks *before* the state goes: closing a
+        // tab after only panning would otherwise lose both, since the prefs
+        // autosave that normally carries them never fired.
+        self.persist_graph_ui_state(key);
         self.editor.scene.graph_editors.remove(key);
+    }
+
+    /// Write one graph's view + bookmarks to the user-local sidecar.
+    #[cfg(feature = "editor")]
+    fn persist_graph_ui_state(&mut self, key: &str) {
+        let Some(st) = self.editor.scene.graph_editors.get(key) else {
+            return;
+        };
+        let root = std::path::Path::new("content");
+        let mut store = GraphStateStore::load(root);
+        store.store(key, st.view, &st.bookmarks);
+        if let Err(e) = store.save() {
+            eprintln!("Warning: failed to save graph UI state: {e}");
+        }
     }
 
     /// Open a graph document by content-relative key: focus it if already

@@ -599,6 +599,34 @@ fn middle_truncate(p: &mut Painter, s: &str, px: f32, max_w: f32) -> String {
     best
 }
 
+/// Which pins of which nodes have an edge on them, indexed once per frame.
+///
+/// The naive form — asking the edge vector per pin per node — is O(nodes x
+/// edges) every frame whether or not anything is on screen, which is the
+/// first thing to fall over on a large graph. One pass builds this instead.
+#[derive(Default)]
+struct IncidentEdges<'a> {
+    incoming: BTreeMap<u64, BTreeSet<&'a str>>,
+    outgoing: BTreeMap<u64, BTreeSet<&'a str>>,
+}
+
+impl<'a> IncidentEdges<'a> {
+    fn build(edges: &'a [Edge]) -> Self {
+        let mut ix = Self::default();
+        for e in edges {
+            ix.incoming
+                .entry(e.to_node)
+                .or_default()
+                .insert(e.to_pin.as_str());
+            ix.outgoing
+                .entry(e.from_node)
+                .or_default()
+                .insert(e.from_pin.as_str());
+        }
+        ix
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_geoms(
     state: &GraphEditorState,
@@ -611,6 +639,7 @@ fn build_geoms(
 ) -> Vec<NodeGeom> {
     let title_px = st.fonts.body;
     let label_px = st.fonts.small;
+    let incident = IncidentEdges::build(&state.doc.edges);
 
     state
         .doc
@@ -732,23 +761,13 @@ fn build_geoms(
                 + tag_w
                 + m.pad_x;
 
-            // One pass over the incident edges instead of a scan per pin:
-            // this was O(pins x edges) per node per frame, which is the churn
-            // that shows up first on a large graph.
-            let incoming: BTreeSet<&str> = state
-                .doc
-                .edges
-                .iter()
-                .filter(|e| e.to_node == n.id)
-                .map(|e| e.to_pin.as_str())
-                .collect();
-            let outgoing: BTreeSet<&str> = state
-                .doc
-                .edges
-                .iter()
-                .filter(|e| e.from_node == n.id)
-                .map(|e| e.from_pin.as_str())
-                .collect();
+            // Looked up, not scanned: the index below is built in one pass
+            // over the edge vector for the whole frame, so this is O(1) per
+            // node instead of O(edges) — the difference between linear and
+            // quadratic at the stated 2,000-node / 5,000-edge budget.
+            let empty: BTreeSet<&str> = BTreeSet::new();
+            let incoming = incident.incoming.get(&n.id).unwrap_or(&empty);
+            let outgoing = incident.outgoing.get(&n.id).unwrap_or(&empty);
             let inline_of = |slug: &str| -> Option<InlineKind> {
                 if incoming.contains(slug) {
                     return None;
@@ -1054,19 +1073,24 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         handle_shortcuts,
     } = ctx;
 
-    if handle_shortcuts && focused {
-        handle_panel_keys(ui, state, registry, clipboard);
-    }
-
     // Finalize a gesture orphaned by a release that landed while this tab was
     // not being drawn (e.g. the user switched tabs mid-drag): the pointer is
     // already up on re-entry, so `draw_and_interact`'s in-body finish never
     // ran. Finalizing (vs reverting) keeps the edit the user made — the
     // simpler correct choice. No-op when nothing is in flight.
+    //
+    // This runs **before** the shortcut handler: undo, redo and save must
+    // never act across a half-finished gesture, or they would either skip an
+    // untracked mutation or mark a save cursor over content the file does not
+    // have.
     if !ui.ctx().input.pointer_down {
         finish_node_drag(state, registry);
         finish_annotation_drag(state, registry);
         state.flush_prop_edit(registry);
+    }
+
+    if handle_shortcuts && focused {
+        handle_panel_keys(ui, state, registry, clipboard);
     }
 
     // The graph toolbar sits above the canvas and takes its row out of the
@@ -1167,12 +1191,24 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     }
 }
 
+/// Is a text field or overlay holding the keyboard right now?
+///
+/// One predicate, consumed by every canvas key gate, so a shortcut can never
+/// be added that forgets one of them: typing `c` in the palette's search must
+/// add a letter, not a group.
+fn overlay_has_focus(state: &GraphEditorState) -> bool {
+    state.palette.is_some() || state.find.is_some() || state.editing.is_some()
+}
+
 fn handle_panel_keys(
     ui: &Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
     clipboard: &mut Option<GraphFragment>,
 ) {
+    if overlay_has_focus(state) {
+        return;
+    }
     let (ctrl, shift, del, z, y, c, v, d, s) = {
         let input = &ui.ctx().input;
         let ctrl = input.modifiers.contains(Modifiers::CTRL);
@@ -1307,6 +1343,7 @@ fn draw_and_interact(
         &wires,
         hovered_wire.or(splice_target),
         &cut_preview,
+        Some(registry),
         wire_prefs,
         &st,
         lod,
@@ -1344,13 +1381,19 @@ fn draw_and_interact(
     let shift = mods.contains(Modifiers::SHIFT);
     let alt = mods.contains(Modifiers::ALT);
     let ctrl = mods.contains(Modifiers::CTRL);
-    let widget_claimed = pointer_screen
-        .is_some_and(|p| widget_rects.iter().any(|r| r.contains(p)));
+    let over_overlay = match (pointer_screen, state.overlay_rect) {
+        (Some(p), Some(r)) => {
+            Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3])).contains(p)
+        }
+        _ => false,
+    };
+    let widget_claimed = over_overlay
+        || pointer_screen.is_some_and(|p| widget_rects.iter().any(|r| r.contains(p)));
 
     // Frame shortcuts (DCC F/A). Fire only while the pointer is over the
     // canvas, no inline text edit is active, and **no modifier is held** —
     // otherwise Ctrl+A / Ctrl+F over the canvas also framed the view.
-    if pointer_world.is_some() && state.editing.is_none() && mods.is_empty() {
+    if pointer_world.is_some() && !overlay_has_focus(state) && mods.is_empty() {
         let (frame_all, frame_sel) = {
             let input = &ui.ctx().input;
             (input.key_pressed(Key::Char('a')), input.key_pressed(Key::Char('f')))
@@ -1665,7 +1708,7 @@ fn draw_and_interact(
                 .map(|i| (i, [state.doc.comments[i].rect[0], state.doc.comments[i].rect[1]]))
                 .collect();
             state.node_drag =
-                Some(NodeDrag { origin_world: [pw.x, pw.y], originals, anchored });
+                Some(NodeDrag { origin_world: [pw.x, pw.y], originals, anchored, pending: None });
         }
     }
 
@@ -2048,7 +2091,7 @@ fn draw_and_interact(
     // Organization keys (Windows mapping): C groups the selection, Shift+C
     // drops a note at the pointer. Canvas-hovered only, and never while an
     // inline editor owns the keyboard.
-    if pointer_world.is_some() && state.editing.is_none() {
+    if pointer_world.is_some() && !overlay_has_focus(state) {
         let (c_key, shift_only, no_mods) = {
             let input = &ui.ctx().input;
             (
@@ -2245,6 +2288,7 @@ fn find_overlay(
     let Some(find) = state.find.clone() else {
         return;
     };
+    // Published for the next frame's canvas pass — see `overlay_rect`.
     let st = ui.style();
     let pad = st.spacing.padding;
     let w = (rect.width() * 0.32).clamp(180.0, 360.0);
@@ -2252,6 +2296,7 @@ fn find_overlay(
         Pos2::new(rect.center().x - w * 0.5, rect.min.y + pad),
         Vec2::new(w, st.metrics.control_height + pad),
     );
+    state.overlay_rect = Some([panel.min.x, panel.min.y, panel.width(), panel.height()]);
     {
         let mut p = ui.painter();
         p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
@@ -2279,6 +2324,7 @@ fn find_overlay(
     );
     if cancelled || ui.ctx().input.key_pressed(Key::Escape) {
         state.find = None;
+        state.overlay_rect = None;
         return;
     }
 
@@ -2736,6 +2782,9 @@ fn palette_popover(
     subgraph_assets: &[String],
 ) {
     let Some(p) = state.palette.clone() else {
+        if state.find.is_none() {
+            state.overlay_rect = None;
+        }
         return;
     };
     let st = ui.style();
@@ -2776,6 +2825,8 @@ fn palette_popover(
         Pos2::new(p.screen[0], p.screen[1]),
         Vec2::new(w, head_h + list_h + foot_h + pad * 2.0),
     );
+
+    state.overlay_rect = Some([rect.min.x, rect.min.y, rect.width(), rect.height()]);
 
     // E3: translucent only here, simple alpha, no blur.
     {
@@ -3678,6 +3729,7 @@ fn draw_wires(
     wires: &[WireGeom],
     hovered: Option<usize>,
     cut_preview: &BTreeSet<usize>,
+    registry: Option<&NodeRegistry>,
     prefs: &WirePrefs,
     st: &Style,
     lod: ZoomLod,
@@ -3706,7 +3758,7 @@ fn draw_wires(
         } else if is_hovered {
             st.palette.focus_ring
         } else {
-            wire_color(None, &w.ty)
+            wire_color(registry, &w.ty)
         };
         // L4 collapses every wire to a hairline.
         let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
@@ -4500,8 +4552,17 @@ fn auto_connect(
     state.commit(edit, registry);
 }
 
+/// `finish_node_drag` for state-level tests, which have no `Ui` to drive.
+#[cfg(test)]
+pub(super) fn finish_node_drag_for_test(
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+) {
+    finish_node_drag(state, registry)
+}
+
 fn finish_node_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
-    let Some(drag) = state.node_drag.take() else {
+    let Some(mut drag) = state.node_drag.take() else {
         return;
     };
     let ids: Vec<u64> = drag.originals.iter().map(|(id, _)| *id).collect();
@@ -4515,8 +4576,22 @@ fn finish_node_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
                 .map(|n| [n.position[0] - start[0], n.position[1] - start[1]])
         })
         .unwrap_or([0.0, 0.0]);
-    if delta[0].abs() > f32::EPSILON || delta[1].abs() > f32::EPSILON {
-        state.commit(GraphEdit::MoveNodes { ids, delta }, registry);
+    let moved = delta[0].abs() > f32::EPSILON || delta[1].abs() > f32::EPSILON;
+    let mv = moved.then_some(GraphEdit::MoveNodes { ids, delta });
+
+    // A midpoint grab applied its reroute insert without recording it, so
+    // that the whole gesture — insert *and* move — is one undo entry.
+    match (drag.pending.take(), mv) {
+        (Some(pending), Some(mv)) => {
+            let label = pending.description();
+            state.commit(
+                GraphEdit::Composite { label, edits: vec![pending, mv] },
+                registry,
+            );
+        }
+        (Some(pending), None) => state.commit(pending, registry),
+        (None, Some(mv)) => state.commit(mv, registry),
+        (None, None) => {}
     }
 }
 

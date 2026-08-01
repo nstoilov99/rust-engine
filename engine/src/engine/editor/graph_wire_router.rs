@@ -129,7 +129,13 @@ pub fn route(a: Pos2, b: Pos2, prefs: &WirePrefs, meta: &RouteMeta) -> Vec<Pos2>
     //    turn at the same x whatever their span — that is what makes a bundle
     //    parallel — offset per target pin row so they stay distinguishable.
     if prefs.style == WireStyle::Manhattan && dx >= MANHATTAN_MIN_DX {
-        let bi = meta.target_pin_index as f32;
+        // The stagger wraps at `bundle_max`: without it a node with 20 input
+        // rows pushes its high-index wires so far out that the `dx/2` cap
+        // clamps them all to the same lane — the exact coincidence the
+        // stagger exists to prevent. Wrapping reuses a lane instead, which is
+        // what the spec's "above bundle_max, draw coincident" describes.
+        let lanes = prefs.bundle_max.max(1) as usize;
+        let bi = (meta.target_pin_index % lanes) as f32;
         let ho = (ho_base + bi * prefs.bundle_offset).min((dx * 0.5).max(MIN_STAGGER_CAP));
         return if source_anchored {
             vec![a, Pos2::new(a.x + ho, a.y), Pos2::new(a.x + ho, b.y), b]
@@ -904,6 +910,36 @@ mod tests {
             short_xs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-3),
             "the cap is supposed to collapse the stagger at short spans: {short_xs:?}"
         );
+    }
+
+    /// The stagger wraps at `bundle_max` rather than climbing forever: past
+    /// the cap the offsets would all clamp to `max(4, dx/2)` and coincide,
+    /// which is precisely what staggering is for.
+    #[test]
+    fn stagger_wraps_at_bundle_max() {
+        let p = prefs(WireStyle::Manhattan);
+        let dx = 400.0;
+        let turn = |bi: usize| {
+            let (a, b, src, dst) = pair(dx, 100.0 + bi as f32 * 22.0);
+            let rects = [src, dst];
+            route(a, b, &p, &meta(&src, &dst, &rects, bi))[1].x
+        };
+        // Lane 0 and lane `bundle_max` share a turn x — the wrap.
+        let lanes = p.bundle_max as usize;
+        assert!(
+            (turn(0) - turn(lanes)).abs() < 1e-3,
+            "index {lanes} should reuse lane 0"
+        );
+        // Every lane inside one period is still distinguishable.
+        let xs: Vec<f32> = (0..lanes).map(turn).collect();
+        for w in xs.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() >= p.bundle_offset - 1e-3,
+                "lanes coincide inside a period: {xs:?}"
+            );
+        }
+        // A high index no longer collapses against the cap.
+        assert!((turn(lanes + 1) - turn(1)).abs() < 1e-3);
     }
 
     // ---------------------------------------------------------------
