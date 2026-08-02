@@ -3207,6 +3207,35 @@ fn draw_grid(ui: &mut Ui, scope: &CanvasScope, st: &Style, vis: Rect, zoom: f32)
 /// the one text exempt from the LOD glyph cut — on a graph too big to read,
 /// annotations are the only wayfinding left.
 #[allow(clippy::too_many_arguments)]
+/// Find-in-graph dims a non-match by blending its fills *toward the canvas*
+/// rather than by lowering their alpha. A node is painted in layers now (the
+/// category-edge underlay, then the body, then the header block); translucent
+/// layers would let the edge color bleed up through the whole card instead of
+/// showing only in its 2px reveal.
+fn fade(col: Color, t: f32, bg: Color) -> Color {
+    if t >= 1.0 {
+        return col;
+    }
+    Color::rgba(
+        bg.r + (col.r - bg.r) * t,
+        bg.g + (col.g - bg.g) * t,
+        bg.b + (col.b - bg.b) * t,
+        col.a,
+    )
+}
+
+/// The title bar of an annotation card rounds its top corners into the card's
+/// outline and squares off into the body below — rounding all four made the
+/// bar's bottom corners curve into open body. A collapsed card *is* its bar, so
+/// there it keeps all four.
+fn bar_rounding(round: Rounding, bar_h: f32, card_h: f32) -> Rounding {
+    if bar_h >= card_h - 0.5 {
+        round
+    } else {
+        Rounding { nw: round.nw, ne: round.ne, sw: 0.0, se: 0.0 }
+    }
+}
+
 fn draw_annotations(
     ui: &mut Ui,
     scope: &CanvasScope,
@@ -3253,7 +3282,7 @@ fn draw_annotations(
         );
         let bar_h = m.group_bar * zoom;
         let bar = Rect::from_min_size(sr.min, Vec2::new(sr.width(), bar_h));
-        p.rect_filled(bar, round, st.palette.header);
+        p.rect_filled(bar, bar_rounding(round, bar_h, sr.height()), st.palette.header);
         let px = annotation_px(st.fonts.body);
         let tx = collapse_caret(&mut p, bar, g.collapsed, st, zoom, m);
         p.text(
@@ -3298,10 +3327,14 @@ fn draw_annotations(
             ),
             None => (st.palette.header, st.palette.text_secondary),
         };
-        p.rect_filled(bar, round, bar_fill);
+        p.rect_filled(bar, bar_rounding(round, bar_h, sr.height()), bar_fill);
         if let Some(t) = c.tint {
+            // The 1px left edge lives on the card's *straight* left side; run it
+            // corner-to-corner and its square ends poke outside the radius.
+            let top = sr.min.y + round.nw;
+            let bot = (sr.max.y - round.sw).max(top);
             p.rect_filled(
-                Rect::from_min_size(sr.min, Vec2::new(m.border, sr.height())),
+                Rect::from_min_max(Pos2::new(sr.min.x, top), Pos2::new(sr.min.x + m.border, bot)),
                 Rounding::ZERO,
                 ramp()[(t % 12) as usize].deep,
             );
@@ -3982,23 +4015,39 @@ fn draw_nodes(
         // Body on `header`, header block on `elevated` — flat, no fill-tinted
         // title bar (the one thing both Blender and Unreal do that does not
         // survive this system's density).
-        p.rect_filled(srect, round, st.palette.header.with_alpha(dim));
-        let header_rect =
-            Rect::from_min_size(srect.min, Vec2::new(srect.width(), m.header_h * zoom));
+        //
+        // The category edge is an *underlay-reveal*, not a strip drawn on top:
+        // a 2px-tall rrect cannot round itself (the tessellator clamps the
+        // radius to half the height, so radius 6 comes out as 1 and the strip's
+        // square ends poke past the node's corners). The prototype got the
+        // clipped look from CSS `overflow: hidden`; with no rounded clipping the
+        // equivalent is to paint a band tall enough to round properly in the
+        // edge color and then inset the fills 2px at the top. The exposed 2px
+        // *is* the edge, and it follows the corner curve exactly.
+        //
+        // Total height is unchanged: the edge already lived inside `header_h`'s
+        // top 2px, this only changes paint order and shape.
+        let bg = st.palette.input;
+        p.rect_filled(srect, round, fade(st.palette.header, dim, bg));
+        // 2·radius tall with all four corners rounded, so below the top curve
+        // the band tucks back inside the fills and leaves no colored fringe
+        // down the node's sides.
+        let band_h = (round.nw * 2.0).min(srect.height());
+        p.rect_filled(
+            Rect::from_min_size(srect.min, Vec2::new(srect.width(), band_h)),
+            Rounding::same(round.nw.min(band_h * 0.5)),
+            edge_col,
+        );
+        let edge_h = (m.edge * zoom).max(1.0).min(band_h);
+        let inner_r = (round.nw - edge_h).max(0.0);
+        let header_rect = Rect::from_min_max(
+            Pos2::new(srect.min.x, srect.min.y + edge_h),
+            Pos2::new(srect.max.x, srect.min.y + m.header_h * zoom),
+        );
         p.rect_filled(
             header_rect,
-            Rounding { nw: round.nw, ne: round.ne, sw: 0.0, se: 0.0 },
-            st.palette.elevated.with_alpha(dim),
-        );
-        // Category identity: the reserved 2px top edge, deep tone.
-        let edge_rect = Rect::from_min_size(
-            srect.min,
-            Vec2::new(srect.width(), (m.edge * zoom).max(1.0)),
-        );
-        p.rect_filled(
-            edge_rect,
-            Rounding { nw: round.nw, ne: round.ne, sw: 0.0, se: 0.0 },
-            edge_col,
+            Rounding { nw: inner_r, ne: inner_r, sw: 0.0, se: 0.0 },
+            fade(st.palette.elevated, dim, bg),
         );
         // 1px border — hairline, never scaled away. Status color reaches the
         // border on a node: there is no row to tint.
@@ -5275,6 +5324,56 @@ mod tests {
         // Out-of-range indices wrap instead of panicking on a hand-edited asset.
         g.tint = Some(200);
         assert_eq!(g.edge_color(), ramp()[(200 % 12) as usize].deep);
+    }
+
+    #[test]
+    fn title_bars_square_off_into_the_body_but_a_collapsed_card_stays_round() {
+        let round = Rounding::same(6.0);
+        // Bar over an open card: top corners follow the outline, bottom squares.
+        let open = bar_rounding(round, 20.0, 140.0);
+        assert_eq!((open.nw, open.ne, open.sw, open.se), (6.0, 6.0, 0.0, 0.0));
+        // Collapsed: the bar *is* the card, so it keeps all four.
+        assert_eq!(bar_rounding(round, 20.0, 20.0), round);
+    }
+
+    #[test]
+    fn the_category_edge_reveal_rounds_with_the_node() {
+        // A 2px strip cannot round itself — the tessellator clamps the radius to
+        // half the height. The underlay band must clear 2·radius so its corners
+        // match the node's, and the inset fill's radius must shrink by the edge.
+        let radius = BASE_RADIUS;
+        let band_h = radius * 2.0;
+        assert!(band_h * 0.5 >= radius, "band must not clamp its own rounding");
+        let edge_h = crate::engine::editor::theme::tokens::Metrics::default().edge_accent;
+        assert!(edge_h < band_h);
+        assert_eq!((radius - edge_h).max(0.0), 4.0);
+        // The reveal is a *top* edge: 2px at the crown, tapering to nothing where
+        // the outline turns vertical. Outer corner center (6,6) r6 vs inner (4,6)
+        // r4 — the gap is edge-wide on the axis and closes by the side.
+        let gap_at = |y: f32| {
+            let outer = radius - (radius * radius - (radius - y).powi(2)).max(0.0).sqrt();
+            let ir = radius - edge_h;
+            let inner = if y < edge_h {
+                f32::INFINITY
+            } else {
+                ir - (ir * ir - (radius - y).powi(2)).max(0.0).sqrt()
+            };
+            inner - outer
+        };
+        assert!(gap_at(0.0).is_infinite(), "full width across the crown");
+        assert!(gap_at(3.0) > 0.0 && gap_at(3.0) < edge_h, "tapering round the curve");
+        assert!(gap_at(radius).abs() < 1e-5, "closed where the side goes vertical");
+    }
+
+    #[test]
+    fn fade_blends_toward_the_canvas_and_is_a_no_op_undimmed() {
+        let bg = Color::rgb(0.0, 0.0, 0.0);
+        let col = Color::rgb(1.0, 0.5, 0.25);
+        assert_eq!(fade(col, 1.0, bg), col);
+        let half = fade(col, 0.5, bg);
+        assert!((half.r - 0.5).abs() < 1e-6 && (half.g - 0.25).abs() < 1e-6);
+        // Opacity is preserved: the layers must stay opaque or the underlay bleeds.
+        assert_eq!(half.a, 1.0);
     }
 
     #[test]
