@@ -292,6 +292,14 @@ pub struct App {
     /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
     #[cfg(feature = "editor")]
     pending_crusty_floats: Vec<rust_engine::engine::editor::crusty_window::CrustyWindowRequest>,
+    /// A dock layout can name per-file editor tabs whose documents nothing has
+    /// opened — on startup it always does, since the layout is restored from
+    /// disk while the state maps start empty. Set here and whenever tabs are
+    /// adopted; cleared once a scan finds nothing missing.
+    pending_hydration: bool,
+    /// Tab ids whose document could not be loaded, so the scan does not retry
+    /// them every frame. Cleared per-key when the user opens the asset again.
+    hydration_failed: std::collections::HashSet<String>,
     /// Live torn-off panel windows, keyed by winit window id.
     #[cfg(feature = "editor")]
     crusty_floats: std::collections::HashMap<
@@ -763,6 +771,10 @@ impl App {
             crusty_tab_ctx: None,
             #[cfg(feature = "editor")]
             pending_crusty_floats: Vec::new(),
+            // The layout was just restored from disk; its per-file tabs have
+            // no documents behind them yet.
+            pending_hydration: true,
+            hydration_failed: std::collections::HashSet::new(),
             #[cfg(feature = "editor")]
             crusty_floats: std::collections::HashMap::new(),
             #[cfg(feature = "editor")]
@@ -971,6 +983,8 @@ impl App {
     /// Open an input action file as a dock tab (default behavior).
     pub fn open_input_action_as_tab(&mut self, file_path: std::path::PathBuf) {
         let key = self.editor.scene.input_action_editor.open(file_path);
+        #[cfg(feature = "editor")]
+        self.hydration_failed.remove(&format!("ia:{key}"));
         let tab = EditorTab::InputActionEditor(key);
         self.editor.ui.crusty_dock.open_tab(tab);
     }
@@ -982,8 +996,63 @@ impl App {
             .input_context_editor
             .refresh_action_names(std::path::Path::new("content"));
         let key = self.editor.scene.input_context_editor.open(file_path);
+        #[cfg(feature = "editor")]
+        self.hydration_failed.remove(&format!("mc:{key}"));
         let tab = EditorTab::InputContextEditor(key);
         self.editor.ui.crusty_dock.open_tab(tab);
+    }
+
+    /// Load a mesh document into `mesh_editors`. Pure file I/O — the preview
+    /// render target is created later from `preview_dirty`, so this needs no
+    /// GPU resources and can run on the first frame.
+    ///
+    /// Shared by the asset-browser double-click and the restored-tab
+    /// hydration pass, so the two can never drift.
+    #[cfg(feature = "editor")]
+    pub fn open_mesh_document(&mut self, relative: &str) -> Result<(), String> {
+        use rust_engine::engine::assets::mesh_import::MeshImportMeta;
+        if self.editor.scene.mesh_editors.contains_key(relative) {
+            return Ok(());
+        }
+        let full_path = std::path::Path::new("content").join(relative);
+        if !full_path.exists() {
+            return Err("file missing".to_string());
+        }
+        // The `.mesh.ron` sidecar is optional: a mesh with no import metadata
+        // still opens, it just has nothing to say about where it came from.
+        let sidecar_path = full_path.with_extension("mesh.ron");
+        let blank = || MeshImportMeta {
+            source: String::new(),
+            settings: Default::default(),
+            source_hash: 0,
+            material_slots: vec![],
+        };
+        let meta = if sidecar_path.exists() {
+            match std::fs::read_to_string(&sidecar_path) {
+                Ok(text) => ron::from_str(&text).unwrap_or_else(|e| {
+                    log::warn!("Failed to parse {}: {}", sidecar_path.display(), e);
+                    blank()
+                }),
+                Err(e) => {
+                    log::warn!("Failed to read {}: {}", sidecar_path.display(), e);
+                    blank()
+                }
+            }
+        } else {
+            blank()
+        };
+        self.editor.scene.mesh_editors.insert(
+            relative.to_string(),
+            rust_engine::engine::editor::mesh_editor::MeshEditorData {
+                mesh_path: relative.to_string(),
+                meta,
+                dirty: false,
+                preview: None,
+                open: true,
+                preview_dirty: true,
+            },
+        );
+        Ok(())
     }
 
     /// Open a mesh file as a dock tab (default behavior).
@@ -2566,51 +2635,14 @@ impl App {
                         } else if asset_type == AssetType::Mesh {
                             // Open mesh editor tab
                             let relative = meta_path.to_string_lossy().to_string();
+                            self.hydration_failed.remove(&format!("mesh:{relative}"));
                             if !self.editor.scene.mesh_editors.contains_key(&relative) {
-                                // Load sidecar metadata
-                                let full_path = std::path::Path::new("content").join(&relative);
-                                let sidecar_path = full_path.with_extension("mesh.ron");
-                                // Handle double extension: "Foo.mesh" → read "Foo.mesh.ron"
-                                let meta = if sidecar_path.exists() {
-                                    match std::fs::read_to_string(&sidecar_path) {
-                                        Ok(text) => ron::from_str(&text).unwrap_or_else(|e| {
-                                            log::warn!("Failed to parse {}: {}", sidecar_path.display(), e);
-                                            rust_engine::engine::assets::mesh_import::MeshImportMeta {
-                                                source: String::new(),
-                                                settings: Default::default(),
-                                                source_hash: 0,
-                                                material_slots: vec![],
-                                            }
-                                        }),
-                                        Err(e) => {
-                                            log::warn!("Failed to read {}: {}", sidecar_path.display(), e);
-                                            rust_engine::engine::assets::mesh_import::MeshImportMeta {
-                                                source: String::new(),
-                                                settings: Default::default(),
-                                                source_hash: 0,
-                                                material_slots: vec![],
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    rust_engine::engine::assets::mesh_import::MeshImportMeta {
-                                        source: String::new(),
-                                        settings: Default::default(),
-                                        source_hash: 0,
-                                        material_slots: vec![],
-                                    }
-                                };
-                                self.editor.scene.mesh_editors.insert(
-                                    relative.clone(),
-                                    rust_engine::engine::editor::mesh_editor::MeshEditorData {
-                                        mesh_path: relative.clone(),
-                                        meta,
-                                        dirty: false,
-                                        preview: None,
-                                        open: true,
-                                        preview_dirty: true,
-                                    },
-                                );
+                                if let Err(e) = self.open_mesh_document(&relative) {
+                                    self.editor.console.messages.push(LogMessage::error(
+                                        format!("Failed to open mesh '{relative}': {e}"),
+                                    ));
+                                    continue;
+                                }
                                 self.open_mesh_as_tab(relative);
                             } else {
                                 // Already open: surface the docked tab. A tab
@@ -3276,6 +3308,10 @@ impl App {
             // P6: refresh subgraph cross-asset validation + build the resolver
             // for the canvas panels; list `.subgraph` assets for the create
             // menu. Both must precede the `&mut self.editor` panel bindings.
+            // Restored tabs get their documents before anything reads them —
+            // and before `revalidate_graph_refs`, so a hydrated subgraph host
+            // shows its cross-asset errors on this frame rather than the next.
+            self.hydrate_restored_tabs();
             let graph_resolver_docs = self.revalidate_graph_refs();
             let subgraph_assets: Vec<String> = {
                 let filter = rust_engine::engine::editor::AssetFilter {
@@ -3570,9 +3606,9 @@ impl App {
                                 Some(EditorTab::InputActionEditor(key)) => {
                                     match ia_states.get_mut(&key) {
                                         Some(state) => input_action_panel(ui, rect, &key, state),
-                                        None => dock_crusty::placeholder_panel(
+                                        None => dock_crusty::missing_document_panel(
                                             ui,
-                                            "Input action not loaded.",
+                                            "Input action", &key, None,
                                         ),
                                     }
                                 }
@@ -3581,9 +3617,9 @@ impl App {
                                         Some(state) => {
                                             input_context_panel(ui, rect, &key, state, mc_actions)
                                         }
-                                        None => dock_crusty::placeholder_panel(
+                                        None => dock_crusty::missing_document_panel(
                                             ui,
-                                            "Mapping context not loaded.",
+                                            "Mapping context", &key, None,
                                         ),
                                     }
                                 }
@@ -3601,7 +3637,7 @@ impl App {
                                             },
                                         ),
                                         None => {
-                                            dock_crusty::placeholder_panel(ui, "Mesh not loaded.")
+                                            dock_crusty::missing_document_panel(ui, "Mesh", &key, None)
                                         }
                                     }
                                 }
@@ -3628,9 +3664,9 @@ impl App {
                                                 handle_shortcuts: false,
                                             },
                                         ),
-                                        None => dock_crusty::placeholder_panel(
+                                        None => dock_crusty::missing_document_panel(
                                             ui,
-                                            "Graph not loaded.",
+                                            "Graph", &key, None,
                                         ),
                                     }
                                 }
@@ -4219,12 +4255,161 @@ impl App {
         }
     }
 
+    /// Open the documents behind per-file editor tabs that a restored layout
+    /// (or an adopted float window) put on screen without them.
+    ///
+    /// Every open path here is CPU-only — graph and input editors are plain
+    /// file loads, and a mesh editor's GPU preview is built later from its
+    /// `preview_dirty` flag — so this needs no render-thread gate and can run
+    /// on the first frame. Runs only while `pending_hydration` is set, and
+    /// clears the flag as soon as a scan finds nothing missing, so the steady
+    /// state costs one boolean test per frame.
+    #[cfg(feature = "editor")]
+    fn hydrate_restored_tabs(&mut self) {
+        use rust_engine::engine::editor::dock_crusty::{collect_tabs, parse_tab};
+
+        if !self.pending_hydration {
+            return;
+        }
+        let mut ids: Vec<String> = Vec::new();
+        collect_tabs(&self.editor.ui.crusty_dock.tree, &mut ids);
+        for fw in self.crusty_floats.values() {
+            collect_tabs(&fw.tree, &mut ids);
+        }
+
+        let mut hydrated = 0usize;
+        let mut still_missing = false;
+        for id in ids {
+            if self.hydration_failed.contains(&id) {
+                continue;
+            }
+            let Some(tab) = parse_tab(&id) else { continue };
+            let outcome = match &tab {
+                EditorTab::GraphEditor(key) => {
+                    if self.editor.scene.graph_editors.contains_key(key) {
+                        continue;
+                    }
+                    Some(("Graph", key.clone(), self.hydrate_graph(key)))
+                }
+                EditorTab::MeshEditor(key) => {
+                    if self.editor.scene.mesh_editors.contains_key(key) {
+                        continue;
+                    }
+                    let r = self.open_mesh_document(key);
+                    Some(("Mesh", key.clone(), r))
+                }
+                EditorTab::InputActionEditor(key) => {
+                    if self
+                        .editor
+                        .scene
+                        .input_action_editor
+                        .open_actions
+                        .contains_key(key)
+                    {
+                        continue;
+                    }
+                    Some(("Input action", key.clone(), self.hydrate_input_action(key)))
+                }
+                EditorTab::InputContextEditor(key) => {
+                    if self
+                        .editor
+                        .scene
+                        .input_context_editor
+                        .open_contexts
+                        .contains_key(key)
+                    {
+                        continue;
+                    }
+                    Some(("Mapping context", key.clone(), self.hydrate_input_context(key)))
+                }
+                _ => None,
+            };
+            let Some((what, key, result)) = outcome else {
+                continue;
+            };
+            match result {
+                Ok(()) => {
+                    hydrated += 1;
+                }
+                Err(e) => {
+                    // One message, then never again: a dead tab must not
+                    // reopen the same error on every frame.
+                    self.hydration_failed.insert(id);
+                    self.editor.console.messages.push(LogMessage::error(format!(
+                        "{what} not loaded — {key} ({e})"
+                    )));
+                    still_missing = true;
+                }
+            }
+        }
+        if hydrated > 0 {
+            // `println!`, not `log::` — no logger is installed in this binary,
+            // and a silent hydration is exactly the failure this pass exists
+            // to make visible.
+            println!("editor: hydrated {hydrated} restored editor tab(s)");
+        }
+        // Nothing left to do until something adds tabs again. Failures are
+        // recorded, so they do not count as outstanding work.
+        let _ = still_missing;
+        self.pending_hydration = false;
+    }
+
+    /// Load a graph document for a restored tab, without touching the dock
+    /// (the tab is already there). Keeps the sidecar view/bookmark restore.
+    #[cfg(feature = "editor")]
+    fn hydrate_graph(&mut self, key: &str) -> Result<(), String> {
+        let abs = std::path::Path::new("content").join(key);
+        if !abs.exists() {
+            return Err("file missing".to_string());
+        }
+        let mut state = rust_engine::engine::editor::graph_editor::GraphEditorState::open(
+            &abs,
+            key,
+            &self.editor.scene.node_registry,
+        )?;
+        restore_graph_ui_state(&mut state, key);
+        self.editor.scene.graph_editors.insert(key.to_string(), state);
+        Ok(())
+    }
+
+    /// Input-action and mapping-context keys are absolute-ish path strings,
+    /// not content-relative — `InputActionEditor::open` keys on the path it
+    /// was handed. Their loaders fall back to an empty definition rather than
+    /// failing, so a missing file is checked here instead: hydrating a tab
+    /// into a blank document would look like data loss.
+    #[cfg(feature = "editor")]
+    fn hydrate_input_action(&mut self, key: &str) -> Result<(), String> {
+        let path = std::path::PathBuf::from(key);
+        if !path.exists() {
+            return Err("file missing".to_string());
+        }
+        self.editor.scene.input_action_editor.open(path);
+        Ok(())
+    }
+
+    #[cfg(feature = "editor")]
+    fn hydrate_input_context(&mut self, key: &str) -> Result<(), String> {
+        let path = std::path::PathBuf::from(key);
+        if !path.exists() {
+            return Err("file missing".to_string());
+        }
+        self.editor
+            .scene
+            .input_context_editor
+            .refresh_action_names(std::path::Path::new("content"));
+        self.editor.scene.input_context_editor.open(path);
+        Ok(())
+    }
+
     /// Open a graph document by content-relative key: focus it if already
     /// open (unless it lives in a float window), else load it from the content
     /// root and open a tab. Shared by the asset browser and subgraph
     /// double-click navigation (P6).
     #[cfg(feature = "editor")]
     fn open_graph_document(&mut self, relative: String) {
+        // An explicit open is the user saying "try again" — drop any failure
+        // recorded by the hydration pass.
+        self.hydration_failed.remove(&format!("graph:{relative}"));
         if !self.editor.scene.graph_editors.contains_key(&relative) {
             let abs = std::path::Path::new("content").join(&relative);
             match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
@@ -4408,6 +4593,10 @@ impl App {
                         &mut self.editor.ui.crusty_dock.tree,
                         req.tab,
                     );
+                    // A tab re-entering the dock re-arms the scan; its
+                    // document normally survives the round trip, but this
+                    // costs one boolean and closes the gap either way.
+                    self.pending_hydration = true;
                     continue;
                 }
             };
@@ -4429,6 +4618,7 @@ impl App {
                         &mut self.editor.ui.crusty_dock.tree,
                         req.tab,
                     );
+                    self.pending_hydration = true;
                 }
             }
         }
@@ -4653,12 +4843,12 @@ impl App {
                         }
                         Some(EditorTab::InputActionEditor(key)) => match ia_states.get_mut(&key) {
                             Some(state) => input_action_panel(ui, rect, &key, state),
-                            None => dock_crusty::placeholder_panel(ui, "Input action not loaded."),
+                            None => dock_crusty::missing_document_panel(ui, "Input action", &key, None),
                         },
                         Some(EditorTab::InputContextEditor(key)) => match mc_states.get_mut(&key) {
                             Some(state) => input_context_panel(ui, rect, &key, state, mc_actions),
                             None => {
-                                dock_crusty::placeholder_panel(ui, "Mapping context not loaded.")
+                                dock_crusty::missing_document_panel(ui, "Mapping context", &key, None)
                             }
                         },
                         Some(EditorTab::MeshEditor(key)) => match mesh_editors.get_mut(&key) {
@@ -4673,7 +4863,7 @@ impl App {
                                     float_thumbs: Some(thumbs),
                                 },
                             ),
-                            None => dock_crusty::placeholder_panel(ui, "Mesh not loaded."),
+                            None => dock_crusty::missing_document_panel(ui, "Mesh", &key, None),
                         },
                         Some(EditorTab::GraphEditor(key)) => match graph_editors.get_mut(&key) {
                             Some(state) => graph_editor_panel(
@@ -4697,7 +4887,7 @@ impl App {
                                     handle_shortcuts: true,
                                 },
                             ),
-                            None => dock_crusty::placeholder_panel(ui, "Graph not loaded."),
+                            None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
                         },
                         _ => dock_crusty::placeholder_panel(
                             ui,

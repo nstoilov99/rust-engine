@@ -39,6 +39,21 @@ pub fn tab_id(tab: &EditorTab) -> String {
     }
 }
 
+/// Every tab id in a dock tree, in traversal order.
+///
+/// The tree has `contains_tab` but no enumeration, and restoring a layout
+/// needs one: a per-file editor tab read back from disk has no state behind
+/// it until something walks the tree and opens its document.
+pub fn collect_tabs(node: &DockNode, out: &mut Vec<String>) {
+    match node {
+        DockNode::Leaf(leaf) => out.extend(leaf.tabs.iter().map(|t| t.to_string())),
+        DockNode::Split(split) => {
+            collect_tabs(&split.first, out);
+            collect_tabs(&split.second, out);
+        }
+    }
+}
+
 /// Inverse of [`tab_id`]. `None` for ids this build doesn't know.
 pub fn parse_tab(id: &str) -> Option<EditorTab> {
     if let Some((kind, key)) = id.split_once(':') {
@@ -426,6 +441,26 @@ pub fn hidden_tabs(tree: &DockNode) -> std::collections::HashSet<String> {
 pub fn placeholder_panel(ui: &mut Ui, text: &str) {
     let dim = ui.style().palette.text_secondary;
     Label::new(text).color(dim).show(ui);
+}
+
+/// Placeholder for a per-file editor tab whose document could not be loaded.
+///
+/// Names the asset and, when known, why: a tab that says only "not loaded"
+/// leaves the user with nothing to act on, and these tabs survive a restart,
+/// so the explanation has to live in the tab itself.
+pub fn missing_document_panel(ui: &mut Ui, what: &str, key: &str, reason: Option<&str>) {
+    let style = ui.style();
+    Label::new(format!("{what} not loaded"))
+        .color(style.palette.text_secondary)
+        .show(ui);
+    ui.add_space(style.spacing.item);
+    Label::new(key).color(style.palette.text_mono).show(ui);
+    if let Some(reason) = reason {
+        ui.add_space(style.spacing.item);
+        Label::new(reason)
+            .color(super::theme::Palette::invariant_status().error)
+            .show(ui);
+    }
 }
 
 /// Add `tab` to the least-crowded leaf that hosts no viewport, so panels
