@@ -817,10 +817,6 @@ pub struct GraphEditorState {
     pub palette: Option<PaletteState>,
     /// Find-in-graph overlay (session-only).
     pub find: Option<FindState>,
-    /// Screen rect of whichever overlay (palette / find) drew last frame, as
-    /// `[x, y, w, h]`. Overlays paint after the canvas, so the canvas pass
-    /// reads last frame's rect to know not to claim a press underneath one.
-    pub overlay_rect: Option<[f32; 4]>,
     /// Frames drawn, for round-robin budgets (preview slots today).
     pub frame: u64,
     /// Set when a graph opened with no remembered view: the first draw frames
@@ -1110,7 +1106,6 @@ impl GraphEditorState {
             node_menu: None,
             palette: None,
             find: None,
-            overlay_rect: None,
             frame: 0,
             frame_all_on_open: false,
         })
@@ -2357,18 +2352,88 @@ impl GraphEditorState {
 
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
+    ///
+    /// Rule 3 of the input model: cancelling **reverts**. Every gesture here
+    /// snapshots its pre-drag state precisely so an abandoned drag can put it
+    /// back, and none of them has recorded anything on the undo stack yet — so
+    /// after this the document reads exactly as it did before the press, and
+    /// undo history is untouched.
     pub fn cancel_interactions(&mut self) {
         self.revert_pending_drag();
-        self.node_drag = None;
-        self.annotation_drag = None;
+        if let Some(drag) = self.node_drag.take() {
+            for (id, pos) in drag.originals {
+                if let Some(n) = self.doc.nodes.iter_mut().find(|n| n.id == id) {
+                    n.position = pos;
+                }
+            }
+            for (i, min) in drag.anchored {
+                if let Some(c) = self.doc.comments.get_mut(i) {
+                    c.rect[0] = min[0];
+                    c.rect[1] = min[1];
+                }
+            }
+        }
+        if let Some(drag) = self.annotation_drag.take() {
+            if drag.is_group {
+                if let Some(g) = self.doc.groups.get_mut(drag.index) {
+                    g.rect[0] = drag.rect_min0[0];
+                    g.rect[1] = drag.rect_min0[1];
+                }
+            } else if let Some(c) = self.doc.comments.get_mut(drag.index) {
+                c.rect[0] = drag.rect_min0[0];
+                c.rect[1] = drag.rect_min0[1];
+            }
+            for (id, pos) in drag.captured {
+                if let Some(n) = self.doc.nodes.iter_mut().find(|n| n.id == id) {
+                    n.position = pos;
+                }
+            }
+        }
+        if let Some(rz) = self.annotation_resize.take() {
+            match rz.target {
+                Annotation::Group(i) => {
+                    if let Some(g) = self.doc.groups.get_mut(i) {
+                        g.rect = rz.rect0;
+                    }
+                }
+                Annotation::Comment(i) => {
+                    if let Some(c) = self.doc.comments.get_mut(i) {
+                        c.rect = rz.rect0;
+                    }
+                }
+            }
+        }
+        // An inline property drag writes the doc live; put the pre-gesture
+        // value back rather than leaving the last dragged one.
+        if let Some(p) = self.prop_edit.take() {
+            if let Some(n) = self.doc.nodes.iter_mut().find(|n| n.id == p.node) {
+                match p.old {
+                    Some(v) => {
+                        n.properties.insert(p.key, v);
+                    }
+                    None => {
+                        n.properties.remove(&p.key);
+                    }
+                }
+            }
+        }
+        // These hold no document state — dropping them is the whole revert.
         self.connect_drag = None;
         self.marquee = None;
         self.marquee_mode = MarqueeMode::Replace;
         self.cut_path = None;
         self.editing = None;
-        self.annotation_resize = None;
-        // Dropped, not flushed: the value it references may already be gone.
-        self.prop_edit = None;
+    }
+
+    /// Is *any* gesture in flight, including the ones that touch no document
+    /// state? [`gesture_in_flight`](Self::gesture_in_flight) deliberately
+    /// answers the narrower "is there an unrecorded edit" question for the
+    /// undo/save gates; Escape has to reach the others too.
+    pub fn interaction_in_flight(&self) -> bool {
+        self.gesture_in_flight()
+            || self.connect_drag.is_some()
+            || self.marquee.is_some()
+            || self.editing.is_some()
     }
 
     /// Copy the selection to the **system** clipboard as RON (so a paste
@@ -2456,7 +2521,8 @@ impl GraphEditorState {
             (Some(f), _) => f,
             (None, Some(f)) => f.clone(),
             (None, None) => {
-                println!("graph: clipboard holds nothing this editor can paste");
+                // Part 6: a valid-but-empty gesture is a silent no-op. Ctrl+V
+                // with nothing to paste is not an error, it is nothing.
                 return;
             }
         };
@@ -3749,6 +3815,119 @@ mod tests {
         assert!(!st.stack.can_undo());
     }
 
+    /// T10 — Escape during a node drag puts the nodes back and records nothing.
+    #[test]
+    fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0])];
+        let before = st.doc.clone();
+
+        // Arm the drag the way the panel does, then move both nodes live.
+        st.selection = [0, 1].into_iter().collect();
+        st.node_drag = Some(NodeDrag {
+            origin_world: [0.0, 0.0],
+            originals: vec![(0, [0.0, 0.0]), (1, [400.0, 0.0])],
+            pending: None,
+            anchored: vec![],
+        });
+        st.doc.node_mut(0).unwrap().position = [120.0, 60.0];
+        st.doc.node_mut(1).unwrap().position = [520.0, 60.0];
+        assert_ne!(st.doc, before, "the drag really moved them");
+
+        st.cancel_interactions();
+
+        assert_eq!(st.doc, before, "Escape restores the pre-drag positions");
+        assert!(!st.stack.can_undo(), "and puts nothing on the undo stack");
+        assert!(st.node_drag.is_none());
+        assert!(!st.interaction_in_flight());
+    }
+
+    #[test]
+    fn escaping_an_annotation_resize_restores_its_rect() {
+        let reg = NodeRegistry::new();
+        let _ = &reg;
+        let mut st = bare_state();
+        st.doc.comments.push(CommentBox {
+            rect: [10.0, 10.0, 200.0, 100.0],
+            ..Default::default()
+        });
+        let before = st.doc.clone();
+
+        st.annotation_resize = Some(AnnotationResize {
+            target: Annotation::Comment(0),
+            handle: ResizeHandle::BottomRight,
+            origin_world: [210.0, 110.0],
+            rect0: [10.0, 10.0, 200.0, 100.0],
+            min_h: 40.0,
+        });
+        st.doc.comments[0].rect = [10.0, 10.0, 320.0, 180.0];
+
+        st.cancel_interactions();
+        assert_eq!(st.doc, before, "an abandoned resize leaves the rect alone");
+        assert!(!st.stack.can_undo());
+    }
+
+    #[test]
+    fn escaping_an_inline_property_drag_restores_the_old_value() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.doc.nodes[0]
+            .properties
+            .insert("gain".into(), PropValue::Float(1.0));
+        let before = st.doc.clone();
+
+        st.prop_edit = Some(PropEdit {
+            node: 0,
+            key: "gain".into(),
+            old: Some(PropValue::Float(1.0)),
+        });
+        st.doc.nodes[0]
+            .properties
+            .insert("gain".into(), PropValue::Float(7.5));
+
+        st.cancel_interactions();
+        assert_eq!(st.doc, before, "the pre-gesture value comes back");
+        assert!(!st.stack.can_undo());
+    }
+
+    #[test]
+    fn a_property_that_did_not_exist_before_the_drag_is_removed_again() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        let before = st.doc.clone();
+
+        st.prop_edit = Some(PropEdit { node: 0, key: "gain".into(), old: None });
+        st.doc.nodes[0]
+            .properties
+            .insert("gain".into(), PropValue::Float(7.5));
+
+        st.cancel_interactions();
+        assert_eq!(st.doc, before, "no old value means the key should not exist");
+    }
+
+    #[test]
+    fn interaction_in_flight_catches_the_gestures_that_touch_no_document_state() {
+        let mut st = bare_state();
+        assert!(!st.interaction_in_flight());
+        // A marquee and a pin drag hold no unrecorded edit, so the narrower
+        // `gesture_in_flight` ignores them — but Escape must still reach them.
+        st.marquee = Some([0.0, 0.0]);
+        assert!(!st.gesture_in_flight());
+        assert!(st.interaction_in_flight());
+        st.cancel_interactions();
+        assert!(!st.interaction_in_flight());
+
+        st.connect_drag = Some(ConnectDrag {
+            from_node: 0,
+            from_pin: "sum".into(),
+            from_output: true,
+        });
+        assert!(st.interaction_in_flight());
+        st.cancel_interactions();
+        assert!(!st.interaction_in_flight());
+    }
+
     /// Review finding 12 (LOW). An oversized clipboard payload is refused
     /// before it is parsed.
     #[test]
@@ -4010,7 +4189,6 @@ mod tests {
             node_menu: None,
             palette: None,
             find: None,
-            overlay_rect: None,
             frame: 0,
             frame_all_on_open: false,
         }
@@ -4023,17 +4201,25 @@ mod tests {
         let reg = NodeRegistry::new();
         let mut st = bare_state();
         st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        // A committed move...
         st.doc.nodes[0].position = [50.0, 0.0];
         st.stack.record(GraphEdit::MoveNodes { ids: vec![0], delta: [50.0, 0.0] });
+        // ...then a *live* drag on top of it, which has recorded nothing.
         st.node_drag = Some(NodeDrag {
-            origin_world: [0.0, 0.0],
-            originals: vec![(0, [0.0, 0.0])],
+            origin_world: [50.0, 0.0],
+            originals: vec![(0, [50.0, 0.0])],
             anchored: Vec::new(),
             pending: None,
         });
+        st.doc.nodes[0].position = [90.0, 0.0];
+
         st.undo(&reg);
         assert!(st.node_drag.is_none(), "undo must cancel the live node drag");
-        assert_eq!(st.doc.nodes[0].position, [0.0, 0.0]);
+        assert_eq!(
+            st.doc.nodes[0].position,
+            [0.0, 0.0],
+            "the live drag reverts to its start, then the recorded move undoes"
+        );
     }
 
     /// Regression (finding 2): deleting the selected annotation while its

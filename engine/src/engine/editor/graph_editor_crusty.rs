@@ -1109,7 +1109,15 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut layout_request = false;
     let mut cycle_error_request: Option<bool> = None;
     let mut frame_request: Option<CanvasView> = None;
-    let out = Canvas::new().zoom_range(zoom_min, zoom_max).show(ui, &mut view, |ui, scope| {
+    // Rule 2's threshold is a crusty constant, scaled by the editor's UI scale
+    // so it stays 4 logical points at any scale factor. One source, so the
+    // canvas's right-drag decision and the graph's own hit tests agree.
+    let out = Canvas::new()
+        .zoom_range(zoom_min, zoom_max)
+        .drag_threshold(crusty_gui::input::drag_threshold(
+            (ui.style().metrics.row_height / BASE_ROW_H).max(0.1),
+        ))
+        .show(ui, &mut view, |ui, scope| {
         draw_and_interact(
             ui,
             scope,
@@ -1196,8 +1204,26 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 /// One predicate, consumed by every canvas key gate, so a shortcut can never
 /// be added that forgets one of them: typing `c` in the palette's search must
 /// add a letter, not a group.
-fn overlay_has_focus(state: &GraphEditorState) -> bool {
-    state.palette.is_some() || state.find.is_some() || state.editing.is_some()
+/// Stack ids for the graph's own transient surfaces. They are drawn by the
+/// engine rather than by a crusty widget, so they register themselves.
+fn find_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("graph_find_overlay")
+}
+
+fn palette_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("graph_palette_overlay")
+}
+
+fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
+    state.palette.is_some()
+        || state.find.is_some()
+        || state.editing.is_some()
+        // Any crusty text field holding focus counts, wherever it lives — an
+        // inspector name box, a search field in another panel. Single-key
+        // shortcuts must never fire mid-typing.
+        || ui.ctx().text_focused()
+        // An open menu/dropdown owns the keyboard too.
+        || ui.ctx().modal_any_open()
 }
 
 fn handle_panel_keys(
@@ -1206,7 +1232,7 @@ fn handle_panel_keys(
     registry: &NodeRegistry,
     clipboard: &mut Option<GraphFragment>,
 ) {
-    if overlay_has_focus(state) {
+    if overlay_has_focus(ui, state) {
         return;
     }
     let (ctrl, shift, del, z, y, c, v, d, s) = {
@@ -1381,19 +1407,49 @@ fn draw_and_interact(
     let shift = mods.contains(Modifiers::SHIFT);
     let alt = mods.contains(Modifiers::ALT);
     let ctrl = mods.contains(Modifiers::CTRL);
-    let over_overlay = match (pointer_screen, state.overlay_rect) {
-        (Some(p), Some(r)) => {
-            Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3])).contains(p)
+
+    // ── Rule 3: every drag is abortable ──────────────────────────────────────
+    // Escape abandons whatever gesture is running; so does losing the window
+    // (the OS drops pointer capture, so resuming against a pointer that moved
+    // while we were away is worse than starting over), and so does the right
+    // button interrupting a left drag. All three revert to the pre-drag state
+    // and record nothing — `cancel_interactions` is the single revert path.
+    //
+    // Note the ordering: this runs before any gesture-start handling below, so
+    // the aborting press cannot also arm a fresh gesture on the same frame.
+    if state.interaction_in_flight() {
+        let escaped = ui.ctx().input.key_pressed(Key::Escape);
+        let interrupted = right_pressed && pointer_down;
+        if escaped || interrupted || ui.ctx().focus_lost() {
+            // The slash-cut is the one gesture with no visible revert (the
+            // path simply vanishes), so it says so.
+            if state.cut_path.is_some() {
+                state.toast("Cut cancelled");
+            }
+            state.cancel_interactions();
+            if escaped {
+                // Consume it, or the same Escape also closes the panel's
+                // overlays on its way past.
+                ui.ctx_mut().input.consume_key(Key::Escape);
+            }
+            // Nothing else this frame: an aborting press must not arm a new
+            // gesture, and the geometry is already drawn.
+            return geoms;
         }
-        _ => false,
-    };
-    let widget_claimed = over_overlay
-        || pointer_screen.is_some_and(|p| widget_rects.iter().any(|r| r.contains(p)));
+    }
+
+    // A press landing on any open transient surface — context menu, combo
+    // dropdown, the palette, the find bar — was already consumed by the modal
+    // stack before we got here (Rule 1). Asking the stack directly also keeps
+    // *hover* interactions off the canvas underneath one, which consumption
+    // alone would not.
+    let widget_claimed = pointer_screen
+        .is_some_and(|p| ui.ctx().modal_contains(p) || widget_rects.iter().any(|r| r.contains(p)));
 
     // Frame shortcuts (DCC F/A). Fire only while the pointer is over the
     // canvas, no inline text edit is active, and **no modifier is held** —
     // otherwise Ctrl+A / Ctrl+F over the canvas also framed the view.
-    if pointer_world.is_some() && !overlay_has_focus(state) && mods.is_empty() {
+    if pointer_world.is_some() && !overlay_has_focus(ui, state) && mods.is_empty() {
         let (frame_all, frame_sel) = {
             let input = &ui.ctx().input;
             (input.key_pressed(Key::Char('a')), input.key_pressed(Key::Char('f')))
@@ -1918,7 +1974,6 @@ fn draw_and_interact(
     // zoom is a different input entirely and never conflicts.
     let mut cut_now: Vec<Edge> = Vec::new();
     {
-        let esc = ui.ctx().input.key_pressed(Key::Escape);
         if pointer_pressed
             && ctrl
             && state.cut_path.is_none()
@@ -1937,19 +1992,16 @@ fn draw_and_interact(
                 }
             }
         }
+        // Escape no longer needs handling here: the Rule 3 abort at the top
+        // of this pass reverts every gesture through one path, this one
+        // included, and toasts on the way out.
         if state.cut_path.is_some() {
-            if esc {
-                // Esc abandons the cut with nothing changed.
+            if let Some(pw) = pointer_world {
+                state.push_cut_point([pw.x, pw.y]);
+            }
+            if !pointer_down {
+                cut_now = crossed_by_cut(state, &wires, scope);
                 state.cut_path = None;
-                state.toast("Cut cancelled");
-            } else {
-                if let Some(pw) = pointer_world {
-                    state.push_cut_point([pw.x, pw.y]);
-                }
-                if !pointer_down {
-                    cut_now = crossed_by_cut(state, &wires, scope);
-                    state.cut_path = None;
-                }
             }
         }
     }
@@ -2050,21 +2102,28 @@ fn draw_and_interact(
 
     // Right-click: an annotation gets its own menu (tint / collapse / anchor
     // / delete); empty canvas gets the create menu.
-    if right_pressed {
-        if let Some(pw) = pointer_world {
+    //
+    // Rule 2 — this fires on the *release* of a right press that never became
+    // a pan, not on the press. The canvas owns that decision (it also owns
+    // right-drag panning), so both readings of the button come from one place
+    // and can never both fire for one gesture.
+    if let Some(rc) = scope.right_clicked() {
+        let menu_at = Some(rc);
+        {
+            let pw = scope.screen_to_world(rc);
             let on_annotation = annotation_at(state, &m, pw);
             let on_node = node_under(&geoms, pw, lod, &m);
             if let Some(i) = hovered_wire {
                 // Right-clicking a wire offers the one thing that belongs to
                 // a wire: splitting it.
                 state.wire_menu = state.doc.edges.get(i).cloned().map(|e| (e, [pw.x, pw.y]));
-                *wire_menu_at = ui.ctx().input.pointer_pos;
+                *wire_menu_at = menu_at;
             } else if let Some(id) = on_node.filter(|_| on_annotation.is_none()) {
                 if !state.selection.contains(&id) {
                     state.select_only(id);
                 }
                 state.node_menu = Some(id);
-                *node_menu_at = ui.ctx().input.pointer_pos;
+                *node_menu_at = menu_at;
             } else if let Some(target) = on_annotation {
                 match target {
                     Annotation::Comment(i) => {
@@ -2077,13 +2136,11 @@ fn draw_and_interact(
                     }
                 }
                 state.annotation_menu = Some(target);
-                *annotation_menu_at = ui.ctx().input.pointer_pos;
+                *annotation_menu_at = menu_at;
             } else if pin_under(&geoms, pw, hit_w).is_none()
                 && node_under(&geoms, pw, lod, &m).is_none()
             {
-                if let Some(sp) = ui.ctx().input.pointer_pos {
-                    open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
-                }
+                open_palette(state, [pw.x, pw.y], [rc.x, rc.y], None);
             }
         }
     }
@@ -2091,7 +2148,7 @@ fn draw_and_interact(
     // Organization keys (Windows mapping): C groups the selection, Shift+C
     // drops a note at the pointer. Canvas-hovered only, and never while an
     // inline editor owns the keyboard.
-    if pointer_world.is_some() && !overlay_has_focus(state) {
+    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
         let (c_key, shift_only, no_mods) = {
             let input = &ui.ctx().input;
             (
@@ -2136,9 +2193,6 @@ fn draw_and_interact(
         if ctrl_alt && input.key_pressed(Key::Char('k')) {
             let unused = state.unused_nodes(registry);
             state.purge_confirm = (!unused.is_empty()).then_some(unused);
-            if state.purge_confirm.is_none() {
-                println!("graph: purge unused found nothing to remove");
-            }
         }
         // Alt+A — align & distribute. Alt+L — auto layout. Both are
         // selection operations, so they live in the node menu; the keys open
@@ -2288,7 +2342,6 @@ fn find_overlay(
     let Some(find) = state.find.clone() else {
         return;
     };
-    // Published for the next frame's canvas pass — see `overlay_rect`.
     let st = ui.style();
     let pad = st.spacing.padding;
     let w = (rect.width() * 0.32).clamp(180.0, 360.0);
@@ -2296,7 +2349,11 @@ fn find_overlay(
         Pos2::new(rect.center().x - w * 0.5, rect.min.y + pad),
         Vec2::new(w, st.metrics.control_height + pad),
     );
-    state.overlay_rect = Some([panel.min.x, panel.min.y, panel.width(), panel.height()]);
+    // Rule 1: the find bar is a transient surface like any other. Registering
+    // it means a press outside dismisses it *and* is consumed, so the same
+    // click can't also select a node — which the old next-frame `overlay_rect`
+    // could only approximate, with no consumption at all.
+    ui.ctx_mut().modal_push(find_modal_id(), panel);
     {
         let mut p = ui.painter();
         p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
@@ -2322,9 +2379,12 @@ fn find_overlay(
             cancelled = out.cancelled;
         },
     );
-    if cancelled || ui.ctx().input.key_pressed(Key::Escape) {
+    if cancelled
+        || ui.ctx().input.key_pressed(Key::Escape)
+        || ui.ctx().modal_dismissed(find_modal_id()).is_some()
+    {
         state.find = None;
-        state.overlay_rect = None;
+        ui.ctx_mut().modal_dismiss(find_modal_id());
         return;
     }
 
@@ -2782,11 +2842,13 @@ fn palette_popover(
     subgraph_assets: &[String],
 ) {
     let Some(p) = state.palette.clone() else {
-        if state.find.is_none() {
-            state.overlay_rect = None;
-        }
+        ui.ctx_mut().modal_dismiss(palette_modal_id());
         return;
     };
+    if ui.ctx().modal_dismissed(palette_modal_id()).is_some() {
+        state.palette = None;
+        return;
+    }
     let st = ui.style();
     let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
     let w = PALETTE_W * s;
@@ -2826,7 +2888,7 @@ fn palette_popover(
         Vec2::new(w, head_h + list_h + foot_h + pad * 2.0),
     );
 
-    state.overlay_rect = Some([rect.min.x, rect.min.y, rect.width(), rect.height()]);
+    ui.ctx_mut().modal_push(palette_modal_id(), rect);
 
     // E3: translucent only here, simple alpha, no blur.
     {
