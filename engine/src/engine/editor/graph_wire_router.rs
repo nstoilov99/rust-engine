@@ -234,9 +234,14 @@ fn dedup(pts: &[Pos2]) -> Vec<Pos2> {
     out
 }
 
-/// Segments to tessellate one rounded corner into. Bigger radii get more.
-fn corner_segments(rr: f32) -> usize {
-    (rr * 0.6).clamp(2.0, 8.0) as usize
+/// Segments to tessellate one rounded corner into.
+///
+/// Takes the **screen** radius, not the graph-space one: the geometry scales
+/// with zoom while the stroke does not, so a corner that needed 3 segments at
+/// 25% needs a dozen at 220% to stop reading as a chamfer. Callers pass the
+/// view scale; a corner drawn at 1:1 behaves exactly as before.
+fn corner_segments(screen_rr: f32) -> usize {
+    (screen_rr * 0.9).ceil().clamp(4.0, 24.0) as usize
 }
 
 /// Round the corners of a routed polyline and return **one dense polyline**
@@ -249,7 +254,11 @@ fn corner_segments(rr: f32) -> usize {
 ///
 /// Per-corner radius clamp `min(radius, l1/2, l2/2)` so two adjacent corners
 /// sharing a short segment can never overrun each other.
-pub fn round_corners(pts: &[Pos2], radius: f32) -> Vec<Pos2> {
+///
+/// `scale` is the view zoom: the arc is tessellated for the size it will be
+/// *drawn* at, since these points are transformed to screen afterwards.
+pub const UNSCALED: f32 = 1.0;
+pub fn round_corners(pts: &[Pos2], radius: f32, scale: f32) -> Vec<Pos2> {
     let pts = dedup(pts);
     if pts.len() < 3 {
         return pts;
@@ -268,7 +277,7 @@ pub fn round_corners(pts: &[Pos2], radius: f32) -> Vec<Pos2> {
         let start = c - (c - p) / l1 * rr;
         let end = c + (n - c) / l2 * rr;
         out.push(start);
-        let segs = corner_segments(rr);
+        let segs = corner_segments(rr * scale.max(0.01));
         for k in 1..=segs {
             let t = k as f32 / segs as f32;
             out.push(quadratic(start, c, end, t));
@@ -957,7 +966,7 @@ mod tests {
             Pos2::new(100.0, 6.0),
             Pos2::new(200.0, 6.0),
         ];
-        let out = round_corners(&pts, 10.0);
+        let out = round_corners(&pts, 10.0, UNSCALED);
         assert!(out.len() > pts.len(), "corners were not tessellated");
         // Everything stays inside the polyline's own bounding box.
         let b = polyline_bounds(&out).unwrap();
@@ -987,7 +996,7 @@ mod tests {
             assert_eq!(pts.len(), 4);
             assert!((pts[0] - pts[1]).length() < 1e-6, "expected a coincident point");
             // …and rounding removes it, cleanly.
-            let rounded = round_corners(&pts, p.corner_radius);
+            let rounded = round_corners(&pts, p.corner_radius, UNSCALED);
             assert!(
                 rounded.iter().all(|q| q.x.is_finite() && q.y.is_finite()),
                 "NaN survived the dedup at d={d}"
@@ -1015,7 +1024,7 @@ mod tests {
         );
         // A two-point route is passed through untouched (nothing to round).
         let two = [Pos2::new(0.0, 0.0), Pos2::new(5.0, 5.0)];
-        assert_eq!(round_corners(&two, 10.0), two.to_vec());
+        assert_eq!(round_corners(&two, 10.0, UNSCALED), two.to_vec());
     }
 
     // ---------------------------------------------------------------

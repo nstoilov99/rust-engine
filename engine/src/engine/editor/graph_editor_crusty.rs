@@ -3715,7 +3715,14 @@ fn wire_screen_points(
     // Spline is drawn as a real cubic; these samples exist so hover-testing
     // and culling see the same shape the user does.
     let pts = if prefs.style.is_orthogonal() {
-        router::round_corners(&router::route(a, b, prefs, meta), prefs.corner_radius)
+        // Tessellated for the size it will be drawn at: these points are
+        // about to be scaled to screen, and a corner arc built for graph
+        // space reads as a chamfer once zoomed in.
+        router::round_corners(
+            &router::route(a, b, prefs, meta),
+            prefs.corner_radius,
+            scope.zoom(),
+        )
     } else {
         router::sample(a, b, prefs, meta)
     };

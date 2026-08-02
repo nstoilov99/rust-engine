@@ -683,9 +683,12 @@ fn wire_preview(ui: &mut Ui, prefs: &super::graph_prefs::WirePrefs) {
         let color = wire_color(None, &ty);
         let width = if ty == PinType::Exec { 2.4 } else { 1.9 };
         if prefs.style.is_orthogonal() {
+            // The preview strip draws at 1:1, so its already-scaled radius
+            // is the screen radius.
             let pts = router::round_corners(
                 &router::route(a, b, prefs, &meta),
                 prefs.corner_radius * s,
+                1.0,
             );
             painter.polyline(&pts, width, color);
         } else {
