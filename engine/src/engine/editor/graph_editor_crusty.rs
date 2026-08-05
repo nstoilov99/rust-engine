@@ -2513,7 +2513,14 @@ fn purge_confirm(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState, registry
     );
     {
         let mut p = ui.painter();
-        p.rect_filled(rect, Rounding::ZERO, Color::BLACK.with_alpha(st.palette.scrim_alpha));
+        // A scrim dims what is behind it and still shows it — that is the
+        // whole point. Glass mode would blur the graph away entirely, so the
+        // user could not see what they are about to purge.
+        p.rect_filled_translucent(
+            rect,
+            Rounding::ZERO,
+            Color::BLACK.with_alpha(st.palette.scrim_alpha),
+        );
         p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
         p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
         p.text(
@@ -3403,7 +3410,9 @@ fn draw_annotations(
                 if sel { st.palette.stroke_strong } else { st.palette.stroke },
             ),
         };
-        p.rect_filled(sr, round, wash);
+        // A 6% body wash is a tint over the canvas and the nodes inside the
+        // group, not a surface that covers them.
+        p.rect_filled_translucent(sr, round, wash);
         p.rect_stroke(
             sr,
             round,

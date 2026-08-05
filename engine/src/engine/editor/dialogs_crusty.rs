@@ -349,7 +349,9 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
 pub fn file_drop_overlay(ui: &mut Ui, screen: Rect) {
     let palette = ui.style().palette;
     let mut p = ui.overlay_painter();
-    p.rect_filled(
+    // A 12% wash over the whole editor: it has to read as "drop here", not as
+    // a curtain drawn across the window.
+    p.rect_filled_translucent(
         screen,
         Rounding::ZERO,
         palette.accent_active.with_alpha(0.12),
