@@ -370,6 +370,7 @@ mod tests {
     use super::*;
     use crate::engine::node_graph::dev_nodes::register_dev_nodes;
     use crate::engine::node_graph::doc::NodeInst;
+    use crate::engine::node_graph::registry::{NodeDescriptor, PinDescriptor};
     use std::collections::BTreeMap;
 
     /// Every variant anchors somewhere, and the two unknown-pin variants both
@@ -486,6 +487,65 @@ mod tests {
 
     /// Wiring a reroute to a pin of a different type is a `TypeMismatch`,
     /// same as any other wire — the reroute is transparent, not permissive.
+    /// The reported bug's other half: an empty reroute could not be connected
+    /// to. Once it can, the type it adopts has to flow through immediately.
+    #[test]
+    fn an_empty_reroute_adopts_the_type_of_the_first_thing_wired_to_it() {
+        let mut reg = NodeRegistry::new();
+        reg.register(NodeDescriptor {
+            id: "src".into(),
+            name: "Src".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![],
+            outputs: vec![PinDescriptor::new("out", "", PinType::Float)],
+            pure: true,
+            realm: NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+
+        let mut doc = GraphDoc::default();
+        doc.nodes.push(NodeInst {
+            id: 1,
+            type_id: "src".into(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+        });
+        doc.nodes.push(NodeInst {
+            id: 2,
+            type_id: REROUTE_TYPE_ID.into(),
+            type_version: 1,
+            position: [200.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+        });
+
+        // Unwired: untyped, and that is not an error.
+        assert_eq!(reroute_type(&doc, &reg, 2), None);
+        assert!(validate_doc(&doc, &reg).is_empty(), "an empty reroute is legal");
+
+        // Wire the Float in; the reroute adopts it.
+        doc.edges.push(Edge {
+            from_node: 1,
+            from_pin: "out".into(),
+            to_node: 2,
+            to_pin: REROUTE_IN.into(),
+        });
+        assert_eq!(
+            reroute_type(&doc, &reg, 2),
+            Some(PinType::Float),
+            "the type flows through the moment the first wire lands"
+        );
+        assert!(validate_doc(&doc, &reg).is_empty(), "{:?}", validate_doc(&doc, &reg));
+    }
+
     #[test]
     fn reroute_still_type_checks_its_output() {
         let reg = registry();

@@ -2701,6 +2701,49 @@ pub mod tests_support {
     pub fn finish_drag(state: &mut GraphEditorState, registry: &NodeRegistry) {
         super::super::graph_editor_crusty::finish_node_drag_for_test(state, registry);
     }
+
+    /// An empty editor state, for tests that only need somewhere to hang a doc.
+    pub fn empty_state() -> GraphEditorState {
+        GraphEditorState {
+            path: "t.graph".into(),
+            doc: GraphDoc::default(),
+            errors: vec![],
+            ref_errors: vec![],
+            dirty: false,
+            last_saved_at: None,
+            view: CanvasView::default(),
+            selection: BTreeSet::new(),
+            primary: None,
+            selected_edges: BTreeSet::new(),
+            stack: GraphEditStack::new(),
+            node_drag: None,
+            connect_drag: None,
+            marquee: None,
+            marquee_mode: MarqueeMode::default(),
+            prop_edit: None,
+            create_menu_world: None,
+            create_menu_search: String::new(),
+            sel_comment: None,
+            sel_group: None,
+            annotation_drag: None,
+            editing: None,
+            annotation_resize: None,
+            annotation_menu: None,
+            error_cursor: 0,
+            error_popover: false,
+            wire_menu: None,
+            bookmarks: [None; BOOKMARK_SLOTS],
+            bookmark_next: 0,
+            purge_confirm: None,
+            toasts: Vec::new(),
+            cut_path: None,
+            node_menu: None,
+            palette: None,
+            find: None,
+            frame: 0,
+            frame_all_on_open: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3818,7 +3861,6 @@ mod tests {
     /// T10 — Escape during a node drag puts the nodes back and records nothing.
     #[test]
     fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
-        let reg = NodeRegistry::new();
         let mut st = bare_state();
         st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0])];
         let before = st.doc.clone();

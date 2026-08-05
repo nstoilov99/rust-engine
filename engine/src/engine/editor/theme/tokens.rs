@@ -327,7 +327,15 @@ pub struct Selection {
     /// Its own token so selection and focus_ring stay separate JOBS.
     /// Overridable ONLY by a preset declaring an achromatic role (core
     /// rule 3 carve-out): Graphite -> #B8BCC0. fill/text stay pinned.
-    pub outline: Color, // #A9C0D8
+    ///
+    /// **User override 2026-08-02; the mockup value was #A9C0D8.** The calm
+    /// blue-gray read as "another shade of UI" against a node's own stroke;
+    /// selection has to be unmistakable at a glance. #FFD44D measures 13.6:1
+    /// against the canvas and 11.6:1 against a node header. #F0C64A was
+    /// considered and rejected: it lands within ΔRGB (10, 6, 5) of
+    /// `status.warning` #E6C04F, so a selected node would have read as a
+    /// warning. #FFD44D is 25% brighter in luminance and stays distinct.
+    pub outline: Color, // #FFD44D
 }
 
 /// Preset-invariant status + danger colors.
@@ -608,7 +616,7 @@ impl Palette {
             selection: Selection {
                 fill: rgb(60, 70, 84),
                 text: Color::WHITE,
-                outline: rgb(169, 192, 216),
+                outline: rgb(0xFF, 0xD4, 0x4D),
             },
             status: Status {
                 error: rgb(226, 91, 84),

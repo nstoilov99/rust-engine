@@ -140,6 +140,16 @@ pub fn preview_slice(count: usize, frame: u64, budget: usize) -> (usize, usize) 
 const FIND_DIM: f32 = 0.45;
 /// Marquee fill alpha (1px accent border + 8% accent fill).
 const MARQUEE_FILL_ALPHA: f32 = 0.08;
+
+/// A reroute's pin hit zones: squares of `d * REROUTE_PIN_HIT` centred
+/// `d * REROUTE_PIN_OFF` either side of the disc centre. They deliberately do
+/// **not** tile the disc — the middle band, and the margins above and below
+/// them, stay body, so the reroute can still be grabbed and dragged. Sharing
+/// one centre with the global 18-unit target (the old behaviour) blanketed the
+/// whole node: every press read as a pin press, so it could neither be moved
+/// nor have its `out` side reached.
+const REROUTE_PIN_OFF: f32 = 0.30;
+const REROUTE_PIN_HIT: f32 = 0.40;
 /// Non-primary members of a multi-selection draw their outline at 55%.
 const SELECTION_REST_ALPHA: f32 = 0.55;
 /// Hollow (unconnected) pin ring width, world units at ui_scale 1.0.
@@ -369,6 +379,12 @@ impl GraphMetrics {
         self.pin_r * 3.2
     }
 
+    /// An untyped (unwired) reroute is provisional and reads that way: a
+    /// smaller neutral dot than a typed one, which carries its type's colour.
+    fn reroute_untyped_d(&self) -> f32 {
+        self.pin_r * 2.6
+    }
+
     /// Where a pin's label column starts, measured from the node border.
     fn label_inset(&self) -> f32 {
         self.pin_inset + self.pin_r + self.label_gap
@@ -473,6 +489,16 @@ struct PinGeom {
     /// A dashed placeholder for a pin the descriptor no longer declares, so
     /// the edge pointing at it has somewhere to land instead of vanishing.
     ghost: bool,
+    /// Hit-target side length in world units, overriding the global
+    /// `pin_hit_w`. A reroute's two pins share a disc smaller than the 18-unit
+    /// global target, which swallowed the whole node — body included, which is
+    /// why an unwired reroute could not be dragged.
+    hit_w: Option<f32>,
+    /// This pin's type is not known yet (an unwired reroute), so it is a
+    /// wildcard: it accepts any type and adopts the first one wired to it.
+    /// Distinct from `PinType::Domain("")`, which merely *encodes* that state
+    /// and compares equal only to itself, refusing every real type.
+    untyped: bool,
 }
 
 struct NodeGeom {
@@ -516,7 +542,10 @@ impl NodeGeom {
     /// The box actually drawn (and hit-tested) at this detail level: below
     /// L2 a node collapses to its header, so rows never render as mush.
     fn body_rect(&self, lod: ZoomLod, m: &GraphMetrics) -> Rect {
-        if lod.rows() {
+        // A reroute has no header to collapse to; it is drawn as the same disc
+        // at every zoom. Falling through to the header-height branch gave it a
+        // hit box nearly twice as tall as the dot, hanging below it.
+        if self.reroute || lod.rows() {
             self.rect
         } else {
             Rect::from_min_size(self.rect.min, Vec2::new(self.rect.width(), m.header_h))
@@ -656,11 +685,17 @@ fn build_geoms(
             // A reroute is a bare pass-through: one in, one out, no header,
             // no rows, and a type inferred from whatever feeds it.
             if is_reroute {
-                let d = m.reroute_d();
+                let inferred = reroute_type(&state.doc, registry, n.id);
+                let untyped = inferred.is_none();
+                let d = if untyped {
+                    m.reroute_untyped_d()
+                } else {
+                    m.reroute_d()
+                };
                 let rect = Rect::from_min_size(min, Vec2::splat(d));
-                let ty = reroute_type(&state.doc, registry, n.id)
-                    .unwrap_or(PinType::Domain(String::new()));
+                let ty = inferred.unwrap_or(PinType::Domain(String::new()));
                 let c = Pos2::new(min.x + d * 0.5, min.y + d * 0.5);
+                let band = d * REROUTE_PIN_OFF;
                 let pin = |slug: &str, output: bool, x: f32| PinGeom {
                     slug: slug.to_string(),
                     label: String::new(),
@@ -668,7 +703,10 @@ fn build_geoms(
                     output,
                     row: 0,
                     wire_anchor: Pos2::new(x, c.y),
-                    dot_center: c,
+                    dot_center: Pos2::new(
+                        if output { c.x + band } else { c.x - band },
+                        c.y,
+                    ),
                     connected: state.doc.edges.iter().any(|e| {
                         if output {
                             e.from_node == n.id && e.from_pin == slug
@@ -678,6 +716,8 @@ fn build_geoms(
                     }),
                     inline: None,
                     ghost: false,
+                    hit_w: Some(d * REROUTE_PIN_HIT),
+                    untyped,
                 };
                 return NodeGeom {
                     id: n.id,
@@ -839,6 +879,8 @@ fn build_geoms(
                     row: i,
                     inline,
                     ghost: false,
+                    hit_w: None,
+                    untyped: false,
                 });
             }
             for (i, (slug, label, ty)) in outputs.into_iter().enumerate() {
@@ -854,6 +896,8 @@ fn build_geoms(
                     row: i,
                     inline: None,
                     ghost: false,
+                    hit_w: None,
+                    untyped: false,
                 });
             }
             // Ghost rows last, one per side, continuing that side's rows.
@@ -879,6 +923,8 @@ fn build_geoms(
                     connected: true,
                     inline: None,
                     ghost: true,
+                    hit_w: None,
+                    untyped: false,
                 });
                 *row += 1;
             }
@@ -1023,12 +1069,21 @@ fn validate_connection(
     a_slug: &str,
     a_out: bool,
     a_ty: &PinType,
+    a_wild: bool,
     b_node: u64,
     b_slug: &str,
     b_out: bool,
     b_ty: &PinType,
+    b_wild: bool,
 ) -> Option<Edge> {
-    if a_node == b_node || a_out == b_out || a_ty != b_ty {
+    if a_node == b_node || a_out == b_out {
+        return None;
+    }
+    // Typing stays strict — no implicit conversions — but an *untyped* reroute
+    // is not a type mismatch, it is an absence of one. It accepts any pin and
+    // adopts that type; `reroute_type` then infers it through the chain from
+    // the first real descriptor pin upstream.
+    if !a_wild && !b_wild && a_ty != b_ty {
         return None;
     }
     let (from_node, from_pin, to_node, to_pin) = if a_out {
@@ -1644,7 +1699,10 @@ fn draw_and_interact(
         // hit-test per pin, which is what keeps the stated budget reachable.
         for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
             for pin in &g.pins {
-                let wr = Rect::from_center_size(pin.dot_center, Vec2::splat(hit_w));
+                let wr = Rect::from_center_size(
+                    pin.dot_center,
+                    Vec2::splat(pin.hit_w.unwrap_or(hit_w)),
+                );
                 let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
                 let resp = scope.interact(ui, id, wr);
                 // Pin hover docs: type name always, descriptor line when the
@@ -1891,7 +1949,17 @@ fn draw_and_interact(
             let tint = match (pin_under(&geoms, pw, hit_w), src_ty.as_ref()) {
                 (Some(h), Some(sty)) => {
                     if validate_connection(
-                        state, from_node, &from_pin, from_output, sty, h.0, &h.1, h.3, &h.2,
+                        state,
+                        from_node,
+                        &from_pin,
+                        from_output,
+                        sty,
+                        pin_is_untyped(&geoms, from_node, &from_pin, from_output),
+                        h.0,
+                        &h.1,
+                        h.3,
+                        &h.2,
+                        pin_is_untyped(&geoms, h.0, &h.1, h.3),
                     )
                     .is_some()
                     {
@@ -4558,12 +4626,28 @@ fn pin_under(
 ) -> Option<(u64, String, PinType, bool)> {
     for g in geoms {
         for pin in &g.pins {
-            if Rect::from_center_size(pin.dot_center, Vec2::splat(hit_w)).contains(pw) {
+            let w = pin.hit_w.unwrap_or(hit_w);
+            if Rect::from_center_size(pin.dot_center, Vec2::splat(w)).contains(pw) {
                 return Some((g.id, pin.slug.clone(), pin.ty.clone(), pin.output));
             }
         }
     }
     None
+}
+
+/// Is this pin a wildcard — an unwired reroute that has not adopted a type
+/// yet? Such an endpoint accepts anything; refusing it is what made an empty
+/// reroute impossible to connect in either direction.
+fn pin_is_untyped(geoms: &[NodeGeom], node: u64, slug: &str, output: bool) -> bool {
+    geoms
+        .iter()
+        .find(|g| g.id == node)
+        .and_then(|g| {
+            g.pins
+                .iter()
+                .find(|p| p.output == output && p.slug == slug)
+        })
+        .is_some_and(|p| p.untyped)
 }
 
 fn node_under(geoms: &[NodeGeom], pw: Pos2, lod: ZoomLod, m: &GraphMetrics) -> Option<u64> {
@@ -4599,7 +4683,17 @@ fn resolve_connection(
         return false;
     };
     if let Some(edge) = validate_connection(
-        state, from_node, &from_pin, from_output, &src_ty, tn, &ts, to, &tty,
+        state,
+        from_node,
+        &from_pin,
+        from_output,
+        &src_ty,
+        pin_is_untyped(geoms, from_node, &from_pin, from_output),
+        tn,
+        &ts,
+        to,
+        &tty,
+        pin_is_untyped(geoms, tn, &ts, to),
     ) {
         state.doc.edges.push(edge.clone());
         state.commit(GraphEdit::Connect(edge), registry);
@@ -4968,7 +5062,11 @@ fn handle_marquee(
         // and drag-time alignment guides — this is one of the three.
         let srect = scope.world_rect_to_screen(world_rect);
         let mut p = ui.painter();
-        p.rect_filled(
+        // Translucent, not glass: the marquee has to reveal the nodes it is
+        // sweeping over. `rect_filled` treats alpha as a glass tint strength
+        // over a *blurred* backdrop and emits an opaque interior, which turned
+        // this into a solid slab that hid everything under it.
+        p.rect_filled_translucent(
             srect,
             Rounding::ZERO,
             st.palette.accent_active.with_alpha(MARQUEE_FILL_ALPHA),
@@ -5304,6 +5402,8 @@ mod tests {
             dot_center: Pos2::ZERO,
             connected: false,
             inline: None,
+            hit_w: None,
+            untyped: false,
         };
         assert_eq!(pin_label(&pin(PinType::Vec2)), "Position \u{b7}2");
         assert_eq!(pin_label(&pin(PinType::Vec3)), "Position \u{b7}3");
@@ -5340,6 +5440,145 @@ mod tests {
                 "hit target collapses below 18 screen px at zoom {zoom}"
             );
         }
+    }
+
+
+    /// Build the two pins of a reroute exactly as `build_geoms` does, so the
+    /// hit-zone tests exercise the shipped layout rather than a copy of it.
+    fn reroute_geom(m: &GraphMetrics, min: Pos2, untyped: bool) -> NodeGeom {
+        let d = if untyped { m.reroute_untyped_d() } else { m.reroute_d() };
+        let c = Pos2::new(min.x + d * 0.5, min.y + d * 0.5);
+        let band = d * REROUTE_PIN_OFF;
+        let pin = |slug: &str, output: bool| PinGeom {
+            slug: slug.into(),
+            label: String::new(),
+            ty: PinType::Float,
+            output,
+            row: 0,
+            wire_anchor: c,
+            dot_center: Pos2::new(if output { c.x + band } else { c.x - band }, c.y),
+            connected: false,
+            inline: None,
+            ghost: false,
+            hit_w: Some(d * REROUTE_PIN_HIT),
+            untyped,
+        };
+        NodeGeom {
+            id: 7,
+            rect: Rect::from_min_size(min, Vec2::splat(d)),
+            title: String::new(),
+            tag: String::new(),
+            category: None,
+            tint: None,
+            missing: false,
+            errored: false,
+            reroute: true,
+            preview: None,
+            pins: vec![pin(REROUTE_IN, false), pin(REROUTE_OUT, true)],
+        }
+    }
+
+    #[test]
+    fn an_untyped_reroute_is_smaller_than_a_typed_one() {
+        let m = GraphMetrics::new(&Style::steel());
+        assert!(
+            m.reroute_untyped_d() < m.reroute_d(),
+            "an unadopted type reads as provisional"
+        );
+        assert!(
+            m.reroute_untyped_d() > m.pin_r * 2.0,
+            "but still bigger than a plain pin dot, or it stops looking like a node"
+        );
+    }
+
+    #[test]
+    fn a_reroute_keeps_its_disc_hit_box_at_every_zoom() {
+        let m = GraphMetrics::new(&Style::steel());
+        let g = reroute_geom(&m, Pos2::ZERO, false);
+        for lod in [ZoomLod::L0, ZoomLod::L2, ZoomLod::L3, ZoomLod::L4] {
+            let r = g.body_rect(lod, &m);
+            assert_eq!(r, g.rect, "a reroute has no header to collapse to ({lod:?})");
+        }
+    }
+
+    /// The reported bug: an empty reroute could not be moved. Its two pins sat
+    /// on the same centre with the global 18-unit hit target, which blanketed
+    /// the whole disc — every press was a pin press, so `pin_claimed` was set
+    /// and the node-drag arm (gated on `!pin_claimed`) never fired.
+    #[test]
+    fn a_reroutes_centre_is_body_so_it_can_be_grabbed_and_dragged() {
+        let m = GraphMetrics::new(&Style::steel());
+        let g = reroute_geom(&m, Pos2::ZERO, true);
+        let geoms = [g];
+        let centre = geoms[0].rect.center();
+        let global_hit = m.pin_hit_w(1.0);
+
+        assert!(
+            global_hit > geoms[0].rect.width(),
+            "the global pin target really is wider than the disc — that was the bug"
+        );
+        assert!(
+            pin_under(&geoms, centre, global_hit).is_none(),
+            "the middle of the disc must not be claimed by a pin"
+        );
+        assert_eq!(
+            node_under(&geoms, centre, ZoomLod::L0, &m),
+            Some(7),
+            "so the body takes the press and the reroute drags like any node"
+        );
+    }
+
+    #[test]
+    fn a_reroutes_two_pins_have_distinct_hit_zones() {
+        let m = GraphMetrics::new(&Style::steel());
+        let g = reroute_geom(&m, Pos2::ZERO, true);
+        let d = g.rect.width();
+        let geoms = [g];
+        let hit = m.pin_hit_w(1.0);
+        let y = d * 0.5;
+
+        let left = pin_under(&geoms, Pos2::new(d * 0.1, y), hit).expect("left band is a pin");
+        assert_eq!(left.1, REROUTE_IN);
+        assert!(!left.3, "the left one is the input");
+
+        let right = pin_under(&geoms, Pos2::new(d * 0.9, y), hit).expect("right band is a pin");
+        assert_eq!(
+            right.1, REROUTE_OUT,
+            "sharing one centre made `out` unreachable — pin_under matched `in` first, always"
+        );
+        assert!(right.3, "the right one is the output");
+    }
+
+    #[test]
+    fn an_untyped_reroute_accepts_any_type_from_either_direction() {
+        let st = crate::engine::editor::graph_editor::tests_support::empty_state();
+        // Dragging a Float output onto the empty reroute's input...
+        assert!(
+            validate_connection(
+                &st, 1, "o", true, &PinType::Float, false,
+                7, REROUTE_IN, false, &PinType::Domain(String::new()), true,
+            )
+            .is_some(),
+            "an untyped reroute is an absence of a type, not a mismatch"
+        );
+        // ...and dragging out of the empty reroute onto a Float input.
+        assert!(
+            validate_connection(
+                &st, 7, REROUTE_OUT, true, &PinType::Domain(String::new()), true,
+                1, "i", false, &PinType::Float, false,
+            )
+            .is_some(),
+            "and it works in the other direction too"
+        );
+        // Strictness is untouched where both sides really are typed.
+        assert!(
+            validate_connection(
+                &st, 1, "o", true, &PinType::Float, false,
+                2, "i", false, &PinType::Exec, false,
+            )
+            .is_none(),
+            "no implicit conversions; typing stays strict"
+        );
     }
 
     #[test]

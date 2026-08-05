@@ -564,6 +564,7 @@ fn caption_controls(ui: &mut Ui, win: Rect, tabs_end_x: f32, maximized: bool) ->
                         }),
                         shadow: None,
                         glow: None,
+                        translucent: false,
                     })
                 };
                 if maximized {
