@@ -16,6 +16,7 @@ use std::sync::Arc;
 use super::command_palette::{CommandPalette, CommandRegistry};
 use super::dialogs::DialogStack;
 use super::dirty_state::DirtyState;
+use super::keymap::Keymap;
 use super::theme::EditorTheme;
 use super::toasts::ToastStack;
 use super::widgets::IconRegistry;
@@ -32,6 +33,10 @@ pub struct EditorServices {
     pub dialogs: DialogStack,
     /// Toast notifications shown over the editor UI.
     pub toasts: ToastStack,
+    /// Keyboard bindings as data — the compiled-in preset overlaid with the
+    /// user's `keymap.ron`. Nothing dispatches through it yet; the consumers
+    /// (menus, tooltips, preferences, the cheat sheet) land in B2.
+    pub keymap: Keymap,
     /// Central command registry and palette UI state.
     pub command_registry: CommandRegistry,
     pub command_palette: CommandPalette,
@@ -46,8 +51,29 @@ impl EditorServices {
             dirty: DirtyState::new(),
             dialogs: DialogStack::new(),
             toasts: ToastStack::new(),
+            keymap: Keymap::default(),
             command_registry: CommandRegistry::new(),
             command_palette: CommandPalette::new(),
+        }
+    }
+
+    /// Read `keymap.ron` over the compiled-in preset, surfacing any problem on
+    /// the console *and* as a toast. A bad or conflicting file is never fatal:
+    /// [`Keymap::load`] hands back working defaults, because an editor that
+    /// refuses to open is a worse outcome than one with the stock bindings.
+    pub fn load_keymap(&mut self) {
+        let (keymap, problems) = Keymap::load();
+        self.keymap = keymap;
+        for p in &problems {
+            println!("keymap: {p}");
+        }
+        if let Some(first) = problems.first() {
+            let msg = if problems.len() > 1 {
+                format!("{first} (+{} more — see the console)", problems.len() - 1)
+            } else {
+                first.clone()
+            };
+            self.toasts.warning(msg);
         }
     }
 

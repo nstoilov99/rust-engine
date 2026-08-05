@@ -64,6 +64,7 @@ pub mod graph_wire_router;
 #[cfg(feature = "editor")]
 pub mod graph_editor_crusty;
 pub mod editor_prefs;
+pub mod keymap;
 pub mod play_mode;
 pub mod play_settings;
 pub mod profiler;

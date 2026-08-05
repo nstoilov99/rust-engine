@@ -652,8 +652,10 @@ impl App {
                 .unwrap_or_else(|| startup_scene.clone())
         };
 
+        let mut services = EditorServices::new();
+        services.load_keymap();
         let editor = EditorApp {
-            services: EditorServices::new(),
+            services,
             viewport: ViewportState {
                 texture: viewport_texture,
                 size: (800, 600),
