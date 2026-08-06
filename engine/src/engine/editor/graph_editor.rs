@@ -820,6 +820,19 @@ pub struct GraphEditorState {
     /// The `?` cheat sheet is open. Session-only, like `find` — a reference
     /// card is not document state.
     pub cheat_sheet: bool,
+    /// Nodes carrying an inert breakpoint mark.
+    ///
+    /// **Session-only, deliberately.** The user-local sidecar is keyed by asset
+    /// path and already carries bookmarks and the view transform, so a debug
+    /// section would fit — but the badge has to be resolved per node on every
+    /// draw, and until Task 45-A's evaluator exists a persisted breakpoint
+    /// cannot do anything on reload anyway. Persisting a mark that provably
+    /// never fires would be inventing durability we cannot honour.
+    pub breakpoints: std::collections::HashSet<u64>,
+    /// Per-tab navigation back-stack for PageUp. Session-only: which graph you
+    /// descended *from* is a property of this browsing session, not of the
+    /// asset.
+    pub nav_back: Vec<String>,
     /// An arrow-key nudge in progress. Holding an arrow key fires the OS
     /// auto-repeat dozens of times a second; each repeat moves the nodes, but
     /// the *whole* hold must land as one undo entry, or a two-second press
@@ -1167,6 +1180,8 @@ impl GraphEditorState {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            breakpoints: Default::default(),
+            nav_back: Vec::new(),
             nudge: None,
             frame: 0,
             frame_all_on_open: false,
@@ -2483,6 +2498,107 @@ impl GraphEditorState {
         self.nudge.is_some()
     }
 
+    /// `F7` — run validation and say what it found.
+    ///
+    /// The honest pre-45-A reading of "compile": there is no evaluator yet, so
+    /// compiling *is* validating. Refreshes the count chip's source of truth
+    /// and reports, because a keypress that silently changes a chip in the
+    /// corner has not told the user anything.
+    pub fn compile(&mut self, registry: &NodeRegistry) {
+        self.errors = validate_doc(&self.doc, registry);
+        let n = self.errors.len() + self.ref_errors.len();
+        if n == 0 {
+            self.toast("Valid");
+        } else if n == 1 {
+            self.toast("1 error");
+        } else {
+            self.toast(format!("{n} errors"));
+        }
+    }
+
+    /// `F9` — toggle an inert breakpoint on the last-clicked node.
+    pub fn toggle_breakpoint(&mut self) {
+        let Some(id) = self.primary.or_else(|| self.selection.iter().copied().next()) else {
+            return;
+        };
+        if !self.breakpoints.remove(&id) {
+            self.breakpoints.insert(id);
+        }
+    }
+
+    /// `Ctrl+Shift+F9` — clear every mark, reporting the count. Silent when
+    /// there was nothing to clear.
+    pub fn clear_breakpoints(&mut self) {
+        let n = self.breakpoints.len();
+        if n == 0 {
+            return;
+        }
+        self.breakpoints.clear();
+        self.toast(if n == 1 {
+            "Cleared 1 breakpoint".to_string()
+        } else {
+            format!("Cleared {n} breakpoints")
+        });
+    }
+
+    pub fn has_breakpoint(&self, id: u64) -> bool {
+        self.breakpoints.contains(&id)
+    }
+
+    /// `F2` — open the inline editor on the selected annotation.
+    ///
+    /// Annotations only: a node's title comes from its descriptor and
+    /// `NodeInst` has no override field, so there is nothing to edit. Recorded
+    /// for Task 45-A rather than faked.
+    pub fn begin_rename(&mut self) -> bool {
+        if let Some(i) = self.sel_comment {
+            if let Some(c) = self.doc.comments.get(i) {
+                self.editing = Some(AnnotationEdit {
+                    is_group: false,
+                    index: i,
+                    buffer: c.text.clone(),
+                    original: c.text.clone(),
+                    anchor_world: [c.rect[0], c.rect[1]],
+                    first_frame: true,
+                });
+                return true;
+            }
+        }
+        if let Some(i) = self.sel_group {
+            if let Some(g) = self.doc.groups.get(i) {
+                self.editing = Some(AnnotationEdit {
+                    is_group: true,
+                    index: i,
+                    buffer: g.title.clone(),
+                    original: g.title.clone(),
+                    anchor_world: [g.rect[0], g.rect[1]],
+                    first_frame: true,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `PageDown` — the subgraph asset under the last-clicked node, if any.
+    /// The caller opens it as a tab; we only record where we came from.
+    pub fn descend_target(&self) -> Option<String> {
+        let id = self.primary.or_else(|| self.selection.iter().copied().next())?;
+        self.doc.node(id).and_then(|n| n.subgraph.clone())
+    }
+
+    /// Remember the graph being left, so `PageUp` can come back to it.
+    pub fn push_nav(&mut self, from: String) {
+        self.nav_back.push(from);
+    }
+
+    /// `PageUp` — the graph to return to. `None` (silent no-op) at the root of
+    /// this session's descent, which is the honest answer: a subgraph can have
+    /// many parents, so "the" parent only exists if you walked in from one.
+    pub fn ascend_target(&mut self) -> Option<String> {
+        self.nav_back.pop()
+    }
+
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
     ///
@@ -2883,6 +2999,8 @@ pub mod tests_support {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            breakpoints: Default::default(),
+            nav_back: Vec::new(),
             nudge: None,
             frame: 0,
             frame_all_on_open: false,
@@ -4230,6 +4348,119 @@ mod tests {
         assert_eq!(AlignMode::ALL.len(), 8);
     }
 
+
+    // ── C3 behaviours
+
+    #[test]
+    fn f7_reports_what_validation_found() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.compile(&reg);
+        // `test_add` is not registered in a bare registry, so this graph has a
+        // problem and compile must say so rather than claiming success.
+        assert!(!st.errors.is_empty(), "validation ran");
+        assert!(
+            st.toasts.last().is_some_and(|t| t.text.contains("error")),
+            "and reported: {:?}",
+            st.toasts.last().map(|t| &t.text)
+        );
+
+        st.doc.nodes.clear();
+        st.compile(&reg);
+        assert!(st.errors.is_empty());
+        assert_eq!(st.toasts.last().map(|t| t.text.as_str()), Some("Valid"));
+    }
+
+    #[test]
+    fn f9_toggles_a_breakpoint_on_the_last_clicked_node() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 0.0])];
+        st.selection = [0, 1].into_iter().collect();
+        st.primary = Some(1);
+
+        st.toggle_breakpoint();
+        assert!(st.has_breakpoint(1), "the mark lands on the last-clicked node");
+        assert!(!st.has_breakpoint(0), "not on the whole selection");
+        st.toggle_breakpoint();
+        assert!(!st.has_breakpoint(1), "and toggles off");
+    }
+
+    #[test]
+    fn f9_on_nothing_is_a_silent_no_op() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.toggle_breakpoint();
+        assert!(st.breakpoints.is_empty());
+        assert!(st.toasts.is_empty(), "and says nothing");
+    }
+
+    #[test]
+    fn clearing_breakpoints_reports_the_count_but_only_when_there_were_some() {
+        let mut st = bare_state();
+        st.doc.nodes = (0..3).map(|i| node(i, [i as f32 * 100.0, 0.0])).collect();
+        for id in 0..3 {
+            st.primary = Some(id);
+            st.toggle_breakpoint();
+        }
+        assert_eq!(st.breakpoints.len(), 3);
+        st.clear_breakpoints();
+        assert!(st.breakpoints.is_empty());
+        assert!(st.toasts.last().is_some_and(|t| t.text.contains('3')));
+
+        let before = st.toasts.len();
+        st.clear_breakpoints();
+        assert_eq!(st.toasts.len(), before, "clearing nothing says nothing");
+    }
+
+    #[test]
+    fn f2_renames_an_annotation_and_never_a_node() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.doc.comments.push(CommentBox {
+            rect: [10.0, 10.0, 200.0, 100.0],
+            text: "note".into(),
+            ..Default::default()
+        });
+
+        // A node selected: nothing to rename — `NodeInst` has no title field.
+        st.select_only(0);
+        assert!(!st.begin_rename());
+        assert!(st.editing.is_none());
+
+        st.clear_selection();
+        st.sel_comment = Some(0);
+        assert!(st.begin_rename());
+        let e = st.editing.as_ref().expect("editor opened");
+        assert_eq!(e.buffer, "note");
+        assert_eq!(e.original, "note", "so Escape can put it back");
+        assert!(!e.is_group);
+    }
+
+    #[test]
+    fn page_navigation_retraces_the_path_actually_walked() {
+        let mut st = bare_state();
+        // Nothing to go back to at the start: silent no-op, not an error.
+        assert_eq!(st.ascend_target(), None);
+
+        st.push_nav("a.graph".into());
+        st.push_nav("b.graph".into());
+        assert_eq!(st.ascend_target(), Some("b.graph".to_string()));
+        assert_eq!(st.ascend_target(), Some("a.graph".to_string()));
+        assert_eq!(st.ascend_target(), None, "and empties cleanly");
+    }
+
+    #[test]
+    fn descending_needs_a_subgraph_node_under_the_cursor() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.select_only(0);
+        assert_eq!(st.descend_target(), None, "a plain node has nowhere to go");
+
+        st.doc.nodes[0].subgraph = Some("inner.subgraph".into());
+        assert_eq!(st.descend_target(), Some("inner.subgraph".to_string()));
+    }
+
     /// T10 — Escape during a node drag puts the nodes back and records nothing.
     #[test]
     fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
@@ -4605,6 +4836,8 @@ mod tests {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            breakpoints: Default::default(),
+            nav_back: Vec::new(),
             nudge: None,
             frame: 0,
             frame_all_on_open: false,

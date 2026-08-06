@@ -368,7 +368,7 @@ actions! {
     GROUP    => "graph.group", "Group Selection", "Organization", Canvas, Live;
     COMMENT  => "graph.comment", "Add Comment", "Organization", Canvas, Live;
     COLLAPSE => "graph.collapse_to_subgraph", "Collapse to Subgraph", "Organization", Canvas, Live;
-    RENAME   => "graph.rename", "Rename", "Organization", Canvas, Unimplemented;
+    RENAME   => "graph.rename", "Rename", "Organization", Canvas, Live;
 
     // ── Alignment
     ALIGN_STRIP    => "graph.align_strip", "Align & Distribute…", "Alignment", Canvas, Live;
@@ -383,8 +383,8 @@ actions! {
     // ── View
     FRAME_SELECTION => "graph.frame_selection", "Frame Selection", "View", Canvas, Live;
     FIT_GRAPH       => "graph.fit_graph", "Fit Graph", "View", Canvas, Live;
-    PARENT_GRAPH    => "graph.parent_graph", "Go to Parent Graph", "View", GraphTab, Unimplemented;
-    CHILD_GRAPH     => "graph.child_graph", "Go to Child Graph", "View", GraphTab, Unimplemented;
+    PARENT_GRAPH    => "graph.parent_graph", "Go to Parent Graph", "View", GraphTab, Live;
+    CHILD_GRAPH     => "graph.child_graph", "Go to Child Graph", "View", GraphTab, Live;
 
     // ── Bookmarks
     BOOKMARK_STORE    => "graph.bookmark_store", "Store Bookmark", "Bookmarks", Canvas, Live;
@@ -398,12 +398,12 @@ actions! {
     FIND         => "graph.find", "Find in Graph", "Search", GraphTab, Live;
     NEXT_ERROR   => "graph.next_error", "Next Validation Error", "Search", GraphTab, Live;
     PREV_ERROR   => "graph.prev_error", "Previous Validation Error", "Search", GraphTab, Live;
-    COMPILE      => "graph.compile", "Compile", "Search", GraphTab, Unimplemented;
+    COMPILE      => "graph.compile", "Compile", "Search", GraphTab, Live;
     PURGE_UNUSED => "graph.purge_unused", "Purge Unused Nodes", "Search", GraphTab, Live;
 
     // ── Debugging
-    TOGGLE_BREAKPOINT => "graph.toggle_breakpoint", "Toggle Breakpoint", "Debugging", Canvas, Unimplemented;
-    CLEAR_BREAKPOINTS => "graph.clear_breakpoints", "Clear All Breakpoints", "Debugging", GraphTab, Unimplemented;
+    TOGGLE_BREAKPOINT => "graph.toggle_breakpoint", "Toggle Breakpoint", "Debugging", Canvas, Live;
+    CLEAR_BREAKPOINTS => "graph.clear_breakpoints", "Clear All Breakpoints", "Debugging", GraphTab, Live;
 
     // ── Input model (structural, listed for the cheat sheet)
     CANCEL => "editor.cancel", "Dismiss / Abort / Revert", "Input Model", Global, Fixed;
@@ -999,13 +999,9 @@ mod tests {
         let km = Keymap::from_preset(Preset::Crusty);
         // The table lists them, so the user can find the key; dispatch no-ops
         // until Pass C fills the handler in.
-        for a in [
-            Action::STRAIGHTEN,
-            Action::DELETE_AND_HEAL,
-            Action::COMPILE,
-            Action::TOGGLE_BREAKPOINT,
-            Action::PARENT_GRAPH,
-        ] {
+        // (QUICK_PLACE is deliberately absent: its key comes from the node
+        // descriptor, so it is the one unimplemented action with no chord.)
+        for a in [Action::STRAIGHTEN, Action::DELETE_AND_HEAL] {
             assert_eq!(a.status(), ActionStatus::Unimplemented, "{}", a.id());
             assert!(!a.status().dispatchable());
             assert!(!km.chords_for(a).is_empty(), "{} is still listed", a.id());

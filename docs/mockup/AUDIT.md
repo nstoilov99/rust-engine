@@ -539,8 +539,12 @@ These need a person, a window manager and a mouse. Run them after any change to
 |---|---|
 | Alt+click a group title breaks links crossing the boundary | The title region is not separated from the group-body drag target; doing it properly means splitting that hit region first. |
 | Alt+click named reroute selects its partner | Named reroutes do not exist. |
-| Node rename (`F2` on a node) | `NodeInst` has no display-name override — the title comes from the descriptor. Needs a `NodeInst.title: Option<String>` field. **Recorded for Task 45-A.** |
+| Node rename (`F2` on a node) | `NodeInst` has no display-name override — the title comes from the descriptor. Needs a `NodeInst.title: Option<String>` field. **Recorded for Task 45-A.** `F2` renames annotations today. |
+| Breakpoint persistence | Marks are session-only. The sidecar could hold them, but until Task 45-A's evaluator exists a reloaded breakpoint provably cannot fire, and persisting a mark that never fires is durability we cannot honour. |
 | Quick-place (`<key>`+click) | Needs `descriptor.quick_key: Option<char>` in the registry plus the macro attribute and a load-time conflict check against the Canvas keymap context. |
 | Unreal `mouse_profile` consumed | The strategy table over `{ctrl_click, ctrl_canvas_drag, ctrl_pin_drag}` is specified but not wired; `MouseProfile` is plumbed and persisted. Slash-cut is Crusty-profile-only by design. |
-| `Q` straighten, `⇧Del` exec heal, `F7` compile, `F9` breakpoints, `PageUp`/`PageDown` nav | Bound and listed in the keymap, dimmed "in Pass C" in Preferences, dispatch to nothing. |
+| `Q` straighten | Needs pin-row geometry, which lives in the draw layer, not the state layer — the honest version has to resolve each wire's two pin rows before it can move anything. |
+| `⇧Del` exec-chain heal | Needs exec-pin identification from the descriptor to know which in/out pair to rejoin. |
+| Unreal `mouse_profile` consumed | The `{ctrl_click, ctrl_canvas_drag, ctrl_pin_drag}` strategy table is specified but not wired. |
+| `Ctrl`+drag-from-pin move-all-connections | Touches the connect-drag path, which currently assumes one edge; lifting N and re-landing them with per-edge validity is a real change to that state machine. |
 

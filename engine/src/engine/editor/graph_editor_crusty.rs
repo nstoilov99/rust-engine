@@ -525,6 +525,8 @@ struct NodeGeom {
     errored: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
+    /// Carries an inert breakpoint mark (`F9`).
+    breakpoint: bool,
     /// Opt-in preview slot; `None` — the common case — costs nothing.
     preview: Option<crate::engine::node_graph::PreviewKind>,
     pins: Vec<PinGeom>,
@@ -737,6 +739,7 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
+                    breakpoint: state.has_breakpoint(n.id),
                     preview: None,
                     pins: vec![
                         pin(REROUTE_IN, false, min.x),
@@ -939,6 +942,7 @@ fn build_geoms(
             NodeGeom {
                 id: n.id,
                 rect,
+                breakpoint: state.has_breakpoint(n.id),
                 title,
                 tag,
                 category,
@@ -1850,6 +1854,7 @@ fn draw_and_interact(
         // Double-click a subgraph node → open its referenced doc as a tab.
         if resp.double_clicked(ui) {
             if let Some(path) = state.doc.node(g.id).and_then(|n| n.subgraph.clone()) {
+                state.push_nav(state.path.clone());
                 *open_subgraph = Some(path);
             }
         }
@@ -2370,6 +2375,23 @@ fn draw_and_interact(
                     state.align_nodes(&rects, AlignMode::CenterVertically, registry);
                 }
                 Action::AUTO_LAYOUT => *layout_request = true,
+                Action::COMPILE => state.compile(registry),
+                Action::TOGGLE_BREAKPOINT => state.toggle_breakpoint(),
+                Action::CLEAR_BREAKPOINTS => state.clear_breakpoints(),
+                Action::RENAME => {
+                    state.begin_rename();
+                }
+                Action::CHILD_GRAPH => {
+                    if let Some(path) = state.descend_target() {
+                        state.push_nav(state.path.clone());
+                        *open_subgraph = Some(path);
+                    }
+                }
+                Action::PARENT_GRAPH => {
+                    if let Some(path) = state.ascend_target() {
+                        *open_subgraph = Some(path);
+                    }
+                }
                 // Arrow nudge. Each repeat extends the open transaction
                 // instead of recording its own entry — see `nudge_selection`.
                 Action::NUDGE_UP => state.nudge_selection([0.0, -NUDGE_COARSE]),
@@ -4605,9 +4627,25 @@ fn draw_nodes(
         if lod.glyphs() {
             let title_px = st.fonts.body * zoom;
             // Badges never stack: one glyph in the header's left gutter, by
-            // precedence. Only errors exist so far — breakpoints and warnings
-            // join the ladder when they land.
-            let gutter = if g.errored || g.missing {
+            // precedence — error/missing outranks a breakpoint, because a node
+            // that cannot run is more urgent than one you meant to stop at.
+            let gutter = if !g.errored && !g.missing && g.breakpoint {
+                let r = m.pin_r * zoom * 0.8;
+                let c = Pos2::new(
+                    srect.min.x + m.pad_x * zoom + r,
+                    srect.min.y + m.header_h * zoom * 0.5,
+                );
+                // An octagon, per the Badges spec: a stop sign reads as "halt"
+                // at a glance and cannot be confused with the error disc.
+                let pts: Vec<Pos2> = (0..8)
+                    .map(|i| {
+                        let a = std::f32::consts::TAU * (i as f32 + 0.5) / 8.0;
+                        Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+                    })
+                    .collect();
+                p.convex_polygon_filled(pts, status.error);
+                r * 2.0 + m.label_gap * zoom
+            } else if g.errored || g.missing {
                 let r = m.pin_r * zoom * 0.8;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
@@ -5877,6 +5915,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: true,
+            breakpoint: false,
             preview: None,
             pins: vec![pin(REROUTE_IN, false), pin(REROUTE_OUT, true)],
         }
@@ -5998,6 +6037,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            breakpoint: false,
             preview: None,
             pins: vec![],
         };
@@ -6019,6 +6059,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            breakpoint: false,
             preview: None,
             pins: vec![],
         };
