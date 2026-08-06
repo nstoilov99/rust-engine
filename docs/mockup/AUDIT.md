@@ -488,3 +488,59 @@ them pulled forward: diff-friendly serialization (hours, stops asset churn now)
 and the F/A modifier bug (minutes).
 
 **Stopping here per the brief — no feature code until you've reviewed this.**
+
+---
+
+# Input model — acceptance scoreboard and manual checklist
+
+Closing record for the input-model overhaul (Passes A, B, C). Automated rows
+name the test; manual rows say what to do and what to look for, because they
+depend on a real window manager, a real pointing device or a real display and
+cannot be driven headlessly.
+
+## Automated
+
+| # | Claim | Test |
+|---|---|---|
+| 1 | A press that closes a menu is consumed | `t1_a_press_that_closes_a_menu_is_consumed`, `t1_the_widget_under_a_menu_is_not_clicked` |
+| 2 | Right-press elsewhere closes the old menu and opens a new one | `acceptance_2_a_right_press_elsewhere_closes_the_old_menu_and_opens_a_new_one` |
+| 3 | A wheel outside an open menu closes it | `t3_a_wheel_outside_an_open_menu_closes_it` |
+| 4 | Alt-Tabbing away closes the menu | `acceptance_4_alt_tabbing_away_closes_the_menu` |
+| 5 | Right press + small move = context menu | `t5_a_right_press_that_barely_moves_is_a_context_click` |
+| 6 | Right press + travel = pan, no menu | `t6_a_right_press_that_travels_pans_and_opens_no_menu` |
+| 7 | Alt+click a wire: one wire, reported, one undo step | `acceptance_7_alt_click_a_wire_deletes_one_wire_in_one_undo_step` |
+| 8 | Alt+click a pin with four links: one undo step | `acceptance_8_alt_click_a_pin_with_four_links_is_one_undo_step` |
+| 10 | Escape during a node drag reverts and records nothing | `t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry` |
+| 11 | A touchpad flick moves a few ladder steps, not hundreds | `a_touchpad_flick_moves_a_few_ladder_steps_not_hundreds` |
+| 12 | A bare Alt does nothing | `acceptance_12_a_bare_alt_does_nothing_at_all` |
+| 14 | Every action appears in the preferences page | `acceptance_14_every_action_appears_in_the_preferences_page` |
+| 15 | Every menu row with a binding displays it | `acceptance_15_every_menu_row_with_a_binding_can_display_it` |
+| 17 | A held arrow key is one undo step | `acceptance_17_a_held_arrow_key_is_one_undo_step` |
+| 18 | The drag threshold scales with UI scale | `the_threshold_scales_with_the_hosts_ui_scale` (crusty) |
+
+## Manual
+
+These need a person, a window manager and a mouse. Run them after any change to
+`Canvas`, the modal stack, or the winit seam in `shell/input.rs`.
+
+| # | Do this | Expect |
+|---|---|---|
+| 9 | Start a node drag, move the pointer **outside the window** and keep moving, then release outside | The node keeps tracking the pointer the whole time and the drag commits on release. winit holds OS pointer capture for the press duration; there is no API surface to assert this headlessly. If the node stops at the window edge, capture has been lost — check for a stray `PointerGone` handler. |
+| 13 | Open **Preferences ▸ Keyboard Shortcuts**, click a chord cell, press a chord already in use in the same context | An inline warning naming the other action, with *Rebind anyway / Cancel*. Cancel leaves the original binding intact. |
+| 16 | Hold `Alt` and sweep the pointer across wires, then over a connected pin | Each wire under the pointer goes red-dashed as you cross it; the pin shows a danger ring. Nothing changes until you click. |
+| 18b | Change **Preferences ▸ Appearance ▸ UI scale** while a graph tab is open, then start a drag | The drag deadzone scales with it — at 2× scale a drag needs visibly more travel before it starts. The value is computed per frame from the live style, so no restart is needed. |
+| — | Minimise the window mid-drag, restore it | The drag is abandoned, the node is back where it started, nothing on the undo stack. Windows delivers this as `Focused(false)`. |
+| — | Spin the wheel hard over the canvas | Zoom steps stop cleanly at 220% and 15%; no overshoot, no jitter, and the point under the cursor stays put throughout. |
+| — | With a precision touchpad, two-finger flick over the canvas | A handful of zoom steps, not a continuous blur. |
+
+## Deferred (with reasons)
+
+| Item | Why it is not done |
+|---|---|
+| Alt+click a group title breaks links crossing the boundary | The title region is not separated from the group-body drag target; doing it properly means splitting that hit region first. |
+| Alt+click named reroute selects its partner | Named reroutes do not exist. |
+| Node rename (`F2` on a node) | `NodeInst` has no display-name override — the title comes from the descriptor. Needs a `NodeInst.title: Option<String>` field. **Recorded for Task 45-A.** |
+| Quick-place (`<key>`+click) | Needs `descriptor.quick_key: Option<char>` in the registry plus the macro attribute and a load-time conflict check against the Canvas keymap context. |
+| Unreal `mouse_profile` consumed | The strategy table over `{ctrl_click, ctrl_canvas_drag, ctrl_pin_drag}` is specified but not wired; `MouseProfile` is plumbed and persisted. Slash-cut is Crusty-profile-only by design. |
+| `Q` straighten, `⇧Del` exec heal, `F7` compile, `F9` breakpoints, `PageUp`/`PageDown` nav | Bound and listed in the keymap, dimmed "in Pass C" in Preferences, dispatch to nothing. |
+

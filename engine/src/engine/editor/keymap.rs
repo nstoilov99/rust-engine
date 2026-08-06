@@ -355,14 +355,14 @@ actions! {
     STRAIGHTEN => "graph.straighten", "Straighten Connections", "Wires", Canvas, Unimplemented;
 
     // ── Movement
-    NUDGE_UP         => "graph.nudge_up", "Nudge Up", "Movement", Canvas, Unimplemented;
-    NUDGE_DOWN       => "graph.nudge_down", "Nudge Down", "Movement", Canvas, Unimplemented;
-    NUDGE_LEFT       => "graph.nudge_left", "Nudge Left", "Movement", Canvas, Unimplemented;
-    NUDGE_RIGHT      => "graph.nudge_right", "Nudge Right", "Movement", Canvas, Unimplemented;
-    NUDGE_UP_FINE    => "graph.nudge_up_fine", "Nudge Up (Fine)", "Movement", Canvas, Unimplemented;
-    NUDGE_DOWN_FINE  => "graph.nudge_down_fine", "Nudge Down (Fine)", "Movement", Canvas, Unimplemented;
-    NUDGE_LEFT_FINE  => "graph.nudge_left_fine", "Nudge Left (Fine)", "Movement", Canvas, Unimplemented;
-    NUDGE_RIGHT_FINE => "graph.nudge_right_fine", "Nudge Right (Fine)", "Movement", Canvas, Unimplemented;
+    NUDGE_UP         => "graph.nudge_up", "Nudge Up", "Movement", Canvas, Live;
+    NUDGE_DOWN       => "graph.nudge_down", "Nudge Down", "Movement", Canvas, Live;
+    NUDGE_LEFT       => "graph.nudge_left", "Nudge Left", "Movement", Canvas, Live;
+    NUDGE_RIGHT      => "graph.nudge_right", "Nudge Right", "Movement", Canvas, Live;
+    NUDGE_UP_FINE    => "graph.nudge_up_fine", "Nudge Up (Fine)", "Movement", Canvas, Live;
+    NUDGE_DOWN_FINE  => "graph.nudge_down_fine", "Nudge Down (Fine)", "Movement", Canvas, Live;
+    NUDGE_LEFT_FINE  => "graph.nudge_left_fine", "Nudge Left (Fine)", "Movement", Canvas, Live;
+    NUDGE_RIGHT_FINE => "graph.nudge_right_fine", "Nudge Right (Fine)", "Movement", Canvas, Live;
 
     // ── Organization
     GROUP    => "graph.group", "Group Selection", "Organization", Canvas, Live;
@@ -376,8 +376,8 @@ actions! {
     ALIGN_LEFT     => "graph.align_left", "Align Left", "Alignment", Canvas, Live;
     ALIGN_BOTTOM   => "graph.align_bottom", "Align Bottom", "Alignment", Canvas, Live;
     ALIGN_RIGHT    => "graph.align_right", "Align Right", "Alignment", Canvas, Live;
-    ALIGN_CENTER_H => "graph.align_center_h", "Align Centers Horizontally", "Alignment", Canvas, Unimplemented;
-    ALIGN_CENTER_V => "graph.align_center_v", "Align Centers Vertically", "Alignment", Canvas, Unimplemented;
+    ALIGN_CENTER_H => "graph.align_center_h", "Align Centers Horizontally", "Alignment", Canvas, Live;
+    ALIGN_CENTER_V => "graph.align_center_v", "Align Centers Vertically", "Alignment", Canvas, Live;
     AUTO_LAYOUT    => "graph.auto_layout", "Auto-Layout", "Alignment", Canvas, Live;
 
     // ── View
@@ -1004,7 +1004,6 @@ mod tests {
             Action::DELETE_AND_HEAL,
             Action::COMPILE,
             Action::TOGGLE_BREAKPOINT,
-            Action::NUDGE_LEFT,
             Action::PARENT_GRAPH,
         ] {
             assert_eq!(a.status(), ActionStatus::Unimplemented, "{}", a.id());

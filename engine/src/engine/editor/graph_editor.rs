@@ -820,6 +820,12 @@ pub struct GraphEditorState {
     /// The `?` cheat sheet is open. Session-only, like `find` — a reference
     /// card is not document state.
     pub cheat_sheet: bool,
+    /// An arrow-key nudge in progress. Holding an arrow key fires the OS
+    /// auto-repeat dozens of times a second; each repeat moves the nodes, but
+    /// the *whole* hold must land as one undo entry, or a two-second press
+    /// costs eighty presses of Ctrl+Z to undo. Opened on the first press,
+    /// extended by every repeat, committed when the key comes up.
+    pub nudge: Option<Nudge>,
     /// Empty-canvas context menu: (world, screen) of the right-click that
     /// opened it. Both are kept because "Add Node…" needs the world point to
     /// place the node and the screen point to anchor the palette, and the
@@ -911,6 +917,11 @@ pub enum AlignMode {
     Right,
     Top,
     Bottom,
+    /// Line the nodes up on a shared vertical centre line (they end up in a
+    /// column). Distinct from Left/Right, which use an edge.
+    CenterHorizontally,
+    /// Shared horizontal centre line (they end up in a row).
+    CenterVertically,
     DistributeHorizontally,
     DistributeVertically,
 }
@@ -939,11 +950,13 @@ impl AlignMode {
         }
     }
 
-    pub const ALL: [AlignMode; 6] = [
+    pub const ALL: [AlignMode; 8] = [
         AlignMode::Left,
         AlignMode::Right,
         AlignMode::Top,
         AlignMode::Bottom,
+        AlignMode::CenterHorizontally,
+        AlignMode::CenterVertically,
         AlignMode::DistributeHorizontally,
         AlignMode::DistributeVertically,
     ];
@@ -954,6 +967,8 @@ impl AlignMode {
             AlignMode::Right => "Align Right",
             AlignMode::Top => "Align Top",
             AlignMode::Bottom => "Align Bottom",
+            AlignMode::CenterHorizontally => "Align Centers Horizontally",
+            AlignMode::CenterVertically => "Align Centers Vertically",
             AlignMode::DistributeHorizontally => "Distribute Horizontally",
             AlignMode::DistributeVertically => "Distribute Vertically",
         }
@@ -1021,6 +1036,19 @@ pub struct AnnotationResize {
 /// Smallest an annotation may be dragged to, world units.
 pub const ANNOTATION_MIN_W: f32 = 80.0;
 pub const ANNOTATION_MIN_H: f32 = 40.0;
+
+/// A held arrow-key nudge, accumulating into one undo entry.
+///
+/// Deliberately the same shape as [`NodeDrag`]: pre-gesture positions so the
+/// movement is absolute rather than incremental (no drift, and Escape can put
+/// them back), plus the running total that gets recorded once at the end.
+#[derive(Debug, Clone)]
+pub struct Nudge {
+    /// Node id + position before the first key press.
+    pub originals: Vec<(u64, [f32; 2])>,
+    /// Total offset applied so far.
+    pub delta: [f32; 2],
+}
 
 /// In-flight node drag: original positions so live movement is absolute
 /// (no drift) and the net delta is recorded once on release.
@@ -1139,6 +1167,7 @@ impl GraphEditorState {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            nudge: None,
             frame: 0,
             frame_all_on_open: false,
         })
@@ -1931,6 +1960,27 @@ impl GraphEditorState {
                 let y = rects.iter().map(|(_, r)| r[1]).fold(f32::MAX, f32::min);
                 deltas.extend(rects.iter().map(|(id, r)| (*id, [0.0, y - r[1]])));
             }
+            // Centre-aligns average the centres rather than picking an
+            // extreme, so the group stays where it is instead of sliding to
+            // whichever node happened to be furthest out.
+            AlignMode::CenterHorizontally => {
+                let cx: f32 = rects.iter().map(|(_, r)| r[0] + r[2] * 0.5).sum::<f32>()
+                    / rects.len() as f32;
+                deltas.extend(
+                    rects
+                        .iter()
+                        .map(|(id, r)| (*id, [cx - (r[0] + r[2] * 0.5), 0.0])),
+                );
+            }
+            AlignMode::CenterVertically => {
+                let cy: f32 = rects.iter().map(|(_, r)| r[1] + r[3] * 0.5).sum::<f32>()
+                    / rects.len() as f32;
+                deltas.extend(
+                    rects
+                        .iter()
+                        .map(|(id, r)| (*id, [0.0, cy - (r[1] + r[3] * 0.5)])),
+                );
+            }
             AlignMode::Bottom => {
                 let y = rects.iter().map(|(_, r)| r[1] + r[3]).fold(f32::MIN, f32::max);
                 deltas.extend(rects.iter().map(|(id, r)| (*id, [0.0, y - (r[1] + r[3])])));
@@ -2383,6 +2433,56 @@ impl GraphEditorState {
         self.commit(edit, registry);
     }
 
+    /// Move the selection by `delta` as part of a held-key nudge.
+    ///
+    /// The first call opens the transaction; later calls extend it. Nothing
+    /// reaches the undo stack until [`commit_nudge`](Self::commit_nudge).
+    pub fn nudge_selection(&mut self, delta: [f32; 2]) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let n = self.nudge.get_or_insert_with(|| Nudge {
+            originals: Vec::new(),
+            delta: [0.0, 0.0],
+        });
+        if n.originals.is_empty() {
+            n.originals = self
+                .doc
+                .nodes
+                .iter()
+                .filter(|node| self.selection.contains(&node.id))
+                .map(|node| (node.id, node.position))
+                .collect();
+        }
+        n.delta[0] += delta[0];
+        n.delta[1] += delta[1];
+        let (dx, dy) = (n.delta[0], n.delta[1]);
+        let originals = n.originals.clone();
+        for (id, start) in &originals {
+            if let Some(node) = self.doc.nodes.iter_mut().find(|n| n.id == *id) {
+                node.position = [start[0] + dx, start[1] + dy];
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Close an open nudge, recording the whole hold as one `MoveNodes`.
+    pub fn commit_nudge(&mut self, registry: &NodeRegistry) {
+        let Some(n) = self.nudge.take() else {
+            return;
+        };
+        if n.delta == [0.0, 0.0] || n.originals.is_empty() {
+            return;
+        }
+        let ids: Vec<u64> = n.originals.iter().map(|(id, _)| *id).collect();
+        self.commit(GraphEdit::MoveNodes { ids, delta: n.delta }, registry);
+    }
+
+    /// Is a nudge open? (Escape reverts it through `cancel_interactions`.)
+    pub fn nudging(&self) -> bool {
+        self.nudge.is_some()
+    }
+
     /// Cancel any in-flight drag / inline edit — indices they hold become
     /// invalid on structural edits and on undo/redo.
     ///
@@ -2450,6 +2550,13 @@ impl GraphEditorState {
                 }
             }
         }
+        if let Some(n) = self.nudge.take() {
+            for (id, pos) in n.originals {
+                if let Some(node) = self.doc.nodes.iter_mut().find(|x| x.id == id) {
+                    node.position = pos;
+                }
+            }
+        }
         // These hold no document state — dropping them is the whole revert.
         self.connect_drag = None;
         self.marquee = None;
@@ -2464,6 +2571,7 @@ impl GraphEditorState {
     /// undo/save gates; Escape has to reach the others too.
     pub fn interaction_in_flight(&self) -> bool {
         self.gesture_in_flight()
+            || self.nudge.is_some()
             || self.connect_drag.is_some()
             || self.marquee.is_some()
             || self.editing.is_some()
@@ -2775,6 +2883,7 @@ pub mod tests_support {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            nudge: None,
             frame: 0,
             frame_all_on_open: false,
         }
@@ -4027,6 +4136,100 @@ mod tests {
         assert!(!st.stack.can_undo(), "one gesture, one entry");
     }
 
+
+    /// Acceptance 17 — holding an arrow key moves continuously but costs
+    /// exactly one undo step, however long the hold.
+    #[test]
+    fn acceptance_17_a_held_arrow_key_is_one_undo_step() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [100.0, 0.0])];
+        st.selection = [0, 1].into_iter().collect();
+        let before = st.doc.clone();
+
+        // First press, then forty auto-repeats.
+        for _ in 0..41 {
+            st.nudge_selection([16.0, 0.0]);
+        }
+        assert!(st.nudging(), "the transaction stays open while the key is held");
+        assert!(!st.stack.can_undo(), "and nothing is recorded mid-hold");
+        assert_eq!(st.doc.node(0).unwrap().position, [41.0 * 16.0, 0.0]);
+
+        st.commit_nudge(&reg);
+        assert!(!st.nudging());
+        assert!(st.stack.can_undo());
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one Ctrl+Z undoes the whole hold");
+        assert!(!st.stack.can_undo(), "there was only ever one entry");
+    }
+
+    #[test]
+    fn a_nudge_is_absolute_from_the_start_so_it_cannot_drift() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [10.0, 20.0])];
+        st.selection = [0].into_iter().collect();
+        st.nudge_selection([1.0, 0.0]);
+        st.nudge_selection([1.0, 0.0]);
+        st.nudge_selection([0.0, -1.0]);
+        assert_eq!(st.doc.node(0).unwrap().position, [12.0, 19.0]);
+        st.commit_nudge(&reg);
+        st.undo(&reg);
+        assert_eq!(st.doc.node(0).unwrap().position, [10.0, 20.0]);
+    }
+
+    #[test]
+    fn escape_reverts_an_open_nudge_and_records_nothing() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        st.selection = [0].into_iter().collect();
+        let before = st.doc.clone();
+        for _ in 0..5 {
+            st.nudge_selection([16.0, 0.0]);
+        }
+        assert!(st.interaction_in_flight(), "Escape must reach a nudge");
+        st.cancel_interactions();
+        assert_eq!(st.doc, before);
+        assert!(!st.stack.can_undo());
+        assert!(!st.nudging());
+    }
+
+    #[test]
+    fn nudging_nothing_is_a_silent_no_op() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        let before = st.doc.clone();
+        st.nudge_selection([16.0, 0.0]);
+        st.commit_nudge(&reg);
+        assert_eq!(st.doc, before);
+        assert!(!st.stack.can_undo());
+    }
+
+    #[test]
+    fn align_centers_average_rather_than_picking_an_extreme() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 0.0])];
+        // Centres at 50 and 250; the average is 150.
+        let rects = vec![(0u64, [0.0, 0.0, 100.0, 60.0]), (1u64, [200.0, 0.0, 100.0, 60.0])];
+        st.align_nodes(&rects, AlignMode::CenterHorizontally, &reg);
+        assert_eq!(st.doc.node(0).unwrap().position[0], 100.0);
+        assert_eq!(st.doc.node(1).unwrap().position[0], 100.0);
+        // Both moved toward each other; the group did not slide to one side.
+        assert!(st.stack.can_undo(), "one undoable edit");
+    }
+
+    #[test]
+    fn align_centers_are_ordinary_two_node_aligns() {
+        for m in [AlignMode::CenterHorizontally, AlignMode::CenterVertically] {
+            assert!(!m.is_distribute());
+            assert_eq!(m.min_nodes(), 2);
+            assert!(AlignMode::ALL.contains(&m), "and they appear in the strip");
+        }
+        assert_eq!(AlignMode::ALL.len(), 8);
+    }
+
     /// T10 — Escape during a node drag puts the nodes back and records nothing.
     #[test]
     fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
@@ -4402,6 +4605,7 @@ mod tests {
             find: None,
             cheat_sheet: false,
             canvas_menu: None,
+            nudge: None,
             frame: 0,
             frame_all_on_open: false,
         }

@@ -149,6 +149,10 @@ const MARQUEE_FILL_ALPHA: f32 = 0.08;
 /// one centre with the global 18-unit target (the old behaviour) blanketed the
 /// whole node: every press read as a pin press, so it could neither be moved
 /// nor have its `out` side reached.
+/// Arrow-key nudge distances, world units.
+const NUDGE_COARSE: f32 = 16.0;
+const NUDGE_FINE: f32 = 1.0;
+
 const REROUTE_PIN_OFF: f32 = 0.30;
 const REROUTE_PIN_HIT: f32 = 0.40;
 /// Non-primary members of a multi-selection draw their outline at 55%.
@@ -2266,6 +2270,20 @@ fn draw_and_interact(
         }
     }
 
+    // A nudge closes when the last arrow key comes up: that is the moment the
+    // whole hold becomes one undo entry. Checking *held* state rather than a
+    // key-up event means a key released while the window was unfocused (whose
+    // key-up went to another window) still closes the transaction.
+    if state.nudging() {
+        let input = &ui.ctx().input;
+        let any_arrow_held = [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight]
+            .iter()
+            .any(|k| input.key_down(*k));
+        if !any_arrow_held {
+            state.commit_nudge(registry);
+        }
+    }
+
     // Rule 5 — Ctrl over empty canvas is the slash-cut's precursor. A
     // crosshair is the cheapest legible hint and the OS already owns drawing
     // it, so it costs nothing and cannot drift out of sync with a glyph.
@@ -2343,7 +2361,25 @@ fn draw_and_interact(
                     let rects = selected_rects(state, &geoms);
                     state.align_nodes(&rects, AlignMode::Right, registry);
                 }
+                Action::ALIGN_CENTER_H => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::CenterHorizontally, registry);
+                }
+                Action::ALIGN_CENTER_V => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::CenterVertically, registry);
+                }
                 Action::AUTO_LAYOUT => *layout_request = true,
+                // Arrow nudge. Each repeat extends the open transaction
+                // instead of recording its own entry — see `nudge_selection`.
+                Action::NUDGE_UP => state.nudge_selection([0.0, -NUDGE_COARSE]),
+                Action::NUDGE_DOWN => state.nudge_selection([0.0, NUDGE_COARSE]),
+                Action::NUDGE_LEFT => state.nudge_selection([-NUDGE_COARSE, 0.0]),
+                Action::NUDGE_RIGHT => state.nudge_selection([NUDGE_COARSE, 0.0]),
+                Action::NUDGE_UP_FINE => state.nudge_selection([0.0, -NUDGE_FINE]),
+                Action::NUDGE_DOWN_FINE => state.nudge_selection([0.0, NUDGE_FINE]),
+                Action::NUDGE_LEFT_FINE => state.nudge_selection([-NUDGE_FINE, 0.0]),
+                Action::NUDGE_RIGHT_FINE => state.nudge_selection([NUDGE_FINE, 0.0]),
                 // The discoverable route to the palette is right-click; this
                 // is the one you keep.
                 Action::ADD_NODE_PALETTE => {
@@ -2891,6 +2927,8 @@ fn align_action(mode: AlignMode) -> Option<Action> {
         AlignMode::Left => Action::ALIGN_LEFT,
         AlignMode::Bottom => Action::ALIGN_BOTTOM,
         AlignMode::Right => Action::ALIGN_RIGHT,
+        AlignMode::CenterHorizontally => Action::ALIGN_CENTER_H,
+        AlignMode::CenterVertically => Action::ALIGN_CENTER_V,
         AlignMode::DistributeHorizontally | AlignMode::DistributeVertically => return None,
     })
 }
@@ -3311,7 +3349,11 @@ fn palette_popover(
 
     ui.ctx_mut().modal_push(palette_modal_id(), rect);
 
-    // E3: translucent only here, simple alpha, no blur.
+    // E3 surface: `popover_alpha` (0.96) is the design system's standard for a
+    // floating panel — near-opaque by design, composited through the glass path
+    // like every other popover. (This comment used to claim "simple alpha, no
+    // blur", contradicting both the constant and the renderer; ruling 2026-08:
+    // the constant wins.)
     {
         let mut pt = ui.painter();
         pt.rect_filled(
