@@ -3378,6 +3378,7 @@ impl App {
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
             let graph_registry = &self.editor.scene.node_registry;
+            let graph_keymap = &self.editor.services.keymap;
             let graph_clipboard = &mut self.editor.scene.graph_clipboard;
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // Edit-menu override when a docked graph tab has focus (P5 routing).
@@ -3650,6 +3651,7 @@ impl App {
                                             GraphEditorPanelCtx {
                                                 state,
                                                 registry: graph_registry,
+                                                keymap: graph_keymap,
                                                 clipboard: graph_clipboard,
                                                 resolver: &graph_resolver_docs,
                                                 subgraph_assets: &subgraph_assets,
@@ -4695,6 +4697,7 @@ impl App {
         let mesh_editors = &mut editor.scene.mesh_editors;
         let graph_editors = &mut editor.scene.graph_editors;
         let graph_registry = &editor.scene.node_registry;
+        let graph_keymap = &editor.services.keymap;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
         let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
@@ -4873,6 +4876,7 @@ impl App {
                                 GraphEditorPanelCtx {
                                     state,
                                     registry: graph_registry,
+                                    keymap: graph_keymap,
                                     clipboard: graph_clipboard,
                                     resolver: &graph_resolver_docs,
                                     subgraph_assets: &subgraph_assets,

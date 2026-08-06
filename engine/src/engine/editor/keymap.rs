@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use crusty_gui::context::InputState;
 use crusty_gui::input::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
@@ -601,6 +602,65 @@ impl Keymap {
         None
     }
 
+    /// Every action triggered by this frame's key presses, in `ctx`.
+    ///
+    /// Only [`ActionStatus::Live`] actions come back: an `Unimplemented`
+    /// binding is listed everywhere a user might look for it, but pressing it
+    /// does nothing until Pass C fills the handler in — quietly, because a
+    /// "not yet" toast on every arrow key would be worse than silence. `Fixed`
+    /// actions are handled by the input model before dispatch ever runs.
+    pub fn dispatch(&self, input: &InputState, ctx: Context) -> Vec<Action> {
+        let mut out = Vec::new();
+        for kp in &input.key_presses {
+            if let Some(a) = self.resolve(Chord::new(kp.key, kp.modifiers), ctx) {
+                if a.status().dispatchable() && !out.contains(&a) {
+                    out.push(a);
+                }
+            }
+        }
+        out
+    }
+
+    /// Rows the Preferences ▸ Keyboard Shortcuts page renders, in display
+    /// order: by context (most specific first), then by group, then by name.
+    ///
+    /// The page builds *only* from this, which is what makes "every action is
+    /// reachable in preferences" a property of the data rather than a promise
+    /// somebody has to keep by hand.
+    pub fn rows(&self) -> Vec<PrefsRow> {
+        let mut rows: Vec<PrefsRow> = Action::all()
+            .map(|action| PrefsRow {
+                action,
+                chords: self.chords_for(action).to_vec(),
+            })
+            .collect();
+        rows.sort_by_key(|r| {
+            let ctx = Context::ALL
+                .iter()
+                .position(|c| *c == r.action.context())
+                .unwrap_or(usize::MAX);
+            (ctx, r.action.group(), r.action.name())
+        });
+        rows
+    }
+
+    /// [`rows`](Self::rows) filtered by a search over name, group and chord —
+    /// so typing `F9` finds the breakpoint rows and `align` finds the strip.
+    pub fn rows_matching(&self, query: &str) -> Vec<PrefsRow> {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return self.rows();
+        }
+        self.rows()
+            .into_iter()
+            .filter(|r| {
+                r.action.name().to_ascii_lowercase().contains(&q)
+                    || r.action.group().to_ascii_lowercase().contains(&q)
+                    || r.chords.iter().any(|c| c.label().to_ascii_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
     pub fn set_chords(&mut self, action: Action, chords: Vec<Chord>) {
         self.chords.insert(action, chords);
     }
@@ -704,6 +764,14 @@ impl Keymap {
         std::fs::write(Self::path(), s)?;
         Ok(())
     }
+}
+
+/// One row of the Preferences ▸ Keyboard Shortcuts list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefsRow {
+    pub action: Action,
+    /// Bound chords, primary first. Empty means unbound.
+    pub chords: Vec<Chord>,
 }
 
 /// On-disk shape of `keymap.ron`. Only the actions a user changed need to
@@ -1111,6 +1179,148 @@ mod tests {
         km.reset(Action::FIND);
         assert_eq!(km.chord_label(Action::FIND).as_deref(), Some("Ctrl+F"));
         assert_eq!(km.chord_label(Action::AUTO_LAYOUT).as_deref(), Some("Alt+Y"));
+    }
+
+
+    // ── Acceptance 14: every action is reachable in preferences
+
+    #[test]
+    fn acceptance_14_every_action_appears_in_the_preferences_page() {
+        let km = Keymap::default();
+        let rows = km.rows();
+        assert_eq!(
+            rows.len(),
+            Action::all().count(),
+            "the page builds from Action::all(), so the counts cannot drift"
+        );
+        let mut listed: Vec<&str> = rows.iter().map(|r| r.action.id()).collect();
+        listed.sort_unstable();
+        let mut every: Vec<&str> = Action::all().map(|a| a.id()).collect();
+        every.sort_unstable();
+        assert_eq!(listed, every);
+        // Unimplemented actions are listed too — dimmed, not hidden, so a user
+        // reading the table finds the key rather than wondering.
+        assert!(rows
+            .iter()
+            .any(|r| r.action.status() == ActionStatus::Unimplemented));
+    }
+
+    #[test]
+    fn preferences_rows_group_by_context_then_group_then_name() {
+        let rows = Keymap::default().rows();
+        let ctx_order: Vec<usize> = rows
+            .iter()
+            .map(|r| Context::ALL.iter().position(|c| *c == r.action.context()).unwrap())
+            .collect();
+        assert!(
+            ctx_order.windows(2).all(|w| w[0] <= w[1]),
+            "contexts must come out already grouped"
+        );
+        // Canvas is the most specific and leads the list.
+        assert_eq!(rows[0].action.context(), Context::Canvas);
+    }
+
+    #[test]
+    fn preferences_search_covers_name_group_and_chord() {
+        let km = Keymap::default();
+        assert!(km
+            .rows_matching("F9")
+            .iter()
+            .any(|r| r.action == Action::TOGGLE_BREAKPOINT), "chord search");
+        assert!(km
+            .rows_matching("align")
+            .iter()
+            .any(|r| r.action == Action::ALIGN_STRIP), "name search");
+        assert!(km
+            .rows_matching("bookmarks")
+            .iter()
+            .any(|r| r.action == Action::BOOKMARK_STORE), "group search");
+        assert_eq!(km.rows_matching("").len(), Action::all().count(), "empty = all");
+        assert!(km.rows_matching("zzzznope").is_empty());
+    }
+
+    // ── Acceptance 15: a bound row shows its chord
+
+    #[test]
+    fn acceptance_15_every_menu_row_with_a_binding_can_display_it() {
+        let km = Keymap::default();
+        // The exact lookup the context menus use (`menu_row_for`).
+        for action in [
+            Action::DELETE_SELECTION,
+            Action::AUTO_LAYOUT,
+            Action::ALIGN_TOP,
+            Action::ALIGN_LEFT,
+            Action::ALIGN_BOTTOM,
+            Action::ALIGN_RIGHT,
+        ] {
+            let label = km.chord_label(action);
+            assert!(label.is_some(), "{} is bound, so its row must show it", action.id());
+            assert!(!label.unwrap().is_empty());
+        }
+        assert_eq!(km.chord_label(Action::DELETE_SELECTION).as_deref(), Some("Del"));
+        assert_eq!(km.chord_label(Action::ALIGN_TOP).as_deref(), Some("Shift+W"));
+    }
+
+    #[test]
+    fn an_unbound_action_offers_no_chord_so_its_row_shows_none() {
+        let mut km = Keymap::default();
+        km.set_chords(Action::AUTO_LAYOUT, vec![]);
+        assert_eq!(km.chord_label(Action::AUTO_LAYOUT), None);
+    }
+
+    // ── Dispatch
+
+    #[test]
+    fn dispatch_returns_live_actions_and_swallows_unimplemented_ones() {
+        use crusty_gui::context::KeyPress;
+        let km = Keymap::default();
+        let press = |key, mods| {
+            let mut i = InputState::default();
+            i.key_presses = vec![KeyPress { key, modifiers: mods, repeat: false }];
+            i
+        };
+
+        assert_eq!(
+            km.dispatch(&press(Key::Char('c'), Modifiers::empty()), Context::Canvas),
+            vec![Action::GROUP],
+        );
+        // Bound, listed, but its handler lands in Pass C: nothing fires, and
+        // nothing complains.
+        assert!(
+            km.dispatch(&press(Key::Char('q'), Modifiers::empty()), Context::Canvas).is_empty(),
+            "an unimplemented binding dispatches to nothing, quietly"
+        );
+        // Canvas-only bindings are unreachable from the tab context.
+        assert!(km
+            .dispatch(&press(Key::Char('c'), Modifiers::empty()), Context::GraphTab)
+            .is_empty());
+        // ...but Global ones reach both.
+        assert_eq!(
+            km.dispatch(&press(Key::Char('z'), Modifiers::CTRL), Context::GraphTab),
+            vec![Action::UNDO],
+        );
+    }
+
+    #[test]
+    fn bare_a_no_longer_fits_the_graph_and_home_does() {
+        let km = Keymap::default();
+        use crusty_gui::context::KeyPress;
+        let press = |key| {
+            let mut i = InputState::default();
+            i.key_presses =
+                vec![KeyPress { key, modifiers: Modifiers::empty(), repeat: false }];
+            i
+        };
+        assert!(
+            km.dispatch(&press(Key::Char('a')), Context::Canvas).is_empty(),
+            "bare A is freed for the Shift+W/A/S/D align family"
+        );
+        assert_eq!(km.dispatch(&press(Key::Home), Context::Canvas), vec![Action::FIT_GRAPH]);
+        assert_eq!(
+            km.dispatch(&press(Key::Char('f')), Context::Canvas),
+            vec![Action::FRAME_SELECTION],
+            "F keeps frame-selection",
+        );
     }
 
     #[test]

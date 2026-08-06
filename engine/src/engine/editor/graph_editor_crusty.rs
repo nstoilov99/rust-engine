@@ -29,6 +29,7 @@ use crusty_gui::widgets::{
     TextEdit,
 };
 
+use super::keymap::{Action, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
@@ -418,6 +419,9 @@ pub struct GraphEditorPanelCtx<'a> {
     /// the host writes it back to `prefs.graph.wires.style`, which is what
     /// makes it show the overridden dot in Preferences and autosave.
     pub wire_style_request: &'a mut Option<WireStyle>,
+    /// Keyboard bindings. Every shortcut below resolves through this rather
+    /// than matching a literal chord.
+    pub keymap: &'a Keymap,
     /// Canvas zoom limits (EditorPrefs, P9).
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -1126,6 +1130,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         zoom_max,
         focused,
         handle_shortcuts,
+        keymap,
     } = ctx;
 
     // Finalize a gesture orphaned by a release that landed while this tab was
@@ -1145,7 +1150,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     }
 
     if handle_shortcuts && focused {
-        handle_panel_keys(ui, state, registry, clipboard);
+        handle_panel_keys(ui, state, registry, clipboard, keymap);
     }
 
     // The graph toolbar sits above the canvas and takes its row out of the
@@ -1191,6 +1196,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             zoom_min,
             zoom_max,
             &mut frame_request,
+            keymap,
         )
     });
     // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
@@ -1202,9 +1208,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 
     palette_popover(ui, state, registry, subgraph_assets);
     find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
-    annotation_menu(ui, state, registry, annotation_menu_at);
+    annotation_menu(ui, state, registry, keymap, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
-    node_menu(ui, state, registry, &out.inner, node_menu_at);
+    node_menu(ui, state, registry, keymap, &out.inner, node_menu_at);
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     draw_toasts(ui, out.rect, state);
@@ -1281,59 +1287,50 @@ fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
         || ui.ctx().modal_any_open()
 }
 
+/// Tab-level shortcuts: clipboard, history, delete, save.
+///
+/// Chords no longer appear here — they live in the keymap, and this resolves
+/// whatever the user bound to each action. The Pass A gating still runs first:
+/// an open modal surface or a focused text field swallows everything, so `Del`
+/// deletes a character rather than the selection while you are renaming.
 fn handle_panel_keys(
     ui: &Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
     clipboard: &mut Option<GraphFragment>,
+    keymap: &Keymap,
 ) {
     if overlay_has_focus(ui, state) {
         return;
     }
-    let (ctrl, shift, del, z, y, c, v, d, s) = {
-        let input = &ui.ctx().input;
-        let ctrl = input.modifiers.contains(Modifiers::CTRL);
-        (
-            ctrl,
-            input.modifiers.contains(Modifiers::SHIFT),
-            input.key_pressed(Key::Delete),
-            input.key_pressed(Key::Char('z')),
-            input.key_pressed(Key::Char('y')),
-            input.key_pressed(Key::Char('c')),
-            input.key_pressed(Key::Char('v')),
-            input.key_pressed(Key::Char('d')),
-            input.key_pressed(Key::Char('s')),
-        )
-    };
-    if del {
-        state.delete_selection(registry);
-    }
-    if ctrl && z {
-        if shift {
-            state.redo(registry);
-        } else {
-            state.undo(registry);
+    for action in keymap.dispatch(&ui.ctx().input, Context::GraphTab) {
+        match action {
+            Action::DELETE_SELECTION => state.delete_selection(registry),
+            Action::UNDO => state.undo(registry),
+            Action::REDO => state.redo(registry),
+            Action::COPY => state.copy_selection(clipboard),
+            Action::CUT => {
+                state.copy_selection(clipboard);
+                state.delete_selection(registry);
+            }
+            Action::PASTE => {
+                // Paste lands at the cursor when the pointer is over this
+                // canvas; otherwise (menu-driven) it falls back to the view.
+                let at = ui.ctx().input.pointer_pos.map(|p| {
+                    let v = state.view;
+                    [v.pan.x + p.x / v.zoom, v.pan.y + p.y / v.zoom]
+                });
+                state.paste_clipboard(clipboard, at, registry);
+            }
+            Action::DUPLICATE => state.duplicate_selection(registry),
+            _ => {}
         }
     }
-    if ctrl && y {
-        state.redo(registry);
-    }
-    if ctrl && c {
-        state.copy_selection(clipboard);
-    }
-    if ctrl && v {
-        // Paste lands at the cursor when the pointer is over this canvas;
-        // otherwise (menu-driven) it falls back to the view centre.
-        let at = ui.ctx().input.pointer_pos.map(|p| {
-            let v = state.view;
-            [v.pan.x + p.x / v.zoom, v.pan.y + p.y / v.zoom]
-        });
-        state.paste_clipboard(clipboard, at, registry);
-    }
-    if ctrl && d {
-        state.duplicate_selection(registry);
-    }
-    if ctrl && s {
+    // Save is the editor's, not the graph's — it is not in the graph keymap
+    // and stays on its literal chord until a Global "file" action exists.
+    if ui.ctx().input.modifiers == Modifiers::CTRL
+        && ui.ctx().input.key_pressed(Key::Char('s'))
+    {
         let abs = std::path::Path::new("content").join(&state.path);
         if let Err(e) = state.save(&abs) {
             log::warn!("graph save failed: {e}");
@@ -1360,6 +1357,7 @@ fn draw_and_interact(
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
+    keymap: &Keymap,
 ) -> Vec<NodeGeom> {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -1501,14 +1499,16 @@ fn draw_and_interact(
     let widget_claimed = pointer_screen
         .is_some_and(|p| ui.ctx().modal_contains(p) || widget_rects.iter().any(|r| r.contains(p)));
 
-    // Frame shortcuts (DCC F/A). Fire only while the pointer is over the
-    // canvas, no inline text edit is active, and **no modifier is held** —
-    // otherwise Ctrl+A / Ctrl+F over the canvas also framed the view.
-    if pointer_world.is_some() && !overlay_has_focus(ui, state) && mods.is_empty() {
-        let (frame_all, frame_sel) = {
-            let input = &ui.ctx().input;
-            (input.key_pressed(Key::Char('a')), input.key_pressed(Key::Char('f')))
-        };
+    // Frame shortcuts. F frames the selection, Home fits the whole graph.
+    // (Bare `A` used to mean fit-graph; the ratified table gives that job to
+    // Home and frees `A` for the Shift+W/A/S/D align family.) The keymap
+    // matches modifiers exactly, which replaces the old blanket
+    // `mods.is_empty()` guard — that existed only to stop Ctrl+A and Ctrl+F
+    // over the canvas also framing the view.
+    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
+        let framing = keymap.dispatch(&ui.ctx().input, Context::Canvas);
+        let frame_all = framing.contains(&Action::FIT_GRAPH);
+        let frame_sel = framing.contains(&Action::FRAME_SELECTION);
         if frame_all || frame_sel {
             // A frames everything. F frames the selection — nodes *or* the
             // selected comment/group (ruling: F applies to all canvas
@@ -2213,85 +2213,100 @@ fn draw_and_interact(
         }
     }
 
-    // Organization keys (Windows mapping): C groups the selection, Shift+C
-    // drops a note at the pointer. Canvas-hovered only, and never while an
-    // inline editor owns the keyboard.
+    // Canvas-context shortcuts. Pointer over the canvas, and never while an
+    // inline editor, a modal surface or a text field owns the keyboard. Chords
+    // come from the keymap: `Canvas` shadows `GraphTab` and `Global`, which is
+    // what lets a bare `C` group here without disturbing `Ctrl+C` elsewhere.
     if pointer_world.is_some() && !overlay_has_focus(ui, state) {
-        let (c_key, shift_only, no_mods) = {
-            let input = &ui.ctx().input;
-            (
-                input.key_pressed(Key::Char('c')),
-                input.modifiers == Modifiers::SHIFT,
-                input.modifiers.is_empty(),
-            )
-        };
-        if c_key && no_mods {
-            state.add_group_around_selection(registry);
-        } else if c_key && shift_only {
-            if let Some(pw) = pointer_world {
-                state.add_comment([pw.x, pw.y], registry);
-            }
-        }
-
-        let input = &ui.ctx().input;
-        let ctrl_only = input.modifiers == Modifiers::CTRL;
-        let ctrl_alt = input.modifiers == Modifiers::CTRL | Modifiers::ALT;
-        let alt_only = input.modifiers == Modifiers::ALT;
-
-        // Ctrl+G — collapse the selection into a new .subgraph asset.
-        if ctrl_only && input.key_pressed(Key::Char('g')) {
-            *collapse_request = true;
-        }
-        // Ctrl+B — store the view in the next bookmark slot (cycles 1..=5).
-        if ctrl_only && input.key_pressed(Key::Char('b')) {
-            let slot = state.store_bookmark();
-            println!("graph: view bookmarked in slot {slot} (Shift+{slot} to recall)");
-        }
-        // Shift+1..5 — recall. Ctrl+1..5 belongs to the dock's tabs and bare
-        // digits to the renderer's debug views, so Shift is the free row.
-        if shift_only {
-            for slot in 1..=BOOKMARK_SLOTS {
-                let ch = char::from_digit(slot as u32, 10).unwrap_or('1');
-                if input.key_pressed(Key::Char(ch)) && state.recall_bookmark(slot) {
-                    *frame_request = Some(state.view);
+        for action in keymap.dispatch(&ui.ctx().input, Context::Canvas) {
+            match action {
+                Action::GROUP => state.add_group_around_selection(registry),
+                Action::COMMENT => {
+                    if let Some(pw) = pointer_world {
+                        state.add_comment([pw.x, pw.y], registry);
+                    }
                 }
+                Action::COLLAPSE => *collapse_request = true,
+                Action::BOOKMARK_STORE => {
+                    let slot = state.store_bookmark();
+                    println!("graph: view bookmarked in slot {slot} (Shift+{slot} to recall)");
+                }
+                Action::BOOKMARK_RECALL_1
+                | Action::BOOKMARK_RECALL_2
+                | Action::BOOKMARK_RECALL_3
+                | Action::BOOKMARK_RECALL_4
+                | Action::BOOKMARK_RECALL_5 => {
+                    let slot = bookmark_slot(action);
+                    if slot <= BOOKMARK_SLOTS && state.recall_bookmark(slot) {
+                        *frame_request = Some(state.view);
+                    }
+                }
+                Action::PURGE_UNUSED => {
+                    let unused = state.unused_nodes(registry);
+                    state.purge_confirm = (!unused.is_empty()).then_some(unused);
+                }
+                // Align & distribute is a selection operation, so it lives in
+                // the node menu; the key opens that rather than duplicating
+                // the rows somewhere else.
+                Action::ALIGN_STRIP => {
+                    if state.selection.len() >= 3 {
+                        state.node_menu =
+                            state.primary.or_else(|| state.selection.iter().copied().next());
+                        *node_menu_at = ui.ctx().input.pointer_pos;
+                    }
+                }
+                Action::ALIGN_TOP => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::Top, registry);
+                }
+                Action::ALIGN_LEFT => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::Left, registry);
+                }
+                Action::ALIGN_BOTTOM => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::Bottom, registry);
+                }
+                Action::ALIGN_RIGHT => {
+                    let rects = selected_rects(state, &geoms);
+                    state.align_nodes(&rects, AlignMode::Right, registry);
+                }
+                Action::AUTO_LAYOUT => *layout_request = true,
+                // The discoverable route to the palette is right-click; this
+                // is the one you keep.
+                Action::ADD_NODE_PALETTE => {
+                    if state.palette.is_none() {
+                        if let (Some(pw), Some(sp)) =
+                            (pointer_world, ui.ctx().input.pointer_pos)
+                        {
+                            open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
+                        }
+                    }
+                }
+                Action::FIND => {
+                    state.find = Some(FindState { first_frame: true, ..Default::default() });
+                }
+                // Same cursor the count chip drives, so the two never disagree.
+                Action::NEXT_ERROR => *cycle_error_request = Some(true),
+                Action::PREV_ERROR => *cycle_error_request = Some(false),
+                _ => {}
             }
-        }
-        // Ctrl+Alt+K — purge unused, via a confirm step.
-        if ctrl_alt && input.key_pressed(Key::Char('k')) {
-            let unused = state.unused_nodes(registry);
-            state.purge_confirm = (!unused.is_empty()).then_some(unused);
-        }
-        // Alt+A — align & distribute. Alt+L — auto layout. Both are
-        // selection operations, so they live in the node menu; the keys open
-        // it rather than duplicating the rows somewhere else.
-        if alt_only && input.key_pressed(Key::Char('a')) && state.selection.len() >= 3 {
-            state.node_menu = state.primary.or_else(|| state.selection.iter().copied().next());
-            *node_menu_at = ui.ctx().input.pointer_pos;
-        }
-        if alt_only && input.key_pressed(Key::Char('l')) {
-            *layout_request = true;
-        }
-        // Tab — the palette, unfiltered. The discoverable route is
-        // right-click; this is the one you keep.
-        if no_mods && input.key_pressed(Key::Tab) && state.palette.is_none() {
-            if let (Some(pw), Some(sp)) = (pointer_world, ui.ctx().input.pointer_pos) {
-                open_palette(state, [pw.x, pw.y], [sp.x, sp.y], None);
-            }
-        }
-        // Ctrl+F — find in graph.
-        if ctrl_only && input.key_pressed(Key::Char('f')) {
-            state.find = Some(FindState { first_frame: true, ..Default::default() });
-        }
-        // F8 / Shift+F8 — walk the anchored errors, newest first. Same
-        // cursor the count chip drives, so the two never disagree.
-        let f8 = input.key_pressed(Key::F(8));
-        if f8 && (no_mods || shift_only) {
-            *cycle_error_request = Some(!shift_only);
         }
     }
 
     geoms
+}
+
+/// Slot number behind a `BOOKMARK_RECALL_n` action.
+fn bookmark_slot(action: Action) -> usize {
+    match action {
+        Action::BOOKMARK_RECALL_1 => 1,
+        Action::BOOKMARK_RECALL_2 => 2,
+        Action::BOOKMARK_RECALL_3 => 3,
+        Action::BOOKMARK_RECALL_4 => 4,
+        Action::BOOKMARK_RECALL_5 => 5,
+        _ => 0,
+    }
 }
 
 /// Does this node's drawn box reach the viewport?
@@ -2585,10 +2600,42 @@ fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option
 
 /// The node context menu. Every break path is also reachable here — the
 /// gesture is the fast route, the menu is the discoverable one.
+/// The direct-align action behind an `AlignMode`, if one exists.
+fn align_action(mode: AlignMode) -> Option<Action> {
+    Some(match mode {
+        AlignMode::Top => Action::ALIGN_TOP,
+        AlignMode::Left => Action::ALIGN_LEFT,
+        AlignMode::Bottom => Action::ALIGN_BOTTOM,
+        AlignMode::Right => Action::ALIGN_RIGHT,
+        AlignMode::DistributeHorizontally | AlignMode::DistributeVertically => return None,
+    })
+}
+
+/// A context-menu row that shows its keyboard chord, right-aligned in mono,
+/// whenever the action has one bound.
+///
+/// The chord is looked up rather than written into the label, so rebinding in
+/// Preferences updates every menu that offers the action — a row and its key
+/// cannot drift apart. An unbound action (the user cleared it, or the preset
+/// never bound it) simply shows no chord.
+fn menu_row_for(
+    ui: &mut Ui,
+    keymap: &Keymap,
+    action: Action,
+    label: &str,
+    enabled: bool,
+) -> bool {
+    match keymap.chord_label(action) {
+        Some(chord) => ui.menu_item_shortcut(label, chord, enabled),
+        None => ui.menu_item_enabled(label, enabled),
+    }
+}
+
 fn node_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    keymap: &Keymap,
     geoms: &[NodeGeom],
     open_at: Option<Pos2>,
 ) {
@@ -2606,18 +2653,24 @@ fn node_menu(
         if ui.menu_item_enabled(format!("Break all links ({links})"), links > 0) {
             brk = true;
         }
-        if ui.menu_item("Delete") {
+        if menu_row_for(ui, keymap, Action::DELETE_SELECTION, "Delete", true) {
             del = true;
         }
         // Selection operations: the node menu is where they belong, since
         // both act on what is selected rather than on where you clicked.
         ui.menu_group_header("Arrange");
-        if ui.menu_item("Auto Layout") {
+        if menu_row_for(ui, keymap, Action::AUTO_LAYOUT, "Auto Layout", true) {
             do_layout = true;
         }
         if align_ready {
             for mode in AlignMode::ALL {
-                if ui.menu_item(mode.label()) {
+                let row = match align_action(mode) {
+                    Some(a) => menu_row_for(ui, keymap, a, mode.label(), true),
+                    // Distribute has no direct key — it is only ever reached
+                    // from this strip.
+                    None => ui.menu_item(mode.label()),
+                };
+                if row {
                     align = Some(mode);
                 }
             }
@@ -2687,6 +2740,7 @@ fn annotation_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    keymap: &Keymap,
     open_at: Option<Pos2>,
 ) {
     let Some(target) = state.annotation_menu else {
@@ -2731,7 +2785,7 @@ fn annotation_menu(
                 anchor_to = Some(None); // resolved below from the selection
             }
         }
-        if ui.menu_item("Delete") {
+        if menu_row_for(ui, keymap, Action::DELETE_SELECTION, "Delete", true) {
             delete = true;
         }
     });
