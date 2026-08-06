@@ -3378,7 +3378,13 @@ impl App {
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
             let graph_registry = &self.editor.scene.node_registry;
-            let graph_keymap = &self.editor.services.keymap;
+            // A frame-local snapshot: the preferences page edits the live
+            // keymap mutably in the same block, and the graph panel only
+            // reads. A rebind therefore takes effect next frame, which is
+            // also the behaviour you want — the chord that committed the
+            // rebind must not immediately fire its new action.
+            let graph_keymap_snapshot = self.editor.services.keymap.clone();
+            let graph_keymap = &graph_keymap_snapshot;
             let graph_clipboard = &mut self.editor.scene.graph_clipboard;
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // Edit-menu override when a docked graph tab has focus (P5 routing).
@@ -3450,6 +3456,7 @@ impl App {
                 + self.editor.services.dirty.dirty_asset_count()
                 + usize::from(project_dirty);
             let settings = &mut self.editor.ui.settings;
+            let settings_keymap = &mut self.editor.services.keymap;
             let toasts = &mut self.editor.services.toasts;
             let dialog_stack = &mut self.editor.services.dialogs;
             let command_palette = &mut self.editor.services.command_palette;
@@ -3759,7 +3766,7 @@ impl App {
                 }
                 {
                     use rust_engine::engine::editor::settings_crusty;
-                    settings_crusty::editor_prefs_window(ui, settings);
+                    settings_crusty::editor_prefs_window(ui, settings, settings_keymap);
                     settings_crusty::project_settings_window(ui, settings);
                 }
                 if is_hovering_files {
@@ -3814,6 +3821,9 @@ impl App {
         // Live-apply + debounced autosave of editor preferences (M10 P7).
         self.apply_editor_prefs(false);
         self.editor.ui.settings.flush_prefs();
+        // Rebinding autosaves on the same debounce as every other preference.
+        let keymap = self.editor.services.keymap.clone();
+        self.editor.ui.settings.flush_keymap(&keymap);
         self.flush_graph_ui_state();
         self.persist_vsync_change();
 

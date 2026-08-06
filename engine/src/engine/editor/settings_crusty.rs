@@ -19,6 +19,8 @@ use crusty_gui::widgets::{
 
 use super::build_dialog::BuildTarget;
 use super::editor_prefs::{EditorPrefs, ThemePreset, PREFS_FILE};
+use super::keymap::{Action, ActionStatus, Chord, Context, Keymap, MouseProfile, Preset};
+use crusty_gui::input::Key;
 use super::graph_prefs::{CrossingStyle, ExecWirePrefs, TurnAnchor, TurnPriority, WireStyle};
 use super::graph_wire_router::{self as router, RouteMeta};
 use super::theme::{wire_color, Density, UI_SCALE_MAX, UI_SCALE_MIN};
@@ -69,6 +71,10 @@ const PREFS_CATS: &[(&str, &[&str])] = &[
         &["Play mode", "Server host", "Module name", "Player count"],
     ),
     ("Performance", &["VSync"]),
+    (
+        "Keyboard Shortcuts",
+        &["Preset", "Keyboard shortcuts", "Rebind", "Chord"],
+    ),
     (
         "Graph",
         &[
@@ -143,6 +149,21 @@ pub struct SettingsState {
     /// Mirror of `WindowConfig.vsync`; the app persists changes + flags restart.
     pub vsync: VSyncMode,
     pub restart_pending: bool,
+
+    /// Action whose chord cell is currently capturing a keypress.
+    keybind_capture: Option<Action>,
+    /// A captured chord that collides with an existing binding, held pending
+    /// the user's "Rebind anyway / Cancel". Deliberately not applied first and
+    /// undone after — an accidental collision should never silently steal a
+    /// key you rely on.
+    keybind_pending: Option<(Action, Chord, String)>,
+    /// Sections the user collapsed, by context label.
+    keybind_collapsed: Vec<String>,
+    /// Set when the keymap changed; the app debounces the `keymap.ron` write
+    /// exactly as it does `editor_prefs.ron`.
+    keymap_dirty_at: Option<Instant>,
+    /// Reset All is behind a confirm — it discards every rebinding at once.
+    keymap_reset_confirm: bool,
 }
 
 impl SettingsState {
@@ -154,6 +175,11 @@ impl SettingsState {
             prefs_open: false,
             prefs_search: String::new(),
             prefs_cat: 0,
+            keybind_capture: None,
+            keybind_pending: None,
+            keybind_collapsed: Vec::new(),
+            keymap_dirty_at: None,
+            keymap_reset_confirm: false,
             project_saved: project.clone(),
             project,
             project_open: false,
@@ -176,6 +202,26 @@ impl SettingsState {
     /// prefs change (window edits and menu play-settings edits alike).
     pub fn mark_prefs_dirty(&mut self) {
         self.prefs_dirty_at = Some(Instant::now());
+    }
+
+    /// Restart the `keymap.ron` autosave debounce.
+    pub fn mark_keymap_dirty(&mut self) {
+        self.keymap_dirty_at = Some(Instant::now());
+    }
+
+    pub fn keymap_saving(&self) -> bool {
+        self.keymap_dirty_at.is_some()
+    }
+
+    /// Debounced autosave of `keymap.ron`, on the same 500ms as prefs — a
+    /// rebind is an edit like any other, with no OK button to press.
+    pub fn flush_keymap(&mut self, keymap: &Keymap) {
+        if let Some(t) = self.keymap_dirty_at {
+            if t.elapsed().as_millis() >= 500 {
+                let _ = keymap.save();
+                self.keymap_dirty_at = None;
+            }
+        }
     }
 
     /// Debounced autosave of `editor_prefs.ron` (~500ms after the last edit).
@@ -379,6 +425,356 @@ fn section_bar(ui: &mut Ui, label: &str) {
         None,
     );
     ui.add_space(3.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard Shortcuts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The Keyboard Shortcuts page. Returns `true` when the keymap changed, so the
+/// caller can start the autosave debounce.
+///
+/// Unlike the other categories this one is generated: every row comes from
+/// `Keymap::rows()`, which is built from `Action::all()`. That is what makes
+/// "every action is reachable here" a property of the data rather than a list
+/// somebody has to remember to extend.
+#[allow(clippy::too_many_arguments)]
+fn draw_keymap_rows(
+    ui: &mut Ui,
+    f: &Filter,
+    keymap: &mut Keymap,
+    capture: &mut Option<Action>,
+    pending: &mut Option<(Action, Chord, String)>,
+    collapsed: &mut Vec<String>,
+    reset_confirm: &mut bool,
+) -> bool {
+    let mut changed = false;
+    section_bar(ui, "Keyboard Shortcuts");
+
+    // ── Preset + Reset All
+    let preset = keymap.preset;
+    if setting_row(ui, f, "Preset", preset != Preset::default(), Some("default Crusty"), false, |ui| {
+        ComboBox::new("keymap_preset")
+            .selected_text(preset.label())
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for p in Preset::ALL {
+                    let mut sel = preset;
+                    if SelectableValue::new(&mut sel, p, p.label()).show(ui).clicked {
+                        // Rebasing drops every overlay entry, including ones
+                        // that happened to match the old preset's default —
+                        // switching preset means "give me that preset".
+                        *keymap = Keymap::from_preset(p);
+                    }
+                }
+            });
+    }) {
+        *keymap = Keymap::from_preset(Preset::default());
+    }
+    if *keymap != Keymap::from_preset(preset) || keymap.preset != preset {
+        changed = true;
+    }
+
+    let profile = keymap.mouse_profile;
+    setting_row(
+        ui,
+        f,
+        "Mouse dialect",
+        profile != MouseProfile::default(),
+        Some("consumed by the input model"),
+        false,
+        |ui| {
+            ComboBox::new("keymap_mouse")
+                .selected_text(profile.label())
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for m in MouseProfile::ALL {
+                        SelectableValue::new(&mut keymap.mouse_profile, m, m.label()).show(ui);
+                    }
+                });
+        },
+    );
+
+    if f.matches("Reset all shortcuts") {
+        ui.horizontal(|ui| {
+            let start = ui.cursor();
+            ui.set_cursor(Pos2::new(start.x + GUTTER_W, start.y + 3.0));
+            if *reset_confirm {
+                let body = ui.style().fonts.body;
+                ui.painter().text(
+                    Pos2::new(start.x + GUTTER_W, start.y + 6.0),
+                    "Discard every rebinding?",
+                    body,
+                    super::theme::Palette::invariant_status().warning,
+                    None,
+                );
+                ui.set_cursor(Pos2::new(start.x + GUTTER_W + LABEL_W, start.y + 3.0));
+                if ui.button("Reset All").clicked {
+                    *keymap = Keymap::from_preset(keymap.preset);
+                    *reset_confirm = false;
+                    changed = true;
+                }
+                if ui.button("Cancel").clicked {
+                    *reset_confirm = false;
+                }
+            } else if ui.button("Reset All…").clicked {
+                *reset_confirm = true;
+            }
+        });
+        ui.add_space(ROW_H * 0.5);
+    }
+
+    // ── The generated rows, grouped by context then group.
+    let rows = keymap.rows_matching(&f.q);
+    let mut last_ctx: Option<Context> = None;
+    let mut last_group = String::new();
+    for row in rows {
+        let ctx = row.action.context();
+        if last_ctx != Some(ctx) {
+            last_ctx = Some(ctx);
+            last_group.clear();
+            let label = ctx.label().to_string();
+            let is_collapsed = collapsed.contains(&label);
+            if keymap_section_header(ui, &label, is_collapsed) {
+                if is_collapsed {
+                    collapsed.retain(|c| *c != label);
+                } else {
+                    collapsed.push(label.clone());
+                }
+            }
+        }
+        if collapsed.iter().any(|c| c == ctx.label()) {
+            continue;
+        }
+        if last_group != row.action.group() {
+            last_group = row.action.group().to_string();
+            keymap_group_header(ui, &last_group);
+        }
+        changed |= keymap_row(ui, keymap, row.action, capture, pending);
+    }
+    changed
+}
+
+/// Collapsing context header. Returns `true` when clicked.
+fn keymap_section_header(ui: &mut Ui, label: &str, collapsed: bool) -> bool {
+    let style = ui.style();
+    let w = ui.available().width();
+    let rect = ui.allocate(Vec2::new(w, SECTION_H));
+    let resp = ui.interact(Id::new(("keymap_sec", label)), rect);
+    let pal = style.palette;
+    ui.painter().rect_filled(rect, 0.0, pal.elevated);
+    let glyph = if collapsed { "\u{25B8}" } else { "\u{25BE}" };
+    ui.painter().text(
+        Pos2::new(rect.min.x + 8.0, rect.min.y + 5.0),
+        &format!("{glyph}  {label}"),
+        style.fonts.body,
+        pal.text,
+        None,
+    );
+    resp.clicked
+}
+
+fn keymap_group_header(ui: &mut Ui, label: &str) {
+    let style = ui.style();
+    let w = ui.available().width();
+    let rect = ui.allocate(Vec2::new(w, style.fonts.small * 1.4 + 8.0));
+    ui.painter().text_family(
+        Pos2::new(rect.min.x + GUTTER_W, rect.min.y + 5.0),
+        &label.to_uppercase(),
+        style.fonts.small,
+        style.palette.text_secondary,
+        None,
+        FontFamily::Mono,
+    );
+}
+
+/// One action's row: name, "in Pass C" tag when it has no handler yet, its
+/// chords in mono, a capture field while rebinding, and the inline conflict
+/// prompt. Returns `true` if the keymap changed.
+fn keymap_row(
+    ui: &mut Ui,
+    keymap: &mut Keymap,
+    action: Action,
+    capture: &mut Option<Action>,
+    pending: &mut Option<(Action, Chord, String)>,
+) -> bool {
+    let style = ui.style();
+    let pal = style.palette;
+    let status = super::theme::Palette::invariant_status();
+    let mut changed = false;
+
+    let defaults = Keymap::from_preset(keymap.preset);
+    let modified = keymap.chords_for(action) != defaults.chords_for(action);
+    let capturing = *capture == Some(action);
+
+    ui.horizontal(|ui| {
+        let start = ui.cursor();
+        if modified {
+            ui.painter().rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(start.x + 2.5, start.y + ROW_H * 0.5),
+                    Vec2::splat(5.0),
+                ),
+                2.5,
+                status.overridden,
+            );
+        }
+        // An action Pass C still owes reads as pending, not broken: dimmed
+        // name plus an explicit tag, never hidden — a user who read the table
+        // should find the key here and see why it does nothing.
+        let live = action.status() == ActionStatus::Live;
+        let name_color = if !live {
+            pal.text_disabled
+        } else if modified {
+            pal.text
+        } else {
+            pal.text_secondary
+        };
+        ui.painter().text(
+            Pos2::new(start.x + GUTTER_W, start.y + 6.0),
+            action.name(),
+            style.fonts.body,
+            name_color,
+            None,
+        );
+        if !live {
+            let tag = if action.status() == ActionStatus::Fixed {
+                "input model"
+            } else {
+                "in Pass C"
+            };
+            let x = start.x + GUTTER_W + LABEL_W - 84.0;
+            ui.painter().text_family(
+                Pos2::new(x, start.y + 7.0),
+                tag,
+                style.fonts.small,
+                pal.text_disabled,
+                None,
+                FontFamily::Mono,
+            );
+        }
+
+        ui.set_cursor(Pos2::new(start.x + GUTTER_W + LABEL_W, start.y + 3.0));
+        if capturing {
+            ui.painter().text(
+                Pos2::new(start.x + GUTTER_W + LABEL_W, start.y + 6.0),
+                "Press a key\u{2026}  (Esc cancels, Del unbinds)",
+                style.fonts.body,
+                status.overridden,
+                None,
+            );
+        } else {
+            let chords = keymap.chords_for(action);
+            let mut x = start.x + GUTTER_W + LABEL_W;
+            if chords.is_empty() {
+                ui.painter().text_family(
+                    Pos2::new(x, start.y + 6.0),
+                    "\u{2014}",
+                    style.fonts.body,
+                    pal.text_disabled,
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            for (i, c) in chords.iter().enumerate() {
+                // The primary chord is the one menus and tooltips show, so it
+                // reads at full strength; alternates sit back at 55%.
+                let col = if i == 0 { pal.text } else { pal.text.with_alpha(0.55) };
+                let label = c.label();
+                let adv = ui.painter().text_family(
+                    Pos2::new(x, start.y + 6.0),
+                    &label,
+                    style.fonts.body,
+                    col,
+                    None,
+                    FontFamily::Mono,
+                );
+                x += adv.x + 10.0;
+            }
+            let hit = Rect::from_min_size(
+                Pos2::new(start.x + GUTTER_W + LABEL_W - 4.0, start.y),
+                Vec2::new(200.0, ROW_H),
+            );
+            if ui.interact(Id::new(("keymap_chord", action.id())), hit).clicked {
+                *capture = Some(action);
+            }
+        }
+
+        // Per-row reset, only where it would do something.
+        if modified {
+            let right = ui.available().max.x;
+            ui.set_cursor(Pos2::new(right - 26.0, start.y + 3.0));
+            if ui.button("R").clicked {
+                keymap.reset(action);
+                changed = true;
+            }
+        }
+    });
+
+    // ── Inline conflict prompt, directly under the row it belongs to.
+    if let Some((a, chord, other)) = pending.clone() {
+        if a == action {
+            ui.horizontal(|ui| {
+                let start = ui.cursor();
+                ui.painter().text(
+                    Pos2::new(start.x + GUTTER_W, start.y + 6.0),
+                    &format!("{} is already {other}", chord.label()),
+                    style.fonts.small,
+                    status.warning,
+                    None,
+                );
+                ui.set_cursor(Pos2::new(start.x + GUTTER_W + LABEL_W, start.y + 3.0));
+                if ui.button("Rebind anyway").clicked {
+                    keymap.set_chords(action, vec![chord]);
+                    *pending = None;
+                    changed = true;
+                }
+                if ui.button("Cancel").clicked {
+                    *pending = None;
+                }
+            });
+        }
+    }
+
+    // ── Capture. Runs after the row so the click that started it is spent.
+    if capturing {
+        let presses: Vec<_> = ui.ctx().input.key_presses.clone();
+        for kp in presses {
+            match kp.key {
+                Key::Escape => {
+                    *capture = None;
+                }
+                Key::Delete => {
+                    keymap.set_chords(action, Vec::new());
+                    *capture = None;
+                    changed = true;
+                }
+                // A bare modifier is not a chord; keep waiting.
+                _ => {
+                    let chord = Chord::new(kp.key, kp.modifiers);
+                    *capture = None;
+                    // Ask before stealing: apply into a copy and see what the
+                    // existing conflict check says, rather than committing and
+                    // undoing.
+                    let mut probe = keymap.clone();
+                    probe.set_chords(action, vec![chord]);
+                    match probe.conflicts().into_iter().find(|c| {
+                        c.first == action || c.second == action
+                    }) {
+                        Some(c) => {
+                            let other = if c.first == action { c.second } else { c.first };
+                            *pending = Some((action, chord, other.name().to_string()));
+                        }
+                        None => {
+                            *keymap = probe;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// 28px setting row: modified dot gutter, 170px label column, control,
@@ -709,7 +1105,7 @@ fn wire_preview(ui: &mut Ui, prefs: &super::graph_prefs::WirePrefs) {
 
 // ── Editor Preferences ───────────────────────────────────────────────────
 
-pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
+pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState, keymap: &mut Keymap) {
     if !state.prefs_open {
         return;
     }
@@ -769,18 +1165,47 @@ pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState) {
                 spacing: 0.0,
             };
             let selected = state.prefs_cat;
-            let prefs = &mut state.prefs;
-            let vsync = &mut state.vsync;
-            ui.run_at(content, Direction::TopDown, Id::new("prefs_content"), opts, |ui| {
-                let h = ui.available_size().y;
-                ScrollArea::new(h)
-                    .auto_shrink(false)
-                    .inset(0.0)
-                    .spacing(0.0)
-                    .show(ui, |ui| {
-                        draw_prefs_rows(ui, &filter, selected, prefs, vsync);
-                    });
-            });
+            let keys_cat = PREFS_CATS
+                .iter()
+                .position(|(n, _)| *n == "Keyboard Shortcuts")
+                .unwrap_or(usize::MAX);
+            // The shortcuts page owns ~50 generated rows rather than a fixed
+            // handful, so it filters itself instead of going through
+            // `setting_row`'s per-label match.
+            let show_keys = filter.active() || selected == keys_cat;
+            let mut keymap_changed = false;
+            {
+                let prefs = &mut state.prefs;
+                let vsync = &mut state.vsync;
+                let kb = &mut state.keybind_capture;
+                let pending = &mut state.keybind_pending;
+                let collapsed = &mut state.keybind_collapsed;
+                let reset_confirm = &mut state.keymap_reset_confirm;
+                ui.run_at(content, Direction::TopDown, Id::new("prefs_content"), opts, |ui| {
+                    let h = ui.available_size().y;
+                    ScrollArea::new(h)
+                        .auto_shrink(false)
+                        .inset(0.0)
+                        .spacing(0.0)
+                        .show(ui, |ui| {
+                            draw_prefs_rows(ui, &filter, selected, prefs, vsync);
+                            if show_keys {
+                                keymap_changed |= draw_keymap_rows(
+                                    ui,
+                                    &filter,
+                                    keymap,
+                                    kb,
+                                    pending,
+                                    collapsed,
+                                    reset_confirm,
+                                );
+                            }
+                        });
+                });
+            }
+            if keymap_changed {
+                state.mark_keymap_dirty();
+            }
 
             let fopts = UiOptions {
                 padding: Vec2::new(10.0, 4.0),

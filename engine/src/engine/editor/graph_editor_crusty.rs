@@ -29,7 +29,7 @@ use crusty_gui::widgets::{
     TextEdit,
 };
 
-use super::keymap::{Action, Context, Keymap};
+use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
@@ -1213,6 +1213,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     node_menu(ui, state, registry, keymap, &out.inner, node_menu_at);
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
+    cheat_sheet(ui, out.rect, state, keymap);
     draw_toasts(ui, out.rect, state);
 
     // F8 / Shift+F8 walk the anchored errors. The chip's own cursor drives
@@ -2166,6 +2167,7 @@ fn draw_and_interact(
         zoom_max,
         frame_request,
         open_subgraph,
+        keymap,
     );
 
     // Right-click: an annotation gets its own menu (tint / collapse / anchor
@@ -2217,6 +2219,18 @@ fn draw_and_interact(
     // inline editor, a modal surface or a text field owns the keyboard. Chords
     // come from the keymap: `Canvas` shadows `GraphTab` and `Global`, which is
     // what lets a bare `C` group here without disturbing `Ctrl+C` elsewhere.
+    // `?` toggles the cheat sheet. Deliberately *not* a keymap action: the
+    // sheet documents the keymap, so binding it through the keymap would let a
+    // user rebind away the only in-app reference for getting it back.
+    if pointer_world.is_some() && !ui.ctx().text_focused() {
+        let input = &ui.ctx().input;
+        let q = input.key_pressed(Key::Char('?'))
+            || (input.modifiers == Modifiers::SHIFT && input.key_pressed(Key::Char('/')));
+        if q {
+            state.cheat_sheet = !state.cheat_sheet;
+        }
+    }
+
     if pointer_world.is_some() && !overlay_has_focus(ui, state) {
         for action in keymap.dispatch(&ui.ctx().input, Context::Canvas) {
             match action {
@@ -2249,7 +2263,7 @@ fn draw_and_interact(
                 // the node menu; the key opens that rather than duplicating
                 // the rows somewhere else.
                 Action::ALIGN_STRIP => {
-                    if state.selection.len() >= 3 {
+                    if state.selection.len() >= 2 {
                         state.node_menu =
                             state.primary.or_else(|| state.selection.iter().copied().next());
                         *node_menu_at = ui.ctx().input.pointer_pos;
@@ -2307,6 +2321,142 @@ fn bookmark_slot(action: Action) -> usize {
         Action::BOOKMARK_RECALL_5 => 5,
         _ => 0,
     }
+}
+
+
+/// The `?` cheat sheet: every binding, two columns, grouped by context.
+///
+/// An E3 surface on the modal stack, so Rule 1 dismisses it exactly like a
+/// context menu — a press outside closes it *and* is consumed, and Escape pops
+/// it without also aborting whatever was underneath.
+fn cheat_sheet(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState, keymap: &Keymap) {
+    if !state.cheat_sheet {
+        return;
+    }
+    let id = cheat_sheet_modal_id();
+    if ui.ctx().modal_dismissed(id).is_some() {
+        state.cheat_sheet = false;
+        ui.ctx_mut().modal_dismiss(id);
+        return;
+    }
+
+    let st = ui.style();
+    let pal = st.palette;
+    let rows = keymap.rows();
+    let bound: Vec<_> = rows.iter().filter(|r| !r.chords.is_empty()).collect();
+
+    // Two columns, split at the halfway mark by row count so both read as a
+    // single continuous list rather than a table with a hole in it.
+    let line_h = st.fonts.body * 1.55;
+    let head_h = st.fonts.small * 1.9;
+    let per_col = bound.len().div_ceil(2) + 6;
+    let w = (rect.width() * 0.8).clamp(520.0, 900.0);
+    let h = (per_col as f32 * line_h + head_h * 4.0 + 56.0).min(rect.height() * 0.9);
+    let panel = Rect::from_min_size(
+        Pos2::new(rect.center().x - w * 0.5, rect.center().y - h * 0.5),
+        Vec2::new(w, h),
+    );
+
+    {
+        let mut p = ui.overlay_painter();
+        // A scrim that still shows the graph: you are reading the sheet
+        // *about* what is behind it.
+        p.rect_filled_translucent(rect, Rounding::ZERO, Color::BLACK.with_alpha(pal.scrim_alpha));
+        p.rect_filled(panel, st.rounding.panel, pal.elevated);
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, pal.stroke_strong);
+        p.text(
+            Pos2::new(panel.min.x + 20.0, panel.min.y + 16.0),
+            "Keyboard Shortcuts",
+            st.fonts.body * 1.15,
+            pal.text,
+            None,
+        );
+        p.text_family(
+            Pos2::new(panel.max.x - 92.0, panel.min.y + 18.0),
+            "Esc or ?",
+            st.fonts.small,
+            pal.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+
+        let col_w = (panel.width() - 56.0) * 0.5;
+        let mut x = panel.min.x + 20.0;
+        let mut y = panel.min.y + 52.0;
+        let mut col = 0usize;
+        let mut last_ctx: Option<Context> = None;
+
+        // Fixed actions are the input model's, not the keymap's, so they get
+        // their own heading rather than sitting among rebindable rows.
+        let mut ordered: Vec<_> = bound.clone();
+        ordered.sort_by_key(|r| {
+            (
+                r.action.status() == ActionStatus::Fixed,
+                Context::ALL
+                    .iter()
+                    .position(|c| *c == r.action.context())
+                    .unwrap_or(usize::MAX),
+            )
+        });
+
+        for (placed, row) in ordered.into_iter().enumerate() {
+            let fixed = row.action.status() == ActionStatus::Fixed;
+            let ctx = row.action.context();
+            let heading = if fixed { None } else { Some(ctx) };
+            if heading != last_ctx || (fixed && last_ctx.is_some()) {
+                if placed > 0 && placed >= per_col && col == 0 {
+                    col = 1;
+                    x = panel.min.x + 20.0 + col_w + 16.0;
+                    y = panel.min.y + 52.0;
+                }
+                last_ctx = heading;
+                let label = if fixed { "Input model".to_string() } else { ctx.label().to_string() };
+                y += 6.0;
+                p.text_family(
+                    Pos2::new(x, y),
+                    &label.to_uppercase(),
+                    st.fonts.small,
+                    pal.text_secondary,
+                    None,
+                    FontFamily::Mono,
+                );
+                y += head_h;
+            }
+            // Unimplemented rows are listed and dimmed: the key exists, its
+            // behaviour does not yet.
+            let live = row.action.status() == ActionStatus::Live;
+            let name_col = if live { pal.text } else { pal.text_disabled };
+            let chord_col = if live { pal.text_mono } else { pal.text_disabled };
+            p.text_family(
+                Pos2::new(x, y),
+                &row.chords[0].label(),
+                st.fonts.body,
+                chord_col,
+                Some(col_w * 0.42),
+                FontFamily::Mono,
+            );
+            p.text(
+                Pos2::new(x + col_w * 0.44, y),
+                row.action.name(),
+                st.fonts.body,
+                name_col,
+                Some(col_w * 0.54),
+            );
+            y += line_h;
+            if y > panel.max.y - line_h && col == 0 {
+                col = 1;
+                x = panel.min.x + 20.0 + col_w + 16.0;
+                y = panel.min.y + 52.0;
+                last_ctx = None;
+            }
+        }
+    }
+
+    ui.ctx_mut().modal_push(id, panel);
+}
+
+fn cheat_sheet_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("graph_cheat_sheet")
 }
 
 /// Does this node's drawn box reach the viewport?
@@ -2643,7 +2793,12 @@ fn node_menu(
         return;
     };
     let links = state.edges_on_node(id).len();
-    let align_ready = state.selection.len() >= 3;
+    // The strip appears as soon as *any* align is possible; distribute rows
+    // are disabled rather than hidden at exactly two, so the operation stays
+    // discoverable and its requirement is legible (the settings rule
+    // generalises: disable, do not hide).
+    let selected = state.selection.len();
+    let align_ready = selected >= 2;
     let mut brk = false;
     let mut del = false;
     let mut align: Option<AlignMode> = None;
@@ -2664,11 +2819,12 @@ fn node_menu(
         }
         if align_ready {
             for mode in AlignMode::ALL {
+                let enabled = selected >= mode.min_nodes();
                 let row = match align_action(mode) {
-                    Some(a) => menu_row_for(ui, keymap, a, mode.label(), true),
+                    Some(a) => menu_row_for(ui, keymap, a, mode.label(), enabled),
                     // Distribute has no direct key — it is only ever reached
                     // from this strip.
-                    None => ui.menu_item(mode.label()),
+                    None => ui.menu_item_enabled(mode.label(), enabled),
                 };
                 if row {
                     align = Some(mode);
@@ -5189,6 +5345,7 @@ fn error_chip(
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
     open_subgraph: &mut Option<String>,
+    keymap: &Keymap,
 ) {
     if errors.is_empty() {
         state.error_popover = false;
@@ -5229,7 +5386,13 @@ fn error_chip(
         );
     }
     if resp.hovered {
-        ui.tooltip_for(chip, "Click to cycle validation errors");
+        // Tooltips that describe a bound action name its chord, so the
+        // keyboard route is learnable from the mouse route.
+        let tip = match keymap.chord_label(Action::NEXT_ERROR) {
+            Some(c) => format!("Click to cycle validation errors  ({c})"),
+            None => "Click to cycle validation errors".to_string(),
+        };
+        ui.tooltip_for(chip, &tip);
     }
     if resp.clicked {
         cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request);

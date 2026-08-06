@@ -817,6 +817,9 @@ pub struct GraphEditorState {
     pub palette: Option<PaletteState>,
     /// Find-in-graph overlay (session-only).
     pub find: Option<FindState>,
+    /// The `?` cheat sheet is open. Session-only, like `find` — a reference
+    /// card is not document state.
+    pub cheat_sheet: bool,
     /// Frames drawn, for round-robin budgets (preview slots today).
     pub frame: u64,
     /// Set when a graph opened with no remembered view: the first draw frames
@@ -908,6 +911,29 @@ pub enum AlignMode {
 }
 
 impl AlignMode {
+    /// Does this mode spread nodes out, rather than line them up?
+    ///
+    /// The distinction is the whole reason the two have different minimums:
+    /// distributing means "equalise the gaps *between*", which needs a middle
+    /// node to move, while aligning two nodes is a perfectly ordinary thing to
+    /// want. One shared `< 3` guard made two-node align a silent no-op on a
+    /// valid gesture.
+    pub fn is_distribute(self) -> bool {
+        matches!(
+            self,
+            AlignMode::DistributeHorizontally | AlignMode::DistributeVertically
+        )
+    }
+
+    /// Smallest selection this mode can act on.
+    pub fn min_nodes(self) -> usize {
+        if self.is_distribute() {
+            3
+        } else {
+            2
+        }
+    }
+
     pub const ALL: [AlignMode; 6] = [
         AlignMode::Left,
         AlignMode::Right,
@@ -1106,6 +1132,7 @@ impl GraphEditorState {
             node_menu: None,
             palette: None,
             find: None,
+            cheat_sheet: false,
             frame: 0,
             frame_all_on_open: false,
         })
@@ -1881,7 +1908,7 @@ impl GraphEditorState {
         mode: AlignMode,
         registry: &NodeRegistry,
     ) {
-        if rects.len() < 3 {
+        if rects.len() < mode.min_nodes() {
             return;
         }
         let mut deltas: Vec<(u64, [f32; 2])> = Vec::new();
@@ -2740,6 +2767,7 @@ pub mod tests_support {
             node_menu: None,
             palette: None,
             find: None,
+            cheat_sheet: false,
             frame: 0,
             frame_all_on_open: false,
         }
@@ -3149,9 +3177,14 @@ mod tests {
         st.undo(&reg);
         assert_eq!(st.doc, before);
 
-        // Fewer than three is not a distribution.
-        st.align_nodes(&rects[..2], AlignMode::Left, &reg);
+        // Fewer than three is not a distribution...
+        st.align_nodes(&rects[..2], AlignMode::DistributeHorizontally, &reg);
         assert!(!st.stack.can_undo());
+        // ...but two nodes align perfectly well. (This line used to assert the
+        // opposite, under a comment about distribution: one shared `< 3` guard
+        // covered both modes, so a two-node align was a silent no-op.)
+        st.align_nodes(&rects[..2], AlignMode::Left, &reg);
+        assert!(st.stack.can_undo());
     }
 
     /// Bookmarks cycle 1..=5 and recall only what was stored.
@@ -3858,6 +3891,72 @@ mod tests {
         assert!(!st.stack.can_undo());
     }
 
+
+    /// The ruled split: aligning two nodes is an ordinary gesture, while
+    /// distributing needs a middle node to move. One shared `< 3` guard made
+    /// two-node align a silent no-op.
+    #[test]
+    fn align_needs_two_nodes_and_distribute_needs_three() {
+        for mode in AlignMode::ALL {
+            let expected = if mode.is_distribute() { 3 } else { 2 };
+            assert_eq!(mode.min_nodes(), expected, "{:?}", mode);
+        }
+    }
+
+    #[test]
+    fn two_selected_nodes_align_but_do_not_distribute() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 80.0])];
+        let rects = vec![(0u64, [0.0, 0.0, 160.0, 60.0]), (1u64, [200.0, 80.0, 160.0, 60.0])];
+
+        st.align_nodes(&rects, AlignMode::Top, &reg);
+        assert_eq!(
+            st.doc.node(1).unwrap().position[1],
+            0.0,
+            "two-node align lines them up instead of doing nothing"
+        );
+        assert!(st.stack.can_undo(), "and it is one undoable edit");
+
+        let before = st.doc.clone();
+        st.align_nodes(&rects, AlignMode::DistributeHorizontally, &reg);
+        assert_eq!(st.doc, before, "distribute still needs three");
+    }
+
+    #[test]
+    fn three_selected_nodes_distribute() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![
+            node(0, [0.0, 0.0]),
+            node(1, [10.0, 0.0]),
+            node(2, [400.0, 0.0]),
+        ];
+        let rects = vec![
+            (0u64, [0.0, 0.0, 100.0, 60.0]),
+            (1u64, [10.0, 0.0, 100.0, 60.0]),
+            (2u64, [400.0, 0.0, 100.0, 60.0]),
+        ];
+        st.align_nodes(&rects, AlignMode::DistributeHorizontally, &reg);
+        assert!(st.stack.can_undo(), "three nodes distribute");
+        // The middle one moves; the outer two anchor the span.
+        assert!(st.doc.node(1).unwrap().position[0] > 10.0);
+    }
+
+    #[test]
+    fn a_single_node_is_never_enough_for_either() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0])];
+        let rects = vec![(0u64, [0.0, 0.0, 100.0, 60.0])];
+        let before = st.doc.clone();
+        for mode in AlignMode::ALL {
+            st.align_nodes(&rects, mode, &reg);
+        }
+        assert_eq!(st.doc, before);
+        assert!(!st.stack.can_undo(), "and nothing reaches the undo stack");
+    }
+
     /// T10 — Escape during a node drag puts the nodes back and records nothing.
     #[test]
     fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
@@ -4231,6 +4330,7 @@ mod tests {
             node_menu: None,
             palette: None,
             find: None,
+            cheat_sheet: false,
             frame: 0,
             frame_all_on_open: false,
         }

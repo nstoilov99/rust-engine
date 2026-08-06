@@ -1323,6 +1323,98 @@ mod tests {
         );
     }
 
+
+    // ── Rebind persistence and preset rebasing (B2b)
+
+    #[test]
+    fn a_rebind_writes_the_overlay_and_survives_a_reload() {
+        let mut km = Keymap::default();
+        km.set_chords(Action::FIND, c("Ctrl+Shift+P"));
+
+        // What the debounced autosave would write.
+        let text = ron::ser::to_string_pretty(&km.to_file(), Default::default()).unwrap();
+        // ...and what the next launch reads back.
+        let file: KeymapFile = ron::from_str(&text).unwrap();
+        let (reloaded, problems) = Keymap::from_file(&file);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(reloaded.chord_label(Action::FIND).as_deref(), Some("Ctrl+Shift+P"));
+        assert_eq!(reloaded, km, "a round-trip through disk changes nothing");
+        assert_eq!(
+            reloaded.resolve(Chord::ctrl(Key::Char('f')), Context::GraphTab),
+            None,
+            "and the old chord really is gone"
+        );
+    }
+
+    #[test]
+    fn an_unbind_survives_a_reload_rather_than_reverting_to_the_default() {
+        let mut km = Keymap::default();
+        km.set_chords(Action::AUTO_LAYOUT, vec![]);
+        let text = ron::ser::to_string_pretty(&km.to_file(), Default::default()).unwrap();
+        let file: KeymapFile = ron::from_str(&text).unwrap();
+        let (reloaded, _) = Keymap::from_file(&file);
+        assert!(
+            reloaded.chords_for(Action::AUTO_LAYOUT).is_empty(),
+            "an empty list is a decision, not an absence"
+        );
+    }
+
+    #[test]
+    fn switching_preset_rebases_and_drops_the_old_overlay() {
+        let mut km = Keymap::default();
+        km.set_chords(Action::FIND, c("Ctrl+Shift+P"));
+        km.set_chords(Action::COMMENT, c("Alt+M"));
+
+        // What the preset dropdown does.
+        km = Keymap::from_preset(Preset::Unreal);
+
+        assert_eq!(km.preset, Preset::Unreal);
+        assert_eq!(
+            km.chord_label(Action::FIND).as_deref(),
+            Some("Ctrl+F"),
+            "the old rebinding is gone — switching preset means \"give me that preset\""
+        );
+        assert_eq!(
+            km.chord_label(Action::COMMENT).as_deref(),
+            Some("C"),
+            "and the new preset's own value applies"
+        );
+        assert_eq!(km.mouse_profile, MouseProfile::Unreal, "the dialect follows");
+        assert_eq!(km, Keymap::from_preset(Preset::Unreal), "nothing lingers");
+    }
+
+    #[test]
+    fn a_rebind_onto_a_taken_chord_is_detectable_before_it_is_applied() {
+        // The page probes a copy rather than applying and undoing, so an
+        // accidental collision never transiently steals a live binding.
+        let km = Keymap::default();
+        let mut probe = km.clone();
+        probe.set_chords(Action::GROUP, c("Ctrl+G"));
+        let clash = probe
+            .conflicts()
+            .into_iter()
+            .find(|c| c.first == Action::GROUP || c.second == Action::GROUP)
+            .expect("the collision must be visible on the probe");
+        // Order within the pair is the map's, not the user's, so the page
+        // reads "the other one" rather than assuming a side.
+        let other = if clash.first == Action::GROUP { clash.second } else { clash.first };
+        assert_eq!(other, Action::COLLAPSE, "and it names who already holds it");
+        assert_eq!(
+            km.chord_label(Action::GROUP).as_deref(),
+            Some("C"),
+            "while the live map is untouched until the user says rebind anyway"
+        );
+    }
+
+    #[test]
+    fn reset_all_returns_every_action_to_the_current_preset() {
+        let mut km = Keymap::from_preset(Preset::Unreal);
+        km.set_chords(Action::FIND, c("Ctrl+Shift+P"));
+        km.set_chords(Action::UNDO, vec![]);
+        km = Keymap::from_preset(km.preset);
+        assert_eq!(km, Keymap::from_preset(Preset::Unreal));
+    }
+
     #[test]
     fn a_hand_written_partial_file_parses_the_way_a_user_would_write_one() {
         // Exactly what the docs will show: two remapped actions, nothing else.
