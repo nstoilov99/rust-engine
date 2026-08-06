@@ -266,7 +266,13 @@ impl WirePrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphPrefs {
+    /// Floor for both wheel paths. Matches the zoom ladder's first stop, so a
+    /// plain wheel can reach it exactly.
     pub zoom_min: f32,
+    /// Ceiling for **Ctrl**+wheel only. A plain wheel stops at the ladder's
+    /// 220%; Ctrl leaves the ladder and runs to here, which is the whole point
+    /// of having a second zoom gesture — inspecting past 1:1. Leaving this at
+    /// 220% would make Ctrl+wheel a no-op.
     pub zoom_max: f32,
     pub wires: WirePrefs,
 }
@@ -275,7 +281,7 @@ impl Default for GraphPrefs {
     fn default() -> Self {
         Self {
             zoom_min: 0.15,
-            zoom_max: 2.2,
+            zoom_max: 4.0,
             wires: WirePrefs::default(),
         }
     }

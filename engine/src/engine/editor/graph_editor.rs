@@ -820,6 +820,11 @@ pub struct GraphEditorState {
     /// The `?` cheat sheet is open. Session-only, like `find` — a reference
     /// card is not document state.
     pub cheat_sheet: bool,
+    /// Empty-canvas context menu: (world, screen) of the right-click that
+    /// opened it. Both are kept because "Add Node…" needs the world point to
+    /// place the node and the screen point to anchor the palette, and the
+    /// click that supplied them is long gone by the time the row is chosen.
+    pub canvas_menu: Option<([f32; 2], [f32; 2])>,
     /// Frames drawn, for round-robin budgets (preview slots today).
     pub frame: u64,
     /// Set when a graph opened with no remembered view: the first draw frames
@@ -1133,6 +1138,7 @@ impl GraphEditorState {
             palette: None,
             find: None,
             cheat_sheet: false,
+            canvas_menu: None,
             frame: 0,
             frame_all_on_open: false,
         })
@@ -2768,6 +2774,7 @@ pub mod tests_support {
             palette: None,
             find: None,
             cheat_sheet: false,
+            canvas_menu: None,
             frame: 0,
             frame_all_on_open: false,
         }
@@ -3957,6 +3964,69 @@ mod tests {
         assert!(!st.stack.can_undo(), "and nothing reaches the undo stack");
     }
 
+
+    /// Acceptance 7 — Alt+click a wire removes exactly that wire, reports it,
+    /// and costs one undo step. (Bug 2: this gesture did nothing at all.)
+    #[test]
+    fn acceptance_7_alt_click_a_wire_deletes_one_wire_in_one_undo_step() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [400.0, 0.0]), node(2, [800.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1), edge(1, 2)];
+        let before = st.doc.clone();
+
+        let doomed = st.doc.edges[0].clone();
+        let n = st.break_links(&[doomed.clone()], "Delete", &reg);
+
+        assert_eq!(n, 1, "it reports the one wire it took");
+        assert_eq!(st.doc.edges.len(), 1, "and takes only that one");
+        assert!(!st.doc.edges.contains(&doomed));
+        assert!(st.stack.can_undo());
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one undo puts it back");
+        assert!(!st.stack.can_undo(), "and there was only ever one entry");
+    }
+
+    /// Acceptance 8 — the same, for a pin carrying several links.
+    #[test]
+    fn acceptance_8_alt_click_a_pin_with_four_links_is_one_undo_step() {
+        let mut reg = NodeRegistry::new();
+        reg.register(NodeDescriptor {
+            id: "fan".into(),
+            name: "Fan".into(),
+            category: "Math".into(),
+            version: 1,
+            inputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "a", "", PinType::Float,
+            )],
+            outputs: vec![crate::engine::node_graph::PinDescriptor::new(
+                "sum", "", PinType::Float,
+            )],
+            pure: true,
+            realm: crate::engine::node_graph::NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+
+        let mut st = bare_state();
+        st.doc.nodes = (0..5).map(|i| node(i, [i as f32 * 200.0, 0.0])).collect();
+        for n in st.doc.nodes.iter_mut() {
+            n.type_id = "fan".into();
+        }
+        // One output fanning out to four inputs.
+        st.doc.edges = (1..5).map(|i| edge(0, i)).collect();
+        let before = st.doc.clone();
+        assert_eq!(st.doc.edges.len(), 4);
+
+        st.break_node_links(0, &reg);
+        assert!(st.doc.edges.is_empty(), "all four go");
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "and all four come back together");
+        assert!(!st.stack.can_undo(), "one gesture, one entry");
+    }
+
     /// T10 — Escape during a node drag puts the nodes back and records nothing.
     #[test]
     fn t10_escaping_a_node_drag_reverts_it_and_leaves_no_undo_entry() {
@@ -4331,6 +4401,7 @@ mod tests {
             palette: None,
             find: None,
             cheat_sheet: false,
+            canvas_menu: None,
             frame: 0,
             frame_all_on_open: false,
         }

@@ -1165,6 +1165,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     let mut annotation_menu_at: Option<Pos2> = None;
     let mut wire_menu_at: Option<Pos2> = None;
     let mut node_menu_at: Option<Pos2> = None;
+    let mut canvas_menu_at: Option<Pos2> = None;
     let mut collapse_request = false;
     let mut layout_request = false;
     let mut cycle_error_request: Option<bool> = None;
@@ -1187,6 +1188,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut annotation_menu_at,
             &mut wire_menu_at,
             &mut node_menu_at,
+            &mut canvas_menu_at,
             &mut collapse_request,
             &mut layout_request,
             &mut cycle_error_request,
@@ -1211,6 +1213,14 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     annotation_menu(ui, state, registry, keymap, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
     node_menu(ui, state, registry, keymap, &out.inner, node_menu_at);
+    if let Some((world, screen)) =
+        canvas_menu(ui, state, registry, keymap, &out.inner, clipboard, canvas_menu_at)
+    {
+        // "Add Node…" opens the palette where the menu was anchored, so the
+        // node lands where the user right-clicked rather than wherever the row
+        // happened to be.
+        open_palette(state, world, screen, None);
+    }
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     cheat_sheet(ui, out.rect, state, keymap);
@@ -1349,6 +1359,7 @@ fn draw_and_interact(
     annotation_menu_at: &mut Option<Pos2>,
     wire_menu_at: &mut Option<Pos2>,
     node_menu_at: &mut Option<Pos2>,
+    canvas_menu_at: &mut Option<Pos2>,
     collapse_request: &mut bool,
     layout_request: &mut bool,
     cycle_error_request: &mut Option<bool>,
@@ -1386,9 +1397,21 @@ fn draw_and_interact(
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
     let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis);
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
+    // Set when Alt+click removed a wire this frame, so nothing downstream
+    // treats the same press as a reroute grab or a selection change.
+    let mut alt_broke_wire = false;
     // What the in-flight cut would take, tested against the drawn polylines
     // so the preview and the release can never disagree.
-    let cut_preview: BTreeSet<usize> = crossed_indices(state, &wires, scope);
+    let mut cut_preview: BTreeSet<usize> = crossed_indices(state, &wires, scope);
+    // Rule 5 — Alt is a *precursor*: holding it shows what the click would
+    // take, before the click. A hovered wire joins the cut preview, so the
+    // break reuses the red-dashed language the slash-cut already speaks
+    // rather than inventing a second one.
+    if ui.ctx().input.modifiers.contains(Modifiers::ALT) {
+        if let Some(i) = hovered_wire {
+            cut_preview.insert(i);
+        }
+    }
 
     // A single node dragged over a wire it could sit on: the wire highlights
     // and a drop splices it in.
@@ -1636,7 +1659,20 @@ fn draw_and_interact(
     // drag, so grabbing the wire and moving it is one gesture rather than
     // insert-then-find-the-thing-you-just-made.
     let mut midpoint_grab: Option<(Edge, [f32; 2])> = None;
-    if let Some(i) = hovered_wire {
+    // Rule 4 — Alt is the break modifier, and a wire is the most direct thing
+    // it can break. Handled before the midpoint handle so an Alt press over
+    // the middle of a wire deletes it instead of grabbing a reroute.
+    // (A pin under the pointer wins — the pin loop runs later and would break
+    // its own links; `wire_under` already excludes the pin end zones.)
+    if alt && pointer_pressed {
+        if let Some(i) = hovered_wire {
+            if let Some(edge) = state.doc.edges.get(i).cloned() {
+                state.break_links(&[edge], "Delete", registry);
+                alt_broke_wire = true;
+            }
+        }
+    }
+    if let Some(i) = hovered_wire.filter(|_| !alt_broke_wire) {
         if let Some(w) = wires.iter().find(|w| w.edge_index == i) {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
                 let r = MIDPOINT_R;
@@ -1720,6 +1756,15 @@ fn draw_and_interact(
                         tip.push_str(&doc);
                     }
                     ui.tooltip_for(scope.world_rect_to_screen(wr), &tip);
+                }
+                // The pin's own precursor: a danger ring around the dot while
+                // Alt is held, so a connected pin reads as breakable before
+                // the press rather than after it.
+                if resp.hovered && alt && pin.connected {
+                    let c = scope.world_to_screen(pin.dot_center);
+                    let r = m.pin_r * zoom * 1.6;
+                    ui.painter()
+                        .circle_stroke(c, r, m.border.max(1.0), Palette::invariant_status().error);
                 }
                 if !resp.pressed {
                     continue;
@@ -2210,9 +2255,22 @@ fn draw_and_interact(
             } else if pin_under(&geoms, pw, hit_w).is_none()
                 && node_under(&geoms, pw, lod, &m).is_none()
             {
-                open_palette(state, [pw.x, pw.y], [rc.x, rc.y], None);
+                // Ratified: empty canvas gets a proper context menu whose
+                // first row *is* "Add Node…". Right-click used to open the
+                // palette directly, which made the canvas the one surface in
+                // the editor where right-click meant something else — and left
+                // Paste and Select All with no mouse route at all.
+                state.canvas_menu = Some(([pw.x, pw.y], [rc.x, rc.y]));
+                *canvas_menu_at = menu_at;
             }
         }
+    }
+
+    // Rule 5 — Ctrl over empty canvas is the slash-cut's precursor. A
+    // crosshair is the cheapest legible hint and the OS already owns drawing
+    // it, so it costs nothing and cannot drift out of sync with a glyph.
+    if ctrl && !widget_claimed && pointer_world.is_some() && hovered_wire.is_none() {
+        ui.ctx_mut().set_cursor_icon(crusty_gui::context::CursorIcon::Crosshair);
     }
 
     // Canvas-context shortcuts. Pointer over the canvas, and never while an
@@ -2748,8 +2806,84 @@ fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option
     None
 }
 
-/// The node context menu. Every break path is also reachable here — the
-/// gesture is the fast route, the menu is the discoverable one.
+/// The empty-canvas context menu. `Add Node…` first, then the operations that
+/// act on the canvas or the selection.
+fn canvas_menu(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    keymap: &Keymap,
+    geoms: &[NodeGeom],
+    clipboard: &mut Option<GraphFragment>,
+    open_at: Option<Pos2>,
+) -> Option<([f32; 2], [f32; 2])> {
+    let at = state.canvas_menu?;
+    let mut palette_at = None;
+    let mut align: Option<AlignMode> = None;
+    let mut do_layout = false;
+    let mut do_paste = false;
+    let mut select_all = false;
+    let selected = state.selection.len();
+    let has_clip = clipboard.is_some();
+
+    crusty_gui::widgets::context_menu_at(ui, "graph_canvas_menu", open_at, |ui| {
+        ui.menu_group_header("Canvas");
+        if menu_row_for(ui, keymap, Action::ADD_NODE_PALETTE, "Add Node\u{2026}", true) {
+            palette_at = Some(at);
+        }
+        if menu_row_for(ui, keymap, Action::PASTE, "Paste", has_clip) {
+            do_paste = true;
+        }
+        if ui.menu_item("Select All") {
+            select_all = true;
+        }
+        ui.separator();
+        // The align strip appears once aligning is possible at all; distribute
+        // rows disable at exactly two, same rule as the node menu.
+        if selected >= 2 {
+            ui.submenu("Align", |ui| {
+                for mode in AlignMode::ALL {
+                    let enabled = selected >= mode.min_nodes();
+                    let row = match align_action(mode) {
+                        Some(a) => menu_row_for(ui, keymap, a, mode.label(), enabled),
+                        None => ui.menu_item_enabled(mode.label(), enabled),
+                    };
+                    if row {
+                        align = Some(mode);
+                    }
+                }
+            });
+        }
+        if menu_row_for(ui, keymap, Action::AUTO_LAYOUT, "Auto Layout", true) {
+            do_layout = true;
+        }
+    });
+
+    if let Some(mode) = align {
+        let rects = selected_rects(state, geoms);
+        state.align_nodes(&rects, mode, registry);
+        state.canvas_menu = None;
+    }
+    if select_all {
+        state.selection = state.doc.nodes.iter().map(|n| n.id).collect();
+        state.canvas_menu = None;
+    }
+    if do_paste {
+        // Paste lands where the menu was opened, which is the point the user
+        // aimed at — not the view centre and not the live pointer, which has
+        // since travelled to the menu row.
+        state.paste_clipboard(clipboard, Some(at.0), registry);
+        state.canvas_menu = None;
+    }
+    if do_layout || palette_at.is_some() {
+        state.canvas_menu = None;
+    }
+    if do_layout {
+        return None;
+    }
+    palette_at
+}
+
 /// The direct-align action behind an `AlignMode`, if one exists.
 fn align_action(mode: AlignMode) -> Option<Action> {
     Some(match mode {
@@ -2781,6 +2915,8 @@ fn menu_row_for(
     }
 }
 
+/// The node context menu. Every break path is also reachable here — the
+/// gesture is the fast route, the menu is the discoverable one.
 fn node_menu(
     ui: &mut Ui,
     state: &mut GraphEditorState,

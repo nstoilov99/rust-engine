@@ -105,7 +105,7 @@ const PREFS_CATS: &[(&str, &[&str])] = &[
             "Spacing",
             // Canvas
             "Min zoom",
-            "Max zoom",
+            "Max zoom (Ctrl+wheel)",
         ],
     ),
 ];
@@ -1823,6 +1823,8 @@ fn draw_graph_rows(ui: &mut Ui, f: &Filter, p: &mut EditorPrefs, d: &EditorPrefs
     section_bar(ui, "Canvas");
     let hint = format!("default {}", fmt_f(d.graph.zoom_min));
     let m = p.graph.zoom_min != d.graph.zoom_min;
+    // The two rows do different jobs now: min floors both wheel paths, max is
+    // Ctrl+wheel's ceiling (a plain wheel stops at the ladder's 220%).
     if setting_row(ui, f, "Min zoom", m, Some(&hint), false, |ui| {
         drag(ui, &mut p.graph.zoom_min, 0.01, 0.05..=1.0, "\u{00d7}");
     }) {
@@ -1830,8 +1832,8 @@ fn draw_graph_rows(ui: &mut Ui, f: &Filter, p: &mut EditorPrefs, d: &EditorPrefs
     }
     let hint = format!("default {}", fmt_f(d.graph.zoom_max));
     let m = p.graph.zoom_max != d.graph.zoom_max;
-    if setting_row(ui, f, "Max zoom", m, Some(&hint), false, |ui| {
-        drag(ui, &mut p.graph.zoom_max, 0.1, 1.0..=8.0, "\u{00d7}");
+    if setting_row(ui, f, "Max zoom (Ctrl+wheel)", m, Some(&hint), false, |ui| {
+        drag(ui, &mut p.graph.zoom_max, 0.1, 2.2..=8.0, "\u{00d7}");
     }) {
         p.graph.zoom_max = d.graph.zoom_max;
     }
@@ -2310,7 +2312,7 @@ mod tests {
             "Speed",
             "Spacing",
             "Min zoom",
-            "Max zoom",
+            "Max zoom (Ctrl+wheel)",
         ] {
             assert!(rows.contains(&label), "'{label}' is missing from the search index");
         }
