@@ -2833,6 +2833,7 @@ A small but fully playable scene that exercises all major systems together. Not 
 - Worker thread pool with work stealing
 - Performance comparison: profile parallel vs sequential, identify which systems benefit most
 - Thread pool size tuning (default: logical core count - 2, one for game thread, one for render thread)
+- **ECS debugger panel** (inspired by Epic's Mass Debugger, Unreal Fest Chicago 2026): system dependency/conflict graph rendered from the Task 32 access declarations (`Schedule::validate()` already computes it — today it only reaches `print_access_report()`), parallel-group visualization once the rayon scheduler lands, and a query-driven entity browser (run an ad-hoc component query, inspect/edit matching entities' data live — complements the single-entity inspector). Traditional data breakpoints are useless in archetype ECS (storage relocates on composition change), so this panel is the debugging story.
 
 **What you'll learn:**
 - Rayon integration with custom ECS scheduling
