@@ -1939,7 +1939,7 @@ Node graphs (40, 41, 45, 50, 51, 53, 57), visual terrain (46), sky/atmosphere (4
 ---
 
 ### 🔄 Refactor Checkpoint #6: Rendering API Cleanup (slim)
-**Status:** ✅ Complete (2026-08-10, commits `1fe455b` items 1-2, `bc64b1f` item 3, `b382e44` items 4-5). All exit criteria verified: legacy `render_*` deleted + all feature combos build; resize exercised editor + standalone (programmatic SetWindowPos passes) with zero validation errors; adding a pass touches 3 sites (pass file, constructor + `passes_mut()` registration, one `add_pass_with` block). Net ~-1000 lines. Scope note: SSAO sample count NOT surfaced — baked into `ssao.frag` (fixed 64-tap kernel loop); exposing it is a shader change, not a refactor.
+**Status:** ✅ Complete (2026-08-10, commits `1fe455b` items 1-2, `bc64b1f` item 3, `b382e44` items 4-5, `6af6ccc` adversarial-review fixes — of note: item 3's declared `ssao_blurred` read revealed that SSAO was previously culled out entirely, i.e. "SSAO enabled" rendered nothing before this checkpoint; it now actually runs when enabled). All exit criteria verified: legacy `render_*` deleted + all feature combos build; resize exercised editor + standalone (programmatic SetWindowPos passes) with zero validation errors; adding a pass touches 3 sites (pass file, constructor + `passes_mut()` registration, one `add_pass_with` block). Net ~-1000 lines. Scope note: SSAO sample count NOT surfaced — baked into `ssao.frag` (fixed 64-tap kernel loop); exposing it is a shader change, not a refactor.
 **Duration:** ~3-4 days (items 1-3 are each self-contained, afternoon-to-day sized)
 **Prerequisites:** none
 
