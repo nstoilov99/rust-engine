@@ -1938,6 +1938,25 @@ Node graphs (40, 41, 45, 50, 51, 53, 57), visual terrain (46), sky/atmosphere (4
 
 ---
 
+### 🔄 Refactor Checkpoint #6: Rendering API Cleanup (slim)
+**Status:** 📋 Planned (before or alongside Task 39.8 — de-risks the render-pass-heavy Phase 12/13 arc: terrain, sky, CSM, IBL/GI, material/VFX graphs all add passes)
+**Duration:** ~3-4 days (items 1-3 are each self-contained, afternoon-to-day sized)
+**Prerequisites:** none
+
+From the 2026-08 rendering API audit (Claude + Codex pass over `engine/src/engine/rendering/`). Verdict: the internals are sound — `FramePacket` thread boundary, render-graph core (sorted/culled/tested), `ArcSwap` hot-reload registry — but the *authoring* surface accumulated debt. In priority order:
+
+1. **Retire the legacy `common/renderer.rs` facade.** The five `render_*` methods (~400 lines: sprite/mesh paths) are dead code presenting a misleading API — per-mesh acquire/present, blocking `wait(None)`, hardcoded texture load in `new()`. Keep only the bootstrap (device/swapchain/allocators, `submit_and_present`), folded into the existing `GpuContext`/`SwapchainState` split.
+2. **Per-pass resize/rebind trait.** `DeferredRenderer::resize` is a hand-maintained chain (gbuffer → SSAO → bloom → luminance → composite → plankton); one missed recreation = stale-descriptor crash on window resize, and resize errors are only logged on the render thread. A `DeferredPass` trait (`resize` + `rebind(inputs)`) turns the chain into a loop; propagate the errors.
+3. **Execution closures on the render graph.** Dispatch is a stringly-typed `match pass_name` (`deferred_renderer.rs:903`) — an unmatched name silently does nothing, and declared reads/writes aren't checked against what passes actually touch. Attach execution at `add_pass` (closure or enum dispatch) so the graph owns execution, not just ordering. Prerequisite if 39.8 plugins or Phase 12/13 tasks ever inject passes.
+4. **`PassPipelineBuilder` helper** for the shared `GraphicsPipelineCreateInfo` recipe — bloom alone builds three near-identical pipelines (~145 lines); SSAO/luminance/composite repeat the same fullscreen-pass boilerplate. Also makes registering all passes for hot reload (today: only Geometry/Lighting) nearly free.
+5. **Small debts:** typed `RenderError` at the module boundary (replace `Box<dyn Error>`); builder constructors for `PbrMaterial`/`MaterialInstance` (8-12 positional args); camera near/far through `FramePacket` (plankton hardcodes 0.1/1000); once-per-path warning when a mesh/material path fails to resolve (`render_loop.rs` silently skips/defaults today); bloom mip count + SSAO sample count surfaced through `PostProcessingSettings`.
+
+**Explicitly not in scope:** full retained-mode render graph (automatic barriers, transient aliasing) — with nine fixed passes the payoff isn't there. Revisit only when plugin-injected passes become real.
+
+**Exit criteria:** legacy `render_*` methods deleted, all feature combos build; resize exercised in editor + standalone with zero stale-descriptor validation errors; adding a pass touches ≤3 sites (pass file, constructor, graph registration).
+
+---
+
 ### Task 39.8: Plugin System & Module Registry
 **Status:** 📋 Planned (post-M-arc, alongside/before Task 40 — shares registry infrastructure)
 **Duration:** ~1.5-2 weeks
@@ -2285,6 +2304,44 @@ impl DamageZone {
     }
 }
 ```
+
+---
+
+### Task 45.5: Node Graph Editor v2 — Refactor & Polish
+**Status:** 📋 Planned (user-requested 2026-08-02: "refactor it again and improve")
+**Duration:** ~1.5–2 weeks
+**Prerequisites:** Task 45-A (graph execution core) and ideally Task 45 — most
+of the deferred ledger unblocks only once the evaluator and the `NodeInst`
+schema additions exist.
+
+One consolidated pass over everything the Task 40 + design-system +
+input-model arcs deliberately deferred. The authoritative backlog is the
+deferred ledger in `docs/mockup/AUDIT.md` (close-out + Pass C sections);
+snapshot of it as of scheduling:
+
+- **Unblocked by 45-A** (do first): node rename via `NodeInst.title`
+  override + F2 · breakpoint persistence in the sidecar + debug visuals
+  (watch chips, execution trace, PAUSED, tinted taken path) · flow bubbles ·
+  collapse-to-subgraph inner wiring (`graph_input`/`graph_output`).
+- **Input-model residue**: Q straighten (needs geometry access from the
+  state layer — small architecture decision) · Shift+Del exec-chain heal ·
+  quick-place (`descriptor.quick_key`, three crates) · Unreal mouse profile
+  consumption + Ctrl+drag-from-pin move-all-connections (multi-edge
+  ConnectDrag) · Alt+click group-title boundary break (title-region split).
+- **Design-system residue**: crossings rendering (Gap/Arc/Circle over the
+  existing broadphase cap) · bundling proper (perpendicular offsets, merge,
+  max-8) · Vec2/3/4 two-line axis fields · L1 value edit popup ·
+  on-canvas color picker · `preserved` distinct visual · full
+  asset-reference field on canvas · pinned nodes (auto-layout exemption).
+- **Structural refactors earned by three arcs of accretion**:
+  `graph_editor_crusty.rs` has grown past 4k lines — split into
+  draw/interact/menu modules · edges sort-canonicalization (the recorded
+  next diff-noise source) · crusty Phase 17 (retained tessellation /
+  culling) when the 2k-node budget is actually approached · revisit the
+  glass-vs-alpha unsure list and the palette 0.96 ruling.
+
+Re-audit AUDIT.md at kickoff — the ledger is live and later tasks may have
+closed or added items.
 
 ---
 
@@ -2967,6 +3024,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | M9.5 | Packaged Co-op Verification | Multiplayer Foundation | Testing | |
 | M9.6 | Editor Net Play Modes (Play as Client / Listen Server) | Multiplayer Foundation | Feature | |
 | -- | 🎯 *Milestone: Networked Co-op Slice (on packaged builds)* | -- | -- | |
+| -- | 📋 *Refactor #6: Rendering API Cleanup (slim — pass trait, graph dispatch, dead facade)* | -- | -- | |
 | 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | |
 | **40** | **Node Graph Framework & Custom Node SDK** | **Node Graph Foundation** | **Infrastructure** | **Framework** |
 | **41** | **Animation Graph** | Game Architecture | Feature | **1st consumer** |
