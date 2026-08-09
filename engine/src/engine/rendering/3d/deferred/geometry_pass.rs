@@ -201,3 +201,11 @@ impl GeometryPass {
         self.layout.clone()
     }
 }
+
+impl super::pass::DeferredPass for GeometryPass {
+    fn name(&self) -> &'static str {
+        "geometry"
+    }
+    // No resize/rebind: renders into the renderer-owned G-buffer framebuffer,
+    // which `DeferredRenderer::resize` recreates before the pass loop runs.
+}

@@ -325,3 +325,27 @@ impl LuminancePass {
         self.persistent_1x1.clone()
     }
 }
+
+impl super::pass::DeferredPass for LuminancePass {
+    fn name(&self) -> &'static str {
+        "luminance"
+    }
+
+    fn resize(
+        &mut self,
+        ctx: &super::pass::PassResizeContext,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Level sizes are fixed powers of two — only the allocator matters.
+        LuminancePass::resize(self, ctx.allocator.clone())
+    }
+
+    fn rebind(
+        &mut self,
+        inputs: &super::pass::PassInputs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_sets(
+            inputs.descriptor_set_allocator.clone(),
+            inputs.hdr_target.clone(),
+        )
+    }
+}

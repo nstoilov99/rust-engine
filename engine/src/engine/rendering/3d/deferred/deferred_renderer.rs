@@ -5,6 +5,7 @@ use super::geometry_pass::GeometryPass;
 use super::grid_pass::{GridPass, GridPushConstants};
 use super::lighting_pass::LightingPass;
 use super::luminance_pass::{LuminancePass, LuminancePush};
+use super::pass::{DeferredPass, PassInputs, PassResizeContext};
 use super::plankton::PlanktonSystem;
 use super::shadow_pass::ShadowPass;
 use super::ssao_pass::{SsaoPass, SsaoPushConstants};
@@ -57,17 +58,10 @@ pub struct DeferredRenderer {
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     debug_view: DebugView,
     render_counters: RenderCounters,
-    gbuffer_descriptor_set: Arc<DescriptorSet>,
-    shadow_descriptor_set: Arc<DescriptorSet>,
-    ssao_descriptor_set: Arc<DescriptorSet>,
-    ssao_fallback_descriptor_set: Arc<DescriptorSet>,
     ssao_sampler: Arc<Sampler>,
-    #[allow(dead_code)]
     ssao_fallback: Arc<ImageView>,
     default_material_set: Arc<DescriptorSet>,
     hdr_target: Arc<ImageView>,
-    hdr_framebuffer: Arc<Framebuffer>,
-    composite_descriptor_set: Arc<DescriptorSet>,
     composite_render_pass: Arc<RenderPass>,
     composite_present_render_pass: Arc<RenderPass>,
     framebuffer_cache: HashMap<usize, Arc<Framebuffer>>,
@@ -242,22 +236,11 @@ impl DeferredRenderer {
 
         let composite_pass = CompositePass::new(device.clone(), composite_render_pass.clone())?;
 
-        let mut bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
+        let bloom_pass = BloomPass::new(device.clone(), allocator.clone(), width, height)?;
 
-        let mut luminance_pass = LuminancePass::new(device.clone(), allocator.clone())?;
+        let luminance_pass = LuminancePass::new(device.clone(), allocator.clone())?;
 
         let hdr_target = create_hdr_target(allocator.clone(), width, height)?;
-
-        bloom_pass.prepare_sets(descriptor_set_allocator.clone(), hdr_target.clone())?;
-        luminance_pass.prepare_sets(descriptor_set_allocator.clone(), hdr_target.clone())?;
-
-        let hdr_framebuffer = Framebuffer::new(
-            lighting_pass.render_pass(),
-            FramebufferCreateInfo {
-                attachments: vec![hdr_target.clone()],
-                ..Default::default()
-            },
-        )?;
 
         // Grid/debug-draw render pass — must match the G-buffer depth's
         // final_layout (DepthStencilReadOnlyOptimal) as initial_layout so the
@@ -323,22 +306,7 @@ impl DeferredRenderer {
         let grid_pass = GridPass::new(device.clone(), grid_render_pass.clone())?;
         let debug_draw_pass = DebugDrawPass::new(device.clone(), grid_render_pass.clone())?;
 
-        let gbuffer_descriptor_set = lighting_pass.create_descriptor_set(
-            descriptor_set_allocator.clone(),
-            gbuffer.position.clone(),
-            gbuffer.normal.clone(),
-            gbuffer.albedo.clone(),
-            gbuffer.material.clone(),
-            gbuffer.emissive.clone(),
-        )?;
-
-        let shadow_descriptor_set = lighting_pass.create_shadow_descriptor_set(
-            descriptor_set_allocator.clone(),
-            shadow_pass.shadow_map(),
-            shadow_pass.shadow_sampler(),
-        )?;
-
-        let mut ssao_pass = SsaoPass::new(
+        let ssao_pass = SsaoPass::new(
             device.clone(),
             allocator.clone(),
             descriptor_set_allocator.clone(),
@@ -346,11 +314,6 @@ impl DeferredRenderer {
             queue.clone(),
             width,
             height,
-        )?;
-        ssao_pass.prepare_sets(
-            descriptor_set_allocator.clone(),
-            gbuffer.position.clone(),
-            gbuffer.normal.clone(),
         )?;
 
         let ssao_sampler = Sampler::new(
@@ -369,34 +332,13 @@ impl DeferredRenderer {
             queue.clone(),
         )?;
 
-        let ssao_descriptor_set = lighting_pass.create_ssao_descriptor_set(
-            descriptor_set_allocator.clone(),
-            ssao_pass.ssao_blurred(),
-            ssao_sampler.clone(),
-        )?;
-
-        let ssao_fallback_descriptor_set = lighting_pass.create_ssao_descriptor_set(
-            descriptor_set_allocator.clone(),
-            ssao_fallback.clone(),
-            ssao_sampler.clone(),
-        )?;
-
-        let composite_descriptor_set = composite_pass.create_descriptor_set(
-            descriptor_set_allocator.clone(),
-            hdr_target.clone(),
-            bloom_pass.bloom_result(),
-            luminance_pass.persistent_1x1(),
-        )?;
-
-        let mut plankton_system = PlanktonSystem::new(
+        let plankton_system = PlanktonSystem::new(
             device.clone(),
             queue.clone(),
             allocator.clone(),
             command_buffer_allocator.clone(),
             descriptor_set_allocator.clone(),
         )?;
-        plankton_system.set_gbuffer_depth(gbuffer.depth.clone())?;
-        plankton_system.set_hdr_target(hdr_target.clone())?;
 
         // --- Pipeline Registry ---
         let mut pipeline_registry = PipelineRegistry::new();
@@ -541,7 +483,7 @@ impl DeferredRenderer {
         )?;
         let default_material_set = default_material.descriptor_set.clone();
 
-        Ok(Self {
+        let mut renderer = Self {
             gbuffer,
             geometry_pass,
             lighting_pass,
@@ -560,16 +502,10 @@ impl DeferredRenderer {
             descriptor_set_allocator,
             debug_view: DebugView::None,
             render_counters: RenderCounters::default(),
-            gbuffer_descriptor_set,
-            shadow_descriptor_set,
-            ssao_descriptor_set,
-            ssao_fallback_descriptor_set,
             ssao_sampler,
             ssao_fallback,
             default_material_set,
             hdr_target,
-            hdr_framebuffer,
-            composite_descriptor_set,
             composite_render_pass,
             composite_present_render_pass,
             framebuffer_cache: HashMap::new(),
@@ -577,7 +513,70 @@ impl DeferredRenderer {
             grid_render_pass,
             grid_present_render_pass,
             plankton_system,
-        })
+        };
+
+        // Populate every pass's descriptor sets / framebuffers (same loop
+        // that runs after each resize).
+        renderer.rebind_passes()?;
+
+        Ok(renderer)
+    }
+
+    /// All deferred passes, in frame execution order. This is the single
+    /// registration point the resize/rebind loops iterate — adding a pass
+    /// means: implement `DeferredPass` on it, construct it in `new`, and
+    /// list it here.
+    ///
+    /// Execution order for reference (resize correctness does not depend on
+    /// it — see `pass.rs`): shadow → geometry → ssao (+blur) → lighting →
+    /// plankton → bloom → luminance → composite → grid → debug_draw.
+    fn passes_mut(&mut self) -> [&mut dyn DeferredPass; 10] {
+        [
+            &mut self.shadow_pass,
+            &mut self.geometry_pass,
+            &mut self.ssao_pass,
+            &mut self.lighting_pass,
+            &mut self.plankton_system,
+            &mut self.bloom_pass,
+            &mut self.luminance_pass,
+            &mut self.composite_pass,
+            &mut self.grid_pass,
+            &mut self.debug_draw_pass,
+        ]
+    }
+
+    /// Snapshot the shared resources and cross-pass outputs that `rebind`
+    /// implementations consume. Must be taken *after* all passes resized.
+    fn pass_inputs(&self) -> PassInputs {
+        PassInputs {
+            descriptor_set_allocator: self.descriptor_set_allocator.clone(),
+            gbuffer_position: self.gbuffer.position.clone(),
+            gbuffer_normal: self.gbuffer.normal.clone(),
+            gbuffer_albedo: self.gbuffer.albedo.clone(),
+            gbuffer_material: self.gbuffer.material.clone(),
+            gbuffer_emissive: self.gbuffer.emissive.clone(),
+            gbuffer_depth: self.gbuffer.depth.clone(),
+            hdr_target: self.hdr_target.clone(),
+            shadow_map: self.shadow_pass.shadow_map(),
+            shadow_sampler: self.shadow_pass.shadow_sampler(),
+            ssao_blurred: self.ssao_pass.ssao_blurred(),
+            ssao_fallback: self.ssao_fallback.clone(),
+            ssao_sampler: self.ssao_sampler.clone(),
+            bloom_result: self.bloom_pass.bloom_result(),
+            luminance_1x1: self.luminance_pass.persistent_1x1(),
+        }
+    }
+
+    /// Rebind phase: every pass recreates the descriptor sets / framebuffers
+    /// that reference shared resources or other passes' outputs.
+    fn rebind_passes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let inputs = self.pass_inputs();
+        for pass in self.passes_mut() {
+            let name = pass.name();
+            pass.rebind(&inputs)
+                .map_err(|e| format!("{name} pass rebind failed: {e}"))?;
+        }
+        Ok(())
     }
 
     fn get_or_create_framebuffer(
@@ -645,6 +644,11 @@ impl DeferredRenderer {
         self.grid_framebuffer_cache.clear();
     }
 
+    /// Recreate all size-dependent GPU state. Runs in three steps:
+    /// shared resources (G-buffer, HDR target) → per-pass `resize` →
+    /// per-pass `rebind` against a fresh input snapshot. Errors carry the
+    /// failing pass's name and propagate to the caller (the render thread
+    /// forwards them to the main thread as `RenderEvent::RenderError`).
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
         if width == 0 || height == 0 {
             return Ok(());
@@ -655,66 +659,27 @@ impl DeferredRenderer {
             return Ok(());
         }
 
+        // Shared resources every pass samples from: recreate first.
         self.gbuffer = GBuffer::new(self.device.clone(), self.allocator.clone(), width, height)?;
-
-        self.gbuffer_descriptor_set = self.lighting_pass.create_descriptor_set(
-            self.descriptor_set_allocator.clone(),
-            self.gbuffer.position.clone(),
-            self.gbuffer.normal.clone(),
-            self.gbuffer.albedo.clone(),
-            self.gbuffer.material.clone(),
-            self.gbuffer.emissive.clone(),
-        )?;
-
         self.hdr_target = create_hdr_target(self.allocator.clone(), width, height)?;
 
-        self.hdr_framebuffer = Framebuffer::new(
-            self.lighting_pass.render_pass(),
-            FramebufferCreateInfo {
-                attachments: vec![self.hdr_target.clone()],
-                ..Default::default()
-            },
-        )?;
+        // Phase 1: each pass recreates its own size-dependent targets.
+        let ctx = PassResizeContext {
+            allocator: self.allocator.clone(),
+            width,
+            height,
+        };
+        for pass in self.passes_mut() {
+            let name = pass.name();
+            pass.resize(&ctx)
+                .map_err(|e| format!("{name} pass resize failed: {e}"))?;
+        }
 
-        self.ssao_pass
-            .resize(self.allocator.clone(), width, height)?;
-        self.ssao_pass.prepare_sets(
-            self.descriptor_set_allocator.clone(),
-            self.gbuffer.position.clone(),
-            self.gbuffer.normal.clone(),
-        )?;
+        // Phase 2: rebind cross-pass references against the new resources.
+        self.rebind_passes()?;
 
-        self.ssao_descriptor_set = self.lighting_pass.create_ssao_descriptor_set(
-            self.descriptor_set_allocator.clone(),
-            self.ssao_pass.ssao_blurred(),
-            self.ssao_sampler.clone(),
-        )?;
-
-        self.bloom_pass
-            .resize(self.allocator.clone(), width, height)?;
-        self.bloom_pass.prepare_sets(
-            self.descriptor_set_allocator.clone(),
-            self.hdr_target.clone(),
-        )?;
-
-        self.luminance_pass.resize(self.allocator.clone())?;
-        self.luminance_pass.prepare_sets(
-            self.descriptor_set_allocator.clone(),
-            self.hdr_target.clone(),
-        )?;
-
-        self.composite_descriptor_set = self.composite_pass.create_descriptor_set(
-            self.descriptor_set_allocator.clone(),
-            self.hdr_target.clone(),
-            self.bloom_pass.bloom_result(),
-            self.luminance_pass.persistent_1x1(),
-        )?;
-
-        self.plankton_system
-            .set_gbuffer_depth(self.gbuffer.depth.clone())?;
-        self.plankton_system
-            .set_hdr_target(self.hdr_target.clone())?;
-
+        // Composite/grid framebuffers are keyed to external target images
+        // and reference the old G-buffer depth — drop them.
         self.framebuffer_cache.clear();
         self.grid_framebuffer_cache.clear();
 
@@ -1005,7 +970,30 @@ impl DeferredRenderer {
                 "lighting" => {
                     crate::profile_scope!("lighting_pass");
 
-                    let hdr_extent = self.hdr_framebuffer.extent();
+                    let hdr_framebuffer = self
+                        .lighting_pass
+                        .hdr_framebuffer()
+                        .ok_or("lighting hdr framebuffer not prepared")?
+                        .clone();
+                    let gbuffer_set = self
+                        .lighting_pass
+                        .gbuffer_set()
+                        .ok_or("lighting gbuffer set not prepared")?
+                        .clone();
+                    let shadow_set = self
+                        .lighting_pass
+                        .shadow_set()
+                        .ok_or("lighting shadow set not prepared")?
+                        .clone();
+                    let ssao_set = if settings.ssao_enabled {
+                        self.lighting_pass.ssao_set()
+                    } else {
+                        self.lighting_pass.ssao_fallback_set()
+                    }
+                    .ok_or("lighting ssao set not prepared")?
+                    .clone();
+
+                    let hdr_extent = hdr_framebuffer.extent();
                     let hdr_viewport = vulkano::pipeline::graphics::viewport::Viewport {
                         offset: [0.0, 0.0],
                         extent: [hdr_extent[0] as f32, hdr_extent[1] as f32],
@@ -1020,7 +1008,7 @@ impl DeferredRenderer {
                         .begin_render_pass(
                             RenderPassBeginInfo {
                                 clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                                ..RenderPassBeginInfo::framebuffer(self.hdr_framebuffer.clone())
+                                ..RenderPassBeginInfo::framebuffer(hdr_framebuffer)
                             },
                             SubpassBeginInfo {
                                 contents: SubpassContents::Inline,
@@ -1036,23 +1024,19 @@ impl DeferredRenderer {
                             PipelineBindPoint::Graphics,
                             self.lighting_pass.layout(),
                             0,
-                            self.gbuffer_descriptor_set.clone(),
+                            gbuffer_set,
                         )?
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
                             self.lighting_pass.layout(),
                             1,
-                            self.shadow_descriptor_set.clone(),
+                            shadow_set,
                         )?
                         .bind_descriptor_sets(
                             PipelineBindPoint::Graphics,
                             self.lighting_pass.layout(),
                             2,
-                            if settings.ssao_enabled {
-                                self.ssao_descriptor_set.clone()
-                            } else {
-                                self.ssao_fallback_descriptor_set.clone()
-                            },
+                            ssao_set,
                         )?
                         .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
                     unsafe {
@@ -1069,6 +1053,12 @@ impl DeferredRenderer {
                 }
                 "composite" => {
                     crate::profile_scope!("composite_pass");
+
+                    let composite_set = self
+                        .composite_pass
+                        .descriptor_set()
+                        .ok_or("composite set not prepared")?
+                        .clone();
 
                     let target_extent = target_framebuffer.extent();
                     let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
@@ -1124,7 +1114,7 @@ impl DeferredRenderer {
                             PipelineBindPoint::Graphics,
                             self.composite_pass.layout(),
                             0,
-                            self.composite_descriptor_set.clone(),
+                            composite_set,
                         )?
                         .push_constants(self.composite_pass.layout(), 0, composite_push)?;
                     unsafe {

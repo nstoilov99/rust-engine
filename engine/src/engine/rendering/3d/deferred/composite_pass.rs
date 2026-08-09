@@ -53,6 +53,8 @@ pub struct CompositePass {
     layout: Arc<PipelineLayout>,
     render_pass: Arc<RenderPass>,
     sampler: Arc<Sampler>,
+    /// Input set (HDR + bloom + luminance) — populated by `rebind()`.
+    descriptor_set: Option<Arc<DescriptorSet>>,
 }
 
 impl CompositePass {
@@ -121,6 +123,7 @@ impl CompositePass {
             layout,
             render_pass,
             sampler,
+            descriptor_set: None,
         })
     }
 
@@ -159,5 +162,32 @@ impl CompositePass {
 
     pub fn render_pass(&self) -> Arc<RenderPass> {
         self.render_pass.clone()
+    }
+
+    /// Input descriptor set. `None` until `rebind()` runs.
+    pub fn descriptor_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.descriptor_set.as_ref()
+    }
+}
+
+impl super::pass::DeferredPass for CompositePass {
+    fn name(&self) -> &'static str {
+        "composite"
+    }
+
+    // No `resize`: renders into externally provided target framebuffers
+    // (swapchain / viewport texture), cached and cleared by the renderer.
+
+    fn rebind(
+        &mut self,
+        inputs: &super::pass::PassInputs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.descriptor_set = Some(self.create_descriptor_set(
+            inputs.descriptor_set_allocator.clone(),
+            inputs.hdr_target.clone(),
+            inputs.bloom_result.clone(),
+            inputs.luminance_1x1.clone(),
+        )?);
+        Ok(())
     }
 }

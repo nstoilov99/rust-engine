@@ -57,7 +57,6 @@ use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use vulkano::descriptor_set::DescriptorSet;
 use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -108,7 +107,6 @@ pub struct CoreApp {
     pub mesh_indices: Vec<usize>,
     pub plane_mesh_index: usize,
     pub cube_mesh_index: usize,
-    pub descriptor_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
     plankton_emitter_buffer:
@@ -424,8 +422,6 @@ impl App {
             game_world.resources_mut().insert(gamepad_state);
         }
 
-        let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
-
         let deferred_renderer = DeferredRenderer::new(
             renderer.gpu.device.clone(),
             renderer.gpu.queue.clone(),
@@ -592,7 +588,6 @@ impl App {
             mesh_indices,
             plane_mesh_index,
             cube_mesh_index,
-            descriptor_set,
             mesh_data_buffer: Vec::with_capacity(64),
             shadow_caster_buffer: Vec::with_capacity(64),
             plankton_emitter_buffer: Vec::with_capacity(32),
@@ -2096,7 +2091,13 @@ impl App {
                         self.editor.viewport.pending_sync = true;
                     }
                     rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
-                        log::error!("editor: render thread error: {}", message);
+                        // Surface on the terminal and in the editor console —
+                        // no logger is installed, so log:: alone is invisible.
+                        eprintln!("editor: render thread error: {}", message);
+                        self.editor.console.messages.push(LogMessage::error(format!(
+                            "Render thread error: {}",
+                            message
+                        )));
                     }
                     rust_engine::engine::rendering::frame_packet::RenderEvent::CrustyTexturesRegistered(regs) => {
                         self.editor

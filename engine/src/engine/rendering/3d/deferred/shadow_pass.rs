@@ -156,3 +156,11 @@ impl ShadowPass {
         self.render_pass.clone()
     }
 }
+
+impl super::pass::DeferredPass for ShadowPass {
+    fn name(&self) -> &'static str {
+        "shadow"
+    }
+    // No resize/rebind: the shadow map is a fixed-size target independent of
+    // the window/viewport extent.
+}

@@ -18,8 +18,9 @@ use vulkano::pipeline::graphics::{
 };
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
-use vulkano::render_pass::RenderPass;
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
+use super::pass::{DeferredPass, PassInputs};
 use crate::engine::rendering::pipeline_registry::{PipelineId, PipelineRegistry};
 
 // Lighting shaders
@@ -43,6 +44,13 @@ pub struct LightingPass {
     sampler: Arc<Sampler>,
     layout: Arc<PipelineLayout>,
     render_pass: Arc<RenderPass>,
+    // Bind state owned by the pass — populated by `rebind()` after
+    // construction and after each resize.
+    gbuffer_set: Option<Arc<DescriptorSet>>,
+    shadow_set: Option<Arc<DescriptorSet>>,
+    ssao_set: Option<Arc<DescriptorSet>>,
+    ssao_fallback_set: Option<Arc<DescriptorSet>>,
+    hdr_framebuffer: Option<Arc<Framebuffer>>,
 }
 
 impl LightingPass {
@@ -69,6 +77,11 @@ impl LightingPass {
                 sampler,
                 layout,
                 render_pass,
+                gbuffer_set: None,
+                shadow_set: None,
+                ssao_set: None,
+                ssao_fallback_set: None,
+                hdr_framebuffer: None,
             },
             pipeline,
         ))
@@ -286,5 +299,74 @@ impl LightingPass {
 
     pub fn render_pass(&self) -> Arc<RenderPass> {
         self.render_pass.clone()
+    }
+
+    /// G-buffer sampling set (Set 0). `None` until `rebind()` runs.
+    pub fn gbuffer_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.gbuffer_set.as_ref()
+    }
+
+    /// Shadow map set (Set 1). `None` until `rebind()` runs.
+    pub fn shadow_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.shadow_set.as_ref()
+    }
+
+    /// SSAO set (Set 2). `None` until `rebind()` runs.
+    pub fn ssao_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.ssao_set.as_ref()
+    }
+
+    /// SSAO fallback set (Set 2, 1x1 white). `None` until `rebind()` runs.
+    pub fn ssao_fallback_set(&self) -> Option<&Arc<DescriptorSet>> {
+        self.ssao_fallback_set.as_ref()
+    }
+
+    /// HDR output framebuffer. `None` until `rebind()` runs.
+    pub fn hdr_framebuffer(&self) -> Option<&Arc<Framebuffer>> {
+        self.hdr_framebuffer.as_ref()
+    }
+}
+
+impl DeferredPass for LightingPass {
+    fn name(&self) -> &'static str {
+        "lighting"
+    }
+
+    // No `resize`: the pass owns no size-dependent images — its output target
+    // (`hdr_target`) is a shared resource recreated by `DeferredRenderer`.
+
+    fn rebind(&mut self, inputs: &PassInputs) -> Result<(), Box<dyn std::error::Error>> {
+        let dsa = inputs.descriptor_set_allocator.clone();
+        self.gbuffer_set = Some(self.create_descriptor_set(
+            dsa.clone(),
+            inputs.gbuffer_position.clone(),
+            inputs.gbuffer_normal.clone(),
+            inputs.gbuffer_albedo.clone(),
+            inputs.gbuffer_material.clone(),
+            inputs.gbuffer_emissive.clone(),
+        )?);
+        self.shadow_set = Some(self.create_shadow_descriptor_set(
+            dsa.clone(),
+            inputs.shadow_map.clone(),
+            inputs.shadow_sampler.clone(),
+        )?);
+        self.ssao_set = Some(self.create_ssao_descriptor_set(
+            dsa.clone(),
+            inputs.ssao_blurred.clone(),
+            inputs.ssao_sampler.clone(),
+        )?);
+        self.ssao_fallback_set = Some(self.create_ssao_descriptor_set(
+            dsa,
+            inputs.ssao_fallback.clone(),
+            inputs.ssao_sampler.clone(),
+        )?);
+        self.hdr_framebuffer = Some(Framebuffer::new(
+            self.render_pass.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![inputs.hdr_target.clone()],
+                ..Default::default()
+            },
+        )?);
+        Ok(())
     }
 }

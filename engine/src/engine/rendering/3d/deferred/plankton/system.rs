@@ -344,3 +344,19 @@ impl PlanktonSystem {
         Ok(())
     }
 }
+
+impl super::super::pass::DeferredPass for PlanktonSystem {
+    fn name(&self) -> &'static str {
+        "plankton"
+    }
+
+    // No `resize`: particle pools are size-independent.
+
+    fn rebind(
+        &mut self,
+        inputs: &super::super::pass::PassInputs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.set_gbuffer_depth(inputs.gbuffer_depth.clone())?;
+        self.set_hdr_target(inputs.hdr_target.clone())
+    }
+}

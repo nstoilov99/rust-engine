@@ -163,3 +163,11 @@ impl GridPass {
         self.layout.clone()
     }
 }
+
+impl super::pass::DeferredPass for GridPass {
+    fn name(&self) -> &'static str {
+        "grid"
+    }
+    // No resize/rebind: draws into renderer-cached target framebuffers,
+    // which are invalidated by `DeferredRenderer::resize`.
+}

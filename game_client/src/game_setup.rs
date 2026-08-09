@@ -15,22 +15,11 @@ use rust_engine::engine::rendering::rendering_3d::mesh::{
     create_primitive, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
 };
 use rust_engine::engine::scene::load_scene;
+#[cfg(feature = "editor")]
 use rust_engine::Renderer;
 #[cfg(feature = "editor")]
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
-    PrimaryCommandBufferAbstract,
-};
-use vulkano::descriptor_set::DescriptorSet;
-use vulkano::format::Format;
-use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
-use vulkano::image::view::ImageView;
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
-use vulkano::sync::GpuFuture;
 
 /// Setup asset manager and hot-reload system (editor only)
 #[cfg(feature = "editor")]
@@ -237,87 +226,6 @@ pub fn register_physics_entities(physics_world: &mut PhysicsWorld, world: &mut W
     {
         physics_world.register_entity(transform, rigidbody, collider);
     }
-}
-
-/// Upload model texture and create descriptor set
-pub fn upload_model_texture(
-    renderer: &Renderer,
-    asset_manager: &Arc<AssetManager>,
-) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-    let duck_model_handle = asset_manager.models.load("models/Duck.glb")?;
-    let duck_model = duck_model_handle.get();
-
-    let (texture_pixels, texture_width, texture_height) = if !duck_model.textures.is_empty() {
-        let duck_texture = &duck_model.textures[0];
-        (
-            duck_texture.clone().into_raw(),
-            duck_texture.width(),
-            duck_texture.height(),
-        )
-    } else {
-        (vec![255u8, 255, 255, 255], 1, 1)
-    };
-
-    let image = Image::new(
-        renderer.gpu.memory_allocator.clone(),
-        ImageCreateInfo {
-            image_type: ImageType::Dim2d,
-            format: Format::R8G8B8A8_SRGB,
-            extent: [texture_width, texture_height, 1],
-            usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-            ..Default::default()
-        },
-        AllocationCreateInfo::default(),
-    )?;
-
-    let buffer = Buffer::from_iter(
-        renderer.gpu.memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        },
-        texture_pixels,
-    )?;
-
-    let mut builder = AutoCommandBufferBuilder::primary(
-        renderer.gpu.command_buffer_allocator.clone(),
-        renderer.gpu.queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )?;
-
-    builder.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(buffer, image.clone()))?;
-
-    let command_buffer = builder.build()?;
-    command_buffer
-        .execute(renderer.gpu.queue.clone())?
-        .then_signal_fence_and_flush()?
-        .wait(None)?;
-
-    let texture_view = ImageView::new_default(image)?;
-    let sampler = Sampler::new(
-        renderer.gpu.device.clone(),
-        SamplerCreateInfo {
-            mag_filter: Filter::Linear,
-            min_filter: Filter::Linear,
-            address_mode: [SamplerAddressMode::Repeat; 3],
-            ..Default::default()
-        },
-    )?;
-
-    // Create descriptor set for texture
-    use rust_engine::rendering::rendering_2d::pipeline_2d::create_texture_descriptor_set;
-    let descriptor_set = create_texture_descriptor_set(
-        renderer.gpu.descriptor_set_allocator.clone(),
-        renderer.pipeline_3d.clone(),
-        texture_view,
-        sampler,
-    )?;
-
-    Ok(descriptor_set)
 }
 
 #[cfg(feature = "editor")]

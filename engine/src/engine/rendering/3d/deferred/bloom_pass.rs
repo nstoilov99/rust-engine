@@ -560,3 +560,26 @@ impl BloomPass {
         MIP_COUNT
     }
 }
+
+impl super::pass::DeferredPass for BloomPass {
+    fn name(&self) -> &'static str {
+        "bloom"
+    }
+
+    fn resize(
+        &mut self,
+        ctx: &super::pass::PassResizeContext,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        BloomPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height)
+    }
+
+    fn rebind(
+        &mut self,
+        inputs: &super::pass::PassInputs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_sets(
+            inputs.descriptor_set_allocator.clone(),
+            inputs.hdr_target.clone(),
+        )
+    }
+}

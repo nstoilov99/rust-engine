@@ -291,6 +291,12 @@ impl RenderThread {
                         if dims[0] > 0 && dims[1] > 0 {
                             if let Err(e) = deferred_renderer.resize(dims[0], dims[1]) {
                                 log::error!("render_thread: resize failed: {}", e);
+                                let _ = response.send(RenderEvent::RenderError {
+                                    message: format!(
+                                        "deferred resize to {}x{} failed: {}",
+                                        dims[0], dims[1], e
+                                    ),
+                                });
                             }
                         }
 
@@ -349,6 +355,12 @@ impl RenderThread {
                             }
                             if let Err(e) = deferred_renderer.resize(vp_w, vp_h) {
                                 log::error!("render_thread: deferred resize failed: {}", e);
+                                let _ = response.send(RenderEvent::RenderError {
+                                    message: format!(
+                                        "deferred resize to {}x{} failed: {}",
+                                        vp_w, vp_h, e
+                                    ),
+                                });
                             }
                             #[cfg(feature = "editor")]
                             if let (Some(cr), Some(id)) =

@@ -562,3 +562,27 @@ impl SsaoPass {
         self.ssao_raw.clone()
     }
 }
+
+impl super::pass::DeferredPass for SsaoPass {
+    fn name(&self) -> &'static str {
+        "ssao"
+    }
+
+    fn resize(
+        &mut self,
+        ctx: &super::pass::PassResizeContext,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        SsaoPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height)
+    }
+
+    fn rebind(
+        &mut self,
+        inputs: &super::pass::PassInputs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_sets(
+            inputs.descriptor_set_allocator.clone(),
+            inputs.gbuffer_position.clone(),
+            inputs.gbuffer_normal.clone(),
+        )
+    }
+}

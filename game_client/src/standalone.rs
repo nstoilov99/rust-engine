@@ -50,7 +50,6 @@ pub struct StandaloneApp {
     pub current_debug_view: DebugView,
     pub _camera_distance: f32,
     pub _mesh_indices: Vec<usize>,
-    pub _descriptor_set: Arc<DescriptorSet>,
     default_material_set: Arc<DescriptorSet>,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
@@ -152,8 +151,6 @@ impl StandaloneApp {
         if let Some(gamepad_state) = GamepadState::try_new() {
             game_world.resources_mut().insert(gamepad_state);
         }
-
-        let descriptor_set = game_setup::upload_model_texture(&renderer, &asset_manager)?;
 
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -307,7 +304,6 @@ impl StandaloneApp {
             current_debug_view: DebugView::None,
             _camera_distance: 5.0,
             _mesh_indices: mesh_indices,
-            _descriptor_set: descriptor_set,
             default_material_set,
             mesh_data_buffer: Vec::with_capacity(64),
             shadow_caster_buffer: Vec::with_capacity(64),
@@ -608,7 +604,8 @@ impl StandaloneApp {
                         );
                     }
                     rust_engine::engine::rendering::frame_packet::RenderEvent::RenderError { message } => {
-                        log::error!("standalone: render thread error: {}", message);
+                        // eprintln — no logger installed, log:: is invisible.
+                        eprintln!("standalone: render thread error: {}", message);
                     }
                     _ => {}
                 }

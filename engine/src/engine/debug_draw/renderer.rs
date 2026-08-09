@@ -248,3 +248,11 @@ impl DebugDrawPass {
         self.layout.clone()
     }
 }
+
+impl crate::engine::rendering::rendering_3d::deferred::pass::DeferredPass for DebugDrawPass {
+    fn name(&self) -> &'static str {
+        "debug_draw"
+    }
+    // No resize/rebind: draws into renderer-cached target framebuffers,
+    // which are invalidated by `DeferredRenderer::resize`.
+}
