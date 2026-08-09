@@ -905,6 +905,8 @@ impl DeferredRenderer {
                     move |ctx| {
                         crate::profile_scope!("plankton_pass");
                         ctx.mark_read(gbuffer_depth);
+                        // Blends over existing HDR content: read + write = modify.
+                        ctx.mark_read(hdr_res);
                         ctx.mark_write(hdr_res);
                         this.plankton_system.render_particles(ctx.builder)
                     },
@@ -967,6 +969,8 @@ impl DeferredRenderer {
                     },
                     move |ctx| {
                         ctx.mark_read(gbuffer_depth);
+                        // Alpha-blends over the composited target: modify.
+                        ctx.mark_read(target_res);
                         ctx.mark_write(target_res);
                         let fb = depth_fb_ref
                             .as_ref()
@@ -985,6 +989,8 @@ impl DeferredRenderer {
                     },
                     move |ctx| {
                         ctx.mark_read(gbuffer_depth);
+                        // Alpha-blends over the composited target: modify.
+                        ctx.mark_read(target_res);
                         ctx.mark_write(target_res);
                         let fb = depth_fb_ref
                             .as_ref()

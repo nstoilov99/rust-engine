@@ -2316,9 +2316,11 @@ impl App {
             light_data,
             view_proj,
             camera_pos,
+            // Must match `view_proj`, which is built from the viewport camera
+            // (renderer.camera_3d never receives its near/far).
             (
-                self.core.renderer.camera_3d.near,
-                self.core.renderer.camera_3d.far,
+                self.editor.viewport.camera.near,
+                self.editor.viewport.camera.far,
             ),
             self.editor.viewport.grid_visible && is_editing,
             debug_draw_data,
