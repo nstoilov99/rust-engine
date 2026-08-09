@@ -18,6 +18,7 @@
 //! order (shadow → geometry → ssao → lighting → plankton → bloom → luminance
 //! → composite → grid → debug_draw) purely for readability.
 
+use crate::engine::rendering::error::RenderError;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::image::sampler::Sampler;
@@ -66,12 +67,12 @@ pub trait DeferredPass {
     fn name(&self) -> &'static str;
 
     /// Recreate this pass's own size-dependent GPU targets.
-    fn resize(&mut self, _ctx: &PassResizeContext) -> Result<(), Box<dyn std::error::Error>> {
+    fn resize(&mut self, _ctx: &PassResizeContext) -> Result<(), RenderError> {
         Ok(())
     }
 
     /// Recreate descriptor sets / framebuffers referencing shared inputs.
-    fn rebind(&mut self, _inputs: &PassInputs) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, _inputs: &PassInputs) -> Result<(), RenderError> {
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use super::pass_node::{PassBuilder, PassContext, PassIndex, PassNode};
 use super::resource::{ResourceDesc, ResourceId, ResourceKind, ResourceTable};
+use crate::engine::rendering::error::RenderError;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -170,7 +171,7 @@ impl<'exec> RenderGraph<'exec> {
     pub fn execute(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), RenderError> {
         let executors = &mut self.executors;
         let passes = &self.passes;
         let resources = &self.resources;
@@ -178,15 +179,16 @@ impl<'exec> RenderGraph<'exec> {
         for &PassIndex(idx) in &self.compiled_order {
             let name = passes[idx].name.as_str();
             let exec = executors[idx].as_mut().ok_or_else(|| {
-                format!(
+                RenderError::Graph(format!(
                     "render graph: pass '{name}' has no executor attached \
                      (declared with add_pass instead of add_pass_with)"
-                )
+                ))
             })?;
 
             #[cfg_attr(not(debug_assertions), allow(unused_mut))]
             let mut ctx = PassContext::new(builder, resources);
-            exec(&mut ctx).map_err(|e| format!("render graph: pass '{name}' failed: {e}"))?;
+            exec(&mut ctx)
+                .map_err(|e| RenderError::Graph(format!("render graph: pass '{name}' failed: {e}")))?;
 
             #[cfg(debug_assertions)]
             Self::check_touches(&passes[idx], &ctx, resources)?;
@@ -204,7 +206,7 @@ impl<'exec> RenderGraph<'exec> {
         pass: &PassNode,
         ctx: &PassContext<'_>,
         resources: &ResourceTable,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), RenderError> {
         let res_name = |id| {
             resources
                 .desc(id)
@@ -213,24 +215,22 @@ impl<'exec> RenderGraph<'exec> {
         };
         for &id in &ctx.touched_reads {
             if !pass.reads.contains(&id) && !pass.modifies.contains(&id) {
-                return Err(format!(
+                return Err(RenderError::Graph(format!(
                     "render graph: pass '{}' reads resource '{}' without declaring it \
                      (add b.read(..) in its setup)",
                     pass.name,
                     res_name(id)
-                )
-                .into());
+                )));
             }
         }
         for &id in &ctx.touched_writes {
             if !pass.writes.contains(&id) && !pass.modifies.contains(&id) {
-                return Err(format!(
+                return Err(RenderError::Graph(format!(
                     "render graph: pass '{}' writes resource '{}' without declaring it \
                      (add b.write(..) in its setup)",
                     pass.name,
                     res_name(id)
-                )
-                .into());
+                )));
             }
         }
         Ok(())

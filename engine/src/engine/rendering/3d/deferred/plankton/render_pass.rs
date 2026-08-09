@@ -1,5 +1,5 @@
+use super::super::pass_pipeline::PassPipelineBuilder;
 use super::pool::PlanktonPool;
-use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use vulkano::command_buffer::AutoCommandBufferBuilder;
@@ -11,20 +11,9 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::color_blend::{
-    AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
-};
-use vulkano::pipeline::graphics::input_assembly::{InputAssemblyState, PrimitiveTopology};
-use vulkano::pipeline::graphics::multisample::MultisampleState;
-use vulkano::pipeline::graphics::rasterization::RasterizationState;
-use vulkano::pipeline::graphics::vertex_input::VertexInputState;
-use vulkano::pipeline::graphics::viewport::ViewportState;
-use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{
-    DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout,
-    PipelineShaderStageCreateInfo,
-};
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, BlendOp};
+use vulkano::pipeline::graphics::input_assembly::PrimitiveTopology;
+use vulkano::pipeline::{GraphicsPipeline, PipelineBindPoint, PipelineLayout};
 use vulkano::render_pass::RenderPass;
 
 mod plankton_vs {
@@ -101,58 +90,19 @@ impl PlanktonRenderPass {
             .entry_point("main")
             .ok_or("missing main entry point in plankton_render.frag")?;
 
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0)
-            .ok_or("failed to get subpass 0 for plankton render pass")?;
-
-        // Additive blending: src * ONE + dst * ONE
-        let blend = AttachmentBlend {
-            src_color_blend_factor: BlendFactor::One,
-            dst_color_blend_factor: BlendFactor::One,
-            color_blend_op: BlendOp::Add,
-            src_alpha_blend_factor: BlendFactor::One,
-            dst_alpha_blend_factor: BlendFactor::One,
-            alpha_blend_op: BlendOp::Add,
-        };
-
-        let pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()),
-                input_assembly_state: Some(InputAssemblyState {
-                    topology: PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                }),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: None, // No depth buffer in HDR-only pass
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    1,
-                    ColorBlendAttachmentState {
-                        blend: Some(blend),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
-                    .into_iter()
-                    .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+        // Billboard quads, additive blend (src * ONE + dst * ONE), no depth
+        // buffer in the HDR-only pass.
+        let (pipeline, layout) = PassPipelineBuilder::new(device.clone(), render_pass.clone(), vs, fs)
+            .topology(PrimitiveTopology::TriangleStrip)
+            .blend(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::One,
+                dst_color_blend_factor: BlendFactor::One,
+                color_blend_op: BlendOp::Add,
+                src_alpha_blend_factor: BlendFactor::One,
+                dst_alpha_blend_factor: BlendFactor::One,
+                alpha_blend_op: BlendOp::Add,
+            })
+            .build()?;
 
         // Create 1x1 white fallback texture (with actual white pixel data uploaded)
         let fallback_texture =
@@ -231,7 +181,7 @@ impl PlanktonRenderPass {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            pixel_data.into_iter(),
+            pixel_data,
         )?;
 
         let mut builder = AutoCommandBufferBuilder::primary(

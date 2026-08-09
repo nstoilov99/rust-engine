@@ -1,4 +1,3 @@
-use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::Device;
@@ -6,18 +5,15 @@ use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::{
-    depth_stencil::{CompareOp, DepthState, DepthStencilState},
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
+    depth_stencil::{CompareOp, DepthState},
     rasterization::{DepthBiasState, RasterizationState},
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout};
-use vulkano::pipeline::{GraphicsPipeline, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::layout::PipelineLayout;
+use vulkano::pipeline::GraphicsPipeline;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
+use super::pass_pipeline::PassPipelineBuilder;
 use crate::engine::rendering::rendering_3d::shadow;
 use crate::engine::rendering::rendering_3d::Vertex3D;
 
@@ -71,56 +67,24 @@ impl ShadowPass {
 
         let vertex_input_state = Vertex3D::per_vertex().definition(&vs)?;
 
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-
-        let pipeline = GraphicsPipeline::new(
-            device,
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(vertex_input_state),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                // Hardware depth bias to prevent shadow acne — slope_factor scales
-                // with surface angle, constant_factor handles precision noise.
-                rasterization_state: Some(RasterizationState {
-                    depth_bias: Some(DepthBiasState {
-                        constant_factor: 2.0,
-                        clamp: 0.0,
-                        slope_factor: 2.5,
-                    }),
-                    ..Default::default()
+        let (pipeline, layout) = PassPipelineBuilder::new(device, render_pass.clone(), vs, fs)
+            .vertex_input(vertex_input_state)
+            // Hardware depth bias to prevent shadow acne — slope_factor scales
+            // with surface angle, constant_factor handles precision noise.
+            .rasterization(RasterizationState {
+                depth_bias: Some(DepthBiasState {
+                    constant_factor: 2.0,
+                    clamp: 0.0,
+                    slope_factor: 2.5,
                 }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        compare_op: CompareOp::LessOrEqual,
-                        write_enable: true,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: None,
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+                ..Default::default()
+            })
+            .depth(DepthState {
+                compare_op: CompareOp::LessOrEqual,
+                write_enable: true,
+            })
+            .no_color_attachments()
+            .build()?;
 
         Ok(Self {
             pipeline,

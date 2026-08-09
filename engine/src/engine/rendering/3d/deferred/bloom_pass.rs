@@ -1,4 +1,5 @@
-use smallvec::smallvec;
+use super::pass_pipeline::PassPipelineBuilder;
+use crate::engine::rendering::error::RenderError;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
@@ -8,19 +9,8 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::{
-    color_blend::{
-        AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState, ColorBlendState,
-    },
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
-    rasterization::RasterizationState,
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
-};
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, BlendOp};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 pub mod bloom_fullscreen_vs {
@@ -155,154 +145,48 @@ impl BloomPass {
                 height,
             )?;
 
-        let threshold_pipeline;
-        let threshold_layout;
-        {
-            let vs = bloom_fullscreen_vs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let fs = bloom_threshold_fs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
-            ];
-            threshold_layout = PipelineLayout::new(
-                device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())?,
-            )?;
-            let subpass = vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
-            threshold_pipeline = GraphicsPipeline::new(
-                device.clone(),
-                None,
-                GraphicsPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone()],
-                    vertex_input_state: Some(VertexInputState::default()),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    depth_stencil_state: None,
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        1,
-                        ColorBlendAttachmentState::default(),
-                    )),
-                    dynamic_state: [
-                        vulkano::pipeline::DynamicState::Viewport,
-                        vulkano::pipeline::DynamicState::Scissor,
-                    ]
-                    .into_iter()
-                    .collect(),
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(threshold_layout.clone())
-                },
-            )?;
-        }
+        // All three are fullscreen passes; upsample adds One+One additive blend.
+        let fullscreen_vs = bloom_fullscreen_vs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
 
-        let downsample_pipeline;
-        let downsample_layout;
-        {
-            let vs = bloom_fullscreen_vs::load(device.clone())?
+        let (threshold_pipeline, threshold_layout) = PassPipelineBuilder::new(
+            device.clone(),
+            mip_render_pass.clone(),
+            fullscreen_vs.clone(),
+            bloom_threshold_fs::load(device.clone())?
                 .entry_point("main")
-                .unwrap();
-            let fs = bloom_downsample_fs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
-            ];
-            downsample_layout = PipelineLayout::new(
-                device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())?,
-            )?;
-            let subpass = vulkano::render_pass::Subpass::from(mip_render_pass.clone(), 0).unwrap();
-            downsample_pipeline = GraphicsPipeline::new(
-                device.clone(),
-                None,
-                GraphicsPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone()],
-                    vertex_input_state: Some(VertexInputState::default()),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    depth_stencil_state: None,
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        1,
-                        ColorBlendAttachmentState::default(),
-                    )),
-                    dynamic_state: [
-                        vulkano::pipeline::DynamicState::Viewport,
-                        vulkano::pipeline::DynamicState::Scissor,
-                    ]
-                    .into_iter()
-                    .collect(),
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(downsample_layout.clone())
-                },
-            )?;
-        }
+                .unwrap(),
+        )
+        .build()?;
 
-        let upsample_pipeline;
-        let upsample_layout;
-        {
-            let vs = bloom_fullscreen_vs::load(device.clone())?
+        let (downsample_pipeline, downsample_layout) = PassPipelineBuilder::new(
+            device.clone(),
+            mip_render_pass.clone(),
+            fullscreen_vs.clone(),
+            bloom_downsample_fs::load(device.clone())?
                 .entry_point("main")
-                .unwrap();
-            let fs = bloom_upsample_fs::load(device.clone())?
+                .unwrap(),
+        )
+        .build()?;
+
+        let (upsample_pipeline, upsample_layout) = PassPipelineBuilder::new(
+            device.clone(),
+            additive_render_pass.clone(),
+            fullscreen_vs,
+            bloom_upsample_fs::load(device.clone())?
                 .entry_point("main")
-                .unwrap();
-            let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
-            ];
-            upsample_layout = PipelineLayout::new(
-                device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())?,
-            )?;
-            let subpass =
-                vulkano::render_pass::Subpass::from(additive_render_pass.clone(), 0).unwrap();
-            upsample_pipeline = GraphicsPipeline::new(
-                device.clone(),
-                None,
-                GraphicsPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone()],
-                    vertex_input_state: Some(VertexInputState::default()),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    depth_stencil_state: None,
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        1,
-                        ColorBlendAttachmentState {
-                            blend: Some(AttachmentBlend {
-                                src_color_blend_factor: BlendFactor::One,
-                                dst_color_blend_factor: BlendFactor::One,
-                                color_blend_op: BlendOp::Add,
-                                src_alpha_blend_factor: BlendFactor::One,
-                                dst_alpha_blend_factor: BlendFactor::One,
-                                alpha_blend_op: BlendOp::Add,
-                            }),
-                            ..Default::default()
-                        },
-                    )),
-                    dynamic_state: [
-                        vulkano::pipeline::DynamicState::Viewport,
-                        vulkano::pipeline::DynamicState::Scissor,
-                    ]
-                    .into_iter()
-                    .collect(),
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(upsample_layout.clone())
-                },
-            )?;
-        }
+                .unwrap(),
+        )
+        .blend(AttachmentBlend {
+            src_color_blend_factor: BlendFactor::One,
+            dst_color_blend_factor: BlendFactor::One,
+            color_blend_op: BlendOp::Add,
+            src_alpha_blend_factor: BlendFactor::One,
+            dst_alpha_blend_factor: BlendFactor::One,
+            alpha_blend_op: BlendOp::Add,
+        })
+        .build()?;
 
         Ok(Self {
             threshold_pipeline,
@@ -566,20 +450,15 @@ impl super::pass::DeferredPass for BloomPass {
         "bloom"
     }
 
-    fn resize(
-        &mut self,
-        ctx: &super::pass::PassResizeContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        BloomPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height)
+    fn resize(&mut self, ctx: &super::pass::PassResizeContext) -> Result<(), RenderError> {
+        BloomPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height).map_err(Into::into)
     }
 
-    fn rebind(
-        &mut self,
-        inputs: &super::pass::PassInputs,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, inputs: &super::pass::PassInputs) -> Result<(), RenderError> {
         self.prepare_sets(
             inputs.descriptor_set_allocator.clone(),
             inputs.hdr_target.clone(),
         )
+        .map_err(Into::into)
     }
 }

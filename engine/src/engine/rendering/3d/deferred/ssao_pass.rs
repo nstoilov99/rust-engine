@@ -1,4 +1,5 @@
-use smallvec::smallvec;
+use super::pass_pipeline::PassPipelineBuilder;
+use crate::engine::rendering::error::RenderError;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -14,17 +15,7 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState},
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
-    rasterization::RasterizationState,
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
-};
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::sync::GpuFuture;
 
@@ -163,95 +154,26 @@ impl SsaoPass {
                 height,
             )?;
 
-        let ssao_pipeline;
-        let ssao_layout;
-        {
-            let vs = ssao_fullscreen_vs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let fs = ssao_fs::load(device.clone())?.entry_point("main").unwrap();
-            let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
-            ];
-            ssao_layout = PipelineLayout::new(
-                device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())?,
-            )?;
-            let subpass = vulkano::render_pass::Subpass::from(ssao_render_pass.clone(), 0).unwrap();
-            ssao_pipeline = GraphicsPipeline::new(
-                device.clone(),
-                None,
-                GraphicsPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone()],
-                    vertex_input_state: Some(VertexInputState::default()),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    depth_stencil_state: None,
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        1,
-                        ColorBlendAttachmentState::default(),
-                    )),
-                    dynamic_state: [
-                        vulkano::pipeline::DynamicState::Viewport,
-                        vulkano::pipeline::DynamicState::Scissor,
-                    ]
-                    .into_iter()
-                    .collect(),
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(ssao_layout.clone())
-                },
-            )?;
-        }
+        // Both are stock fullscreen passes.
+        let fullscreen_vs = ssao_fullscreen_vs::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
 
-        let blur_pipeline;
-        let blur_layout;
-        {
-            let vs = ssao_fullscreen_vs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let fs = ssao_blur_fs::load(device.clone())?
-                .entry_point("main")
-                .unwrap();
-            let stages = [
-                PipelineShaderStageCreateInfo::new(vs),
-                PipelineShaderStageCreateInfo::new(fs),
-            ];
-            blur_layout = PipelineLayout::new(
-                device.clone(),
-                PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())?,
-            )?;
-            let subpass = vulkano::render_pass::Subpass::from(blur_render_pass.clone(), 0).unwrap();
-            blur_pipeline = GraphicsPipeline::new(
-                device,
-                None,
-                GraphicsPipelineCreateInfo {
-                    stages: smallvec![stages[0].clone(), stages[1].clone()],
-                    vertex_input_state: Some(VertexInputState::default()),
-                    input_assembly_state: Some(InputAssemblyState::default()),
-                    viewport_state: Some(ViewportState::default()),
-                    rasterization_state: Some(RasterizationState::default()),
-                    multisample_state: Some(MultisampleState::default()),
-                    depth_stencil_state: None,
-                    color_blend_state: Some(ColorBlendState::with_attachment_states(
-                        1,
-                        ColorBlendAttachmentState::default(),
-                    )),
-                    dynamic_state: [
-                        vulkano::pipeline::DynamicState::Viewport,
-                        vulkano::pipeline::DynamicState::Scissor,
-                    ]
-                    .into_iter()
-                    .collect(),
-                    subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(blur_layout.clone())
-                },
-            )?;
-        }
+        let (ssao_pipeline, ssao_layout) = PassPipelineBuilder::new(
+            device.clone(),
+            ssao_render_pass.clone(),
+            fullscreen_vs.clone(),
+            ssao_fs::load(device.clone())?.entry_point("main").unwrap(),
+        )
+        .build()?;
+
+        let (blur_pipeline, blur_layout) = PassPipelineBuilder::new(
+            device.clone(),
+            blur_render_pass.clone(),
+            fullscreen_vs,
+            ssao_blur_fs::load(device)?.entry_point("main").unwrap(),
+        )
+        .build()?;
 
         Ok(Self {
             ssao_pipeline,
@@ -568,21 +490,16 @@ impl super::pass::DeferredPass for SsaoPass {
         "ssao"
     }
 
-    fn resize(
-        &mut self,
-        ctx: &super::pass::PassResizeContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        SsaoPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height)
+    fn resize(&mut self, ctx: &super::pass::PassResizeContext) -> Result<(), RenderError> {
+        SsaoPass::resize(self, ctx.allocator.clone(), ctx.width, ctx.height).map_err(Into::into)
     }
 
-    fn rebind(
-        &mut self,
-        inputs: &super::pass::PassInputs,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, inputs: &super::pass::PassInputs) -> Result<(), RenderError> {
         self.prepare_sets(
             inputs.descriptor_set_allocator.clone(),
             inputs.gbuffer_position.clone(),
             inputs.gbuffer_normal.clone(),
         )
+        .map_err(Into::into)
     }
 }

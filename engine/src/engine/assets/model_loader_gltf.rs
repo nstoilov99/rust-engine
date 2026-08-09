@@ -698,20 +698,18 @@ pub fn extract_material_from_gltf(
     let roughness = pbr.roughness_factor();
     let emissive = material.emissive_factor();
 
-    PbrMaterial::new(
+    PbrMaterial::builder(
         albedo_view,
         normal_view,
         metallic_roughness_view,
         ao_view,
         sampler,
-        base_color,
-        metallic,
-        roughness,
-        emissive,
-        allocator,
-        descriptor_set_allocator,
-        geom_pipeline_layout,
     )
+    .base_color_factor(base_color)
+    .metallic_factor(metallic)
+    .roughness_factor(roughness)
+    .emissive_factor(emissive)
+    .build(allocator, descriptor_set_allocator, geom_pipeline_layout)
 }
 
 /// Helper: Load GLTF image data to Vulkan texture

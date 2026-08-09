@@ -31,6 +31,23 @@ use vulkano::{Validated, VulkanError};
 /// Result type for swapchain image acquisition.
 type AcquireResult = Result<(u32, Arc<Image>, Box<dyn GpuFuture>), SwapchainError>;
 
+/// Warn once per offending asset path, then stay silent. `prepare_mesh_data`
+/// runs every frame — without the seen-set a single broken path would spam
+/// the console at frame rate. (No logger is installed in `game_client`;
+/// stderr is the visible channel for these main-thread warnings.)
+fn warn_once_per_path(kind: &str, path: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.insert(format!("{kind}:{path}")) {
+        eprintln!("render: {kind} '{path}' failed to resolve (skipping/using fallback); further warnings for this path suppressed");
+    }
+}
+
 /// Walk the parent chain to resolve effective editor visibility. Returns
 /// `true` unless `entity` or any ancestor carries `EditorVisibility { visible:
 /// false }`. Visibility-component absence is treated as "visible" so the
@@ -101,6 +118,7 @@ pub fn prepare_mesh_data(
             if let Some(indices) = meshes.indices_for_path(&mesh_renderer.mesh_path) {
                 indices
             } else {
+                warn_once_per_path("mesh path", &mesh_renderer.mesh_path);
                 continue;
             };
 
@@ -129,19 +147,19 @@ pub fn prepare_mesh_data(
                 let world_aabb = local_aabb.transformed(&glam_model);
                 let in_camera = camera_frustum.contains_aabb(world_aabb.min, world_aabb.max);
 
-                // Resolve material descriptor set from cache, falling back to default
-                let mat_set = mesh_renderer
-                    .material_paths
-                    .get(sub_i)
-                    .and_then(|p| {
-                        if p.is_empty() {
-                            None
-                        } else {
-                            material_cache.get(p)
+                // Resolve material descriptor set from cache, falling back to
+                // default. An unset/empty path is normal; a set path missing
+                // from the cache is a broken reference worth one warning.
+                let mat_set = match mesh_renderer.material_paths.get(sub_i) {
+                    Some(p) if !p.is_empty() => match material_cache.get(p) {
+                        Some(set) => set.clone(),
+                        None => {
+                            warn_once_per_path("material path", p);
+                            default_material_set.clone()
                         }
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| default_material_set.clone());
+                    },
+                    _ => default_material_set.clone(),
+                };
 
                 let data = MeshRenderData {
                     vertex_buffer: gpu_mesh.vertex_buffer.clone(),

@@ -1,26 +1,17 @@
 //! Lighting pass - reads G-Buffer and calculates lighting
 
-use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
-use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState},
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
-    rasterization::RasterizationState,
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
-};
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 use super::pass::{DeferredPass, PassInputs};
+use super::pass_pipeline::PassPipelineBuilder;
+use crate::engine::rendering::error::RenderError;
 use crate::engine::rendering::pipeline_registry::{PipelineId, PipelineRegistry};
 
 // Lighting shaders
@@ -92,51 +83,15 @@ impl LightingPass {
         device: Arc<Device>,
         render_pass: Arc<RenderPass>,
     ) -> Result<(Arc<GraphicsPipeline>, Arc<PipelineLayout>), Box<dyn std::error::Error>> {
-        let vs = lighting_vs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-        let fs = lighting_fs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        let layout = PipelineLayout::new(
+        let (pipeline, layout) = PassPipelineBuilder::new(
             device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-
-        let pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: None,
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+            render_pass,
+            lighting_vs::load(device.clone())?
+                .entry_point("main")
+                .unwrap(),
+            lighting_fs::load(device)?.entry_point("main").unwrap(),
+        )
+        .build()?;
 
         Ok((pipeline, layout))
     }
@@ -171,44 +126,7 @@ impl LightingPass {
             .entry_point("main")
             .ok_or("Missing fragment entry point 'main'")?;
 
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-
-        let pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: None,
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout)
-            },
-        )?;
+        let (pipeline, _layout) = PassPipelineBuilder::new(device, render_pass, vs, fs).build()?;
 
         Ok(pipeline)
     }
@@ -335,7 +253,7 @@ impl DeferredPass for LightingPass {
     // No `resize`: the pass owns no size-dependent images — its output target
     // (`hdr_target`) is a shared resource recreated by `DeferredRenderer`.
 
-    fn rebind(&mut self, inputs: &PassInputs) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, inputs: &PassInputs) -> Result<(), RenderError> {
         let dsa = inputs.descriptor_set_allocator.clone();
         self.gbuffer_set = Some(self.create_descriptor_set(
             dsa.clone(),

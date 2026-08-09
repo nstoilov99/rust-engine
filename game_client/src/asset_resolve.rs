@@ -316,20 +316,16 @@ pub fn resolve_material_sets(
             continue;
         }
 
-        match PbrMaterial::new(
-            albedo,
-            normal,
-            mr,
-            ao,
-            sampler.clone(),
-            def.base_color_factor,
-            def.metallic_factor,
-            def.roughness_factor,
-            def.emissive_factor,
-            gpu.allocator.clone(),
-            gpu.ds_allocator.clone(),
-            gpu.geom_layout.clone(),
-        ) {
+        match PbrMaterial::builder(albedo, normal, mr, ao, sampler.clone())
+            .base_color_factor(def.base_color_factor)
+            .metallic_factor(def.metallic_factor)
+            .roughness_factor(def.roughness_factor)
+            .emissive_factor(def.emissive_factor)
+            .build(
+                gpu.allocator.clone(),
+                gpu.ds_allocator.clone(),
+                gpu.geom_layout.clone(),
+            ) {
             Ok(mat) => {
                 println!("✅ Loaded material: {}", mat_path);
                 store.cache.insert(mat_path.clone(), mat.descriptor_set);

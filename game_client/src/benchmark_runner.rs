@@ -405,6 +405,8 @@ impl BenchmarkRunner {
             false,
             self.renderer.camera_3d.view_projection_matrix(),
             self.renderer.camera_3d.position,
+            self.renderer.camera_3d.near,
+            self.renderer.camera_3d.far,
             &debug_draw_data,
             &rust_engine::engine::rendering::rendering_3d::PostProcessingSettings::default(),
             &self.plankton_emitter_buffer,

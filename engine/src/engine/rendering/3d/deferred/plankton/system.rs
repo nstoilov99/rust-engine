@@ -355,8 +355,9 @@ impl super::super::pass::DeferredPass for PlanktonSystem {
     fn rebind(
         &mut self,
         inputs: &super::super::pass::PassInputs,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), crate::engine::rendering::error::RenderError> {
         self.set_gbuffer_depth(inputs.gbuffer_depth.clone())?;
         self.set_hdr_target(inputs.hdr_target.clone())
+            .map_err(Into::into)
     }
 }

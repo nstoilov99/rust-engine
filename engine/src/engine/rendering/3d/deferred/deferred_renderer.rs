@@ -11,6 +11,7 @@ use super::shadow_pass::ShadowPass;
 use super::ssao_pass::{SsaoPass, SsaoPushConstants};
 use crate::engine::debug_draw::{DebugDrawData, DebugDrawPass, DebugLinePushConstants};
 use crate::engine::rendering::counters::RenderCounters;
+use crate::engine::rendering::error::RenderError;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
@@ -467,20 +468,13 @@ impl DeferredRenderer {
             .get(crate::engine::rendering::pipeline_registry::PipelineId::Geometry)
             .layout()
             .clone();
-        let default_material = PbrMaterial::new(
-            default_albedo,
-            default_normal,
-            default_mr,
-            default_ao,
-            mat_sampler,
-            [1.0, 1.0, 1.0, 1.0],
-            1.0,
-            0.5,
-            [0.0, 0.0, 0.0],
-            allocator.clone(),
-            descriptor_set_allocator.clone(),
-            geom_pipeline_layout,
-        )?;
+        let default_material =
+            PbrMaterial::builder(default_albedo, default_normal, default_mr, default_ao, mat_sampler)
+                .build(
+                    allocator.clone(),
+                    descriptor_set_allocator.clone(),
+                    geom_pipeline_layout,
+                )?;
         let default_material_set = default_material.descriptor_set.clone();
 
         let mut renderer = Self {
@@ -569,12 +563,14 @@ impl DeferredRenderer {
 
     /// Rebind phase: every pass recreates the descriptor sets / framebuffers
     /// that reference shared resources or other passes' outputs.
-    fn rebind_passes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind_passes(&mut self) -> Result<(), RenderError> {
         let inputs = self.pass_inputs();
         for pass in self.passes_mut() {
             let name = pass.name();
-            pass.rebind(&inputs)
-                .map_err(|e| format!("{name} pass rebind failed: {e}"))?;
+            pass.rebind(&inputs).map_err(|e| RenderError::PassRebind {
+                pass: name,
+                message: e.to_string(),
+            })?;
         }
         Ok(())
     }
@@ -649,7 +645,7 @@ impl DeferredRenderer {
     /// per-pass `rebind` against a fresh input snapshot. Errors carry the
     /// failing pass's name and propagate to the caller (the render thread
     /// forwards them to the main thread as `RenderEvent::RenderError`).
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -671,8 +667,10 @@ impl DeferredRenderer {
         };
         for pass in self.passes_mut() {
             let name = pass.name();
-            pass.resize(&ctx)
-                .map_err(|e| format!("{name} pass resize failed: {e}"))?;
+            pass.resize(&ctx).map_err(|e| RenderError::PassResize {
+                pass: name,
+                message: e.to_string(),
+            })?;
         }
 
         // Phase 2: rebind cross-pass references against the new resources.
@@ -696,10 +694,12 @@ impl DeferredRenderer {
         grid_visible: bool,
         view_proj: Mat4,
         camera_pos: Vec3,
+        camera_near: f32,
+        camera_far: f32,
         debug_draw: &DebugDrawData,
         settings: &PostProcessingSettings,
         plankton_emitters: &[crate::engine::rendering::frame_packet::PlanktonEmitterFrameData],
-    ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
+    ) -> Result<Arc<PrimaryAutoCommandBuffer>, RenderError> {
         crate::profile_function!();
 
         self.render_counters.reset();
@@ -742,8 +742,8 @@ impl DeferredRenderer {
                 &vp_cols,
                 cam_right.into(),
                 cam_up.into(),
-                0.1,    // near plane (TODO: pass from camera)
-                1000.0, // far plane (TODO: pass from camera)
+                camera_near,
+                camera_far,
             )?;
         } else {
             self.plankton_system.update_frame(
@@ -752,8 +752,8 @@ impl DeferredRenderer {
                 &[[0.0; 4]; 4],
                 [0.0; 3],
                 [0.0; 3],
-                0.1,
-                1000.0,
+                camera_near,
+                camera_far,
             )?;
         }
 
@@ -1509,7 +1509,7 @@ impl DeferredRenderer {
             view_projection: view_proj.to_cols_array_2d(),
             screen_size: [extent[0] as f32, extent[1] as f32],
             radius: settings.ssao_radius,
-            bias: 0.025,
+            bias: settings.ssao_bias,
         };
 
         builder
@@ -1669,7 +1669,9 @@ impl DeferredRenderer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::profile_scope!("bloom_pass");
 
-        let mip_count = self.bloom_pass.mip_count();
+        // The mip chain is allocated at its full depth; the setting only
+        // limits how far down the downsample/upsample walk goes.
+        let mip_count = (settings.bloom_mip_count as usize).clamp(1, self.bloom_pass.mip_count());
         let mip_sizes = self.bloom_pass.mip_sizes();
         let mip_fbs = self.bloom_pass.mip_framebuffers();
         let additive_fbs = self.bloom_pass.additive_framebuffers();
@@ -1896,12 +1898,23 @@ pub enum ToneMapMode {
     AcesFilmic,
 }
 
+/// Post-processing knobs consumed by the deferred renderer each frame.
+///
+/// Reaches the render thread as `FramePacket::post_processing` — today the
+/// packet builders always use `Default`, so a future settings page (Editor
+/// Preferences / Project Settings) plugs in by writing these fields on the
+/// packet before send.
 pub struct PostProcessingSettings {
     pub bloom_enabled: bool,
     pub bloom_intensity: f32,
     pub bloom_threshold: f32,
+    /// How many mips of the bloom chain to walk (clamped to the allocated
+    /// chain depth, currently 6). Fewer mips = tighter, cheaper bloom.
+    pub bloom_mip_count: u32,
     pub ssao_enabled: bool,
     pub ssao_radius: f32,
+    /// Depth-compare bias that suppresses self-occlusion acne.
+    pub ssao_bias: f32,
     pub ssao_intensity: f32,
     pub exposure_mode: ExposureMode,
     pub vignette_intensity: f32,
@@ -1914,10 +1927,12 @@ impl Default for PostProcessingSettings {
             bloom_enabled: true,
             bloom_intensity: 0.04,
             bloom_threshold: 1.0,
+            bloom_mip_count: 6,
             // Disabled by default: current blur/noise produces visible
             // tile-aligned banding. Re-enable once blur kernel is widened.
             ssao_enabled: false,
             ssao_radius: 0.5,
+            ssao_bias: 0.025,
             ssao_intensity: 1.0,
             // Manual default avoids the "darker when close" snap from the
             // instant auto-exposure path. Scene brightness should be driven by

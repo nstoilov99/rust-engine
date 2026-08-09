@@ -674,6 +674,7 @@ impl StandaloneApp {
             light_data,
             view_proj,
             camera_pos,
+            (self.renderer.camera_3d.near, self.renderer.camera_3d.far),
             false,
             debug_draw_data,
             [size.width, size.height],

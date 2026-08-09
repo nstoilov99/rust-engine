@@ -48,9 +48,32 @@ pub struct PbrMaterial {
 }
 
 impl PbrMaterial {
+    /// Start building a material from its texture set. Factor overrides are
+    /// optional (defaults: white base color, metallic 1.0, roughness 0.5, no
+    /// emissive); GPU plumbing is supplied at [`PbrMaterialBuilder::build`].
+    pub fn builder(
+        albedo: Arc<ImageView>,
+        normal: Arc<ImageView>,
+        metallic_roughness: Arc<ImageView>,
+        ao: Arc<ImageView>,
+        sampler: Arc<Sampler>,
+    ) -> PbrMaterialBuilder {
+        PbrMaterialBuilder {
+            albedo,
+            normal,
+            metallic_roughness,
+            ao,
+            sampler,
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 1.0,
+            roughness_factor: 0.5,
+            emissive_factor: [0.0, 0.0, 0.0],
+        }
+    }
+
     /// Create a new PBR material with textures, factors, and a pre-built Set 1 descriptor set.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn new(
         albedo: Arc<ImageView>,
         normal: Arc<ImageView>,
         metallic_roughness: Arc<ImageView>,
@@ -124,6 +147,63 @@ impl PbrMaterial {
     }
 }
 
+/// Builder for [`PbrMaterial`] — see [`PbrMaterial::builder`].
+pub struct PbrMaterialBuilder {
+    albedo: Arc<ImageView>,
+    normal: Arc<ImageView>,
+    metallic_roughness: Arc<ImageView>,
+    ao: Arc<ImageView>,
+    sampler: Arc<Sampler>,
+    base_color_factor: [f32; 4],
+    metallic_factor: f32,
+    roughness_factor: f32,
+    emissive_factor: [f32; 3],
+}
+
+impl PbrMaterialBuilder {
+    pub fn base_color_factor(mut self, factor: [f32; 4]) -> Self {
+        self.base_color_factor = factor;
+        self
+    }
+
+    pub fn metallic_factor(mut self, factor: f32) -> Self {
+        self.metallic_factor = factor;
+        self
+    }
+
+    pub fn roughness_factor(mut self, factor: f32) -> Self {
+        self.roughness_factor = factor;
+        self
+    }
+
+    pub fn emissive_factor(mut self, factor: [f32; 3]) -> Self {
+        self.emissive_factor = factor;
+        self
+    }
+
+    pub fn build(
+        self,
+        allocator: Arc<StandardMemoryAllocator>,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        geom_pipeline_layout: Arc<PipelineLayout>,
+    ) -> Result<PbrMaterial, Box<dyn std::error::Error>> {
+        PbrMaterial::new(
+            self.albedo,
+            self.normal,
+            self.metallic_roughness,
+            self.ao,
+            self.sampler,
+            self.base_color_factor,
+            self.metallic_factor,
+            self.roughness_factor,
+            self.emissive_factor,
+            allocator,
+            descriptor_set_allocator,
+            geom_pipeline_layout,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MaterialBase / MaterialInstance split
 // ---------------------------------------------------------------------------
@@ -165,9 +245,22 @@ pub struct MaterialInstance {
 }
 
 impl MaterialInstance {
+    /// Start building an instance over a shared [`MaterialBase`]. Factor
+    /// overrides are optional (same defaults as [`PbrMaterial::builder`]);
+    /// GPU plumbing is supplied at [`MaterialInstanceBuilder::build`].
+    pub fn builder(base: &MaterialBase) -> MaterialInstanceBuilder<'_> {
+        MaterialInstanceBuilder {
+            base,
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 1.0,
+            roughness_factor: 0.5,
+            emissive_factor: [0.0, 0.0, 0.0],
+        }
+    }
+
     /// Create a new instance from a `MaterialBase` and per-instance factor overrides.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn new(
         base: &MaterialBase,
         base_color_factor: [f32; 4],
         metallic_factor: f32,
@@ -239,6 +332,55 @@ impl MaterialInstance {
             params_buffer,
             descriptor_set,
         })
+    }
+}
+
+/// Builder for [`MaterialInstance`] — see [`MaterialInstance::builder`].
+pub struct MaterialInstanceBuilder<'a> {
+    base: &'a MaterialBase,
+    base_color_factor: [f32; 4],
+    metallic_factor: f32,
+    roughness_factor: f32,
+    emissive_factor: [f32; 3],
+}
+
+impl MaterialInstanceBuilder<'_> {
+    pub fn base_color_factor(mut self, factor: [f32; 4]) -> Self {
+        self.base_color_factor = factor;
+        self
+    }
+
+    pub fn metallic_factor(mut self, factor: f32) -> Self {
+        self.metallic_factor = factor;
+        self
+    }
+
+    pub fn roughness_factor(mut self, factor: f32) -> Self {
+        self.roughness_factor = factor;
+        self
+    }
+
+    pub fn emissive_factor(mut self, factor: [f32; 3]) -> Self {
+        self.emissive_factor = factor;
+        self
+    }
+
+    pub fn build(
+        self,
+        allocator: Arc<StandardMemoryAllocator>,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+        geom_pipeline_layout: Arc<PipelineLayout>,
+    ) -> Result<MaterialInstance, Box<dyn std::error::Error>> {
+        MaterialInstance::new(
+            self.base,
+            self.base_color_factor,
+            self.metallic_factor,
+            self.roughness_factor,
+            self.emissive_factor,
+            allocator,
+            descriptor_set_allocator,
+            geom_pipeline_layout,
+        )
     }
 }
 

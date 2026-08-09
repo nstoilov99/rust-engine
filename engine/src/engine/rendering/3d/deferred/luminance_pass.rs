@@ -1,4 +1,5 @@
-use smallvec::smallvec;
+use super::pass_pipeline::PassPipelineBuilder;
+use crate::engine::rendering::error::RenderError;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
@@ -8,17 +9,7 @@ use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreate
 use vulkano::image::view::ImageView;
 use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState},
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
-    rasterization::RasterizationState,
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
-};
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 
 pub mod lum_fullscreen_vs {
@@ -113,47 +104,17 @@ impl LuminancePass {
         let (level_images, level_framebuffers, level_sizes) =
             Self::create_levels(allocator, &render_pass, &persistent_1x1)?;
 
-        let vs = lum_fullscreen_vs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-        let fs = lum_downsample_fs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-        let layout = PipelineLayout::new(
+        let (pipeline, layout) = PassPipelineBuilder::new(
             device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-        let pipeline = GraphicsPipeline::new(
-            device,
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: None,
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    1,
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+            render_pass.clone(),
+            lum_fullscreen_vs::load(device.clone())?
+                .entry_point("main")
+                .unwrap(),
+            lum_downsample_fs::load(device)?
+                .entry_point("main")
+                .unwrap(),
+        )
+        .build()?;
 
         Ok(Self {
             pipeline,
@@ -331,21 +292,16 @@ impl super::pass::DeferredPass for LuminancePass {
         "luminance"
     }
 
-    fn resize(
-        &mut self,
-        ctx: &super::pass::PassResizeContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn resize(&mut self, ctx: &super::pass::PassResizeContext) -> Result<(), RenderError> {
         // Level sizes are fixed powers of two — only the allocator matters.
-        LuminancePass::resize(self, ctx.allocator.clone())
+        LuminancePass::resize(self, ctx.allocator.clone()).map_err(Into::into)
     }
 
-    fn rebind(
-        &mut self,
-        inputs: &super::pass::PassInputs,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, inputs: &super::pass::PassInputs) -> Result<(), RenderError> {
         self.prepare_sets(
             inputs.descriptor_set_allocator.clone(),
             inputs.hdr_target.clone(),
         )
+        .map_err(Into::into)
     }
 }

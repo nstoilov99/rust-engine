@@ -4,22 +4,18 @@
 //! No manual depth sampling needed - GPU depth test handles occlusion automatically.
 
 use glam::{Mat4, Vec3};
-use smallvec::smallvec;
 use std::sync::Arc;
 use vulkano::device::Device;
 use vulkano::pipeline::graphics::{
-    color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
-    depth_stencil::{CompareOp, DepthState, DepthStencilState},
-    input_assembly::{InputAssemblyState, PrimitiveTopology},
-    multisample::MultisampleState,
+    color_blend::AttachmentBlend,
+    depth_stencil::{CompareOp, DepthState},
+    input_assembly::PrimitiveTopology,
     rasterization::{CullMode, DepthBiasState, RasterizationState},
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::RenderPass;
+
+use super::pass_pipeline::PassPipelineBuilder;
 
 // Grid shaders
 pub mod grid_vs {
@@ -79,74 +75,32 @@ impl GridPass {
         device: Arc<Device>,
         render_pass: Arc<RenderPass>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Load shaders
-        let vs = grid_vs::load(device.clone())?.entry_point("main").unwrap();
-        let fs = grid_fs::load(device.clone())?.entry_point("main").unwrap();
-
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        // Pipeline layout with push constants only (no descriptor sets needed)
-        let layout = PipelineLayout::new(
+        // Camera-centered quad, alpha-blended, depth-tested but not depth-written.
+        let (pipeline, layout) = PassPipelineBuilder::new(
             device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        // Create pipeline with alpha blending and depth testing
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-
-        let pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()), // No vertex buffer
-                input_assembly_state: Some(InputAssemblyState {
-                    topology: PrimitiveTopology::TriangleStrip, // 4 vertices as triangle strip
-                    ..Default::default()
-                }),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    // Push grid fragments slightly behind coplanar geometry
-                    // so a floor mesh sitting on Z=0 reliably wins the depth
-                    // test instead of flickering against the infinite grid.
-                    depth_bias: Some(DepthBiasState {
-                        constant_factor: 1.0,
-                        clamp: 0.0,
-                        slope_factor: 1.0,
-                    }),
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                // Enable depth testing but disable depth writes
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        compare_op: CompareOp::Less,
-                        write_enable: false, // Don't write to depth buffer
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend::alpha()),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+            render_pass.clone(),
+            grid_vs::load(device.clone())?.entry_point("main").unwrap(),
+            grid_fs::load(device)?.entry_point("main").unwrap(),
+        )
+        .topology(PrimitiveTopology::TriangleStrip) // 4 vertices as triangle strip
+        .rasterization(RasterizationState {
+            cull_mode: CullMode::None,
+            // Push grid fragments slightly behind coplanar geometry
+            // so a floor mesh sitting on Z=0 reliably wins the depth
+            // test instead of flickering against the infinite grid.
+            depth_bias: Some(DepthBiasState {
+                constant_factor: 1.0,
+                clamp: 0.0,
+                slope_factor: 1.0,
+            }),
+            ..Default::default()
+        })
+        .depth(DepthState {
+            compare_op: CompareOp::Less,
+            write_enable: false, // Don't write to depth buffer
+        })
+        .blend(AttachmentBlend::alpha())
+        .build()?;
 
         Ok(Self {
             pipeline,

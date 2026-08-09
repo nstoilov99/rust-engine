@@ -3,22 +3,18 @@
 //! Provides `DebugDrawPass` (two Vulkan line-list pipelines) and
 //! `DebugDrawData` (vertex buffers ready for rendering).
 
-use smallvec::smallvec;
+use crate::engine::rendering::rendering_3d::deferred::pass_pipeline::PassPipelineBuilder;
 use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::device::Device;
 use vulkano::pipeline::graphics::{
-    color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
-    depth_stencil::{CompareOp, DepthState, DepthStencilState},
-    input_assembly::{InputAssemblyState, PrimitiveTopology},
-    multisample::MultisampleState,
+    color_blend::AttachmentBlend,
+    depth_stencil::{CompareOp, DepthState},
+    input_assembly::PrimitiveTopology,
     rasterization::{CullMode, RasterizationState},
     vertex_input::{Vertex as VertexTrait, VertexDefinition},
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
 };
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::RenderPass;
 
 /// Debug line vertex: position (vec3) + color (vec4) = 28 bytes.
@@ -127,106 +123,31 @@ impl DebugDrawPass {
         // Vertex input from DebugLineVertex
         let vertex_input_state = DebugLineVertex::per_vertex().definition(&vs)?;
 
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
-        // Pipeline layout with push constants only
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0)
-            .ok_or("Invalid subpass for debug draw")?;
+        let line_pipeline = |depth: DepthState| {
+            PassPipelineBuilder::new(device.clone(), render_pass.clone(), vs.clone(), fs.clone())
+                .vertex_input(vertex_input_state.clone())
+                .topology(PrimitiveTopology::LineList)
+                .rasterization(RasterizationState {
+                    cull_mode: CullMode::None,
+                    ..Default::default()
+                })
+                .depth(depth)
+                .blend(AttachmentBlend::alpha())
+                .build()
+        };
 
         // Depth-tested pipeline: CompareOp::LessOrEqual, write_enable: false
-        let depth_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(vertex_input_state.clone()),
-                input_assembly_state: Some(InputAssemblyState {
-                    topology: PrimitiveTopology::LineList,
-                    ..Default::default()
-                }),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        compare_op: CompareOp::LessOrEqual,
-                        write_enable: false,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend::alpha()),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.clone().into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+        let (depth_pipeline, layout) = line_pipeline(DepthState {
+            compare_op: CompareOp::LessOrEqual,
+            write_enable: false,
+        })?;
 
-        // Overlay pipeline: no depth test
-        let overlay_pipeline = GraphicsPipeline::new(
-            device.clone(),
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(vertex_input_state),
-                input_assembly_state: Some(InputAssemblyState {
-                    topology: PrimitiveTopology::LineList,
-                    ..Default::default()
-                }),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState {
-                    cull_mode: CullMode::None,
-                    ..Default::default()
-                }),
-                multisample_state: Some(MultisampleState::default()),
-                // Render pass has a depth attachment so we must declare state,
-                // but use Always compare + no writes to skip depth testing.
-                depth_stencil_state: Some(DepthStencilState {
-                    depth: Some(DepthState {
-                        compare_op: CompareOp::Always,
-                        write_enable: false,
-                    }),
-                    ..Default::default()
-                }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState {
-                        blend: Some(AttachmentBlend::alpha()),
-                        ..Default::default()
-                    },
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+        // Overlay pipeline: the render pass has a depth attachment so state
+        // must be declared, but Always compare + no writes skips depth testing.
+        let (overlay_pipeline, _overlay_layout) = line_pipeline(DepthState {
+            compare_op: CompareOp::Always,
+            write_enable: false,
+        })?;
 
         Ok(Self {
             depth_pipeline,

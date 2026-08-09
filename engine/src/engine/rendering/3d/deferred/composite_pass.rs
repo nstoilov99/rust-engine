@@ -1,21 +1,12 @@
-use smallvec::smallvec;
+use super::pass_pipeline::PassPipelineBuilder;
+use crate::engine::rendering::error::RenderError;
 use std::sync::Arc;
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::Device;
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
 use vulkano::image::view::ImageView;
-use vulkano::pipeline::graphics::{
-    color_blend::{ColorBlendAttachmentState, ColorBlendState},
-    input_assembly::InputAssemblyState,
-    multisample::MultisampleState,
-    rasterization::RasterizationState,
-    vertex_input::VertexInputState,
-    viewport::ViewportState,
-    GraphicsPipelineCreateInfo,
-};
-use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{GraphicsPipeline, PipelineLayout};
 use vulkano::render_pass::RenderPass;
 
 pub mod composite_vs {
@@ -62,18 +53,6 @@ impl CompositePass {
         device: Arc<Device>,
         render_pass: Arc<RenderPass>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let vs = composite_vs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-        let fs = composite_fs::load(device.clone())?
-            .entry_point("main")
-            .unwrap();
-
-        let stages = [
-            PipelineShaderStageCreateInfo::new(vs),
-            PipelineShaderStageCreateInfo::new(fs),
-        ];
-
         let sampler = Sampler::new(
             device.clone(),
             SamplerCreateInfo {
@@ -84,39 +63,15 @@ impl CompositePass {
             },
         )?;
 
-        let layout = PipelineLayout::new(
+        let (pipeline, layout) = PassPipelineBuilder::new(
             device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
-
-        let subpass = vulkano::render_pass::Subpass::from(render_pass.clone(), 0).unwrap();
-
-        let pipeline = GraphicsPipeline::new(
-            device,
-            None,
-            GraphicsPipelineCreateInfo {
-                stages: smallvec![stages[0].clone(), stages[1].clone()],
-                vertex_input_state: Some(VertexInputState::default()),
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState::default()),
-                depth_stencil_state: None,
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    subpass.num_color_attachments(),
-                    ColorBlendAttachmentState::default(),
-                )),
-                dynamic_state: [
-                    vulkano::pipeline::DynamicState::Viewport,
-                    vulkano::pipeline::DynamicState::Scissor,
-                ]
-                .into_iter()
-                .collect(),
-                subpass: Some(subpass.into()),
-                ..GraphicsPipelineCreateInfo::layout(layout.clone())
-            },
-        )?;
+            render_pass.clone(),
+            composite_vs::load(device.clone())?
+                .entry_point("main")
+                .unwrap(),
+            composite_fs::load(device)?.entry_point("main").unwrap(),
+        )
+        .build()?;
 
         Ok(Self {
             pipeline,
@@ -178,10 +133,7 @@ impl super::pass::DeferredPass for CompositePass {
     // No `resize`: renders into externally provided target framebuffers
     // (swapchain / viewport texture), cached and cleared by the renderer.
 
-    fn rebind(
-        &mut self,
-        inputs: &super::pass::PassInputs,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebind(&mut self, inputs: &super::pass::PassInputs) -> Result<(), RenderError> {
         self.descriptor_set = Some(self.create_descriptor_set(
             inputs.descriptor_set_allocator.clone(),
             inputs.hdr_target.clone(),

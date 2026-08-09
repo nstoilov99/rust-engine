@@ -2316,6 +2316,10 @@ impl App {
             light_data,
             view_proj,
             camera_pos,
+            (
+                self.core.renderer.camera_3d.near,
+                self.core.renderer.camera_3d.far,
+            ),
             self.editor.viewport.grid_visible && is_editing,
             debug_draw_data,
             [window_size.width, window_size.height],

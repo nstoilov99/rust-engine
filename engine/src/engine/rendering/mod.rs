@@ -1,5 +1,6 @@
 pub mod common;
 pub mod counters;
+pub mod error;
 pub mod frame_packet;
 pub mod graph;
 pub mod pipeline_registry;
@@ -42,4 +43,5 @@ pub mod rendering_3d {
 
 pub use common::*;
 pub use counters::*;
+pub use error::RenderError;
 pub use render_target::RenderTarget;

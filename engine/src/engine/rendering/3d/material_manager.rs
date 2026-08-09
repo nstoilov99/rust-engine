@@ -111,16 +111,12 @@ impl MaterialManager {
     ) -> Result<MaterialInstanceId, Box<dyn std::error::Error>> {
         let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
-        let instance = MaterialInstance::new(
-            base,
-            base_color_factor,
-            metallic_factor,
-            roughness_factor,
-            emissive_factor,
-            allocator,
-            descriptor_set_allocator,
-            geom_pipeline_layout,
-        )?;
+        let instance = MaterialInstance::builder(base)
+            .base_color_factor(base_color_factor)
+            .metallic_factor(metallic_factor)
+            .roughness_factor(roughness_factor)
+            .emissive_factor(emissive_factor)
+            .build(allocator, descriptor_set_allocator, geom_pipeline_layout)?;
 
         let id = MaterialInstanceId::new();
         self.instances.insert(id, instance);
@@ -143,16 +139,12 @@ impl MaterialManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
-        let instance = MaterialInstance::new(
-            base,
-            base_color_factor,
-            metallic_factor,
-            roughness_factor,
-            emissive_factor,
-            allocator,
-            descriptor_set_allocator,
-            geom_pipeline_layout,
-        )?;
+        let instance = MaterialInstance::builder(base)
+            .base_color_factor(base_color_factor)
+            .metallic_factor(metallic_factor)
+            .roughness_factor(roughness_factor)
+            .emissive_factor(emissive_factor)
+            .build(allocator, descriptor_set_allocator, geom_pipeline_layout)?;
 
         self.instances.insert(id, instance);
         Ok(())
@@ -188,16 +180,12 @@ impl MaterialManager {
         let base_id = instance.base_id;
         let base = self.bases.get(&base_id).ok_or("MaterialBase not found")?;
 
-        let new_instance = MaterialInstance::new(
-            base,
-            base_color_factor,
-            metallic_factor,
-            roughness_factor,
-            emissive_factor,
-            allocator,
-            descriptor_set_allocator,
-            geom_pipeline_layout,
-        )?;
+        let new_instance = MaterialInstance::builder(base)
+            .base_color_factor(base_color_factor)
+            .metallic_factor(metallic_factor)
+            .roughness_factor(roughness_factor)
+            .emissive_factor(emissive_factor)
+            .build(allocator, descriptor_set_allocator, geom_pipeline_layout)?;
 
         self.instances.insert(id, new_instance);
         Ok(())
