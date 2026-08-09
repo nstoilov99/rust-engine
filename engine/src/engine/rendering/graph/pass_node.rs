@@ -25,13 +25,13 @@ impl PassNode {
     }
 }
 
-pub struct PassBuilder<'a> {
-    graph: &'a mut RenderGraph,
+pub struct PassBuilder<'a, 'exec> {
+    graph: &'a mut RenderGraph<'exec>,
     pass_index: usize,
 }
 
-impl<'a> PassBuilder<'a> {
-    pub(crate) fn new(graph: &'a mut RenderGraph, pass_index: usize) -> Self {
+impl<'a, 'exec> PassBuilder<'a, 'exec> {
+    pub(crate) fn new(graph: &'a mut RenderGraph<'exec>, pass_index: usize) -> Self {
         Self { graph, pass_index }
     }
 
@@ -58,14 +58,62 @@ impl<'a> PassBuilder<'a> {
     }
 }
 
+/// Per-pass execution context handed to executors by [`RenderGraph::execute`].
+///
+/// In debug builds it also records what the executor claims to touch
+/// (`mark_read`/`mark_write`); after the executor returns, the graph checks
+/// those claims against the pass's declared reads/writes and fails loudly on
+/// undeclared access (undeclared = the topological sort never saw the
+/// dependency, so ordering is luck).
 pub struct PassContext<'a> {
     pub builder:
         &'a mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     pub resources: &'a ResourceTable,
+    #[cfg(debug_assertions)]
+    pub(crate) touched_reads: Vec<ResourceId>,
+    #[cfg(debug_assertions)]
+    pub(crate) touched_writes: Vec<ResourceId>,
 }
 
 impl<'a> PassContext<'a> {
-    pub fn get_image(&self, id: ResourceId) -> Option<&Arc<ImageView>> {
+    pub(crate) fn new(
+        builder: &'a mut AutoCommandBufferBuilder<
+            vulkano::command_buffer::PrimaryAutoCommandBuffer,
+        >,
+        resources: &'a ResourceTable,
+    ) -> Self {
+        Self {
+            builder,
+            resources,
+            #[cfg(debug_assertions)]
+            touched_reads: Vec::new(),
+            #[cfg(debug_assertions)]
+            touched_writes: Vec::new(),
+        }
+    }
+
+    /// Fetch a resource image; counts as a read of `id` for the debug
+    /// declaration check.
+    pub fn get_image(&mut self, id: ResourceId) -> Option<&Arc<ImageView>> {
+        self.mark_read(id);
         self.resources.get_image(id)
+    }
+
+    /// Record that this pass actually reads `id` (e.g. samples it through a
+    /// descriptor set it binds). Debug builds verify the pass declared the
+    /// read (or a modify) in its setup. No-op in release.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    pub fn mark_read(&mut self, id: ResourceId) {
+        #[cfg(debug_assertions)]
+        self.touched_reads.push(id);
+    }
+
+    /// Record that this pass actually writes `id` (renders/dispatches into
+    /// it). Debug builds verify the pass declared the write (or a modify) in
+    /// its setup. No-op in release.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    pub fn mark_write(&mut self, id: ResourceId) {
+        #[cfg(debug_assertions)]
+        self.touched_writes.push(id);
     }
 }

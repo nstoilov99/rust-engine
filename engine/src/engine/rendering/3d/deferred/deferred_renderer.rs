@@ -757,10 +757,21 @@ impl DeferredRenderer {
             )?;
         }
 
-        let graph = {
-            crate::profile_scope!("graph_setup");
+        // Counters move into a RefCell during recording: multiple pass
+        // executors (geometry, shadow) bump them while the graph's closures
+        // hold shared borrows of `self`. Restored right after execution.
+        let counters = std::cell::RefCell::new(std::mem::take(&mut self.render_counters));
+        let counters_ref = &counters;
+        // Executor closures are `move`: the ResourceIds they capture are
+        // locals of the setup scope below, so by-ref capture would dangle.
+        // Shared state enters as Copy references instead.
+        let this: &Self = &*self;
+        let target_fb_ref = &target_framebuffer;
+        let depth_fb_ref = &depth_framebuffer;
 
-            let mut graph = RenderGraph::new();
+        let mut graph = RenderGraph::new();
+        {
+            crate::profile_scope!("graph_setup");
 
             let gbuffer_position = graph.declare_virtual("gbuffer_position");
             let gbuffer_normal = graph.declare_virtual("gbuffer_normal");
@@ -769,472 +780,228 @@ impl DeferredRenderer {
             let gbuffer_emissive = graph.declare_virtual("gbuffer_emissive");
             let gbuffer_depth = graph.declare_virtual("gbuffer_depth");
             let target_res = graph.declare_virtual("target");
+            let ssao_raw_res = graph.declare_virtual("ssao_raw");
+            let ssao_blurred_res = graph.declare_virtual("ssao_blurred");
+            let bloom_res = graph.declare_virtual("bloom_result");
+            let lum_res = graph.declare_virtual("luminance_result");
 
             let shadow_map_res = graph.import_image("shadow_map", self.shadow_pass.shadow_map());
             let hdr_res = graph.import_image("hdr_target", self.hdr_target.clone());
 
-            graph.add_pass("geometry", |b| {
-                b.write(gbuffer_position);
-                b.write(gbuffer_normal);
-                b.write(gbuffer_albedo);
-                b.write(gbuffer_material);
-                b.write(gbuffer_emissive);
-                b.write(gbuffer_depth);
-            });
+            let gbuffer_color = [
+                gbuffer_position,
+                gbuffer_normal,
+                gbuffer_albedo,
+                gbuffer_material,
+                gbuffer_emissive,
+            ];
+            let ssao_enabled = settings.ssao_enabled;
+
+            // Each pass is registered with its declaration AND its executor in
+            // one place — the graph owns dispatch (no name-based match), and
+            // an executor-less pass is a hard error at execute time.
+            graph.add_pass_with(
+                "geometry",
+                |b| {
+                    for id in gbuffer_color {
+                        b.write(id);
+                    }
+                    b.write(gbuffer_depth);
+                },
+                move |ctx| {
+                    for id in gbuffer_color {
+                        ctx.mark_write(id);
+                    }
+                    ctx.mark_write(gbuffer_depth);
+                    this.record_geometry_pass(ctx.builder, mesh_data, counters_ref)
+                },
+            );
 
             if light_data.shadow_enabled > 0.5 {
-                graph.add_pass("shadow", |b| {
-                    b.write(shadow_map_res);
-                });
+                graph.add_pass_with(
+                    "shadow",
+                    |b| {
+                        b.write(shadow_map_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_write(shadow_map_res);
+                        this.record_shadow_pass(
+                            ctx.builder,
+                            shadow_caster_data,
+                            light_data,
+                            counters_ref,
+                        )
+                    },
+                );
             }
 
-            if settings.ssao_enabled {
-                let ssao_raw_res = graph.declare_virtual("ssao_raw");
-                let ssao_blurred_res = graph.declare_virtual("ssao_blurred");
+            if ssao_enabled {
+                graph.add_pass_with(
+                    "ssao",
+                    |b| {
+                        b.read(gbuffer_position);
+                        b.read(gbuffer_normal);
+                        b.write(ssao_raw_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(gbuffer_position);
+                        ctx.mark_read(gbuffer_normal);
+                        ctx.mark_write(ssao_raw_res);
+                        this.record_ssao_pass(ctx.builder, view_proj, settings)
+                    },
+                );
 
-                graph.add_pass("ssao", |b| {
-                    b.read(gbuffer_position);
-                    b.read(gbuffer_normal);
-                    b.write(ssao_raw_res);
-                });
-
-                graph.add_pass("ssao_blur", |b| {
-                    b.read(ssao_raw_res);
-                    b.write(ssao_blurred_res);
-                });
+                graph.add_pass_with(
+                    "ssao_blur",
+                    |b| {
+                        b.read(ssao_raw_res);
+                        b.write(ssao_blurred_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(ssao_raw_res);
+                        ctx.mark_write(ssao_blurred_res);
+                        this.record_ssao_blur_pass(ctx.builder)
+                    },
+                );
             }
 
-            graph.add_pass("lighting", |b| {
-                b.read(gbuffer_position);
-                b.read(gbuffer_normal);
-                b.read(gbuffer_albedo);
-                b.read(gbuffer_material);
-                b.read(gbuffer_emissive);
-                b.read(shadow_map_res);
-                b.write(hdr_res);
-            });
+            graph.add_pass_with(
+                "lighting",
+                |b| {
+                    for id in gbuffer_color {
+                        b.read(id);
+                    }
+                    b.read(shadow_map_res);
+                    // The lighting shader samples the blurred SSAO texture when
+                    // SSAO is on. This read was previously undeclared — the
+                    // culler saw no consumer of ssao_blurred and removed the
+                    // SSAO passes entirely, and ordering relied on the
+                    // insertion-order tiebreak.
+                    if ssao_enabled {
+                        b.read(ssao_blurred_res);
+                    }
+                    b.write(hdr_res);
+                },
+                move |ctx| {
+                    for id in gbuffer_color {
+                        ctx.mark_read(id);
+                    }
+                    ctx.mark_read(shadow_map_res);
+                    if ssao_enabled {
+                        ctx.mark_read(ssao_blurred_res);
+                    }
+                    ctx.mark_write(hdr_res);
+                    this.record_lighting_pass(ctx.builder, light_data, ssao_enabled)
+                },
+            );
 
             if self.plankton_system.has_pending_draws() {
-                graph.add_pass("plankton", |b| {
-                    b.read(gbuffer_depth);
-                    b.modify(hdr_res);
-                });
+                graph.add_pass_with(
+                    "plankton",
+                    |b| {
+                        b.read(gbuffer_depth);
+                        b.modify(hdr_res);
+                    },
+                    move |ctx| {
+                        crate::profile_scope!("plankton_pass");
+                        ctx.mark_read(gbuffer_depth);
+                        ctx.mark_write(hdr_res);
+                        this.plankton_system.render_particles(ctx.builder)
+                    },
+                );
             }
 
-            let bloom_res = graph.declare_virtual("bloom_result");
-            let lum_res = graph.declare_virtual("luminance_result");
-
             if settings.bloom_enabled {
-                graph.add_pass("bloom", |b| {
-                    b.read(hdr_res);
-                    b.write(bloom_res);
-                });
+                graph.add_pass_with(
+                    "bloom",
+                    |b| {
+                        b.read(hdr_res);
+                        b.write(bloom_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(hdr_res);
+                        ctx.mark_write(bloom_res);
+                        this.record_bloom_pass(ctx.builder, settings)
+                    },
+                );
             }
 
             if matches!(settings.exposure_mode, ExposureMode::Auto) {
-                graph.add_pass("luminance", |b| {
-                    b.read(hdr_res);
-                    b.write(lum_res);
-                });
+                graph.add_pass_with(
+                    "luminance",
+                    |b| {
+                        b.read(hdr_res);
+                        b.write(lum_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(hdr_res);
+                        ctx.mark_write(lum_res);
+                        this.record_luminance_pass(ctx.builder)
+                    },
+                );
             }
 
-            graph.add_pass("composite", |b| {
-                b.read(hdr_res);
-                b.read(bloom_res);
-                b.read(lum_res);
-                b.write(target_res);
-            });
+            graph.add_pass_with(
+                "composite",
+                |b| {
+                    b.read(hdr_res);
+                    b.read(bloom_res);
+                    b.read(lum_res);
+                    b.write(target_res);
+                },
+                move |ctx| {
+                    ctx.mark_read(hdr_res);
+                    ctx.mark_read(bloom_res);
+                    ctx.mark_read(lum_res);
+                    ctx.mark_write(target_res);
+                    this.record_composite_pass(ctx.builder, target_fb_ref, settings)
+                },
+            );
 
             if grid_visible {
-                graph.add_pass("grid", |b| {
-                    b.read(gbuffer_depth);
-                    b.modify(target_res);
-                });
+                graph.add_pass_with(
+                    "grid",
+                    |b| {
+                        b.read(gbuffer_depth);
+                        b.modify(target_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(gbuffer_depth);
+                        ctx.mark_write(target_res);
+                        let fb = depth_fb_ref
+                            .as_ref()
+                            .ok_or("grid pass requires the depth framebuffer")?;
+                        this.record_grid_pass(ctx.builder, fb, view_proj, camera_pos)
+                    },
+                );
             }
 
             if !debug_draw.is_empty() {
-                graph.add_pass("debug_draw", |b| {
-                    b.read(gbuffer_depth);
-                    b.modify(target_res);
-                });
+                graph.add_pass_with(
+                    "debug_draw",
+                    |b| {
+                        b.read(gbuffer_depth);
+                        b.modify(target_res);
+                    },
+                    move |ctx| {
+                        ctx.mark_read(gbuffer_depth);
+                        ctx.mark_write(target_res);
+                        let fb = depth_fb_ref
+                            .as_ref()
+                            .ok_or("debug_draw pass requires the depth framebuffer")?;
+                        this.record_debug_draw_pass(ctx.builder, fb, debug_draw, view_proj)
+                    },
+                );
             }
 
             graph.mark_output(target_res);
             graph.enable_culling();
             graph.compile()?;
-            graph
-        };
-
-        for &pass_idx in graph.compiled_order() {
-            let pass_name = graph.pass_name(pass_idx);
-            match pass_name {
-                "shadow" => {
-                    self.render_shadow_pass(&mut builder, shadow_caster_data, light_data)?;
-                }
-                "geometry" => {
-                    crate::profile_scope!("geometry_pass");
-
-                    let gbuffer_extent = self.gbuffer.framebuffer.extent();
-                    let viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                        offset: [0.0, 0.0],
-                        extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
-                        depth_range: 0.0..=1.0,
-                    };
-                    let scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                        offset: [0, 0],
-                        extent: [gbuffer_extent[0], gbuffer_extent[1]],
-                    };
-
-                    builder
-                        .begin_render_pass(
-                            RenderPassBeginInfo {
-                                clear_values: vec![
-                                    Some([0.0, 0.0, 0.0, 1.0].into()),
-                                    Some([0.0, 0.0, 0.0, 1.0].into()),
-                                    Some([0.0, 0.0, 0.0, 1.0].into()),
-                                    Some([0.0, 0.0, 0.0, 1.0].into()),
-                                    Some([0.0, 0.0, 0.0, 0.0].into()), // emissive
-                                    Some(1.0.into()),
-                                ],
-                                ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
-                            },
-                            SubpassBeginInfo {
-                                contents: SubpassContents::Inline,
-                                ..Default::default()
-                            },
-                        )?
-                        .bind_pipeline_graphics(
-                            self.geometry_pass.pipeline(&self.pipeline_registry),
-                        )?
-                        .set_viewport(0, smallvec![viewport.clone()])?
-                        .set_scissor(0, smallvec![scissor])?;
-
-                    {
-                        crate::profile_scope!("mesh_loop");
-                        let mut last_material_ptr: Option<usize> = None;
-                        let mut last_palette: Option<usize> = None;
-                        let geom_layout = self.geometry_pass.layout();
-                        for mesh in mesh_data {
-                            self.render_counters.visible_entities += 1;
-                            self.render_counters.draw_calls += 1;
-                            self.render_counters.triangles += mesh.index_count / 3;
-
-                            let mat_set = mesh
-                                .material_descriptor_set
-                                .as_ref()
-                                .unwrap_or(&self.default_material_set);
-                            let mat_ptr = Arc::as_ptr(mat_set) as usize;
-                            if last_material_ptr != Some(mat_ptr) {
-                                builder.bind_descriptor_sets(
-                                    PipelineBindPoint::Graphics,
-                                    geom_layout.clone(),
-                                    1,
-                                    mat_set.clone(),
-                                )?;
-                                last_material_ptr = Some(mat_ptr);
-                                self.render_counters.material_changes += 1;
-                            }
-
-                            let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
-                            if last_palette != Some(palette_ptr) {
-                                builder.bind_descriptor_sets(
-                                    PipelineBindPoint::Graphics,
-                                    geom_layout.clone(),
-                                    0,
-                                    mesh.bone_palette_set.clone(),
-                                )?;
-                                last_palette = Some(palette_ptr);
-                            }
-
-                            builder
-                                .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
-                                .bind_index_buffer(mesh.index_buffer.clone())?
-                                .push_constants(geom_layout.clone(), 0, mesh.push_constants)?;
-                            unsafe {
-                                builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
-                            }
-                        }
-                    }
-
-                    builder.end_render_pass(SubpassEndInfo::default())?;
-                }
-                "ssao" => {
-                    self.render_ssao_pass(&mut builder, view_proj, settings)?;
-                }
-                "ssao_blur" => {
-                    self.render_ssao_blur_pass(&mut builder)?;
-                }
-                "luminance" => {
-                    self.render_luminance_pass(&mut builder)?;
-                }
-                "lighting" => {
-                    crate::profile_scope!("lighting_pass");
-
-                    let hdr_framebuffer = self
-                        .lighting_pass
-                        .hdr_framebuffer()
-                        .ok_or("lighting hdr framebuffer not prepared")?
-                        .clone();
-                    let gbuffer_set = self
-                        .lighting_pass
-                        .gbuffer_set()
-                        .ok_or("lighting gbuffer set not prepared")?
-                        .clone();
-                    let shadow_set = self
-                        .lighting_pass
-                        .shadow_set()
-                        .ok_or("lighting shadow set not prepared")?
-                        .clone();
-                    let ssao_set = if settings.ssao_enabled {
-                        self.lighting_pass.ssao_set()
-                    } else {
-                        self.lighting_pass.ssao_fallback_set()
-                    }
-                    .ok_or("lighting ssao set not prepared")?
-                    .clone();
-
-                    let hdr_extent = hdr_framebuffer.extent();
-                    let hdr_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                        offset: [0.0, 0.0],
-                        extent: [hdr_extent[0] as f32, hdr_extent[1] as f32],
-                        depth_range: 0.0..=1.0,
-                    };
-                    let hdr_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                        offset: [0, 0],
-                        extent: [hdr_extent[0], hdr_extent[1]],
-                    };
-
-                    builder
-                        .begin_render_pass(
-                            RenderPassBeginInfo {
-                                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                                ..RenderPassBeginInfo::framebuffer(hdr_framebuffer)
-                            },
-                            SubpassBeginInfo {
-                                contents: SubpassContents::Inline,
-                                ..Default::default()
-                            },
-                        )?
-                        .bind_pipeline_graphics(
-                            self.lighting_pass.pipeline(&self.pipeline_registry),
-                        )?
-                        .set_viewport(0, smallvec![hdr_viewport])?
-                        .set_scissor(0, smallvec![hdr_scissor])?
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            self.lighting_pass.layout(),
-                            0,
-                            gbuffer_set,
-                        )?
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            self.lighting_pass.layout(),
-                            1,
-                            shadow_set,
-                        )?
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            self.lighting_pass.layout(),
-                            2,
-                            ssao_set,
-                        )?
-                        .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
-                    unsafe {
-                        builder.draw(3, 1, 0, 0)?;
-                    }
-                    builder.end_render_pass(SubpassEndInfo::default())?;
-                }
-                "plankton" => {
-                    crate::profile_scope!("plankton_pass");
-                    self.plankton_system.render_particles(&mut builder)?;
-                }
-                "bloom" => {
-                    self.render_bloom_pass(&mut builder, settings)?;
-                }
-                "composite" => {
-                    crate::profile_scope!("composite_pass");
-
-                    let composite_set = self
-                        .composite_pass
-                        .descriptor_set()
-                        .ok_or("composite set not prepared")?
-                        .clone();
-
-                    let target_extent = target_framebuffer.extent();
-                    let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                        offset: [0.0, 0.0],
-                        extent: [target_extent[0] as f32, target_extent[1] as f32],
-                        depth_range: 0.0..=1.0,
-                    };
-                    let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                        offset: [0, 0],
-                        extent: [target_extent[0], target_extent[1]],
-                    };
-
-                    let exposure_val = match settings.exposure_mode {
-                        ExposureMode::Manual(v) => v,
-                        ExposureMode::Auto => 1.0,
-                    };
-                    let composite_push = CompositePushConstants {
-                        exposure: exposure_val,
-                        bloom_intensity: if settings.bloom_enabled {
-                            settings.bloom_intensity
-                        } else {
-                            0.0
-                        },
-                        vignette_intensity: settings.vignette_intensity,
-                        tone_map_mode: match settings.tone_map_mode {
-                            ToneMapMode::Reinhard => 0.0,
-                            ToneMapMode::AcesFilmic => 1.0,
-                        },
-                        exposure_mode: match settings.exposure_mode {
-                            ExposureMode::Auto => 0.0,
-                            ExposureMode::Manual(_) => 1.0,
-                        },
-                        _pad0: 0.0,
-                        _pad1: 0.0,
-                        _pad2: 0.0,
-                    };
-
-                    builder
-                        .begin_render_pass(
-                            RenderPassBeginInfo {
-                                clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
-                                ..RenderPassBeginInfo::framebuffer(target_framebuffer.clone())
-                            },
-                            SubpassBeginInfo {
-                                contents: SubpassContents::Inline,
-                                ..Default::default()
-                            },
-                        )?
-                        .bind_pipeline_graphics(self.composite_pass.pipeline())?
-                        .set_viewport(0, smallvec![target_viewport])?
-                        .set_scissor(0, smallvec![target_scissor])?
-                        .bind_descriptor_sets(
-                            PipelineBindPoint::Graphics,
-                            self.composite_pass.layout(),
-                            0,
-                            composite_set,
-                        )?
-                        .push_constants(self.composite_pass.layout(), 0, composite_push)?;
-                    unsafe {
-                        builder.draw(3, 1, 0, 0)?;
-                    }
-                    builder.end_render_pass(SubpassEndInfo::default())?;
-                }
-                "grid" => {
-                    if let Some(ref grid_fb) = depth_framebuffer {
-                        crate::profile_scope!("grid_pass");
-
-                        let grid_extent = grid_fb.extent();
-                        let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                            offset: [0.0, 0.0],
-                            extent: [grid_extent[0] as f32, grid_extent[1] as f32],
-                            depth_range: 0.0..=1.0,
-                        };
-                        let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                            offset: [0, 0],
-                            extent: [grid_extent[0], grid_extent[1]],
-                        };
-
-                        let grid_extent_size = 500.0;
-                        let grid_push =
-                            GridPushConstants::new(view_proj, camera_pos, grid_extent_size, 100.0);
-
-                        builder
-                            .begin_render_pass(
-                                RenderPassBeginInfo {
-                                    clear_values: vec![None, None],
-                                    ..RenderPassBeginInfo::framebuffer(grid_fb.clone())
-                                },
-                                SubpassBeginInfo {
-                                    contents: SubpassContents::Inline,
-                                    ..Default::default()
-                                },
-                            )?
-                            .bind_pipeline_graphics(self.grid_pass.pipeline())?
-                            .set_viewport(0, smallvec![grid_viewport])?
-                            .set_scissor(0, smallvec![grid_scissor])?
-                            .push_constants(self.grid_pass.layout(), 0, grid_push)?;
-
-                        unsafe {
-                            builder.draw(4, 1, 0, 0)?;
-                        }
-                        builder.end_render_pass(SubpassEndInfo::default())?;
-                    }
-                }
-                "debug_draw" => {
-                    if let Some(ref debug_fb) = depth_framebuffer {
-                        crate::profile_scope!("debug_draw_pass");
-
-                        let debug_extent = debug_fb.extent();
-                        let debug_viewport = vulkano::pipeline::graphics::viewport::Viewport {
-                            offset: [0.0, 0.0],
-                            extent: [debug_extent[0] as f32, debug_extent[1] as f32],
-                            depth_range: 0.0..=1.0,
-                        };
-                        let debug_scissor = vulkano::pipeline::graphics::viewport::Scissor {
-                            offset: [0, 0],
-                            extent: [debug_extent[0], debug_extent[1]],
-                        };
-
-                        let debug_push = DebugLinePushConstants {
-                            view_proj: view_proj.to_cols_array_2d(),
-                        };
-
-                        builder.begin_render_pass(
-                            RenderPassBeginInfo {
-                                clear_values: vec![None, None],
-                                ..RenderPassBeginInfo::framebuffer(debug_fb.clone())
-                            },
-                            SubpassBeginInfo {
-                                contents: SubpassContents::Inline,
-                                ..Default::default()
-                            },
-                        )?;
-
-                        if let Some(ref depth_buf) = debug_draw.depth_buffer {
-                            builder
-                                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
-                                .set_viewport(0, smallvec![debug_viewport.clone()])?
-                                .set_scissor(0, smallvec![debug_scissor])?
-                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
-                                .bind_vertex_buffers(0, depth_buf.clone())?;
-                            unsafe {
-                                builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
-                            }
-                        }
-
-                        if let Some(ref static_buf) = debug_draw.static_depth_buffer {
-                            builder
-                                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
-                                .set_viewport(0, smallvec![debug_viewport.clone()])?
-                                .set_scissor(0, smallvec![debug_scissor])?
-                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
-                                .bind_vertex_buffers(0, static_buf.clone())?;
-                            unsafe {
-                                builder.draw(debug_draw.static_depth_vertex_count, 1, 0, 0)?;
-                            }
-                        }
-
-                        if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
-                            builder
-                                .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?
-                                .set_viewport(0, smallvec![debug_viewport])?
-                                .set_scissor(0, smallvec![debug_scissor])?
-                                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
-                                .bind_vertex_buffers(0, overlay_buf.clone())?;
-                            unsafe {
-                                builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;
-                            }
-                        }
-
-                        builder.end_render_pass(SubpassEndInfo::default())?;
-                    }
-                }
-                _ => {}
-            }
         }
+
+        graph.execute(&mut builder)?;
+        drop(graph);
+        self.render_counters = counters.into_inner();
 
         let command_buffer = {
             crate::profile_scope!("command_buffer_build");
@@ -1266,11 +1033,12 @@ impl DeferredRenderer {
         &self.default_material_set
     }
 
-    fn render_shadow_pass(
-        &mut self,
+    fn record_shadow_pass(
+        &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         mesh_data: &[MeshRenderData],
         light_data: &LightUniformData,
+        counters: &std::cell::RefCell<RenderCounters>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::profile_scope!("shadow_pass");
 
@@ -1303,6 +1071,7 @@ impl DeferredRenderer {
             .set_scissor(0, smallvec![shadow_scissor])?;
 
         let shadow_layout = self.shadow_pass.layout();
+        let mut counters = counters.borrow_mut();
         for mesh in mesh_data {
             builder
                 .bind_descriptor_sets(
@@ -1324,14 +1093,388 @@ impl DeferredRenderer {
             unsafe {
                 builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
             }
-            self.render_counters.draw_calls += 1;
+            counters.draw_calls += 1;
         }
 
         builder.end_render_pass(SubpassEndInfo::default())?;
         Ok(())
     }
 
-    fn render_ssao_pass(
+    fn record_geometry_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        mesh_data: &[MeshRenderData],
+        counters: &std::cell::RefCell<RenderCounters>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("geometry_pass");
+
+        let gbuffer_extent = self.gbuffer.framebuffer.extent();
+        let viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [gbuffer_extent[0] as f32, gbuffer_extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [gbuffer_extent[0], gbuffer_extent[1]],
+        };
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 1.0].into()),
+                        Some([0.0, 0.0, 0.0, 0.0].into()), // emissive
+                        Some(1.0.into()),
+                    ],
+                    ..RenderPassBeginInfo::framebuffer(self.gbuffer.framebuffer.clone())
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.geometry_pass.pipeline(&self.pipeline_registry))?
+            .set_viewport(0, smallvec![viewport])?
+            .set_scissor(0, smallvec![scissor])?;
+
+        {
+            crate::profile_scope!("mesh_loop");
+            let mut counters = counters.borrow_mut();
+            let mut last_material_ptr: Option<usize> = None;
+            let mut last_palette: Option<usize> = None;
+            let geom_layout = self.geometry_pass.layout();
+            for mesh in mesh_data {
+                counters.visible_entities += 1;
+                counters.draw_calls += 1;
+                counters.triangles += mesh.index_count / 3;
+
+                let mat_set = mesh
+                    .material_descriptor_set
+                    .as_ref()
+                    .unwrap_or(&self.default_material_set);
+                let mat_ptr = Arc::as_ptr(mat_set) as usize;
+                if last_material_ptr != Some(mat_ptr) {
+                    builder.bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        geom_layout.clone(),
+                        1,
+                        mat_set.clone(),
+                    )?;
+                    last_material_ptr = Some(mat_ptr);
+                    counters.material_changes += 1;
+                }
+
+                let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
+                if last_palette != Some(palette_ptr) {
+                    builder.bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        geom_layout.clone(),
+                        0,
+                        mesh.bone_palette_set.clone(),
+                    )?;
+                    last_palette = Some(palette_ptr);
+                }
+
+                builder
+                    .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
+                    .bind_index_buffer(mesh.index_buffer.clone())?
+                    .push_constants(geom_layout.clone(), 0, mesh.push_constants)?;
+                unsafe {
+                    builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                }
+            }
+        }
+
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn record_lighting_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        light_data: &LightUniformData,
+        ssao_enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("lighting_pass");
+
+        let hdr_framebuffer = self
+            .lighting_pass
+            .hdr_framebuffer()
+            .ok_or("lighting hdr framebuffer not prepared")?
+            .clone();
+        let gbuffer_set = self
+            .lighting_pass
+            .gbuffer_set()
+            .ok_or("lighting gbuffer set not prepared")?
+            .clone();
+        let shadow_set = self
+            .lighting_pass
+            .shadow_set()
+            .ok_or("lighting shadow set not prepared")?
+            .clone();
+        let ssao_set = if ssao_enabled {
+            self.lighting_pass.ssao_set()
+        } else {
+            self.lighting_pass.ssao_fallback_set()
+        }
+        .ok_or("lighting ssao set not prepared")?
+        .clone();
+
+        let hdr_extent = hdr_framebuffer.extent();
+        let hdr_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [hdr_extent[0] as f32, hdr_extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let hdr_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [hdr_extent[0], hdr_extent[1]],
+        };
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(hdr_framebuffer)
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.lighting_pass.pipeline(&self.pipeline_registry))?
+            .set_viewport(0, smallvec![hdr_viewport])?
+            .set_scissor(0, smallvec![hdr_scissor])?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.lighting_pass.layout(),
+                0,
+                gbuffer_set,
+            )?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.lighting_pass.layout(),
+                1,
+                shadow_set,
+            )?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.lighting_pass.layout(),
+                2,
+                ssao_set,
+            )?
+            .push_constants(self.lighting_pass.layout(), 0, *light_data)?;
+        unsafe {
+            builder.draw(3, 1, 0, 0)?;
+        }
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn record_composite_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        target_framebuffer: &Arc<Framebuffer>,
+        settings: &PostProcessingSettings,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("composite_pass");
+
+        let composite_set = self
+            .composite_pass
+            .descriptor_set()
+            .ok_or("composite set not prepared")?
+            .clone();
+
+        let target_extent = target_framebuffer.extent();
+        let target_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [target_extent[0] as f32, target_extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let target_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [target_extent[0], target_extent[1]],
+        };
+
+        let exposure_val = match settings.exposure_mode {
+            ExposureMode::Manual(v) => v,
+            ExposureMode::Auto => 1.0,
+        };
+        let composite_push = CompositePushConstants {
+            exposure: exposure_val,
+            bloom_intensity: if settings.bloom_enabled {
+                settings.bloom_intensity
+            } else {
+                0.0
+            },
+            vignette_intensity: settings.vignette_intensity,
+            tone_map_mode: match settings.tone_map_mode {
+                ToneMapMode::Reinhard => 0.0,
+                ToneMapMode::AcesFilmic => 1.0,
+            },
+            exposure_mode: match settings.exposure_mode {
+                ExposureMode::Auto => 0.0,
+                ExposureMode::Manual(_) => 1.0,
+            },
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(target_framebuffer.clone())
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.composite_pass.pipeline())?
+            .set_viewport(0, smallvec![target_viewport])?
+            .set_scissor(0, smallvec![target_scissor])?
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.composite_pass.layout(),
+                0,
+                composite_set,
+            )?
+            .push_constants(self.composite_pass.layout(), 0, composite_push)?;
+        unsafe {
+            builder.draw(3, 1, 0, 0)?;
+        }
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn record_grid_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        grid_fb: &Arc<Framebuffer>,
+        view_proj: Mat4,
+        camera_pos: Vec3,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("grid_pass");
+
+        let grid_extent = grid_fb.extent();
+        let grid_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [grid_extent[0] as f32, grid_extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let grid_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [grid_extent[0], grid_extent[1]],
+        };
+
+        let grid_extent_size = 500.0;
+        let grid_push = GridPushConstants::new(view_proj, camera_pos, grid_extent_size, 100.0);
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![None, None],
+                    ..RenderPassBeginInfo::framebuffer(grid_fb.clone())
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            .bind_pipeline_graphics(self.grid_pass.pipeline())?
+            .set_viewport(0, smallvec![grid_viewport])?
+            .set_scissor(0, smallvec![grid_scissor])?
+            .push_constants(self.grid_pass.layout(), 0, grid_push)?;
+
+        unsafe {
+            builder.draw(4, 1, 0, 0)?;
+        }
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn record_debug_draw_pass(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        debug_fb: &Arc<Framebuffer>,
+        debug_draw: &DebugDrawData,
+        view_proj: Mat4,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::profile_scope!("debug_draw_pass");
+
+        let debug_extent = debug_fb.extent();
+        let debug_viewport = vulkano::pipeline::graphics::viewport::Viewport {
+            offset: [0.0, 0.0],
+            extent: [debug_extent[0] as f32, debug_extent[1] as f32],
+            depth_range: 0.0..=1.0,
+        };
+        let debug_scissor = vulkano::pipeline::graphics::viewport::Scissor {
+            offset: [0, 0],
+            extent: [debug_extent[0], debug_extent[1]],
+        };
+
+        let debug_push = DebugLinePushConstants {
+            view_proj: view_proj.to_cols_array_2d(),
+        };
+
+        builder.begin_render_pass(
+            RenderPassBeginInfo {
+                clear_values: vec![None, None],
+                ..RenderPassBeginInfo::framebuffer(debug_fb.clone())
+            },
+            SubpassBeginInfo {
+                contents: SubpassContents::Inline,
+                ..Default::default()
+            },
+        )?;
+
+        if let Some(ref depth_buf) = debug_draw.depth_buffer {
+            builder
+                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
+                .set_viewport(0, smallvec![debug_viewport.clone()])?
+                .set_scissor(0, smallvec![debug_scissor])?
+                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                .bind_vertex_buffers(0, depth_buf.clone())?;
+            unsafe {
+                builder.draw(debug_draw.depth_vertex_count, 1, 0, 0)?;
+            }
+        }
+
+        if let Some(ref static_buf) = debug_draw.static_depth_buffer {
+            builder
+                .bind_pipeline_graphics(self.debug_draw_pass.depth_pipeline())?
+                .set_viewport(0, smallvec![debug_viewport.clone()])?
+                .set_scissor(0, smallvec![debug_scissor])?
+                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                .bind_vertex_buffers(0, static_buf.clone())?;
+            unsafe {
+                builder.draw(debug_draw.static_depth_vertex_count, 1, 0, 0)?;
+            }
+        }
+
+        if let Some(ref overlay_buf) = debug_draw.overlay_buffer {
+            builder
+                .bind_pipeline_graphics(self.debug_draw_pass.overlay_pipeline())?
+                .set_viewport(0, smallvec![debug_viewport])?
+                .set_scissor(0, smallvec![debug_scissor])?
+                .push_constants(self.debug_draw_pass.layout(), 0, debug_push)?
+                .bind_vertex_buffers(0, overlay_buf.clone())?;
+            unsafe {
+                builder.draw(debug_draw.overlay_vertex_count, 1, 0, 0)?;
+            }
+        }
+
+        builder.end_render_pass(SubpassEndInfo::default())?;
+        Ok(())
+    }
+
+    fn record_ssao_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         view_proj: Mat4,
@@ -1403,7 +1546,7 @@ impl DeferredRenderer {
         Ok(())
     }
 
-    fn render_ssao_blur_pass(
+    fn record_ssao_blur_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1454,7 +1597,7 @@ impl DeferredRenderer {
         Ok(())
     }
 
-    fn render_luminance_pass(
+    fn record_luminance_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1519,7 +1662,7 @@ impl DeferredRenderer {
         Ok(())
     }
 
-    fn render_bloom_pass(
+    fn record_bloom_pass(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         settings: &PostProcessingSettings,

@@ -405,6 +405,9 @@ impl RenderThread {
                             Ok(cb) => Some(cb),
                             Err(e) => {
                                 log::error!("render_thread: deferred render error: {}", e);
+                                let _ = response.send(RenderEvent::RenderError {
+                                    message: format!("deferred render failed: {}", e),
+                                });
                                 None
                             }
                         }
@@ -521,6 +524,9 @@ impl RenderThread {
                         Ok(cb) => cb,
                         Err(e) => {
                             log::error!("render_thread: render error: {}", e);
+                            let _ = response.send(RenderEvent::RenderError {
+                                message: format!("deferred render failed: {}", e),
+                            });
                             continue;
                         }
                     }

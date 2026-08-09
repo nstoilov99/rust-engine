@@ -22,8 +22,17 @@ impl fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
-pub struct RenderGraph {
+/// A pass's execution attached at registration time (`add_pass_with`). The
+/// `'exec` lifetime lets per-frame graphs capture references to renderer
+/// state; a long-lived graph would use `'static` executors.
+pub type PassExecutor<'exec> =
+    Box<dyn FnMut(&mut PassContext<'_>) -> Result<(), Box<dyn std::error::Error>> + 'exec>;
+
+pub struct RenderGraph<'exec> {
     pub(crate) passes: Vec<PassNode>,
+    /// Parallel to `passes`. `None` = declared with `add_pass` (ordering
+    /// only) — executing such a pass is a hard error, never a silent no-op.
+    executors: Vec<Option<PassExecutor<'exec>>>,
     pub(crate) resources: ResourceTable,
     pub(crate) transient_resources: Vec<ResourceId>,
     compiled_order: Vec<PassIndex>,
@@ -31,10 +40,11 @@ pub struct RenderGraph {
     culling_enabled: bool,
 }
 
-impl Default for RenderGraph {
+impl Default for RenderGraph<'_> {
     fn default() -> Self {
         Self {
             passes: Vec::new(),
+            executors: Vec::new(),
             resources: ResourceTable::new(),
             transient_resources: Vec::new(),
             compiled_order: Vec::new(),
@@ -44,7 +54,7 @@ impl Default for RenderGraph {
     }
 }
 
-impl RenderGraph {
+impl<'exec> RenderGraph<'exec> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -67,15 +77,34 @@ impl RenderGraph {
         self.resources.insert(desc, None)
     }
 
+    /// Declare a pass without execution (ordering/culling only). Executing a
+    /// graph containing such a pass fails loudly — use `add_pass_with` for
+    /// anything that records.
     pub fn add_pass<F>(&mut self, name: &str, setup_fn: F) -> PassIndex
     where
         F: FnOnce(&mut PassBuilder),
     {
         let index = self.passes.len();
         self.passes.push(PassNode::new(name));
+        self.executors.push(None);
         let mut builder = PassBuilder::new(self, index);
         setup_fn(&mut builder);
         PassIndex(index)
+    }
+
+    /// Declare a pass with its execution attached — the graph owns dispatch,
+    /// there is no name-based match to fall out of. `setup_fn` declares the
+    /// resource reads/writes (ordering/culling); `exec` records the pass into
+    /// the frame's command buffer and should `mark_read`/`mark_write` what it
+    /// actually binds so debug builds can cross-check the declaration.
+    pub fn add_pass_with<F, E>(&mut self, name: &str, setup_fn: F, exec: E) -> PassIndex
+    where
+        F: FnOnce(&mut PassBuilder),
+        E: FnMut(&mut PassContext<'_>) -> Result<(), Box<dyn std::error::Error>> + 'exec,
+    {
+        let index = self.add_pass(name, setup_fn);
+        self.executors[index.0] = Some(Box::new(exec));
+        index
     }
 
     pub fn mark_output(&mut self, resource: ResourceId) {
@@ -132,25 +161,84 @@ impl RenderGraph {
         &self.passes[index.0].name
     }
 
-    pub fn execute_with<F>(
-        &self,
+    /// Run the compiled pass order, dispatching each pass's attached
+    /// executor. Loud failure modes (never a silent no-op):
+    /// - a compiled pass with no executor attached → error naming the pass;
+    /// - an executor returning an error → wrapped with the pass name;
+    /// - (debug builds) an executor that marked a read/write it did not
+    ///   declare in setup → error naming pass and resource.
+    pub fn execute(
+        &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        mut callback: F,
-    ) where
-        F: FnMut(&str, &mut PassContext),
-    {
-        for &pass_idx in &self.compiled_order {
-            let name = &self.passes[pass_idx.0].name;
-            let mut ctx = PassContext {
-                builder,
-                resources: &self.resources,
-            };
-            callback(name, &mut ctx);
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let executors = &mut self.executors;
+        let passes = &self.passes;
+        let resources = &self.resources;
+
+        for &PassIndex(idx) in &self.compiled_order {
+            let name = passes[idx].name.as_str();
+            let exec = executors[idx].as_mut().ok_or_else(|| {
+                format!(
+                    "render graph: pass '{name}' has no executor attached \
+                     (declared with add_pass instead of add_pass_with)"
+                )
+            })?;
+
+            #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+            let mut ctx = PassContext::new(builder, resources);
+            exec(&mut ctx).map_err(|e| format!("render graph: pass '{name}' failed: {e}"))?;
+
+            #[cfg(debug_assertions)]
+            Self::check_touches(&passes[idx], &ctx, resources)?;
         }
+        Ok(())
+    }
+
+    /// Debug cross-check: everything the executor claimed to touch must have
+    /// been declared in setup (reads against reads∪modifies, writes against
+    /// writes∪modifies). Undeclared access means the topological sort never
+    /// saw the dependency — ordering is luck. Returns an error (instead of
+    /// panicking) so the render thread can surface it without dying.
+    #[cfg(debug_assertions)]
+    fn check_touches(
+        pass: &PassNode,
+        ctx: &PassContext<'_>,
+        resources: &ResourceTable,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let res_name = |id| {
+            resources
+                .desc(id)
+                .map(|d| d.name.as_str())
+                .unwrap_or("<unknown>")
+        };
+        for &id in &ctx.touched_reads {
+            if !pass.reads.contains(&id) && !pass.modifies.contains(&id) {
+                return Err(format!(
+                    "render graph: pass '{}' reads resource '{}' without declaring it \
+                     (add b.read(..) in its setup)",
+                    pass.name,
+                    res_name(id)
+                )
+                .into());
+            }
+        }
+        for &id in &ctx.touched_writes {
+            if !pass.writes.contains(&id) && !pass.modifies.contains(&id) {
+                return Err(format!(
+                    "render graph: pass '{}' writes resource '{}' without declaring it \
+                     (add b.write(..) in its setup)",
+                    pass.name,
+                    res_name(id)
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) {
         self.passes.clear();
+        self.executors.clear();
         self.resources.clear();
         self.transient_resources.clear();
         self.compiled_order.clear();
@@ -289,7 +377,7 @@ mod tests {
         }
     }
 
-    fn make_graph_with_virtual_resources(count: usize) -> (RenderGraph, Vec<ResourceId>) {
+    fn make_graph_with_virtual_resources(count: usize) -> (RenderGraph<'static>, Vec<ResourceId>) {
         let mut graph = RenderGraph::new();
         let mut ids = Vec::new();
         for i in 0..count {
