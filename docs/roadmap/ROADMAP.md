@@ -1972,7 +1972,7 @@ From the 2026-08 rendering API audit (Claude + Codex pass over `engine/src/engin
 | P5 — Rapier extraction | `b6fffc2` | `RapierPhysicsPlugin` (step system, body registration via `on_world_loaded`, collider overlay hook), `depends_on` cascade, play-enter gating, inspector inert note, gameplay-disabled hint |
 | P6a — relaunch mechanics | `61fb30f` | `ReplaceFileW` atomic config writes, `--wait-parent` + `OpenProcess`/`WaitForSingleObject` handle wait, manifest facts |
 | P6b — Plugin Manager UI | `67ed6d6` | two-pane manager as a Project Settings page, full D8 state ladder, cascade warning, Relaunch Now |
-| P7 — export features + close-out | _(this commit)_ | `--no-default-features --features <base + enabled runtime>`, `EditorOnly` never ships, build-dialog visibility, docs |
+| P7 — export features + close-out | `d37bd82` | `--no-default-features --features <base + enabled runtime>`, `EditorOnly` never ships, build-dialog visibility, docs |
 
 **Verified at close-out:** export with base features only is 17,317,376 bytes
 and contains no `dev_nodes` fixture strings; forcing `dev_nodes` in adds
