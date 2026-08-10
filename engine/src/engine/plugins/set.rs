@@ -53,6 +53,7 @@ pub struct PluginSet {
     /// moved between builds must not lose its intent.
     orphans: Vec<String>,
     world_loaded: Vec<(String, WorldLoadedFn)>,
+    debug_draws: Vec<(String, super::context::DebugDrawFn)>,
     /// Live panels contributed by built plugins (D6). A disabled or failed
     /// plugin contributes none — which is exactly what makes a restored
     /// layout degrade to a missing-panel placeholder instead of silently
@@ -102,6 +103,7 @@ impl PluginSet {
         self.disabled.clear();
         self.orphans.clear();
         self.world_loaded.clear();
+        self.debug_draws.clear();
         #[cfg(feature = "editor")]
         {
             self.panels.clear();
@@ -253,6 +255,9 @@ impl PluginSet {
         targets.resources.append_from(ctx.resources);
         for callback in ctx.world_loaded {
             self.world_loaded.push((manifest.id.clone(), callback));
+        }
+        for callback in ctx.debug_draws {
+            self.debug_draws.push((manifest.id.clone(), callback));
         }
         #[cfg(feature = "editor")]
         {
@@ -424,5 +429,25 @@ impl PluginSet {
     /// How many world-loaded callbacks are registered (test/diagnostic hook).
     pub fn world_loaded_count(&self) -> usize {
         self.world_loaded.len()
+    }
+
+    /// Run every built plugin's debug-overlay contribution.
+    pub fn run_debug_draw(
+        &mut self,
+        world: &hecs::World,
+        buffer: &mut crate::engine::debug_draw::DebugDrawBuffer,
+    ) {
+        for (_id, callback) in &mut self.debug_draws {
+            callback(world, buffer);
+        }
+    }
+
+    /// Is this plugin live *right now*?
+    ///
+    /// True only if it built successfully this session. Deliberately reads the
+    /// active runtime set, never the pending manifest: between a manifest edit
+    /// and the restart, what is running has not changed (ruling §5.8).
+    pub fn is_active(&self, id: &str) -> bool {
+        self.records.iter().any(|r| r.manifest.id == id)
     }
 }

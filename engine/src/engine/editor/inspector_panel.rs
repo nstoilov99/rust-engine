@@ -104,6 +104,10 @@ pub struct InspectorPanel {
     pub(crate) cached_presence: ComponentPresence,
     /// The entity for which `cached_presence` was computed.
     pub(crate) presence_entity: Option<Entity>,
+    /// Refreshed per frame from `InspectorPanelCtx::physics_inactive` (39.8
+    /// D7). A field rather than another parameter: the component editors are
+    /// already deep in the call stack.
+    pub(crate) physics_inactive: bool,
     /// Unreal-style saved color swatches shared by all inspector color pickers.
     #[cfg(feature = "editor")]
     pub(crate) crusty_swatches: Vec<crusty_gui::math::Color>,
@@ -130,6 +134,7 @@ impl InspectorPanel {
             search_filter: String::new(),
             cached_presence: ComponentPresence::default(),
             presence_entity: None,
+            physics_inactive: false,
             #[cfg(feature = "editor")]
             crusty_swatches: Vec::new(),
             #[cfg(feature = "editor")]

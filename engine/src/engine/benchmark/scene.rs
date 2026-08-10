@@ -35,7 +35,12 @@ pub fn load_or_create_benchmark_scene(
         spawn_benchmark_scene(world, config, cube_mesh_index)
     };
 
-    register_scene_physics(world, physics_world);
+    // Bodies are *not* registered here (39.8 P5). Loading content and
+    // registering physics for it are separate jobs: the editor's
+    // world-population helper runs `RapierPhysicsPlugin`'s callback, and with
+    // that plugin disabled no handles must be created at all. The
+    // `PhysicsWorld::new()` reset above is what leaves this scene clean.
+    // Headless callers (`benchmark_runner`) register explicitly.
     Ok(roots)
 }
 
@@ -226,7 +231,9 @@ fn spawn_with_guid(world: &mut World, bundle: impl hecs::DynamicBundle) -> hecs:
     entity
 }
 
-fn register_scene_physics(world: &mut World, physics_world: &mut PhysicsWorld) {
+/// Register the loaded scene's bodies. Only the headless benchmark runner
+/// needs this — it has no `PluginSet` to run the physics plugin's callback.
+pub fn register_scene_physics(world: &mut World, physics_world: &mut PhysicsWorld) {
     for (_, (transform, rigidbody, collider)) in world
         .query::<(&Transform, &mut RigidBody, &mut Collider)>()
         .iter()

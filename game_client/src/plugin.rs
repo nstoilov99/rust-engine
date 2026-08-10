@@ -23,6 +23,12 @@ impl EnginePlugin for ClientGamePlugin {
             .with_description("Player input, character movement and game command execution.")
             .with_origin(PluginOrigin::Project)
             .with_kind(PluginKind::Runtime)
+            // The honest truth of this codebase (D7 cascade): PlayerInputSystem
+            // declares `.after(PhysicsStepSystem)` and CharacterMovementSystem
+            // writes `PhysicsWorld` and consumes Rapier handles. Turning
+            // physics off therefore turns gameplay off with it — "physics off"
+            // is a scene-editing configuration, not a playable one.
+            .depends_on([rust_engine::engine::plugins::PHYSICS_RAPIER_ID])
             .internal()
     }
 
@@ -59,6 +65,7 @@ impl EnginePlugin for ClientGamePlugin {
 /// sorting, so engine plugins go in before the project's own module.
 pub fn client_plugin_set() -> PluginSet {
     let mut set = PluginSet::new();
+    set.add(rust_engine::engine::plugins::RapierPhysicsPlugin);
     #[cfg(feature = "dev_nodes")]
     set.add(rust_engine::engine::plugins::DevNodesPlugin);
     set.add(ClientGamePlugin);

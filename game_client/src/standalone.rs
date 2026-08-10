@@ -21,10 +21,7 @@ use rust_engine::engine::input::event::InputEvent;
 use rust_engine::engine::input::gamepad::GamepadState;
 use rust_engine::engine::input::serialization;
 use rust_engine::engine::input::subsystem::{EnhancedInputSystem, InputSubsystem};
-use rust_engine::engine::physics::{
-    Collider as PhysCollider, PhysicsStepSystem, PhysicsWorld, RigidBody as PhysRigidBody,
-    Velocity as PhysVelocity,
-};
+use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::rendering::frame_packet::FramePacket;
 use rust_engine::engine::rendering::render_thread::{RenderThread, RenderThreadConfig};
 use rust_engine::engine::rendering::rendering_3d::deferred_renderer::DebugView;
@@ -222,20 +219,11 @@ impl StandaloneApp {
                 .writes::<AnimationPlayer>()
                 .writes::<SkeletonInstance>(),
         );
-        schedule.add_system_described(
-            PhysicsStepSystem,
-            Stage::PreUpdate,
-            SystemDescriptor::new("PhysicsStepSystem")
-                .reads_resource::<Time>()
-                .writes_resource::<PhysicsWorld>()
-                .writes::<Transform>()
-                .writes::<TransformDirty>()
-                .reads::<PhysRigidBody>()
-                .reads::<PhysCollider>()
-                .reads::<PhysVelocity>()
-                .after("AnimationUpdateSystem"),
-        );
-
+        // `PhysicsStepSystem` is registered by `RapierPhysicsPlugin` below.
+        // It carries `RunIfPlaying` there; `StandaloneApp` forces
+        // `PlayMode::Playing` at construction precisely so that criteria is
+        // always true in a shipped game.
+        //
         // Plugins register *before* transform propagation, matching the
         // editor (39.8 D4): gameplay systems that move entities must run
         // before their transforms are propagated. Exports resolve plugin

@@ -22,7 +22,7 @@ use rust_engine::engine::ecs::hierarchy::{
 };
 use rust_engine::engine::ecs::resources::Time;
 use rust_engine::engine::ecs::resources::{EditorState, PlayMode};
-use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
+use rust_engine::engine::ecs::schedule::{Schedule, Stage};
 use rust_engine::engine::editor::commands::Command as _;
 use rust_engine::engine::editor::play_mode::{self, PlayModeSnapshot};
 use rust_engine::engine::editor::graph_prefs::WireStyle;
@@ -445,10 +445,6 @@ impl App {
         use rust_engine::engine::audio::components::{AudioEmitter, AudioListener};
         use rust_engine::engine::ecs::components::TransformDirty;
         use rust_engine::engine::ecs::hierarchy::{Children, Parent};
-        use rust_engine::engine::physics::{
-            Collider as PhysCollider, PhysicsStepSystem, RigidBody as PhysRigidBody,
-            Velocity as PhysVelocity,
-        };
 
         // Node type registry (Task 40) — starts empty and is filled entirely by
         // plugins in `build_all` below (39.8 D5: `dev_nodes` is a plugin now).
@@ -469,20 +465,10 @@ impl App {
                 .writes::<AnimationPlayer>()
                 .writes::<SkeletonInstance>(),
         );
-        schedule.add_system_described_with_criteria(
-            PhysicsStepSystem,
-            Stage::PreUpdate,
-            SystemDescriptor::new("PhysicsStepSystem")
-                .reads_resource::<Time>()
-                .writes_resource::<PhysicsWorld>()
-                .writes::<Transform>()
-                .writes::<TransformDirty>()
-                .reads::<PhysRigidBody>()
-                .reads::<PhysCollider>()
-                .reads::<PhysVelocity>()
-                .after("AnimationUpdateSystem"),
-            RunIfPlaying,
-        );
+        // `PhysicsStepSystem` is registered by `RapierPhysicsPlugin` inside
+        // `build_all` below (39.8 D7) — it lands in the same stage, in the
+        // same relative position, with the same descriptor and criteria.
+        //
         // Registration is staged per plugin and committed only on success, so
         // a failing plugin registers nothing. The editor surfaces the failure
         // and boots anyway (the Plugin Manager shows it); only a shipped game
@@ -2336,12 +2322,13 @@ impl App {
 
         let is_editing = self.play_mode() == PlayMode::Edit;
 
-        // Submit collider debug wireframes for entities with debug_draw_visible
+        // Plugin debug overlays (39.8 D7): the collider wireframes come from
+        // `RapierPhysicsPlugin`, so with it disabled nothing is drawn and this
+        // path never mentions physics.
         #[cfg(debug_assertions)]
-        rust_engine::engine::physics::submit_collider_debug_draws(
-            self.core.game_world.hecs(),
-            &mut self.core.debug_draw_buffer,
-        );
+        self.core
+            .plugin_set
+            .run_debug_draw(self.core.game_world.hecs(), &mut self.core.debug_draw_buffer);
 
         // Submit bone debug wireframes for skeletons with debug_draw_visible
         #[cfg(debug_assertions)]
@@ -3529,6 +3516,13 @@ impl App {
                         .map(|(k, _)| format!("graph:{k}")),
                 )
                 .collect();
+            // Both driven by the *active* runtime plugin set (39.8 §5.8/D7),
+            // never by a pending manifest edit.
+            let physics_inactive = !self
+                .core
+                .plugin_set
+                .is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID);
+            let gameplay_disabled = !self.core.plugin_set.is_active("game_client");
             let plugin_panel_entries = self.core.plugin_set.panel_menu_entries();
             let plugin_panel_titles: std::collections::HashMap<String, String> =
                 plugin_panel_entries.iter().cloned().collect();
@@ -3598,6 +3592,7 @@ impl App {
                         play_settings: &mut settings.prefs.play,
                         scene_name: &current_scene_name,
                         plugin_panels: &plugin_panel_entries,
+                        gameplay_disabled,
                     },
                 );
                 if status_bar_panel(
@@ -3674,6 +3669,7 @@ impl App {
                                         asset_browser: &mut *asset_browser,
                                         icons,
                                         world_object: world_object_info.as_ref(),
+                                        physics_inactive,
                                     },
                                 ),
                                 Some(EditorTab::AssetBrowser) => asset_browser_panel(
@@ -4818,6 +4814,8 @@ impl App {
             );
         let (world, world_resources) = core.game_world.world_and_resources_mut();
         let plugin_set = &mut core.plugin_set;
+        let float_physics_inactive =
+            !plugin_set.is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID);
         let plugin_panel_titles: std::collections::HashMap<String, String> =
             plugin_set.panel_menu_entries().into_iter().collect();
         let console = &mut editor.console;
@@ -4976,6 +4974,7 @@ impl App {
                                 asset_browser: &mut *asset_browser,
                                 icons,
                                 world_object: world_object_info.as_ref(),
+                                physics_inactive: float_physics_inactive,
                             },
                         ),
                         Some(EditorTab::AssetBrowser) => asset_browser_panel(
@@ -6054,6 +6053,15 @@ impl App {
             state.play_mode = PlayMode::Playing;
         }
 
+        // Resync Rapier with transforms edited in edit mode. Not a world
+        // population moment (nothing was loaded), so it does not run the
+        // plugin callbacks — but it *is* body registration, so it is gated on
+        // the physics plugin actually running. Disabled means no handle is
+        // created anywhere, play mode included (D7).
+        if self
+            .core
+            .plugin_set
+            .is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID)
         {
             let mut pw = self
                 .core

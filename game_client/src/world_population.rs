@@ -15,7 +15,6 @@
 //! `play_mode::rebuild_physics`.
 
 use rust_engine::engine::ecs::game_world::GameWorld;
-use rust_engine::engine::physics::PhysicsWorld;
 use rust_engine::engine::plugins::{PluginFailure, PluginSet};
 
 /// Run the post-population hooks. Call immediately after anything that
@@ -31,13 +30,11 @@ pub fn after_world_populated(
 ) -> Vec<PluginFailure> {
     let (world, resources) = game_world.world_and_resources_mut();
 
-    // Engine core, until P5: clear-and-re-register every physics body. The
-    // clear makes this idempotent, so a loader that already registered (the
-    // benchmark scene does) cannot end up with doubled bodies.
-    if let Some(physics_world) = resources.get_mut::<PhysicsWorld>() {
-        rust_engine::engine::physics::rebuild_bodies_from_world(physics_world, world);
-    }
-
+    // Since P5 this is *only* the callback run. Physics body registration is
+    // `RapierPhysicsPlugin`'s `on_world_loaded`, so with that plugin disabled
+    // no handles are created here at all — which is the whole point of D7.
+    // The rebuild it performs clears first, so a loader that already
+    // registered (the benchmark scene does) cannot end up with doubled bodies.
     plugin_set.run_world_loaded(world, resources)
 }
 

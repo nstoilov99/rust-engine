@@ -63,6 +63,10 @@ pub struct InspectorPanelCtx<'a> {
     /// Streamed-world object info, shown read-only when the world row is
     /// selected in the hierarchy.
     pub world_object: Option<&'a super::world_object::WorldObjectInfo>,
+    /// `true` when `physics_rapier` is not running this session (39.8 D7).
+    /// Physics components still edit, save and load exactly as before — they
+    /// just do nothing — so the inspector says so rather than pretending.
+    pub physics_inactive: bool,
 }
 
 /// Shared color-picker context threaded to every color row: the saved
@@ -108,7 +112,9 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                 asset_browser,
                 icons,
                 world_object,
+                physics_inactive,
             } = ctx;
+            panel.physics_inactive = physics_inactive;
             let picker_icon = icons.get("color-picker").copied();
             let read_only = play_mode != PlayMode::Edit;
 
@@ -1262,7 +1268,7 @@ fn render_components(
         || panel.matches_filter("body")
         || panel.matches_filter("physics"))
         && p.has(ComponentPresence::RIGID_BODY)
-        && edit_rigidbody(ui, world, entity)
+        && edit_rigidbody(ui, world, entity, panel.physics_inactive)
     {
         action = Some(ComponentAction::RemoveRigidBody);
     }
@@ -1270,7 +1276,7 @@ fn render_components(
         || panel.matches_filter("physics")
         || panel.matches_filter("collision"))
         && p.has(ComponentPresence::COLLIDER)
-        && edit_collider(ui, world, entity)
+        && edit_collider(ui, world, entity, panel.physics_inactive)
     {
         action = Some(ComponentAction::RemoveCollider);
     }
@@ -1709,11 +1715,24 @@ fn edit_point_light(ui: &mut Ui, world: &mut World, entity: Entity, picker: &mut
     })
 }
 
-fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+/// The passive note shown on physics components when `physics_rapier` is not
+/// running (39.8 D7): the values still edit, save and load — nothing moves.
+fn physics_inert_note(ui: &mut Ui) {
+    let color = super::theme::Palette::invariant_status().warning;
+    Label::new("physics_rapier disabled \u{2014} components inert")
+        .color(color)
+        .show(ui);
+    ui.add_space(2.0);
+}
+
+fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity, physics_inactive: bool) -> bool {
     let Ok(mut rb) = world.get::<&mut RigidBody>(entity) else {
         return false;
     };
     component_section(ui, "Rigid Body", cat("physics"), true, |ui| {
+        if physics_inactive {
+            physics_inert_note(ui);
+        }
         if !rb.mass.is_finite() {
             rb.mass = 1.0;
         }
@@ -1785,11 +1804,14 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
     })
 }
 
-fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity, physics_inactive: bool) -> bool {
     let Ok(mut collider) = world.get::<&mut Collider>(entity) else {
         return false;
     };
     component_section(ui, "Collider", cat("physics"), true, |ui| {
+        if physics_inactive {
+            physics_inert_note(ui);
+        }
         #[derive(PartialEq, Copy, Clone)]
         enum Shape {
             Cuboid,

@@ -59,6 +59,9 @@ pub struct MenuBarCtx<'a> {
     /// View ▸ Panels after the built-ins, so a plugin's panel is reachable
     /// the same way every other panel is.
     pub plugin_panels: &'a [(String, String)],
+    /// The project's gameplay systems are not running because their plugin
+    /// did not build (39.8 D7 cascade). Shows a hint beside the transport.
+    pub gameplay_disabled: bool,
 }
 
 /// Brighten a status color for the hovered play-control state.
@@ -97,6 +100,7 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
         has_clipboard,
         play_settings,
         scene_name,
+        gameplay_disabled,
         ..
     } = ctx;
 
@@ -315,6 +319,25 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 let dim = ui.style().palette.text_secondary;
                 Label::new("Rust Game Engine").color(dim).show(ui);
             });
+
+            // Ruling §5.8: a hint, not a modal, and driven by the *active*
+            // runtime plugin set — before a restart, gameplay may still be
+            // live even though the manifest already says otherwise.
+            if gameplay_disabled {
+                let text = "gameplay disabled by plugin configuration";
+                let font = ui.style().fonts.body;
+                let w = ui.text_mut().measure(text, font, None).x;
+                // Just left of the transport cluster (3 buttons + caret).
+                let cluster_w = 26.0 * 3.0 + 2.0 * 3.0 + 20.0;
+                let x = rect.max.x - 16.0 - cluster_w - w;
+                ui.painter().text(
+                    Pos2::new(x, rect.min.y + (rect.height() - font * 1.25) * 0.5),
+                    text,
+                    font,
+                    theme.palette.status.warning,
+                    None,
+                );
+            }
 
             render_play_controls(
                 ui,

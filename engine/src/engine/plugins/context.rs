@@ -13,6 +13,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 
 use crate::engine::ecs::access::SystemDescriptor;
+use crate::engine::debug_draw::DebugDrawBuffer;
 use crate::engine::ecs::resources::Resources;
 use crate::engine::ecs::schedule::{RunCriteria, Schedule, Stage, System};
 use crate::engine::node_graph::migrate::MigrationCtx;
@@ -29,6 +30,15 @@ use crate::engine::plugins::PluginError;
 pub type WorldLoadedFn =
     Box<dyn FnMut(&mut hecs::World, &mut Resources) -> Result<(), PluginError> + Send + Sync>;
 
+/// A debug-overlay contributor, run wherever the engine has a
+/// [`DebugDrawBuffer`] to fill (today: the editor's frame path, under
+/// `debug_assertions`).
+///
+/// The engine owns *when* this runs; the plugin owns *what* it draws. That
+/// keeps the collider overlay off the screen entirely when its plugin is
+/// disabled, without the render path knowing anything about physics.
+pub type DebugDrawFn = Box<dyn FnMut(&hecs::World, &mut DebugDrawBuffer) + Send + Sync>;
+
 /// What a plugin actually registered — collected during staging so the Plugin
 /// Manager gets its per-plugin counts with zero bookkeeping from authors.
 ///
@@ -43,6 +53,7 @@ pub struct PluginCounts {
     pub domain_pins: usize,
     pub migrations: usize,
     pub world_loaded_callbacks: usize,
+    pub debug_draw_hooks: usize,
     #[cfg(feature = "editor")]
     pub panels: usize,
     #[cfg(feature = "editor")]
@@ -60,6 +71,7 @@ pub struct PluginContext {
     pub(super) resource_names: HashMap<TypeId, &'static str>,
     pub(super) registry: StagedRegistry,
     pub(super) world_loaded: Vec<WorldLoadedFn>,
+    pub(super) debug_draws: Vec<DebugDrawFn>,
     /// Staged editor panels: (panel id, title, factory).
     #[cfg(feature = "editor")]
     pub(super) panels: Vec<(String, String, super::panel::PluginPanelFactory)>,
@@ -199,6 +211,16 @@ impl PluginContext {
         self
     }
 
+    /// Contribute to the engine's debug overlay. Runs only where the engine
+    /// has a debug-draw buffer; a disabled plugin draws nothing at all.
+    pub fn register_debug_draw(
+        &mut self,
+        callback: impl FnMut(&hecs::World, &mut DebugDrawBuffer) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.debug_draws.push(Box::new(callback));
+        self
+    }
+
     // === Introspection ===
 
     /// Counts as staged. `PluginSet` adjusts `node_types` down for skipped
@@ -211,6 +233,7 @@ impl PluginContext {
             domain_pins: self.registry.domain_pins.len(),
             migrations: self.registry.migrations.len(),
             world_loaded_callbacks: self.world_loaded.len(),
+            debug_draw_hooks: self.debug_draws.len(),
             #[cfg(feature = "editor")]
             panels: self.panels.len(),
             #[cfg(feature = "editor")]

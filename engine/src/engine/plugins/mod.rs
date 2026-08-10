@@ -18,6 +18,9 @@ mod context;
 /// traits mention crusty-gui types.
 #[cfg(feature = "editor")]
 pub mod panel;
+/// Rapier physics stepping as a plugin (D7). Module-first by decision;
+/// promoting it to a workspace crate later is a move, not a redesign.
+pub mod rapier;
 mod set;
 
 /// Fixture node types (D5) — the first plugin, and the doc example.
@@ -28,7 +31,8 @@ pub mod dev_nodes;
 #[cfg(test)]
 mod tests;
 
-pub use context::{PluginContext, PluginCounts, WorldLoadedFn};
+pub use context::{DebugDrawFn, PluginContext, PluginCounts, WorldLoadedFn};
+pub use rapier::{RapierPhysicsPlugin, PHYSICS_RAPIER_ID};
 #[cfg(feature = "dev_nodes")]
 pub use dev_nodes::DevNodesPlugin;
 #[cfg(feature = "editor")]

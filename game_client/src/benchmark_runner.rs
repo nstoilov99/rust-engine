@@ -238,6 +238,13 @@ impl BenchmarkRunner {
             &config,
             cube_mesh_index,
         )?;
+        // Headless: no PluginSet, so the physics plugin's `on_world_loaded`
+        // never runs. The benchmark measures a stepping world, so register
+        // explicitly (39.8 P5 moved this out of the loader).
+        rust_engine::engine::benchmark::register_scene_physics(
+            game_world.hecs_mut(),
+            &mut physics_world,
+        );
 
         let resource_counters =
             ResourceCounters::collect(game_world.hecs(), &asset_manager, &physics_world);
