@@ -1958,9 +1958,59 @@ From the 2026-08 rendering API audit (Claude + Codex pass over `engine/src/engin
 ---
 
 ### Task 39.8: Plugin System & Module Registry
-**Status:** 📋 Planned — full plan in `docs/roadmap/VULKANO-39.8-PLUGIN-SYSTEM.md` (2026-08-10, supersedes the bullets below where they differ)
-**Duration:** ~1.5-2 weeks
+**Status:** ✅ **Complete** (2026-08-10) — plan + binding rulings in `docs/roadmap/VULKANO-39.8-PLUGIN-SYSTEM.md`; architecture in `docs/ARCHITECTURE.md` ▸ Plugin System; author guide in `docs/PLUGINS.md`
 **Prerequisites:** Task 40 (registry contract), Refactor Checkpoint #6
+
+**Commit map** (one commit per package, each gated independently):
+
+| Package | Commit | What landed |
+|---|---|---|
+| P1 — trait + PluginSet + manifest | `cc5b010` | `EnginePlugin`, `PluginManifest`, `PluginError`, staging `PluginContext`, topo-ordered `build_all` with commit-on-Ok, `plugins` in `project.ron`, `ClientGamePlugin` ported, `GamePlugin` deleted, standalone plugin position unified |
+| P2 — editor init-order refactor | `46b1d7e` | registries-then-content in `App::new()`, one world-population helper for all five content moments, `world_and_resources_mut`, fallible `on_world_loaded` |
+| P3 — dev_nodes conversion | `c89ea3e` | `DevNodesPlugin` (first real plugin), registry-parity golden, doc-level unregistered-type save round-trip |
+| P4 — editor extension points | `0bd9473` | `EditorTab::Plugin`, `PluginPanel`/`PluginSettingsPage` + `PluginPanelCtx`, View ▸ Panels, layout persistence + missing-panel placeholder |
+| P5 — Rapier extraction | `b6fffc2` | `RapierPhysicsPlugin` (step system, body registration via `on_world_loaded`, collider overlay hook), `depends_on` cascade, play-enter gating, inspector inert note, gameplay-disabled hint |
+| P6a — relaunch mechanics | `61fb30f` | `ReplaceFileW` atomic config writes, `--wait-parent` + `OpenProcess`/`WaitForSingleObject` handle wait, manifest facts |
+| P6b — Plugin Manager UI | `67ed6d6` | two-pane manager as a Project Settings page, full D8 state ladder, cascade warning, Relaunch Now |
+| P7 — export features + close-out | _(this commit)_ | `--no-default-features --features <base + enabled runtime>`, `EditorOnly` never ships, build-dialog visibility, docs |
+
+**Verified at close-out:** export with base features only is 17,317,376 bytes
+and contains no `dev_nodes` fixture strings; forcing `dev_nodes` in adds
+12,800 bytes and the fixture content appears — i.e. the `EditorOnly` rule
+strips something real. HUD survives `--no-default-features`. Packaged bundle
+runs from its own output directory.
+
+**Deferred, honestly:**
+
+1. **`physics_rapier` cannot be stripped from exports.** It has no Cargo
+   feature, and adding one would not help: D7 deliberately keeps
+   `PhysicsWorld`, the components, scene serialization and the inspector in
+   engine core, and `rapier3d` is a non-optional dependency used by 16 files
+   (collision cooking, prefabs, counters, character movement, …). A
+   `plugin-rapier` feature would gate ~100 lines while the crate stayed
+   linked — a near-zero saving and a false promise in the manager. Real
+   stripping requires the reflection-lite component-registry arc that D2 put
+   out of scope. Disabling physics remains a *runtime* configuration.
+2. **Plugin Manager: no "Copy error" button** on the failure detail (the
+   mockup has one; not part of D8's state contract).
+3. **Filter-segment counts** render inside the segment label rather than as a
+   separately-colored span — the shared `segmented_control` widget takes
+   `&[&str]`.
+4. **Orphan rows show no kind chip**: a plugin that is not in this build has
+   no known `kind`, so the manager declines to assert one.
+5. **Floating plugin panels** take their OS window title from the plugin set,
+   but `float_window_attrs` still falls back to the panel id for anything it
+   cannot resolve.
+6. **Component types, asset types and render passes** remain non-registrable
+   (D2). Steam SDK and the Gameplay Ability System remain follow-on plugin
+   candidates, unblocked by this task.
+7. **`streaming_acceptance::flythrough_streaming_stays_within_budget`** fails
+   on this machine both before and after the whole task — a pre-existing
+   machine-speed budget test, unrelated to plugins.
+
+<details>
+<summary>Original plan bullets (superseded where they differ)</summary>
+
 
 Engine functionality as discoverable, toggleable units (Unreal-plugin analogue,
 Rust-shaped). **Two-tier model** (revised 2026-08-10 — the original "flip =
@@ -1989,6 +2039,8 @@ plugins; editor ships batteries-included). Tier 2 (future, shape-preserved only)
 - **Discipline starting now** (costs nothing): new subsystems are built as
   self-contained modules with a single registration entry point, so extraction
   into plugins is mechanical, not surgery.
+
+</details>
 
 ---
 
@@ -3031,7 +3083,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | M9.6 | Editor Net Play Modes (Play as Client / Listen Server) | Multiplayer Foundation | Feature | |
 | -- | 🎯 *Milestone: Networked Co-op Slice (on packaged builds)* | -- | -- | |
 | -- | 📋 *Refactor #6: Rendering API Cleanup (slim — pass trait, graph dispatch, dead facade)* | -- | -- | |
-| 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | |
+| 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | ✅ Complete |
 | **40** | **Node Graph Framework & Custom Node SDK** | **Node Graph Foundation** | **Infrastructure** | **Framework** |
 | **41** | **Animation Graph** | Game Architecture | Feature | **1st consumer** |
 | 42 | 🔀 Save/Load & Runtime Persistence (networked part → M5) | Game Architecture | Feature | |

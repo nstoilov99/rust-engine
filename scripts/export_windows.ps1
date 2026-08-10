@@ -4,6 +4,16 @@
 # Usage: .\scripts\export_windows.ps1 [-OutputDir <path>] [-Profile <release|shipping>]
 #                                     [-Target <standalone|mp-client>]
 #                                     [-ServerUri <uri>] [-Module <name>]
+#                                     [-Features <comma-list>]
+#
+# Features (Task 39.8 D9): exports build with
+#   --no-default-features --features <base + enabled runtime plugin features>
+# `default` contains the non-plugin `hud`, so adding features on top of it
+# could never *remove* a default-enabled plugin feature, and
+# --no-default-features alone would strip the HUD. The base list therefore has
+# to be carried back in explicitly. The editor's Build dialog computes this
+# list from the plugin manifests + project.ron; from the command line pass it
+# yourself. Editor-only plugins never appear in it.
 #
 # Targets (M9 D2): same binary either way - the target is configuration.
 #   standalone : no net config in the bundle (and deletes a stale one)
@@ -16,7 +26,11 @@ param(
     [ValidateSet("standalone", "mp-client")]
     [string]$Target = "standalone",
     [string]$ServerUri = "http://127.0.0.1:3000",
-    [string]$Module = "rust-engine-dev"
+    [string]$Module = "rust-engine-dev",
+    # Base = the non-plugin defaults (keep in step with
+    # `plugins::EXPORT_BASE_FEATURES`). Append enabled runtime plugin
+    # features, comma-separated.
+    [string]$Features = "hud"
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,10 +57,11 @@ Write-Host ""
 
 # Build
 Write-Host "Building ($Profile)..." -ForegroundColor Yellow
+Write-Host "Features: --no-default-features --features $Features"
 if ($Profile -eq "shipping") {
-    cargo build --profile shipping
+    cargo build --profile shipping --bin game --no-default-features --features $Features
 } else {
-    cargo build --release
+    cargo build --release --bin game --no-default-features --features $Features
 }
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Build FAILED" -ForegroundColor Red

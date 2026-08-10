@@ -27,11 +27,14 @@ mod set;
 /// Compiled in only under the `dev_nodes` feature.
 #[cfg(feature = "dev_nodes")]
 pub mod dev_nodes;
+/// Export feature resolution (D9): Cargo features as the packaging tool.
+pub mod export;
 
 #[cfg(test)]
 mod tests;
 
 pub use context::{DebugDrawFn, PluginContext, PluginCounts, WorldLoadedFn};
+pub use export::{export_features, exported_plugins, ExportedPlugin, EXPORT_BASE_FEATURES};
 pub use rapier::{RapierPhysicsPlugin, PHYSICS_RAPIER_ID};
 #[cfg(feature = "dev_nodes")]
 pub use dev_nodes::DevNodesPlugin;

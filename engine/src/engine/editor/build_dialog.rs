@@ -72,6 +72,22 @@ impl BuildProfile {
         }
     }
 
+    /// Full argv for an export build, including the D9 feature selection.
+    ///
+    /// `--no-default-features` is mandatory: `default` contains `hud`, so
+    /// adding features on top of it could never *remove* a default-enabled
+    /// plugin feature. `features` therefore has to carry the non-plugin base
+    /// back in (see `plugins::EXPORT_BASE_FEATURES`).
+    pub fn cargo_args_with_features(&self, features: &[String]) -> Vec<String> {
+        let mut args: Vec<String> = self.cargo_args().into_iter().map(String::from).collect();
+        args.push("--no-default-features".to_string());
+        if !features.is_empty() {
+            args.push("--features".to_string());
+            args.push(features.join(","));
+        }
+        args
+    }
+
     pub fn output_dir(&self) -> &'static str {
         match self {
             BuildProfile::Release => "target/release",
@@ -98,6 +114,12 @@ pub struct BuildSettings {
     /// Defaults must match `game_client/src/net.rs`.
     pub server_uri: String,
     pub module: String,
+    /// Exact `--features` list for this export (39.8 D9), refreshed from the
+    /// plugin set + `project.ron` before a build starts.
+    pub features: Vec<String>,
+    /// Runtime plugins going into this export, for the dialog's "what am I
+    /// shipping" list. `None` feature = compiled in unconditionally.
+    pub exported_plugins: Vec<crate::engine::plugins::ExportedPlugin>,
 }
 
 impl Default for BuildSettings {
@@ -109,6 +131,11 @@ impl Default for BuildSettings {
             target: BuildTarget::Standalone,
             server_uri: "http://127.0.0.1:3000".to_string(),
             module: "rust-engine-dev".to_string(),
+            features: crate::engine::plugins::EXPORT_BASE_FEATURES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            exported_plugins: Vec::new(),
         }
     }
 }
@@ -273,11 +300,25 @@ impl BuildDialog {
                 self.settings.platform.label(),
                 target.label()
             ));
+            // D9 visibility: "why is my game 40 MB" gets a one-glance answer,
+            // and the fix is a documented toggle away.
+            if self.settings.exported_plugins.is_empty() {
+                log.push("Runtime plugins: none".to_string());
+            } else {
+                log.push("Runtime plugins in this export:".to_string());
+                for p in &self.settings.exported_plugins {
+                    log.push(match &p.cargo_feature {
+                        Some(f) => format!("  - {} ({f})", p.name),
+                        None => format!("  - {} (always compiled in)", p.name),
+                    });
+                }
+            }
         }
 
         let profile = self.settings.profile;
+        let features = self.settings.features.clone();
         self.build_thread = Some(std::thread::spawn(move || {
-            run_cargo_build(profile, build_log)
+            run_cargo_build(profile, features, build_log)
         }));
     }
 
@@ -342,9 +383,13 @@ fn stream_child(
 
 fn run_cargo_build(
     profile: BuildProfile,
+    features: Vec<String>,
     build_log: Arc<Mutex<Vec<String>>>,
 ) -> Result<u64, String> {
-    let args = profile.cargo_args();
+    let args = profile.cargo_args_with_features(&features);
+    if let Ok(mut log) = build_log.lock() {
+        log.push(format!("cargo {}", args.join(" ")));
+    }
 
     let child = Command::new("cargo")
         .args(&args)

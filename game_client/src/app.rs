@@ -3551,6 +3551,18 @@ impl App {
             let theme = self.editor.services.theme.clone();
             let has_selection = !sel.is_empty();
             let has_clipboard = !self.editor.scene.clipboard.is_empty();
+            // D9: resolve the export's feature set from the live plugin
+            // manifests + the edited project manifest, every frame the dialog
+            // could be opened, so a toggle is reflected before the build runs.
+            {
+                let manifests = self.core.plugin_set.manifests();
+                let entries = &self.editor.ui.settings.project.plugins;
+                let features = rust_engine::engine::plugins::export_features(&manifests, entries);
+                let listed = rust_engine::engine::plugins::exported_plugins(&manifests, entries);
+                let bd = &mut self.editor.play.build_dialog;
+                bd.settings.features = features;
+                bd.settings.exported_plugins = listed;
+            }
             let plugin_set = &mut self.core.plugin_set;
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;

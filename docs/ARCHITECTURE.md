@@ -429,6 +429,122 @@ evaluators live here — consumers bring their own node libraries and backends.
   crusty-gui's `Canvas` pan/zoom primitive). Graph tabs mirror the
   MeshEditor pattern (`EditorTab::GraphEditor(key)`).
 
+## Plugin System (Task 39.8)
+
+`engine/src/engine/plugins/` is the engine/game/extension boundary. Author
+guide: [PLUGINS.md](PLUGINS.md). Plan and rulings:
+`roadmap/VULKANO-39.8-PLUGIN-SYSTEM.md`.
+
+### Two-tier model
+
+**Tier 1 (shipped).** A plugin is Rust code compiled into the binary. Whether
+it *runs* is decided at startup by `project.ron`. Toggling in the Plugin
+Manager edits the manifest and prompts a restart — **restart-only, never a
+rebuild**, because a shipped editor must be usable by people without a
+toolchain. Dormant code in the editor binary is the accepted cost; shipped
+*game* binaries strip via Cargo features at export.
+
+**Tier 2 (out of scope, shape preserved).** Binary plugins over a C-ABI or
+WASM seam at narrow extension points. Nothing here precludes it: registration
+goes through runtime registry calls (never compile-time inventory as the only
+path), plugin identity is a string id (never a `TypeId`), and the
+`PluginContext` surface stays object-safe.
+
+Rust has no stable ABI and the registry APIs are generic-adjacent, so a DLL
+model for tier 1 is not available — this is the ecosystem consensus (Bevy's
+model), not a shortcut.
+
+### Trait and staged commit
+
+```rust
+pub trait EnginePlugin: Send + Sync {
+    fn manifest(&self) -> PluginManifest;
+    fn build(&self, ctx: &mut PluginContext) -> Result<(), PluginError>;
+}
+```
+
+`build()` never touches live engine state. `PluginContext` is a **staging**
+context: a scratch `Schedule`, a scratch `Resources`, a `StagedRegistry` of
+node types/domain pins/migrations, and vectors of lifecycle callbacks, panels
+and settings pages. `PluginSet` commits a plugin's stage only when `build()`
+returns `Ok` — a plugin that fails half-way registers *nothing*.
+
+Commit order is preflight-everything-then-mutate:
+
+1. resource `TypeId` collisions (with core or an earlier plugin) → error;
+2. panel / settings-page id collisions → error;
+3. `NodeRegistry::merge_staged` — itself preflight-then-apply;
+4. `Schedule::append_from` (preserves stage, run criteria, enabled flag and
+   access descriptor; reassigns insertion order), `Resources::append_from`,
+   then callbacks/panels.
+
+Collision policy differs by what is at stake: a **node id** collision skips
+that descriptor and records a warning (a user's graph document references it,
+so the plugin ends "enabled with warnings" rather than failing), while
+**migration keys**, **resources** and **panel ids** are hard errors.
+
+### Manifest and activation
+
+`PluginManifest` carries `id` (permanent slug), `name`, `version`,
+`description`, `author`, `depends_on`, `origin` (`Engine`/`Project`), `kind`
+(`Runtime`/`EditorOnly`), `internal`, `module_path` and `cargo_feature`.
+
+`ProjectConfig.plugins: Vec<PluginEntry { id, enabled }>` is the manifest.
+Absent id = enabled (batteries included). Entries naming nothing in this build
+are **preserved, not errors** — a project moved between machines must not lose
+its intent. Renames need an alias (`PluginSet::with_alias`); without one the
+old id orphans and the new id defaults to enabled, silently reversing a user's
+disable. Build order is a topological sort over `depends_on`; a dependency
+hole (absent, disabled, or itself failed) fails the dependent with
+`MissingDependency`.
+
+### Lifecycle callbacks
+
+Registration alone is not enough — some plugin work happens at *content*
+moments. `ctx.on_world_loaded(cb)` runs after **every** world population, and
+all five moments funnel through one helper
+(`game_client/src/world_population.rs`): editor startup, editor scene open,
+standalone `load_world`, benchmark load, play-mode stop. Play-mode *enter* is
+deliberately not one — nothing is loaded there; it resyncs Rapier with
+edit-mode transform edits.
+
+`ctx.register_debug_draw(cb)` contributes to the debug overlay: the engine owns
+*when* it runs, the plugin owns *what* it draws.
+
+### Editor extension points
+
+`ctx.register_panel(id, title, factory)` adds a dock panel
+(`EditorTab::Plugin(id)` ↔ `"plugin:<id>"`), and
+`ctx.register_settings_page(...)` adds a Project Settings page — the seam the
+Plugin Manager itself is built on. Panels receive a per-frame `PluginPanelCtx`
+(world, resources, play mode) rather than `&mut App`: both dispatch sites run
+inside closures where `App` is already split into disjoint field borrows.
+
+A `plugin:<id>` tab **always parses**, even when nothing registers that id, so
+a restored layout degrades to a visible missing-panel placeholder instead of
+silently reshaping itself.
+
+### Export rule
+
+Exports resolve activation at *build time* — a shipped game has no runtime
+manifest and needs none. Builds pass
+`--no-default-features --features <base + enabled runtime plugin features>`;
+`--no-default-features` is mandatory because `default` contains the non-plugin
+`hud`, which the base list carries back in
+(`plugins::EXPORT_BASE_FEATURES`).
+
+**`EditorOnly` plugins never contribute a feature, regardless of enabled
+state** — Unreal's Editor-module-type behaviour. Enabled-but-unused runtime
+plugins *do* ship (registration references the code, so no LTO can drop it);
+the mitigation is visibility — the build dialog lists what is going in — not
+magic.
+
+### What is deliberately not plugin-registrable
+
+Components in scenes (needs a name-keyed registry with
+serialize/deserialize/inspect — a reflection-lite arc), asset types/importers,
+and render passes. See `VULKANO-39.8-PLUGIN-SYSTEM.md` §D2.
+
 ## Performance Profiling
 
 The engine integrates puffin and Tracy for profiling:

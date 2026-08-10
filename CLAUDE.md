@@ -124,7 +124,8 @@ use `println!` for temporary diagnostics (and remove before commit).
 - Task 40 (Node Graph Framework & Custom Node SDK): **complete** — `engine/src/engine/node_graph/` (docs/registry/validation/migration/resolver), `crates/node_graph_macros`, graph editor on crusty-gui's `Canvas` primitive (see `docs/roadmap/VULKANO-40-NODE-GRAPH-FRAMEWORK.md`)
 - Crusty node-graph design system (docs/mockup spec, Phases 0–7): **complete** — theme tokens/ramp + design lint in CI, spec node anatomy/pins/LOD, orthogonal wire router (`graph_wire_router.rs`), Preferences ▸ Graph + toolbar, annotations/anchored errors/organization, RON clipboard + break gestures, palette/find/F8/auto-layout/sidecars; audit + rulings + deferred ledger in `docs/mockup/AUDIT.md`
 - Refactor Checkpoint #6 (Rendering API Cleanup): **complete** — legacy renderer facade retired, `DeferredPass` resize/rebind trait, graph-owned pass execution (`add_pass_with` + debug read/write cross-check), `PassPipelineBuilder`, typed `RenderError`
-- Next: Task 39.8 (Plugin System & Module Registry — implements against Task 40's registry contract), per `docs/roadmap/ROADMAP.md`
+- Task 39.8 (Plugin System & Module Registry): **complete** — `engine/src/engine/plugins/` (`EnginePlugin` trait, staging `PluginContext`, topo-ordered `PluginSet`, `rapier`/`dev_nodes` plugins, export feature policy), Plugin Manager in Project Settings, restart-only activation via `project.ron`. See `docs/ARCHITECTURE.md` ▸ Plugin System and `docs/PLUGINS.md` (author guide); close-out + deferred items in `docs/roadmap/ROADMAP.md`
+- Next: per `docs/roadmap/ROADMAP.md` (Phase 11 continues — Tasks 41-45)
 
 ## Patched Dependencies
 
