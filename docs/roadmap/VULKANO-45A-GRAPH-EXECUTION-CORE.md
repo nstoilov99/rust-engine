@@ -272,16 +272,14 @@ instances (edit during play = instances restart on re-enter).
 - **Determinism erosion by future nodes**: the effect-stream determinism
   test runs in CI from P2 on; nodes that break it fail loudly.
 
-## Open questions (decide at review)
+## Open questions — RESOLVED (user decision 2026-08-11, per recommendation)
 
-1. Effect granularity: fine-grained effects (SetTransform) vs. batched
-   command lists — plan assumes fine-grained (simpler, matches CommandBuffer).
-2. `Int` width: i64 (plan) vs i32 (SpacetimeDB-friendlier) — decide before
-   P1 freezes the schema.
-3. Does `event_custom` cross graph instances on the same entity only, or
-   globally by name? Plan assumes same-entity + explicit target pin later.
-4. Timeline curve asset shared with the future animation task's curves, or
-   separate? Plan assumes shared `.curve` from day one.
+1. Effect granularity: **fine-grained** (SetTransform etc.), as planned.
+2. `Int` width: **i32** — SpacetimeDB-friendlier, and graphs don't need
+   64-bit loop counters. `PropValue::Int(i32)`; amends D2's i64.
+3. `event_custom` scope: **same-entity in v1**, explicit target pin later.
+4. Timeline curves: **shared `.curve` asset from day one** — the animation
+   task (41) grows the same asset/editor rather than forking one.
 
 ## Audit addendum (2026-08-11, Claude + Codex, pre-kickoff)
 
