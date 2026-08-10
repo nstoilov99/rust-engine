@@ -371,23 +371,11 @@ impl App {
         let (mesh_indices, plane_mesh_index, cube_mesh_index) =
             game_setup::load_assets(&asset_manager)?;
 
+        // Registries-then-content (39.8 D4): the world starts empty, every
+        // registry is built and every plugin has registered before any scene
+        // content exists. Scene load happens further down, after
+        // `schedule.validate()`.
         let mut game_world = GameWorld::new();
-
-        let (scene_loaded, root_entities) =
-            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], &startup_scene)?;
-
-        if !scene_loaded {
-            game_setup::spawn_physics_test_objects(
-                game_world.hecs_mut(),
-                plane_mesh_index,
-                cube_mesh_index,
-            );
-        }
-
-        let mut hierarchy_panel = HierarchyPanel::new();
-        if !root_entities.is_empty() {
-            hierarchy_panel.set_root_order(root_entities);
-        }
 
         // Audio engine — no-audio fallback if initialization fails
         if let Some(audio_engine) = AudioEngine::new() {
@@ -399,7 +387,8 @@ impl App {
         let mut physics_world = PhysicsWorld::new();
         physics_world.set_gravity(nalgebra_glm::vec3(0.0, 0.0, project_config.gravity_z));
         physics_world.set_timestep(1.0 / project_config.fixed_timestep_hz.max(1.0));
-        game_setup::register_physics_entities(&mut physics_world, game_world.hecs_mut());
+        // Bodies are registered by the world-population helper after the
+        // scene loads, not here.
         game_world.resources_mut().insert(physics_world);
         // Collision fills in below via `init_streaming_for_scene` (streamed
         // or monolithic depending on the scene's world manifest).
@@ -461,6 +450,17 @@ impl App {
             Velocity as PhysVelocity,
         };
 
+        // Node type registry (Task 40) — built before `build_all` so plugins
+        // can register node types; moves into `SceneEditorState` below.
+        let mut node_registry = {
+            #[allow(unused_mut)]
+            let mut reg = rust_engine::engine::node_graph::NodeRegistry::new();
+            #[cfg(feature = "dev_nodes")]
+            rust_engine::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg)
+                .expect("dev_nodes registration");
+            reg
+        };
+
         let mut schedule = Schedule::new();
         schedule.add_system_described(
             EnhancedInputSystem,
@@ -493,14 +493,11 @@ impl App {
         // a failing plugin registers nothing. The editor surfaces the failure
         // and boots anyway (the Plugin Manager shows it); only a shipped game
         // treats it as fatal.
-        //
-        // `node_registry: None` until P2 moves registry construction ahead of
-        // plugin build; no plugin registers node types yet.
         plugin_set.build_all(
             rust_engine::engine::plugins::PluginTargets {
                 schedule: &mut schedule,
                 resources: game_world.resources_mut(),
-                node_registry: None,
+                node_registry: &mut node_registry,
             },
             Some(&project_config.plugins),
         );
@@ -555,6 +552,31 @@ impl App {
             );
         }
         schedule.print_access_report();
+
+        // === Content ===
+        // Everything above is registration; the world is empty until here, so
+        // plugin-registered systems, resources and node types are all in place
+        // before any scene entity exists (39.8 D4).
+        let (scene_loaded, root_entities) =
+            game_setup::load_or_create_scene(game_world.hecs_mut(), mesh_indices[0], &startup_scene)?;
+
+        if !scene_loaded {
+            game_setup::spawn_physics_test_objects(
+                game_world.hecs_mut(),
+                plane_mesh_index,
+                cube_mesh_index,
+            );
+        }
+
+        crate::world_population::report_failures(&crate::world_population::after_world_populated(
+            &mut game_world,
+            &mut plugin_set,
+        ));
+
+        let mut hierarchy_panel = HierarchyPanel::new();
+        if !root_entities.is_empty() {
+            hierarchy_panel.set_root_order(root_entities);
+        }
 
         let render_thread = RenderThread::spawn(RenderThreadConfig {
             gpu_context: renderer.gpu.clone(),
@@ -723,14 +745,7 @@ impl App {
                 import_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
                 graph_editors: std::collections::HashMap::new(),
-                node_registry: {
-                    #[allow(unused_mut)]
-                    let mut reg = rust_engine::engine::node_graph::NodeRegistry::new();
-                    #[cfg(feature = "dev_nodes")]
-                    rust_engine::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg)
-                        .expect("dev_nodes registration");
-                    reg
-                },
+                node_registry,
                 graph_clipboard: None,
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
@@ -1678,6 +1693,79 @@ impl App {
         self.core.debug_draw_buffer.update(delta_time);
     }
 
+    /// Park the active scene and open `relative` in a fresh tab.
+    ///
+    /// Extracted from the asset-browser double-click arm in 39.8 P2 so the
+    /// content moment it contains has a name and can be exercised directly.
+    fn open_scene_in_new_tab(&mut self, relative: &str, display_name: &str) {
+        let new_id = self.editor.scene.registry.allocate_id();
+        let parked = self.park_active_scene();
+        self.editor.scene.registry.park(parked);
+
+        self.core.game_world = self.fresh_scene_world();
+        self.editor.scene.registry.active_id = new_id;
+        self.editor.scene.current_scene_relative = relative.to_string();
+        self.editor.scene.current_scene_name = String::new();
+        self.editor.scene.active_dirty = false;
+        self.editor.scene.selection.clear();
+        self.editor.scene.command_history.clear();
+        self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
+        self.editor.ui.crusty_dock.open_viewport_tab(new_id);
+
+        match load_scene(self.core.game_world.hecs_mut(), relative) {
+            Ok((scene_name, root_entities)) => {
+                self.editor.scene.hierarchy_panel.set_root_order(root_entities);
+                self.editor.scene.current_scene_name = scene_name.clone();
+                // Content moment. Before P2 this path registered no physics
+                // bodies at all, so a scene opened in a new tab had an empty
+                // Rapier world until play mode happened to rebuild it.
+                self.run_world_population_hooks();
+                {
+                    self.core
+                        .game_world
+                        .resources_mut()
+                        .remove::<TransformCache>();
+                    let mut tc = TransformCache::new();
+                    tc.propagate(self.core.game_world.hecs_mut());
+                    self.core.game_world.resources_mut().insert(tc);
+                }
+                // Resolve mesh_path → mesh_index for loaded entities
+                self.resolve_mesh_paths();
+                self.init_streaming_for_scene(relative);
+
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("Loaded scene: {}", scene_name)));
+                println!("Scene loaded: {}", display_name);
+            }
+            Err(e) => {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Failed to load scene: {}", e)));
+                eprintln!("Failed to load scene: {}", e);
+            }
+        }
+    }
+
+    /// Post-population hooks for every editor content moment (39.8 ruling
+    /// §5.5): re-register physics bodies, then run each plugin's
+    /// `on_world_loaded`. Editor policy on failure is surface-and-continue.
+    fn run_world_population_hooks(&mut self) {
+        let failures = crate::world_population::after_world_populated(
+            &mut self.core.game_world,
+            &mut self.core.plugin_set,
+        );
+        crate::world_population::report_failures(&failures);
+        for failure in &failures {
+            self.editor
+                .console
+                .messages
+                .push(LogMessage::error(crate::world_population::describe(failure)));
+        }
+    }
+
     /// Resolve `mesh_path` to `mesh_index` for all MeshRenderer components.
     fn resolve_mesh_paths(&mut self) {
         crate::asset_resolve::resolve_mesh_paths(
@@ -2604,55 +2692,7 @@ impl App {
                                 continue;
                             }
 
-                            // Open in a new tab: park current, allocate id, load fresh.
-                            let new_id = self.editor.scene.registry.allocate_id();
-                            let parked = self.park_active_scene();
-                            self.editor.scene.registry.park(parked);
-
-                            self.core.game_world = self.fresh_scene_world();
-                            self.editor.scene.registry.active_id = new_id;
-                            self.editor.scene.current_scene_relative = relative.clone();
-                            self.editor.scene.current_scene_name = String::new();
-                            self.editor.scene.active_dirty = false;
-                            self.editor.scene.selection.clear();
-                            self.editor.scene.command_history.clear();
-                            self.editor.scene.hierarchy_panel.set_root_order(Vec::new());
-                            self.editor.ui.crusty_dock.open_viewport_tab(new_id);
-
-                            match load_scene(self.core.game_world.hecs_mut(), &relative) {
-                                Ok((scene_name, root_entities)) => {
-                                    self.editor
-                                        .scene
-                                        .hierarchy_panel
-                                        .set_root_order(root_entities);
-                                    self.editor.scene.current_scene_name = scene_name.clone();
-                                    {
-                                        self.core
-                                            .game_world
-                                            .resources_mut()
-                                            .remove::<TransformCache>();
-                                        let mut tc = TransformCache::new();
-                                        tc.propagate(self.core.game_world.hecs_mut());
-                                        self.core.game_world.resources_mut().insert(tc);
-                                    }
-                                    // Resolve mesh_path → mesh_index for loaded entities
-                                    self.resolve_mesh_paths();
-                                    self.init_streaming_for_scene(&relative);
-
-                                    self.editor.console.messages.push(LogMessage::info(format!(
-                                        "Loaded scene: {}",
-                                        scene_name
-                                    )));
-                                    println!("Scene loaded: {}", display_name);
-                                }
-                                Err(e) => {
-                                    self.editor.console.messages.push(LogMessage::error(format!(
-                                        "Failed to load scene: {}",
-                                        e
-                                    )));
-                                    eprintln!("Failed to load scene: {}", e);
-                                }
-                            }
+                            self.open_scene_in_new_tab(&relative, &display_name);
                         } else if asset_type == AssetType::Audio {
                             // Play audio preview on dedicated preview track
                             let relative = meta_path.to_string_lossy().to_string();
@@ -5799,6 +5839,10 @@ impl App {
             }
         };
         self.core.game_world.resources_mut().insert(pw);
+        // Content moment. `load_or_create_benchmark_scene` already registered
+        // bodies; the helper clears first, so this re-registers rather than
+        // doubling them.
+        self.run_world_population_hooks();
         self.editor.scene.hierarchy_panel.set_root_order(roots);
         self.editor.scene.current_scene_relative = BENCHMARK_SCENE_RELATIVE.to_string();
         self.editor.scene.current_scene_name = "Benchmark Scene".to_string();
@@ -6090,22 +6134,18 @@ impl App {
         self.flush_streaming();
 
         if let Some(snapshot) = self.editor.play.snapshot.as_ref() {
-            let mut pw = self
-                .core
-                .game_world
-                .resources_mut()
-                .remove::<PhysicsWorld>()
-                .unwrap_or_default();
             match play_mode::restore_snapshot(
                 snapshot,
                 &mut self.core.game_world,
                 &mut self.editor.scene.hierarchy_panel,
                 &mut self.editor.scene.selection,
-                &mut pw,
                 &mut self.editor.scene.command_history,
             ) {
                 Ok(()) => {
                     self.editor.play.snapshot = None;
+                    // Content moment: the restored world's physics handles are
+                    // stale and plugins need their world-loaded hooks.
+                    self.run_world_population_hooks();
                     if let Some(tc) = self.core.game_world.resource_mut::<TransformCache>() {
                         tc.request_full_propagation();
                     }
@@ -6117,7 +6157,6 @@ impl App {
                     );
                 }
             }
-            self.core.game_world.resources_mut().insert(pw);
         } else {
             log::warn!("stop_play_mode called but no snapshot exists");
         }

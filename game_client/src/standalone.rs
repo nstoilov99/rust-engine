@@ -57,9 +57,13 @@ pub struct StandaloneApp {
         Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     schedule: Schedule,
     /// The built plugin set — owns the `on_world_loaded` callbacks that run
-    /// at every content moment (wired in P2).
-    #[allow(dead_code)]
+    /// at every content moment.
     plugin_set: rust_engine::engine::plugins::PluginSet,
+    /// Node types registered by plugins. Unused by the runtime today (no
+    /// graph evaluator ships yet), but plugin registrations must land
+    /// somewhere that outlives startup rather than being dropped.
+    #[allow(dead_code)]
+    node_registry: rust_engine::engine::node_graph::NodeRegistry,
     frame_number: u64,
     render_thread: Option<RenderThread>,
     /// Net session (M5); `Some` when launched with `--connect`.
@@ -236,11 +240,12 @@ impl StandaloneApp {
         // editor (39.8 D4): gameplay systems that move entities must run
         // before their transforms are propagated. Exports resolve plugin
         // activation at build time, so there is no manifest filter here.
+        let mut node_registry = rust_engine::engine::node_graph::NodeRegistry::new();
         plugin_set.build_all(
             rust_engine::engine::plugins::PluginTargets {
                 schedule: &mut schedule,
                 resources: game_world.resources_mut(),
-                node_registry: None,
+                node_registry: &mut node_registry,
             },
             None,
         );
@@ -337,6 +342,7 @@ impl StandaloneApp {
             plankton_emitter_buffer: Vec::with_capacity(32),
             schedule,
             plugin_set,
+            node_registry,
             frame_number: 0,
             render_thread: Some(render_thread),
             net,
@@ -393,13 +399,14 @@ impl StandaloneApp {
             );
         }
 
-        let mut physics_world = self
-            .game_world
-            .resources_mut()
-            .remove::<PhysicsWorld>()
-            .unwrap_or_default();
-        game_setup::register_physics_entities(&mut physics_world, self.game_world.hecs_mut());
-        self.game_world.resources_mut().insert(physics_world);
+        // Content moment (39.8 ruling §5.5): physics registration + plugin
+        // `on_world_loaded`. A shipped game treats a failure here as fatal.
+        crate::world_population::abort_on_failures(
+            &crate::world_population::after_world_populated(
+                &mut self.game_world,
+                &mut self.plugin_set,
+            ),
+        );
 
         let mut transform_cache = self
             .game_world

@@ -13,7 +13,7 @@ use rust_engine::engine::ecs::game_world::GameWorld;
 use rust_engine::engine::ecs::hierarchy::set_parent;
 use rust_engine::engine::editor::play_mode::{build_guid_map, create_snapshot, restore_snapshot};
 use rust_engine::engine::editor::{CommandHistory, HierarchyPanel, Selection};
-use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
+use rust_engine::engine::physics::{rebuild_bodies_from_world, Collider, PhysicsWorld, RigidBody};
 
 /// Helper: set up a game world with some entities for testing.
 fn setup_test_world() -> (GameWorld, Vec<hecs::Entity>) {
@@ -56,7 +56,6 @@ fn snapshot_preserves_entity_count() {
     let original_count = game_world.hecs().len();
 
     // Restore
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -65,7 +64,6 @@ fn snapshot_preserves_entity_count() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");
@@ -87,7 +85,6 @@ fn snapshot_preserves_transforms() {
     let snapshot = create_snapshot(game_world.hecs(), &mut hierarchy, &selection)
         .expect("snapshot should succeed");
 
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -96,7 +93,6 @@ fn snapshot_preserves_transforms() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");
@@ -124,7 +120,6 @@ fn snapshot_preserves_hierarchy() {
     let snapshot = create_snapshot(game_world.hecs(), &mut hierarchy, &selection)
         .expect("snapshot should succeed");
 
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -133,7 +128,6 @@ fn snapshot_preserves_hierarchy() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");
@@ -154,8 +148,12 @@ fn snapshot_preserves_hierarchy() {
     );
 }
 
+/// Since 39.8 P2, `restore_snapshot` no longer rebuilds physics — that is the
+/// world-population helper's job, run by the caller at every content moment.
+/// This test walks that sequence and also pins the idempotence the helper
+/// relies on: running the rebuild twice must not double the bodies.
 #[test]
-fn snapshot_rebuilds_physics() {
+fn restore_then_rebuild_registers_bodies_exactly_once() {
     let (mut game_world, roots) = setup_test_world();
     let mut hierarchy = HierarchyPanel::new();
     hierarchy.set_root_order(roots);
@@ -164,7 +162,6 @@ fn snapshot_rebuilds_physics() {
     let snapshot = create_snapshot(game_world.hecs(), &mut hierarchy, &selection)
         .expect("snapshot should succeed");
 
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -173,15 +170,30 @@ fn snapshot_rebuilds_physics() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");
 
-    // Physics world should have a body for the PhysBox entity
+    let mut physics = PhysicsWorld::new();
     assert!(
-        !physics.rigid_body_set.is_empty(),
-        "physics should have at least 1 rigid body after restore"
+        physics.rigid_body_set.is_empty(),
+        "restore_snapshot must not register bodies itself"
+    );
+
+    rebuild_bodies_from_world(&mut physics, game_world.hecs_mut());
+    let after_first = physics.rigid_body_set.len();
+    assert_eq!(
+        after_first, 1,
+        "the PhysBox entity should have exactly one rigid body"
+    );
+
+    // The benchmark loader registers bodies before the helper runs; the
+    // helper must therefore be safe to run over an already-populated world.
+    rebuild_bodies_from_world(&mut physics, game_world.hecs_mut());
+    assert_eq!(
+        physics.rigid_body_set.len(),
+        after_first,
+        "a second population pass must not double-register bodies"
     );
 }
 
@@ -216,7 +228,6 @@ fn snapshot_preserves_selection() {
         "snapshot should capture selected entity GUID"
     );
 
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -225,7 +236,6 @@ fn snapshot_preserves_selection() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");
@@ -251,7 +261,6 @@ fn snapshot_preserves_root_order() {
         "root order GUIDs should not be empty"
     );
 
-    let mut physics = PhysicsWorld::new();
     let mut cmd_history = CommandHistory::new(100);
     let mut sel = Selection::new();
 
@@ -260,7 +269,6 @@ fn snapshot_preserves_root_order() {
         &mut game_world,
         &mut hierarchy,
         &mut sel,
-        &mut physics,
         &mut cmd_history,
     )
     .expect("restore should succeed");

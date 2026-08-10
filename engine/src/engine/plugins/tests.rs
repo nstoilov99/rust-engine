@@ -99,7 +99,7 @@ impl Live {
             PluginTargets {
                 schedule: &mut self.schedule,
                 resources: &mut self.resources,
-                node_registry: Some(&mut self.registry),
+                node_registry: &mut self.registry,
             },
             filter,
         );
@@ -248,7 +248,7 @@ fn successful_build_commits_systems_resources_and_nodes() {
             ctx.register_node(pure_node("plug_node"));
             ctx.register_domain_pin("plug_domain");
             ctx.register_migration("plug_node", 1, |_| {});
-            ctx.on_world_loaded(|_w, _r| {});
+            ctx.on_world_loaded(|_w, _r| Ok(()));
             Ok(())
         },
     ));
@@ -285,7 +285,7 @@ fn partial_failure_discards_the_whole_stage() {
             );
             ctx.insert_resource(ResA(1));
             ctx.register_node(pure_node("ghost_node"));
-            ctx.on_world_loaded(|_w, _r| {});
+            ctx.on_world_loaded(|_w, _r| Ok(()));
             Err(PluginError::build("gave up after registering"))
         },
     ));
@@ -434,44 +434,6 @@ fn domain_pin_reregistration_is_identical_ok_else_first_wins() {
     assert!(clash[0].contains("clash") && clash[0].contains("first"));
 }
 
-#[test]
-fn missing_node_registry_fails_only_plugins_that_need_one() {
-    let mut schedule = Schedule::new();
-    let mut resources = Resources::new();
-
-    let mut set = PluginSet::new();
-    set.add(TestPlugin::new(
-        PluginManifest::new("nodes", "Nodes"),
-        |ctx| {
-            ctx.register_node(pure_node("n"));
-            Ok(())
-        },
-    ));
-    set.add(TestPlugin::new(
-        PluginManifest::new("systems", "Systems"),
-        |ctx| {
-            ctx.add_system(
-                NoopSystem("s"),
-                Stage::Update,
-                SystemDescriptor::new("s"),
-            );
-            Ok(())
-        },
-    ));
-
-    set.build_all(
-        PluginTargets {
-            schedule: &mut schedule,
-            resources: &mut resources,
-            node_registry: None,
-        },
-        None,
-    );
-
-    assert_eq!(built_ids(&set), vec!["systems"]);
-    assert_eq!(set.failures()[0].phase, RegistrationPhase::NodeRegistry);
-}
-
 // === Lifecycle ===
 
 #[test]
@@ -484,6 +446,7 @@ fn world_loaded_callbacks_run_on_demand_and_only_for_built_plugins() {
         let r = Arc::clone(&r);
         ctx.on_world_loaded(move |_w, _res| {
             r.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         });
         Ok(())
     }));
@@ -492,6 +455,7 @@ fn world_loaded_callbacks_run_on_demand_and_only_for_built_plugins() {
         let r = Arc::clone(&r);
         ctx.on_world_loaded(move |_w, _res| {
             r.fetch_add(100, Ordering::SeqCst);
+            Ok(())
         });
         Err(PluginError::build("nope"))
     }));
@@ -500,10 +464,41 @@ fn world_loaded_callbacks_run_on_demand_and_only_for_built_plugins() {
     live.build(&mut set, None);
 
     let mut world = hecs::World::new();
-    set.run_world_loaded(&mut world, &mut live.resources);
-    set.run_world_loaded(&mut world, &mut live.resources);
+    assert!(set.run_world_loaded(&mut world, &mut live.resources).is_empty());
+    assert!(set.run_world_loaded(&mut world, &mut live.resources).is_empty());
 
     assert_eq!(runs.load(Ordering::SeqCst), 2, "runs per content moment");
+}
+
+#[test]
+fn world_loaded_failure_is_reported_per_plugin_and_does_not_stop_the_others() {
+    let later_ran = Arc::new(AtomicUsize::new(0));
+
+    let mut set = PluginSet::new();
+    set.add(TestPlugin::new(PluginManifest::new("bad", "Bad"), |ctx| {
+        ctx.on_world_loaded(|_w, _r| Err(PluginError::build("content moment blew up")));
+        Ok(())
+    }));
+    let r = Arc::clone(&later_ran);
+    set.add(TestPlugin::new(PluginManifest::new("good", "Good"), move |ctx| {
+        let r = Arc::clone(&r);
+        ctx.on_world_loaded(move |_w, _res| {
+            r.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        Ok(())
+    }));
+
+    let mut live = Live::new();
+    live.build(&mut set, None);
+
+    let mut world = hecs::World::new();
+    let failures = set.run_world_loaded(&mut world, &mut live.resources);
+
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].id, "bad");
+    assert_eq!(failures[0].phase, RegistrationPhase::WorldLoaded);
+    assert_eq!(later_ran.load(Ordering::SeqCst), 1, "later callbacks still run");
 }
 
 // === Manifest ===

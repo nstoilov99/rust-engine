@@ -20,6 +20,7 @@ mod prediction;
 mod render_loop;
 mod replication;
 mod systems;
+mod world_population;
 
 #[cfg(feature = "editor")]
 use app::{App, EditorRuntimeFlags};

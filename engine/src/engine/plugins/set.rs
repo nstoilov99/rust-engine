@@ -17,13 +17,12 @@ use super::{
 
 /// The live registries a plugin's stage is committed into.
 ///
-/// `node_registry` is optional only until the P2 init-order refactor makes the
-/// registry exist before plugins build; a plugin that stages node types while
-/// it is `None` fails loudly rather than silently registering nothing.
+/// All three exist before any plugin builds (P2's registries-then-content
+/// order), so none of them is optional.
 pub struct PluginTargets<'a> {
     pub schedule: &'a mut Schedule,
     pub resources: &'a mut Resources,
-    pub node_registry: Option<&'a mut NodeRegistry>,
+    pub node_registry: &'a mut NodeRegistry,
 }
 
 /// A plugin that came up, with what it registered.
@@ -202,23 +201,14 @@ impl PluginSet {
         let mut warnings = Vec::new();
         if ctx.touches_node_registry() {
             let staged = std::mem::take(&mut ctx.registry);
-            match targets.node_registry.as_mut() {
-                Some(registry) => {
-                    let report = registry.merge_staged(&manifest.id, staged).map_err(|e| {
-                        PluginError::at(RegistrationPhase::NodeRegistry, e.to_string())
-                    })?;
-                    counts.node_types = report.nodes_registered;
-                    counts.domain_pins = report.domain_pins_registered;
-                    counts.migrations = report.migrations_registered;
-                    warnings = report.warnings;
-                }
-                None => {
-                    return Err(PluginError::at(
-                        RegistrationPhase::NodeRegistry,
-                        "no node registry is available at plugin build time",
-                    ));
-                }
-            }
+            let report = targets
+                .node_registry
+                .merge_staged(&manifest.id, staged)
+                .map_err(|e| PluginError::at(RegistrationPhase::NodeRegistry, e.to_string()))?;
+            counts.node_types = report.nodes_registered;
+            counts.domain_pins = report.domain_pins_registered;
+            counts.migrations = report.migrations_registered;
+            warnings = report.warnings;
         }
 
         // Commit.
@@ -319,12 +309,28 @@ impl PluginSet {
 
     // === Lifecycle ===
 
-    /// Run every enabled plugin's `on_world_loaded` callback. Called by the
-    /// engine after any world population; see `GameWorld::world_and_resources_mut`.
-    pub fn run_world_loaded(&mut self, world: &mut hecs::World, resources: &mut Resources) {
-        for (_id, callback) in &mut self.world_loaded {
-            callback(world, resources);
+    /// Run every built plugin's `on_world_loaded` callback. Called after any
+    /// world population; see `GameWorld::world_and_resources_mut`.
+    ///
+    /// One callback failing does not stop the others — the caller decides what
+    /// a failure means (editor: surface and continue; standalone: fatal).
+    #[must_use]
+    pub fn run_world_loaded(
+        &mut self,
+        world: &mut hecs::World,
+        resources: &mut Resources,
+    ) -> Vec<PluginFailure> {
+        let mut failures = Vec::new();
+        for (id, callback) in &mut self.world_loaded {
+            if let Err(error) = callback(world, resources) {
+                failures.push(PluginFailure {
+                    id: id.clone(),
+                    phase: RegistrationPhase::WorldLoaded,
+                    error,
+                });
+            }
         }
+        failures
     }
 
     /// How many world-loaded callbacks are registered (test/diagnostic hook).

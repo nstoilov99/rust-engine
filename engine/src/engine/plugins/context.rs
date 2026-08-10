@@ -17,13 +17,17 @@ use crate::engine::ecs::resources::Resources;
 use crate::engine::ecs::schedule::{RunCriteria, Schedule, Stage, System};
 use crate::engine::node_graph::migrate::MigrationCtx;
 use crate::engine::node_graph::registry::{NodeDescriptor, StagedRegistry};
+use crate::engine::plugins::PluginError;
 
 /// A callback run after any world population (editor initial scene, scene
 /// open, standalone `load_world`, benchmark load, play-mode reset).
 ///
 /// `FnMut` because a plugin's content hook legitimately keeps state between
-/// loads (Rapier's handle bookkeeping, for one).
-pub type WorldLoadedFn = Box<dyn FnMut(&mut hecs::World, &mut Resources) + Send + Sync>;
+/// loads (Rapier's handle bookkeeping, for one). Fallible because a content
+/// moment can fail for content reasons; the editor surfaces the failure and
+/// continues, a shipped game treats it as fatal.
+pub type WorldLoadedFn =
+    Box<dyn FnMut(&mut hecs::World, &mut Resources) -> Result<(), PluginError> + Send + Sync>;
 
 /// What a plugin actually registered — collected during staging so the Plugin
 /// Manager gets its per-plugin counts with zero bookkeeping from authors.
@@ -142,7 +146,10 @@ impl PluginContext {
     /// enough for plugins whose work happens at content moments, not startup.
     pub fn on_world_loaded(
         &mut self,
-        callback: impl FnMut(&mut hecs::World, &mut Resources) + Send + Sync + 'static,
+        callback: impl FnMut(&mut hecs::World, &mut Resources) -> Result<(), PluginError>
+            + Send
+            + Sync
+            + 'static,
     ) -> &mut Self {
         self.world_loaded.push(Box::new(callback));
         self

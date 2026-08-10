@@ -10,7 +10,7 @@ use rust_engine::assets::AssetManager;
 use rust_engine::assets::{HotReloadWatcher, ReloadEvent};
 use rust_engine::engine::ecs::components::DirectionalLight as EcsDirectionalLight;
 use rust_engine::engine::ecs::components::{Camera, MeshRenderer, Name, Transform};
-use rust_engine::engine::physics::{Collider, PhysicsWorld, RigidBody};
+use rust_engine::engine::physics::{Collider, RigidBody};
 use rust_engine::engine::rendering::rendering_3d::mesh::{
     create_primitive, PRIMITIVE_CUBE, PRIMITIVE_PLANE, PRIMITIVE_SPHERE,
 };
@@ -218,15 +218,10 @@ pub fn spawn_physics_test_objects(world: &mut World, plane_mesh: usize, cube_mes
     }
 }
 
-/// Register physics entities with the physics world
-pub fn register_physics_entities(physics_world: &mut PhysicsWorld, world: &mut World) {
-    for (_, (transform, rigidbody, collider)) in world
-        .query::<(&Transform, &mut RigidBody, &mut Collider)>()
-        .iter()
-    {
-        physics_world.register_entity(transform, rigidbody, collider);
-    }
-}
+// `register_physics_entities` lived here until 39.8 P2. Body registration is
+// now `engine::physics::rebuild_bodies_from_world`, reached only through
+// `world_population::after_world_populated`, so there is exactly one seam for
+// P5 to move into `RapierPhysicsPlugin`.
 
 #[cfg(feature = "editor")]
 pub fn print_controls() {

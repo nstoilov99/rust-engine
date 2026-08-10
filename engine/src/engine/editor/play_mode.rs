@@ -66,12 +66,15 @@ pub fn create_snapshot(
 
 /// Restore the scene from a snapshot.
 /// Clears the world and rebuilds everything from the snapshot RON string.
+///
+/// This is a world-population moment: the caller must run the world-population
+/// helper afterwards, which re-registers physics bodies (the handles restored
+/// here are stale) and runs plugin `on_world_loaded` callbacks.
 pub fn restore_snapshot(
     snapshot: &PlayModeSnapshot,
     game_world: &mut GameWorld,
     hierarchy_panel: &mut HierarchyPanel,
     selection: &mut Selection,
-    physics_world: &mut PhysicsWorld,
     command_history: &mut CommandHistory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load scene from snapshot RON string (clears world internally)
@@ -103,8 +106,7 @@ pub fn restore_snapshot(
         }
     }
 
-    // Rebuild physics world from restored ECS state
-    rebuild_physics(physics_world, game_world.hecs_mut());
+    // Physics is rebuilt by the world-population helper, not here.
 
     // Clear undo/redo history (commands reference stale Entity handles)
     command_history.clear();
@@ -113,37 +115,13 @@ pub fn restore_snapshot(
 }
 
 /// Clear and rebuild the physics world from current ECS state.
+///
+/// Play *enter* uses this to resync Rapier with transforms edited in edit
+/// mode. It is not a world-population moment (nothing was loaded), so it does
+/// not run plugin `on_world_loaded` callbacks — population moments go through
+/// the world-population helper instead.
 pub fn rebuild_physics(physics_world: &mut PhysicsWorld, world: &mut hecs::World) {
-    use crate::engine::ecs::components::Transform;
-    use crate::engine::physics::{Collider as PhysCollider, RigidBody as PhysRigidBody};
-
-    // Clear all Rapier state
-    physics_world.rigid_body_set = rapier3d::prelude::RigidBodySet::new();
-    physics_world.collider_set = rapier3d::prelude::ColliderSet::new();
-    physics_world.island_manager = rapier3d::prelude::IslandManager::new();
-    physics_world.broad_phase = rapier3d::prelude::DefaultBroadPhase::new();
-    physics_world.narrow_phase = rapier3d::prelude::NarrowPhase::new();
-    physics_world.impulse_joint_set = rapier3d::prelude::ImpulseJointSet::new();
-    physics_world.multibody_joint_set = rapier3d::prelude::MultibodyJointSet::new();
-    physics_world.ccd_solver = rapier3d::prelude::CCDSolver::new();
-    physics_world.query_pipeline = rapier3d::prelude::QueryPipeline::new();
-    physics_world.reset_accumulator();
-
-    for (_, rigidbody) in world.query::<&mut PhysRigidBody>().iter() {
-        rigidbody.handle = None;
-    }
-
-    for (_, collider) in world.query::<&mut PhysCollider>().iter() {
-        collider.handle = None;
-    }
-
-    // Re-register all physics entities from ECS
-    for (_, (transform, rigidbody, collider)) in world
-        .query::<(&Transform, &mut PhysRigidBody, &mut PhysCollider)>()
-        .iter()
-    {
-        physics_world.register_entity(transform, rigidbody, collider);
-    }
+    crate::engine::physics::rebuild_bodies_from_world(physics_world, world);
 }
 
 #[cfg(test)]
