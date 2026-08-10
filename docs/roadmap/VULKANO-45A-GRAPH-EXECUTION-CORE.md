@@ -282,3 +282,69 @@ instances (edit during play = instances restart on re-enter).
    globally by name? Plan assumes same-entity + explicit target pin later.
 4. Timeline curve asset shared with the future animation task's curves, or
    separate? Plan assumes shared `.curve` from day one.
+
+## Audit addendum (2026-08-11, Claude + Codex, pre-kickoff)
+
+The plan predates Task 39.8, the node-graph design-system arc, the input
+model, and Refactor Checkpoint #6. Audited against the current tree; twelve
+findings, all folded here. These rulings amend the sections they name.
+
+**Corrections (discrepancies/stale):**
+1. **D3 — `DocDescriptors` scope grows:** validation now special-cases *two*
+   doc-dependent types (subgraph at `validate.rs:213` AND dynamically-typed
+   reroutes at `validate.rs:236`), plus the cross-asset resolver
+   (`resolver.rs`). The resolver must absorb all three, not just subgraph.
+2. **D4 — rewrite the lifecycle around what exists now:** enter-play
+   snapshots, flips mode, conditionally rebuilds physics (gated on the
+   Rapier plugin), and emits a `PlayModeChanged` event; stop restores the
+   snapshot (physics-free signature) then runs the world-population hooks.
+   "Task 24 transition hooks" as written no longer describes reality.
+3. **D4 — BeginPlay arming must NOT ride `on_world_loaded`:** play-enter is
+   deliberately not a population moment, and population hooks also run
+   while editing. Ruling: **lazy runtime-state creation by the runner
+   system itself** (`RunIfPlaying`): any `GraphRunner` entity without a
+   `GraphInstance` gets one created + BeginPlay armed on first playing
+   tick — covers initial entities and play-spawned ones uniformly, and
+   snapshot restore deletes non-serialized state so re-entry re-arms
+   naturally. No lifecycle hook needed at all.
+4. **P6/P7 — already partially shipped by the design-system arc:** inline
+   property editing (Float/Bool/Color/Enum, coalesced `SetProperty`) and
+   wire-drop-on-empty-canvas → filtered palette + auto-connect both exist
+   (`graph_editor_crusty.rs:4931`, `:2050`). Retarget P6 to: Int/String
+   field widgets + the variables panel; P7 to execution viz only.
+5. **Roadmap Task 45 contradicts this plan** (`ScriptComponent`,
+   world-mutating `NodeContext`): 45-A is authoritative; Task 45 becomes
+   the node-library/gameplay-API/debugging tail on 45-A's runtime.
+   (Roadmap section annotated.)
+
+**Additions (gaps the landed systems create):**
+6. **Graph execution ships as an `EnginePlugin`** — `"graph_scripting"`,
+   `PluginOrigin::Engine`, `PluginKind::Runtime`, staging `std_nodes`
+   registrations + the runner system atomically (Rapier pattern). Unlike
+   Rapier it gets a **Cargo feature (default-on)**: `node_graph_exec` is a
+   leaf crate, so the gate is clean and a disabled plugin genuinely strips
+   from exports — the first plugin to exercise the full D9 export policy.
+7. **P1 — new pin types cross the design system:** `pin_color`/`wire_color`
+   in `theme/tokens.rs:224` map the current families exhaustively — add
+   deliberate Int/String/Array entries + resolver tests + design-lint
+   coverage, and the exhaustive `PropValue` presentation matches in
+   `graph_editor_crusty.rs` (~:464).
+8. **P6/P7/P8 — keymap registration:** new editor actions (variables panel,
+   curve editor) register in `keymap.rs`'s action table with contexts —
+   wire-drag-create is a pointer gesture, no action needed.
+9. **P5 — persistence is three seams, not one:** `ComponentData` arms
+   (`scene_format.rs:728`) plus scene_serializer extraction/insertion
+   (`scene_serializer.rs:37`/`:447`) plus prefab loading (`prefab.rs:82`).
+10. **P8 — `.curve` touches every closed `AssetType` table**
+    (`asset_type.rs`: variant, `from_extension`, `display_name`,
+    `extensions`, `all`).
+
+**Ownership split vs Task 45.5 (double-booking resolved):**
+11. 45-A P7 ships the *trace data* + basic pulse/value hover; 45.5 owns
+    flow-bubble rendering, watches, and persisted breakpoints. 45-A P1
+    ships `graph_input`/`graph_output` + compiler splicing (and the
+    `NodeInst.title` schema field, cheap while the container migrates);
+    45.5 owns collapse-to-subgraph and rename UI.
+12. Verified still true (no change needed): the io.rs envelope placeholder,
+    closure-based command buffer flushed between stages,
+    `SystemDescriptor::writes::<T>()`, `ComponentData` closed enum.

@@ -2280,9 +2280,9 @@ pub struct SpeedBlend {
 ---
 
 ### Task 45: Visual Scripting (Node-Based)
-**Status:** 📋 Planned
-**Duration:** ~2-2.5 weeks
-**Prerequisites:** Task 40, Task 34
+**Status:** 📋 Planned — **superseded in part by Task 45-A** (`docs/roadmap/VULKANO-45A-GRAPH-EXECUTION-CORE.md`, audited 2026-08-11): the execution runtime, `GraphRunner` component (not `ScriptComponent`), events, control flow, latents, and the starter node library land in 45-A. Task 45 becomes the tail on that runtime: broader gameplay node API, debugging beyond basic viz, polish. Bullets below predate 45-A where they conflict.
+**Duration:** ~2-2.5 weeks (reduced by 45-A)
+**Prerequisites:** Task 45-A
 
 Second consumer of the Node Graph Framework.
 
