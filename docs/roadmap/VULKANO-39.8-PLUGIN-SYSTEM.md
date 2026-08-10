@@ -350,8 +350,9 @@ batteries-included. `MpServer` (WASM publish) is unaffected.
 node-registry + `on_world_loaded`), `PluginSet` with topo-ordered `build_all`,
 commit-on-Ok, failure capture. `plugins` field in `ProjectConfig` (serde-default:
 empty = all enabled) with orphan preservation + id-alias table. `GamePlugin`
-absorbed: `ClientGamePlugin` ported (now `depends_on: ["physics_rapier"]` per
-D7), old trait deleted; standalone's plugin position unified with the editor's
+absorbed: `ClientGamePlugin` ported (its `depends_on: ["physics_rapier"]`
+arrives in P5 with the plugin itself — §5.1), old trait deleted; standalone's
+plugin position unified with the editor's
 (D4). *Accept:* unit tests — ordering, cycle error, missing dep, partial-failure
 discards the stage (no half-registered plugin), manifest round-trip incl.
 orphans + alias; both binaries build all combos; access-report diff shows only
@@ -375,9 +376,9 @@ restore-across-restart; disable plugin → placeholder tab, layout not corrupted
 **P5 — Rapier extraction (D7).** Plugin crate/module layout decided here
 (recommendation: `engine/src/engine/plugins/rapier/` module first, workspace
 crate only if the dependency graph forces it — avoid pre-emptive crate
-proliferation). `on_world_loaded` wiring at all four content moments (editor
-initial, standalone `load_world`, benchmark loads, play-mode reset), debug-draw
-hook. *Accept:* physics on = identical behavior (existing physics tests +
+proliferation). `on_world_loaded` runs at every content moment via P2's
+centralized population helper (all five — incl. editor scene open, §5.5),
+debug-draw hook; `depends_on` declared here (§5.1). *Accept:* physics on = identical behavior (existing physics tests +
 play-mode smoke + access-report diff); physics off = gameplay-systems cascade
 disables cleanly (validation passes — the `PlayerInputSystem.after(PHYSICS_STEP)`
 edge must not dangle), editor boots and edits, scenes with physics components
@@ -402,7 +403,52 @@ suite, all feature combos, clippy-no-new, design lint, editor+standalone smoke).
 
 ---
 
-## 5. Risks / open questions
+## 5. Pre-implementation review rulings (2026-08-10, Claude + Codex, 2 rounds)
+
+Binding on implementation; they refine §3/§4 without changing the architecture.
+
+1. **Phasing fix (was a blocker):** `ClientGamePlugin.depends_on: ["physics_rapier"]`
+   is declared **in P5**, not P1 — the plugin it names doesn't exist until then;
+   core registers physics unconditionally through P1–P4 so the
+   `after(PHYSICS_STEP)` edge stays satisfied. No placeholder plugin.
+2. **Staging mechanics:** per-plugin scratch `Schedule` + scratch `Resources`;
+   crate-private `Schedule::append_from` (preserves stage/criteria/descriptor,
+   reassigns insertion order) and `Resources::append_from`. **Resource collision
+   = error** (a plugin never silently replaces a core or earlier-plugin
+   resource).
+3. **Registry commit:** `NodeRegistry::merge_staged` preflights before any
+   mutation, and all preflights (registry + resources) run before *any* commit.
+   Collision policy: **node id collision = skip that descriptor + warning**
+   (plugin ends "enabled with warnings" — matches D8 and the mockup's Math/Remap
+   case), domain pin re-registration OK if identical else first-wins + warning
+   naming both plugins, migration key `(type_id, from_version)` collision =
+   error.
+4. **Split borrow:** `GameWorld::world_and_resources_mut()`; `on_world_loaded`
+   callbacks live in `PluginSet`, owned by App/StandaloneApp beside `GameWorld`.
+5. **Fifth content moment (review catch):** editor scene *open* (`app.rs:2589`)
+   also populates the world. P2 centralizes **all** world population (editor
+   initial, scene open, standalone `load_world`, benchmark, play-mode reset)
+   behind one helper that runs the callbacks — and that helper **replaces** the
+   direct `register_physics_entities` call sites (else P5 double-registers
+   bodies, or registers them with the plugin disabled).
+6. **Relaunch:** atomic replace for `project.ron`/prefs/layout via a
+   platform-correct primitive (`std::fs::rename` onto an existing file is not
+   reliable on Windows — use ReplaceFileW-equivalent, temp file in the
+   destination directory); child waits on the parent *process handle* (PID
+   reuse), does not read config until parent exit. The M9.6 launcher is
+   precedent for spawning only — it never exits the parent; no code reuse
+   claimed.
+7. **Hidden cascade:** internal dependents stay in the dependency closure;
+   the warning special-cases them ("this will disable the project's gameplay
+   systems") without exposing a toggle row.
+8. **Play with gameplay cascaded off:** toolbar hint ("gameplay disabled by
+   plugin configuration") based on the **active runtime** `PluginSet`, not the
+   pending manifest — before restart, gameplay may still be live.
+9. **Callback/build failure policy at content moments:** editor = surface
+   (console + Plugin Manager state) and continue; standalone = fatal with a
+   clear message — mirrors D1's build() policy.
+
+## 6. Risks / open questions
 
 1. **P2 is the risk concentration.** Moving scene load after registration touches
    the most-trafficked constructor in the codebase. Mitigation: it's an isolated
