@@ -43,6 +43,10 @@ pub struct PluginCounts {
     pub domain_pins: usize,
     pub migrations: usize,
     pub world_loaded_callbacks: usize,
+    #[cfg(feature = "editor")]
+    pub panels: usize,
+    #[cfg(feature = "editor")]
+    pub settings_pages: usize,
 }
 
 /// Per-plugin scratch space. See the module docs.
@@ -56,6 +60,12 @@ pub struct PluginContext {
     pub(super) resource_names: HashMap<TypeId, &'static str>,
     pub(super) registry: StagedRegistry,
     pub(super) world_loaded: Vec<WorldLoadedFn>,
+    /// Staged editor panels: (panel id, title, factory).
+    #[cfg(feature = "editor")]
+    pub(super) panels: Vec<(String, String, super::panel::PluginPanelFactory)>,
+    /// Staged Project Settings pages: (page id, title, factory).
+    #[cfg(feature = "editor")]
+    pub(super) settings_pages: Vec<(String, String, super::panel::PluginSettingsFactory)>,
 }
 
 impl PluginContext {
@@ -140,6 +150,40 @@ impl PluginContext {
         self
     }
 
+    // === Editor extension points (D6) ===
+
+    /// Contribute a dock panel. It appears in View ▸ Panels, docks/floats like
+    /// any built-in panel, and persists in the layout as `plugin:<id>`.
+    ///
+    /// `id` is permanent for the same reason plugin ids are: it is written
+    /// into `editor_layout_crusty.ron`. Renaming one turns saved layouts into
+    /// missing-panel placeholders.
+    #[cfg(feature = "editor")]
+    pub fn register_panel(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        factory: impl Fn() -> Box<dyn super::panel::PluginPanel> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.panels
+            .push((id.into(), title.into(), Box::new(factory)));
+        self
+    }
+
+    /// Contribute a Project Settings page — how a plugin ships its own
+    /// settings, and how the Plugin Manager itself is built (D6).
+    #[cfg(feature = "editor")]
+    pub fn register_settings_page(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        factory: impl Fn() -> Box<dyn super::panel::PluginSettingsPage> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.settings_pages
+            .push((id.into(), title.into(), Box::new(factory)));
+        self
+    }
+
     // === Lifecycle ===
 
     /// Run `callback` after every world population. Registration alone is not
@@ -167,6 +211,10 @@ impl PluginContext {
             domain_pins: self.registry.domain_pins.len(),
             migrations: self.registry.migrations.len(),
             world_loaded_callbacks: self.world_loaded.len(),
+            #[cfg(feature = "editor")]
+            panels: self.panels.len(),
+            #[cfg(feature = "editor")]
+            settings_pages: self.settings_pages.len(),
         }
     }
 

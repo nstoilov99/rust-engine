@@ -3372,6 +3372,7 @@ impl App {
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
+            use rust_engine::engine::plugins::PluginPanelCtx;
             use rust_engine::engine::editor::toasts_crusty::toasts_panel;
             use rust_engine::engine::editor::viewport_crusty::{viewport_panel, ViewportPanelCtx};
             // A tab dragged out of a float window: the OS window follows the
@@ -3451,7 +3452,10 @@ impl App {
                 rust_engine::engine::editor::world_object::WorldObjectInfo::from_streamer(
                     &self.core.world_streamer,
                 );
-            let world = self.core.game_world.hecs_mut();
+            // Split borrow: plugin panels get both halves (P1's
+            // `world_and_resources_mut`), every built-in panel keeps taking
+            // just the hecs world.
+            let (world, world_resources) = self.core.game_world.world_and_resources_mut();
             let show_stat_fps = &mut self.editor.ui.show_stat_fps;
             let vp = &mut self.editor.viewport;
             let vp_command_history = &mut self.editor.scene.command_history;
@@ -3525,18 +3529,25 @@ impl App {
                         .map(|(k, _)| format!("graph:{k}")),
                 )
                 .collect();
+            let plugin_panel_entries = self.core.plugin_set.panel_menu_entries();
+            let plugin_panel_titles: std::collections::HashMap<String, String> =
+                plugin_panel_entries.iter().cloned().collect();
             let (titles, dirty_tabs) = dock_crusty::tab_titles(
                 &self.editor.ui.crusty_dock.tree,
-                active_scene_id,
-                &current_scene_name,
-                active_dirty,
-                &self.editor.scene.registry.dormant,
-                self.crusty_dock_drag.as_deref(),
-                &editor_dirty,
+                dock_crusty::TabTitlesCtx {
+                    active_id: active_scene_id,
+                    active_name: &current_scene_name,
+                    active_dirty,
+                    dormant: &self.editor.scene.registry.dormant,
+                    extra: self.crusty_dock_drag.as_deref(),
+                    editor_dirty: &editor_dirty,
+                    plugin_titles: &plugin_panel_titles,
+                },
             );
             let theme = self.editor.services.theme.clone();
             let has_selection = !sel.is_empty();
             let has_clipboard = !self.editor.scene.clipboard.is_empty();
+            let plugin_set = &mut self.core.plugin_set;
             let crusty_dock = &mut self.editor.ui.crusty_dock;
             let dock_drag = &mut self.crusty_dock_drag;
             let tab_ctx_target = &mut self.crusty_tab_ctx;
@@ -3586,6 +3597,7 @@ impl App {
                         has_clipboard,
                         play_settings: &mut settings.prefs.play,
                         scene_name: &current_scene_name,
+                        plugin_panels: &plugin_panel_entries,
                     },
                 );
                 if status_bar_panel(
@@ -3774,6 +3786,25 @@ impl App {
                                         ),
                                     }
                                 }
+                                Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
+                                    Some(entry) => entry.panel.draw(
+                                        ui,
+                                        rect,
+                                        &mut PluginPanelCtx {
+                                            world: &mut *world,
+                                            resources: &mut *world_resources,
+                                            play_mode: current_play_mode,
+                                        },
+                                    ),
+                                    // Plugin disabled, failed, or not in this
+                                    // build: keep the tab, say why.
+                                    None => dock_crusty::missing_document_panel(
+                                        ui,
+                                        "Plugin panel",
+                                        &id,
+                                        Some("no enabled plugin registers this panel"),
+                                    ),
+                                },
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -3860,7 +3891,11 @@ impl App {
                 {
                     use rust_engine::engine::editor::settings_crusty;
                     settings_crusty::editor_prefs_window(ui, settings, settings_keymap);
-                    settings_crusty::project_settings_window(ui, settings);
+                    settings_crusty::project_settings_window(
+                        ui,
+                        settings,
+                        plugin_set.settings_pages_mut(),
+                    );
                 }
                 if is_hovering_files {
                     dialogs_crusty::file_drop_overlay(ui, crusty_screen_rect);
@@ -4781,7 +4816,10 @@ impl App {
             rust_engine::engine::editor::world_object::WorldObjectInfo::from_streamer(
                 &core.world_streamer,
             );
-        let world = core.game_world.hecs_mut();
+        let (world, world_resources) = core.game_world.world_and_resources_mut();
+        let plugin_set = &mut core.plugin_set;
+        let plugin_panel_titles: std::collections::HashMap<String, String> =
+            plugin_set.panel_menu_entries().into_iter().collect();
         let console = &mut editor.console;
         let show_stat_fps = &mut editor.ui.show_stat_fps;
         let hierarchy = &mut editor.scene.hierarchy_panel;
@@ -4882,12 +4920,15 @@ impl App {
             let float_editor_dirty = std::collections::HashSet::new();
             let (titles, _) = dock_crusty::tab_titles(
                 &fw.tree,
-                active_scene_id,
-                &scene_name,
-                false,
-                dormant,
-                None,
-                &float_editor_dirty,
+                dock_crusty::TabTitlesCtx {
+                    active_id: active_scene_id,
+                    active_name: &scene_name,
+                    active_dirty: false,
+                    dormant,
+                    extra: None,
+                    editor_dirty: &float_editor_dirty,
+                    plugin_titles: &plugin_panel_titles,
+                },
             );
             // Subgraph double-click in this float → queued for the host to open.
             let mut float_open_request: Option<String> = None;
@@ -4997,6 +5038,23 @@ impl App {
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
+                        },
+                        Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
+                            Some(entry) => entry.panel.draw(
+                                ui,
+                                rect,
+                                &mut rust_engine::engine::plugins::PluginPanelCtx {
+                                    world: &mut *world,
+                                    resources: &mut *world_resources,
+                                    play_mode,
+                                },
+                            ),
+                            None => dock_crusty::missing_document_panel(
+                                ui,
+                                "Plugin panel",
+                                &id,
+                                Some("no enabled plugin registers this panel"),
+                            ),
                         },
                         _ => dock_crusty::placeholder_panel(
                             ui,

@@ -501,6 +501,135 @@ fn world_loaded_failure_is_reported_per_plugin_and_does_not_stop_the_others() {
     assert_eq!(later_ran.load(Ordering::SeqCst), 1, "later callbacks still run");
 }
 
+// === Editor extension points (D6) ===
+
+#[cfg(feature = "editor")]
+mod editor_seams {
+    use super::*;
+    use crate::engine::editor::dock_crusty::{parse_tab, tab_id};
+    use crate::engine::editor::EditorTab;
+    use crate::engine::plugins::panel::{
+        PluginPanel, PluginPanelCtx, PluginSettingsCtx, PluginSettingsPage,
+    };
+
+    struct Panel;
+    impl PluginPanel for Panel {
+        fn draw(
+            &mut self,
+            _ui: &mut crusty_gui::context::Ui,
+            _rect: crusty_gui::math::Rect,
+            _ctx: &mut PluginPanelCtx<'_>,
+        ) {
+        }
+    }
+
+    struct Page;
+    impl PluginSettingsPage for Page {
+        fn draw(&mut self, _ui: &mut crusty_gui::context::Ui, _ctx: &mut PluginSettingsCtx<'_>) {}
+    }
+
+    fn panel_plugin(id: &'static str, panel_id: &'static str) -> TestPlugin {
+        TestPlugin::new(PluginManifest::new(id, id), move |ctx| {
+            ctx.register_panel(panel_id, "Title", || Box::new(Panel));
+            Ok(())
+        })
+    }
+
+    /// The layout file stores `plugin:<id>`; it must survive the round trip
+    /// **whether or not** anything registers that id, or a restored layout
+    /// would silently reshape itself.
+    #[test]
+    fn plugin_tab_id_round_trips_even_for_an_unregistered_panel() {
+        let tab = EditorTab::Plugin("never_registered".to_string());
+        let id = tab_id(&tab);
+        assert_eq!(id, "plugin:never_registered");
+        assert_eq!(parse_tab(&id), Some(tab));
+        assert_eq!(
+            parse_tab("plugin:anything_at_all"),
+            Some(EditorTab::Plugin("anything_at_all".to_string())),
+            "parsing must not depend on the live plugin set"
+        );
+    }
+
+    /// A registered panel's menu entry and its persisted tab id are the same
+    /// string — that is what makes View ▸ Panels open the tab a layout restores.
+    #[test]
+    fn panel_menu_entry_matches_the_persisted_tab_id() {
+        let mut set = PluginSet::new();
+        set.add(panel_plugin("p", "my_panel"));
+        let mut live = Live::new();
+        live.build(&mut set, None);
+
+        let entries = set.panel_menu_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, tab_id(&EditorTab::Plugin("my_panel".into())));
+        assert_eq!(
+            parse_tab(&entries[0].0),
+            Some(EditorTab::Plugin("my_panel".into()))
+        );
+    }
+
+    /// Two plugins cannot share one dock tab id. Unlike a duplicate node type
+    /// there is no user document to protect, so this fails the second plugin
+    /// rather than silently letting one panel shadow the other.
+    #[test]
+    fn duplicate_panel_id_fails_the_second_plugin_and_keeps_the_first() {
+        let mut set = PluginSet::new();
+        set.add(panel_plugin("first", "shared"));
+        set.add(panel_plugin("second", "shared"));
+
+        let mut live = Live::new();
+        live.build(&mut set, None);
+
+        assert_eq!(built_ids(&set), vec!["first"]);
+        assert_eq!(set.failures().len(), 1);
+        assert_eq!(set.failures()[0].id, "second");
+        assert_eq!(set.failures()[0].phase, RegistrationPhase::Panels);
+        assert_eq!(set.panel_menu_entries().len(), 1);
+    }
+
+    /// A failing plugin's panel and settings page are discarded with the rest
+    /// of its stage — the staged-commit guarantee extends to the new seams.
+    #[test]
+    fn failed_build_discards_staged_panels_and_pages() {
+        let mut set = PluginSet::new();
+        set.add(TestPlugin::new(
+            PluginManifest::new("half", "Half"),
+            |ctx| {
+                ctx.register_panel("ghost_panel", "Ghost", || Box::new(Panel));
+                ctx.register_settings_page("ghost_page", "Ghost", || Box::new(Page));
+                Err(PluginError::build("gave up"))
+            },
+        ));
+
+        let mut live = Live::new();
+        live.build(&mut set, None);
+
+        assert!(set.panel_menu_entries().is_empty());
+        assert!(set.settings_pages().is_empty());
+        assert!(set.panel_mut("ghost_panel").is_none());
+    }
+
+    /// Counts feed the Plugin Manager rows.
+    #[test]
+    fn panel_and_page_registrations_are_counted() {
+        let mut set = PluginSet::new();
+        set.add(TestPlugin::new(PluginManifest::new("p", "P"), |ctx| {
+            ctx.register_panel("a", "A", || Box::new(Panel));
+            ctx.register_panel("b", "B", || Box::new(Panel));
+            ctx.register_settings_page("s", "S", || Box::new(Page));
+            Ok(())
+        }));
+
+        let mut live = Live::new();
+        live.build(&mut set, None);
+
+        let counts = set.records()[0].counts;
+        assert_eq!(counts.panels, 2);
+        assert_eq!(counts.settings_pages, 1);
+    }
+}
+
 // === Manifest ===
 
 #[test]

@@ -55,6 +55,10 @@ pub struct MenuBarCtx<'a> {
     pub play_settings: &'a mut PlaySettings,
     /// Active scene name for the centered "<scene> — Crusty" identity.
     pub scene_name: &'a str,
+    /// `(tab id, title)` for each live plugin panel (39.8 D6). Listed under
+    /// View ▸ Panels after the built-ins, so a plugin's panel is reachable
+    /// the same way every other panel is.
+    pub plugin_panels: &'a [(String, String)],
 }
 
 /// Brighten a status color for the hovered play-control state.
@@ -253,6 +257,20 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                     let is_open = dock_state.is_tab_open(tab);
                     if ui.menu_item(format!(" {}", name)) && !is_open {
                         dock_state.open_tab(tab.clone());
+                    }
+                }
+
+                // Plugin-contributed panels (39.8 D6), below the built-ins.
+                if !ctx.plugin_panels.is_empty() {
+                    ui.separator();
+                    for (tab_id, title) in ctx.plugin_panels {
+                        let Some(tab) = super::dock_crusty::parse_tab(tab_id) else {
+                            continue;
+                        };
+                        let is_open = dock_state.is_tab_open(&tab);
+                        if ui.menu_item(format!(" {}", title)) && !is_open {
+                            dock_state.open_tab(tab);
+                        }
                     }
                 }
 

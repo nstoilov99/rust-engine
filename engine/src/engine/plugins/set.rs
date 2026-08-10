@@ -53,6 +53,14 @@ pub struct PluginSet {
     /// moved between builds must not lose its intent.
     orphans: Vec<String>,
     world_loaded: Vec<(String, WorldLoadedFn)>,
+    /// Live panels contributed by built plugins (D6). A disabled or failed
+    /// plugin contributes none — which is exactly what makes a restored
+    /// layout degrade to a missing-panel placeholder instead of silently
+    /// dropping the tab.
+    #[cfg(feature = "editor")]
+    panels: Vec<super::panel::PluginPanelEntry>,
+    #[cfg(feature = "editor")]
+    settings_pages: Vec<super::panel::PluginSettingsEntry>,
 }
 
 impl PluginSet {
@@ -94,6 +102,11 @@ impl PluginSet {
         self.disabled.clear();
         self.orphans.clear();
         self.world_loaded.clear();
+        #[cfg(feature = "editor")]
+        {
+            self.panels.clear();
+            self.settings_pages.clear();
+        }
 
         // Take ownership so per-plugin commits can borrow `self` mutably.
         let plugins = std::mem::take(&mut self.plugins);
@@ -197,6 +210,30 @@ impl PluginSet {
             }
         }
 
+        // Preflight: panel / settings-page id collisions. Unlike a duplicate
+        // node type — where skipping protects a document that references it —
+        // nothing user-authored is at stake here, and two panels fighting over
+        // one dock tab id is a plain bug. So it fails the plugin.
+        #[cfg(feature = "editor")]
+        {
+            for (id, _, _) in &ctx.panels {
+                if self.panels.iter().any(|p| &p.id == id) {
+                    return Err(PluginError::at(
+                        RegistrationPhase::Panels,
+                        format!("panel id '{id}' is already registered by another plugin"),
+                    ));
+                }
+            }
+            for (id, _, _) in &ctx.settings_pages {
+                if self.settings_pages.iter().any(|p| &p.id == id) {
+                    return Err(PluginError::at(
+                        RegistrationPhase::Panels,
+                        format!("settings page id '{id}' is already registered by another plugin"),
+                    ));
+                }
+            }
+        }
+
         // Node registry: preflights and commits atomically inside merge_staged.
         let mut warnings = Vec::new();
         if ctx.touches_node_registry() {
@@ -216,6 +253,27 @@ impl PluginSet {
         targets.resources.append_from(ctx.resources);
         for callback in ctx.world_loaded {
             self.world_loaded.push((manifest.id.clone(), callback));
+        }
+        #[cfg(feature = "editor")]
+        {
+            for (id, title, factory) in ctx.panels {
+                let panel = factory();
+                self.panels.push(super::panel::PluginPanelEntry {
+                    plugin_id: manifest.id.clone(),
+                    id,
+                    title,
+                    panel,
+                });
+            }
+            for (id, title, factory) in ctx.settings_pages {
+                let page = factory();
+                self.settings_pages.push(super::panel::PluginSettingsEntry {
+                    plugin_id: manifest.id.clone(),
+                    id,
+                    title,
+                    page,
+                });
+            }
         }
 
         Ok(PluginRecord {
@@ -305,6 +363,36 @@ impl PluginSet {
     /// Every compiled-in plugin, enabled or not.
     pub fn manifests(&self) -> Vec<PluginManifest> {
         self.plugins.iter().map(|p| p.manifest()).collect()
+    }
+
+    // === Editor extension points (D6) ===
+
+    /// `(tab id, title)` for every live plugin panel — feeds View ▸ Panels and
+    /// the dock tab strip.
+    #[cfg(feature = "editor")]
+    pub fn panel_menu_entries(&self) -> Vec<(String, String)> {
+        self.panels
+            .iter()
+            .map(|p| (p.tab_id(), p.title.clone()))
+            .collect()
+    }
+
+    /// Look up a live panel by its panel id (the part after `plugin:`).
+    /// `None` means "no plugin registered this id in this session" — the
+    /// dispatch sites turn that into a missing-panel placeholder.
+    #[cfg(feature = "editor")]
+    pub fn panel_mut(&mut self, id: &str) -> Option<&mut super::panel::PluginPanelEntry> {
+        self.panels.iter_mut().find(|p| p.id == id)
+    }
+
+    #[cfg(feature = "editor")]
+    pub fn settings_pages_mut(&mut self) -> &mut [super::panel::PluginSettingsEntry] {
+        &mut self.settings_pages
+    }
+
+    #[cfg(feature = "editor")]
+    pub fn settings_pages(&self) -> &[super::panel::PluginSettingsEntry] {
+        &self.settings_pages
     }
 
     // === Lifecycle ===

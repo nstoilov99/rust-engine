@@ -22,6 +22,8 @@ pub enum SecondaryWindowKind {
     InputSettings,
     InputAction,
     InputContext,
+    /// A plugin-contributed panel (Task 39.8 D6), keyed by panel id.
+    Plugin,
     #[cfg(feature = "editor-debug")]
     IconInspector,
 }

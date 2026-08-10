@@ -14,6 +14,10 @@
 //! Plan: `docs/roadmap/VULKANO-39.8-PLUGIN-SYSTEM.md`.
 
 mod context;
+/// Editor panel / settings-page extension points (D6). Editor-only: the
+/// traits mention crusty-gui types.
+#[cfg(feature = "editor")]
+pub mod panel;
 mod set;
 
 /// Fixture node types (D5) — the first plugin, and the doc example.
@@ -27,6 +31,11 @@ mod tests;
 pub use context::{PluginContext, PluginCounts, WorldLoadedFn};
 #[cfg(feature = "dev_nodes")]
 pub use dev_nodes::DevNodesPlugin;
+#[cfg(feature = "editor")]
+pub use panel::{
+    PluginPanel, PluginPanelCtx, PluginPanelEntry, PluginSettingsCtx, PluginSettingsEntry,
+    PluginSettingsPage,
+};
 pub use set::{PluginRecord, PluginSet, PluginTargets};
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +159,8 @@ pub enum RegistrationPhase {
     Resources,
     /// Committing staged node types / domain pins / migrations.
     NodeRegistry,
+    /// Committing staged editor panels / settings pages.
+    Panels,
     /// Running an `on_world_loaded` callback at a content moment.
     WorldLoaded,
 }
@@ -162,6 +173,7 @@ impl RegistrationPhase {
             RegistrationPhase::Systems => "system registration",
             RegistrationPhase::Resources => "resource registration",
             RegistrationPhase::NodeRegistry => "node registration",
+            RegistrationPhase::Panels => "panel registration",
             RegistrationPhase::WorldLoaded => "world-loaded callback",
         }
     }

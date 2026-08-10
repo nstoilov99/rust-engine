@@ -36,6 +36,7 @@ pub fn tab_id(tab: &EditorTab) -> String {
         EditorTab::GraphEditor(key) => format!("graph:{key}"),
         EditorTab::InputActionEditor(key) => format!("ia:{key}"),
         EditorTab::InputContextEditor(key) => format!("mc:{key}"),
+        EditorTab::Plugin(id) => format!("plugin:{id}"),
     }
 }
 
@@ -63,6 +64,10 @@ pub fn parse_tab(id: &str) -> Option<EditorTab> {
             "graph" => Some(EditorTab::GraphEditor(key.to_string())),
             "ia" => Some(EditorTab::InputActionEditor(key.to_string())),
             "mc" => Some(EditorTab::InputContextEditor(key.to_string())),
+            // Always parses, even for a panel id nothing registers this
+            // session: the tab must keep its place in the tree and degrade
+            // visibly, not vanish and quietly reshape the user's layout.
+            "plugin" => Some(EditorTab::Plugin(key.to_string())),
             _ => None,
         };
     }
@@ -198,15 +203,36 @@ impl CrustyDockLayout {
 /// driven from the host's editor state rather than the scene registry. The
 /// second return value is the set of dirty tabs, shown as a warning dot in the
 /// tab strip.
+/// Everything [`tab_titles`] needs besides the tree itself.
+pub struct TabTitlesCtx<'a> {
+    pub active_id: SceneId,
+    pub active_name: &'a str,
+    pub active_dirty: bool,
+    pub dormant: &'a [DormantScene],
+    /// A tab currently torn off the tree (ghost drag), so its card still
+    /// shows a display title.
+    pub extra: Option<&'a str>,
+    /// Tab ids of per-file editors (mesh, graph, …) with unsaved changes.
+    pub editor_dirty: &'a std::collections::HashSet<String>,
+    /// Plugin panel *tab id* -> registered title. An id missing from this map
+    /// is a panel no plugin registered this session; its tab keeps the id as
+    /// its label, so the placeholder body has something to name.
+    pub plugin_titles: &'a HashMap<String, String>,
+}
+
 pub fn tab_titles(
     tree: &DockNode,
-    active_id: SceneId,
-    active_name: &str,
-    active_dirty: bool,
-    dormant: &[DormantScene],
-    extra: Option<&str>,
-    editor_dirty: &std::collections::HashSet<String>,
+    ctx: TabTitlesCtx<'_>,
 ) -> (HashMap<String, String>, std::collections::HashSet<String>) {
+    let TabTitlesCtx {
+        active_id,
+        active_name,
+        active_dirty,
+        dormant,
+        extra,
+        editor_dirty,
+        plugin_titles,
+    } = ctx;
     let mut ids = Vec::new();
     tree.collect_tabs(&mut ids);
     if let Some(extra) = extra {
@@ -237,6 +263,10 @@ pub fn tab_titles(
                     }
                     name.to_string()
                 }
+                Some(EditorTab::Plugin(_)) => plugin_titles
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| id.clone()),
                 Some(tab) => {
                     // Per-file editor tabs (mesh, graph) get their dirty dot
                     // from the host's editor state, keyed by tab id.

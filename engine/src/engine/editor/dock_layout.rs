@@ -36,6 +36,13 @@ pub enum EditorTab {
     InputActionEditor(String),
     /// Per-file mapping context editor (keyed by file path)
     InputContextEditor(String),
+    /// A panel contributed by a plugin (Task 39.8 D6), keyed by panel id.
+    ///
+    /// The one open variant: a plugin panel that is not registered this
+    /// session (plugin disabled, failed, or absent from this build) still
+    /// parses and still occupies its place in a restored layout — it just
+    /// draws the missing-panel placeholder.
+    Plugin(String),
 }
 
 impl EditorTab {
@@ -79,6 +86,9 @@ impl EditorTab {
                     .unwrap_or_else(|| key.clone());
                 format!("MC \u{2014} {}", name)
             }
+            // Fallback only: the registered title wins wherever the live
+            // plugin set is reachable (`dock_crusty::tab_titles`).
+            EditorTab::Plugin(id) => id.clone(),
         }
     }
 
@@ -101,6 +111,7 @@ impl EditorTab {
             EditorTab::GraphEditor(key) => format!("tab_graph_{}", key),
             EditorTab::InputActionEditor(key) => format!("tab_ia_{}", key),
             EditorTab::InputContextEditor(key) => format!("tab_mc_{}", key),
+            EditorTab::Plugin(id) => format!("tab_plugin_{}", id),
         }
     }
 
@@ -120,6 +131,7 @@ impl EditorTab {
             EditorTab::GraphEditor(key) => Some((K::Graph, key.clone())),
             EditorTab::InputActionEditor(key) => Some((K::InputAction, key.clone())),
             EditorTab::InputContextEditor(key) => Some((K::InputContext, key.clone())),
+            EditorTab::Plugin(id) => Some((K::Plugin, id.clone())),
         }
     }
 }

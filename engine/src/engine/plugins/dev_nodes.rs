@@ -46,7 +46,100 @@ impl EnginePlugin for DevNodesPlugin {
         for descriptor in dev_node_descriptors() {
             ctx.register_node(descriptor);
         }
+
+        // The D6 extension points, exercised for real (P4). Also the doc
+        // example: this is everything a plugin needs to ship a panel.
+        #[cfg(feature = "editor")]
+        {
+            ctx.register_panel(DEV_NODES_ID, "Dev Nodes", || {
+                Box::new(DevNodesPanel::default())
+            });
+            ctx.register_settings_page(DEV_NODES_ID, "Dev Nodes", || {
+                Box::new(DevNodesSettingsPage)
+            });
+        }
+
         Ok(())
+    }
+}
+
+/// A deliberately plain panel: it proves the seam carries a live world,
+/// live resources and the play mode, and that per-panel state survives
+/// between frames.
+#[cfg(feature = "editor")]
+#[derive(Default)]
+pub struct DevNodesPanel {
+    /// Frames drawn — visible proof the instance persists across frames.
+    frames: u64,
+}
+
+#[cfg(feature = "editor")]
+impl super::panel::PluginPanel for DevNodesPanel {
+    fn draw(
+        &mut self,
+        ui: &mut crusty_gui::context::Ui,
+        _rect: crusty_gui::math::Rect,
+        ctx: &mut super::panel::PluginPanelCtx<'_>,
+    ) {
+        use crusty_gui::widgets::Label;
+
+        self.frames = self.frames.saturating_add(1);
+        let style = ui.style();
+        let dim = style.palette.text_secondary;
+        let mono = style.palette.text_mono;
+        let item = style.spacing.item;
+
+        Label::new("Dev Nodes").show(ui);
+        ui.add_space(item);
+        Label::new(format!("entities: {}", ctx.world.len()))
+            .color(mono)
+            .show(ui);
+        ui.add_space(item);
+        Label::new(format!("play mode: {:?}", ctx.play_mode))
+            .color(mono)
+            .show(ui);
+        ui.add_space(item);
+        let time = ctx
+            .resources
+            .get::<crate::engine::ecs::resources::Time>()
+            .map(|t| t.frame)
+            .unwrap_or(0);
+        Label::new(format!("engine frame: {time}"))
+            .color(mono)
+            .show(ui);
+        ui.add_space(item);
+        Label::new(format!("panel frames drawn: {}", self.frames))
+            .color(dim)
+            .show(ui);
+    }
+}
+
+/// A Project Settings page contributed by a plugin — the same seam P6 builds
+/// the Plugin Manager on.
+#[cfg(feature = "editor")]
+pub struct DevNodesSettingsPage;
+
+#[cfg(feature = "editor")]
+impl super::panel::PluginSettingsPage for DevNodesSettingsPage {
+    fn draw(
+        &mut self,
+        ui: &mut crusty_gui::context::Ui,
+        ctx: &mut super::panel::PluginSettingsCtx<'_>,
+    ) {
+        use crusty_gui::widgets::Label;
+
+        let style = ui.style();
+        Label::new("Fixture node types for exercising the graph editor.")
+            .color(style.palette.text_secondary)
+            .show(ui);
+        ui.add_space(style.spacing.item);
+        Label::new(format!("project: {}", ctx.project.name))
+            .color(style.palette.text_mono)
+            .show(ui);
+        ui.add_space(style.spacing.item);
+        Label::new("Disable this plugin in project.ron and restart to remove it.")
+            .color(style.palette.text_secondary)
+            .show(ui);
     }
 }
 
@@ -139,6 +232,69 @@ mod tests {
         assert!(set.records().is_empty());
         assert_eq!(registry.iter().count(), 0);
         assert!(registry.get("test_add").is_none());
+    }
+
+    /// D6: the panel and settings page come up with the plugin, are keyed by
+    /// the tab id the layout persists, and are counted for the manager.
+    #[cfg(feature = "editor")]
+    #[test]
+    fn enabled_plugin_contributes_its_panel_and_settings_page() {
+        let mut registry = NodeRegistry::new();
+        let mut schedule = Schedule::new();
+        let mut resources = Resources::new();
+        let mut set = PluginSet::new();
+        set.add(DevNodesPlugin);
+        set.build_all(
+            PluginTargets {
+                schedule: &mut schedule,
+                resources: &mut resources,
+                node_registry: &mut registry,
+            },
+            None,
+        );
+
+        assert!(set.failures().is_empty(), "{:?}", set.failures());
+        assert_eq!(
+            set.panel_menu_entries(),
+            vec![("plugin:dev_nodes".to_string(), "Dev Nodes".to_string())],
+            "the View menu entry and the persisted tab id are the same string"
+        );
+        assert!(set.panel_mut("dev_nodes").is_some());
+        assert!(
+            set.panel_mut("not_a_panel").is_none(),
+            "an unknown panel id resolves to None, which the dispatch sites \
+             render as the missing-panel placeholder"
+        );
+        assert_eq!(set.settings_pages().len(), 1);
+        assert_eq!(set.settings_pages()[0].title, "Dev Nodes");
+
+        let counts = set.records()[0].counts;
+        assert_eq!(counts.panels, 1);
+        assert_eq!(counts.settings_pages, 1);
+    }
+
+    /// The acceptance the placeholder path depends on: with the plugin off,
+    /// nothing registers the panel, so a restored layout has no panel to draw.
+    #[cfg(feature = "editor")]
+    #[test]
+    fn disabled_plugin_contributes_no_panel_or_settings_page() {
+        let mut registry = NodeRegistry::new();
+        let mut schedule = Schedule::new();
+        let mut resources = Resources::new();
+        let mut set = PluginSet::new();
+        set.add(DevNodesPlugin);
+        set.build_all(
+            PluginTargets {
+                schedule: &mut schedule,
+                resources: &mut resources,
+                node_registry: &mut registry,
+            },
+            Some(&[crate::engine::plugins::PluginEntry::new(DEV_NODES_ID, false)]),
+        );
+
+        assert!(set.panel_menu_entries().is_empty());
+        assert!(set.panel_mut("dev_nodes").is_none());
+        assert!(set.settings_pages().is_empty());
     }
 
     /// The manifest says what this plugin costs an export: nothing.

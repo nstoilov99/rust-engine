@@ -1885,7 +1885,14 @@ fn draw_prefs_footer(ui: &mut Ui, footer: Rect, state: &mut SettingsState) {
 
 // ── Project Settings ─────────────────────────────────────────────────────
 
-pub fn project_settings_window(ui: &mut Ui, state: &mut SettingsState) {
+/// `plugin_pages` are the live plugin-contributed settings pages (39.8 D6).
+/// They are appended after the built-in categories, so a page appears and
+/// disappears exactly with its plugin's enablement — no separate bookkeeping.
+pub fn project_settings_window(
+    ui: &mut Ui,
+    state: &mut SettingsState,
+    plugin_pages: &mut [crate::engine::plugins::PluginSettingsEntry],
+) {
     if !state.project_open {
         return;
     }
@@ -1916,13 +1923,24 @@ pub fn project_settings_window(ui: &mut Ui, state: &mut SettingsState) {
                 c.build_target != s.build_target || c.build_output_dir != s.build_output_dir,
             ];
 
+            // Built-in categories plus one per plugin page. `label_store`
+            // backs the borrowed label slices for the length of the call.
+            let label_store: Vec<[&str; 1]> =
+                plugin_pages.iter().map(|p| [p.title.as_str()]).collect();
+            let mut cats: Vec<(&str, &[&str])> = PROJECT_CATS.to_vec();
+            for (page, labels) in plugin_pages.iter().zip(label_store.iter()) {
+                cats.push((page.title.as_str(), labels.as_slice()));
+            }
+            let mut cat_mod = cat_mod.to_vec();
+            cat_mod.resize(cats.len(), false);
+
             let (content, footer, filter) = shell_chrome(
                 ui,
                 "project",
                 "project",
                 PROJECT_FILE,
                 &mut state.project_search,
-                PROJECT_CATS,
+                &cats,
                 &mut state.project_cat,
                 &cat_mod,
             );
@@ -1947,6 +1965,20 @@ pub fn project_settings_window(ui: &mut Ui, state: &mut SettingsState) {
                         .spacing(0.0)
                         .show(ui, |ui| {
                             draw_project_rows(ui, &filter, selected, project, &saved);
+                            // A plugin page owns everything below the built-in
+                            // categories; it draws only when its own row is the
+                            // selected one (or search is showing everything).
+                            for (i, page) in plugin_pages.iter_mut().enumerate() {
+                                let idx = PROJECT_CATS.len() + i;
+                                if !filter.cat_visible(idx, selected, &[page.title.as_str()]) {
+                                    continue;
+                                }
+                                section_bar(ui, &page.title.clone());
+                                page.page
+                                    .draw(ui, &mut crate::engine::plugins::PluginSettingsCtx {
+                                        project,
+                                    });
+                            }
                         });
                 },
             );
