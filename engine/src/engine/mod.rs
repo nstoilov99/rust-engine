@@ -58,8 +58,8 @@ pub mod animation;
 // Audio system (Kira integration)
 pub mod audio;
 
-// Plugin trait for engine-game boundary
-pub mod plugin;
+// Plugin system (Task 39.8) — engine/game/extension boundary
+pub mod plugins;
 
 // Re-export commonly used types
 pub use assets::{load_gltf, load_model, load_texture, LoadedMesh, Model};

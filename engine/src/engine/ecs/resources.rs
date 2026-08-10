@@ -58,6 +58,20 @@ impl Resources {
     pub fn contains<T: 'static>(&self) -> bool {
         self.map.contains_key(&TypeId::of::<T>())
     }
+
+    /// Same, by erased type — the plugin-system collision preflight works from
+    /// `TypeId`s it collected while staging.
+    #[inline]
+    pub(crate) fn contains_id(&self, type_id: TypeId) -> bool {
+        self.map.contains_key(&type_id)
+    }
+
+    /// Move every resource out of `other` into `self` (Task 39.8 staged
+    /// commit). Callers preflight for collisions first — this overwrites, so
+    /// an unchecked call would let a plugin silently replace a core resource.
+    pub(crate) fn append_from(&mut self, other: Resources) {
+        self.map.extend(other.map);
+    }
 }
 
 impl Default for Resources {

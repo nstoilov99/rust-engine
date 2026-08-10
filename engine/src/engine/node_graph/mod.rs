@@ -26,7 +26,8 @@ pub use doc::{
 pub use io::{load_graph, parse_graph, save_graph, serialize_graph, GraphIoError};
 pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};
 pub use registry::{
-    MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, PreviewKind, RegistryError,
+    MergeReport, MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, PreviewKind,
+    RegistryError, StagedRegistry,
     REROUTE_IN,
     REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };

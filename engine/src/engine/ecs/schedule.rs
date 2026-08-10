@@ -263,6 +263,19 @@ impl Schedule {
         self.add_system(sys, stage)
     }
 
+    /// Append every system from `other`, preserving each one's stage, run
+    /// criteria, enabled flag and access descriptor, and reassigning its
+    /// insertion order into this schedule's sequence (Task 39.8 staged
+    /// commit). Relative order within `other` is preserved.
+    pub(crate) fn append_from(&mut self, other: Schedule) {
+        for mut registered in other.systems {
+            registered.insertion_order = self.next_order;
+            self.next_order += 1;
+            self.systems.push(registered);
+        }
+        self.needs_sort = true;
+    }
+
     /// Sort systems by (stage, insertion_order) if needed.
     fn ensure_sorted(&mut self) {
         if self.needs_sort {

@@ -1,41 +1,61 @@
 //! Game client plugin — registers gameplay systems with the engine.
+//!
+//! Runs through `PluginSet` like every other plugin, but is flagged
+//! `internal`: no engine lists the game's own module as a toggleable plugin,
+//! so it never appears in the Plugin Manager and the manifest cannot switch it
+//! off. (Its `depends_on: ["physics_rapier"]` arrives with the Rapier plugin.)
 
 use game_shared::commands::GameCommandBuffer;
 use rust_engine::engine::ecs::access::SystemDescriptor;
-use rust_engine::engine::ecs::resources::Resources;
-use rust_engine::engine::ecs::schedule::{RunIfPlaying, Schedule, Stage};
-use rust_engine::engine::plugin::GamePlugin;
+use rust_engine::engine::ecs::schedule::{RunIfPlaying, Stage};
+use rust_engine::engine::plugins::{
+    EnginePlugin, PluginContext, PluginError, PluginKind, PluginManifest, PluginOrigin, PluginSet,
+};
 
 use crate::systems::{CharacterMovementSystem, GameCommandExecutor, PlayerInputSystem};
 
 /// Client-side game plugin that registers player input, movement, and command systems.
 pub struct ClientGamePlugin;
 
-impl GamePlugin for ClientGamePlugin {
-    fn build(&self, schedule: &mut Schedule, resources: &mut Resources) {
-        resources.insert(GameCommandBuffer::new());
+impl EnginePlugin for ClientGamePlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest::new("game_client", "Game Client")
+            .with_description("Player input, character movement and game command execution.")
+            .with_origin(PluginOrigin::Project)
+            .with_kind(PluginKind::Runtime)
+            .internal()
+    }
 
-        schedule.add_system_described_with_criteria(
+    fn build(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+        ctx.insert_resource(GameCommandBuffer::new());
+
+        ctx.add_system_with_criteria(
             PlayerInputSystem,
             Stage::Update,
             PlayerInputSystem::descriptor(),
             RunIfPlaying,
         );
-        schedule.add_system_described_with_criteria(
+        ctx.add_system_with_criteria(
             CharacterMovementSystem,
             Stage::Update,
             CharacterMovementSystem::descriptor(),
             RunIfPlaying,
         );
-        schedule.add_system_described_with_criteria(
+        ctx.add_system_with_criteria(
             GameCommandExecutor,
             Stage::PostUpdate,
             SystemDescriptor::new("GameCommandExecutor").writes_resource::<GameCommandBuffer>(),
             RunIfPlaying,
         );
-    }
 
-    fn name(&self) -> &str {
-        "ClientGamePlugin"
+        Ok(())
     }
+}
+
+/// The plugin set both binaries run. Plugin *inclusion* is Rust code plus
+/// Cargo features; *activation* is the `project.ron` manifest.
+pub fn client_plugin_set() -> PluginSet {
+    let mut set = PluginSet::new();
+    set.add(ClientGamePlugin);
+    set
 }

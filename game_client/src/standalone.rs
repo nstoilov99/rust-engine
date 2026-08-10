@@ -56,6 +56,10 @@ pub struct StandaloneApp {
     plankton_emitter_buffer:
         Vec<rust_engine::engine::rendering::frame_packet::PlanktonEmitterFrameData>,
     schedule: Schedule,
+    /// The built plugin set — owns the `on_world_loaded` callbacks that run
+    /// at every content moment (wired in P2).
+    #[allow(dead_code)]
+    plugin_set: rust_engine::engine::plugins::PluginSet,
     frame_number: u64,
     render_thread: Option<RenderThread>,
     /// Net session (M5); `Some` when launched with `--connect`.
@@ -90,7 +94,7 @@ const OFFLINE_SCENE: &str = "scenes/main.scene";
 impl StandaloneApp {
     pub fn new(
         window: Arc<Window>,
-        plugin: &dyn rust_engine::engine::plugin::GamePlugin,
+        mut plugin_set: rust_engine::engine::plugins::PluginSet,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up (standalone)...");
 
@@ -227,6 +231,30 @@ impl StandaloneApp {
                 .reads::<PhysVelocity>()
                 .after("AnimationUpdateSystem"),
         );
+
+        // Plugins register *before* transform propagation, matching the
+        // editor (39.8 D4): gameplay systems that move entities must run
+        // before their transforms are propagated. Exports resolve plugin
+        // activation at build time, so there is no manifest filter here.
+        plugin_set.build_all(
+            rust_engine::engine::plugins::PluginTargets {
+                schedule: &mut schedule,
+                resources: game_world.resources_mut(),
+                node_registry: None,
+            },
+            None,
+        );
+        if let Some(failure) = plugin_set.failures().first() {
+            // A shipped game missing a plugin it needs should not limp.
+            return Err(format!(
+                "plugin '{}' failed during {}: {}",
+                failure.id,
+                failure.phase.label(),
+                failure.error
+            )
+            .into());
+        }
+
         schedule.add_system_described(
             TransformPropagationSystem,
             Stage::PostUpdate,
@@ -239,7 +267,6 @@ impl StandaloneApp {
                 .writes::<TransformDirty>(),
         );
 
-        plugin.build(&mut schedule, game_world.resources_mut());
         let validation_errors = schedule.validate();
         if !validation_errors.is_empty() {
             for err in &validation_errors {
@@ -309,6 +336,7 @@ impl StandaloneApp {
             shadow_caster_buffer: Vec::with_capacity(64),
             plankton_emitter_buffer: Vec::with_capacity(32),
             schedule,
+            plugin_set,
             frame_number: 0,
             render_thread: Some(render_thread),
             net,

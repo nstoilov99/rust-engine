@@ -116,7 +116,7 @@ impl ApplicationHandler for GameApp {
         match App::new(
             window.clone(),
             self.runtime_flags,
-            &plugin::ClientGamePlugin,
+            plugin::client_plugin_set(),
         ) {
             Ok(app) => {
                 app.print_controls();
@@ -399,7 +399,7 @@ impl ApplicationHandler for GameApp {
             }
         };
 
-        match standalone::StandaloneApp::new(window.clone(), &plugin::ClientGamePlugin) {
+        match standalone::StandaloneApp::new(window.clone(), plugin::client_plugin_set()) {
             Ok(app) => {
                 println!("Game ready!");
                 self.app = Some(app);

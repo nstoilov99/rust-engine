@@ -82,6 +82,13 @@ impl GameWorld {
         &mut self.resources
     }
 
+    /// Split borrow of the two halves a plugin lifecycle callback needs
+    /// (`PluginSet::run_world_loaded`) — `hecs_mut()` and `resources_mut()`
+    /// cannot both be held at once.
+    pub fn world_and_resources_mut(&mut self) -> (&mut hecs::World, &mut Resources) {
+        (&mut self.hecs_world, &mut self.resources)
+    }
+
     /// Convenience: get an immutable resource reference.
     pub fn resource<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.resources.get::<T>()

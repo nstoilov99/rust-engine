@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::build_dialog::BuildTarget;
+use crate::engine::plugins::PluginEntry;
 
 pub const PROJECT_FILE: &str = "project.ron";
 
@@ -43,6 +44,12 @@ pub struct ProjectConfig {
     // Build defaults (seed the Build Game dialog)
     pub build_target: BuildTarget,
     pub build_output_dir: String,
+
+    /// Plugin activation (Task 39.8). Empty = every compiled-in plugin is
+    /// enabled; an absent id is enabled. Entries naming a plugin that is not
+    /// in this build are kept verbatim so moving a project between builds
+    /// doesn't lose the user's intent.
+    pub plugins: Vec<PluginEntry>,
 }
 
 impl Default for ProjectConfig {
@@ -63,6 +70,7 @@ impl Default for ProjectConfig {
             stream_max_in_flight: 2,
             build_target: BuildTarget::Standalone,
             build_output_dir: "build/export".to_string(),
+            plugins: Vec::new(),
         }
     }
 }

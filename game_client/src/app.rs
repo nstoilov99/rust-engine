@@ -99,6 +99,10 @@ pub struct CoreApp {
     pub reload_rx: Receiver<ReloadEvent>,
     pub game_world: GameWorld,
     pub schedule: Schedule,
+    /// The built plugin set — kept beside `game_world` because it owns the
+    /// `on_world_loaded` callbacks that run at every content moment, and the
+    /// per-plugin records the Plugin Manager reads.
+    pub plugin_set: rust_engine::engine::plugins::PluginSet,
     pub deferred_renderer: DeferredRenderer,
     pub skinning: SkinningBackend,
     pub game_loop: GameLoop,
@@ -338,7 +342,7 @@ impl App {
     pub fn new(
         window: Arc<Window>,
         runtime_flags: EditorRuntimeFlags,
-        plugin: &dyn rust_engine::engine::plugin::GamePlugin,
+        mut plugin_set: rust_engine::engine::plugins::PluginSet,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up...");
 
@@ -485,7 +489,35 @@ impl App {
                 .after("AnimationUpdateSystem"),
             RunIfPlaying,
         );
-        plugin.build(&mut schedule, game_world.resources_mut());
+        // Registration is staged per plugin and committed only on success, so
+        // a failing plugin registers nothing. The editor surfaces the failure
+        // and boots anyway (the Plugin Manager shows it); only a shipped game
+        // treats it as fatal.
+        //
+        // `node_registry: None` until P2 moves registry construction ahead of
+        // plugin build; no plugin registers node types yet.
+        plugin_set.build_all(
+            rust_engine::engine::plugins::PluginTargets {
+                schedule: &mut schedule,
+                resources: game_world.resources_mut(),
+                node_registry: None,
+            },
+            Some(&project_config.plugins),
+        );
+        for failure in plugin_set.failures() {
+            eprintln!(
+                "plugin '{}' failed during {}: {}",
+                failure.id,
+                failure.phase.label(),
+                failure.error
+            );
+        }
+        for record in plugin_set.records() {
+            for warning in &record.warnings {
+                eprintln!("plugin '{}': {warning}", record.manifest.id);
+            }
+        }
+
         schedule.add_system_described(
             TransformPropagationSystem,
             Stage::PostUpdate,
@@ -580,6 +612,7 @@ impl App {
             reload_rx,
             game_world,
             schedule,
+            plugin_set,
             deferred_renderer,
             skinning,
             game_loop: GameLoop::new(),

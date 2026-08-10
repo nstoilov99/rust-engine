@@ -157,7 +157,17 @@ impl NodeDescriptor {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegistryError {
     DuplicateId(String),
-    InvalidDescriptor { id: String, reason: String },
+    InvalidDescriptor {
+        id: String,
+        reason: String,
+    },
+    /// Two migration steps claim the same `(type_id, from_version)`. Unlike a
+    /// duplicate node id this is not survivable: silently picking one would
+    /// change how documents upgrade.
+    DuplicateMigration {
+        type_id: String,
+        from_version: u32,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -167,6 +177,13 @@ impl std::fmt::Display for RegistryError {
             RegistryError::InvalidDescriptor { id, reason } => {
                 write!(f, "invalid node descriptor '{id}': {reason}")
             }
+            RegistryError::DuplicateMigration {
+                type_id,
+                from_version,
+            } => write!(
+                f,
+                "migration for '{type_id}' v{from_version} already registered"
+            ),
         }
     }
 }
@@ -175,6 +192,28 @@ impl std::error::Error for RegistryError {}
 
 /// A single migration step for one node type, from one version to the next.
 pub type MigrationFn = Box<dyn Fn(&mut super::migrate::MigrationCtx) + Send + Sync>;
+
+/// One plugin's pending registry contributions, collected by `PluginContext`
+/// and merged in one shot by [`NodeRegistry::merge_staged`].
+#[derive(Default)]
+pub struct StagedRegistry {
+    pub nodes: Vec<NodeDescriptor>,
+    pub domain_pins: Vec<(String, Option<u8>)>,
+    pub migrations: Vec<((String, u32), MigrationFn)>,
+}
+
+/// What a [`NodeRegistry::merge_staged`] call actually did. The counts are
+/// what the Plugin Manager shows; the warnings are the "enabled with
+/// warnings" state.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergeReport {
+    pub warnings: Vec<String>,
+    /// Descriptors inserted (staged minus id-collision skips).
+    pub nodes_registered: usize,
+    /// Domain pins newly registered (identical re-registrations don't count).
+    pub domain_pins_registered: usize,
+    pub migrations_registered: usize,
+}
 
 /// Registry of node types, consumer domain pin types, and migration chains.
 /// `BTreeMap` keeps iteration deterministic (stable search-menu ordering,
@@ -186,6 +225,10 @@ pub struct NodeRegistry {
     /// (the theme hashes the slug); absent = not registered (theme renders
     /// `neutral`, the only unknown-color case).
     domain_pins: BTreeMap<String, Option<u8>>,
+    /// Which plugin registered a domain pin first, so a later conflicting
+    /// registration can name both sides in its warning. Only populated via
+    /// [`NodeRegistry::merge_staged`].
+    domain_pin_owners: BTreeMap<String, String>,
     migrations: BTreeMap<(String, u32), MigrationFn>,
 }
 
@@ -199,6 +242,18 @@ impl NodeRegistry {
     /// pure nodes may not have exec pins, impure nodes require exec flow,
     /// pin slugs must be unique per side, the subgraph slug is reserved.
     pub fn register(&mut self, desc: NodeDescriptor) -> Result<(), RegistryError> {
+        Self::validate_descriptor(&desc)?;
+        if self.nodes.contains_key(&desc.id) {
+            return Err(RegistryError::DuplicateId(desc.id));
+        }
+        self.nodes.insert(desc.id.clone(), desc);
+        Ok(())
+    }
+
+    /// The descriptor-level invariants — the checks that need no document and
+    /// no registry state. Shared by [`register`](Self::register) and
+    /// [`merge_staged`](Self::merge_staged).
+    fn validate_descriptor(desc: &NodeDescriptor) -> Result<(), RegistryError> {
         let invalid = |reason: &str| {
             Err(RegistryError::InvalidDescriptor {
                 id: desc.id.clone(),
@@ -228,11 +283,100 @@ impl NodeRegistry {
                 }
             }
         }
-        if self.nodes.contains_key(&desc.id) {
-            return Err(RegistryError::DuplicateId(desc.id));
-        }
-        self.nodes.insert(desc.id.clone(), desc);
         Ok(())
+    }
+
+    /// Merge one plugin's staged registrations (Task 39.8).
+    ///
+    /// Every check runs before any mutation: on `Err` the registry is exactly
+    /// as it was. Collision policy, per the 39.8 rulings:
+    ///
+    /// - **node id already taken** — the descriptor is skipped and a warning
+    ///   returned; the plugin ends up "enabled with warnings", not failed.
+    /// - **invalid descriptor** — hard error. That is a bug in the plugin, not
+    ///   two plugins disagreeing.
+    /// - **domain pin re-registered** — identical is a no-op; different is
+    ///   first-wins plus a warning naming both registrants.
+    /// - **migration key `(type_id, from_version)` taken** — hard error.
+    pub fn merge_staged(
+        &mut self,
+        plugin_id: &str,
+        staged: StagedRegistry,
+    ) -> Result<MergeReport, RegistryError> {
+        let mut warnings = Vec::new();
+
+        // --- preflight: nodes ---
+        let mut nodes = Vec::with_capacity(staged.nodes.len());
+        let mut claimed: BTreeSet<String> = BTreeSet::new();
+        for desc in staged.nodes {
+            Self::validate_descriptor(&desc)?;
+            if self.nodes.contains_key(&desc.id) || !claimed.insert(desc.id.clone()) {
+                warnings.push(format!(
+                    "node type '{}' is already registered — plugin '{plugin_id}' skipped it",
+                    desc.id
+                ));
+                continue;
+            }
+            nodes.push(desc);
+        }
+
+        // --- preflight: domain pins ---
+        let mut pins: Vec<(String, Option<u8>)> = Vec::new();
+        for (slug, key) in staged.domain_pins {
+            let existing = self
+                .domain_pins
+                .get(&slug)
+                .copied()
+                .or_else(|| pins.iter().find(|(s, _)| *s == slug).map(|(_, k)| *k));
+            match existing {
+                Some(existing_key) if existing_key == key => {}
+                Some(_) => {
+                    let owner = self
+                        .domain_pin_owners
+                        .get(&slug)
+                        .cloned()
+                        .unwrap_or_else(|| plugin_id.to_string());
+                    warnings.push(format!(
+                        "domain pin '{slug}' re-registered with a different ramp key by \
+                         plugin '{plugin_id}' — keeping the registration from '{owner}'"
+                    ));
+                }
+                None => pins.push((slug, key)),
+            }
+        }
+
+        // --- preflight: migrations ---
+        let mut migration_keys: BTreeSet<(String, u32)> = BTreeSet::new();
+        for ((type_id, from_version), _) in &staged.migrations {
+            let key = (type_id.clone(), *from_version);
+            if self.migrations.contains_key(&key) || !migration_keys.insert(key) {
+                return Err(RegistryError::DuplicateMigration {
+                    type_id: type_id.clone(),
+                    from_version: *from_version,
+                });
+            }
+        }
+
+        // --- commit (nothing below can fail) ---
+        let report = MergeReport {
+            nodes_registered: nodes.len(),
+            domain_pins_registered: pins.len(),
+            migrations_registered: staged.migrations.len(),
+            warnings,
+        };
+        for desc in nodes {
+            self.nodes.insert(desc.id.clone(), desc);
+        }
+        for (slug, key) in pins {
+            self.domain_pin_owners
+                .insert(slug.clone(), plugin_id.to_string());
+            self.domain_pins.insert(slug, key);
+        }
+        for (key, step) in staged.migrations {
+            self.migrations.insert(key, step);
+        }
+
+        Ok(report)
     }
 
     pub fn get(&self, id: &str) -> Option<&NodeDescriptor> {
