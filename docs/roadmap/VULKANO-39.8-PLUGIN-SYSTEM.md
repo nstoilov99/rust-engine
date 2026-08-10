@@ -284,6 +284,21 @@ are the contract, matching D1/D3):
   manager — no engine surveyed lists the game's own code as a toggleable plugin
   (resolves §5 Q4).
 
+**Design reconciliation (2026-08-10, against
+`docs/mockup/Crusty Plugin Manager.dc.html` — the visual source of truth for
+P6):** adopt the mockup's layout, state glyph/chip ladder, load-phase
+progression display, warning surface, filter segments, empty state, and footer.
+v1 deltas (the mock was designed tier-2-flavored):
+1. Manifest facts: crate/module path + Cargo feature + kind + origin — no
+   `Entry: *.dll`, no `plugin.ron` file path (those return in tier 2).
+2. "Blocked — engine version mismatch" state is impossible in tier 1 → replaced
+   by the **"not in this build"** orphan state (D3), which the mock lacks.
+3. Add Engine/Project group headers and the kind chip
+   ("editor-only" / "ships with exported game") per the engine survey.
+4. Lives in **Project Settings**, not Editor Preferences — the plugin set is
+   `project.ron`, VCS-checked-in, Ctrl+S dirty semantics (D3).
+5. `Ctrl+F`, not `⌘F` (input-model spec: Windows keys, no Mac glyphs).
+
 ### D9 — Export integration: features become the packaging tool
 
 Extend `run_cargo_build` (build_dialog.rs) and `scripts/export_windows.ps1` to
@@ -403,6 +418,9 @@ suite, all feature combos, clippy-no-new, design lint, editor+standalone smoke).
 4. ~~Open: should `ClientGamePlugin` be manifest-visible?~~ **Resolved by the
    2026-08-10 engine survey (D8):** hardwired `internal: true`, hidden from the
    manager — no surveyed engine lists the game's own module as a plugin.
-5. **Open for review:** module vs workspace crate for `RapierPhysicsPlugin` (P5
-   recommends module-first; a crate is more honest tier-1 "plugin shape" but adds
-   workspace churn — cheap to revisit at P5 kickoff).
+5. ~~Open: module vs workspace crate for `RapierPhysicsPlugin`?~~ **Resolved
+   (user decision, 2026-08-10): module first** —
+   `engine/src/engine/plugins/rapier/`, registering only through
+   `PluginContext`. Promote to a workspace crate when something forces the
+   boundary (an in-house physics backend as a sibling plugin, or tier 2) — the
+   move is mechanical then; premature `pub` API surface is not.
