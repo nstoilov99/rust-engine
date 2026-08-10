@@ -32,3 +32,5 @@ perf.data*
 /target/doc/
 nul
 editor_graph_state.ron
+.p2_play.txt
+.p2_play.err.txt

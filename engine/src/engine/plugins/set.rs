@@ -407,12 +407,20 @@ impl PluginSet {
     ///
     /// One callback failing does not stop the others — the caller decides what
     /// a failure means (editor: surface and continue; standalone: fatal).
+    ///
+    /// Failures are also recorded in [`failures`](Self::failures), so the
+    /// Plugin Manager stops showing a plugin as Enabled after its content hook
+    /// blew up. Every callback re-runs at every content moment, so the previous
+    /// moment's world-loaded failures are replaced rather than accumulated —
+    /// a hook that succeeds this time clears its own row.
     #[must_use]
     pub fn run_world_loaded(
         &mut self,
         world: &mut hecs::World,
         resources: &mut Resources,
     ) -> Vec<PluginFailure> {
+        self.failures
+            .retain(|f| f.phase != RegistrationPhase::WorldLoaded);
         let mut failures = Vec::new();
         for (id, callback) in &mut self.world_loaded {
             if let Err(error) = callback(world, resources) {
@@ -423,6 +431,7 @@ impl PluginSet {
                 });
             }
         }
+        self.failures.extend(failures.iter().cloned());
         failures
     }
 

@@ -501,6 +501,54 @@ fn world_loaded_failure_is_reported_per_plugin_and_does_not_stop_the_others() {
     assert_eq!(later_ran.load(Ordering::SeqCst), 1, "later callbacks still run");
 }
 
+/// The Plugin Manager reads `failures()`; a content-hook failure that only
+/// came back as a return value left the plugin showing Enabled forever.
+#[test]
+fn world_loaded_failure_is_recorded_in_the_sets_failure_list() {
+    let fail_next = Arc::new(AtomicUsize::new(1));
+
+    let mut set = PluginSet::new();
+    let f = Arc::clone(&fail_next);
+    set.add(TestPlugin::new(PluginManifest::new("bad", "Bad"), move |ctx| {
+        let f = Arc::clone(&f);
+        ctx.on_world_loaded(move |_w, _r| {
+            if f.load(Ordering::SeqCst) > 0 {
+                Err(PluginError::build("content moment blew up"))
+            } else {
+                Ok(())
+            }
+        });
+        Ok(())
+    }));
+
+    let mut live = Live::new();
+    live.build(&mut set, None);
+    assert!(set.failures().is_empty(), "build itself succeeded");
+
+    let mut world = hecs::World::new();
+    let _ = set.run_world_loaded(&mut world, &mut live.resources);
+
+    assert_eq!(set.failures().len(), 1);
+    assert_eq!(set.failures()[0].id, "bad");
+    assert_eq!(set.failures()[0].phase, RegistrationPhase::WorldLoaded);
+    assert!(
+        set.is_active("bad"),
+        "the record stays — its committed systems really are registered"
+    );
+
+    // A second content moment re-runs every callback, so its outcome replaces
+    // the previous one instead of piling up.
+    let _ = set.run_world_loaded(&mut world, &mut live.resources);
+    assert_eq!(set.failures().len(), 1, "no duplicate per content moment");
+
+    fail_next.store(0, Ordering::SeqCst);
+    let _ = set.run_world_loaded(&mut world, &mut live.resources);
+    assert!(
+        set.failures().is_empty(),
+        "a hook that succeeds again clears its own failure"
+    );
+}
+
 // === Editor extension points (D6) ===
 
 #[cfg(feature = "editor")]

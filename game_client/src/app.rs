@@ -484,7 +484,7 @@ impl App {
         // The console does not exist yet, so plugin diagnostics are collected
         // here and seeded into it below. P6 turns this data into the Plugin
         // Manager's Failed / Enabled-with-warnings rows; it has to flow now.
-        let plugin_diagnostics: Vec<LogMessage> = {
+        let mut plugin_diagnostics: Vec<LogMessage> = {
             let mut out = Vec::new();
             for failure in plugin_set.failures() {
                 let line = format!(
@@ -564,10 +564,20 @@ impl App {
             );
         }
 
-        crate::world_population::report_failures(&crate::world_population::after_world_populated(
-            &mut game_world,
-            &mut plugin_set,
-        ));
+        // The first content moment. Its callback failures arrive *after* the
+        // diagnostics block above ran, so they are appended here — otherwise
+        // the console would never mention them and the only trace would be
+        // stderr (no logger is installed in `game_client`).
+        {
+            let failures =
+                crate::world_population::after_world_populated(&mut game_world, &mut plugin_set);
+            crate::world_population::report_failures(&failures);
+            for failure in &failures {
+                plugin_diagnostics.push(LogMessage::error(crate::world_population::describe(
+                    failure,
+                )));
+            }
+        }
 
         let mut hierarchy_panel = HierarchyPanel::new();
         if !root_entities.is_empty() {
@@ -3559,9 +3569,14 @@ impl App {
                 let entries = &self.editor.ui.settings.project.plugins;
                 let features = rust_engine::engine::plugins::export_features(&manifests, entries);
                 let listed = rust_engine::engine::plugins::exported_plugins(&manifests, entries);
+                // …and the dirty flag alongside it: `features` above comes from
+                // the *edited* config, so an unsaved toggle must block the
+                // build rather than silently ship.
+                let dirty = self.editor.ui.settings.project_dirty();
                 let bd = &mut self.editor.play.build_dialog;
                 bd.settings.features = features;
                 bd.settings.exported_plugins = listed;
+                bd.settings.project_dirty = dirty;
             }
             let plugin_set = &mut self.core.plugin_set;
             let crusty_dock = &mut self.editor.ui.crusty_dock;
@@ -5250,6 +5265,43 @@ impl App {
     #[must_use]
     pub fn take_relaunch_request(&mut self) -> bool {
         if !std::mem::take(&mut self.editor.ui.settings.plugins.relaunch_requested) {
+            return false;
+        }
+
+        // A relaunch is a process exit, so anything that would lose work or be
+        // cut off refuses it outright. Project settings are saved below (they
+        // are the thing being relaunched *for*); scenes are not — silently
+        // auto-saving someone's edits is worse than refusing.
+        //
+        // The manifest edit stays pending, so the manager's banner is still
+        // there once the user has dealt with the reason.
+        let mut refusals: Vec<&str> = Vec::new();
+        if self.play_mode() != PlayMode::Edit {
+            // Exiting mid-play would drop the edit-world snapshot taken on
+            // enter, i.e. every edit made before pressing Play.
+            refusals.push("Stop play mode before relaunching");
+        }
+        let scene = &self.editor.scene;
+        if scene.active_dirty
+            || scene.command_history.is_dirty()
+            || scene.registry.dormant.iter().any(|d| d.dirty)
+        {
+            refusals.push("Save scenes before relaunching");
+        }
+        if matches!(
+            self.editor.play.build_dialog.state,
+            rust_engine::engine::editor::build_dialog::BuildState::Building
+                | rust_engine::engine::editor::build_dialog::BuildState::CopyingContent
+        ) {
+            refusals.push("Wait for the build to finish before relaunching");
+        }
+        if !refusals.is_empty() {
+            for reason in refusals {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Relaunch cancelled — {reason}")));
+            }
             return false;
         }
 

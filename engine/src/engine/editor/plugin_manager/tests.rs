@@ -135,6 +135,43 @@ fn failed_state_carries_the_phase_for_the_progression() {
     }
 }
 
+/// A plugin whose *content hook* failed built fine — its systems are really
+/// registered — but the manager must not keep calling it Enabled.
+#[test]
+fn world_loaded_failure_makes_a_built_plugin_read_as_failed() {
+    let (model, mut set, project) = model_of(
+        vec![TestPlugin {
+            manifest: manifest("hooked"),
+            build: Box::new(|ctx| {
+                ctx.on_world_loaded(|_w, _r| Err(PluginError::build("hook blew up")));
+                Ok(())
+            }),
+        }],
+        vec![],
+        false,
+    );
+    assert_eq!(model.get("hooked").unwrap().state, RowState::Enabled);
+
+    let mut world = hecs::World::new();
+    let mut resources = Resources::new();
+    let _ = set.run_world_loaded(&mut world, &mut resources);
+
+    let model = PluginManagerModel::build(&set, &project);
+    let row = model.get("hooked").expect("row");
+    match &row.state {
+        RowState::Failed { phase, message } => {
+            assert_eq!(*phase, RegistrationPhase::WorldLoaded);
+            assert!(message.contains("hook blew up"), "{message}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(row.state.is_problem());
+    assert!(
+        row.counts.is_some(),
+        "the record survives — what it registered is still registered"
+    );
+}
+
 #[test]
 fn blocked_missing_dependency_names_the_dependency() {
     let (model, _set, _p) = model_of(

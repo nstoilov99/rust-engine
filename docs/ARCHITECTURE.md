@@ -508,8 +508,24 @@ standalone `load_world`, benchmark load, play-mode stop. Play-mode *enter* is
 deliberately not one — nothing is loaded there; it resyncs Rapier with
 edit-mode transform edits.
 
+A callback failure is recorded in `PluginSet::failures()` as well as returned,
+so the Plugin Manager stops calling that plugin Enabled; the record stays
+(its committed systems really are registered). Each content moment re-runs
+every callback, so the previous moment's world-loaded failures are *replaced*
+— a hook that succeeds again clears its own row. Editor policy is
+surface-and-continue (console + manager), shipped-game policy is fatal.
+
 `ctx.register_debug_draw(cb)` contributes to the debug overlay: the engine owns
 *when* it runs, the plugin owns *what* it draws.
+
+### Restart flow
+
+The manager's **Relaunch now** saves `project.ron` + layout, spawns a
+replacement process (which parks on the parent's process *handle*) and exits.
+Because it is a process exit, it refuses outright — with a console error, the
+banner left pending — while play mode is active (the edit-world snapshot would
+be lost), while any scene is dirty (scenes are never auto-saved for you), or
+while a build is running.
 
 ### Editor extension points
 
@@ -532,6 +548,12 @@ manifest and needs none. Builds pass
 `--no-default-features` is mandatory because `default` contains the non-plugin
 `hud`, which the base list carries back in
 (`plugins::EXPORT_BASE_FEATURES`).
+
+The feature list is recomputed each frame from the *edited* project config, so
+a build is refused while `project.ron` is dirty ("Save project settings
+(Ctrl+S) before exporting") — an export must never consume a toggle the user
+never committed. Module publishes (`MpServer`) read no features and are not
+blocked.
 
 **`EditorOnly` plugins never contribute a feature, regardless of enabled
 state** — Unreal's Editor-module-type behaviour. Enabled-but-unused runtime

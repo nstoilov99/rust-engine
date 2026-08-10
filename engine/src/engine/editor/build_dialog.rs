@@ -120,6 +120,11 @@ pub struct BuildSettings {
     /// Runtime plugins going into this export, for the dialog's "what am I
     /// shipping" list. `None` feature = compiled in unconditionally.
     pub exported_plugins: Vec<crate::engine::plugins::ExportedPlugin>,
+    /// Whether `project.ron` has unsaved edits. `features` above is recomputed
+    /// every frame from the *in-memory* project config, so a pending plugin
+    /// toggle would otherwise be baked into an export the user never saved.
+    /// Refreshed alongside `features` by the editor.
+    pub project_dirty: bool,
 }
 
 impl Default for BuildSettings {
@@ -136,6 +141,7 @@ impl Default for BuildSettings {
                 .map(|s| (*s).to_string())
                 .collect(),
             exported_plugins: Vec::new(),
+            project_dirty: false,
         }
     }
 }
@@ -158,6 +164,48 @@ fn validate_mp_settings(server_uri: &str, module: &str) -> Result<(), String> {
         return Err(format!("invalid server URI '{server_uri}' (must be http(s)://...)"));
     }
     Ok(())
+}
+
+/// Does an unsaved `project.ron` block this target (39.8 D9 review finding)?
+///
+/// The export's feature set is derived from the project's plugin manifest, and
+/// `BuildSettings::features` is refreshed from the *edited* config — so an exe
+/// export would otherwise consume a toggle the user never committed. A module
+/// publish reads no features and is left alone.
+pub fn export_blocked_by_dirty_project(target: BuildTarget, project_dirty: bool) -> bool {
+    target != BuildTarget::MpServer && project_dirty
+}
+
+/// The lines an exe export writes to the build log before cargo starts:
+/// what is being built, where its feature set came from, and which runtime
+/// plugins it therefore ships (D9 visibility).
+fn export_preamble(settings: &BuildSettings) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "Starting {} build for {} ({})...",
+            settings.profile.label(),
+            settings.platform.label(),
+            settings.target.label()
+        ),
+        format!(
+            "Features (from the saved project.ron): {}",
+            settings.features.join(", ")
+        ),
+    ];
+    // "Why is my game 40 MB" gets a one-glance answer, and the fix is a
+    // documented toggle away.
+    if settings.exported_plugins.is_empty() {
+        lines.push("Runtime plugins: none".to_string());
+    } else {
+        lines.push("Runtime plugins in this export:".to_string());
+        for p in &settings.exported_plugins {
+            lines.push(match &p.cargo_feature {
+                Some(f) => format!("  - {} ({f})", p.name),
+                None => format!("  - {} (always compiled in)", p.name),
+            });
+        }
+    }
+    lines
 }
 
 pub struct BuildDialog {
@@ -263,6 +311,18 @@ impl BuildDialog {
         }
 
         let target = self.settings.target;
+
+        if export_blocked_by_dirty_project(target, self.settings.project_dirty) {
+            let msg = "Save project settings (Ctrl+S) before exporting — the export's \
+                       plugin feature set comes from the saved project.ron."
+                .to_string();
+            if let Ok(mut log) = self.build_log.lock() {
+                log.push(format!("ERROR: {msg}"));
+            }
+            self.state = BuildState::Failed { error: msg };
+            return;
+        }
+
         if target != BuildTarget::Standalone {
             if let Err(e) = validate_mp_settings(&self.settings.server_uri, &self.settings.module)
             {
@@ -294,24 +354,8 @@ impl BuildDialog {
         }
 
         if let Ok(mut log) = self.build_log.lock() {
-            log.push(format!(
-                "Starting {} build for {} ({})...",
-                self.settings.profile.label(),
-                self.settings.platform.label(),
-                target.label()
-            ));
-            // D9 visibility: "why is my game 40 MB" gets a one-glance answer,
-            // and the fix is a documented toggle away.
-            if self.settings.exported_plugins.is_empty() {
-                log.push("Runtime plugins: none".to_string());
-            } else {
-                log.push("Runtime plugins in this export:".to_string());
-                for p in &self.settings.exported_plugins {
-                    log.push(match &p.cargo_feature {
-                        Some(f) => format!("  - {} ({f})", p.name),
-                        None => format!("  - {} (always compiled in)", p.name),
-                    });
-                }
+            for line in export_preamble(&self.settings) {
+                log.push(line);
             }
         }
 
@@ -609,4 +653,60 @@ fn cook_stale_collision(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 39.8 D9 review finding: `settings.features` is recomputed every frame
+    /// from the *in-memory* project config, so an unsaved plugin toggle would
+    /// otherwise be baked into an export the user never saved.
+    ///
+    /// Only the refusal path is driven through `start_build` — the accepting
+    /// path spawns a real cargo/publish process, so the policy itself is
+    /// asserted through [`export_blocked_by_dirty_project`].
+    #[test]
+    fn dirty_project_settings_refuse_an_exe_export() {
+        let mut dialog = BuildDialog::new();
+        dialog.settings.project_dirty = true;
+        dialog.start_build();
+
+        match &dialog.state {
+            BuildState::Failed { error } => assert!(error.contains("Ctrl+S"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let log = dialog.build_log.lock().expect("lock");
+        assert!(
+            log.iter().any(|l| l.contains("Save project settings")),
+            "the reason has to reach the build log: {log:?}"
+        );
+    }
+
+    #[test]
+    fn the_dirty_guard_covers_exe_targets_only() {
+        for target in [BuildTarget::Standalone, BuildTarget::MpClient] {
+            assert!(export_blocked_by_dirty_project(target, true), "{target:?}");
+            assert!(!export_blocked_by_dirty_project(target, false), "{target:?}");
+        }
+        // A module publish reads no Cargo features, so `project.ron` cannot
+        // leak into it — blocking it would be a spurious refusal.
+        assert!(!export_blocked_by_dirty_project(BuildTarget::MpServer, true));
+    }
+
+    /// The export's provenance is stated in the log the user is already
+    /// reading, next to the plugin list.
+    #[test]
+    fn feature_provenance_is_stated_in_the_build_log() {
+        let mut settings = BuildSettings::default();
+        settings.features = vec!["hud".to_string(), "physics_rapier".to_string()];
+
+        let lines = export_preamble(&settings);
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("Features ("))
+            .unwrap_or_else(|| panic!("no provenance line in {lines:?}"));
+        assert!(line.contains("saved project.ron"), "{line}");
+        assert!(line.contains("physics_rapier"), "{line}");
+    }
 }
