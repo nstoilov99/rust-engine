@@ -1,5 +1,5 @@
 (
-    version: 1,
+    version: 2,
     realm: Shared,
     nodes: [
         (
@@ -10,13 +10,47 @@
             properties: {},
             subgraph: None,
             tint: None,
+            title: None,
+        ),
+        (
+            id: 1,
+            type_id: "graph_input",
+            type_version: 1,
+            position: (-140.0, 80.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 2,
+            type_id: "graph_output",
+            type_version: 1,
+            position: (400.0, 80.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
         ),
     ],
-    edges: [],
+    edges: [
+        (
+            from_node: 1,
+            from_pin: "amount",
+            to_node: 0,
+            to_pin: "a",
+        ),
+        (
+            from_node: 0,
+            from_pin: "sum",
+            to_node: 2,
+            to_pin: "result",
+        ),
+    ],
     comments: [
         (
             rect: (60.0, 200.0, 380.0, 50.0),
-            text: "Reusable subgraph: declares one Float input and one Float output.",
+            text: "Reusable subgraph: the interface binding pair carries values across the boundary.",
             tint: None,
             font_scale: 1.0,
             anchor: None,
@@ -38,4 +72,5 @@
             ty: Float,
         ),
     ],
+    variables: [],
 )

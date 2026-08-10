@@ -104,11 +104,15 @@ pub struct Palettes {
     /// Asset kind -> ramp index (tile edges, typed icons; bright tone).
     pub assets: &'static [(&'static str, u8)],
     /// PinType -> ramp index (pin dots + wires; bright tone). Order:
-    /// float, vec, color, bool, enum, texture, mesh, entity.
+    /// float, vec, color, bool, enum, texture, mesh, entity, int, string,
+    /// array.
     /// Exec is not in the ramp (white @ 92%) and Domain resolves through
     /// [`domain_ramp_index`] — neither belongs in this array. (v1.2: the old
     /// ninth `domain_default` slot was 9/violet, pixel-identical to Color.)
-    pub pins: [u8; 8],
+    ///
+    /// v1.3 (Task 45-A): the last three slots are appended, never inserted —
+    /// the existing indices are the published mapping.
+    pub pins: [u8; 11],
     /// Reserved category name -> ramp index (2px node edge, GroupBox tint;
     /// deep tone). Unreserved names: hash % 12. Dev = neutral, by assignment.
     pub categories: &'static [(&'static str, u8)],
@@ -129,8 +133,13 @@ pub const PALETTES: Palettes = Palettes {
         ("geometry", 10),  // magenta — moved off gray; gray = unknown, only
         ("animation", 11), // rose
     ],
-    //      float vec color bool enum texture mesh entity
-    pins: [4, 8, 9, 0, 11, 1, 10, 7],
+    //      float vec color bool enum texture mesh entity int string array
+    //   Int/3 lime sits one ramp step from Float/4 green: numbers read as a
+    //   family, the same "adjacent = related" logic that puts Vec/8 blue next
+    //   to Color/9 violet. String/5 teal and Array/6 cyan take the two
+    //   remaining cool slots, clear of every scalar-numeric hue so a
+    //   collection never reads as a number. Gold/2 stays free.
+    pins: [4, 8, 9, 0, 11, 1, 10, 7, 3, 5, 6],
     categories: &[
         ("Event", 0),
         ("Flow", 2),
@@ -233,6 +242,12 @@ pub fn pin_color(registry: Option<&NodeRegistry>, ty: &PinType) -> Color {
         PinType::Texture => b(5),
         PinType::Mesh => b(6),
         PinType::Entity => b(7),
+        PinType::Int => b(8),
+        PinType::String => b(9),
+        // An array is its own hue, not a shade of its element type: at pin-dot
+        // size a "green-ish" dot next to a green dot is not a distinction, and
+        // shape already carries the element type's family in the label.
+        PinType::Array(_) => b(10),
         PinType::Domain(k) => match domain_ramp_index(registry, k) {
             Some(i) => ramp()[i as usize].bright,
             None => neutral().bright,
@@ -865,6 +880,58 @@ mod tests {
         let unreg = PinType::Domain("nope".into());
         assert_eq!(pin_color(Some(&reg), &unreg), neutral().bright);
         assert_eq!(pin_color(Some(&reg), &PinType::Domain("curve".into())), ramp()[7].bright);
+    }
+
+    /// The Task 45-A pin types resolve to their own deliberate ramp slots —
+    /// appended, so the published mapping of the eight Task 40 types is
+    /// untouched — and every one of them is a *distinct* hue.
+    #[test]
+    fn new_pin_types_take_deliberate_ramp_slots() {
+        assert_eq!(PALETTES.pins[..8], [4, 8, 9, 0, 11, 1, 10, 7]);
+
+        // Int sits one ramp step from Float: numbers read as a family.
+        assert_eq!(pin_color(None, &PinType::Int), ramp()[3].bright);
+        assert_eq!(pin_color(None, &PinType::Float), ramp()[4].bright);
+        assert_eq!(pin_color(None, &PinType::String), ramp()[5].bright);
+        assert_eq!(pin_color(None, &PinType::Array(Box::new(PinType::Float))), ramp()[6].bright);
+        // An array's hue is its own, not its element type's — at pin-dot size
+        // a shade of green next to green is not a distinction.
+        assert_ne!(
+            pin_color(None, &PinType::Array(Box::new(PinType::Float))),
+            pin_color(None, &PinType::Float)
+        );
+        assert_eq!(
+            pin_color(None, &PinType::Array(Box::new(PinType::Float))),
+            pin_color(None, &PinType::Array(Box::new(PinType::Entity))),
+            "nesting does not change the slot"
+        );
+
+        // No two pin types collide, and none of them lands on neutral (which
+        // means "unregistered", the only unknown-color case).
+        let all = [
+            PinType::Float,
+            PinType::Int,
+            PinType::Vec3,
+            PinType::Color,
+            PinType::Bool,
+            PinType::Enum,
+            PinType::String,
+            PinType::Array(Box::new(PinType::Int)),
+            PinType::Texture,
+            PinType::Mesh,
+            PinType::Entity,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert_ne!(pin_color(None, a), neutral().bright, "{a:?} must not read as unknown");
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(pin_color(None, a), pin_color(None, b), "{a:?} vs {b:?}");
+            }
+        }
+
+        // Wires follow their pins at 80%, new types included.
+        for ty in [PinType::Int, PinType::String, PinType::Array(Box::new(PinType::Int))] {
+            assert_eq!(wire_color(None, &ty), pin_color(None, &ty).with_alpha(0.80));
+        }
     }
 
     #[test]

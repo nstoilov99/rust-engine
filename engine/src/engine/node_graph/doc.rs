@@ -11,7 +11,12 @@ use std::collections::BTreeMap;
 
 /// Container schema version written to every saved doc. Bump on container-
 /// level changes and add a rewrite step in `io::parse_graph`'s envelope pass.
-pub const GRAPH_DOC_VERSION: u32 = 1;
+///
+/// - **v1** — Task 40 shape.
+/// - **v2** — Task 45-A P1: `GraphDoc::variables` and `NodeInst::title`. Both
+///   default, so a v1 document still *parses*; the migration exists so a
+///   loaded v1 doc is stamped v2 and every consumer sees exactly one shape.
+pub const GRAPH_DOC_VERSION: u32 = 2;
 
 /// The realm a graph targets. Validated against each node type's
 /// [`NodeRealm`] so authority violations are caught at edit time, before any
@@ -68,17 +73,86 @@ impl NodeRealm {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PinType {
     Float,
+    /// 32-bit signed. `i32` rather than `i64` (Task 45-A resolved Q2):
+    /// SpacetimeDB-friendlier, and no graph needs 64-bit loop counters.
+    Int,
     Vec2,
     Vec3,
     Vec4,
     Color,
     Bool,
     Enum,
+    String,
+    /// Homogeneous list of another pin type. Nesting is legal
+    /// (`Array(Array(Float))`); `Array(Exec)` is not meaningful and no
+    /// descriptor should declare one.
+    Array(Box<PinType>),
     Texture,
     Mesh,
     Entity,
     Exec,
     Domain(String),
+}
+
+impl PinType {
+    /// The domain slug this type ultimately names, seeing through `Array`.
+    /// `Array(Domain("shader"))` is still a shader pin as far as
+    /// registration is concerned.
+    pub fn domain_slug(&self) -> Option<&str> {
+        match self {
+            PinType::Domain(d) => Some(d.as_str()),
+            PinType::Array(inner) => inner.domain_slug(),
+            _ => None,
+        }
+    }
+
+    /// Stable lowercase spelling, used where a pin type has to survive as a
+    /// *string* — today the `event_custom` payload declaration
+    /// (`std_events::EVENT_PAYLOAD_PREFIX`). Round-trips through
+    /// [`PinType::from_type_slug`].
+    pub fn type_slug(&self) -> String {
+        match self {
+            PinType::Float => "float".to_string(),
+            PinType::Int => "int".to_string(),
+            PinType::Vec2 => "vec2".to_string(),
+            PinType::Vec3 => "vec3".to_string(),
+            PinType::Vec4 => "vec4".to_string(),
+            PinType::Color => "color".to_string(),
+            PinType::Bool => "bool".to_string(),
+            PinType::Enum => "enum".to_string(),
+            PinType::String => "string".to_string(),
+            PinType::Array(inner) => format!("array<{}>", inner.type_slug()),
+            PinType::Texture => "texture".to_string(),
+            PinType::Mesh => "mesh".to_string(),
+            PinType::Entity => "entity".to_string(),
+            PinType::Exec => "exec".to_string(),
+            PinType::Domain(d) => format!("domain:{d}"),
+        }
+    }
+
+    /// Inverse of [`PinType::type_slug`]. `None` for anything unrecognized —
+    /// stale data to fix, never a guessed type.
+    pub fn from_type_slug(s: &str) -> Option<PinType> {
+        Some(match s {
+            "float" => PinType::Float,
+            "int" => PinType::Int,
+            "vec2" => PinType::Vec2,
+            "vec3" => PinType::Vec3,
+            "vec4" => PinType::Vec4,
+            "color" => PinType::Color,
+            "bool" => PinType::Bool,
+            "enum" => PinType::Enum,
+            "string" => PinType::String,
+            "texture" => PinType::Texture,
+            "mesh" => PinType::Mesh,
+            "entity" => PinType::Entity,
+            "exec" => PinType::Exec,
+            other => match other.strip_prefix("array<").and_then(|x| x.strip_suffix('>')) {
+                Some(inner) => PinType::Array(Box::new(PinType::from_type_slug(inner)?)),
+                None => PinType::Domain(other.strip_prefix("domain:")?.to_string()),
+            },
+        })
+    }
 }
 
 /// A constant value stored on an unconnected input pin. Mirrors [`PinType`];
@@ -88,6 +162,7 @@ pub enum PinType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PropValue {
     Float(f32),
+    Int(i32),
     Vec2([f32; 2]),
     Vec3([f32; 3]),
     Vec4([f32; 4]),
@@ -95,6 +170,13 @@ pub enum PropValue {
     Bool(bool),
     /// Enum variant slug.
     Enum(String),
+    /// Plain text. Spelled `Str` so it does not shadow `std::string::String`
+    /// at every match site.
+    Str(String),
+    /// Homogeneous list. Element types are not enforced by the schema —
+    /// validation compares *pin* types, and a hand-edited mixed array is
+    /// stale data the type-compat rule reports at the wire.
+    Array(Vec<PropValue>),
     /// Content-relative asset path.
     Asset(String),
     /// Unrecognized value preserved verbatim (RON text).
@@ -115,6 +197,14 @@ pub struct NodeInst {
     pub position: [f32; 2],
     /// Unconnected input constants, keyed by pin slug. `BTreeMap` keeps
     /// serialization byte-stable.
+    ///
+    /// Doc-dependent reserved types (45-A) also store their *configuration*
+    /// here under keys that are deliberately not pin slugs — `var` on
+    /// `var_get`/`var_set`, `event_name` and `payload.<slug>` on
+    /// `event_custom`, `action` on `event_input_action`. The keys are
+    /// documented next to each reserved id in `registry.rs`; nothing else may
+    /// invent one, because an undocumented key is indistinguishable from a
+    /// stale pin constant.
     #[serde(default)]
     pub properties: BTreeMap<String, PropValue>,
     /// Content-relative path of the referenced subgraph asset, present only
@@ -126,6 +216,12 @@ pub struct NodeInst {
     /// keeps the category's color. `None` = take the category's slot.
     #[serde(default)]
     pub tint: Option<u8>,
+    /// Author-supplied node title, overriding the descriptor's display name.
+    /// Schema only in 45-A P1 (the rename UI is Task 45.5); it lands with the
+    /// container migration because adding a field to `NodeInst` later would
+    /// cost a second container bump for nothing.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// A connection between two pins. Pin *slugs*, not indices — pins can be
@@ -148,6 +244,23 @@ pub struct IfacePin {
     pub slug: String,
     pub label: String,
     pub ty: PinType,
+}
+
+/// One per-graph variable (45-A D3). `var_get`/`var_set` node instances name
+/// a `slug` and take their pin type from here — which is why variables live
+/// in the document and not in a node's properties.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VarDecl {
+    /// Stable identity, referenced by `var_get`/`var_set` instances.
+    pub slug: String,
+    /// Display label, free to change.
+    pub label: String,
+    pub ty: PinType,
+    /// Initial value. `Option` because not every type has a constant form
+    /// (`Entity` is connection-only) — `None` means "the type's zero", which
+    /// the interpreter defines, not the schema.
+    #[serde(default)]
+    pub default: Option<PropValue>,
 }
 
 /// Free-floating comment box (canvas world-space rect: min x/y, size w/h).
@@ -243,6 +356,9 @@ pub struct GraphDoc {
     pub inputs: Vec<IfacePin>,
     #[serde(default)]
     pub outputs: Vec<IfacePin>,
+    /// Per-graph variables (container v2).
+    #[serde(default)]
+    pub variables: Vec<VarDecl>,
 }
 
 impl Default for GraphDoc {
@@ -256,6 +372,7 @@ impl Default for GraphDoc {
             groups: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            variables: Vec::new(),
         }
     }
 }
@@ -267,6 +384,11 @@ impl GraphDoc {
 
     pub fn node_mut(&mut self, id: u64) -> Option<&mut NodeInst> {
         self.nodes.iter_mut().find(|n| n.id == id)
+    }
+
+    /// The declaration a `var_get`/`var_set` instance names.
+    pub fn variable(&self, slug: &str) -> Option<&VarDecl> {
+        self.variables.iter().find(|v| v.slug == slug)
     }
 
     /// Next free doc-local node id.

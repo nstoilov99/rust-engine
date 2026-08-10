@@ -1,5 +1,5 @@
 (
-    version: 1,
+    version: 2,
     realm: Shared,
     nodes: [
         (
@@ -12,6 +12,7 @@
             },
             subgraph: None,
             tint: None,
+            title: None,
         ),
         (
             id: 1,
@@ -23,6 +24,7 @@
             },
             subgraph: None,
             tint: None,
+            title: None,
         ),
     ],
     edges: [
@@ -37,4 +39,5 @@
     groups: [],
     inputs: [],
     outputs: [],
+    variables: [],
 )

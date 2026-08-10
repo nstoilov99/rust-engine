@@ -1,5 +1,5 @@
 (
-    version: 1,
+    version: 2,
     realm: Shared,
     nodes: [
         (
@@ -10,6 +10,7 @@
             properties: {},
             subgraph: None,
             tint: None,
+            title: None,
         ),
         (
             id: 1,
@@ -21,6 +22,7 @@
             },
             subgraph: None,
             tint: None,
+            title: None,
         ),
         (
             id: 2,
@@ -33,6 +35,7 @@
             },
             subgraph: None,
             tint: None,
+            title: None,
         ),
         (
             id: 3,
@@ -42,6 +45,7 @@
             properties: {},
             subgraph: Some("graphs/lib/calc.subgraph"),
             tint: None,
+            title: None,
         ),
     ],
     edges: [
@@ -71,4 +75,5 @@
     groups: [],
     inputs: [],
     outputs: [],
+    variables: [],
 )

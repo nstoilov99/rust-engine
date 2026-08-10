@@ -70,6 +70,8 @@ pub fn type_tag(ty: &PinType) -> String {
     match ty {
         PinType::Domain(d) if d.is_empty() => "?".to_string(),
         PinType::Domain(d) => d.clone(),
+        // `Array(Float)` is Rust spelling; `Float[]` is what an author reads.
+        PinType::Array(inner) => format!("{}[]", type_tag(inner)),
         other => format!("{other:?}"),
     }
 }
@@ -367,5 +369,12 @@ mod tests {
         assert_eq!(type_tag(&PinType::Domain("shader".into())), "shader");
         // A ghost pin's empty domain has no name to show.
         assert_eq!(type_tag(&PinType::Domain(String::new())), "?");
+        // Arrays read the way an author writes them, at any nesting.
+        assert_eq!(type_tag(&PinType::Int), "Int");
+        assert_eq!(type_tag(&PinType::Array(Box::new(PinType::Float))), "Float[]");
+        assert_eq!(
+            type_tag(&PinType::Array(Box::new(PinType::Array(Box::new(PinType::String))))),
+            "String[][]"
+        );
     }
 }

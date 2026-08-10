@@ -23,6 +23,52 @@ pub const REROUTE_TYPE_ID: &str = "reroute";
 pub const REROUTE_IN: &str = "in";
 pub const REROUTE_OUT: &str = "out";
 
+/// Reserved node-type slug for a subgraph's **interface input** node (45-A
+/// D3, Blender's Group Input pattern): its *outputs* mirror the document's
+/// declared `inputs`, so compilation has somewhere to splice host edges. Only
+/// meaningful inside a document that declares an interface.
+pub const GRAPH_INPUT_TYPE_ID: &str = "graph_input";
+
+/// Reserved node-type slug for a subgraph's **interface output** node: its
+/// *inputs* mirror the document's declared `outputs`.
+pub const GRAPH_OUTPUT_TYPE_ID: &str = "graph_output";
+
+/// Reserved node-type slugs for variable access. Pins are synthesized from
+/// the document's [`VarDecl`](super::doc::VarDecl) named by the instance's
+/// reserved [`VAR_PROP`] property, so neither can be registered.
+///
+/// `var_get` — pure, one output [`VAR_VALUE_PIN`] of the variable's type.
+/// `var_set` — impure: inputs [`EXEC_IN_PIN`] + [`VAR_VALUE_PIN`], output
+/// [`EXEC_OUT_PIN`].
+pub const VAR_GET_TYPE_ID: &str = "var_get";
+pub const VAR_SET_TYPE_ID: &str = "var_set";
+
+/// Reserved *property* key naming the variable a `var_get`/`var_set` reads or
+/// writes. Value is a [`PropValue::Str`](super::doc::PropValue::Str) holding
+/// the [`VarDecl::slug`](super::doc::VarDecl::slug).
+pub const VAR_PROP: &str = "var";
+
+/// The value pin of both variable nodes.
+pub const VAR_VALUE_PIN: &str = "value";
+
+/// The exec pin slugs the framework's own synthesized descriptors use. Node
+/// libraries are free to pick their own; these exist so the doc-dependent
+/// types spell them one way.
+pub const EXEC_IN_PIN: &str = "exec_in";
+pub const EXEC_OUT_PIN: &str = "exec_out";
+
+/// Every reserved node-type slug, in one place: a descriptor may not claim
+/// any of them, because their pins come from the *document*, not a registry
+/// entry. Consulted by [`NodeRegistry::register`] and `merge_staged`.
+pub const RESERVED_TYPE_IDS: [&str; 6] = [
+    SUBGRAPH_TYPE_ID,
+    REROUTE_TYPE_ID,
+    GRAPH_INPUT_TYPE_ID,
+    GRAPH_OUTPUT_TYPE_ID,
+    VAR_GET_TYPE_ID,
+    VAR_SET_TYPE_ID,
+];
+
 /// What a node type can render as a per-node preview. Opting in costs the
 /// common case nothing: a node without one draws no slot at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +286,7 @@ impl NodeRegistry {
     /// Register a node type. Errors on slug collision and on descriptor-
     /// level invariant violations (the checks that don't need a document):
     /// pure nodes may not have exec pins, impure nodes require exec flow,
-    /// pin slugs must be unique per side, the subgraph slug is reserved.
+    /// pin slugs must be unique per side, [`RESERVED_TYPE_IDS`] are refused.
     pub fn register(&mut self, desc: NodeDescriptor) -> Result<(), RegistryError> {
         Self::validate_descriptor(&desc)?;
         if self.nodes.contains_key(&desc.id) {
@@ -260,11 +306,8 @@ impl NodeRegistry {
                 reason: reason.to_string(),
             })
         };
-        if desc.id == SUBGRAPH_TYPE_ID {
-            return invalid("slug is reserved for subgraph instances");
-        }
-        if desc.id == REROUTE_TYPE_ID {
-            return invalid("slug is reserved for reroute nodes");
+        if RESERVED_TYPE_IDS.contains(&desc.id.as_str()) {
+            return invalid("slug is reserved: its pins come from the document, not a descriptor");
         }
         if desc.pure && desc.has_exec_pin() {
             return invalid("pure nodes may not have exec pins");
@@ -505,16 +548,24 @@ mod tests {
         dup_pin.inputs.push(PinDescriptor::new("a", "A again", PinType::Float));
         assert!(reg.register(dup_pin).is_err());
 
-        let mut reserved = pure_add();
-        reserved.id = SUBGRAPH_TYPE_ID.into();
-        assert!(reg.register(reserved).is_err());
-
-        let mut reroute = pure_add();
-        reroute.id = REROUTE_TYPE_ID.into();
-        assert!(
-            reg.register(reroute).is_err(),
-            "the reroute slug is reserved: it has no descriptor by design"
-        );
+        // Every reserved slug is refused: those types take their pins from
+        // the document, so a descriptor claiming one would be shadowed.
+        for id in RESERVED_TYPE_IDS {
+            let mut reserved = pure_add();
+            reserved.id = id.into();
+            assert!(
+                reg.register(reserved).is_err(),
+                "'{id}' is reserved: it has no descriptor by design"
+            );
+            // …by the staged path too, where it is a hard error rather than a
+            // skip-with-warning (a bug in the plugin, not two plugins
+            // disagreeing).
+            let mut staged = StagedRegistry::default();
+            let mut d = pure_add();
+            d.id = id.into();
+            staged.nodes.push(d);
+            assert!(reg.merge_staged("p", staged).is_err(), "staged '{id}'");
+        }
     }
 
     #[test]

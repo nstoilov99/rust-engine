@@ -1,10 +1,16 @@
 //! Graph asset serialization: RON save/load with a version-envelope pass.
 //!
 //! The container version is probed from the text *before* strict
-//! deserialization, so future container migrations can rewrite old documents
-//! that no longer parse as the current `GraphDoc` schema (none exist at v1;
-//! the seam is `parse_graph`). Per-node-type migrations run after parse, in
-//! the migration layer (P3).
+//! deserialization, so container migrations can rewrite old documents that no
+//! longer parse as the current `GraphDoc` schema. Per-node-type migrations run
+//! after parse, in the migration layer.
+//!
+//! **v1 → v2** (Task 45-A P1) is the first real container step and retires
+//! the placeholder seam. Both new fields — `GraphDoc::variables` and
+//! `NodeInst::title` — carry serde defaults, so a v1 document still *parses*
+//! as the v2 schema; the step exists so that a loaded document is stamped v2
+//! and every consumer downstream of `parse_graph` sees exactly one shape,
+//! rather than "v1 or v2 depending on where the file came from".
 
 use std::path::Path;
 
@@ -50,9 +56,36 @@ pub fn parse_graph(text: &str) -> Result<GraphDoc, GraphIoError> {
             supported: GRAPH_DOC_VERSION,
         });
     }
-    // Container migrations slot in here when GRAPH_DOC_VERSION grows past 1:
-    // rewrite `text` (or a ron::Value) from probe.version up, then parse.
-    ron::from_str(text).map_err(|e| GraphIoError::Parse(e.to_string()))
+    let mut doc: GraphDoc =
+        ron::from_str(text).map_err(|e| GraphIoError::Parse(e.to_string()))?;
+    migrate_container(&mut doc, probe.version);
+    Ok(doc)
+}
+
+/// Run the container migration chain from `from` up to [`GRAPH_DOC_VERSION`].
+///
+/// Steps run in order and each one leaves the document at the next version,
+/// so a v1 document passing through a future v3 build takes 1→2 then 2→3.
+/// Textual rewriting (a `ron::Value` pass before the typed parse) is only
+/// needed by a step that *removes or retypes* a field; v1→v2 only adds
+/// defaulted ones, so it runs on the parsed document.
+fn migrate_container(doc: &mut GraphDoc, from: u32) {
+    let mut v = from;
+    while v < GRAPH_DOC_VERSION {
+        match v {
+            // v1 → v2: `variables` and `NodeInst::title` arrive, both empty
+            // on an old document. Serde already defaulted them; the step's
+            // real work is the stamp, which is what makes "this document is
+            // v2" true rather than incidental.
+            1 => {}
+            // No step for this version: stop rather than claim an upgrade
+            // that did not happen. The stamp below then reports how far the
+            // document actually got.
+            _ => break,
+        }
+        v += 1;
+    }
+    doc.version = v;
 }
 
 /// Serialize a graph document to RON text. Deterministic (ordered maps,
@@ -136,7 +169,7 @@ mod tests {
                 position: [10.4, -3.6],
                 properties: BTreeMap::new(),
                 subgraph: None,
-                tint: None,
+                tint: None, title: None,
             },
             NodeInst {
                 id: 2,
@@ -145,7 +178,7 @@ mod tests {
                 position: [0.49, 100.5],
                 properties: BTreeMap::new(),
                 subgraph: None,
-                tint: None,
+                tint: None, title: None,
             },
         ];
         a.comments = vec![CommentBox { rect: [1.2, 2.7, 100.4, 60.6], ..Default::default() }];
@@ -188,7 +221,7 @@ mod tests {
             position: [f32::NAN, f32::INFINITY],
             properties: BTreeMap::new(),
             subgraph: None,
-            tint: None,
+            tint: None, title: None,
         }];
         let text = serialize_graph(&d).unwrap();
         assert!(!text.contains("NaN") && !text.contains("inf"), "{text}");
@@ -226,6 +259,48 @@ mod tests {
         }
     }
 
+    /// The repository's committed graph assets still load and still validate
+    /// — the container bump and the new validation rules must not turn
+    /// existing content into errors. Warnings are allowed to appear (that is
+    /// what warnings are for); errors are not.
+    #[test]
+    fn committed_content_graphs_load_and_validate() {
+        use crate::engine::node_graph::{validate_doc, ErrorSeverity, NodeRegistry};
+
+        let mut reg = NodeRegistry::new();
+        crate::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg).unwrap();
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("content/graphs");
+        let mut stack = vec![root];
+        let mut checked = 0;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                if ext != "graph" && ext != "subgraph" {
+                    continue;
+                }
+                let doc = load_graph(&p).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+                assert_eq!(doc.version, GRAPH_DOC_VERSION, "{p:?}");
+                let hard: Vec<_> = validate_doc(&doc, &reg)
+                    .into_iter()
+                    .filter(|e| e.severity() == ErrorSeverity::Error)
+                    .collect();
+                assert_eq!(hard, vec![], "{p:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "expected the demo graph and its subgraph");
+    }
+
     fn demo_doc() -> GraphDoc {
         let mut props = BTreeMap::new();
         props.insert("dps".to_string(), PropValue::Float(12.5));
@@ -241,7 +316,7 @@ mod tests {
                     properties: BTreeMap::new(),
                     subgraph: None,
                 
-                tint: None,},
+                tint: None, title: None,},
                 NodeInst {
                     id: 1,
                     type_id: "test_damage".to_string(),
@@ -250,7 +325,7 @@ mod tests {
                     properties: props,
                     subgraph: None,
                 
-                tint: None,},
+                tint: None, title: None,},
             ],
             edges: vec![Edge {
                 from_node: 0,
@@ -293,7 +368,7 @@ mod tests {
                     position: [60.0, 120.0],
                     properties: BTreeMap::new(),
                     subgraph: None,
-                    tint: None,
+                    tint: None, title: None,
                 },
                 NodeInst {
                     id: 1,
@@ -302,7 +377,7 @@ mod tests {
                     position: [320.0, 100.0],
                     properties: damage_props,
                     subgraph: None,
-                    tint: Some(4),
+                    tint: Some(4), title: None,
                 },
             ],
             edges: vec![Edge {
@@ -349,6 +424,150 @@ mod tests {
             "save -> load -> save with unregistered types must be byte-identical"
         );
         assert_eq!(parse_graph(&resaved).unwrap(), doc);
+    }
+
+    /// A v2 document exercising everything the container bump added:
+    /// variables (including one of each new value type), node titles, and the
+    /// three new `PropValue` variants on pin constants.
+    fn v2_doc() -> GraphDoc {
+        let mut props = BTreeMap::new();
+        props.insert("count".to_string(), PropValue::Int(-3));
+        props.insert("label".to_string(), PropValue::Str("hello".to_string()));
+        props.insert(
+            "tags".to_string(),
+            PropValue::Array(vec![
+                PropValue::Str("a".to_string()),
+                PropValue::Str("b".to_string()),
+            ]),
+        );
+        props.insert(
+            "grid".to_string(),
+            PropValue::Array(vec![PropValue::Array(vec![PropValue::Int(1)])]),
+        );
+        GraphDoc {
+            realm: GraphRealm::Client,
+            nodes: vec![
+                NodeInst {
+                    id: 0,
+                    type_id: "test_event".to_string(),
+                    type_version: 1,
+                    position: [0.0, 0.0],
+                    properties: BTreeMap::new(),
+                    subgraph: None,
+                    tint: None,
+                    title: Some("Start Here".to_string()),
+                },
+                NodeInst {
+                    id: 1,
+                    type_id: "test_damage".to_string(),
+                    type_version: 1,
+                    position: [220.0, 0.0],
+                    properties: props,
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                },
+            ],
+            variables: vec![
+                VarDecl {
+                    slug: "score".to_string(),
+                    label: "Score".to_string(),
+                    ty: PinType::Int,
+                    default: Some(PropValue::Int(7)),
+                },
+                VarDecl {
+                    slug: "names".to_string(),
+                    label: "Names".to_string(),
+                    ty: PinType::Array(Box::new(PinType::String)),
+                    default: Some(PropValue::Array(vec![PropValue::Str("a".to_string())])),
+                },
+                VarDecl {
+                    slug: "target".to_string(),
+                    label: "Target".to_string(),
+                    ty: PinType::Entity,
+                    default: None,
+                },
+            ],
+            ..GraphDoc::default()
+        }
+    }
+
+    /// Every new pin/prop type survives a save → load → save cycle
+    /// byte-identically, and the canonical form is idempotent.
+    #[test]
+    fn new_value_types_round_trip_in_canonical_form() {
+        let doc = v2_doc();
+        let a = serialize_graph(&doc).unwrap();
+        let back = parse_graph(&a).unwrap();
+        assert_eq!(back, doc);
+        assert_eq!(serialize_graph(&back).unwrap(), a, "canonical form is idempotent");
+        assert!(a.ends_with('\n'));
+        assert!(a.contains("version: 2"), "a saved doc is v2: {a}");
+        // Node titles and variable declarations reach the file.
+        assert!(a.contains("title: Some(\"Start Here\")"), "{a}");
+        assert!(a.contains("Array(String)"), "{a}");
+        assert_eq!(back.variable("names").unwrap().ty, PinType::Array(Box::new(PinType::String)));
+        assert_eq!(back.variable("target").unwrap().default, None);
+        assert_eq!(back.nodes[0].title.as_deref(), Some("Start Here"));
+        assert_eq!(back.nodes[1].title, None);
+    }
+
+    /// **Golden container migration, forward:** a v1 document written by an
+    /// older engine loads, is stamped v2, and re-saves in the v2 canonical
+    /// form — with every v1 field intact.
+    #[test]
+    fn container_v1_migrates_to_v2() {
+        let v1 = include_str!("fixtures/container_v1.graph");
+        assert!(v1.contains("version: 1"), "the input fixture must stay v1");
+        assert!(!v1.contains("variables"), "the input fixture must stay v1");
+
+        let doc = parse_graph(v1).unwrap();
+        assert_eq!(doc.version, GRAPH_DOC_VERSION, "loading stamps the new version");
+        assert_eq!(doc.variables, vec![], "v1 knew no variables");
+        assert!(doc.nodes.iter().all(|n| n.title.is_none()), "v1 knew no titles");
+
+        // Nothing else moved.
+        assert_eq!(doc.realm, GraphRealm::Client);
+        assert_eq!(doc.nodes.len(), 2);
+        assert_eq!(doc.nodes[1].tint, Some(4));
+        assert_eq!(
+            doc.nodes[1].properties.get("dps"),
+            Some(&PropValue::Float(12.5))
+        );
+        assert_eq!(doc.edges.len(), 1);
+        assert_eq!(doc.comments[0].anchor, Some(1));
+        assert_eq!(doc.groups[0].title, "Pulse");
+        assert_eq!(doc.inputs[0].slug, "amount");
+
+        let actual = serialize_graph(&doc).unwrap();
+        if std::env::var("UPDATE_GRAPH_FIXTURES").is_ok() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/engine/node_graph/fixtures/container_v1_expected.graph"
+                ),
+                &actual,
+            )
+            .unwrap();
+            return; // freshly written; the compiled-in copy is stale
+        }
+        assert_eq!(actual, include_str!("fixtures/container_v1_expected.graph"));
+
+        // **Backward:** the migrated document is a *fixed point* — loading
+        // the v2 output again changes nothing, so a repeated upgrade cannot
+        // drift.
+        let again = parse_graph(&actual).unwrap();
+        assert_eq!(again, doc);
+        assert_eq!(serialize_graph(&again).unwrap(), actual);
+    }
+
+    /// The committed v2 fixture, alongside the v1 one: the shape the engine
+    /// writes today, frozen so a schema change fails here before it reaches a
+    /// user asset.
+    #[test]
+    fn checked_in_v2_fixture_parses() {
+        let doc = parse_graph(include_str!("fixtures/container_v2.graph")).unwrap();
+        assert_eq!(doc, v2_doc());
     }
 
     #[test]
@@ -398,7 +617,7 @@ mod tests {
             properties: BTreeMap::new(),
             subgraph: Some("graphs/lib/calc.subgraph".to_string()),
         
-        tint: None,});
+        tint: None, title: None,});
 
         let dir = std::env::temp_dir().join("rust_engine_graph_io_test");
         std::fs::create_dir_all(&dir).unwrap();
@@ -422,11 +641,17 @@ mod tests {
     #[test]
     fn write_fixture_if_requested() {
         if std::env::var("UPDATE_GRAPH_FIXTURES").is_ok() {
-            let path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/src/engine/node_graph/fixtures/demo.graph"
-            );
-            std::fs::write(path, serialize_graph(&demo_doc()).unwrap()).unwrap();
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/node_graph/fixtures");
+            std::fs::write(
+                format!("{dir}/demo.graph"),
+                serialize_graph(&demo_doc()).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                format!("{dir}/container_v2.graph"),
+                serialize_graph(&v2_doc()).unwrap(),
+            )
+            .unwrap();
         }
     }
 

@@ -47,7 +47,7 @@ use super::theme::{
 };
 use super::widgets::segmented_control;
 use crate::engine::node_graph::{
-    reroute_type, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeRegistry,
+    DocDescriptors, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeRegistry,
     PinType, PropValue, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
 
@@ -679,6 +679,12 @@ fn build_geoms(
     let title_px = st.fonts.body;
     let label_px = st.fonts.small;
     let incident = IncidentEdges::build(&state.doc.edges);
+    // One resolver for the whole pass: "what are this instance's pins" is a
+    // document question, not a registry lookup (45-A D3). Subgraph
+    // interfaces, variable and interface-binding synthesis and custom-event
+    // payloads all arrive through it; the reroute branch below is the one
+    // shape it cannot answer with a descriptor, by design.
+    let docd = DocDescriptors::with_resolver(&state.doc, registry, resolver);
 
     state
         .doc
@@ -688,14 +694,13 @@ fn build_geoms(
             let min = Pos2::new(n.position[0], n.position[1]);
             let is_sub = n.type_id == SUBGRAPH_TYPE_ID;
             let is_reroute = n.type_id == REROUTE_TYPE_ID;
-            let desc = (!is_sub && !is_reroute)
-                .then(|| registry.get(&n.type_id))
-                .flatten();
+            let desc = docd.descriptor(n.id);
+            let desc = desc.as_deref();
 
             // A reroute is a bare pass-through: one in, one out, no header,
             // no rows, and a type inferred from whatever feeds it.
             if is_reroute {
-                let inferred = reroute_type(&state.doc, registry, n.id);
+                let inferred = docd.reroute_type(n.id);
                 let untyped = inferred.is_none();
                 let d = if untyped {
                     m.reroute_untyped_d()
@@ -754,32 +759,17 @@ fn build_geoms(
                 bool,
                 Vec<(String, String, PinType)>,
                 Vec<(String, String, PinType)>,
-            ) = if is_sub {
+            ) = if is_sub && desc.is_none() {
+                // An unresolvable reference renders in the missing-node style
+                // but keeps the name the path implies — the author still has
+                // to recognize which subgraph went missing.
                 let name = n
                     .subgraph
                     .as_deref()
                     .and_then(|q| std::path::Path::new(q).file_stem())
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Subgraph".to_string());
-                // Pins derive from the referenced doc's declared interface;
-                // an unresolvable reference renders in the missing-node style.
-                match n.subgraph.as_deref().and_then(|q| resolver.resolve(q)) {
-                    Some(sub) => {
-                        let iface = |pins: &[crate::engine::node_graph::IfacePin]| {
-                            pins.iter()
-                                .map(|q| (q.slug.clone(), q.label.clone(), q.ty.clone()))
-                                .collect::<Vec<_>>()
-                        };
-                        (
-                            name,
-                            Some("Subgraph".to_string()),
-                            false,
-                            iface(&sub.inputs),
-                            iface(&sub.outputs),
-                        )
-                    }
-                    None => (name, Some("Subgraph".to_string()), true, vec![], vec![]),
-                }
+                (name, Some("Subgraph".to_string()), true, vec![], vec![])
             } else if let Some(d) = desc {
                 // The three clones per pin are the one unavoidable copy: a
                 // `PinGeom` outlives the registry borrow. Everything else in
@@ -1759,7 +1749,9 @@ fn draw_and_interact(
                         pin.label,
                         graph_palette::type_tag(&pin.ty)
                     );
-                    if let Some(doc) = pin_doc(registry, state, g.id, &pin.slug, pin.output) {
+                    if let Some(doc) =
+                        pin_doc(registry, resolver, state, g.id, &pin.slug, pin.output)
+                    {
                         tip.push('\n');
                         tip.push_str(&doc);
                     }
@@ -1816,7 +1808,7 @@ fn draw_and_interact(
                 Vec2::new(g.rect.width(), m.header_h),
             );
             if pointer_world.is_some_and(|p| header.contains(p)) {
-                if let Some(doc) = node_doc(registry, state, g.id) {
+                if let Some(doc) = node_doc(registry, resolver, state, g.id) {
                     ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
                 }
             }
@@ -2075,7 +2067,7 @@ fn draw_and_interact(
                         // canvas: the type-filtered palette.
                         match node_under(&geoms, pw, lod, &m) {
                             Some(target) if target != from_node => {
-                                auto_connect(state, registry, &src, target);
+                                auto_connect(state, registry, resolver, &src, target);
                             }
                             _ => {
                                 if let Some(sp) = ui.ctx().input.pointer_pos {
@@ -5016,24 +5008,32 @@ fn inline_widget(
 // Hit-testing helpers
 // ---------------------------------------------------------------------------
 
-/// A pin's descriptor doc line, if the node type declares one.
+/// A pin's descriptor doc line, if this node *instance*'s pin declares one.
+/// Through the resolver, so a subgraph or variable node answers from the
+/// document instead of silently having no pins.
 fn pin_doc(
     registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
     state: &GraphEditorState,
     node: u64,
     slug: &str,
     output: bool,
 ) -> Option<String> {
-    let n = state.doc.node(node)?;
-    let d = registry.get(&n.type_id)?;
-    let side = if output { &d.outputs } else { &d.inputs };
-    side.iter().find(|p| p.slug == slug)?.doc.clone()
+    let d = DocDescriptors::with_resolver(&state.doc, registry, resolver).descriptor(node)?;
+    if output { d.output(slug) } else { d.input(slug) }?.doc.clone()
 }
 
-/// A node type's doc line, if it declares one.
-fn node_doc(registry: &NodeRegistry, state: &GraphEditorState, node: u64) -> Option<String> {
-    let n = state.doc.node(node)?;
-    registry.get(&n.type_id)?.doc.clone()
+/// A node's doc line, if it declares one.
+fn node_doc(
+    registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
+    state: &GraphEditorState,
+    node: u64,
+) -> Option<String> {
+    DocDescriptors::with_resolver(&state.doc, registry, resolver)
+        .descriptor(node)?
+        .doc
+        .clone()
 }
 
 /// Node centers (world) for group capture.
@@ -5144,17 +5144,21 @@ fn resolve_connection(
 fn auto_connect(
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
     src: &PaletteDragSource,
     target: u64,
 ) {
-    let Some(n) = state.doc.node(target) else {
-        return;
-    };
-    let Some(desc) = registry.get(&n.type_id) else {
-        return;
+    // Instance pins, not type pins: dropping a wire on a subgraph or a
+    // variable node has to see the pins the canvas is drawing.
+    let desc = {
+        let d = DocDescriptors::with_resolver(&state.doc, registry, resolver);
+        match d.descriptor(target) {
+            Some(d) => d.into_owned(),
+            None => return,
+        }
     };
     let filter = PinFilter { ty: src.ty.clone(), need_input: src.output };
-    let Some(pin) = graph_palette::auto_connect_pin(desc, &filter, &src.label) else {
+    let Some(pin) = graph_palette::auto_connect_pin(&desc, &filter, &src.label) else {
         state.toast("No compatible pin");
         return;
     };
@@ -6135,16 +6139,33 @@ mod tests {
             InlineKind::of(&PropValue::Raw("(x:1)".into()), none),
             InlineKind::Raw(_)
         ));
-        // Everything else falls back to a read-only chip.
+        // Everything else falls back to a read-only chip — including the
+        // Task 45-A additions, which are display-only until P6 gives them
+        // field widgets.
         for v in [
             PropValue::Vec2([1.0, 2.0]),
             PropValue::Vec3([1.0, 2.0, 3.0]),
             PropValue::Vec4([1.0; 4]),
             PropValue::Enum("Variant".into()),
             PropValue::Asset("textures/a.png".into()),
+            PropValue::Int(-7),
+            PropValue::Str("hello".into()),
+            PropValue::Array(vec![PropValue::Int(1), PropValue::Int(2)]),
         ] {
             assert!(matches!(InlineKind::of(&v, none), InlineKind::Chip(_)), "{v:?}");
         }
+        // …and the chips say something useful rather than `Debug` spew.
+        assert_eq!(
+            InlineKind::of(&PropValue::Int(-7), none),
+            InlineKind::Chip("-7".to_string())
+        );
+        assert_eq!(
+            InlineKind::of(
+                &PropValue::Array(vec![PropValue::Int(1), PropValue::Str("a".into())]),
+                none
+            ),
+            InlineKind::Chip("[1, a]".to_string())
+        );
     }
 
     /// An `Enum` pin becomes a dropdown only when its descriptor says what

@@ -6,8 +6,9 @@
 //! use a plain map. Paths are canonical content-relative with forward
 //! slashes — the same key form used by editor tabs and hot-reload matching.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use super::descriptors::DocDescriptors;
 use super::doc::{GraphDoc, PinType};
 use super::registry::{NodeRegistry, SUBGRAPH_TYPE_ID};
 use super::validate::GraphError;
@@ -49,18 +50,22 @@ pub fn validate_refs(
 ) -> Vec<GraphError> {
     let mut errors = Vec::new();
 
+    // Every instance-pin answer — subgraph interfaces included — comes from
+    // one resolver (45-A D3); this pass only decides which *errors* the
+    // cross-asset view is allowed to report.
+    let d = DocDescriptors::with_resolver(doc, registry, resolver);
+
     // Resolve every subgraph node's interface.
-    let mut ifaces: BTreeMap<u64, &GraphDoc> = BTreeMap::new();
+    let mut resolved: BTreeSet<u64> = BTreeSet::new();
     for n in &doc.nodes {
         let Some(path) = n.subgraph.as_deref() else { continue };
-        match resolver.resolve(path) {
-            Some(sub) => {
-                ifaces.insert(n.id, sub);
-            }
-            None => errors.push(GraphError::MissingSubgraph {
+        if resolver.resolve(path).is_some() {
+            resolved.insert(n.id);
+        } else {
+            errors.push(GraphError::MissingSubgraph {
                 node: n.id,
                 path: path.to_string(),
-            }),
+            });
         }
     }
 
@@ -77,47 +82,25 @@ pub fn validate_refs(
         }
 
         // A subgraph node's *outputs* come from the referenced doc's
-        // `outputs`; its *inputs* from `inputs`.
-        let from_ty: Option<PinType> = if from_is_sub {
-            ifaces.get(&from.id).and_then(|sub| {
-                match sub.outputs.iter().find(|p| p.slug == e.from_pin) {
-                    Some(p) => Some(p.ty.clone()),
-                    None => {
-                        errors.push(GraphError::SubgraphPinUnknown {
-                            node: from.id,
-                            pin: e.from_pin.clone(),
-                            output: true,
-                        });
-                        None
-                    }
-                }
-            })
-        } else {
-            registry
-                .get(&from.type_id)
-                .and_then(|d| d.output(&e.from_pin))
-                .map(|p| p.ty.clone())
+        // `outputs`, its *inputs* from `inputs` — which is exactly what the
+        // resolver's synthesized descriptor already says, so this pass no
+        // longer reads the interface by hand. What it still owns is the
+        // error: a pin the interface no longer declares is
+        // `SubgraphPinUnknown`, reportable only where the interface is in
+        // reach and only for a reference that actually resolved.
+        let mut side_ty = |node: u64, pin: &str, output: bool, is_sub: bool| {
+            let ty = d.pin_type(node, pin, output);
+            if ty.is_none() && is_sub && resolved.contains(&node) {
+                errors.push(GraphError::SubgraphPinUnknown {
+                    node,
+                    pin: pin.to_string(),
+                    output,
+                });
+            }
+            ty
         };
-        let to_ty: Option<PinType> = if to_is_sub {
-            ifaces.get(&to.id).and_then(|sub| {
-                match sub.inputs.iter().find(|p| p.slug == e.to_pin) {
-                    Some(p) => Some(p.ty.clone()),
-                    None => {
-                        errors.push(GraphError::SubgraphPinUnknown {
-                            node: to.id,
-                            pin: e.to_pin.clone(),
-                            output: false,
-                        });
-                        None
-                    }
-                }
-            })
-        } else {
-            registry
-                .get(&to.type_id)
-                .and_then(|d| d.input(&e.to_pin))
-                .map(|p| p.ty.clone())
-        };
+        let from_ty: Option<PinType> = side_ty(from.id, &e.from_pin, true, from_is_sub);
+        let to_ty: Option<PinType> = side_ty(to.id, &e.to_pin, false, to_is_sub);
         if let (Some(from_ty), Some(to_ty)) = (from_ty, to_ty) {
             if from_ty != to_ty {
                 errors.push(GraphError::TypeMismatch { edge: e.clone(), from_ty, to_ty });
@@ -182,7 +165,7 @@ mod tests {
             properties: Default::default(),
             subgraph: Some(path.to_string()),
         
-        tint: None,}
+        tint: None, title: None,}
     }
 
     fn plain_node(id: u64, type_id: &str) -> NodeInst {
@@ -194,7 +177,7 @@ mod tests {
             properties: Default::default(),
             subgraph: None,
         
-        tint: None,}
+        tint: None, title: None,}
     }
 
     fn calc_subgraph() -> GraphDoc {

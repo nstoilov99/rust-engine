@@ -1,6 +1,6 @@
 (
     version: 2,
-    realm: Shared,
+    realm: Client,
     nodes: [
         (
             id: 0,
@@ -22,7 +22,7 @@
                 "label": Enum("burn"),
             },
             subgraph: None,
-            tint: None,
+            tint: Some(4),
             title: None,
         ),
     ],
@@ -34,9 +34,31 @@
             to_pin: "exec_in",
         ),
     ],
-    comments: [],
-    groups: [],
-    inputs: [],
+    comments: [
+        (
+            rect: (10.0, 10.0, 220.0, 130.0),
+            text: "written by a v1 engine",
+            tint: Some(2),
+            font_scale: 1.5,
+            anchor: Some(1),
+            collapsed: false,
+        ),
+    ],
+    groups: [
+        (
+            rect: (0.0, 0.0, 400.0, 200.0),
+            title: "Pulse",
+            tint: None,
+            collapsed: false,
+        ),
+    ],
+    inputs: [
+        (
+            slug: "amount",
+            label: "Amount",
+            ty: Float,
+        ),
+    ],
     outputs: [],
     variables: [],
 )

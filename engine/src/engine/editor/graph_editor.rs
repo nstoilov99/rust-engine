@@ -17,9 +17,15 @@ use crusty_gui::widgets::CanvasView;
 use crate::engine::node_graph::{
     endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
     GraphDoc, IfacePin, PinType,
-    GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, REROUTE_IN, REROUTE_OUT,
+    DocDescriptors, GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, GRAPH_INPUT_TYPE_ID,
+    GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
+
+/// How far outside the collapsed selection's bounding box the auto-inserted
+/// `graph_input` / `graph_output` nodes land, in canvas world units. Far
+/// enough that they read as the boundary rather than as part of the content.
+const GRAPH_IFACE_NODE_GAP: f32 = 260.0;
 
 // ---------------------------------------------------------------------------
 // Edit stack (plan D7): reversible ops + saved-cursor dirty.
@@ -1398,7 +1404,7 @@ impl GraphEditorState {
             properties,
             subgraph: None,
         
-        tint: None,};
+        tint: None, title: None,};
         let id = node.id;
         self.doc.nodes.push(node.clone());
         self.select_only(id);
@@ -1421,7 +1427,7 @@ impl GraphEditorState {
             properties: std::collections::BTreeMap::new(),
             subgraph: Some(subgraph_path.to_string()),
         
-        tint: None,};
+        tint: None, title: None,};
         let id = node.id;
         self.doc.nodes.push(node.clone());
         self.select_only(id);
@@ -1621,7 +1627,7 @@ impl GraphEditorState {
             position: pos,
             properties: Default::default(),
             subgraph: None,
-            tint: None,
+            tint: None, title: None,
         };
         Some(GraphEdit::Composite {
             label: "Add Reroute".to_string(),
@@ -1717,8 +1723,11 @@ impl GraphEditorState {
             return None;
         }
         let ty = endpoint_type(&self.doc, registry, edge.from_node, &edge.from_pin, true)?;
-        let n = self.doc.node(node)?;
-        let desc = registry.get(&n.type_id)?;
+        // Instance pins: splicing a wire through a variable or interface node
+        // has to see the pins the canvas draws. (A subgraph node needs the
+        // cross-asset resolver, which this gesture does not carry — same
+        // answer as before, now for a stated reason.)
+        let desc = DocDescriptors::new(&self.doc, registry).descriptor(node)?;
         // An input takes exactly one edge, so prefer a free one; only fall
         // back to an occupied pin, whose existing edge the splice replaces.
         // Picking blind would emit `InputMultiplyConnected` — an illegal
@@ -2105,17 +2114,80 @@ impl GraphEditorState {
         }
 
         // The new asset. Internal edges come along; the boundary ones are
-        // replaced by the interface declaration.
+        // replaced by the interface declaration — and by the pair of
+        // interface *binding* nodes that carry the values across it (45-A
+        // D3). Without them the interface would be a declaration with nothing
+        // attached: the subgraph could not be inlined, and every collapse
+        // would immediately report unbound interface pins.
+        let mut sub_nodes = nodes.clone();
+        let mut sub_edges: Vec<Edge> = self
+            .doc
+            .edges
+            .iter()
+            .filter(|e| inside.contains(&e.from_node) && inside.contains(&e.to_node))
+            .cloned()
+            .collect();
+        let bbox = nodes.iter().fold(
+            [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+            |a, n| {
+                [
+                    a[0].min(n.position[0]),
+                    a[1].min(n.position[1]),
+                    a[2].max(n.position[0]),
+                    a[3].max(n.position[1]),
+                ]
+            },
+        );
+        let mut next_id = sub_nodes.iter().map(|n| n.id).max().map_or(0, |m| m + 1);
+        if !inputs.is_empty() {
+            let id = next_id;
+            next_id += 1;
+            sub_nodes.push(NodeInst {
+                id,
+                type_id: GRAPH_INPUT_TYPE_ID.to_string(),
+                type_version: 1,
+                position: [bbox[0] - GRAPH_IFACE_NODE_GAP, bbox[1]],
+                properties: Default::default(),
+                subgraph: None,
+                tint: None,
+                title: None,
+            });
+            // Each inbound boundary edge continues inside from the binding
+            // node's matching pin to the same destination pin.
+            for (e, slug) in &inbound {
+                sub_edges.push(Edge {
+                    from_node: id,
+                    from_pin: slug.clone(),
+                    to_node: e.to_node,
+                    to_pin: e.to_pin.clone(),
+                });
+            }
+        }
+        if !outputs.is_empty() {
+            let id = next_id;
+            sub_nodes.push(NodeInst {
+                id,
+                type_id: GRAPH_OUTPUT_TYPE_ID.to_string(),
+                type_version: 1,
+                position: [bbox[2] + GRAPH_IFACE_NODE_GAP, bbox[1]],
+                properties: Default::default(),
+                subgraph: None,
+                tint: None,
+                title: None,
+            });
+            for (e, slug) in &outbound {
+                sub_edges.push(Edge {
+                    from_node: e.from_node,
+                    from_pin: e.from_pin.clone(),
+                    to_node: id,
+                    to_pin: slug.clone(),
+                });
+            }
+        }
         let sub = GraphDoc {
             realm: self.doc.realm,
-            nodes: nodes.clone(),
-            edges: self
-                .doc
-                .edges
-                .iter()
-                .filter(|e| inside.contains(&e.from_node) && inside.contains(&e.to_node))
-                .cloned()
-                .collect(),
+            nodes: sub_nodes,
+            edges: sub_edges,
             inputs,
             outputs,
             ..GraphDoc::default()
@@ -2167,7 +2239,7 @@ impl GraphEditorState {
                 position: anchor,
                 properties: Default::default(),
                 subgraph: Some(rel.clone()),
-                tint: None,
+                tint: None, title: None,
             }),
         ];
         for (e, slug) in inbound {
@@ -2386,8 +2458,19 @@ impl GraphEditorState {
                 if n.type_id == REROUTE_TYPE_ID {
                     return false;
                 }
-                // An unregistered type is not evidence of uselessness.
-                registry.get(&n.type_id).map(|d| !d.pure).unwrap_or(true)
+                // A `graph_output` node is the document's *result*: whatever
+                // feeds it is reached by definition, even when the interface
+                // is pure data and the node therefore reads as pure.
+                if n.type_id == GRAPH_OUTPUT_TYPE_ID {
+                    return true;
+                }
+                // Purity is an instance question — a `var_set` writes and a
+                // `var_get` does not — so it comes from the resolver. An
+                // unresolvable type is not evidence of uselessness.
+                DocDescriptors::new(&self.doc, registry)
+                    .descriptor(n.id)
+                    .map(|d| !d.pure)
+                    .unwrap_or(true)
             })
             .map(|n| n.id)
             .collect();
@@ -2937,12 +3020,20 @@ pub fn frame_view(
 pub fn prop_display(v: &PropValue) -> String {
     match v {
         PropValue::Float(x) => format!("{x}"),
+        PropValue::Int(i) => format!("{i}"),
         PropValue::Vec2(a) => format!("({}, {})", a[0], a[1]),
         PropValue::Vec3(a) => format!("({}, {}, {})", a[0], a[1], a[2]),
         PropValue::Vec4(a) => format!("({}, {}, {}, {})", a[0], a[1], a[2], a[3]),
         PropValue::Color(a) => format!("#{:.2},{:.2},{:.2},{:.2}", a[0], a[1], a[2], a[3]),
         PropValue::Bool(b) => b.to_string(),
         PropValue::Enum(s) => s.clone(),
+        PropValue::Str(s) => s.clone(),
+        // Arrays have no literal editor in v1 (D9); the chip states the shape
+        // rather than pretending to show the contents.
+        PropValue::Array(v) => format!(
+            "[{}]",
+            v.iter().map(prop_display).collect::<Vec<_>>().join(", ")
+        ),
         PropValue::Asset(s) => s.clone(),
         PropValue::Raw(s) => s.clone(),
     }
@@ -3023,7 +3114,7 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
             subgraph: None,
         
-        tint: None,}
+        tint: None, title: None,}
     }
 
     fn edge(a: u64, b: u64) -> Edge {
@@ -3325,7 +3416,7 @@ mod tests {
             position: [200.0, 0.0],
             properties: Default::default(),
             subgraph: None,
-            tint: None,
+            tint: None, title: None,
         });
         st.doc.edges = vec![
             Edge { from_node: 0, from_pin: "sum".into(), to_node: 9, to_pin: REROUTE_IN.into() },
@@ -3504,7 +3595,7 @@ mod tests {
             position: [0.0, 0.0],
             properties: Default::default(),
             subgraph: None,
-            tint: None,
+            tint: None, title: None,
         };
         // 0 -> 1 -> 2(sink); 3 is an orphan; 4 feeds only the orphan.
         st.doc.nodes = vec![
@@ -3535,6 +3626,29 @@ mod tests {
         let mut pure_only = bare_state();
         pure_only.doc.nodes = vec![mk(0, "pure_add"), mk(1, "pure_add")];
         assert!(pure_only.unused_nodes(&reg).is_empty());
+
+        // A subgraph's `graph_output` is a seed even though a pure data
+        // interface makes it read as pure: it *is* the document's result, so
+        // whatever feeds it is reached. Without this, purging a subgraph of
+        // pure math would delete the whole body.
+        let mut sub = bare_state();
+        sub.doc.outputs = vec![IfacePin {
+            slug: "result".into(),
+            label: "Result".into(),
+            ty: PinType::Float,
+        }];
+        sub.doc.nodes = vec![mk(0, "pure_add"), mk(1, GRAPH_OUTPUT_TYPE_ID), mk(2, "pure_add")];
+        sub.doc.edges = vec![Edge {
+            from_node: 0,
+            from_pin: "sum".into(),
+            to_node: 1,
+            to_pin: "result".into(),
+        }];
+        assert_eq!(
+            sub.unused_nodes(&reg),
+            vec![2],
+            "only the node feeding nothing is unused"
+        );
     }
 
     /// Collapse writes the asset, derives the interface from boundary edges,
@@ -3574,15 +3688,55 @@ mod tests {
         assert!(st.doc.edges.iter().any(|e| e.from_node == 0 && e.to_node == sub.id));
         assert!(st.doc.edges.iter().any(|e| e.from_node == sub.id && e.to_node == 3));
 
-        // Asset: internal edge kept, interface derived from the cut edges.
+        // Asset: internal edge kept, interface derived from the cut edges,
+        // and the interface *binding* pair auto-inserted and wired (45-A) so
+        // the declaration is attached to something.
         let written =
             crate::engine::node_graph::load_graph(&dir.join(&rel)).expect("reload");
-        assert_eq!(written.nodes.len(), 2);
-        assert_eq!(written.edges.len(), 1, "only the internal edge came along");
         assert_eq!(written.inputs.len(), 1);
         assert_eq!(written.outputs.len(), 1);
         assert_eq!(written.inputs[0].slug, "sum", "input slug comes from its source pin");
         assert_eq!(written.outputs[0].slug, "sum");
+
+        let gi = written
+            .nodes
+            .iter()
+            .find(|n| n.type_id == GRAPH_INPUT_TYPE_ID)
+            .expect("graph_input auto-inserted");
+        let go = written
+            .nodes
+            .iter()
+            .find(|n| n.type_id == GRAPH_OUTPUT_TYPE_ID)
+            .expect("graph_output auto-inserted");
+        assert_eq!(written.nodes.len(), 4, "two collapsed nodes + the pair");
+        assert_eq!(
+            written.edges.len(),
+            3,
+            "the internal edge plus one binding edge per boundary edge"
+        );
+        assert!(
+            written
+                .edges
+                .iter()
+                .any(|e| e.from_node == gi.id && e.from_pin == "sum" && e.to_node == 1),
+            "the inbound boundary edge continues from graph_input: {:?}",
+            written.edges
+        );
+        assert!(
+            written
+                .edges
+                .iter()
+                .any(|e| e.from_node == 2 && e.to_node == go.id && e.to_pin == "sum"),
+            "the outbound boundary edge ends at graph_output"
+        );
+        // …and the result validates clean: no unbound interface pins.
+        assert_eq!(
+            crate::engine::node_graph::validate_doc(&written, &reg)
+                .iter()
+                .filter(|e| matches!(e, GraphError::InterfacePinUnbound { .. }))
+                .count(),
+            0
+        );
 
         // Undo restores the host exactly; the asset deliberately stays.
         st.undo(&reg);
@@ -3617,6 +3771,20 @@ mod tests {
             .insert("weird".into(), PropValue::Raw("(a:1,b:[2,3])".into()));
         unknown.tint = Some(9);
 
+        // Task 45-A: the node title and the new value types ride the
+        // clipboard like anything else — a copy that silently dropped them
+        // would be data loss across a paste.
+        let mut titled = node(9, [30.0, 40.0]);
+        titled.title = Some("Renamed".into());
+        titled.properties.insert("n".into(), PropValue::Int(-4));
+        titled
+            .properties
+            .insert("s".into(), PropValue::Str("text".into()));
+        titled.properties.insert(
+            "xs".into(),
+            PropValue::Array(vec![PropValue::Int(1), PropValue::Int(2)]),
+        );
+
         let mut anchored = comment(50.0);
         anchored.anchor = Some(7);
         anchored.tint = Some(3);
@@ -3624,7 +3792,7 @@ mod tests {
         anchored.collapsed = true;
 
         let frag = GraphFragment {
-            nodes: vec![node(0, [0.0, 0.0]), unknown],
+            nodes: vec![node(0, [0.0, 0.0]), unknown, titled],
             edges: vec![edge(0, 7)],
             comments: vec![anchored],
             groups: vec![group(0.0)],
@@ -3633,6 +3801,11 @@ mod tests {
         let text = frag.to_ron().expect("serialize");
         let back = GraphFragment::from_ron(&text).expect("parse");
         assert_eq!(back, frag, "a fragment must survive a full round trip");
+        assert_eq!(back.nodes[2].title.as_deref(), Some("Renamed"));
+        assert_eq!(
+            back.nodes[2].properties.get("xs"),
+            Some(&PropValue::Array(vec![PropValue::Int(1), PropValue::Int(2)]))
+        );
         // Forward-compat data is preserved untouched (the Raw philosophy).
         assert_eq!(
             back.nodes[1].properties.get("weird"),
@@ -5010,7 +5183,7 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
             subgraph: Some("lib/leaf.subgraph".to_string()),
         
-        tint: None,});
+        tint: None, title: None,});
         save_graph(&dir.join("lib/leaf.subgraph"), &leaf).unwrap();
         save_graph(&dir.join("lib/mid.subgraph"), &mid).unwrap();
 
@@ -5025,7 +5198,7 @@ mod tests {
             properties: std::collections::BTreeMap::new(),
             subgraph: Some("lib/mid.subgraph".to_string()),
         
-        tint: None,});
+        tint: None, title: None,});
 
         let open = [("main.graph", &host)];
         let docs = build_resolver_docs(open.into_iter().map(|(k, d)| (k, d)), &dir);

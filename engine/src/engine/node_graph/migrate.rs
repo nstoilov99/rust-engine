@@ -10,8 +10,9 @@
 
 use std::collections::BTreeMap;
 
+use super::descriptors::NodeKind;
 use super::doc::{GraphDoc, PropValue};
-use super::registry::{NodeRegistry, SUBGRAPH_TYPE_ID};
+use super::registry::NodeRegistry;
 
 /// What a migration step may do to a node instance.
 pub struct MigrationCtx<'a> {
@@ -68,8 +69,13 @@ impl std::error::Error for MigrationError {}
 
 /// Migrate every stale node instance in `doc` up to its registered
 /// descriptor version. Unknown types are left untouched (missing-node
-/// tolerance — a disabled plugin must not corrupt or block the doc);
-/// subgraph instances have no descriptor and are skipped.
+/// tolerance — a disabled plugin must not corrupt or block the doc).
+///
+/// Document-dependent instances — subgraphs, reroutes, variable access,
+/// interface binding — have no registered descriptor and therefore no version
+/// chain: their pins move when the *document* moves, which is not a migration.
+/// [`DocDescriptors::kind`] is what decides that, so the list of exceptions
+/// lives in one place rather than growing a `type_id ==` here per reserved id.
 pub fn migrate_doc(
     doc: &mut GraphDoc,
     registry: &NodeRegistry,
@@ -80,7 +86,13 @@ pub fn migrate_doc(
             let n = &doc.nodes[i];
             (n.id, n.type_id.clone(), n.type_version)
         };
-        if type_id == SUBGRAPH_TYPE_ID {
+        // `EventCustom` is deliberately *not* skipped: its base descriptor is
+        // registered and versioned like any other, and only its payload pins
+        // come from the document.
+        if !matches!(
+            NodeKind::of_type(&type_id),
+            NodeKind::Registered | NodeKind::EventCustom
+        ) {
             continue;
         }
         let Some(desc) = registry.get(&type_id) else {
@@ -227,7 +239,7 @@ mod tests {
             properties: BTreeMap::new(),
             subgraph: None,
         
-        tint: None,});
+        tint: None, title: None,});
         assert_eq!(
             migrate_doc(&mut doc, &reg),
             Err(MigrationError::MissingStep { type_id: "gappy".into(), from: 2, current: 3 })
@@ -246,7 +258,7 @@ mod tests {
             properties: BTreeMap::new(),
             subgraph: None,
         
-        tint: None,});
+        tint: None, title: None,});
         // Unknown type: not an error here (validate_doc reports it), and
         // the instance is untouched.
         assert_eq!(migrate_doc(&mut doc, &reg).unwrap(), vec![]);

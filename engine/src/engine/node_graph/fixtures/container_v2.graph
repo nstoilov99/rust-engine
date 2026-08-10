@@ -1,0 +1,65 @@
+(
+    version: 2,
+    realm: Client,
+    nodes: [
+        (
+            id: 0,
+            type_id: "test_event",
+            type_version: 1,
+            position: (0.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: Some("Start Here"),
+        ),
+        (
+            id: 1,
+            type_id: "test_damage",
+            type_version: 1,
+            position: (220.0, 0.0),
+            properties: {
+                "count": Int(-3),
+                "grid": Array([
+                    Array([
+                        Int(1),
+                    ]),
+                ]),
+                "label": Str("hello"),
+                "tags": Array([
+                    Str("a"),
+                    Str("b"),
+                ]),
+            },
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+    ],
+    edges: [],
+    comments: [],
+    groups: [],
+    inputs: [],
+    outputs: [],
+    variables: [
+        (
+            slug: "score",
+            label: "Score",
+            ty: Int,
+            default: Some(Int(7)),
+        ),
+        (
+            slug: "names",
+            label: "Names",
+            ty: Array(String),
+            default: Some(Array([
+                Str("a"),
+            ])),
+        ),
+        (
+            slug: "target",
+            label: "Target",
+            ty: Entity,
+            default: None,
+        ),
+    ],
+)
