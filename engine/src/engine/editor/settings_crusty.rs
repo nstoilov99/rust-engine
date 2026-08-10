@@ -127,7 +127,14 @@ const PROJECT_CATS: &[(&str, &[&str])] = &[
         &["Load radius", "Unload radius", "Frame budget", "Max in flight"],
     ),
     ("Build", &["Default target", "Output directory"]),
+    // 39.8 D8 delta 4: the Plugin Manager is a Project Settings page — the
+    // plugin set is `project.ron`, VCS-checked-in, Ctrl+S dirty semantics.
+    ("Plugins", &["Plugins", "Enable", "Disable", "Relaunch"]),
 ];
+
+/// Index of the Plugins category — it replaces the rows pane wholesale
+/// rather than drawing setting rows.
+const PLUGINS_CAT: usize = PROJECT_CATS.len() - 1;
 
 /// UI + persistence state for both settings windows. Owned by the app;
 /// `flush_prefs` must be called once per frame for the debounced autosave.
@@ -144,11 +151,16 @@ pub struct SettingsState {
     pub project_saved: ProjectConfig,
     pub project_open: bool,
     project_search: String,
-    project_cat: usize,
+    /// Selected Project Settings category. Public so the app can deep-link
+    /// (Edit ▸ Plugins opens straight to the manager).
+    pub project_cat: usize,
 
     /// Mirror of `WindowConfig.vsync`; the app persists changes + flags restart.
     pub vsync: VSyncMode,
     pub restart_pending: bool,
+
+    /// Plugin Manager page state (39.8 P6).
+    pub plugins: super::plugin_manager::PluginManagerState,
 
     /// Action whose chord cell is currently capturing a keypress.
     keybind_capture: Option<Action>,
@@ -187,6 +199,7 @@ impl SettingsState {
             project_cat: 0,
             vsync,
             restart_pending: false,
+            plugins: super::plugin_manager::PluginManagerState::default(),
         }
     }
 
@@ -1892,6 +1905,7 @@ pub fn project_settings_window(
     ui: &mut Ui,
     state: &mut SettingsState,
     plugin_pages: &mut [crate::engine::plugins::PluginSettingsEntry],
+    plugin_model: &super::plugin_manager::PluginManagerModel,
 ) {
     if !state.project_open {
         return;
@@ -1903,7 +1917,9 @@ pub fn project_settings_window(
         .resizable(false)
         .collapsible(false)
         .anchor_center(true)
-        .default_size(Vec2::new(780.0, 520.0))
+        // Wide enough for the Plugin Manager's list + detail panes (the
+        // mockup's shell is 1059px); the row-based pages just get roomier.
+        .default_size(Vec2::new(1060.0, 620.0))
         .open(&mut open)
         .show(ui, |ui| {
             let c = &state.project;
@@ -1951,6 +1967,29 @@ pub fn project_settings_window(
             };
             let selected = state.project_cat;
             let saved = state.project_saved.clone();
+
+            // The Plugin Manager owns the whole content pane: it is a
+            // two-pane list/detail surface, not a stack of setting rows, so
+            // it takes `content` directly instead of going through the
+            // ScrollArea + rows path below.
+            if selected == PLUGINS_CAT && !filter.active() {
+                super::plugin_manager::plugin_manager_page(
+                    ui,
+                    content,
+                    &mut state.plugins,
+                    plugin_model,
+                    &mut state.project,
+                );
+                let fopts = UiOptions {
+                    padding: Vec2::new(10.0, 4.0),
+                    spacing: 8.0,
+                };
+                ui.run_at(footer, Direction::LeftToRight, Id::new("project_footer"), fopts, |ui| {
+                    draw_project_footer(ui, footer, state);
+                });
+                return;
+            }
+
             let project = &mut state.project;
             ui.run_at(
                 content,

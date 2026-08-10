@@ -3526,6 +3526,13 @@ impl App {
                 .core
                 .plugin_set
                 .is_active(crate::plugin::GAME_CLIENT_ID);
+            // Owned snapshot: the manager needs to read the plugin set while
+            // the settings window holds its plugin *pages* mutably.
+            let plugin_model =
+                rust_engine::engine::editor::plugin_manager::PluginManagerModel::build(
+                    &self.core.plugin_set,
+                    &self.editor.ui.settings.project,
+                );
             let plugin_panel_entries = self.core.plugin_set.panel_menu_entries();
             let plugin_panel_titles: std::collections::HashMap<String, String> =
                 plugin_panel_entries.iter().cloned().collect();
@@ -3894,6 +3901,7 @@ impl App {
                         ui,
                         settings,
                         plugin_set.settings_pages_mut(),
+                        &plugin_model,
                     );
                 }
                 if is_hovering_files {
@@ -5215,6 +5223,48 @@ impl App {
                 Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
                     "Failed to save project settings: {e}"
                 ))),
+            }
+        }
+    }
+
+    /// Handle a Relaunch Now click from the Plugin Manager (39.8 §5.6).
+    ///
+    /// Order matters: save first (through the atomic-write paths), then spawn
+    /// the replacement, then ask the loop to exit. The child parks on our
+    /// process handle until we are actually gone, so it never reads a config
+    /// we are still holding.
+    ///
+    /// Returns `true` when the caller should exit the event loop.
+    #[must_use]
+    pub fn take_relaunch_request(&mut self) -> bool {
+        if !std::mem::take(&mut self.editor.ui.settings.plugins.relaunch_requested) {
+            return false;
+        }
+
+        // Unsaved-changes check runs first, exactly like the normal close
+        // path — a restart must not be a way to lose work.
+        if self.editor.ui.settings.project_dirty() {
+            if let Err(e) = self.editor.ui.settings.save_project() {
+                self.editor.console.messages.push(LogMessage::error(format!(
+                    "Relaunch cancelled — could not save project settings: {e}"
+                )));
+                return false;
+            }
+            self.apply_project_settings();
+        }
+        self.save_layout_on_exit();
+
+        match rust_engine::engine::editor::relaunch::spawn_replacement() {
+            Ok(pid) => {
+                println!("relaunching editor: child pid {pid}");
+                true
+            }
+            Err(e) => {
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::error(format!("Relaunch failed: {e}")));
+                false
             }
         }
     }

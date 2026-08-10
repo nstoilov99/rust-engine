@@ -216,6 +216,18 @@ impl ApplicationHandler for GameApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.run_frame(event_loop);
+
+        // Plugin Manager ▸ Relaunch now (39.8 §5.6). Checked after the frame
+        // that drew the button: it saves, spawns the replacement, and then we
+        // take the ordinary exit path so `exiting` still runs.
+        if self
+            .app
+            .as_mut()
+            .is_some_and(|app| app.take_relaunch_request())
+        {
+            self.should_exit = true;
+            event_loop.exit();
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -494,6 +506,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_asset_source();
 
     let args: Vec<String> = std::env::args().collect();
+
+    // A relaunched editor (39.8 §5.6) waits on the *process handle* of the
+    // instance that spawned it before touching any config. Must happen before
+    // `WindowConfig::load_or_default()` below — the parent is still writing.
+    #[cfg(feature = "editor")]
+    if let Some(parent) = rust_engine::engine::editor::relaunch::parse_wait_parent(&args) {
+        println!("relaunch: waiting for parent {parent} to exit");
+        rust_engine::engine::editor::relaunch::wait_for_parent(parent);
+    }
+
     let event_loop = EventLoop::new()?;
     // Poll keeps the event loop spinning continuously instead of sleeping between
     // events. On Windows the DWM delivers RedrawRequested at vblank, so Wait caps

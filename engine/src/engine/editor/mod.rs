@@ -40,6 +40,8 @@ pub mod dock_crusty;
 mod dock_layout;
 #[cfg(feature = "editor")]
 pub mod hierarchy_crusty;
+#[cfg(feature = "editor")]
+pub mod plugin_manager;
 pub mod relaunch;
 mod hierarchy_panel;
 pub mod import_dialog;
