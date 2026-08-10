@@ -32,6 +32,7 @@ pub mod console_crusty;
 pub mod crusty_window;
 #[cfg(all(feature = "editor", windows))]
 pub mod desktop_sampler;
+pub mod atomic_file;
 #[cfg(feature = "editor")]
 pub mod dialogs_crusty;
 #[cfg(feature = "editor")]
@@ -39,6 +40,7 @@ pub mod dock_crusty;
 mod dock_layout;
 #[cfg(feature = "editor")]
 pub mod hierarchy_crusty;
+pub mod relaunch;
 mod hierarchy_panel;
 pub mod import_dialog;
 mod input_action_editor;

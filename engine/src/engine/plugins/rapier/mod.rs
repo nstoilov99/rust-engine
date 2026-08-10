@@ -70,6 +70,7 @@ impl EnginePlugin for RapierPhysicsPlugin {
             .with_author("rust-engine")
             .with_origin(PluginOrigin::Engine)
             .with_kind(PluginKind::Runtime)
+            .with_module_path("engine/src/engine/plugins/rapier")
     }
 
     fn build(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {

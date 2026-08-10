@@ -117,4 +117,9 @@ windows-sys = { version = "0.52", optional = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
+    # Task 39.8 P6 relaunch: ReplaceFileW for atomic config writes,
+    # OpenProcess/WaitForSingleObject so the relaunched child waits on the
+    # parent's process handle rather than polling a reusable pid.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
 ] }

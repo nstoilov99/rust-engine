@@ -99,7 +99,9 @@ impl ProjectConfig {
     /// place so packaged runtimes keep reading current values.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let ron_str = ron::ser::to_string_pretty(self, Default::default())?;
-        std::fs::write(Self::path(), ron_str)?;
+        // Atomic (39.8 §5.6): the relaunch flow saves and then exits, so this
+        // file is read by the next process moments later.
+        super::atomic_file::atomic_write(&Self::path(), &ron_str)?;
 
         let net = NetConfigOut {
             host: &self.net_host,

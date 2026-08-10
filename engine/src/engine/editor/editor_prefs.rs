@@ -204,7 +204,8 @@ impl EditorPrefs {
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let ron_str = ron::ser::to_string_pretty(self, Default::default())?;
-        std::fs::write(Self::path(), ron_str)?;
+        // Atomic (39.8 §5.6) — the relaunch flow writes this then exits.
+        super::atomic_file::atomic_write(&Self::path(), &ron_str)?;
         Ok(())
     }
 }

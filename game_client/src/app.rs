@@ -3522,7 +3522,10 @@ impl App {
                 .core
                 .plugin_set
                 .is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID);
-            let gameplay_disabled = !self.core.plugin_set.is_active("game_client");
+            let gameplay_disabled = !self
+                .core
+                .plugin_set
+                .is_active(crate::plugin::GAME_CLIENT_ID);
             let plugin_panel_entries = self.core.plugin_set.panel_menu_entries();
             let plugin_panel_titles: std::collections::HashMap<String, String> =
                 plugin_panel_entries.iter().cloned().collect();
@@ -4709,7 +4712,14 @@ impl App {
         let memory_allocator = self.core.renderer.gpu.memory_allocator.clone();
         let command_buffer_allocator = self.core.renderer.gpu.command_buffer_allocator.clone();
         for req in std::mem::take(&mut self.pending_crusty_floats) {
-            let (title, w, h) = float_window_attrs(&req.tab);
+            let (mut title, w, h) = float_window_attrs(&req.tab);
+            // A plugin panel's real title lives in the plugin set, not in the
+            // tab enum — without this the OS window would say the panel id.
+            if let Some(id) = req.tab.strip_prefix("plugin:") {
+                if let Some(entry) = self.core.plugin_set.panel_mut(id) {
+                    title = entry.title.clone();
+                }
+            }
             // Tab strip roughly under the cursor, where the ghost card was.
             let pos = winit::dpi::PhysicalPosition::new(
                 main_origin.x + req.main_local.x as i32 - 60,

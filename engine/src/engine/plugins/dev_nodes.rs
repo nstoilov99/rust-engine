@@ -35,6 +35,8 @@ impl EnginePlugin for DevNodesPlugin {
             )
             .with_author("rust-engine")
             .with_origin(PluginOrigin::Engine)
+            .with_module_path("engine/src/engine/plugins/dev_nodes.rs")
+            .with_cargo_feature("dev_nodes")
             // Fixtures, not shipping content: they exist to populate the
             // create menu and keep `graphs/demo.graph` openable. `EditorOnly`
             // is what keeps them out of an export no matter how the manifest

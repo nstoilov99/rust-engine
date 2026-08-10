@@ -90,6 +90,14 @@ pub struct PluginManifest {
     /// Manager and are not manifest-toggleable — no engine lists the game's
     /// own code as a plugin.
     pub internal: bool,
+    /// Where the code lives, shown in the manager's Manifest facts (D8 v1
+    /// delta 1). Tier 1 has no `plugin.ron` and no DLL entry point; the
+    /// honest answer to "where is this from" is the module path.
+    pub module_path: String,
+    /// The Cargo feature that decides whether this plugin is *compiled in*
+    /// at all. `None` = always compiled in. Inclusion is the feature;
+    /// activation is the manifest.
+    pub cargo_feature: Option<String>,
 }
 
 impl PluginManifest {
@@ -105,7 +113,22 @@ impl PluginManifest {
             origin: PluginOrigin::Engine,
             kind: PluginKind::Runtime,
             internal: false,
+            module_path: String::new(),
+            cargo_feature: None,
         }
+    }
+
+    /// Where this plugin's code lives, e.g.
+    /// `engine/src/engine/plugins/rapier`.
+    pub fn with_module_path(mut self, path: impl Into<String>) -> Self {
+        self.module_path = path.into();
+        self
+    }
+
+    /// The Cargo feature gating its inclusion in the build.
+    pub fn with_cargo_feature(mut self, feature: impl Into<String>) -> Self {
+        self.cargo_feature = Some(feature.into());
+        self
     }
 
     pub fn with_version(mut self, v: impl Into<String>) -> Self {

@@ -17,9 +17,14 @@ use crate::systems::{CharacterMovementSystem, GameCommandExecutor, PlayerInputSy
 /// Client-side game plugin that registers player input, movement, and command systems.
 pub struct ClientGamePlugin;
 
+/// The project module's plugin id. Permanent, and referenced by the editor's
+/// "gameplay disabled" hint, so it lives here rather than as a loose literal.
+pub const GAME_CLIENT_ID: &str = "game_client";
+
 impl EnginePlugin for ClientGamePlugin {
     fn manifest(&self) -> PluginManifest {
-        PluginManifest::new("game_client", "Game Client")
+        PluginManifest::new(GAME_CLIENT_ID, "Game Client")
+            .with_module_path("game_client/src/plugin.rs")
             .with_description("Player input, character movement and game command execution.")
             .with_origin(PluginOrigin::Project)
             .with_kind(PluginKind::Runtime)
