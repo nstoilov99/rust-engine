@@ -81,7 +81,13 @@ One trait, replacing (absorbing) `GamePlugin`:
 
 - `manifest(&self) -> PluginManifest` — static metadata: `id` (stable string slug,
   same identity rules as node type ids), `name`, `version` (semver string),
-  `description`, `author`, `depends_on: Vec<String>` (plugin ids).
+  `description`, `author`, `depends_on: Vec<String>` (plugin ids),
+  `origin: PluginOrigin` (`Engine` | `Project` — manager grouping, Unreal-style),
+  and `kind: PluginKind` (`Runtime` | `EditorOnly`). `EditorOnly` is the direct
+  analog of Unreal's Editor module type — the single mechanic the 2026-08-10
+  engine survey found load-bearing everywhere: editor-only plugins (tooling,
+  importers-to-come, debug panels) are auto-excluded from game exports (D9)
+  with zero user thought, and the manager can say so.
 - `build(&self, ctx: &mut PluginContext) -> Result<(), PluginError>` — the single
   registration entry point.
 
@@ -266,6 +272,17 @@ are the contract, matching D1/D3):
   first (normal close path).
 - Registration counts per plugin (N systems, N node types, N panels) — collected
   by `PluginContext` during `build()`, zero bookkeeping for plugin authors.
+- **Grouping (engine survey):** list sections by `PluginOrigin` — Engine plugins
+  (physics_rapier, dev_nodes, future Steam) then Project plugins — exactly how
+  Unreal's Edit ▸ Plugins and O3DE's Gems catalog present it. Everything visible
+  and searchable, including built-ins; visibility is how users learn what can be
+  turned off. Each row shows its `kind` ("editor-only" chip = never ships in the
+  game; runtime = "ships with exported game"), answering at a glance what a
+  toggle costs.
+- The **game module itself is not a plugin**: `ClientGamePlugin` runs through
+  `PluginSet` for uniform mechanics but is flagged `internal` and hidden from the
+  manager — no engine surveyed lists the game's own code as a toggleable plugin
+  (resolves §5 Q4).
 
 ### D9 — Export integration: features become the packaging tool
 
@@ -282,6 +299,16 @@ pass an explicit feature set. Two corrections from review:
   and none is needed: activation is resolved *at build time*. Every plugin
   compiled into an export is enabled; disabled plugins aren't in the binary.
   Standalone's `PluginSet` therefore skips the manifest filter entirely.
+
+- **`EditorOnly` plugins never enter the export feature set** regardless of
+  enabled state (D1) — Unreal's Editor-module-type behavior. Only `Runtime`
+  plugins that are enabled ship.
+- **Enabled-but-unused runtime plugins DO ship** (bloat + startup registration),
+  exactly like Unreal — automatic "is it really used?" stripping is a
+  whole-program-analysis fantasy (registration itself references the code, so
+  LTO can't drop it). The mitigation is visibility, not magic: the build dialog
+  lists the runtime plugins being included in this export, so "why is my game
+  40 MB" has a one-glance answer and the fix is a documented toggle away.
 
 Disabled plugin ⇒ compiled out of the *shipped game* — the zero-cost story
 survives exactly where it matters. The editor binary itself stays
@@ -373,10 +400,9 @@ suite, all feature combos, clippy-no-new, design lint, editor+standalone smoke).
 3. **Relaunch mechanism on Windows** (spawn-self + exit while holding file locks
    on layout/prefs): write-then-spawn-then-exit ordering matters; reuse and
    harden the M9.6 launcher path.
-4. **Open for review:** should `ClientGamePlugin`'s systems (player input,
-   character movement) become a *manifest-visible* plugin ("game" — toggleable,
-   weird) or stay a hardwired `PluginSet` entry not shown in the manager
-   (recommended: hardwired, `internal: true` flag on the manifest struct)?
+4. ~~Open: should `ClientGamePlugin` be manifest-visible?~~ **Resolved by the
+   2026-08-10 engine survey (D8):** hardwired `internal: true`, hidden from the
+   manager — no surveyed engine lists the game's own module as a plugin.
 5. **Open for review:** module vs workspace crate for `RapierPhysicsPlugin` (P5
    recommends module-first; a crate is more honest tier-1 "plugin shape" but adds
    workspace churn — cheap to revisit at P5 kickoff).
