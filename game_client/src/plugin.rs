@@ -54,8 +54,13 @@ impl EnginePlugin for ClientGamePlugin {
 
 /// The plugin set both binaries run. Plugin *inclusion* is Rust code plus
 /// Cargo features; *activation* is the `project.ron` manifest.
+///
+/// Insertion order here is the "manifest order" tie-break for dependency
+/// sorting, so engine plugins go in before the project's own module.
 pub fn client_plugin_set() -> PluginSet {
     let mut set = PluginSet::new();
+    #[cfg(feature = "dev_nodes")]
+    set.add(rust_engine::engine::plugins::DevNodesPlugin);
     set.add(ClientGamePlugin);
     set
 }

@@ -272,6 +272,85 @@ mod tests {
         assert_eq!(a, b, "save -> load -> save must be byte-identical");
     }
 
+    /// Task 40 D3, exercised for real by 39.8 P3: with the plugin that owns a
+    /// node type disabled, the type is unregistered — and the document must
+    /// still load, still validate to a *reportable* error rather than a
+    /// parse failure, and above all still **save without losing the node**.
+    /// Opening a graph with a plugin off and hitting Ctrl+S must not silently
+    /// delete work.
+    #[test]
+    fn unregistered_node_types_survive_a_save_round_trip() {
+        // A `graphs/demo.graph`-shaped document: dev-node types, properties,
+        // an edge between them.
+        let mut damage_props = BTreeMap::new();
+        damage_props.insert("dps".to_string(), PropValue::Float(12.5));
+        let doc = GraphDoc {
+            nodes: vec![
+                NodeInst {
+                    id: 0,
+                    type_id: "test_event".to_string(),
+                    type_version: 1,
+                    position: [60.0, 120.0],
+                    properties: BTreeMap::new(),
+                    subgraph: None,
+                    tint: None,
+                },
+                NodeInst {
+                    id: 1,
+                    type_id: "test_damage".to_string(),
+                    type_version: 1,
+                    position: [320.0, 100.0],
+                    properties: damage_props,
+                    subgraph: None,
+                    tint: Some(4),
+                },
+            ],
+            edges: vec![Edge {
+                from_node: 0,
+                from_pin: "exec_out".to_string(),
+                to_node: 1,
+                to_pin: "exec_in".to_string(),
+            }],
+            ..GraphDoc::default()
+        };
+
+        let text = serialize_graph(&doc).unwrap();
+
+        // The plugin is disabled: nothing is registered.
+        let empty = crate::engine::node_graph::NodeRegistry::new();
+
+        let loaded = parse_graph(&text).expect("an unknown type must not break loading");
+        assert_eq!(loaded, doc, "every node, property and edge survives loading");
+
+        // Validation degrades to anchored errors, not data loss.
+        let errors = crate::engine::node_graph::validate_doc(&loaded, &empty);
+        let unknown: Vec<&str> = errors
+            .iter()
+            .filter_map(|e| match e {
+                crate::engine::node_graph::GraphError::UnknownNodeType { type_id, .. } => {
+                    Some(type_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unknown, vec!["test_event", "test_damage"]);
+
+        // Migration leaves unknown types alone rather than rejecting the doc.
+        let mut migrating = loaded.clone();
+        assert_eq!(
+            crate::engine::node_graph::migrate_doc(&mut migrating, &empty).unwrap(),
+            vec![]
+        );
+
+        // The save round trip: byte-identical, nothing dropped.
+        let resaved = serialize_graph(&migrating).unwrap();
+        assert_eq!(
+            resaved, text,
+            "save -> load -> save with unregistered types must be byte-identical"
+        );
+        assert_eq!(parse_graph(&resaved).unwrap(), doc);
+    }
+
     #[test]
     fn newer_container_version_is_rejected() {
         let doc = GraphDoc { version: GRAPH_DOC_VERSION + 1, ..GraphDoc::default() };

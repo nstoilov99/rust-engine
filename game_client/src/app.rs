@@ -450,16 +450,10 @@ impl App {
             Velocity as PhysVelocity,
         };
 
-        // Node type registry (Task 40) — built before `build_all` so plugins
-        // can register node types; moves into `SceneEditorState` below.
-        let mut node_registry = {
-            #[allow(unused_mut)]
-            let mut reg = rust_engine::engine::node_graph::NodeRegistry::new();
-            #[cfg(feature = "dev_nodes")]
-            rust_engine::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg)
-                .expect("dev_nodes registration");
-            reg
-        };
+        // Node type registry (Task 40) — starts empty and is filled entirely by
+        // plugins in `build_all` below (39.8 D5: `dev_nodes` is a plugin now).
+        // Moves into `SceneEditorState` further down.
+        let mut node_registry = rust_engine::engine::node_graph::NodeRegistry::new();
 
         let mut schedule = Schedule::new();
         schedule.add_system_described(
@@ -501,19 +495,35 @@ impl App {
             },
             Some(&project_config.plugins),
         );
-        for failure in plugin_set.failures() {
-            eprintln!(
-                "plugin '{}' failed during {}: {}",
-                failure.id,
-                failure.phase.label(),
-                failure.error
-            );
-        }
-        for record in plugin_set.records() {
-            for warning in &record.warnings {
-                eprintln!("plugin '{}': {warning}", record.manifest.id);
+        // The console does not exist yet, so plugin diagnostics are collected
+        // here and seeded into it below. P6 turns this data into the Plugin
+        // Manager's Failed / Enabled-with-warnings rows; it has to flow now.
+        let plugin_diagnostics: Vec<LogMessage> = {
+            let mut out = Vec::new();
+            for failure in plugin_set.failures() {
+                let line = format!(
+                    "plugin '{}' failed during {}: {}",
+                    failure.id,
+                    failure.phase.label(),
+                    failure.error
+                );
+                eprintln!("{line}");
+                out.push(LogMessage::error(line));
             }
-        }
+            for record in plugin_set.records() {
+                for warning in &record.warnings {
+                    let line = format!("plugin '{}': {warning}", record.manifest.id);
+                    eprintln!("{line}");
+                    out.push(LogMessage::warning(line));
+                }
+            }
+            for id in plugin_set.orphans() {
+                out.push(LogMessage::warning(format!(
+                    "project.ron lists plugin '{id}', which is not in this build"
+                )));
+            }
+            out
+        };
 
         schedule.add_system_described(
             TransformPropagationSystem,
@@ -726,6 +736,9 @@ impl App {
                     let mut log = ConsoleLog::new();
                     log.push(LogMessage::info("Engine initialized successfully"));
                     log.push(LogMessage::info("Scene loaded"));
+                    for message in plugin_diagnostics {
+                        log.push(message);
+                    }
                     log
                 },
                 log_filter: LogFilter::default(),

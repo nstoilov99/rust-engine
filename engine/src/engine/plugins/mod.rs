@@ -16,10 +16,17 @@
 mod context;
 mod set;
 
+/// Fixture node types (D5) — the first plugin, and the doc example.
+/// Compiled in only under the `dev_nodes` feature.
+#[cfg(feature = "dev_nodes")]
+pub mod dev_nodes;
+
 #[cfg(test)]
 mod tests;
 
 pub use context::{PluginContext, PluginCounts, WorldLoadedFn};
+#[cfg(feature = "dev_nodes")]
+pub use dev_nodes::DevNodesPlugin;
 pub use set::{PluginRecord, PluginSet, PluginTargets};
 
 use serde::{Deserialize, Serialize};
