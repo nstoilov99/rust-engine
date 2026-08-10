@@ -1958,21 +1958,26 @@ From the 2026-08 rendering API audit (Claude + Codex pass over `engine/src/engin
 ---
 
 ### Task 39.8: Plugin System & Module Registry
-**Status:** 📋 Planned (post-M-arc, alongside/before Task 40 — shares registry infrastructure)
+**Status:** 📋 Planned — full plan in `docs/roadmap/VULKANO-39.8-PLUGIN-SYSTEM.md` (2026-08-10, supersedes the bullets below where they differ)
 **Duration:** ~1.5-2 weeks
-**Prerequisites:** Multiplayer Foundation complete
+**Prerequisites:** Task 40 (registry contract), Refactor Checkpoint #6
 
 Engine functionality as discoverable, toggleable units (Unreal-plugin analogue,
-Rust-shaped). **Compile-time plugins, not runtime DLLs** — Rust has no stable
-ABI, so dynamically loaded plugin binaries are ruled out; the model is Bevy's:
+Rust-shaped). **Two-tier model** (revised 2026-08-10 — the original "flip =
+recompile" toggle was rejected: a shipped editor must be usable by
+non-programmers): tier 1 = compiled-in plugin crates whose *activation* is a
+per-project manifest read at startup — **toggle = restart only, never a
+rebuild**; Cargo features remain the packaging tool (game export strips disabled
+plugins; editor ships batteries-included). Tier 2 (future, shape-preserved only)
+= binary plugins via a C-ABI/WASM seam at narrow extension points
+(GDExtension/Zellij precedent).
 
-- `Plugin` trait: each plugin is a crate with one entry point
-  (`fn build(&self, app)`) registering its systems, components, editor panels,
-  and asset types; gated behind a Cargo feature. Disabled = compiled out —
-  zero cost.
-- **Project manifest** (`project.ron`): declares enabled plugins per game
-  project, maps to features; editor shows toggles and triggers the rebuild
-  (flip = recompile, acceptable in Rust land).
+- `EnginePlugin` trait: one entry point (`fn build(&self, ctx)`) staging systems,
+  resources, node types, editor panels/settings pages; commit-on-Ok so a failing
+  plugin is skipped cleanly and surfaced in the Plugin Manager.
+- **Project manifest** (`plugins` in `project.ron`): per-project enabled set,
+  VCS-checked-in; unknown-in-this-build entries preserved, dependency cascade
+  enforced; Plugin Manager settings page + restart flow.
 - Registry unification with Task 40's node/component registry (that design
   already reserves runtime registration "for future plugins").
 - **First candidates, in extraction order:**
