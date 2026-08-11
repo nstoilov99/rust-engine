@@ -56,6 +56,22 @@ fn edge(from: u64, fp: &str, to: u64, tp: &str) -> Edge {
     }
 }
 
+/// The demo's curve, read from the committed asset (45-A P8). Read rather
+/// than rebuilt: a fixture that restates the file's contents proves the test
+/// agrees with itself, not that the engine can load a `.curve`.
+const DEMO_CURVE: &str = "curves/duck_hop.curve";
+
+fn demo_curve() -> curve_asset::CurveDoc {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content")
+        .join(DEMO_CURVE);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    curve_asset::parse_curve(&text).expect("the committed demo curve parses")
+}
+
 /// Every tick: read this entity's position, add 1 to X, write it back. A
 /// read-modify-write, so it proves the read seam and the write seam in one
 /// fixture and fails visibly if either is wrong.
@@ -116,11 +132,15 @@ fn count_begin_play() -> GraphDoc {
 
 /// A loader over an in-memory map — the same seam the engine fills with a
 /// disk/pak reader.
-struct MapLoader(BTreeMap<String, GraphDoc>);
+struct MapLoader(BTreeMap<String, GraphDoc>, BTreeMap<String, curve_asset::CurveDoc>);
 
 impl GraphLoader for MapLoader {
     fn load(&self, content_rel: &str) -> Option<GraphDoc> {
         self.0.get(content_rel).cloned()
+    }
+
+    fn load_curve(&self, content_rel: &str) -> Option<curve_asset::CurveDoc> {
+        self.1.get(content_rel).cloned()
     }
 }
 
@@ -138,7 +158,23 @@ impl Harness {
         Self::with_root(docs, std::path::Path::new("content"))
     }
 
+    /// …with `.curve` assets in the loader as well (45-A P8).
+    fn with_curves(
+        docs: &[(&str, GraphDoc)],
+        curves: &[(&str, curve_asset::CurveDoc)],
+    ) -> Self {
+        Self::build(docs, curves, std::path::Path::new("content"))
+    }
+
     fn with_root(docs: &[(&str, GraphDoc)], root: &std::path::Path) -> Self {
+        Self::build(docs, &[], root)
+    }
+
+    fn build(
+        docs: &[(&str, GraphDoc)],
+        curves: &[(&str, curve_asset::CurveDoc)],
+        root: &std::path::Path,
+    ) -> Self {
         let mut resources = Resources::new();
         resources.insert(Time::new());
         let mut editor = EditorState::new();
@@ -149,13 +185,17 @@ impl Harness {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect();
+        let curve_map: BTreeMap<String, curve_asset::CurveDoc> = curves
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
 
         // The *real* plugin, pointed at in-memory documents — the system
         // under test is the one the binaries register, not a stand-in.
         let mut set = PluginSet::new();
         set.add(GraphScriptingPlugin::with_loader(
             root.to_path_buf(),
-            Box::new(move || Box::new(MapLoader(map.clone()))),
+            Box::new(move || Box::new(MapLoader(map.clone(), curve_map.clone()))),
         ));
 
         let mut h = Self {
@@ -695,6 +735,93 @@ fn destroy_entity_removes_it() {
     assert!(!h.world.contains(e), "the entity destroyed itself");
 }
 
+/// **P8 acceptance**: the whole `.curve` path, end to end in the real engine
+/// — the loader fetches the asset, the *compiler* resolves the Timeline's
+/// track pins from it, the runner hands the same copy to the interpreter
+/// through `WorldRead::curve`, and the sampled values land on a real
+/// `Transform` as SetPosition effects.
+///
+/// Four seams, one assertion each, because any one of them failing silently
+/// would look identical from outside: "the entity did not move".
+#[test]
+fn a_timeline_drives_a_real_transform_from_a_curve_asset() {
+    let mut curve = curve_asset::CurveDoc::default();
+    curve.tracks = vec![curve_asset::Track {
+        slug: "height".into(),
+        label: "Height".into(),
+        keys: vec![
+            curve_asset::Key::new(0.0, 0.0),
+            curve_asset::Key::new(0.5, 10.0),
+        ],
+    }];
+
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(
+            1,
+            node_graph_types::TIMELINE_TYPE_ID,
+            &[(
+                node_graph_types::CURVE_PROP,
+                PropValue::Asset("curves/t.curve".into()),
+            )],
+        ),
+        node(2, ids::GET_POSITION),
+        node(3, ids::BREAK_VEC3),
+        node(4, ids::MAKE_VEC3),
+        node(5, ids::SET_POSITION),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, node_graph_types::TIMELINE_PLAY_PIN),
+        edge(1, node_graph_types::TIMELINE_UPDATE_PIN, 5, EXEC_IN_PIN),
+        edge(2, "position", 3, "value"),
+        edge(3, "x", 4, "x"),
+        edge(3, "y", 4, "y"),
+        edge(1, "height", 4, "z"),
+        edge(4, "result", 5, "position"),
+    ];
+
+    let mut h = Harness::with_curves(
+        &[("graphs/tl.graph", doc)],
+        &[("curves/t.curve", curve)],
+    );
+    let e = h.spawn_runner("Hopper", "graphs/tl.graph");
+
+    // 1. It compiled: the Timeline's `height` output only exists because the
+    //    compiler could read the curve.
+    h.ticks(1);
+    let disabled = h.world.get::<&GraphRuntime>(e).unwrap().disabled.clone();
+    assert!(disabled.is_none(), "{disabled:?}");
+
+    // 2. The curve is in the cache the runner shares with the interpreter.
+    assert_eq!(
+        h.resources
+            .get::<crate::engine::scripting::runner::CurveCache>()
+            .map(|c| c.len()),
+        Some(1),
+        "the compiler prefetched the asset"
+    );
+
+    // 3. It is *sampling*, not holding: Z climbs while the run is under way.
+    //    (t = 0 on the first tick, so the first sample is the curve's start.)
+    assert_eq!(h.position(e).z, 0.0);
+    h.ticks(15);
+    let mid = h.position(e).z;
+    assert!(mid > 0.0 && mid < 10.0, "mid-run Z should be climbing, got {mid}");
+
+    // 4. …and it comes to rest on the curve's last value rather than
+    //    overshooting or snapping back.
+    h.ticks(60);
+    assert!(
+        (h.position(e).z - 10.0).abs() < 1e-3,
+        "settled at {}",
+        h.position(e).z
+    );
+    // Nothing else moved: the Timeline replaced Z and preserved X/Y.
+    assert_eq!(h.position(e).x, 0.0);
+    assert_eq!(h.position(e).y, 0.0);
+}
+
 /// The committed demo graph, generated rather than hand-written so it is
 /// guaranteed valid and canonical:
 /// `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine --lib write_runner_demo`
@@ -705,7 +832,11 @@ fn destroy_entity_removes_it() {
 /// - then a **Delay** chain prints once more a second later, which is the
 ///   only way to see latency working from outside;
 /// - **Tick** walks the entity along +X, so the effect stream visibly moves
-///   something in the world every frame.
+///   something in the world every frame;
+/// - a looping **Timeline** drives Z off `curves/duck_hop.curve`, which is
+///   what makes the P8 asset visible from outside. It composes with the Tick
+///   chain rather than fighting it: both read the current position and each
+///   replaces only the axis it owns.
 #[test]
 fn write_runner_demo_if_requested() {
     use node_graph_types::{serialize_graph, PinType, VarDecl, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN};
@@ -741,6 +872,22 @@ fn write_runner_demo_if_requested() {
         with(12, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("steps".into()))]),
         with(13, ids::ADD_INT, &[("b", PropValue::Int(1))]),
         with(14, VAR_SET_TYPE_ID, &[(VAR_PROP, PropValue::Str("steps".into()))]),
+        // --- …and a looping Timeline hopping the entity along Z (P8) --------
+        with(
+            15,
+            node_graph_types::TIMELINE_TYPE_ID,
+            &[
+                (
+                    node_graph_types::CURVE_PROP,
+                    PropValue::Asset(DEMO_CURVE.into()),
+                ),
+                ("looping", PropValue::Bool(true)),
+            ],
+        ),
+        node(16, ids::GET_POSITION),
+        node(17, ids::BREAK_VEC3),
+        node(18, ids::MAKE_VEC3),
+        node(19, ids::SET_POSITION),
     ];
     doc.edges = vec![
         edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
@@ -759,6 +906,15 @@ fn write_runner_demo_if_requested() {
         edge(11, EXEC_OUT_PIN, 14, EXEC_IN_PIN),
         edge(12, VAR_VALUE_PIN, 13, "a"),
         edge(13, "result", 14, VAR_VALUE_PIN),
+        // The delayed line is also the cue to start hopping, so the Timeline
+        // begins visibly *after* the rest rather than at frame zero.
+        edge(5, EXEC_OUT_PIN, 15, node_graph_types::TIMELINE_PLAY_PIN),
+        edge(15, node_graph_types::TIMELINE_UPDATE_PIN, 19, EXEC_IN_PIN),
+        edge(16, "position", 17, "value"),
+        edge(17, "x", 18, "x"),
+        edge(17, "y", 18, "y"),
+        edge(15, "height", 18, "z"),
+        edge(18, "result", 19, "position"),
     ];
     // Lay it out so the committed asset opens readably rather than as a heap.
     for (i, n) in doc.nodes.iter_mut().enumerate() {
@@ -766,8 +922,12 @@ fn write_runner_demo_if_requested() {
     }
 
     // It must compile before it is committed — a demo that does not run is
-    // worse than no demo.
-    let mut h = Harness::new(&[("graphs/runner_demo.graph", doc.clone())]);
+    // worse than no demo. Compiled against the *committed* curve, so a
+    // regenerated demo and the asset on disk cannot drift apart.
+    let mut h = Harness::with_curves(
+        &[("graphs/runner_demo.graph", doc.clone())],
+        &[(DEMO_CURVE, demo_curve())],
+    );
     let e = h.spawn_runner("Demo", "graphs/runner_demo.graph");
     h.ticks(3);
     let rt = h.world.get::<&GraphRuntime>(e).unwrap();

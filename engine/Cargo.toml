@@ -24,7 +24,7 @@ dev_nodes = []
 # leaf crate, so turning this off genuinely strips the interpreter from a
 # build. The `GraphRunner` *component* is unconditional (scenes must round-trip
 # either way); only the runtime is gated.
-graph-scripting = ["dep:node_graph_exec"]
+graph-scripting = ["dep:node_graph_exec", "dep:curve_asset"]
 tracy = ["tracy-client"]
 
 [dependencies]
@@ -116,6 +116,9 @@ game_shared = { path = "../game_shared" }
 node_graph_macros = { path = "../crates/node_graph_macros" }
 node_graph_types = { path = "../crates/node_graph_types" }
 node_graph_exec = { path = "../crates/node_graph_exec", optional = true }
+# 45-A P8: `.curve` assets — the engine owns file IO and AssetType, the crate
+# owns the data and its evaluation.
+curve_asset = { path = "../crates/curve_asset", optional = true }
 inventory = "0.3"
 
 # Desktop-wide color sampling for the crusty eyedropper (editor only)

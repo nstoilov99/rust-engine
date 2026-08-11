@@ -454,4 +454,25 @@ impl GraphDoc {
         refs.dedup();
         refs
     }
+
+    /// Every `.curve` this document references, deduplicated and sorted
+    /// (45-A P8). The counterpart of [`GraphDoc::subgraph_refs`]: a host has
+    /// to materialize these before it can compile, because a Timeline's output
+    /// pins are its curve's tracks.
+    pub fn curve_refs(&self) -> Vec<&str> {
+        let mut refs: Vec<&str> = self
+            .nodes
+            .iter()
+            .filter(|n| n.type_id == crate::registry::TIMELINE_TYPE_ID)
+            .filter_map(|n| match n.properties.get(crate::registry::CURVE_PROP) {
+                Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.is_empty() => {
+                    Some(s.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        refs
+    }
 }

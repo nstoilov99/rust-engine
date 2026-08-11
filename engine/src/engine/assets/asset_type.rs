@@ -33,6 +33,9 @@ pub enum AssetType {
     InputMappingContext,
     /// Node graph documents (*.graph) and reusable subgraphs (*.subgraph)
     Graph,
+    /// Float-track curves (*.curve) — Timeline tracks today, animation
+    /// channels when Task 41 grows the same asset.
+    Curve,
     /// Unknown or unsupported file type
     #[default]
     Unknown,
@@ -62,6 +65,7 @@ impl AssetType {
             "inputaction" => AssetType::InputAction,
             "mappingcontext" => AssetType::InputMappingContext,
             "graph" | "subgraph" => AssetType::Graph,
+            "curve" => AssetType::Curve,
             // Legacy RON files - refined by filename pattern in from_path
             "ron" => AssetType::Unknown,
             _ => AssetType::Unknown,
@@ -116,6 +120,7 @@ impl AssetType {
             AssetType::InputAction => "Input Action",
             AssetType::InputMappingContext => "Input Mapping Context",
             AssetType::Graph => "Node Graph",
+            AssetType::Curve => "Curve",
             AssetType::Unknown => "Unknown",
         }
     }
@@ -135,6 +140,7 @@ impl AssetType {
             AssetType::InputAction => &["inputaction"],
             AssetType::InputMappingContext => &["mappingcontext"],
             AssetType::Graph => &["graph", "subgraph"],
+            AssetType::Curve => &["curve"],
             AssetType::Unknown => &[],
         }
     }
@@ -154,6 +160,7 @@ impl AssetType {
             AssetType::InputAction,
             AssetType::InputMappingContext,
             AssetType::Graph,
+            AssetType::Curve,
         ]
     }
 

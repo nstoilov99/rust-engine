@@ -246,6 +246,9 @@ pub struct FireCtx<'a> {
     /// compile time (`PlanNode::variable`) so the implementation stays
     /// stateless and never parses a property at run time.
     pub(crate) variable: Option<&'a str>,
+    /// The `.curve` path a Timeline instance names, resolved at compile time
+    /// (`PlanNode::curve`).
+    pub(crate) curve: Option<&'a str>,
     pub(crate) effects: &'a mut dyn EffectSink,
     pub(crate) world: &'a dyn WorldRead,
     pub(crate) tick: TickInput,
@@ -425,6 +428,11 @@ impl FireCtx<'_> {
     /// re-fired after its body finished.
     pub fn loop_frame(&self) -> Option<LoopFrameView> {
         self.frame
+    }
+
+    /// The `.curve` asset this instance names, if it names one.
+    pub fn curve_path(&self) -> Option<&str> {
+        self.curve
     }
 
     /// Instance time: the accumulated total of every `dt` the runner has

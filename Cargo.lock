@@ -904,6 +904,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "curve_asset"
+version = "0.1.0"
+dependencies = [
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2774,6 +2782,7 @@ dependencies = [
 name = "node_graph_exec"
 version = "0.1.0"
 dependencies = [
+ "curve_asset",
  "node_graph_types",
  "ron",
  "serde",
@@ -2792,6 +2801,7 @@ dependencies = [
 name = "node_graph_types"
 version = "0.1.0"
 dependencies = [
+ "curve_asset",
  "ron",
  "serde",
 ]
@@ -4072,6 +4082,7 @@ dependencies = [
  "bytemuck",
  "crossbeam-channel",
  "crusty-gui",
+ "curve_asset",
  "game_shared",
  "gilrs",
  "glam 0.29.3",

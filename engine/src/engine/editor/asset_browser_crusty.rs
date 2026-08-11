@@ -94,6 +94,10 @@ pub(super) fn type_color(t: AssetType) -> Color {
         | AssetType::InputAction
         | AssetType::InputMappingContext
         | AssetType::Graph => "scripting",
+        // A curve is animation data — it shares a slot with `.anim` because
+        // Task 41 grows this exact asset into animation channels, and the two
+        // reading alike is the point rather than an accident.
+        AssetType::Curve => "animation",
         _ => "geometry",
     })
 }

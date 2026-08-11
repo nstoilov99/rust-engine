@@ -14,6 +14,8 @@ edition = "2021"
 
 [dependencies]
 node_graph_types = { path = "../node_graph_types" }
+# 45-A P8: the Timeline node samples `.curve` tracks.
+curve_asset = { path = "../curve_asset" }
 serde = { workspace = true }
 
 [dev-dependencies]

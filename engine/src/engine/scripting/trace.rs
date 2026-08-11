@@ -316,6 +316,7 @@ mod tests {
             inputs: Default::default(),
             exec: Default::default(),
             variable: None,
+            curve: None,
         }
     }
 

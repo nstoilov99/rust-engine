@@ -94,6 +94,18 @@ pub trait WorldRead {
     fn position(&self, entity: EntityRef) -> Option<[f32; 3]> {
         self.transform(entity).map(|t| t.position)
     }
+
+    /// A `.curve` asset by content-relative path (45-A P8).
+    ///
+    /// Content, not world state — but it rides the same injected-read seam
+    /// rather than growing a second one, because the property that matters is
+    /// identical: **the core never opens a file**. The host hands over
+    /// whatever it has already loaded, and a curve it does not have reads as
+    /// absent. Defaulted, so the P2-era implementors (and every test) are
+    /// unaffected.
+    fn curve(&self, _content_rel_path: &str) -> Option<&curve_asset::CurveDoc> {
+        None
+    }
 }
 
 /// A world that is not there: every read is absent. The default for headless

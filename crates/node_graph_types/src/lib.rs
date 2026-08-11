@@ -41,9 +41,15 @@ pub use registry::{
     MergeReport, MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, PreviewKind,
     RegistryError, StagedRegistry, EXEC_IN_PIN, EXEC_OUT_PIN, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, RESERVED_TYPE_IDS, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID,
-    SUBGRAPH_TYPE_ID, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN,
+    SUBGRAPH_TYPE_ID, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN, CURVE_PROP,
+    TIMELINE_FINISHED_PIN, TIMELINE_PLAY_PIN, TIMELINE_REVERSE_PIN, TIMELINE_STOP_PIN,
+    TIMELINE_TYPE_ID, TIMELINE_UPDATE_PIN,
 };
-pub use resolver::{referencing_hosts, validate_refs, GraphResolver};
+pub use resolver::{referencing_hosts, validate_refs, CurveResolver, GraphResolver};
+
+// Re-exported so a consumer holding graph documents does not need a second
+// dependency to read the curves they reference.
+pub use curve_asset;
 pub use std_events::{
     register_std_events, std_event_descriptors, EventPhase, EVENT_ACTION_PROP,
     EVENT_BEGIN_PLAY_TYPE_ID, EVENT_CUSTOM_TYPE_ID, EVENT_DRAIN_ORDER,

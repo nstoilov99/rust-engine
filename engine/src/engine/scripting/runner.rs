@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use nalgebra_glm as glm;
 use node_graph_exec::{
-    compile, nodes as std_impls, Effect, EntityRef, ExecError, GraphInstance, NodeImpls, Plan,
-    TickInput, TransformSnapshot, WorldRead,
+    compile_with_curves, nodes as std_impls, Effect, EntityRef, ExecError, GraphInstance,
+    NodeImpls, Plan, TickInput, TransformSnapshot, WorldRead,
 };
 /// The traced entry point is the editor's; a shipped game takes the plain one,
 /// which instantiates the interpreter against `NoTrace` (see [`super::trace`]).
@@ -146,11 +146,12 @@ impl GraphPlanCache {
         content_rel: &str,
         registry: &NodeRegistry,
         loader: &dyn GraphLoader,
+        curves: &mut CurveCache,
     ) -> Result<Arc<Plan>, String> {
         if let Some(hit) = self.peek(content_rel) {
             return hit;
         }
-        let result = compile_asset(content_rel, registry, loader);
+        let result = compile_asset(content_rel, registry, loader, curves);
         self.store(content_rel, result.clone());
         result
     }
@@ -161,6 +162,82 @@ impl GraphPlanCache {
 /// editor will later want open-but-unsaved documents to win.
 pub trait GraphLoader {
     fn load(&self, content_rel: &str) -> Option<GraphDoc>;
+
+    /// A `.curve` asset (45-A P8). On the same trait as documents because it
+    /// is the same question — "get me this content-relative asset" — answered
+    /// by the same owner, and splitting it would mean every test harness
+    /// implementing two traits to say "I have files here". Defaulted to
+    /// nothing, so a loader with no curves stays a one-method impl.
+    fn load_curve(&self, _content_rel: &str) -> Option<curve_asset::CurveDoc> {
+        None
+    }
+}
+
+/// Every `.curve` the graphs in play have referenced, by content-relative
+/// path.
+///
+/// Loaded at **compile** time, not at fire time: a Timeline's output pins are
+/// its curve's track names, so the compiler needs the asset before it can
+/// validate a single wire — and once it is loaded the interpreter reads the
+/// very same copy through [`WorldRead::curve`]. One source, so the descriptor
+/// the editor draws, the plan the compiler builds and the values the runtime
+/// samples cannot drift apart.
+#[derive(Default)]
+pub struct CurveCache {
+    curves: BTreeMap<String, Arc<curve_asset::CurveDoc>>,
+}
+
+impl CurveCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.curves.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.curves.is_empty()
+    }
+
+    pub fn get(&self, content_rel: &str) -> Option<&curve_asset::CurveDoc> {
+        self.curves
+            .get(&super::normalize_graph_path(content_rel))
+            .map(|c| c.as_ref())
+    }
+
+    pub fn insert(&mut self, content_rel: &str, doc: curve_asset::CurveDoc) {
+        self.curves
+            .insert(super::normalize_graph_path(content_rel), Arc::new(doc));
+    }
+
+    /// Drop one curve (hot-reload). The plan cache is invalidated alongside,
+    /// because a track added or removed changes every Timeline's pins.
+    pub fn invalidate(&mut self, content_rel: &str) {
+        self.curves.remove(&super::normalize_graph_path(content_rel));
+    }
+
+    /// Load what `paths` names and is not already held. Failures are silent
+    /// here on purpose: the compiler is about to report the missing curve
+    /// against the node that named it, which says far more than a bare "file
+    /// not found" from a loading pass would.
+    pub fn prefetch(&mut self, paths: &[String], loader: &dyn GraphLoader) {
+        for p in paths {
+            let key = super::normalize_graph_path(p);
+            if self.curves.contains_key(&key) {
+                continue;
+            }
+            if let Some(doc) = loader.load_curve(&key) {
+                self.curves.insert(key, Arc::new(doc));
+            }
+        }
+    }
+}
+
+impl node_graph_types::CurveResolver for CurveCache {
+    fn resolve_curve(&self, content_rel_path: &str) -> Option<&curve_asset::CurveDoc> {
+        self.get(content_rel_path)
+    }
 }
 
 /// Loads through the engine's asset source, so paks work.
@@ -173,13 +250,21 @@ impl GraphLoader for AssetGraphLoader {
         let path = self.content_root.join(content_rel);
         node_graph_types::load_graph(&path).ok()
     }
+
+    fn load_curve(&self, content_rel: &str) -> Option<curve_asset::CurveDoc> {
+        let path = self.content_root.join(content_rel);
+        let text = std::fs::read_to_string(path).ok()?;
+        curve_asset::parse_curve(&text).ok()
+    }
 }
 
-/// Load a graph and every subgraph it references, then compile.
+/// Load a graph, every subgraph it references and every curve any of them
+/// plays, then compile.
 fn compile_asset(
     content_rel: &str,
     registry: &NodeRegistry,
     loader: &dyn GraphLoader,
+    curves: &mut CurveCache,
 ) -> Result<Arc<Plan>, String> {
     let root = loader
         .load(content_rel)
@@ -204,7 +289,18 @@ fn compile_asset(
         docs.insert(next, doc);
     }
 
-    compile(&root, content_rel, registry, &docs)
+    // Curves come from the whole reference tree, not just the root: a
+    // subgraph is free to contain a Timeline, and it is inlined into this
+    // plan.
+    let curve_refs: Vec<String> = root
+        .curve_refs()
+        .into_iter()
+        .chain(docs.values().flat_map(|d| d.curve_refs()))
+        .map(|s| s.to_string())
+        .collect();
+    curves.prefetch(&curve_refs, loader);
+
+    compile_with_curves(&root, content_rel, registry, &docs, curves)
         .map(Arc::new)
         .map_err(|e| e.to_string())
 }
@@ -226,6 +322,8 @@ struct LiveWorld<'a> {
     world: &'a hecs::World,
     self_entity: hecs::Entity,
     aliases: &'a BTreeMap<u32, hecs::Entity>,
+    /// The same curves the plan was compiled against (45-A P8).
+    curves: Option<&'a CurveCache>,
 }
 
 impl LiveWorld<'_> {
@@ -259,6 +357,10 @@ impl WorldRead for LiveWorld<'_> {
         self.resolve(entity)
             .map(|e| self.world.contains(e))
             .unwrap_or(false)
+    }
+
+    fn curve(&self, content_rel_path: &str) -> Option<&curve_asset::CurveDoc> {
+        self.curves?.get(content_rel_path)
     }
 }
 
@@ -352,6 +454,11 @@ impl System for GraphScriptRunnerSystem {
             .map(|(e, _)| e)
             .collect();
 
+        // Borrowed read-only for the whole tick loop: arming is finished, so
+        // nothing below writes to `Resources`, and every instance samples the
+        // same curves its plan was compiled against.
+        let curves = resources.get::<CurveCache>();
+
         let mut effects: Vec<(hecs::Entity, Vec<Effect>)> = Vec::new();
         for entity in entities {
             let Ok(mut guard) = world.get::<&mut GraphRuntime>(entity) else {
@@ -376,6 +483,7 @@ impl System for GraphScriptRunnerSystem {
                     world,
                     self_entity: entity,
                     aliases: &aliases,
+                    curves,
                 };
                 let input = TickInput { dt, time: now };
                 #[cfg(feature = "editor")]
@@ -438,13 +546,24 @@ impl GraphScriptRunnerSystem {
         let plan = match cached {
             Some(hit) => hit,
             None => {
+                // Three short borrows again: the registry, then the curve
+                // cache, then the plan cache. `Resources` hands out one at a
+                // time, and compiling needs both caches, so the curves come
+                // out and go back around the compile.
+                let mut curve_cache = resources
+                    .get_mut::<CurveCache>()
+                    .map(std::mem::take)
+                    .unwrap_or_default();
                 let compiled = match resources.get::<std::sync::Arc<NodeRegistry>>() {
-                    Some(reg) => compile_asset(graph, reg, &*self.loader),
+                    Some(reg) => compile_asset(graph, reg, &*self.loader, &mut curve_cache),
                     None => Err(
                         "no node registry in Resources — the app shares one after                          building its plugins"
                             .to_string(),
                     ),
                 };
+                if let Some(slot) = resources.get_mut::<CurveCache>() {
+                    *slot = curve_cache;
+                }
                 if let Some(cache) = resources.get_mut::<GraphPlanCache>() {
                     cache.store(graph, compiled.clone());
                 }

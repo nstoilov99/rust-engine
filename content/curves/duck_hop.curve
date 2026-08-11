@@ -1,0 +1,28 @@
+// 45-A P8 demo: the height the Timeline in `graphs/runner_demo.graph` drives
+// the Duck's Z to. Cubic on the way up and over the top so the hop eases
+// instead of reading as two straight ramps; the landing key is Cubic too, and
+// the loop wraps back to it.
+(
+    version: 1,
+    tracks: [
+        (
+            slug: "height",
+            label: "Height",
+            keys: [
+                (t: 0.0, value: 0.0, interp: Cubic),
+                (t: 0.7, value: 2.6, interp: Cubic),
+                (t: 1.4, value: 0.0, interp: Cubic),
+            ],
+        ),
+        (
+            slug: "lean",
+            label: "Lean",
+            keys: [
+                (t: 0.0, value: 0.0, interp: Linear),
+                (t: 0.35, value: 1.0, interp: Linear),
+                (t: 1.05, value: -1.0, interp: Linear),
+                (t: 1.4, value: 0.0, interp: Linear),
+            ],
+        ),
+    ],
+)

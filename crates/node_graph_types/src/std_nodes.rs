@@ -33,6 +33,8 @@
 use crate::doc::{NodeRealm, PinType, PropValue};
 use crate::registry::{
     NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, EXEC_IN_PIN, EXEC_OUT_PIN,
+    TIMELINE_FINISHED_PIN, TIMELINE_PLAY_PIN, TIMELINE_REVERSE_PIN, TIMELINE_STOP_PIN,
+    TIMELINE_TYPE_ID, TIMELINE_UPDATE_PIN,
 };
 
 // --- control -----------------------------------------------------------
@@ -283,6 +285,30 @@ fn control() -> Vec<NodeDescriptor> {
             "Waits Duration seconds, then continues — the activation suspends meanwhile",
             vec![exec_in(), f("duration", "Duration", 0.2)],
             vec![PinDescriptor::new(EXEC_OUT_PIN, "Completed", PinType::Exec)],
+        ),
+        // 45-A D7. Impure and *stateful across ticks* rather than a
+        // suspension user: a Timeline is a per-tick node, not a wait. See
+        // `node_graph_exec::nodes` for the execution model. Its Float outputs
+        // are synthesized from the referenced curve's tracks
+        // (`NodeKind::Timeline`), so the descriptor declares only the fixed
+        // half.
+        impure(
+            TIMELINE_TYPE_ID,
+            "Timeline",
+            "Flow",
+            "Plays a .curve over time: Update fires every tick with the track              values, Finished fires once at the end",
+            vec![
+                exec(TIMELINE_PLAY_PIN, "Play"),
+                exec(TIMELINE_REVERSE_PIN, "Reverse"),
+                exec(TIMELINE_STOP_PIN, "Stop"),
+                f("duration", "Duration", 0.0),
+                b("looping", "Looping", false),
+            ],
+            vec![
+                exec(TIMELINE_UPDATE_PIN, "Update"),
+                exec(TIMELINE_FINISHED_PIN, "Finished"),
+                f("time", "Time", 0.0),
+            ],
         ),
         impure(
             GATE,

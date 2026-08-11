@@ -9,6 +9,7 @@ members = [
     "tools/greybox_gen",
     "tools/migrate_asset_extensions",
     "tools/net_bots",
+    "crates/curve_asset",
     "crates/node_graph_macros",
     "crates/node_graph_types",
     "crates/node_graph_exec",

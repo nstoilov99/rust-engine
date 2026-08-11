@@ -23,8 +23,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use node_graph_types::{
-    validate_doc_with, validate_refs, DocDescriptors, ErrorSeverity, EventPhase, GraphDoc,
-    GraphRealm,
+    validate_doc_with, validate_refs, CurveResolver, DocDescriptors, ErrorSeverity, EventPhase,
+    GraphDoc, GraphRealm,
     GraphError, GraphResolver, NodeRegistry, PropValue, VarDecl, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
@@ -85,6 +85,12 @@ pub struct PlanNode {
     pub exec: BTreeMap<String, ExecEdge>,
     /// The variable a `var_get`/`var_set` names, resolved at compile time.
     pub variable: Option<String>,
+    /// The `.curve` a Timeline names, resolved at compile time from the
+    /// instance's [`CURVE_PROP`](node_graph_types::CURVE_PROP) property — the
+    /// same treatment `variable` gets, and for the same reason: a reference
+    /// stored as a property is not an input pin, so the implementation would
+    /// otherwise have no way to see it (45-A P8).
+    pub curve: Option<String>,
 }
 
 /// An entry point: an event node the runner can activate.
@@ -161,19 +167,46 @@ impl std::error::Error for CompileError {}
 type NodeKey = (Vec<u64>, u64);
 
 /// Compile `doc` (loaded from `doc_path`) into an executable plan.
+///
+/// No curves: a document containing a Timeline will not validate, because its
+/// track outputs are unknowable. Use [`compile_with_curves`] when the caller
+/// has `.curve` assets — which the engine's runner always does.
 pub fn compile(
     doc: &GraphDoc,
     doc_path: &str,
     registry: &NodeRegistry,
     resolver: &dyn GraphResolver,
 ) -> Result<Plan, CompileError> {
+    compile_inner(doc, doc_path, registry, resolver, None)
+}
+
+/// …and with `.curve` assets in reach, so Timeline nodes resolve their track
+/// pins (45-A P8).
+pub fn compile_with_curves(
+    doc: &GraphDoc,
+    doc_path: &str,
+    registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
+    curves: &dyn CurveResolver,
+) -> Result<Plan, CompileError> {
+    compile_inner(doc, doc_path, registry, resolver, Some(curves))
+}
+
+fn compile_inner(
+    doc: &GraphDoc,
+    doc_path: &str,
+    registry: &NodeRegistry,
+    resolver: &dyn GraphResolver,
+    curves: Option<&dyn CurveResolver>,
+) -> Result<Plan, CompileError> {
     // --- 1. validate, through the whole reference tree ---------------------
-    validate_tree(doc, doc_path, registry, resolver, &mut BTreeSet::new())?;
+    validate_tree(doc, doc_path, registry, resolver, curves, &mut BTreeSet::new())?;
 
     // --- 2. flatten --------------------------------------------------------
     let mut f = Flattener {
         registry,
         resolver,
+        curves,
         nodes: Vec::new(),
         index: BTreeMap::new(),
         scopes: Vec::new(),
@@ -184,7 +217,7 @@ pub fn compile(
     let scopes = std::mem::take(&mut f.scopes);
     let mut nodes = std::mem::take(&mut f.nodes);
     let index = f.index.clone();
-    let ctx = SpliceCtx { scopes: &scopes, index: &index, registry, resolver };
+    let ctx = SpliceCtx { scopes: &scopes, index: &index, registry, resolver, curves };
     for flat in nodes.iter_mut() {
         let scope = ctx.scope_of(&flat.key);
         flat.plan.inputs = ctx.resolve_inputs(&flat.key, scope);
@@ -260,12 +293,13 @@ fn validate_tree(
     path: &str,
     registry: &NodeRegistry,
     resolver: &dyn GraphResolver,
+    curves: Option<&dyn CurveResolver>,
     seen: &mut BTreeSet<String>,
 ) -> Result<(), CompileError> {
     if !seen.insert(path.to_string()) {
         return Ok(()); // already checked (and cycles are a validation error)
     }
-    let d = DocDescriptors::with_resolver(doc, registry, resolver);
+    let d = with_curves(DocDescriptors::with_resolver(doc, registry, resolver), curves);
     let mut errors = validate_doc_with(&d);
     errors.extend(validate_refs(doc, path, registry, resolver));
     let hard: Vec<GraphError> = errors
@@ -279,7 +313,7 @@ fn validate_tree(
         let sub = resolver
             .resolve(r)
             .ok_or_else(|| CompileError::MissingSubgraph { path: r.to_string() })?;
-        validate_tree(sub, r, registry, resolver, seen)?;
+        validate_tree(sub, r, registry, resolver, curves, seen)?;
     }
     Ok(())
 }
@@ -300,9 +334,22 @@ struct Scope {
     host: Option<(usize, u64)>,
 }
 
+/// Attach the curve resolver when there is one. One helper rather than the
+/// same three-line `match` at every `DocDescriptors` construction.
+fn with_curves<'a>(
+    d: DocDescriptors<'a>,
+    curves: Option<&'a dyn CurveResolver>,
+) -> DocDescriptors<'a> {
+    match curves {
+        Some(c) => d.with_curves(c),
+        None => d,
+    }
+}
+
 struct Flattener<'a> {
     registry: &'a NodeRegistry,
     resolver: &'a dyn GraphResolver,
+    curves: Option<&'a dyn CurveResolver>,
     nodes: Vec<Flat>,
     index: BTreeMap<NodeKey, usize>,
     scopes: Vec<Scope>,
@@ -349,7 +396,14 @@ impl Flattener<'_> {
                 continue;
             }
 
-            let d = DocDescriptors::with_resolver(&self.scopes[scope_ix].doc, self.registry, self.resolver);
+            let d = with_curves(
+                DocDescriptors::with_resolver(
+                    &self.scopes[scope_ix].doc,
+                    self.registry,
+                    self.resolver,
+                ),
+                self.curves,
+            );
             let desc = d.descriptor(n.id);
             let (pure, volatile) = desc
                 .as_ref()
@@ -373,6 +427,7 @@ impl Flattener<'_> {
                     inputs: BTreeMap::new(),
                     exec: BTreeMap::new(),
                     variable: d.variable_slug(n.id).map(|s| s.to_string()),
+                    curve: d.curve_path(n.id).map(|s| s.to_string()),
                 },
                 event_name: match n.properties.get(node_graph_types::EVENT_NAME_PROP) {
                     Some(PropValue::Str(s)) => Some(s.clone()),
@@ -392,6 +447,7 @@ struct SpliceCtx<'a> {
     index: &'a BTreeMap<NodeKey, usize>,
     registry: &'a NodeRegistry,
     resolver: &'a dyn GraphResolver,
+    curves: Option<&'a dyn CurveResolver>,
 }
 
 impl SpliceCtx<'_> {
@@ -405,7 +461,10 @@ impl SpliceCtx<'_> {
     /// Resolve every input pin of `flat` to a constant or a real producer.
     fn resolve_inputs(&self, key: &NodeKey, scope: usize) -> BTreeMap<String, InputSource> {
         let doc = &self.scopes[scope].doc;
-        let d = DocDescriptors::with_resolver(doc, self.registry, self.resolver);
+        let d = with_curves(
+            DocDescriptors::with_resolver(doc, self.registry, self.resolver),
+            self.curves,
+        );
         let node = doc.node(key.1).expect("flattened node exists");
         let mut out = BTreeMap::new();
 
@@ -521,7 +580,10 @@ impl SpliceCtx<'_> {
     /// else the descriptor's declared default, else the type's zero.
     fn constant_at(&self, scope: usize, node: u64, pin: &str) -> Value {
         let doc = &self.scopes[scope].doc;
-        let d = DocDescriptors::with_resolver(doc, self.registry, self.resolver);
+        let d = with_curves(
+            DocDescriptors::with_resolver(doc, self.registry, self.resolver),
+            self.curves,
+        );
         if let Some(n) = doc.node(node) {
             if let Some(v) = n.properties.get(pin) {
                 return Value::from_prop(v);

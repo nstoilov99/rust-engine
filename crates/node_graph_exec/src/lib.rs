@@ -57,7 +57,7 @@ pub use node::{
     EvalCtx, ExecError, FireCtx, FireResult, ImpureNode, LoopFrameView, NodeImpl, NodeImpls,
     PureNode, Suspension, TickInput,
 };
-pub use plan::{compile, CompileError, Entry, InputSource, Plan, PlanNode, VarSlot};
+pub use plan::{compile, compile_with_curves, CompileError, Entry, InputSource, Plan, PlanNode, VarSlot};
 pub use trace::{NoTrace, TraceSink};
 pub use value::{EntityRef, Value};
 

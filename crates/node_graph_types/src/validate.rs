@@ -66,6 +66,16 @@ pub enum GraphError {
     /// wires to anything. The subgraph still loads and still runs; that pin
     /// just goes nowhere, which is a warning, not a broken document.
     InterfacePinUnbound { pin: String, output: bool },
+    /// A Timeline node naming a `.curve` the resolver cannot produce — an
+    /// empty reference, or a file that is missing or unreadable. Its track
+    /// outputs are unknowable, so every wire leaving it is dangling; the same
+    /// statement `MissingSubgraph` makes about an interface (45-A P8).
+    ///
+    /// Only reported when curves were actually offered
+    /// ([`DocDescriptors::has_curves`]): a doc-local validation pass has no
+    /// business claiming a file is missing when it was never handed a way to
+    /// look.
+    MissingCurve { node: u64, path: String },
 }
 
 /// Where an error belongs on the canvas. The error UI is complete rather than
@@ -98,6 +108,9 @@ impl GraphError {
             // lists in the popover — reference errors stay visually separate
             // from doc errors, but the node still has to say something.
             GraphError::MissingSubgraph { node, .. } => ErrorAnchor::Node(*node),
+            // Same reasoning for a missing curve: the node that named it is
+            // the node whose pins are now unknowable.
+            GraphError::MissingCurve { node, .. } => ErrorAnchor::Node(*node),
             GraphError::UnknownDomainPin { node, pin, .. } => ErrorAnchor::Pin {
                 node: *node,
                 pin: pin.clone(),
@@ -159,6 +172,12 @@ impl std::fmt::Display for GraphError {
             GraphError::DuplicateNodeId(id) => write!(f, "duplicate node id {id}"),
             GraphError::UnknownNodeType { node, type_id } => {
                 write!(f, "node {node}: unknown type '{type_id}'")
+            }
+            GraphError::MissingCurve { node, path } if path.is_empty() => {
+                write!(f, "node {node}: Timeline names no curve asset")
+            }
+            GraphError::MissingCurve { node, path } => {
+                write!(f, "node {node}: curve '{path}' not found")
             }
             GraphError::DanglingEdgeNode { edge } => write!(
                 f,
@@ -290,6 +309,14 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
                 }
                 continue;
             }
+            NodeKind::Timeline => {
+                if d.has_curves() && d.curve_of(n.id).is_none() {
+                    errors.push(GraphError::MissingCurve {
+                        node: n.id,
+                        path: d.curve_path(n.id).unwrap_or_default().to_string(),
+                    });
+                }
+            }
             NodeKind::Registered | NodeKind::EventCustom => {}
         }
         match d.descriptor(n.id) {
@@ -373,12 +400,18 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
 
         // Subgraph edges stay `validate_refs` territory even when a resolver
         // is in reach, so the two passes never report the same wire twice.
-        let from_desc = (NodeKind::of_type(&from.type_id) != NodeKind::Subgraph)
-            .then(|| d.descriptor(from.id))
-            .flatten();
-        let to_desc = (NodeKind::of_type(&to.type_id) != NodeKind::Subgraph)
-            .then(|| d.descriptor(to.id))
-            .flatten();
+        //
+        // A Timeline whose curve did not resolve is the same situation one
+        // asset over: its track pins live in a file nobody handed us, so every
+        // wire leaving it would report as `UnknownPin` and bury the one error
+        // that matters. `MissingCurve` says it once, on the node, and only
+        // when curves were actually offered.
+        let opaque = |n: &crate::doc::NodeInst| {
+            let kind = NodeKind::of_type(&n.type_id);
+            kind == NodeKind::Subgraph || (kind == NodeKind::Timeline && d.curve_of(n.id).is_none())
+        };
+        let from_desc = (!opaque(from)).then(|| d.descriptor(from.id)).flatten();
+        let to_desc = (!opaque(to)).then(|| d.descriptor(to.id)).flatten();
 
         let from_ty = match from_desc {
             Some(d) => match d.output(&e.from_pin) {

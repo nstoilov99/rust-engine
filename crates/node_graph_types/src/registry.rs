@@ -51,6 +51,27 @@ pub const VAR_PROP: &str = "var";
 /// The value pin of both variable nodes.
 pub const VAR_VALUE_PIN: &str = "value";
 
+/// Node-type slug for the Timeline (45-A D7). **Registered, not reserved**:
+/// its exec pins and configuration come from a normal descriptor, and only
+/// its *track outputs* are synthesized from the referenced `.curve` — the
+/// same "registry base plus document-dependent extras" shape `event_custom`
+/// uses.
+pub const TIMELINE_TYPE_ID: &str = "timeline";
+
+/// Reserved *property* key naming the `.curve` asset a Timeline plays.
+/// A property rather than an input pin on purpose: the track list — and
+/// therefore the node's output pins — has to be knowable from the document
+/// alone, and a wired pin's value is not. Same rule the `subgraph` reference
+/// follows. Value is a [`PropValue::Asset`](crate::doc::PropValue::Asset).
+pub const CURVE_PROP: &str = "curve";
+
+/// Timeline exec pins.
+pub const TIMELINE_PLAY_PIN: &str = "play";
+pub const TIMELINE_REVERSE_PIN: &str = "reverse";
+pub const TIMELINE_STOP_PIN: &str = "stop";
+pub const TIMELINE_UPDATE_PIN: &str = "update";
+pub const TIMELINE_FINISHED_PIN: &str = "finished";
+
 /// The exec pin slugs the framework's own synthesized descriptors use. Node
 /// libraries are free to pick their own; these exist so the doc-dependent
 /// types spell them one way.

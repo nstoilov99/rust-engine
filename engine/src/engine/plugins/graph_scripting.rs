@@ -38,7 +38,8 @@ use crate::engine::ecs::components::{Transform, TransformDirty};
 use crate::engine::ecs::resources::Time;
 use crate::engine::ecs::schedule::{RunIfPlaying, Stage};
 use crate::engine::scripting::runner::{
-    AssetGraphLoader, GraphLoader, GraphPlanCache, GraphRuntime, GraphScriptRunnerSystem,
+    AssetGraphLoader, CurveCache, GraphLoader, GraphPlanCache, GraphRuntime,
+    GraphScriptRunnerSystem,
 };
 use crate::engine::scripting::GraphRunner;
 
@@ -118,6 +119,10 @@ impl EnginePlugin for GraphScriptingPlugin {
         // 2. The compiled-plan cache. One per app: two entities running the
         //    same graph share a compilation.
         ctx.insert_resource(GraphPlanCache::new());
+        // …and the `.curve` assets those plans reference (45-A P8). Loaded by
+        // the compiler, sampled by the interpreter — one copy, so a Timeline's
+        // pins and its values cannot come from different files.
+        ctx.insert_resource(CurveCache::new());
 
         // 3. The runner. `RunIfPlaying` for the same reason physics uses it —
         //    standalone forces `Playing` at startup, so a shipped game always
@@ -142,6 +147,7 @@ impl EnginePlugin for GraphScriptingPlugin {
             SystemDescriptor::new("GraphScriptRunnerSystem")
                 .reads_resource::<Time>()
                 .writes_resource::<GraphPlanCache>()
+                .writes_resource::<CurveCache>()
                 .reads::<GraphRunner>()
                 .writes::<GraphRuntime>()
                 .writes::<Transform>()

@@ -23,6 +23,23 @@ impl GraphResolver for BTreeMap<String, GraphDoc> {
     }
 }
 
+/// The same indirection for `.curve` assets (45-A P8).
+///
+/// A separate trait rather than a method on [`GraphResolver`]: the two are
+/// answered by different owners — open graph tabs resolve documents, while
+/// curves come from the asset source — and a consumer that has one but not the
+/// other is a normal state (headless compilation of a graph with no Timeline
+/// in it has no business loading curves).
+pub trait CurveResolver {
+    fn resolve_curve(&self, content_rel_path: &str) -> Option<&curve_asset::CurveDoc>;
+}
+
+impl CurveResolver for BTreeMap<String, curve_asset::CurveDoc> {
+    fn resolve_curve(&self, content_rel_path: &str) -> Option<&curve_asset::CurveDoc> {
+        self.get(content_rel_path)
+    }
+}
+
 /// Reverse index: which docs reference a given subgraph. Built by the caller
 /// over whatever set of docs it knows (open editors + scanned assets); used
 /// by hot-reload to refresh host graphs when a subgraph changes.

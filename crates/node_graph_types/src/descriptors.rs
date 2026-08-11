@@ -32,9 +32,9 @@ use crate::doc::{GraphDoc, NodeRealm, PinType, PropValue, VarDecl};
 use crate::registry::{
     NodeDescriptor, NodeRegistry, PinDescriptor, EXEC_IN_PIN, EXEC_OUT_PIN, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID, VAR_GET_TYPE_ID,
-    VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN,
+    VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN, CURVE_PROP, TIMELINE_TYPE_ID,
 };
-use crate::resolver::GraphResolver;
+use crate::resolver::{CurveResolver, GraphResolver};
 use crate::std_events::{
     payload_pins, EVENT_ACTION_PROP, EVENT_CUSTOM_TYPE_ID, EVENT_INPUT_ACTION_TYPE_ID,
     EVENT_NAME_PROP,
@@ -63,6 +63,9 @@ pub enum NodeKind {
     /// Registry base descriptor plus payload pins from the instance's
     /// properties.
     EventCustom,
+    /// Registry base descriptor plus one Float output per track of the
+    /// `.curve` the instance names (45-A D7).
+    Timeline,
 }
 
 impl NodeKind {
@@ -76,6 +79,7 @@ impl NodeKind {
             VAR_GET_TYPE_ID => NodeKind::VarGet,
             VAR_SET_TYPE_ID => NodeKind::VarSet,
             EVENT_CUSTOM_TYPE_ID => NodeKind::EventCustom,
+            TIMELINE_TYPE_ID => NodeKind::Timeline,
             _ => NodeKind::Registered,
         }
     }
@@ -98,13 +102,14 @@ pub struct DocDescriptors<'a> {
     doc: &'a GraphDoc,
     registry: &'a NodeRegistry,
     resolver: Option<&'a dyn GraphResolver>,
+    curves: Option<&'a dyn CurveResolver>,
 }
 
 impl<'a> DocDescriptors<'a> {
     /// Doc-local answers only: subgraph nodes resolve to `None`, exactly as
     /// `validate_doc` has always treated them.
     pub fn new(doc: &'a GraphDoc, registry: &'a NodeRegistry) -> Self {
-        Self { doc, registry, resolver: None }
+        Self { doc, registry, resolver: None, curves: None }
     }
 
     /// …plus cross-asset answers: subgraph nodes resolve their interface.
@@ -113,7 +118,40 @@ impl<'a> DocDescriptors<'a> {
         registry: &'a NodeRegistry,
         resolver: &'a dyn GraphResolver,
     ) -> Self {
-        Self { doc, registry, resolver: Some(resolver) }
+        Self { doc, registry, resolver: Some(resolver), curves: None }
+    }
+
+    /// …and `.curve` answers: a Timeline node grows one Float output per
+    /// track. Builder-style rather than a fourth constructor argument, because
+    /// most callers have no curves to offer and a Timeline with no resolver
+    /// degrades exactly like a subgraph with no resolver — base pins only, no
+    /// invented tracks (45-A P8).
+    pub fn with_curves(mut self, curves: &'a dyn CurveResolver) -> Self {
+        self.curves = Some(curves);
+        self
+    }
+
+    /// Whether this resolver can answer curve questions at all. Validation
+    /// consults it before reporting a missing curve: "I was not given any
+    /// curves" and "this curve does not exist" are different statements.
+    pub fn has_curves(&self) -> bool {
+        self.curves.is_some()
+    }
+
+    /// The `.curve` path a Timeline instance names, declared or not — so a
+    /// dangling reference can be reported with the path the author typed.
+    pub fn curve_path(&self, node_id: u64) -> Option<&'a str> {
+        match self.doc.node(node_id)?.properties.get(CURVE_PROP) {
+            Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.is_empty() => {
+                Some(s.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    /// The resolved curve a Timeline instance plays.
+    pub fn curve_of(&self, node_id: u64) -> Option<&'a curve_asset::CurveDoc> {
+        self.curves?.resolve_curve(self.curve_path(node_id)?)
     }
 
     pub fn doc(&self) -> &'a GraphDoc {
@@ -170,6 +208,20 @@ impl<'a> DocDescriptors<'a> {
                 base.outputs.extend(payload_pins(&n.properties));
                 Some(Cow::Owned(base))
             }
+            NodeKind::Timeline => {
+                let mut base = self.registry.get(&n.type_id)?.clone();
+                // No resolver, no curve, or a curve with no tracks: the base
+                // descriptor stands. The node still has its exec pins and is
+                // still authorable — an unresolvable reference is validation's
+                // problem to report, not a reason to render nothing.
+                if let Some(curve) = self.curve_of(node_id) {
+                    base.outputs.extend(curve.tracks.iter().map(|t| {
+                        PinDescriptor::new(&t.slug, &t.label, PinType::Float)
+                            .with_doc(&format!("Track '{}' of the curve", t.label))
+                    }));
+                }
+                Some(Cow::Owned(base))
+            }
         }
     }
 
@@ -207,6 +259,15 @@ impl<'a> DocDescriptors<'a> {
             }
             NodeKind::EventCustom => {
                 format!("Event: {}", config(EVENT_NAME_PROP).unwrap_or_else(|| "<unnamed>".into()))
+            }
+            NodeKind::Timeline => {
+                // Named by the asset it plays — two Timelines in one graph are
+                // otherwise indistinguishable on the canvas.
+                let stem = self
+                    .curve_path(node_id)
+                    .and_then(|p| p.rsplit('/').next())
+                    .map(|f| f.trim_end_matches(".curve").to_string());
+                format!("Timeline: {}", stem.unwrap_or_else(|| "<no curve>".into()))
             }
             _ if n.type_id == EVENT_INPUT_ACTION_TYPE_ID => {
                 format!("Input: {}", config(EVENT_ACTION_PROP).unwrap_or_else(|| "<unbound>".into()))

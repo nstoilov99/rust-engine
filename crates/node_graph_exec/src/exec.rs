@@ -302,6 +302,7 @@ fn advance<T: TraceSink>(
                 outputs: &mut outputs,
                 vars: &mut instance.variables,
                 variable: node.variable.as_deref(),
+                curve: node.curve.as_deref(),
                 effects,
                 world,
                 tick: tick_in,
