@@ -131,6 +131,16 @@ pub fn tick_traced<T: TraceSink>(
                 due.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
                 for (_, _, i) in due {
                     instance.threads[i].state = ThreadState::Running;
+                    // The wire out of the latent is travelled *now*, so this
+                    // is where it pulses. Taken (not copied) — one wake, one
+                    // pulse, and a resumed activation that suspends again
+                    // records a fresh edge.
+                    if let (Some((from, pin)), Some(to)) = (
+                        instance.threads[i].resume_edge.take(),
+                        instance.threads[i].cursor,
+                    ) {
+                        trace.exec_edge(from, &pin, to);
+                    }
                     report.resumed += 1;
                 }
             }
@@ -206,6 +216,7 @@ fn start_phase(
             frames: Vec::new(),
             locals: BTreeMap::new(),
             payload: payload.clone(),
+            resume_edge: None,
             state: ThreadState::Running,
         });
         started += 1;
@@ -374,16 +385,17 @@ fn advance<T: TraceSink>(
                 // The node's own loop frame is deliberately *not* popped:
                 // suspending is not leaving a loop.
                 //
-                // **Not traced** (P7): the continuation is *resolved* here but
-                // not taken until the activation is due, and lighting the wire
-                // out of a `Delay(5)` five seconds before control reaches it
-                // would be a lie the visualization cannot walk back. Waking is
-                // a pure state flip in the latent phase with no edge in hand,
-                // so a truthful pulse there needs the resumed-from node parked
-                // on the activation — serializable instance state grown for an
-                // editor feature. Deferred to 45.5 with flow bubbles, which
-                // want the same data.
+                // **Not traced here** (P7, revised by the 45-A review): the
+                // continuation is *resolved* now but not taken until the
+                // activation is due, and lighting the wire out of a `Delay(5)`
+                // five seconds before control reaches it would be a lie the
+                // visualization cannot walk back. So the edge is *parked* on
+                // the activation instead, and the latent phase pulses it at
+                // wake — the moment control actually leaves this node.
                 let next = s.resume.as_deref().and_then(|pin| plan.nodes[node_ix].exec.get(pin));
+                instance.threads[thread].resume_edge = next
+                    .and(s.resume.as_deref())
+                    .map(|pin| (node_ix, pin.to_string()));
                 instance.threads[thread].cursor = next.map(|t| t.node);
                 instance.threads[thread].entered = next.map(|t| t.pin.clone());
                 instance.threads[thread].state = ThreadState::Suspended(s);

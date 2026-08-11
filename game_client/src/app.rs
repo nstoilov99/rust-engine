@@ -4598,7 +4598,26 @@ impl App {
                     .console
                     .messages
                     .push(LogMessage::error(format!("Failed to save graph '{key}': {e}")));
+                return;
             }
+        } else {
+            return;
+        }
+        // The write is what makes the cached plan stale, so invalidation
+        // belongs *here* and not in the watcher handler — whose echo guard
+        // returns before it precisely because this save is not an external
+        // edit. Missing this meant play mode kept executing the plan the file
+        // no longer contains, across restarts, for the rest of the session.
+        //
+        // Same shape as `save_curve_state` (P8b): write, then invalidate.
+        #[cfg(feature = "graph-scripting")]
+        if let Some(cache) = self
+            .core
+            .game_world
+            .resources_mut()
+            .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
+        {
+            cache.invalidate(key);
         }
     }
 

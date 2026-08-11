@@ -101,14 +101,20 @@ impl GraphPlanCache {
         self.generation
     }
 
-    /// Drop one asset's compilation (hot-reload). Also bumps the generation,
-    /// so live instances of *any* graph re-check — a subgraph edit changes
-    /// the plan of every host that inlined it, and the cache does not track
-    /// that reference tree.
+    /// Drop **every** compilation because `content_rel` changed, and bump the
+    /// generation so live instances restart.
+    ///
+    /// Wholesale, not per-key, and the argument is kept only to say *why* in a
+    /// log: a subgraph inlines into every host that references it, and the
+    /// cache does not track that reference tree — so dropping one key restarts
+    /// the hosts and then re-accepts their stale cached plans, which is worse
+    /// than not invalidating at all (the restart hides it). The same reasoning
+    /// P8b applied to curves, where a track is a Timeline pin.
+    ///
+    /// Compilation is cheap and this happens on author actions, not per frame.
     pub fn invalidate(&mut self, content_rel: &str) {
-        let key = super::normalize_graph_path(content_rel);
-        self.plans.remove(&key);
-        self.generation = self.generation.wrapping_add(1);
+        let _ = content_rel;
+        self.invalidate_all();
     }
 
     pub fn invalidate_all(&mut self) {
@@ -442,7 +448,30 @@ impl System for GraphScriptRunnerSystem {
 
         for (entity, graph) in needs_runtime {
             let runtime = self.arm(&graph, generation, resources);
+            // An instance that refused to arm — a compile error, a realm
+            // violation, a Timeline whose curve no longer has the track a wire
+            // names — must say so. Silence here reads as "the graph does
+            // nothing", which is the one diagnosis that is never true.
+            if let Some(why) = runtime.disabled.clone() {
+                report_disabled(entity, world, &why);
+            }
             let _ = world.insert_one(entity, runtime);
+        }
+
+        // 1b. Config changed under a live instance (D9 non-goal, but silence
+        //     is not an option): a runner switched off or re-pointed mid-play
+        //     keeps its old runtime otherwise, so the graph the component
+        //     names and the graph that is running disagree. Dropping the
+        //     runtime stops it now; the arming pass re-creates it next tick if
+        //     the component is runnable again.
+        let mismatched: Vec<hecs::Entity> = world
+            .query::<(&GraphRunner, &GraphRuntime)>()
+            .iter()
+            .filter(|(_, (r, rt))| !r.is_runnable() || r.graph != rt.graph)
+            .map(|(e, _)| e)
+            .collect();
+        for e in mismatched {
+            let _ = world.remove_one::<GraphRuntime>(e);
         }
 
         // 2. Tick each instance and collect what it emitted. Entity order is
@@ -524,7 +553,14 @@ impl System for GraphScriptRunnerSystem {
                 self.apply(world, *owner, effect, &mut spawns, &mut despawns);
             }
         }
-        self.apply_structural(world, spawns, despawns);
+        // Rapier registration rides along with the structural pass: a body
+        // created mid-play has to be *told* to Rapier, and a despawned one
+        // has to be taken back out or it keeps colliding invisibly. Optional
+        // by design — `PhysicsWorld` is engine-core (39.8 D7) but a build or
+        // a project with the Rapier plugin off simply has no resource here,
+        // and graphs still spawn and despawn.
+        let physics = resources.get_mut::<crate::engine::physics::PhysicsWorld>();
+        self.apply_structural(world, spawns, despawns, physics);
     }
 
     fn name(&self) -> &str {
@@ -682,11 +718,15 @@ impl GraphScriptRunnerSystem {
     }
 
     /// Structural changes, after every non-structural one has landed.
+    ///
+    /// `physics` is `None` when nothing put a `PhysicsWorld` in `Resources`;
+    /// spawns and despawns still work, they just do not reach Rapier.
     fn apply_structural(
         &self,
         world: &mut hecs::World,
         spawns: Vec<PendingSpawn>,
         despawns: Vec<hecs::Entity>,
+        mut physics: Option<&mut crate::engine::physics::PhysicsWorld>,
     ) {
         for s in spawns {
             let full = self.content_root.join(&s.path);
@@ -719,6 +759,13 @@ impl GraphScriptRunnerSystem {
             if !placed {
                 let _ = world.insert_one(entity, Transform::new(position));
             }
+            // A prefab carrying a RigidBody+Collider joins the simulation
+            // now. Registration reads the Transform we just wrote, so it runs
+            // *after* the placement above and the body starts where the graph
+            // put it.
+            if let Some(pw) = physics.as_deref_mut() {
+                crate::engine::physics::register_entity(pw, world, entity);
+            }
             // Bind the alias **before the owner's next tick**, which is what
             // lets a graph spawn something and act on it next frame.
             if let Ok(mut rt) = world.get::<&mut GraphRuntime>(s.owner) {
@@ -728,9 +775,44 @@ impl GraphScriptRunnerSystem {
             }
         }
         for e in despawns {
+            // Children go with the parent, so every body in the subtree has to
+            // come out of Rapier — walking the subtree *before* the despawn is
+            // the only moment the hierarchy still exists.
+            if let Some(pw) = physics.as_deref_mut() {
+                let mut subtree = Vec::new();
+                collect_subtree(world, e, &mut subtree);
+                for entity in subtree {
+                    crate::engine::physics::deregister_entity(pw, world, entity);
+                }
+            }
             crate::engine::ecs::hierarchy::despawn_recursive(world, e);
         }
     }
+}
+
+/// An entity and every descendant, parents first. Local rather than a new
+/// `hierarchy` export: the only caller is the despawn path below, which needs
+/// the subtree one instant *before* `despawn_recursive` dissolves it.
+fn collect_subtree(world: &hecs::World, entity: hecs::Entity, out: &mut Vec<hecs::Entity>) {
+    out.push(entity);
+    let children: Vec<hecs::Entity> = world
+        .get::<&crate::engine::ecs::hierarchy::Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for c in children {
+        collect_subtree(world, c, out);
+    }
+}
+
+/// Say why an instance will not run, on the console the author is watching.
+/// Not "once" like [`report_once`]: this fires at arm time, and arming only
+/// happens when there is no runtime — so it cannot repeat per frame.
+fn report_disabled(entity: hecs::Entity, world: &hecs::World, why: &str) {
+    let who = world
+        .get::<&Name>(entity)
+        .map(|n| n.0.clone())
+        .unwrap_or_else(|_| format!("{entity:?}"));
+    println!("[graph] {who} will not run — {why}");
 }
 
 /// Report a halted instance once, then remember that we did.

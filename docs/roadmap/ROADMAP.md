@@ -2305,7 +2305,8 @@ applied to scripting).
 | P7 | `7b34a0d` | `TraceSink` generic (zero-cost `NoTrace`), `GraphTrace` ring, plan→doc mapping, wire pulse + node rings + value hover |
 | P8a | `1991247` | `curve_asset` crate (time-scaled CR Hermite), `AssetType::Curve`, Timeline node, `CurveCache` shared by compiler + runtime |
 | P8b | `5a452c9` | Curve editor tab (`Canvas` plot, `CurveEditStack`, atomic save), `DocResolvers` curve wiring, `CurveChanged` hot-reload |
-| P9 | _(this commit)_ | Showcase demo verbatim, acceptance sweep, docs, close-out |
+| P9 | `6fb90bc` | Showcase demo verbatim, acceptance sweep, docs, close-out |
+| Review | _(this commit)_ | Full-arc adversarial review pass: 8 findings — plan-cache invalidation on save, wholesale graph invalidation, exec-output fan-out validation, graph-spawned physics registration, visible disable reasons, per-tick runner config, latent resume pulse |
 
 **Acceptance** — every plan line, with what proves it:
 
@@ -2348,14 +2349,33 @@ home when the owning task is scheduled.
   that decoupling is Task 41's, together with growing the `.curve` editor
   (which 45-A shipped deliberately basic).
 
+*Closed by the review pass (kept for the record)*
+- Exec output fan-out is now a validation error (`ExecOutputFanOut`), the
+  compiler asserts single-target, and the editor's connect gesture replaces an
+  occupied exec output's wire.
+- The latent resume edge now pulses on the tick the activation wakes
+  (`Activation::resume_edge`), so a resuming `Delay` no longer reads as a
+  graph that started by itself.
+
 *Unowned — schedule with whichever task next touches the area*
-- **Exec output fan-out is unvalidated**: two wires off one exec output are
-  not rejected, and `PlanNode::exec` keeps one target per pin, so one wire
-  silently wins. Wants a `validate_doc` rule (and the editor replacing rather
-  than adding on connect).
-- **Suspend-edge trace gap**: the exec edge that *enters* a latent is traced,
-  but the resume is a new activation step with no incoming edge to light, so
-  a `Delay` resuming reads as a graph that started by itself.
+- **Plan-cache invalidation is wholesale** (review finding 2): any graph or
+  curve edit drops *every* compiled plan, because the cache does not track the
+  reference tree. Correct and cheap at authoring cadence; a project with
+  hundreds of graphs and a hot-reload loop would want a real dependency index
+  (`GraphPlanCache` keyed by path → the set of plans that inlined it).
+- **`GraphScriptRunnerSystem`'s declared access understates its writes**
+  (review finding 8): it spawns/despawns, writes `Name`/`EntityGuid`/physics
+  components on spawn, and writes `PhysicsWorld`. Safe under the sequential
+  executor; **a prerequisite for the parallel executor (Task 58)** is a
+  structural-access bit on `SystemDescriptor`, since neither `exclusive()` nor
+  the current per-type declarations can express it. Documented at the
+  descriptor.
+- **Graph-spawned physics needs the Rapier plugin to actually move**
+  (review finding 4 residual): the runner registers a spawned body with
+  `PhysicsWorld` whenever that resource exists, but *stepping* is the Rapier
+  plugin's system — with the plugin off, a spawned rigid body is registered
+  and inert. Consistent with every other body in that configuration, and worth
+  a Plugin Manager note when 39.8's warnings are next revisited.
 - **Array literal editing**: `ForEach` runs and arrays flow through pins, but
   editing an array *constant* on the canvas is not authorable — the inline
   cell is a read-only chip (plan D6 note).

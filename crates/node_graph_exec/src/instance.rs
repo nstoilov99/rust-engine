@@ -65,6 +65,17 @@ pub struct Activation {
     /// Payload delivered by the event that started this activation, exposed
     /// through the entry node's payload output pins.
     pub payload: BTreeMap<String, Value>,
+    /// The latent node and exec output pin this activation is parked on, set
+    /// while suspended (45-A review, finding 7).
+    ///
+    /// Suspension resolves its continuation immediately but does not *take*
+    /// it until the activation is due — so the edge is known at suspend time
+    /// and travelled at wake time, and only the second is the truth a pulse
+    /// should show. Recording it here is what lets the wake light the wire
+    /// out of a `Delay` at the moment control actually leaves it. Plain data,
+    /// so an instance still serializes mid-wait.
+    #[serde(default)]
+    pub resume_edge: Option<(usize, String)>,
     pub state: ThreadState,
 }
 

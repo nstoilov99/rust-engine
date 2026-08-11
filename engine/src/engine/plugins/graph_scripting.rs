@@ -135,12 +135,26 @@ impl EnginePlugin for GraphScriptingPlugin {
         //    Exclusive conflicts with *everything* in its stage, and the
         //    validator rejects an unresolved conflict — so claiming it would
         //    mean naming every other Update system in an `after` edge, which
-        //    is a coupling this plugin has no business having. The system does
-        //    also spawn and despawn entities (a scheduled `System` never
-        //    receives the command buffer — that belongs to the scheduler), and
-        //    the executor is sequential, so structural work between systems is
-        //    safe today. If the schedule ever runs systems in parallel this is
-        //    the declaration that has to grow a structural-access bit.
+        //    is a coupling this plugin has no business having.
+        //
+        //    **KNOWN UNDERSTATEMENT (45-A review, finding 8).** The declared
+        //    set below is not the whole truth. The system also:
+        //      - spawns and despawns entities (a scheduled `System` never
+        //        receives the command buffer — that belongs to the scheduler),
+        //        which touches every component of the affected archetypes;
+        //      - writes `Name`, `EntityGuid`, `RigidBody`, `Collider` and the
+        //        hierarchy components on spawn, none of which are declared;
+        //      - writes `PhysicsWorld` when it registers or removes a
+        //        graph-spawned body.
+        //    The sequential executor makes this safe today — structural work
+        //    between systems cannot race anything — and declaring it honestly
+        //    would mean either `exclusive()` (rejected above) or a
+        //    structural-access bit the descriptor does not have.
+        //
+        //    This is therefore a **prerequisite for the parallel executor**
+        //    (Task 58), recorded in the 45-A deferred ledger: `SystemDescriptor`
+        //    needs a way to say "structural" before this declaration can be
+        //    made true, and until then no parallel schedule may include it.
         ctx.add_system_with_criteria(
             GraphScriptRunnerSystem::new((self.loader)(), self.content_root.clone()),
             Stage::Update,

@@ -34,9 +34,14 @@ pub enum GraphError {
     /// that side (outputs feed `from`, inputs feed `to`).
     UnknownPin { node: u64, pin: String, output: bool },
     TypeMismatch { edge: Edge, from_ty: PinType, to_ty: PinType },
-    /// An input pin has more than one incoming edge (outputs may fan out;
-    /// inputs may not).
+    /// An input pin has more than one incoming edge (data outputs may fan
+    /// out; inputs may not).
     InputMultiplyConnected { node: u64, pin: String },
+    /// An **exec** output pin has more than one outgoing edge. Control has
+    /// one continuation: fanning out is what `Sequence` is for. Reported on
+    /// every wire past the first, so the offending wires are the ones that
+    /// light up rather than the pin they leave.
+    ExecOutputFanOut { edge: Edge },
     RealmViolation { node: u64, node_realm: NodeRealm, graph_realm: GraphRealm },
     /// A `Domain` pin type nobody registered with the registry.
     UnknownDomainPin { node: u64, pin: String, domain: String },
@@ -121,6 +126,7 @@ impl GraphError {
                 pin: pin.clone(),
                 output: false,
             },
+            GraphError::ExecOutputFanOut { edge } => ErrorAnchor::Edge(edge.clone()),
             GraphError::TypeMismatch { edge, .. } => ErrorAnchor::Edge(edge.clone()),
             // Both unknown-pin variants get the ghost-row treatment: the pin
             // the edge names does not exist, so one is drawn for it.
@@ -188,6 +194,12 @@ impl std::fmt::Display for GraphError {
                 f,
                 "node {node}: no {} pin '{pin}'",
                 if *output { "output" } else { "input" }
+            ),
+            GraphError::ExecOutputFanOut { edge } => write!(
+                f,
+                "exec output {}:{} already continues somewhere \u{2014} use Sequence to run \
+                 more than one thing",
+                edge.from_node, edge.from_pin
             ),
             GraphError::TypeMismatch { edge, from_ty, to_ty } => write!(
                 f,
@@ -379,6 +391,10 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
     // Edge checks. Nodes that are unknown/subgraph get their edges skipped
     // instead of cascading noise.
     let mut input_use: BTreeMap<(u64, &str), u32> = BTreeMap::new();
+    // Exec outputs, in document order: the first wire off a pin is the
+    // continuation, every later one is the error.
+    let mut exec_out_seen: BTreeSet<(u64, &str)> = BTreeSet::new();
+    let mut fan_out: Vec<Edge> = Vec::new();
     for e in &doc.edges {
         let (from, to) = (doc.node(e.from_node), doc.node(e.to_node));
         let (Some(from), Some(to)) = (from, to) else {
@@ -386,6 +402,16 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
             continue;
         };
         *input_use.entry((to.id, e.to_pin.as_str())).or_default() += 1;
+        // **An exec output takes at most one wire** (45-A review ruling).
+        // Control has one continuation; `PlanNode::exec` is one target per
+        // pin, so a second wire here does not fan out — it silently replaces
+        // the first at compile time. Refusing is the only honest answer, and
+        // `Sequence` is the node that actually runs two things.
+        if d.pin_type(e.from_node, &e.from_pin, true) == Some(PinType::Exec)
+            && !exec_out_seen.insert((from.id, e.from_pin.as_str()))
+        {
+            fan_out.push(e.clone());
+        }
 
         // A reroute has no descriptor: its type is whatever reaches it, so
         // both sides resolve through `reroute_type` instead.
@@ -492,6 +518,8 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
             pin: pin.to_string(),
         });
     }
+
+    errors.extend(fan_out.into_iter().map(|edge| GraphError::ExecOutputFanOut { edge }));
 
     errors.extend(data_cycles(d));
 
@@ -667,16 +695,17 @@ mod tests {
             GraphError::UnknownVariable { node: 1, slug: "score".into() },
             GraphError::InterfaceNodeInvalid { node: 1, output: false },
             GraphError::InterfacePinUnbound { pin: "amount".into(), output: false },
+            GraphError::ExecOutputFanOut { edge: e.clone() },
         ];
-        // The closed set is fifteen (eleven from Task 40, four from 45-A);
+        // The closed set is sixteen (eleven from Task 40, five from 45-A);
         // the UI is complete because the set is.
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 16);
 
         assert_eq!(all[0].anchor(), ErrorAnchor::Node(1));
         assert_eq!(all[1].anchor(), ErrorAnchor::Node(1));
         assert_eq!(all[2].anchor(), ErrorAnchor::Document);
         assert!(matches!(all[3].anchor(), ErrorAnchor::GhostPin { .. }));
-        assert_eq!(all[4].anchor(), ErrorAnchor::Edge(e));
+        assert_eq!(all[4].anchor(), ErrorAnchor::Edge(e.clone()));
         assert!(matches!(all[5].anchor(), ErrorAnchor::Pin { .. }));
         assert_eq!(all[6].anchor(), ErrorAnchor::Node(1));
         assert!(matches!(all[7].anchor(), ErrorAnchor::Pin { .. }));
@@ -688,6 +717,7 @@ mod tests {
         assert_eq!(all[12].anchor(), ErrorAnchor::Node(1));
         assert_eq!(all[13].anchor(), ErrorAnchor::Node(1));
         assert_eq!(all[14].anchor(), ErrorAnchor::Document);
+        assert_eq!(all[15].anchor(), ErrorAnchor::Edge(e.clone()));
 
         // Only the cycle carries a breadcrumb.
         assert_eq!(all[10].cycle_chain().map(|c| c.len()), Some(2));
@@ -701,6 +731,57 @@ mod tests {
             .collect();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(matches!(warnings[0], GraphError::InterfacePinUnbound { .. }));
+    }
+
+    /// **An exec output takes one wire; data outputs fan out freely.**
+    ///
+    /// The mirror of `exec_inputs_fan_in_data_inputs_do_not`, and the reason
+    /// it has to be a validation error rather than a convention:
+    /// `PlanNode::exec` holds one target per output pin, so a second wire is
+    /// not a fan-out at run time — it silently replaces the first.
+    #[test]
+    fn exec_outputs_take_one_wire_data_outputs_fan_out() {
+        let reg = registry();
+
+        // Two exec wires off one output: the second is the error, and it is
+        // anchored on the wire, not the pin.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![
+            node(0, "test_event"),
+            node(1, "test_damage"),
+            node(2, "test_damage"),
+        ];
+        let first = edge(0, "exec_out", 1, "exec_in");
+        let second = edge(0, "exec_out", 2, "exec_in");
+        doc.edges = vec![first.clone(), second.clone()];
+        let errs = validate_doc(&doc, &reg);
+        let fan: Vec<&GraphError> = errs
+            .iter()
+            .filter(|e| matches!(e, GraphError::ExecOutputFanOut { .. }))
+            .collect();
+        assert_eq!(fan.len(), 1, "one error, on the second wire: {errs:?}");
+        assert!(
+            matches!(fan[0], GraphError::ExecOutputFanOut { edge } if *edge == second),
+            "the *later* wire is the offender, so the first stays authoritative"
+        );
+        assert_eq!(fan[0].anchor(), ErrorAnchor::Edge(second.clone()));
+
+        // One wire is fine.
+        doc.edges = vec![first];
+        assert!(!validate_doc(&doc, &reg)
+            .iter()
+            .any(|e| matches!(e, GraphError::ExecOutputFanOut { .. })));
+
+        // A *data* output still fans out to as many inputs as it likes.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "test_add"), node(1, "test_add"), node(2, "test_add")];
+        doc.edges = vec![edge(0, "sum", 1, "a"), edge(0, "sum", 2, "a")];
+        assert!(
+            !validate_doc(&doc, &reg)
+                .iter()
+                .any(|e| matches!(e, GraphError::ExecOutputFanOut { .. })),
+            "data outputs fan out"
+        );
     }
 
     /// A reroute takes the type of whatever feeds it, through a chain, and

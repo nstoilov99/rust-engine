@@ -489,6 +489,12 @@ impl SpliceCtx<'_> {
     }
 
     /// Resolve every exec output pin to the plan node it continues to.
+    ///
+    /// One target per pin, and validation guarantees it: `ExecOutputFanOut`
+    /// refuses a second wire off an exec output before compilation is
+    /// reached, so an overwrite here would mean the validator and the
+    /// compiler disagree about the same document. The debug assertion is
+    /// there to say which one broke.
     fn resolve_exec(&self, key: &NodeKey, scope: usize) -> BTreeMap<String, ExecEdge> {
         let doc = &self.scopes[scope].doc;
         let mut out = BTreeMap::new();
@@ -498,7 +504,13 @@ impl SpliceCtx<'_> {
                 continue;
             }
             if let Some(target) = self.consumer(scope, e.to_node, &e.to_pin) {
-                out.insert(e.from_pin.clone(), target);
+                let prior = out.insert(e.from_pin.clone(), target);
+                debug_assert!(
+                    prior.is_none(),
+                    "exec output {}:{} resolved twice — validation should have refused it                      as ExecOutputFanOut",
+                    key.1,
+                    e.from_pin
+                );
             }
         }
         out

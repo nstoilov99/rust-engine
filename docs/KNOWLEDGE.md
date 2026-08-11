@@ -339,10 +339,12 @@ pub struct EntityRef {
   it is unauthorable otherwise. Two *values* arriving at one data input has no
   meaning and is `InputMultiplyConnected`. Both rules live in `validate_doc`
   (`d.pin_type(..) == Exec` is the gate); do not re-derive them at a call site.
-  The known corner (deferred, see the 45-A ledger): an exec *output* wired
-  twice is not rejected by validation, and `PlanNode::exec` holds one target
-  per output pin — so one of the two wires silently wins at compile time. If
-  you need two continuations, that is what `Sequence` is for.
+  The mirror rule: an exec **output** takes at most one wire
+  (`ExecOutputFanOut`), because `PlanNode::exec` holds one target per output
+  pin — a second wire would not fan out, it would silently replace the first.
+  If you need two continuations, that is what `Sequence` is for. The editor
+  enforces it as a gesture: dragging a second wire off an occupied exec output
+  *replaces* the existing one, the same way a data input's second wire does.
 - **Config rows shift the pin band**: a node's per-instance configuration
   (the variable a `var_get` names, a Timeline's curve) occupies rows
   `0..config_n`, so pin row `i` is `config_n + i`. Everything measured off a
@@ -356,11 +358,24 @@ pub struct EntityRef {
   what an editor's "auto" tangent gives — so the plot draws what the
   interpreter samples. Never reimplement sampling; call
   `curve_asset::Track::sample`.
-- **A `.curve`'s track names are Timeline pins**, so adding or removing a
-  track changes every referencing graph's shape. Saving one invalidates
-  `CurveCache` for that path and the *whole* `GraphPlanCache` (the cache does
-  not track the reference tree). The editor's own resolver needs nothing — it
-  is rebuilt from open tabs + disk every frame, open tabs winning.
+- **Every author-side write invalidates the whole plan cache.** Saving a
+  `.graph`, a `.subgraph` or a `.curve` calls `GraphPlanCache::invalidate`,
+  which is `invalidate_all` — a subgraph inlines into its hosts and a curve
+  track is a Timeline pin, and the cache does not track either reference tree,
+  so dropping one key restarts the hosts *onto their stale plans*, which is
+  worse than not invalidating at all. The editor's own resolver needs nothing:
+  it is rebuilt from open tabs + disk every frame, open tabs winning.
+- **A save is what makes a plan stale, so the save path invalidates** —
+  not the file watcher, whose echo guard returns early precisely because the
+  write was ours. Both `save_graph_editor` and `save_curve_state` follow the
+  same shape: write, then invalidate. Adding a third asset kind means adding
+  the second half too.
+- **A graph-spawned entity is a full citizen**: it gets an `EntityGuid`, and
+  if the prefab carries `RigidBody` + `Collider` it is registered with Rapier
+  on the spawn tick (`physics::register_entity`) and removed on despawn
+  (`physics::deregister_entity`, walking the subtree *before*
+  `despawn_recursive` dissolves it). Registration is skipped, not failed, when
+  no `PhysicsWorld` resource exists.
 - **Demo/fixture assets are generated, not hand-written**:
   `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine --lib write_runner_demo`
   regenerates `content/graphs/runner_demo.graph` *and*

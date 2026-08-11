@@ -94,6 +94,105 @@ fn loop_doc() -> GraphDoc {
     doc
 }
 
+/// **Finding 7 (45-A review): a latent's resume edge pulses when it wakes.**
+///
+/// The wire out of a `Delay` is *resolved* at suspend time and *travelled* at
+/// wake time, and only the second is a truth a pulse may show — lighting it
+/// five seconds early would be a lie the visualization cannot walk back. So
+/// the edge is parked on the activation and reported on the wake tick, which
+/// is what this pins: nothing on the suspending tick, exactly one on the tick
+/// control actually leaves the node.
+#[test]
+fn a_latent_reports_its_resume_edge_on_the_tick_it_wakes() {
+    use node_graph_exec::nodes::DELAY;
+
+    // BeginPlay -> Delay(0.25s) -> Print
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, DELAY, &[("duration", PropValue::Float(0.25))]),
+        print(2, "resumed"),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(1, EXEC_OUT_PIN, 2, EXEC_IN_PIN),
+    ];
+
+    let reg = registry();
+    let plan = compile(&doc, "test.graph", &reg, &BTreeMap::new()).expect("compile");
+    let impls = impls();
+    let mut inst = GraphInstance::new(&plan, EntityRef::SelfEntity, 7);
+    let ix = |doc_id: u64| {
+        plan.nodes
+            .iter()
+            .position(|n| n.doc_node == doc_id)
+            .unwrap_or_else(|| panic!("node {doc_id} in the plan"))
+    };
+    let (delay, printer) = (ix(1), ix(2));
+
+    let mut effects: Vec<Effect> = Vec::new();
+    let step = |inst: &mut GraphInstance, effects: &mut Vec<Effect>, t: f64| -> Recorder {
+        let mut rec = Recorder::default();
+        tick_traced(
+            &plan,
+            inst,
+            &impls,
+            TickInput { dt: 0.1, time: t },
+            &NoWorld,
+            effects,
+            DEFAULT_BUDGET,
+            &mut rec,
+        );
+        rec
+    };
+
+    // Tick 1: BeginPlay enters the Delay, which suspends. The edge *into* the
+    // Delay is travelled; the edge out of it is not.
+    let rec = step(&mut inst, &mut effects, 0.0);
+    assert!(
+        rec.exec.iter().any(|(_, _, to)| *to == delay),
+        "control reached the Delay: {:?}",
+        rec.exec
+    );
+    assert!(
+        !rec.exec.iter().any(|(from, _, _)| *from == delay),
+        "the wire out of a waiting Delay must not light: {:?}",
+        rec.exec
+    );
+
+    // Run well past the due time. Exactly one tick may report the wire out of
+    // the Delay — the one that crosses it — and every other tick reports
+    // nothing at all, which is the half that says the pulse is not sticky.
+    let mut reporting_ticks = Vec::new();
+    for i in 1..8 {
+        let rec = step(&mut inst, &mut effects, i as f64 * 0.1);
+        let resume: Vec<&(usize, String, usize)> =
+            rec.exec.iter().filter(|(from, _, _)| *from == delay).collect();
+        match resume.len() {
+            0 => assert!(
+                rec.exec.is_empty(),
+                "a waiting (or finished) activation reports nothing: {:?}",
+                rec.exec
+            ),
+            1 => {
+                assert_eq!(resume[0].1, EXEC_OUT_PIN);
+                assert_eq!(resume[0].2, printer, "to the node it continues to");
+                reporting_ticks.push(i);
+            }
+            n => panic!("{n} resume pulses on one tick: {:?}", rec.exec),
+        }
+    }
+    assert_eq!(
+        reporting_ticks.len(),
+        1,
+        "one wake, one pulse (ticks that reported: {reporting_ticks:?})"
+    );
+    assert!(
+        matches!(effects.last(), Some(Effect::Log { text, .. }) if text == "resumed"),
+        "and the continuation really ran: {effects:?}"
+    );
+}
+
 /// A host document with one subgraph node (id 1) whose body is three real
 /// nodes, so the reverse mapping has something to collapse.
 fn host_and_sub() -> (GraphDoc, BTreeMap<String, GraphDoc>) {

@@ -73,6 +73,82 @@ pub fn rebuild_bodies_from_world(physics_world: &mut PhysicsWorld, world: &mut h
     }
 }
 
+/// Register **one** entity's body/collider, if it has both and is not
+/// already registered.
+///
+/// The same call `rebuild_bodies_from_world` makes per entity, reachable on
+/// its own — because a whole-world rebuild is the wrong tool for an entity
+/// that appeared mid-play. A graph-spawned prefab with a `RigidBody` used to
+/// get a `handle: None` that nothing ever filled, so it sat in the world
+/// looking physical and never fell.
+///
+/// Returns whether a body was created. No-op when the entity lacks a
+/// Transform/RigidBody/Collider triple — a prefab with only a mesh is a
+/// normal thing to spawn.
+///
+/// Note: this creates the body. *Stepping* it still requires the Rapier
+/// plugin to be active — `PhysicsWorld` is engine-core (39.8 D7), the
+/// stepping system is the plugin's.
+pub fn register_entity(
+    physics_world: &mut PhysicsWorld,
+    world: &mut hecs::World,
+    entity: hecs::Entity,
+) -> bool {
+    use crate::engine::ecs::components::Transform;
+
+    let Ok(mut q) = world.query_one::<(&Transform, &mut RigidBody, &mut Collider)>(entity) else {
+        return false;
+    };
+    let Some((transform, rigidbody, collider)) = q.get() else {
+        return false;
+    };
+    if rigidbody.handle.is_some() {
+        return false;
+    }
+    physics_world.register_entity(transform, rigidbody, collider);
+    true
+}
+
+/// Remove one entity's body (and, with it, its attached colliders) from
+/// Rapier, clearing the ECS-side handles.
+///
+/// The mirror of [`register_entity`], and the reason a graph despawn is not
+/// simply `world.despawn`: the entity goes, but Rapier keeps simulating an
+/// invisible body at the last known position — a leak that also keeps
+/// colliding with things.
+///
+/// Returns whether a body was removed.
+pub fn deregister_entity(
+    physics_world: &mut PhysicsWorld,
+    world: &mut hecs::World,
+    entity: hecs::Entity,
+) -> bool {
+    let handle = match world.get::<&RigidBody>(entity) {
+        Ok(rb) => rb.handle,
+        Err(_) => None,
+    };
+    let Some(handle) = handle else {
+        return false;
+    };
+    // `remove` takes the colliders with it (`true`), which is what we want:
+    // the collider handle the ECS holds is a child of this body.
+    physics_world.rigid_body_set.remove(
+        handle,
+        &mut physics_world.island_manager,
+        &mut physics_world.collider_set,
+        &mut physics_world.impulse_joint_set,
+        &mut physics_world.multibody_joint_set,
+        true,
+    );
+    if let Ok(mut rb) = world.get::<&mut RigidBody>(entity) {
+        rb.handle = None;
+    }
+    if let Ok(mut col) = world.get::<&mut Collider>(entity) {
+        col.handle = None;
+    }
+    true
+}
+
 // Re-export useful Rapier types
 pub use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 

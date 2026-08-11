@@ -452,6 +452,211 @@ fn invalidating_the_cache_restarts_live_instances() {
     assert!(h.world.get::<&GraphRuntime>(e).is_ok(), "and it is running again");
 }
 
+/// **Finding 2**: a subgraph edit must recompile its *hosts*, not just
+/// restart them onto the plan they already had.
+///
+/// `invalidate` used to drop one key. The host's plan stayed cached, the
+/// generation bump restarted every instance, and each restart re-accepted the
+/// stale host plan — so editing a subgraph looked like it worked (the graph
+/// visibly restarted) while running exactly the old code. Wholesale
+/// invalidation is the fix, and the cache being empty afterwards is the
+/// assertion.
+#[test]
+fn invalidating_a_subgraph_drops_its_hosts_plans_too() {
+    let mut h = Harness::new(&[
+        ("graphs/host.graph", count_begin_play()),
+        ("graphs/other.graph", move_each_tick()),
+    ]);
+    let a = h.spawn_runner("A", "graphs/host.graph");
+    let b = h.spawn_runner("B", "graphs/other.graph");
+    h.ticks(3);
+    assert_eq!(
+        h.resources.get::<GraphPlanCache>().map(|c| c.len()),
+        Some(2),
+        "both compiled"
+    );
+
+    // A subgraph nobody has compiled by name — the point is that invalidating
+    // it still clears the hosts that inlined it.
+    if let Some(cache) = h.resources.get_mut::<GraphPlanCache>() {
+        cache.invalidate("graphs/lib/edited.subgraph");
+    }
+    assert_eq!(
+        h.resources.get::<GraphPlanCache>().map(|c| c.len()),
+        Some(0),
+        "every plan is dropped: the cache does not track the reference tree"
+    );
+
+    // …and both instances come back, recompiled.
+    h.ticks(3);
+    assert!(h.world.get::<&GraphRuntime>(a).is_ok());
+    assert!(h.world.get::<&GraphRuntime>(b).is_ok());
+    assert_eq!(h.resources.get::<GraphPlanCache>().map(|c| c.len()), Some(2));
+}
+
+/// **Finding 6**: the `GraphRunner` component is read on every tick, not only
+/// at arming. Switching it off, or re-pointing it at another asset, used to
+/// leave the old instance ticking — the component said one thing and the
+/// world did another.
+#[test]
+fn runner_config_changes_take_effect_mid_play() {
+    let mut h = Harness::new(&[
+        ("graphs/a.graph", move_each_tick()),
+        ("graphs/b.graph", count_begin_play()),
+    ]);
+    let e = h.spawn_runner("Switcher", "graphs/a.graph");
+    h.ticks(3);
+    let moved = h.position(e).x;
+    assert!(moved > 0.0, "graph A is running");
+
+    // Disable it: the runtime goes, and nothing moves any more.
+    h.world.get::<&mut GraphRunner>(e).unwrap().enabled = false;
+    h.ticks(3);
+    assert!(
+        h.world.get::<&GraphRuntime>(e).is_err(),
+        "a disabled runner keeps no runtime"
+    );
+    assert_eq!(h.position(e).x, moved, "and stops having effects");
+
+    // Re-point it at another graph and switch it back on: the new one arms.
+    {
+        let mut r = h.world.get::<&mut GraphRunner>(e).unwrap();
+        r.enabled = true;
+        r.graph = "graphs/b.graph".to_string();
+    }
+    h.ticks(3);
+    let rt = h.world.get::<&GraphRuntime>(e).expect("re-armed");
+    assert_eq!(rt.graph, "graphs/b.graph", "on the asset the component names");
+    drop(rt);
+
+    // Re-pointing a *running* instance swaps it too, without a disable step.
+    h.world.get::<&mut GraphRunner>(e).unwrap().graph = "graphs/a.graph".to_string();
+    h.ticks(2);
+    assert_eq!(
+        h.world.get::<&GraphRuntime>(e).unwrap().graph,
+        "graphs/a.graph"
+    );
+}
+
+/// **Finding 5**: an instance that refuses to arm says so. Silence reads as
+/// "the graph does nothing", which is the one diagnosis that is never true.
+#[test]
+fn a_refusal_to_arm_is_reported_not_swallowed() {
+    let mut h = Harness::new(&[]);
+    let e = h.spawn_runner("Broken", "graphs/missing.graph");
+    h.ticks(1);
+    let rt = h.world.get::<&GraphRuntime>(e).expect("armed, disabled");
+    let why = rt.disabled.clone().expect("a reason");
+    assert!(why.contains("graphs/missing.graph"), "{why}");
+}
+
+/// **Finding 4**: a graph-spawned prefab with physics joins the simulation,
+/// and a graph-despawned one leaves it. Before this, `RigidBody::handle`
+/// stayed `None` for the entity's whole life — it looked physical and never
+/// moved — and despawning left Rapier simulating an invisible body.
+#[test]
+fn spawned_prefabs_join_and_leave_the_physics_world() {
+    use crate::engine::physics::{Collider, PhysicsWorld, RigidBody};
+    use crate::engine::scene::scene_format::{ComponentData, EntityData};
+
+    let root = std::env::temp_dir().join("rust_engine_rev_physics");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("prefabs")).unwrap();
+    let prefab = crate::engine::scene::prefab::Prefab {
+        name: "Boulder".to_string(),
+        description: String::new(),
+        template: EntityData {
+            name: "Boulder".to_string(),
+            guid: None,
+            components: vec![
+                ComponentData::Transform {
+                    position: [0.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+                ComponentData::RigidBody {
+                    body_type: crate::engine::scene::scene_format::RigidBodyTypeData::Dynamic,
+                    mass: 1.0,
+                    linear_damping: 0.0,
+                    angular_damping: 0.0,
+                    can_sleep: true,
+                    gravity_scale: 1.0,
+                    continuous_collision: false,
+                    lock_rotation: [false; 3],
+                },
+                ComponentData::Collider {
+                    shape: crate::engine::scene::scene_format::ColliderShapeData::Ball {
+                        radius: 0.5,
+                    },
+                    friction: 0.5,
+                    restitution: 0.0,
+                    is_sensor: false,
+                },
+            ],
+        },
+    };
+    std::fs::write(
+        root.join("prefabs/boulder.prefab"),
+        ron::ser::to_string_pretty(&prefab, ron::ser::PrettyConfig::default()).unwrap(),
+    )
+    .unwrap();
+    crate::engine::assets::asset_source::init_filesystem_if_unset(root.clone());
+
+    // BeginPlay spawns it; a Custom Event destroys it, so the two structural
+    // paths are exercised on the same entity.
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(
+            1,
+            ids::SPAWN_PREFAB,
+            &[("path", PropValue::Str("prefabs/boulder.prefab".into()))],
+        ),
+    ];
+    doc.edges = vec![edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN)];
+
+    let mut h = Harness::with_root(&[("graphs/spawn.graph", doc)], &root);
+    h.resources.insert(PhysicsWorld::new());
+    let owner = h.spawn_runner("Spawner", "graphs/spawn.graph");
+
+    h.tick(1.0 / 60.0);
+    let spawned: Vec<hecs::Entity> = h
+        .world
+        .query::<&RigidBody>()
+        .iter()
+        .map(|(e, _)| e)
+        .filter(|e| *e != owner)
+        .collect();
+    assert_eq!(spawned.len(), 1, "the prefab spawned");
+    let boulder = spawned[0];
+    assert!(
+        h.world.get::<&RigidBody>(boulder).unwrap().handle.is_some(),
+        "…and it is registered with Rapier, mid-play"
+    );
+    assert!(h.world.get::<&Collider>(boulder).unwrap().handle.is_some());
+    assert_eq!(
+        h.resources.get::<PhysicsWorld>().unwrap().rigid_body_count(),
+        1
+    );
+
+    // Now take it back out through the same seam the graph would.
+    {
+        let (pw, world) = (
+            &mut *h.resources.get_mut::<PhysicsWorld>().unwrap(),
+            &mut h.world,
+        );
+        assert!(crate::engine::physics::deregister_entity(pw, world, boulder));
+    }
+    assert_eq!(
+        h.resources.get::<PhysicsWorld>().unwrap().rigid_body_count(),
+        0,
+        "the body left with the entity"
+    );
+    assert!(h.world.get::<&RigidBody>(boulder).unwrap().handle.is_none());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The runner never ticks outside play. `RunIfPlaying` is doing the work, but
 /// it is worth asserting: an editor that ran gameplay while you were laying
 /// out a level would be unusable.

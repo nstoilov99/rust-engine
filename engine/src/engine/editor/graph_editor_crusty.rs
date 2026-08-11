@@ -6650,12 +6650,24 @@ fn auto_connect(
             to_pin: src.pin.clone(),
         }
     };
-    // A *data* input takes one edge, so a second drop replaces it. An exec
-    // input may fan in, so a second drop is an addition — silently breaking
-    // the wire that was already there would delete work the author can see.
+    // What a second wire replaces depends on which end is which:
+    //
+    // - a *data input* takes one edge, so a second drop replaces it;
+    // - an *exec input* may fan in, so a second drop is an addition —
+    //   silently breaking a converging wire would delete visible work;
+    // - an *exec output* takes one edge (review ruling: `PlanNode::exec` is
+    //   one target per pin, and `Sequence` is how you run two things), so
+    //   dragging a second continuation off it replaces the first rather than
+    //   authoring a document validation is about to refuse.
     let is_exec = pin.ty == PinType::Exec;
     let existing: Vec<Edge> = if is_exec {
-        Vec::new()
+        state
+            .doc
+            .edges
+            .iter()
+            .filter(|e| e.from_node == edge.from_node && e.from_pin == edge.from_pin)
+            .cloned()
+            .collect()
     } else {
         state
             .doc
