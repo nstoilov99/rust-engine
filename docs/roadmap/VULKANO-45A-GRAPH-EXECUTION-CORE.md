@@ -1,6 +1,9 @@
 # Task 45-A — Graph Execution Core (Visual Scripting v1)
 
-**Status:** 📋 Plan (drafted 2026-07-27)
+**Status:** ✅ **Complete** (2026-08-11, P1–P9 — commit map and deferred
+ledger in [`ROADMAP.md`](ROADMAP.md) ▸ Task 45-A). Drafted 2026-07-27;
+audited pre-kickoff 2026-08-11 (see the addendum at the end, whose rulings
+amend the sections they name).
 **Duration:** ~2–2.5 weeks
 **Prerequisites:** Task 40 (complete). Pulls the core of roadmap Task 45
 forward, per decision 2026-07-27; the rest of Task 45 (full gameplay node

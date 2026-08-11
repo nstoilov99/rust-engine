@@ -245,6 +245,109 @@ fn subgraphs_inline_through_their_interface() {
     );
 }
 
+/// **The plan's headless acceptance fixture, in one graph**: Branch +
+/// ForLoop + variables + subgraph, checked against its whole expected effect
+/// stream rather than against one assertion per feature.
+///
+/// The four are covered individually above; this exists because they are only
+/// *composed* once — a loop whose body calls a subgraph, whose result feeds a
+/// variable, whose value a Branch reads on the next pass — and composition is
+/// where an interpreter goes wrong. The exact stream, in order, is the claim.
+#[test]
+fn the_acceptance_fixture_runs_branch_loop_variables_and_a_subgraph() {
+    // A subgraph that doubles: exec + Int in, exec + Int out.
+    let mut sub = GraphDoc::default();
+    sub.inputs = vec![
+        IfacePin { slug: "run".into(), label: "Run".into(), ty: PinType::Exec },
+        IfacePin { slug: "n".into(), label: "N".into(), ty: PinType::Int },
+    ];
+    sub.outputs = vec![
+        IfacePin { slug: "done".into(), label: "Done".into(), ty: PinType::Exec },
+        IfacePin { slug: "out".into(), label: "Out".into(), ty: PinType::Int },
+    ];
+    sub.nodes = vec![
+        node(0, GRAPH_INPUT_TYPE_ID),
+        node(1, GRAPH_OUTPUT_TYPE_ID),
+        node(2, ADD_INT),
+    ];
+    sub.edges = vec![
+        edge(0, "run", 1, "done"),
+        // n + n, so the subgraph does something a constant could not fake.
+        edge(0, "n", 2, "a"),
+        edge(0, "n", 2, "b"),
+        edge(2, "result", 1, "out"),
+    ];
+
+    // Host: for i in 1..=3 {
+    //     total = double(i) + total       // subgraph in the loop body
+    //     if total > 6 { print("over") } else { print(total) }   // Branch
+    // }
+    let mut doc = GraphDoc::default();
+    doc.variables = vec![VarDecl {
+        slug: "total".into(),
+        label: "Total".into(),
+        ty: PinType::Int,
+        default: Some(PropValue::Int(0)),
+    }];
+    let mut sub_node = node(2, SUBGRAPH_TYPE_ID);
+    sub_node.subgraph = Some("lib/double.subgraph".into());
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, FOR_LOOP, &[("first", PropValue::Int(1)), ("last", PropValue::Int(3))]),
+        sub_node,
+        node(3, ADD_INT),
+        with(4, VAR_SET_TYPE_ID, &[(VAR_PROP, PropValue::Str("total".into()))]),
+        with(5, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("total".into()))]),
+        node(6, BRANCH),
+        with(
+            7,
+            node_graph_exec::nodes::COMPARE_INT,
+            &[("b", PropValue::Int(6)), ("op", PropValue::Enum("greater".into()))],
+        ),
+        with(8, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("total".into()))]),
+        print(9, "over"),
+        node(10, INT_TO_STRING),
+        node(11, PRINT),
+        with(12, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("total".into()))]),
+    ];
+    doc.edges = vec![
+        // exec: BeginPlay -> ForLoop -> body(subgraph -> set -> branch)
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(1, "body", 2, "run"),
+        edge(2, "done", 4, EXEC_IN_PIN),
+        edge(4, EXEC_OUT_PIN, 6, EXEC_IN_PIN),
+        edge(6, "true", 9, EXEC_IN_PIN),
+        edge(6, "false", 11, EXEC_IN_PIN),
+        // data: the loop index into the subgraph, its result + the running
+        // total back into the variable.
+        edge(1, "index", 2, "n"),
+        edge(2, "out", 3, "a"),
+        edge(5, VAR_VALUE_PIN, 3, "b"),
+        edge(3, "result", 4, VAR_VALUE_PIN),
+        // the Branch reads the variable it just wrote
+        edge(8, VAR_VALUE_PIN, 7, "a"),
+        edge(7, "result", 6, "condition"),
+        edge(12, VAR_VALUE_PIN, 10, "value"),
+        edge(10, "text", 11, "text"),
+    ];
+
+    let mut subs = BTreeMap::new();
+    subs.insert("lib/double.subgraph".to_string(), sub);
+
+    let (effects, inst) = run_with(&doc, &subs, 1, 7, &NoWorld);
+    // i=1: total = 2      -> not > 6 -> "2"
+    // i=2: total = 2 + 4  -> not > 6 -> "6"
+    // i=3: total = 6 + 6  ->     > 6 -> "over"
+    assert_eq!(
+        logs(&effects),
+        vec!["2", "6", "over"],
+        "the whole composition, in order"
+    );
+    // The variable survived the loop with the value the stream implies, and
+    // nothing is left suspended.
+    assert_eq!(inst.variables.get("total"), Some(&Value::Int(12)));
+}
+
 /// Unreachable nodes are pruned: a disconnected experiment costs nothing.
 #[test]
 fn unreachable_nodes_are_pruned() {

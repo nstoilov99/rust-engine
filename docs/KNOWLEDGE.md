@@ -321,6 +321,52 @@ pub struct EntityRef {
 - **Editor keys are content-relative forward-slash paths** — same key shape
   for tabs (`graph:{key}`), the resolver, and hot-reload matching.
 
+## Graph Execution Gotchas (Task 45-A)
+
+- **Timeline is frame-parity, not wall-clock**: `update` fires *once per
+  tick* while a run is under way, and the first tick samples `t = 0`. A run of
+  duration `d` therefore lands its last sample on the tick that crosses `d` —
+  do not assert "N ticks = N×dt seconds of curve" without accounting for that
+  first sample. `finished` fires exactly once, and never for a looping
+  Timeline.
+- **A suspension captures the whole continuation**, loop frames included.
+  That is why `Delay` inside `ForLoop` works, and also why an activation holds
+  **at most one** suspension — a second latent on the same activation is a
+  contract violation, not a queue. Concurrent *activations* of one latent node
+  wait independently (node state is shared, frames are not).
+- **Exec inputs fan in; data inputs do not.** Many exec wires may converge on
+  one exec input — that is how a Branch's two sides rejoin a shared tail, and
+  it is unauthorable otherwise. Two *values* arriving at one data input has no
+  meaning and is `InputMultiplyConnected`. Both rules live in `validate_doc`
+  (`d.pin_type(..) == Exec` is the gate); do not re-derive them at a call site.
+  The known corner (deferred, see the 45-A ledger): an exec *output* wired
+  twice is not rejected by validation, and `PlanNode::exec` holds one target
+  per output pin — so one of the two wires silently wins at compile time. If
+  you need two continuations, that is what `Sequence` is for.
+- **Config rows shift the pin band**: a node's per-instance configuration
+  (the variable a `var_get` names, a Timeline's curve) occupies rows
+  `0..config_n`, so pin row `i` is `config_n + i`. Everything measured off a
+  node — pin centres, wire anchors, the band separator, the node's height —
+  goes through `band_y`/`node_h` for that reason. Computing a pin's `y`
+  directly is how a node ends up disagreeing with its own wires by one row.
+- **Cubic curve tangents are time-scaled Catmull-Rom, deliberately**:
+  keyframes are not uniformly spaced in time, and the uniform form overshoots
+  badly when they are not. The finite-difference form scaled by each segment's
+  duration is C1, degenerates to a straight line on collinear keys, and is
+  what an editor's "auto" tangent gives — so the plot draws what the
+  interpreter samples. Never reimplement sampling; call
+  `curve_asset::Track::sample`.
+- **A `.curve`'s track names are Timeline pins**, so adding or removing a
+  track changes every referencing graph's shape. Saving one invalidates
+  `CurveCache` for that path and the *whole* `GraphPlanCache` (the cache does
+  not track the reference tree). The editor's own resolver needs nothing — it
+  is rebuilt from open tabs + disk every frame, open tabs winning.
+- **Demo/fixture assets are generated, not hand-written**:
+  `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine --lib write_runner_demo`
+  regenerates `content/graphs/runner_demo.graph` *and*
+  `content/prefabs/graph_cube.prefab`, and refuses to write either unless the
+  graph compiles and runs.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing

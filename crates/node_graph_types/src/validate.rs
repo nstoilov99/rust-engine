@@ -1242,7 +1242,7 @@ mod tests {
         use crate::std_nodes::register_std_nodes;
 
         let mut reg = NodeRegistry::new();
-        register_std_nodes(&mut reg);
+        register_std_nodes(&mut reg).expect("std nodes register");
         let mut doc = GraphDoc::default();
         let mut n = NodeInst {
             id: 3,

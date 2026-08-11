@@ -4,24 +4,18 @@ One graph editor for every graph type (script, material, animation) — the node
 graph type, the chrome is learned once. Reference: **Crusty Node Graph.dc.html**.
 Core rules, ramp + palette maps, tokens: **DESIGN.md**.
 
-**Status legend — spec vs build (updated 2026-08-01, post-Phases 1–7).** ✅ = built in the Rust
-editor and gate-tested · 📐 = specified only. As of the seven-phase implementation
-(`6a2eee2`..`432b695`; audit + rulings in AUDIT.md):
-✅ tokens/ramp/resolvers + lint, node anatomy/edges/tags/tint, pins (shapes, states, inset,
-strict typing), inline Float/Bool/Enum-variant widgets, zoom LOD ladder, wire colors + router
-(all three modes, continuous degradation, node-aware backward lane, Manhattan stagger v0),
-selection (outline, primary/rest), marquee (⇧/⌥), annotations (divergence, tint, font_scale,
-anchor, collapse, resize, #node-slug chips), anchored errors + ghost rows + count chip,
-realm chip, reroutes + midpoint grab, collapse-to-subgraph, align/distribute, auto-layout,
-bookmarks + view sidecar, purge-unused, break gestures (all three paths), RON clipboard
-(cross-session), add-node palette (ranked, pin-filtered, auto-connect, splice), find-in-graph,
-F8 error nav, pin hover docs, per-node preview schema + budget, culling pass, diff-friendly
-serialization, Editor Preferences ▸ Graph + toolbar.
-📐 (deferred ledger, blockers recorded in AUDIT.md close-out): crossings rendering, flow
-bubbles + debug visuals (blocked on Task 45-A's evaluator), bundling proper, `preserved`
-distinct visual, Vec axis fields, L1 value edit popup, on-canvas color picker,
-collapse-to-subgraph inner wiring (45-A `graph_input`/`graph_output`), pinned nodes,
-full asset-reference field on canvas.
+**Status legend — spec vs build.** This document has outrun the implementation; trust requires
+saying which is which. ✅ = built (in `graph_editor_crusty.rs` and/or proven in the reference
+prototype's live router) · 📐 = specified only, not built. As of v1.2.2:
+✅ node anatomy/edges/tags, pins + strict typing, wire colors, selection, groups/comments
+(rendering), validation model, realms, break gestures, inspector, router geometry (all three
+modes, continuous degradation, node-aware backward lane, Manhattan stagger — prototype-proven
+against the acceptance tests).
+📐 bundling proper, crossings, flow bubbles, zoom LOD ladder, copy/paste, auto-layout, per-node
+previews, error navigation, find-in-graph, pin hover docs, culling budget, diff-friendly
+serialization, the Editor Preferences ▸ Graph surface, debug sidecar persistence.
+A 📐 item moves to ✅ only when its acceptance criteria are exercised against the Rust
+implementation — the next real information comes from there, not from another spec pass.
 
 - **Canvas** is `input` (darkest — it *is* an editing surface). Grid: minor 16px @ 5% white, major
   128px @ 9%; minor grid drops below 40% zoom. Grid never uses accent.
@@ -193,11 +187,7 @@ full asset-reference field on canvas.
     rules, live preview strip, toolbar quick switch).
 - **Selection is the documented exception** to `selection.fill`: a node keeps its fill and swaps
   its border to **`selection.outline`** (its own preset-invariant token — never `focus_ring`,
-  which is a different JOB) — last-clicked 100%, rest of the set 55%, 2px outline offset.
-  **User override 2026-08-02: `#FFD44D`, not the mockup's `#A9C0D8`** — the calm blue-grey read as
-  another shade of UI against a node's own stroke. 13.6:1 on canvas, 11.6:1 on a node header.
-  `#F0C64A` was rejected for landing within ΔRGB (10, 6, 5) of `status.warning`. Graphite keeps its
-  achromatic `#B8BCC0` carve-out. Accent
+  which is a different JOB) — last-clicked 100%, rest of the set 55%, 2px outline offset. Accent
   on canvas is spent only on the compile chip, the marquee, and drag-time alignment guides.
 - **Zoom LOD** — L0 90–220% everything · L1 60–90% inline widgets → plain values · L2 35–60% pin
   labels drop · L3 15–35% header block + type edge only · L4 <15% 4px type bars + 1px wires.
@@ -231,8 +221,8 @@ full asset-reference field on canvas.
   `#node-slug` in body text renders as a chip; click selects and frames that node (the breadcrumb
   path) — body otherwise **plain text, stored verbatim** (the `Raw` philosophy: never reformat an
   author's text on load; no markdown, no rich text, no images).
-- **Validation errors** are a closed set (currently 11, `GraphError` — ruling 2026-08-01, was
-  "ten"), so the error UI is complete, not best-effort: anchor each one to the thing that is wrong (node border + gutter badge, pin ring,
+- **Validation errors** are a closed set of ten (`GraphError`), so the error UI is complete, not
+  best-effort: anchor each one to the thing that is wrong (node border + gutter badge, pin ring,
   or the wire — `TypeMismatch` is the *only* error that colors a wire) and demote the corner overlay
   to a count. `DanglingEdgeNode` and `SubgraphCycle` are document-level: compiler row only, the cycle
   rendered as a clickable mono breadcrumb. `UnknownPin`/`SubgraphPinUnknown` add a dashed *ghost row*
@@ -318,96 +308,3 @@ full asset-reference field on canvas.
   `editor/graph_prefs.rs` · bubbles replace exec dashes · annotation `tint` / `font_scale` /
   `anchor` / `collapsed` fields · registry: `domain_registration(slug) -> Option<Option<u8>>` so
   `theme::domain_ramp_index()` can resolve keyed / unkeyed / unregistered domains.
-
----
-
-## Interaction model
-
-Six rules govern every gesture in the editor. They are not style — they are the
-contract the rest of this document assumes, and where a surface contradicts one,
-the surface is wrong.
-
-1. **One modal stack.** Context menus, popups, dropdowns and menu flyouts are one
-   stack with one dismissal rule. A press outside the top surface dismisses it
-   **and is consumed**, so the click that closes a menu never also acts on what
-   was under it. `Esc` pops one surface; a wheel outside dismisses the stack;
-   losing the window dismisses it. Running a command from inside dismisses.
-2. **Nothing commits on press.** A press only *arms* a gesture. It becomes a drag
-   once the pointer travels past `DRAG_THRESHOLD` (4 logical points × UI scale);
-   if it never does, the release is a click. This is what lets the right button
-   pan when dragged and open a menu when not.
-3. **Every drag is abortable, and abort means revert.** `Esc`, losing window
-   focus, or the right button interrupting a left drag all abandon the gesture:
-   the pre-drag state comes back and nothing reaches the undo stack.
-4. **Alt breaks, Ctrl cuts.** Alt+click removes the thing under the pointer — a
-   wire, a pin's links, a node's links. Ctrl+drag on empty canvas is the
-   slash-cut. Both are one undoable transaction however many links they take.
-5. **Modifiers preview before they act.** Holding Alt tints what a click would
-   remove (red-dashed wire, danger ring on a connected pin); holding Ctrl over
-   empty canvas shows the cut crosshair. You see the consequence before you
-   commit to it.
-6. **Destructive gestures report and are reversible.** Anything that removes
-   something says what it removed and undoes in one step. A gesture that is valid
-   but affects nothing is a **silent** no-op, not an error.
-
-### Mouse (canvas)
-
-| Gesture | Action |
-|---|---|
-| Left drag on empty canvas | Marquee select (⇧ adds, Alt subtracts) |
-| Left drag on a node | Move selection |
-| Middle drag | Pan |
-| Right drag | Pan (past the drag threshold) |
-| Right click | Context menu (under threshold) — canvas, node, wire or annotation |
-| Space + left drag | Pan |
-| Wheel | **Zoom at the cursor**, walking the 12-stop ladder 15% → 220% |
-| Ctrl + wheel | Zoom off the ladder, up to `zoom_max` — how you get past 1:1 |
-| ⇧ + wheel | Pan horizontally |
-| Double click empty canvas | Add-node palette |
-| Double click subgraph node | Open it as a tab |
-| Alt + click wire | Delete that wire |
-| Alt + click pin / node header | Break that pin's / node's links |
-| Ctrl + drag on empty canvas | Slash-cut wires (**Crusty profile only**) |
-| Drag from pin → empty canvas | Type-filtered palette, auto-connects |
-| Drag a wire's midpoint | Insert a reroute and drag it (one undo step) |
-
-Plain-wheel **panning is gone** (2026-08): a node graph is a zoomable surface
-first, and panning already has three buttons.
-
-### Keyboard (canvas focus, Windows names)
-
-| Key | Action |
-|---|---|
-| `Tab` | Add-node palette |
-| `Del` | Delete selection |
-| `⇧Del` | Delete and reconnect the exec chain |
-| `Q` | Straighten connections (anchor = last-clicked) |
-| Arrows | Nudge 16px · `⇧`+arrow 1px — a held key is **one** undo step |
-| `C` / `⇧C` | Group / comment |
-| `F` / `Home` | Frame selection / fit graph |
-| `F2` | Rename |
-| `F7` | Compile |
-| `F8` / `⇧F8` | Cycle validation errors |
-| `F9` / `Ctrl⇧F9` | Toggle breakpoint / clear all |
-| `Ctrl+F` | Find in graph |
-| `Ctrl+G` | Collapse to subgraph |
-| `Alt+A` | Align & distribute strip |
-| `⇧W/A/S/D` | Align top / left / bottom / right |
-| `Alt⇧W` / `Alt⇧S` | Align centres horizontal / vertical |
-| `Alt+L` | Auto-layout |
-| `Ctrl+B` / `⇧1..5` | Store bookmark / recall |
-| `Ctrl+Alt+K` | Purge unused |
-| `Ctrl+X/C/V/D` | Cut / copy / paste / duplicate |
-| `PageUp` / `PageDown` | Parent / child graph |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl⇧Z` also redoes) |
-| `?` | Keyboard cheat sheet |
-| `Esc` | Dismiss surface → abort drag → revert inline edit, in that order |
-| `<key>` + click | Quick-place from `descriptor.quick_key` |
-
-**Bindings are data.** The table above is the compiled-in *Crusty* preset; an
-`Unreal` preset ships alongside it, and a user's `keymap.ron` overlays either.
-Every row is an `Action` with a stable id, remappable in
-**Editor Preferences ▸ Keyboard Shortcuts**. Mouse gestures are deliberately
-**not** remappable — which button starts a marquee is structural, not a
-preference — but a whole-profile `mouse_profile` switch selects the dialect.
-

@@ -2279,6 +2279,103 @@ pub struct SpeedBlend {
 
 ---
 
+### Task 45-A: Graph Execution Core (Visual Scripting v1)
+**Status:** ✅ **Complete** (2026-08-11). Plan + rulings:
+[`VULKANO-45A-GRAPH-EXECUTION-CORE.md`](VULKANO-45A-GRAPH-EXECUTION-CORE.md).
+
+Graphs run. A `.graph` on an entity executes Blueprint-style — events, exec
+control flow, lazily-pulled pure data chains, per-graph variables, latents
+that suspend across frames — with execution visible in the editor. The
+interpreter is engine-independent and deterministic, so the same code can
+later compile into the SpacetimeDB module (D8, the M6 insurance policy
+applied to scripting).
+
+**Commit map**
+
+| Pkg | Commit | What landed |
+|---|---|---|
+| P1 | `45b4871` | Int(i32)/String/Array pin types, `DocDescriptors` resolver, `graph_input`/`graph_output`, `VarDecl` + container v1→v2 migration, data-cycle validation, `NodeInst.title` |
+| P2 | `dbc667f` | `node_graph_types` extraction (wasm-clean), `node_graph_exec` interpreter, 5-stage compile, execution threads + budget + phased event queue, determinism test |
+| P3 | `72b05d0` | Exec fan-in ruling, 46-node std library, entered-pin tracking, per-node state |
+| P4 | `f120d40` | Latent machinery: suspend-time continuation, `EventPhase::Latent` drain, `Delay`, mid-wait serialization |
+| P5 | `902431d` | `GraphScriptingPlugin` (feature-gated, strips from exports), `GraphRunner` + 4 persistence seams, `GraphPlanCache`, effect application + spawn-alias binding |
+| P6a | `f1169bc` | Int/String inline field widgets, Array read-only chip, reserved config-row gap |
+| P6b | `a235dcb` | Variables model: 5 undoable edits, no-coercion retype, per-gesture coalescing |
+| P6c | `e4a16dc` | Variables panel, config-row band via `band_y`/`node_h`, Alt+V |
+| P7 | `7b34a0d` | `TraceSink` generic (zero-cost `NoTrace`), `GraphTrace` ring, plan→doc mapping, wire pulse + node rings + value hover |
+| P8a | `1991247` | `curve_asset` crate (time-scaled CR Hermite), `AssetType::Curve`, Timeline node, `CurveCache` shared by compiler + runtime |
+| P8b | `5a452c9` | Curve editor tab (`Canvas` plot, `CurveEditStack`, atomic save), `DocResolvers` curve wiring, `CurveChanged` hot-reload |
+| P9 | _(this commit)_ | Showcase demo verbatim, acceptance sweep, docs, close-out |
+
+**Acceptance** — every plan line, with what proves it:
+
+| Plan line | Evidence |
+|---|---|
+| Headless fixture: Branch + ForLoop + variables + subgraph → expected effect stream | `walking_skeleton::the_acceptance_fixture_runs_branch_loop_variables_and_a_subgraph` (P9) |
+| Determinism test green | `walking_skeleton::determinism_holds_across_runs` (P2) |
+| Budget kills an infinite WhileLoop with a reported error | `budget_kills_a_runaway_loop` + `budget_kills_a_runaway_and_names_the_node` (P2) |
+| Demo graph: BeginPlay spawns prefabs in a ForLoop, Tick moves one via Timeline, Delay chains fire | `acceptance::the_committed_demo_shows_all_three_behaviours` over the committed `runner_demo.graph` + `duck_hop.curve` + `graph_cube.prefab` (P9) |
+| …all visible via execution pulse | `trace.rs` suite + `graph_editor_crusty::a_pulse_resolves_through_reroutes` (P7) |
+| play → stop → play restarts cleanly | `acceptance::stopping_and_replaying_refires_begin_play_exactly_once` (P5) |
+| Editor authors all of it without touching RON | typed constants `graph_editor_crusty::int_and_string_are_editable_arrays_are_not` (P6a); variables `graph_variables_tests` (9 tests, P6b); wire-drag create `graph_palette::auto_connect_picks_the_type_then_the_closest_name` (P7) |
+| Realm gate: a `Server` graph on a client errors visibly and does not run | `acceptance::the_realm_gate_refuses_a_server_graph_on_a_client` (P5) |
+| Portability (D8) | CI checks `node_graph_types` / `node_graph_exec` / `curve_asset` standalone **and** for `wasm32-unknown-unknown` (P9) |
+| All Task 40 gates hold | tests, clippy (no new warnings), `lint_design.sh`, both builds — every package |
+
+**Deferred ledger.** Everything the arc deliberately left, in one place.
+Items marked **45.5** are already in that task's backlog; the rest need a
+home when the owning task is scheduled.
+
+*Owned by Task 45.5 (Node Graph Editor v2)*
+- Flow bubbles, watch chips, PAUSED state and tinted taken-path rendering —
+  45-A P7 ships the trace *data* and basic pulse/value hover only (addendum
+  ruling 11).
+- Persisted breakpoints in the graph sidecar.
+- Per-instance subgraph inspection: an inlined subgraph lights its *host*
+  node whole; stepping into one instance of it is 45.5.
+- Collapse-to-subgraph inner wiring UI, and node rename via `NodeInst.title`
+  + F2 — 45-A ships the schema field and the compiler splicing, not the UI.
+
+*Owned by Task 45 (Visual Scripting tail)*
+- Broader gameplay node API beyond the 46-node starter library.
+- `event_custom` cross-entity targeting — v1 is same-entity only (resolved
+  question 3); an explicit target pin is the follow-up.
+
+*Owned by Task 41 (Animation)*
+- **Timeline/Delay coupling**: both are latents on one activation, so a
+  Timeline cannot run *while* a Delay on the same activation waits. Blueprint
+  decouples them with per-node timelines driven independently of exec flow;
+  that decoupling is Task 41's, together with growing the `.curve` editor
+  (which 45-A shipped deliberately basic).
+
+*Unowned — schedule with whichever task next touches the area*
+- **Exec output fan-out is unvalidated**: two wires off one exec output are
+  not rejected, and `PlanNode::exec` keeps one target per pin, so one wire
+  silently wins. Wants a `validate_doc` rule (and the editor replacing rather
+  than adding on connect).
+- **Suspend-edge trace gap**: the exec edge that *enters* a latent is traced,
+  but the resume is a new activation step with no incoming edge to light, so
+  a `Delay` resuming reads as a graph that started by itself.
+- **Array literal editing**: `ForEach` runs and arrays flow through pins, but
+  editing an array *constant* on the canvas is not authorable — the inline
+  cell is a read-only chip (plan D6 note).
+- **Docked-undo focus quirk**: per-file editors claim Undo/Redo only while
+  their tab is the focused tab of the *main* dock; a float window owns its
+  own keyboard. Consistent between graph and curve editors, but it means the
+  Edit menu's labels follow dock focus rather than last-edited document.
+- **Config-band label alignment across nodes**: config rows are aligned
+  within a node (`band_y`), not across neighbouring nodes, so two adjacent
+  nodes with different config counts have visually unrelated first pin rows.
+- **Severity badge rendering**: P1 added `ErrorSeverity` and the anchor
+  taxonomy; warnings and errors still render with the same badge treatment.
+- **Curve editor visual verification (45-A P8b)**: the three review
+  screenshots (curve editor with `duck_hop.curve`, a key selected, a Timeline
+  node showing its track pins) could not be captured — the workstation locked
+  mid-session and GDI capture needs an unlocked desktop. Substituted by two
+  independent code reviews with fixes applied; a manual pass is queued.
+
+---
+
 ### Task 45: Visual Scripting (Node-Based)
 **Status:** 📋 Planned — **superseded in part by Task 45-A** (`docs/roadmap/VULKANO-45A-GRAPH-EXECUTION-CORE.md`, audited 2026-08-11): the execution runtime, `GraphRunner` component (not `ScriptComponent`), events, control flow, latents, and the starter node library land in 45-A. Task 45 becomes the tail on that runtime: broader gameplay node API, debugging beyond basic viz, polish. Bullets below predate 45-A where they conflict.
 **Duration:** ~2-2.5 weeks (reduced by 45-A)

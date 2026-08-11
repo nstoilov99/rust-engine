@@ -61,6 +61,10 @@ fn edge(from: u64, fp: &str, to: u64, tp: &str) -> Edge {
 /// agrees with itself, not that the engine can load a `.curve`.
 const DEMO_CURVE: &str = "curves/duck_hop.curve";
 
+/// The prefab the demo's ForLoop spawns (45-A P9 showcase). Written by the
+/// same fixture generator that writes the graph.
+const DEMO_PREFAB: &str = "prefabs/graph_cube.prefab";
+
 fn demo_curve() -> curve_asset::CurveDoc {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -822,20 +826,112 @@ fn a_timeline_drives_a_real_transform_from_a_curve_asset() {
     assert_eq!(h.position(e).y, 0.0);
 }
 
-/// The committed demo graph, generated rather than hand-written so it is
+/// **The showcase, on the committed assets.** Loads `runner_demo.graph`,
+/// `duck_hop.curve` and `graph_cube.prefab` off the real content tree and
+/// checks the plan's three acceptance behaviours in one run:
+///
+/// 1. *BeginPlay spawns prefabs in a ForLoop* — three cubes, spaced by the
+///    loop index, each placed through the spawn pin;
+/// 2. *Delay chains fire* — the Timeline's Play is wired downstream of the
+///    one-second Delay, so nothing hops until the latent resumes. That
+///    ordering is the assertion: hop-before-delay would be indistinguishable
+///    from "the Delay was ignored";
+/// 3. *Tick moves one via Timeline* — the last spawned cube's Z rides the
+///    curve while the graph's own entity walks +X, two effect streams on two
+///    entities in the same tick.
+///
+/// Reading the committed files rather than rebuilding them is the point: this
+/// is the test that fails if someone edits the demo asset into something that
+/// no longer demonstrates the task.
+#[test]
+fn the_committed_demo_shows_all_three_behaviours() {
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content");
+    if !content.join("prefabs/graph_cube.prefab").exists() {
+        return; // packaged build, no content tree
+    }
+    crate::engine::assets::asset_source::init_filesystem_if_unset(content.clone());
+    let doc = node_graph_types::load_graph(&content.join("graphs/runner_demo.graph"))
+        .expect("the committed demo graph loads");
+
+    let mut h = Harness::build(
+        &[("graphs/runner_demo.graph", doc)],
+        &[(DEMO_CURVE, demo_curve())],
+        &content,
+    );
+    let owner = h.spawn_runner("Demo", "graphs/runner_demo.graph");
+
+    // 1. One tick is enough: BeginPlay runs the whole loop in a single
+    //    statement chain, and the spawns apply at the end of it.
+    h.ticks(1);
+    let disabled = h.world.get::<&GraphRuntime>(owner).unwrap().disabled.clone();
+    assert!(disabled.is_none(), "the demo compiles and runs: {disabled:?}");
+    let mut cubes: Vec<(hecs::Entity, glm::Vec3)> = h
+        .world
+        .query::<(&Name, &Transform)>()
+        .iter()
+        .filter(|(e, _)| *e != owner)
+        .map(|(e, (_, t))| (e, t.position))
+        .collect();
+    cubes.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+    assert_eq!(cubes.len(), 3, "three loop iterations, three prefabs");
+    let xs: Vec<f32> = cubes.iter().map(|(_, p)| p.x).collect();
+    assert_eq!(xs, vec![1.5, 3.0, 4.5], "each spawn was placed by the loop index");
+    assert!(
+        cubes.iter().all(|(_, p)| p.z == 0.0),
+        "nothing has hopped yet"
+    );
+
+    // 2. The Delay is still counting: half a second in, the Timeline that
+    //    hangs off it has not started.
+    h.ticks(30);
+    let hopper = cubes.last().expect("a last spawn").0;
+    assert_eq!(
+        h.world.get::<&Transform>(hopper).unwrap().position.z,
+        0.0,
+        "the Timeline must not start before the Delay resumes"
+    );
+    // …meanwhile the Tick chain has been running all along.
+    let walked = h.position(owner).x;
+    assert!(walked > 0.0, "Tick walks the graph's own entity, got {walked}");
+
+    // 3. Past the delay, the curve drives the last cube's Z — and only its Z.
+    h.ticks(60);
+    let hop = h.world.get::<&Transform>(hopper).unwrap().position;
+    assert!(hop.z > 0.0, "the Timeline is sampling the curve, z = {}", hop.z);
+    assert_eq!(hop.x, 4.5, "the hop replaces Z and leaves X alone");
+    let others: Vec<f32> = cubes[..2]
+        .iter()
+        .map(|(e, _)| h.world.get::<&Transform>(*e).unwrap().position.z)
+        .collect();
+    assert_eq!(others, vec![0.0, 0.0], "only the handle the graph kept moves");
+    assert!(
+        h.position(owner).x > walked,
+        "both effect streams ran in the same ticks"
+    );
+}
+
+/// The committed demo graph — **the plan's acceptance demo, verbatim**
+/// ("BeginPlay spawns prefabs in a ForLoop, Tick moves one via Timeline,
+/// Delay chains fire"). Generated rather than hand-written so it is
 /// guaranteed valid and canonical:
 /// `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine --lib write_runner_demo`
 ///
 /// What it does, and why each piece is there:
-/// - **BeginPlay** runs a ForLoop that prints three lines — control flow and
-///   a pure chain, visible in the console the moment play starts;
-/// - then a **Delay** chain prints once more a second later, which is the
-///   only way to see latency working from outside;
-/// - **Tick** walks the entity along +X, so the effect stream visibly moves
-///   something in the world every frame;
-/// - a looping **Timeline** drives Z off `curves/duck_hop.curve`, which is
-///   what makes the P8 asset visible from outside. It composes with the Tick
-///   chain rather than fighting it: both read the current position and each
+/// - **BeginPlay** runs a ForLoop that *spawns a prefab per iteration*,
+///   parking each handle in an Entity variable and printing the index —
+///   control flow, a pure chain, the spawn-alias protocol and a variable, all
+///   visible the moment play starts;
+/// - then a **Delay** chain prints once more a second later, which is the only
+///   way to see latency working from outside;
+/// - **Tick** walks the graph's own entity along +X, so the effect stream
+///   visibly moves something every frame;
+/// - a looping **Timeline** drives the **last spawned prefab's** Z off
+///   `curves/duck_hop.curve` — so the P8 asset, the alias binding and the
+///   latent are all visible in one motion. It composes with the Tick chain
+///   rather than fighting it: the two act on different entities, and each
 ///   replaces only the axis it owns.
 #[test]
 fn write_runner_demo_if_requested() {
@@ -847,14 +943,24 @@ fn write_runner_demo_if_requested() {
 
     let mut doc = GraphDoc::default();
     doc.realm = GraphRealm::Shared;
-    doc.variables = vec![VarDecl {
-        slug: "steps".into(),
-        label: "Steps".into(),
-        ty: PinType::Int,
-        default: Some(PropValue::Int(0)),
-    }];
+    doc.variables = vec![
+        VarDecl {
+            slug: "steps".into(),
+            label: "Steps".into(),
+            ty: PinType::Int,
+            default: Some(PropValue::Int(0)),
+        },
+        // The handle the ForLoop parks each spawn in; the Timeline reads it
+        // back, which is what makes the alias protocol visible in the world.
+        VarDecl {
+            slug: "hopper".into(),
+            label: "Hopper".into(),
+            ty: PinType::Entity,
+            default: None,
+        },
+    ];
     doc.nodes = vec![
-        // --- BeginPlay: a counted loop, then a delayed line ---------------
+        // --- BeginPlay: a counted loop that spawns, then a delayed line ----
         node(0, EVENT_BEGIN_PLAY_TYPE_ID),
         with(1, ids::FOR_LOOP, &[("first", PropValue::Int(1)), ("last", PropValue::Int(3))]),
         node(2, ids::INT_TO_STRING),
@@ -888,10 +994,32 @@ fn write_runner_demo_if_requested() {
         node(17, ids::BREAK_VEC3),
         node(18, ids::MAKE_VEC3),
         node(19, ids::SET_POSITION),
+        // --- the spawn itself, and the handle it hands back -----------------
+        with(
+            20,
+            ids::SPAWN_PREFAB,
+            &[("path", PropValue::Asset(DEMO_PREFAB.into()))],
+        ),
+        with(21, VAR_SET_TYPE_ID, &[(VAR_PROP, PropValue::Str("hopper".into()))]),
+        node(22, ids::INT_TO_FLOAT),
+        // Spawn at (index * 1.5, 0, 0) so the three cubes stand apart.
+        with(23, ids::MUL_FLOAT, &[("b", PropValue::Float(1.5))]),
+        node(24, ids::MAKE_VEC3),
+        // One Get feeding both ends of the Timeline chain: an output may fan
+        // out, and two Gets of one variable would only invite them to drift.
+        with(25, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("hopper".into()))]),
     ];
     doc.edges = vec![
         edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
-        edge(1, "body", 3, EXEC_IN_PIN),
+        // Loop body: spawn, park the handle, then say which iteration it was.
+        edge(1, "body", 20, EXEC_IN_PIN),
+        edge(20, EXEC_OUT_PIN, 21, EXEC_IN_PIN),
+        edge(21, EXEC_OUT_PIN, 3, EXEC_IN_PIN),
+        edge(20, "spawned", 21, VAR_VALUE_PIN),
+        edge(1, "index", 22, "value"),
+        edge(22, "result", 23, "a"),
+        edge(23, "result", 24, "x"),
+        edge(24, "result", 20, "position"),
         edge(1, "index", 2, "value"),
         edge(2, "text", 3, "text"),
         edge(1, "completed", 4, EXEC_IN_PIN),
@@ -910,6 +1038,9 @@ fn write_runner_demo_if_requested() {
         // begins visibly *after* the rest rather than at frame zero.
         edge(5, EXEC_OUT_PIN, 15, node_graph_types::TIMELINE_PLAY_PIN),
         edge(15, node_graph_types::TIMELINE_UPDATE_PIN, 19, EXEC_IN_PIN),
+        // …on the spawned entity, not on self.
+        edge(25, VAR_VALUE_PIN, 16, "entity"),
+        edge(25, VAR_VALUE_PIN, 19, "entity"),
         edge(16, "position", 17, "value"),
         edge(17, "x", 18, "x"),
         edge(17, "y", 18, "y"),
@@ -921,12 +1052,22 @@ fn write_runner_demo_if_requested() {
         n.position = [(i % 6) as f32 * 260.0, (i / 6) as f32 * 220.0];
     }
 
-    // It must compile before it is committed — a demo that does not run is
-    // worse than no demo. Compiled against the *committed* curve, so a
+    // It must compile *and run* before it is committed — a demo that does not
+    // work is worse than no demo. Compiled against the *committed* curve, so a
     // regenerated demo and the asset on disk cannot drift apart.
-    let mut h = Harness::with_curves(
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content");
+    write_demo_prefab(&content);
+    crate::engine::assets::asset_source::init_filesystem_if_unset(content.clone());
+    // Rooted at the *repo's* content dir, not the relative "content" the other
+    // harnesses use: this one has to load a real prefab off disk, and the test
+    // process runs from the engine crate.
+    let mut h = Harness::build(
         &[("graphs/runner_demo.graph", doc.clone())],
         &[(DEMO_CURVE, demo_curve())],
+        &content,
     );
     let e = h.spawn_runner("Demo", "graphs/runner_demo.graph");
     h.ticks(3);
@@ -934,11 +1075,55 @@ fn write_runner_demo_if_requested() {
     assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
     drop(rt);
     assert!(h.position(e).x > 0.0, "the demo actually moves its entity");
+    assert_eq!(
+        h.world.query::<&Name>().iter().filter(|(o, _)| *o != e).count(),
+        3,
+        "three loop iterations, three spawned prefabs"
+    );
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("content/graphs/runner_demo.graph");
-    std::fs::write(&root, serialize_graph(&doc).unwrap()).unwrap();
-    println!("wrote {}", root.display());
+    let path = content.join("graphs/runner_demo.graph");
+    std::fs::write(&path, serialize_graph(&doc).unwrap()).unwrap();
+    println!("wrote {}", path.display());
+}
+
+/// The prefab the demo spawns, written alongside the graph for the same
+/// reason the graph is generated: a hand-written asset can drift out of the
+/// serde shape the loader expects, and nothing would notice until play.
+#[cfg(test)]
+fn write_demo_prefab(content: &std::path::Path) {
+    use crate::engine::scene::scene_format::{ComponentData, EntityData};
+    let prefab = crate::engine::scene::prefab::Prefab {
+        name: "GraphCube".to_string(),
+        description: "Spawned by graphs/runner_demo.graph (Task 45-A)".to_string(),
+        template: EntityData {
+            name: "GraphCube".to_string(),
+            guid: None,
+            components: vec![
+                ComponentData::Transform {
+                    position: [0.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [0.4, 0.4, 0.4],
+                },
+                ComponentData::MeshRenderer {
+                    mesh_path: "__primitive__/Cube".to_string(),
+                    material_paths: vec![String::new()],
+                    material_path: String::new(),
+                    mesh_index: 0,
+                    material_index: 0,
+                    visible: true,
+                    cast_shadows: true,
+                    receive_shadows: true,
+                    base_color_factor: [0.9, 0.5, 0.2, 1.0],
+                    metallic_factor: 0.0,
+                    roughness_factor: 0.6,
+                    emissive_factor: [0.0, 0.0, 0.0],
+                },
+            ],
+        },
+    };
+    let dir = content.join("prefabs");
+    std::fs::create_dir_all(&dir).expect("prefabs dir");
+    let text = ron::ser::to_string_pretty(&prefab, ron::ser::PrettyConfig::default())
+        .expect("serialize prefab");
+    std::fs::write(dir.join("graph_cube.prefab"), text).expect("write prefab");
 }

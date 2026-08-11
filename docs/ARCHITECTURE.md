@@ -429,6 +429,98 @@ evaluators live here — consumers bring their own node libraries and backends.
   crusty-gui's `Canvas` pan/zoom primitive). Graph tabs mirror the
   MeshEditor pattern (`EditorTab::GraphEditor(key)`).
 
+## Graph Execution (Task 45-A)
+
+Graphs *run*. Plan and rulings:
+[VULKANO-45A-GRAPH-EXECUTION-CORE.md](roadmap/VULKANO-45A-GRAPH-EXECUTION-CORE.md).
+
+### Crate layout, and why
+
+Three workspace crates outside the engine, because the interpreter has to be
+able to leave:
+
+| Crate | Owns | Depends on |
+|---|---|---|
+| `crates/node_graph_types` | documents, registry, descriptors, validation, migration, resolvers | serde, ron, `curve_asset` |
+| `crates/node_graph_exec` | compiler (`Plan`), interpreter, node impls, `Effect` | `node_graph_types` |
+| `crates/curve_asset` | `.curve` data + evaluation | serde, ron |
+
+None of them can see Vulkan, `hecs`, or the editor. That is the M6 insurance
+policy applied to scripting (D8): client-first execution today, the *same*
+interpreter compiled into a SpacetimeDB module later. CI enforces it — the
+three crates are checked standalone and for `wasm32-unknown-unknown`
+alongside `game_shared`.
+
+The engine's `engine/src/engine/node_graph/` is a re-export shim plus the two
+pieces that genuinely belong to the engine build (derive-macro markers,
+`inventory` auto-registration).
+
+### Compile pipeline
+
+`GraphDoc` → **validate** → **flatten** → `Plan` (`node_graph_exec::plan`):
+
+1. `validate_doc_with` + `validate_refs` over the whole reference closure.
+   Errors refuse compilation; warnings do not.
+2. Subgraphs inline through their interface, reroutes splice away,
+   unreachable nodes are pruned — none of the three exist at run time.
+3. Data inputs resolve to an `InputSource` (constant, another node's output,
+   a variable slot) so the interpreter never searches edges.
+4. A Timeline's outputs are its `.curve`'s track names, so compilation needs
+   the asset: `CurveCache` prefetches every `curve_refs()` before compiling,
+   and the same copy is what the interpreter samples. One source, so the
+   descriptor the editor draws, the plan the compiler builds and the values
+   the runtime samples cannot drift.
+
+`GraphPlanCache` caches by content-relative path; **failures are cached too**
+(a broken graph must not recompile sixty times a second to fail identically).
+Invalidation bumps a generation counter, so live instances restart.
+
+### Execution
+
+`GraphInstance` is plain serializable data: variables, an activation list,
+per-node state, a seeded PRNG. A tick drains queued events in phase order and
+runs each activation until it blocks or finishes.
+
+- **Exec vs data**: an impure node fires, *pulls* its data inputs backward
+  through pure chains, performs its effect, then names the exec output to
+  continue on. Pure nodes are re-evaluated per firing (no cross-statement
+  caching in v1).
+- **Latents** (`Delay`, `Timeline`) suspend an activation and resume it on a
+  later tick, loop stack and all — one data structure, so a `Delay` inside a
+  `ForLoop` serializes correctly by construction.
+- **Budget**: every activation runs under a step budget; exceeding it halts
+  the instance with an error naming the node, which is how an infinite
+  `WhileLoop` is a reported bug rather than a hang.
+
+### Effect seam
+
+The interpreter never touches the world. It emits `Effect`s
+(`SetPosition`, `SpawnPrefab`, `Log`, …) into a buffer; `GraphScriptRunnerSystem`
+(`engine/src/engine/scripting/runner.rs`) applies them, non-structural first,
+then spawns/despawns. `SpawnPrefab` hands back an **alias** immediately and the
+runner binds it to a real entity before the owner's next tick, so a graph can
+spawn something and act on the handle.
+
+Registered as the `graph_scripting` plugin (Task 39.8) behind a default-on
+`graph-scripting` Cargo feature — the first plugin to exercise the full export
+policy, since disabling it genuinely strips the interpreter from a build.
+
+### Trace / viz
+
+Tracing is a generic parameter (`TraceSink`), so `NoTrace` costs nothing and a
+standalone build contains zero trace symbols. Editor builds keep a bounded
+`GraphTrace` ring per instance; `graph_exec_viz.rs` maps plan-space hits back
+to document space (an inlined subgraph lights its host node) for wire pulses,
+node rings and value hover.
+
+### Determinism discipline
+
+All nondeterminism is injected: time comes from the runner, RNG is a seeded
+per-instance PRNG, iteration order over instances and events is stable. A
+determinism test runs the same graph + seed + inputs twice and compares the
+effect streams; it has been in CI since P2, so a node that breaks it fails
+loudly rather than quietly.
+
 ## Plugin System (Task 39.8)
 
 `engine/src/engine/plugins/` is the engine/game/extension boundary. Author

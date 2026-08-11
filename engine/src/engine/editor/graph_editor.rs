@@ -5568,7 +5568,7 @@ mod tests {
         use curve_asset::{CurveDoc, Track};
 
         let mut reg = NodeRegistry::new();
-        register_std_nodes(&mut reg);
+        let _ = register_std_nodes(&mut reg);
         let doc = timeline_doc("curves/x.curve");
 
         let base = DocDescriptors::new(&doc, &reg);
@@ -5627,7 +5627,7 @@ mod tests {
         );
 
         let mut reg = NodeRegistry::new();
-        register_std_nodes(&mut reg);
+        let _ = register_std_nodes(&mut reg);
         let d = DocDescriptors::new(&doc, &reg).with_curves(&curves);
         let timeline = doc
             .nodes
