@@ -445,8 +445,17 @@ pub struct GraphEditorPanelCtx<'a> {
 enum InlineKind {
     /// Editable at L0 (`DragValue`).
     Float(f32),
+    /// Editable at L0 (`DragValue` stepping whole numbers). Separate from
+    /// `Float` because the *widget* differs — no decimals, and a scrub speed
+    /// tuned so one unit is a deliberate movement rather than a twitch.
+    Int(i32),
     /// Editable at L0 (`Checkbox`).
     Bool(bool),
+    /// Editable at L0 (`TextEdit`). Focus is what keeps canvas shortcuts out
+    /// of the field: `overlay_has_focus` already returns true whenever any
+    /// crusty text field holds focus, so `Del` deletes a character rather
+    /// than the selected nodes.
+    Str(String),
     /// Painted swatch + hex; not yet editable.
     Color([f32; 4]),
     /// An `Enum` pin whose descriptor declares its legal values — a real
@@ -467,7 +476,9 @@ impl InlineKind {
     fn of(v: &PropValue, variants: &[String]) -> Self {
         match v {
             PropValue::Float(x) => InlineKind::Float(*x),
+            PropValue::Int(i) => InlineKind::Int(*i),
             PropValue::Bool(b) => InlineKind::Bool(*b),
+            PropValue::Str(t) => InlineKind::Str(t.clone()),
             PropValue::Color(c) => InlineKind::Color(*c),
             PropValue::Raw(s) => InlineKind::Raw(s.clone()),
             PropValue::Enum(e) if !variants.is_empty() => InlineKind::Enum {
@@ -4764,7 +4775,11 @@ fn draw_nodes(
                     if lod.inline_widgets()
                         && matches!(
                             kind,
-                            InlineKind::Float(_) | InlineKind::Bool(_) | InlineKind::Enum { .. }
+                            InlineKind::Float(_)
+                                | InlineKind::Int(_)
+                                | InlineKind::Bool(_)
+                                | InlineKind::Str(_)
+                                | InlineKind::Enum { .. }
                         )
                     {
                         pending_widgets.push((g.id, pin.slug.clone(), cell, kind.clone()));
@@ -4978,11 +4993,40 @@ fn inline_widget(
                     changed = Some(PropValue::Float(x));
                 }
             }
+            InlineKind::Int(v) => {
+                // `DragValue` is f32-only, so an Int rides through one: no
+                // decimals on display, rounded on the way back, and a slower
+                // scrub than Float because every pixel of travel is a whole
+                // unit of meaning.
+                let mut x = *v as f32;
+                DragValue::new(&mut x)
+                    .speed(0.05)
+                    .decimals(0)
+                    .min_decimals(0)
+                    .width(cell.width())
+                    .height(cell.height())
+                    .show(ui);
+                let n = x.round() as i32;
+                if n != *v {
+                    changed = Some(PropValue::Int(n));
+                }
+            }
             InlineKind::Bool(v) => {
                 let mut b = *v;
                 Checkbox::new(&mut b, "").show(ui);
                 if b != *v {
                     changed = Some(PropValue::Bool(b));
+                }
+            }
+            InlineKind::Str(v) => {
+                let mut t = v.clone();
+                let field_bg = ui.style().palette.input;
+                TextEdit::new(&mut t)
+                    .width(cell.width())
+                    .fill(field_bg)
+                    .show_full(ui);
+                if t != *v {
+                    changed = Some(PropValue::Str(t));
                 }
             }
             InlineKind::Enum { value, variants, .. } => {
@@ -6159,26 +6203,27 @@ mod tests {
             InlineKind::of(&PropValue::Raw("(x:1)".into()), none),
             InlineKind::Raw(_)
         ));
-        // Everything else falls back to a read-only chip — including the
-        // Task 45-A additions, which are display-only until P6 gives them
-        // field widgets.
+        // Int and String became editable in 45-A P6.
+        assert!(matches!(InlineKind::of(&PropValue::Int(-7), none), InlineKind::Int(-7)));
+        assert!(matches!(
+            InlineKind::of(&PropValue::Str("hi".into()), none),
+            InlineKind::Str(_)
+        ));
+
+        // Everything else still falls back to a read-only chip. **Arrays stay
+        // read-only on purpose**: array literal editing is a stated non-goal
+        // (D9), and arrays reach a graph through wires and variables.
         for v in [
             PropValue::Vec2([1.0, 2.0]),
             PropValue::Vec3([1.0, 2.0, 3.0]),
             PropValue::Vec4([1.0; 4]),
             PropValue::Enum("Variant".into()),
             PropValue::Asset("textures/a.png".into()),
-            PropValue::Int(-7),
-            PropValue::Str("hello".into()),
             PropValue::Array(vec![PropValue::Int(1), PropValue::Int(2)]),
         ] {
             assert!(matches!(InlineKind::of(&v, none), InlineKind::Chip(_)), "{v:?}");
         }
         // …and the chips say something useful rather than `Debug` spew.
-        assert_eq!(
-            InlineKind::of(&PropValue::Int(-7), none),
-            InlineKind::Chip("-7".to_string())
-        );
         assert_eq!(
             InlineKind::of(
                 &PropValue::Array(vec![PropValue::Int(1), PropValue::Str("a".into())]),
@@ -6186,6 +6231,100 @@ mod tests {
             ),
             InlineKind::Chip("[1, a]".to_string())
         );
+    }
+
+    /// The 45-A P6 field widgets: which `PropValue`s are *interactive* at L0,
+    /// and which stay painted. The list is asserted rather than described
+    /// because "editable" is the whole feature.
+    #[test]
+    fn int_and_string_are_editable_arrays_are_not() {
+        let none: &[String] = &[];
+        let editable = |v: PropValue| {
+            matches!(
+                InlineKind::of(&v, none),
+                InlineKind::Float(_)
+                    | InlineKind::Int(_)
+                    | InlineKind::Bool(_)
+                    | InlineKind::Str(_)
+                    | InlineKind::Enum { .. }
+            )
+        };
+        assert!(editable(PropValue::Float(1.0)));
+        assert!(editable(PropValue::Int(1)));
+        assert!(editable(PropValue::Bool(true)));
+        assert!(editable(PropValue::Str("x".into())));
+        assert!(!editable(PropValue::Array(vec![])), "array literals are a non-goal");
+        assert!(!editable(PropValue::Vec3([0.0; 3])), "vectors are P7+ work");
+        assert!(!editable(PropValue::Asset("a/b.png".into())), "asset picker is not here yet");
+        assert!(!editable(PropValue::Raw("(x:1)".into())), "forward-compat data is never edited");
+    }
+
+    /// The standard library's comparison nodes declare their operator
+    /// variants, so the inline editor gives them a real dropdown rather than a
+    /// free-text chip — the reason 45-A P3 collapsed twelve comparison nodes
+    /// into two.
+    #[test]
+    fn compare_nodes_get_a_real_operator_dropdown() {
+        let mut reg = NodeRegistry::new();
+        node_graph_types::register_std_nodes(&mut reg).unwrap();
+
+        for id in [
+            node_graph_types::std_nodes::COMPARE_INT,
+            node_graph_types::std_nodes::COMPARE_FLOAT,
+        ] {
+            let desc = reg.get(id).expect("registered");
+            let variants = &desc.input("op").expect("an operator pin").variants;
+            match InlineKind::of(&PropValue::Enum("less".into()), variants) {
+                InlineKind::Enum { value, variants: v, ok } => {
+                    assert_eq!(value, "less");
+                    assert!(ok);
+                    assert_eq!(v.len(), 6, "all six operators are offered on {id}");
+                }
+                other => panic!("{id}: expected a dropdown, got {other:?}"),
+            }
+            // A stale operator still edits, flagged rather than rejected.
+            assert!(matches!(
+                InlineKind::of(&PropValue::Enum("approximately".into()), variants),
+                InlineKind::Enum { ok: false, .. }
+            ));
+        }
+    }
+
+    /// **Known gap, pinned rather than papered over.** P1 encodes an
+    /// `event_custom` payload declaration as a reserved *property* —
+    /// `payload.<slug>` holding `Enum(<type slug>)` — and reserved config
+    /// properties (`payload.*`, `event_name`, `action`, `var`) are deliberately
+    /// **not pins**. The inline editor only draws rows for pins, and it sources
+    /// dropdown variants from the pin descriptor, so today these properties
+    /// have no row and no dropdown at all.
+    ///
+    /// Handing `InlineKind::of` a variants list is not the fix — the value
+    /// renders correctly the moment it has one. The missing piece is node
+    /// *anatomy*: a config row above the pins. That is a design decision for
+    /// the variables/config pass, not something to smuggle in here, so this
+    /// test records exactly where the line currently falls.
+    #[test]
+    fn reserved_config_properties_have_no_inline_row_yet() {
+        // With no variants — which is what the pin lookup yields for a
+        // property that is not a pin — it degrades to a chip.
+        let none: &[String] = &[];
+        assert!(matches!(
+            InlineKind::of(&PropValue::Enum("float".into()), none),
+            InlineKind::Chip(_)
+        ));
+        // Given the payload type list it would render as a proper dropdown,
+        // so only the row is missing.
+        let variants: Vec<String> = node_graph_types::std_events::PAYLOAD_PIN_TYPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        match InlineKind::of(&PropValue::Enum("float".into()), &variants) {
+            InlineKind::Enum { ok, variants: v, .. } => {
+                assert!(ok);
+                assert_eq!(v.len(), 9);
+            }
+            other => panic!("expected a dropdown once variants exist, got {other:?}"),
+        }
     }
 
     /// An `Enum` pin becomes a dropdown only when its descriptor says what
