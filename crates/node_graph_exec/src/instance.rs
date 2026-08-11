@@ -49,8 +49,13 @@ pub struct Activation {
     pub id: ActivationId,
     /// The entry node this started from, for reporting.
     pub entry: usize,
-    /// Continuation point: the plan node to fire next.
+    /// Continuation point: the plan node to fire next, and the exec input
+    /// pin it is being entered through. The pin is part of the continuation
+    /// because a node with several exec inputs (Gate's open/close/enter)
+    /// behaves differently per entrance, and only the edge knows which one
+    /// was taken.
     pub cursor: Option<usize>,
+    pub entered: Option<String>,
     /// Loop/call frames, innermost last.
     pub frames: Vec<Frame>,
     /// Data outputs impure nodes have produced in this activation. Pure
@@ -118,6 +123,16 @@ pub struct GraphInstance {
     pub threads: Vec<Activation>,
     pub queue: VecDeque<QueuedEvent>,
     pub rng: Rng,
+    /// Per-node persistent state, keyed by plan index — the one thing a
+    /// stateful node (Gate's open/closed, DoOnce's fired, FlipFlop's side)
+    /// cannot re-derive from its inputs and its frame. It lives here rather
+    /// than in the implementation so implementations stay stateless and the
+    /// whole instance stays serializable.
+    pub node_state: BTreeMap<usize, Value>,
+    /// Spawn aliases handed out but not yet bound to a real entity. The
+    /// runner drains this after applying the tick's effects and records its
+    /// own alias -> entity mapping; real ids never enter this crate (D1).
+    pub pending_aliases: Vec<u32>,
     /// The entity this instance is attached to, as the core may see it.
     pub self_entity: EntityRef,
     /// BeginPlay fires exactly once per instance lifetime (D3). Restart
@@ -145,6 +160,8 @@ impl GraphInstance {
             threads: Vec::new(),
             queue: VecDeque::new(),
             rng: Rng::new(seed),
+            node_state: BTreeMap::new(),
+            pending_aliases: Vec::new(),
             self_entity,
             begin_play_pending: true,
             time: 0.0,
@@ -158,6 +175,12 @@ impl GraphInstance {
     /// re-enters the graph (D3: no reentrancy).
     pub fn queue_event(&mut self, phase: EventPhase, name: Option<String>, payload: BTreeMap<String, Value>) {
         self.queue.push_back(QueuedEvent { phase, name, payload });
+    }
+
+    /// Take the aliases the runner still has to bind. Draining is the
+    /// handshake: what is left in the list is what has not been spawned yet.
+    pub fn take_pending_aliases(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending_aliases)
     }
 
     pub(crate) fn next_activation_id(&mut self) -> ActivationId {

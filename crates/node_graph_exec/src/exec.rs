@@ -167,6 +167,7 @@ fn start_phase(
             id,
             entry: node,
             cursor: Some(node),
+            entered: None,
             frames: Vec::new(),
             locals: BTreeMap::new(),
             payload: payload.clone(),
@@ -207,10 +208,19 @@ fn advance(
         // Pull the data inputs backward through the pure chains. The memo is
         // created here and dropped at the end of this firing — that *is*
         // "statement-scoped".
+        //
+        // The RNG travels as a local across the pull so that a volatile pure
+        // node (RandomFloat) genuinely *advances* it: handing the pull phase a
+        // throwaway copy would make every draw return the same number, which
+        // is deterministic in the least useful sense.
         let mut memo: BTreeMap<usize, BTreeMap<String, Value>> = BTreeMap::new();
-        let inputs = pull_inputs(
+        let mut rng = instance.rng;
+        let pulled = pull_inputs(
             plan, instance, thread, node_ix, impls, tick_in, world, budget, report, &mut memo,
-        )?;
+            &mut rng,
+        );
+        instance.rng = rng;
+        let inputs = pulled?;
 
         let Some(NodeImpl::Impure(imp)) = impls.get(&node.type_id) else {
             return Err(ExecError::MissingImpl {
@@ -227,6 +237,8 @@ fn advance(
             .filter(|f| f.node == node_ix)
             .map(|f| LoopFrameView { iteration: f.iteration });
 
+        let entered = instance.threads[thread].entered.clone();
+        let node_state = instance.node_state.get(&node_ix).cloned();
         let mut outputs: BTreeMap<String, Value> = instance.threads[thread]
             .locals
             .get(&node_ix)
@@ -239,7 +251,7 @@ fn advance(
             }
         }
 
-        let result = {
+        let (result, new_state) = {
             let mut ctx = FireCtx {
                 node: &node.name,
                 inputs: &inputs,
@@ -252,19 +264,28 @@ fn advance(
                 rng: &mut instance.rng,
                 self_entity: instance.self_entity,
                 next_alias: &mut instance.next_alias,
+                pending_aliases: &mut instance.pending_aliases,
+                queue: &mut instance.queue,
+                state: node_state,
+                entered: entered.as_deref(),
                 frame,
             };
-            imp.fire(&mut ctx)
+            let r = imp.fire(&mut ctx);
+            (r, ctx.state)
         };
         instance.threads[thread].locals.insert(node_ix, outputs);
+        if let Some(v) = new_state {
+            instance.node_state.insert(node_ix, v);
+        }
 
         match result {
             FireResult::Continue(pin) => {
                 // Leaving a loop is how a loop ends: drop the frame this node
                 // owns, if it owns one.
                 pop_own_frame(&mut instance.threads[thread], node_ix);
-                let next = plan.nodes[node_ix].exec.get(pin).copied();
-                instance.threads[thread].cursor = next;
+                let next = plan.nodes[node_ix].exec.get(pin);
+                instance.threads[thread].cursor = next.map(|t| t.node);
+                instance.threads[thread].entered = next.map(|t| t.pin.clone());
                 if next.is_none() {
                     unwind(plan, instance, thread);
                 }
@@ -274,21 +295,25 @@ fn advance(
                 if frames.last().map(|f| f.node) != Some(node_ix) {
                     frames.push(Frame { node: node_ix, iteration: 0 });
                 }
-                let next = plan.nodes[node_ix].exec.get(body).copied();
-                match next {
+                match plan.nodes[node_ix].exec.get(body) {
                     // An empty body is legal — the loop still counts down,
-                    // which is what makes an unwired ForLoop terminate rather
-                    // than spin.
+                    // which is what makes an unwired ForLoop (or a Sequence
+                    // with gaps) terminate rather than spin.
                     None => {
                         bump_frame(&mut instance.threads[thread], node_ix);
                         instance.threads[thread].cursor = Some(node_ix);
+                        instance.threads[thread].entered = None;
                     }
-                    Some(n) => instance.threads[thread].cursor = Some(n),
+                    Some(t) => {
+                        instance.threads[thread].cursor = Some(t.node);
+                        instance.threads[thread].entered = Some(t.pin.clone());
+                    }
                 }
             }
             FireResult::Done => {
                 pop_own_frame(&mut instance.threads[thread], node_ix);
                 instance.threads[thread].cursor = None;
+                instance.threads[thread].entered = None;
                 unwind(plan, instance, thread);
             }
             FireResult::Suspend(s) => {
@@ -315,6 +340,9 @@ fn unwind(plan: &Plan, instance: &mut GraphInstance, thread: usize) {
     if let Some(f) = t.frames.last_mut() {
         f.iteration += 1;
         t.cursor = Some(f.node);
+        // Re-entering a loop node from its own body is not an entrance
+        // through one of its exec inputs.
+        t.entered = None;
     } else {
         t.state = ThreadState::Finished;
     }
@@ -347,6 +375,7 @@ fn pull_inputs(
     budget: u32,
     report: &mut TickReport,
     memo: &mut BTreeMap<usize, BTreeMap<String, Value>>,
+    rng: &mut crate::instance::Rng,
 ) -> Result<BTreeMap<String, Value>, ExecError> {
     let mut out = BTreeMap::new();
     let sources: Vec<(String, InputSource)> = plan.nodes[node_ix]
@@ -359,6 +388,7 @@ fn pull_inputs(
             InputSource::Constant(v) => v,
             InputSource::Pin { node, pin } => pull_output(
                 plan, instance, thread, node, &pin, impls, tick_in, world, budget, report, memo,
+                rng,
             )?,
         };
         out.insert(slug, v);
@@ -381,6 +411,7 @@ fn pull_output(
     budget: u32,
     report: &mut TickReport,
     memo: &mut BTreeMap<usize, BTreeMap<String, Value>>,
+    rng: &mut crate::instance::Rng,
 ) -> Result<Value, ExecError> {
     let node = &plan.nodes[node_ix];
     if !node.pure {
@@ -408,7 +439,7 @@ fn pull_output(
     // Data-edge cycles are rejected at validation (P1's `DataCycle` rule), so
     // this recursion is over a DAG by construction.
     let inputs = pull_inputs(
-        plan, instance, thread, node_ix, impls, tick_in, world, budget, report, memo,
+        plan, instance, thread, node_ix, impls, tick_in, world, budget, report, memo, rng,
     )?;
 
     let Some(NodeImpl::Pure(imp)) = impls.get(&node.type_id) else {
@@ -419,12 +450,6 @@ fn pull_output(
     };
 
     let mut outputs = BTreeMap::new();
-    // A pure node may not mutate the instance, so it gets a scratch RNG
-    // derived from the instance seed state rather than the instance's own.
-    // Volatile pure nodes (Random*) are P3; the seam is here and the
-    // determinism contract is unaffected because the derivation is a pure
-    // function of the instance state.
-    let mut rng = instance.rng;
     {
         let mut ctx = EvalCtx {
             node: &node.name,
@@ -433,7 +458,7 @@ fn pull_output(
             vars: &instance.variables,
             variable: node.variable.as_deref(),
             tick: tick_in,
-            rng: &mut rng,
+            rng,
             world,
             self_entity: instance.self_entity,
         };

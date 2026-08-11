@@ -6,6 +6,11 @@
 //! its public API only, which is the same surface the engine spike and the
 //! future SpacetimeDB module see.
 
+// Tests build documents the way an author does: start from the default and
+// fill in what matters. A single giant struct literal would technically
+// satisfy clippy and be markedly harder to read.
+#![allow(clippy::field_reassign_with_default)]
+
 use std::collections::BTreeMap;
 
 use node_graph_exec::nodes::{ADD_INT, BRANCH, FOR_LOOP, INT_TO_STRING, PRINT, SET_POSITION};
@@ -26,7 +31,7 @@ use node_graph_types::{
 
 fn registry() -> NodeRegistry {
     let mut reg = NodeRegistry::new();
-    nodes::register_descriptors(&mut reg).unwrap();
+    node_graph_types::register_std_nodes(&mut reg).unwrap();
     register_std_events(&mut reg).unwrap();
     reg
 }
@@ -153,7 +158,7 @@ fn reroutes_are_spliced_away() {
     doc.edges = vec![
         edge(0, EXEC_OUT_PIN, 1, REROUTE_IN),
         edge(1, REROUTE_OUT, 4, EXEC_IN_PIN),
-        edge(2, "sum", 3, REROUTE_IN),
+        edge(2, "result", 3, REROUTE_IN),
         edge(3, REROUTE_OUT, 5, "value"),
         edge(5, "text", 4, "text"),
     ];
@@ -195,7 +200,7 @@ fn subgraphs_inline_through_their_interface() {
         edge(0, "run", 3, EXEC_IN_PIN),
         edge(3, EXEC_OUT_PIN, 1, "done"),
         edge(0, "n", 2, "a"),
-        edge(2, "sum", 1, "out"),
+        edge(2, "result", 1, "out"),
     ];
 
     // The host: BeginPlay -> subgraph(5) -> Print(the result).
@@ -310,7 +315,7 @@ fn for_loop_runs_its_body_then_completes() {
         // index -> Add(+100) -> the printed text, so the body observes the
         // loop variable through a pure chain re-evaluated per iteration.
         edge(1, "index", 4, "a"),
-        edge(4, "sum", 5, "value"),
+        edge(4, "result", 5, "value"),
         edge(5, "text", 2, "text"),
     ];
     assert_eq!(logs(&run(&doc, 1)), vec!["101", "102", "103", "done"]);
@@ -380,7 +385,7 @@ fn variables_read_and_write_across_ticks() {
     doc.edges = vec![
         edge(0, EXEC_OUT_PIN, 3, EXEC_IN_PIN),
         edge(1, VAR_VALUE_PIN, 2, "a"),
-        edge(2, "sum", 3, VAR_VALUE_PIN),
+        edge(2, "result", 3, VAR_VALUE_PIN),
         edge(3, EXEC_OUT_PIN, 4, EXEC_IN_PIN),
         edge(5, VAR_VALUE_PIN, 6, "value"),
         edge(6, "text", 4, "text"),
@@ -402,8 +407,8 @@ fn variables_read_and_write_across_ticks() {
 fn world_read_and_effect_out() {
     struct At([f32; 3]);
     impl WorldRead for At {
-        fn position(&self, _e: EntityRef) -> Option<[f32; 3]> {
-            Some(self.0)
+        fn transform(&self, _e: EntityRef) -> Option<node_graph_exec::TransformSnapshot> {
+            Some(node_graph_exec::TransformSnapshot { position: self.0, ..Default::default() })
         }
         fn exists(&self, _e: EntityRef) -> bool {
             true
@@ -511,47 +516,24 @@ fn multiple_entries_for_one_event_all_fire_in_doc_order() {
 /// The budget kills a runaway and the report names the node, and the whole
 /// **instance** halts rather than being trusted afterwards.
 ///
-/// The runaway here is a loop, not a bare exec cycle — and that is a finding
-/// worth recording rather than a limitation of the test. Task 40's
-/// `InputMultiplyConnected` rule applies to *every* input pin including exec
-/// ones, so an exec pin takes exactly one incoming wire. Any cycle reachable
-/// from an entry point would need a second wire into its join node, which
-/// means a bare exec cycle **cannot be authored at all** in v1. The budget's
-/// real job is runaway iteration.
+/// Both shapes are exercised: a runaway loop, and an **authored exec cycle**
+/// — which is only expressible because exec inputs may fan in (45-A P3). The
+/// plan's "exec-wire cycles remain legal (loops)" is a statement about
+/// authoring; the budget is what makes it safe.
 #[test]
 fn budget_kills_a_runaway_and_names_the_node() {
-    let mut doc = GraphDoc::default();
-    doc.nodes = vec![
-        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
-        with(
-            1,
-            FOR_LOOP,
-            &[("first", PropValue::Int(0)), ("last", PropValue::Int(i32::MAX))],
-        ),
-        print(2, "spin"),
-    ];
-    doc.edges = vec![
+    // An exec cycle: BeginPlay enters Print, and Print continues back into
+    // itself. The second wire into `exec_in` is the fan-in.
+    let mut cyclic = GraphDoc::default();
+    cyclic.nodes = vec![node(0, EVENT_BEGIN_PLAY_TYPE_ID), print(1, "spin")];
+    cyclic.edges = vec![
         edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
-        edge(1, "body", 2, EXEC_IN_PIN),
+        edge(1, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
     ];
-
-    // An exec cycle really is unauthorable: a second wire into an exec input
-    // is the same error as a second wire into a data input.
-    let mut cyclic = doc.clone();
-    cyclic.edges.push(edge(2, EXEC_OUT_PIN, 2, EXEC_IN_PIN));
-    match compile(&cyclic, "test.graph", &registry(), &BTreeMap::new()) {
-        Err(CompileError::Invalid { errors, .. }) => assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, node_graph_types::GraphError::InputMultiplyConnected { .. })),
-            "{errors:?}"
-        ),
-        other => panic!("expected refusal, got {other:?}"),
-    }
-
     let reg = registry();
     let subs: BTreeMap<String, GraphDoc> = BTreeMap::new();
-    let plan = compile(&doc, "test.graph", &reg, &subs).unwrap();
+    let plan = compile(&cyclic, "test.graph", &reg, &subs)
+        .expect("an exec cycle is legal to author; the budget makes it safe");
     let impls = impls();
     let mut inst = GraphInstance::new(&plan, EntityRef::SelfEntity, 1);
     let mut effects: Vec<Effect> = Vec::new();
@@ -564,14 +546,10 @@ fn budget_kills_a_runaway_and_names_the_node() {
         &mut effects,
         500,
     );
-
     match report.halted {
         Some(ExecError::BudgetExceeded { node, budget }) => {
             assert_eq!(budget, 500);
-            assert!(
-                node.contains("print") || node.contains("for_loop"),
-                "the report names the node it died on: {node}"
-            );
+            assert!(node.contains("print"), "the report names the node: {node}");
         }
         other => panic!("expected a budget kill, got {other:?}"),
     }
@@ -582,6 +560,52 @@ fn budget_kills_a_runaway_and_names_the_node() {
     effects.clear();
     tick(&plan, &mut inst, &impls, TickInput::default(), &NoWorld, &mut effects);
     assert_eq!(effects, vec![]);
+}
+
+/// **Exec fan-in, end to end**: Branch's two sides converge on a shared tail,
+/// and both paths reach it. This is the pattern the ruling exists for.
+#[test]
+fn branch_paths_converge_on_a_shared_tail() {
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(0, EVENT_TICK_TYPE_ID),
+        with(1, BRANCH, &[("condition", PropValue::Bool(true))]),
+        print(2, "took-true"),
+        print(3, "took-false"),
+        print(4, "tail"),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(1, "true", 2, EXEC_IN_PIN),
+        edge(1, "false", 3, EXEC_IN_PIN),
+        // Both sides rejoin here.
+        edge(2, EXEC_OUT_PIN, 4, EXEC_IN_PIN),
+        edge(3, EXEC_OUT_PIN, 4, EXEC_IN_PIN),
+    ];
+    assert_eq!(logs(&run(&doc, 1)), vec!["took-true", "tail"]);
+
+    doc.nodes[1]
+        .properties
+        .insert("condition".into(), PropValue::Bool(false));
+    assert_eq!(
+        logs(&run(&doc, 1)),
+        vec!["took-false", "tail"],
+        "the other side reaches the same tail"
+    );
+
+    // The plan records both continuations independently, each pointing at the
+    // same target: fan-in needs no special case in the splice stage.
+    let reg = registry();
+    let plan = compile(&doc, "test.graph", &reg, &BTreeMap::new()).unwrap();
+    let tails: Vec<usize> = plan
+        .nodes
+        .iter()
+        .filter_map(|n| n.exec.get(EXEC_OUT_PIN).map(|t| t.node))
+        .collect();
+    assert!(
+        tails.windows(2).any(|w| w[0] == w[1]),
+        "two exec outputs resolve to the same plan node: {tails:?}"
+    );
 }
 
 /// A runaway *loop* (rather than an exec cycle) hits the same wall.
@@ -647,7 +671,7 @@ fn determinism_holds_across_runs() {
         edge(1, "body", 4, EXEC_IN_PIN),
         edge(1, "index", 3, "b"),
         edge(2, VAR_VALUE_PIN, 3, "a"),
-        edge(3, "sum", 4, VAR_VALUE_PIN),
+        edge(3, "result", 4, VAR_VALUE_PIN),
         edge(4, EXEC_OUT_PIN, 6, EXEC_IN_PIN),
         edge(6, "true", 5, EXEC_IN_PIN),
         edge(2, VAR_VALUE_PIN, 8, "value"),

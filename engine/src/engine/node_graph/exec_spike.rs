@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 
 use nalgebra_glm as glm;
 use node_graph_exec::{
-    compile, nodes, tick, Effect, EntityRef, GraphInstance, NodeImpls, TickInput, WorldRead,
+    compile, nodes, tick, Effect, EntityRef, GraphInstance, TickInput,
+    TransformSnapshot, WorldRead,
 };
 
 use crate::engine::ecs::components::Transform;
@@ -43,13 +44,17 @@ struct EntityView<'a> {
 }
 
 impl WorldRead for EntityView<'_> {
-    fn position(&self, entity: EntityRef) -> Option<[f32; 3]> {
+    fn transform(&self, entity: EntityRef) -> Option<TransformSnapshot> {
         match entity {
-            EntityRef::SelfEntity => self
-                .world
-                .get::<Transform>(self.entity)
-                .ok()
-                .map(|t| [t.position.x, t.position.y, t.position.z]),
+            EntityRef::SelfEntity => self.world.get::<Transform>(self.entity).ok().map(|t| {
+                // The seam is where engine types stop: `glam`/`nalgebra` on
+                // this side, plain Z-up arrays on the portable one.
+                TransformSnapshot {
+                    position: [t.position.x, t.position.y, t.position.z],
+                    rotation: [t.rotation.i, t.rotation.j, t.rotation.k, t.rotation.w],
+                    scale: [t.scale.x, t.scale.y, t.scale.z],
+                }
+            }),
             // Spawn aliases resolve in P5, where the command buffer that
             // creates them runs.
             EntityRef::Spawned(_) => None,
@@ -131,13 +136,12 @@ fn graph_effects_apply_to_a_real_world() {
     ];
 
     let mut reg = NodeRegistry::new();
-    nodes::register_descriptors(&mut reg).unwrap();
+    crate::engine::node_graph::register_std_nodes(&mut reg).unwrap();
     register_std_events(&mut reg).unwrap();
     let subs: BTreeMap<String, GraphDoc> = BTreeMap::new();
     let plan = compile(&doc, "spike.graph", &reg, &subs).expect("compile");
 
-    let mut impls = NodeImpls::new();
-    nodes::register_impls(&mut impls);
+    let impls = nodes::std_impls();
     assert_eq!(impls.check_plan(&plan), vec![], "plan/impl cross-check");
 
     // A real world, a real entity, a real Transform — Z-up, unconverted.

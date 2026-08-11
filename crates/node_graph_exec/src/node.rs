@@ -227,6 +227,13 @@ pub struct FireCtx<'a> {
     pub(crate) rng: &'a mut Rng,
     pub(crate) self_entity: EntityRef,
     pub(crate) next_alias: &'a mut u32,
+    pub(crate) pending_aliases: &'a mut Vec<u32>,
+    pub(crate) queue: &'a mut std::collections::VecDeque<crate::instance::QueuedEvent>,
+    /// This node's persistent state slot, read in and written back by the
+    /// interpreter around the firing.
+    pub(crate) state: Option<Value>,
+    /// Which exec input pin this firing was entered through.
+    pub(crate) entered: Option<&'a str>,
     /// The frame this node owns, when it is being re-fired by the interpreter
     /// after its body finished. `None` on the first firing.
     pub(crate) frame: Option<LoopFrameView>,
@@ -354,7 +361,37 @@ impl FireCtx<'_> {
     pub fn new_alias(&mut self) -> u32 {
         let a = *self.next_alias;
         *self.next_alias += 1;
+        self.pending_aliases.push(a);
         a
+    }
+
+    /// Queue a custom event on **this** instance, for the next tick. Same-
+    /// entity scope in v1 (resolved question 3), and never re-entrant: the
+    /// event lands in the queue, not in the current tick.
+    pub fn queue_event(&mut self, name: &str, payload: Vec<(String, Value)>) {
+        self.queue.push_back(crate::instance::QueuedEvent {
+            phase: node_graph_types::EventPhase::Custom,
+            name: Some(name.to_string()),
+            payload: payload.into_iter().collect(),
+        });
+    }
+
+    /// Which exec input pin this firing was entered through. `None` for the
+    /// first firing of an activation (an entry node is not entered by a wire)
+    /// and for a loop node's re-entry from its own body.
+    pub fn entered(&self) -> Option<&str> {
+        self.entered
+    }
+
+    /// This node's persistent state — the one thing a stateful node cannot
+    /// re-derive. Survives across firings, activations and ticks, and
+    /// serializes with the instance.
+    pub fn state(&self) -> Option<&Value> {
+        self.state.as_ref()
+    }
+
+    pub fn set_state(&mut self, v: Value) {
+        self.state = Some(v);
     }
 
     /// The loop frame the interpreter owns for this node, when it is being

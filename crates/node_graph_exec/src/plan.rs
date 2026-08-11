@@ -40,6 +40,15 @@ pub enum InputSource {
     Pin { node: usize, pin: String },
 }
 
+/// Where one exec output continues. The **pin** matters as well as the node:
+/// a node with several exec inputs (Gate, DoOnce) has to know which one it
+/// was entered through, and only the edge knows that.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecEdge {
+    pub node: usize,
+    pub pin: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanNode {
     pub type_id: String,
@@ -52,8 +61,10 @@ pub struct PlanNode {
     pub name: String,
     /// Input pin -> where its value comes from.
     pub inputs: BTreeMap<String, InputSource>,
-    /// Exec output pin -> the plan node it continues to.
-    pub exec: BTreeMap<String, usize>,
+    /// Exec output pin -> where it continues. Several exec outputs (of
+    /// this or any other node) may target the same input: exec fan-in is
+    /// legal, and each source's continuation resolves independently.
+    pub exec: BTreeMap<String, ExecEdge>,
     /// The variable a `var_get`/`var_set` names, resolved at compile time.
     pub variable: Option<String>,
 }
@@ -181,9 +192,9 @@ pub fn compile(
                 *node = remap[*node];
             }
         }
-        n.exec.retain(|_, target| remap[*target] != usize::MAX);
-        for target in n.exec.values_mut() {
-            *target = remap[*target];
+        n.exec.retain(|_, t| remap[t.node] != usize::MAX);
+        for t in n.exec.values_mut() {
+            t.node = remap[t.node];
         }
     }
     let entries: Vec<Entry> = entries
@@ -380,7 +391,7 @@ impl SpliceCtx<'_> {
     }
 
     /// Resolve every exec output pin to the plan node it continues to.
-    fn resolve_exec(&self, key: &NodeKey, scope: usize) -> BTreeMap<String, usize> {
+    fn resolve_exec(&self, key: &NodeKey, scope: usize) -> BTreeMap<String, ExecEdge> {
         let doc = &self.scopes[scope].doc;
         let mut out = BTreeMap::new();
         for e in doc.edges.iter().filter(|e| e.from_node == key.1) {
@@ -489,7 +500,7 @@ impl SpliceCtx<'_> {
 
     /// Walk *forward* from an exec edge's destination to the real plan node
     /// that executes, stepping through the same transparent nodes.
-    fn consumer(&self, scope: usize, node: u64, pin: &str) -> Option<usize> {
+    fn consumer(&self, scope: usize, node: u64, pin: &str) -> Option<ExecEdge> {
         let mut scope = scope;
         let mut node = node;
         let mut pin = pin.to_string();
@@ -533,7 +544,12 @@ impl SpliceCtx<'_> {
                     pin = e.to_pin.clone();
                 }
                 GRAPH_INPUT_TYPE_ID => return None,
-                _ => return self.index.get(&(self.scopes[scope].path.clone(), n.id)).copied(),
+                _ => {
+                    return self
+                        .index
+                        .get(&(self.scopes[scope].path.clone(), n.id))
+                        .map(|ix| ExecEdge { node: *ix, pin: pin.clone() })
+                }
             }
         }
         None
@@ -568,8 +584,8 @@ fn reachable(nodes: &[Flat], entries: &[Entry]) -> BTreeSet<usize> {
         if !keep.insert(ix) {
             continue;
         }
-        for target in nodes[ix].plan.exec.values() {
-            frontier.push(*target);
+        for t in nodes[ix].plan.exec.values() {
+            frontier.push(t.node);
         }
         for src in nodes[ix].plan.inputs.values() {
             if let InputSource::Pin { node, .. } = src {

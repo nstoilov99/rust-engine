@@ -1063,7 +1063,12 @@ fn pin_label(pin: &PinGeom) -> String {
 
 /// If a wire between two pins is legal, return the normalized edge
 /// (output → input). No implicit conversions; exec only to exec (type
-/// equality covers both); the input side must be currently unconnected.
+/// equality covers both).
+///
+/// The input side must be currently unconnected — **unless it is an exec
+/// pin**, which may fan in (45-A P3 ruling): an exec input is a continuation
+/// target, so a second wire into it is a second place execution can arrive
+/// from, not a second value. Data inputs keep the single-wire rule.
 #[allow(clippy::too_many_arguments)]
 fn validate_connection(
     state: &GraphEditorState,
@@ -1093,12 +1098,20 @@ fn validate_connection(
     } else {
         (b_node, b_slug, a_node, a_slug)
     };
-    if state
+    let to_ty = if a_out { b_ty } else { a_ty };
+    let occupied = state
         .doc
         .edges
         .iter()
-        .any(|e| e.to_node == to_node && e.to_pin == to_pin)
-    {
+        .any(|e| e.to_node == to_node && e.to_pin == to_pin);
+    if occupied && *to_ty != PinType::Exec {
+        return None;
+    }
+    // An identical wire is not a second arrival, it is the same one.
+    if state.doc.edges.iter().any(|e| {
+        e.to_node == to_node && e.to_pin == to_pin && e.from_node == from_node
+            && e.from_pin == from_pin
+    }) {
         return None;
     }
     Some(Edge {
@@ -5177,14 +5190,21 @@ fn auto_connect(
             to_pin: src.pin.clone(),
         }
     };
-    // An input takes one edge; a second drop replaces it.
-    let existing: Vec<Edge> = state
-        .doc
-        .edges
-        .iter()
-        .filter(|e| e.to_node == edge.to_node && e.to_pin == edge.to_pin)
-        .cloned()
-        .collect();
+    // A *data* input takes one edge, so a second drop replaces it. An exec
+    // input may fan in, so a second drop is an addition — silently breaking
+    // the wire that was already there would delete work the author can see.
+    let is_exec = pin.ty == PinType::Exec;
+    let existing: Vec<Edge> = if is_exec {
+        Vec::new()
+    } else {
+        state
+            .doc
+            .edges
+            .iter()
+            .filter(|e| e.to_node == edge.to_node && e.to_pin == edge.to_pin)
+            .cloned()
+            .collect()
+    };
     let mut edits: Vec<GraphEdit> = Vec::new();
     if !existing.is_empty() {
         let indexed: Vec<(usize, Edge)> = state

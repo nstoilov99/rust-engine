@@ -417,14 +417,27 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
         }
     }
     for ((node, pin), count) in input_use {
-        // A reroute is explicitly one-in, many-out; its `in` still takes one.
-
-        if count > 1 {
-            errors.push(GraphError::InputMultiplyConnected {
-                node,
-                pin: pin.to_string(),
-            });
+        if count <= 1 {
+            continue;
         }
+        // **Exec inputs may fan in** (ruling, 45-A P3). An exec input is a
+        // *continuation target*, not a value source: three wires into it mean
+        // three places execution can arrive from, which is the fundamental
+        // convergence pattern — Branch's True and False rejoining a shared
+        // tail. A *data* input still takes exactly one wire, because two
+        // values arriving at one pin has no meaning.
+        //
+        // The type comes from the resolver, so doc-dependent nodes (variable
+        // writes, interface binding, inlined subgraph pins) answer correctly.
+        // An untyped reroute answers `None` and stays strict: refusing is the
+        // honest answer when the type cannot be proven exec.
+        if d.pin_type(node, pin, false) == Some(PinType::Exec) {
+            continue;
+        }
+        errors.push(GraphError::InputMultiplyConnected {
+            node,
+            pin: pin.to_string(),
+        });
     }
 
     errors.extend(data_cycles(d));
@@ -1194,6 +1207,127 @@ mod tests {
 
         reg.register_domain_pin("shader");
         assert_eq!(validate_doc(&doc, &reg), vec![]);
+    }
+
+    /// **Exec inputs may fan in; data inputs may not** (45-A P3 ruling).
+    ///
+    /// Convergence is the fundamental Blueprint pattern — Branch's True and
+    /// False rejoining a shared tail — and it is unauthorable without this.
+    /// Two *values* arriving at one pin still has no meaning, including when
+    /// they arrive through reroute chains.
+    #[test]
+    fn exec_inputs_fan_in_data_inputs_do_not() {
+        let reg = registry();
+
+        // Two exec outputs into one exec input: legal.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "test_event"), node(1, "test_event"), node(2, "test_damage")];
+        doc.edges = vec![edge(0, "exec_out", 2, "exec_in"), edge(1, "exec_out", 2, "exec_in")];
+        assert_eq!(validate_doc(&doc, &reg), vec![], "exec convergence is legal");
+
+        // Three, for good measure — the rule is not "exactly two".
+        doc.nodes.push(node(3, "test_event"));
+        doc.edges.push(edge(3, "exec_out", 2, "exec_in"));
+        assert_eq!(validate_doc(&doc, &reg), vec![]);
+
+        // Two data outputs into one data input: still refused.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "test_add"), node(1, "test_add"), node(2, "test_add")];
+        doc.edges = vec![edge(0, "sum", 2, "a"), edge(1, "sum", 2, "a")];
+        assert!(
+            validate_doc(&doc, &reg)
+                .iter()
+                .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, pin } if pin == "a")),
+            "{:?}",
+            validate_doc(&doc, &reg)
+        );
+
+        // …and refused when the two values converge *through reroute chains*,
+        // which is where a naive type check would lose track of them.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![
+            node(0, "test_add"),
+            node(1, "test_add"),
+            node(2, REROUTE_TYPE_ID),
+            node(3, REROUTE_TYPE_ID),
+            node(4, "test_add"),
+        ];
+        doc.edges = vec![
+            edge(0, "sum", 2, REROUTE_IN),
+            edge(1, "sum", 3, REROUTE_IN),
+            edge(2, REROUTE_OUT, 4, "a"),
+            edge(3, REROUTE_OUT, 4, "a"),
+        ];
+        assert!(
+            validate_doc(&doc, &reg)
+                .iter()
+                .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 4, pin } if pin == "a")),
+            "two values through reroutes are still two values: {:?}",
+            validate_doc(&doc, &reg)
+        );
+
+        // Two *data* wires into one reroute's `in` is the same violation one
+        // step earlier.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "test_add"), node(1, "test_add"), node(2, REROUTE_TYPE_ID)];
+        doc.edges = vec![edge(0, "sum", 2, REROUTE_IN), edge(1, "sum", 2, REROUTE_IN)];
+        assert!(validate_doc(&doc, &reg)
+            .iter()
+            .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, .. })));
+
+        // An *untyped* reroute stays strict: refusing is the honest answer
+        // when the type cannot be proven exec.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, REROUTE_TYPE_ID), node(1, REROUTE_TYPE_ID), node(2, REROUTE_TYPE_ID)];
+        doc.edges = vec![edge(0, REROUTE_OUT, 2, REROUTE_IN), edge(1, REROUTE_OUT, 2, REROUTE_IN)];
+        assert!(validate_doc(&doc, &reg)
+            .iter()
+            .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, .. })));
+
+        // Exec fan-in through a reroute that *is* provably exec: legal.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![
+            node(0, "test_event"),
+            node(1, "test_event"),
+            node(2, REROUTE_TYPE_ID),
+            node(3, "test_damage"),
+        ];
+        doc.edges = vec![
+            edge(0, "exec_out", 2, REROUTE_IN),
+            edge(1, "exec_out", 2, REROUTE_IN),
+            edge(2, REROUTE_OUT, 3, "exec_in"),
+        ];
+        assert_eq!(validate_doc(&doc, &reg), vec![], "the reroute infers Exec");
+    }
+
+    /// A variable write's exec input is doc-dependent — the exemption has to
+    /// resolve its type through `DocDescriptors`, not through the registry.
+    #[test]
+    fn exec_fan_in_works_on_doc_dependent_nodes() {
+        use crate::{VAR_SET_TYPE_ID, VAR_PROP};
+        let reg = registry();
+        let mut doc = GraphDoc::default();
+        doc.variables = vec![crate::VarDecl {
+            slug: "n".into(),
+            label: "N".into(),
+            ty: PinType::Float,
+            default: Some(crate::PropValue::Float(0.0)),
+        }];
+        let mut set = node(2, VAR_SET_TYPE_ID);
+        set.properties
+            .insert(VAR_PROP.into(), crate::PropValue::Str("n".into()));
+        doc.nodes = vec![node(0, "test_event"), node(1, "test_event"), set];
+        doc.edges = vec![edge(0, "exec_out", 2, "exec_in"), edge(1, "exec_out", 2, "exec_in")];
+        assert_eq!(validate_doc(&doc, &reg), vec![]);
+
+        // Its *value* input still takes one wire.
+        doc.nodes.push(node(3, "test_add"));
+        doc.nodes.push(node(4, "test_add"));
+        doc.edges.push(edge(3, "sum", 2, "value"));
+        doc.edges.push(edge(4, "sum", 2, "value"));
+        assert!(validate_doc(&doc, &reg)
+            .iter()
+            .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, pin } if pin == "value")));
     }
 
     #[test]

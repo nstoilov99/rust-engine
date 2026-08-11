@@ -27,6 +27,7 @@ pub mod migrate;
 pub mod registry;
 pub mod resolver;
 pub mod std_events;
+pub mod std_nodes;
 pub mod validate;
 
 pub use descriptors::{DocDescriptors, NodeKind};
@@ -48,6 +49,7 @@ pub use std_events::{
     EVENT_BEGIN_PLAY_TYPE_ID, EVENT_CUSTOM_TYPE_ID, EVENT_DRAIN_ORDER,
     EVENT_INPUT_ACTION_TYPE_ID, EVENT_NAME_PROP, EVENT_PAYLOAD_PREFIX, EVENT_TICK_TYPE_ID,
 };
+pub use std_nodes::{register_std_nodes, std_node_descriptors, COMPARE_OPS, SEQUENCE_PINS};
 pub use validate::{
     endpoint_type, reroute_type, validate_doc, validate_doc_with, ErrorAnchor, ErrorSeverity,
     GraphError,

@@ -1671,20 +1671,27 @@ impl GraphEditorState {
         if edge.from_node == node || edge.to_node == node {
             return false;
         }
-        // The chosen input may already be taken; a second drop replaces the
-        // edge rather than fanning in. Both removals go in the same
-        // Composite, highest index first so neither shifts the other.
+        // The spliced wire itself always goes — it is being rerouted through
+        // the node. Whether anything *else* on the chosen input goes depends
+        // on the pin: a data input takes one wire so a second drop replaces
+        // it, while an exec input may fan in (45-A P3) and breaking a wire
+        // that converges there would silently delete work.
+        let in_is_exec = DocDescriptors::new(&self.doc, registry)
+            .pin_type(node, in_pin, false)
+            == Some(PinType::Exec);
         let mut doomed: Vec<(usize, Edge)> = vec![(index, edge.clone())];
-        doomed.extend(
-            self.doc
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|(i, e)| {
-                    *i != index && e.to_node == node && e.to_pin == in_pin
-                })
-                .map(|(i, e)| (i, e.clone())),
-        );
+        if !in_is_exec {
+            doomed.extend(
+                self.doc
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, e)| {
+                        *i != index && e.to_node == node && e.to_pin == in_pin
+                    })
+                    .map(|(i, e)| (i, e.clone())),
+            );
+        }
         doomed.sort_by_key(|(i, _)| *i);
         let edit = GraphEdit::Composite {
             label: "Splice Node".to_string(),

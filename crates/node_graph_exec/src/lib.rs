@@ -47,7 +47,7 @@ pub mod nodes;
 pub mod plan;
 pub mod value;
 
-pub use effect::{Effect, EffectSink, LogLevel, NoWorld, WorldRead};
+pub use effect::{Effect, EffectSink, LogLevel, NoWorld, TransformSnapshot, WorldRead};
 pub use exec::{tick, tick_with_budget, TickReport, DEFAULT_BUDGET};
 pub use instance::{
     Activation, ActivationId, Frame, GraphInstance, QueuedEvent, Rng, ThreadState,
