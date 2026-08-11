@@ -71,12 +71,34 @@ impl std::fmt::Display for ExecError {
     }
 }
 
-/// A suspended activation's resume condition (P4 lands the machinery; the
-/// shape is fixed here so the thread state does not change under it).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum Suspension {
-    /// Resume once instance time reaches this value.
-    Until { time: f64 },
+/// A suspended activation's resume condition **and its continuation**.
+///
+/// Carrying the continuation is what makes resuming cheap and honest: at the
+/// moment a node suspends, the interpreter resolves `resume` through the plan
+/// exactly as it would resolve a [`FireResult::Continue`], parks the resulting
+/// cursor on the activation, and marks it suspended. Waking up is then a
+/// state flip — no plan lookup, no re-firing of the latent node, and no way
+/// for a Delay to suspend itself twice.
+///
+/// It is plain data, because the whole point is that an instance can be
+/// written to disk mid-wait and resumed (D1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Suspension {
+    /// Instance time at which the activation becomes due. Instance time is
+    /// the sum of the `dt`s the runner has supplied — nothing in this crate
+    /// reads a clock (D8).
+    pub until: f64,
+    /// The suspending node's exec output to continue on when due. `None`
+    /// means the activation unwinds on resume: back to its enclosing loop
+    /// frame, or finished.
+    pub resume: Option<String>,
+}
+
+impl Suspension {
+    /// Suspend until `until`, continuing on `pin`.
+    pub fn until(until: f64, pin: &str) -> Self {
+        Self { until, resume: Some(pin.to_string()) }
+    }
 }
 
 /// What an impure node's firing decided.
@@ -100,7 +122,10 @@ pub enum FireResult {
     Continue(&'static str),
     /// Run this exec output as a loop body owned by the firing node.
     Loop(&'static str),
-    /// Suspend the activation (P4).
+    /// Suspend the activation until its due time, then continue on the pin
+    /// the suspension names. **An activation has one continuation, so it has
+    /// at most one outstanding suspension** — two simultaneous latents in one
+    /// thread are impossible by construction, not by policy.
     Suspend(Suspension),
     /// Stop the activation with a reported error.
     Stop(ExecError),
@@ -234,6 +259,8 @@ pub struct FireCtx<'a> {
     pub(crate) state: Option<Value>,
     /// Which exec input pin this firing was entered through.
     pub(crate) entered: Option<&'a str>,
+    /// Instance time, for latent nodes.
+    pub(crate) now: f64,
     /// The frame this node owns, when it is being re-fired by the interpreter
     /// after its body finished. `None` on the first firing.
     pub(crate) frame: Option<LoopFrameView>,
@@ -398,5 +425,13 @@ impl FireCtx<'_> {
     /// re-fired after its body finished.
     pub fn loop_frame(&self) -> Option<LoopFrameView> {
         self.frame
+    }
+
+    /// Instance time: the accumulated total of every `dt` the runner has
+    /// supplied since this instance started. **This is the clock latent nodes
+    /// measure against** — the same one the due-latent drain compares — and it
+    /// is injected, never read.
+    pub fn now(&self) -> f64 {
+        self.now
     }
 }

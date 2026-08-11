@@ -32,6 +32,8 @@ pub struct TickReport {
     pub steps: u32,
     /// Activations started this tick.
     pub activations: u32,
+    /// Suspended activations woken this tick.
+    pub resumed: u32,
     /// The error that halted the instance, if one did.
     pub halted: Option<ExecError>,
 }
@@ -83,22 +85,30 @@ pub fn tick_with_budget(
                 }
             }
             EventPhase::Latent => {
-                // Resume suspended activations whose time has come, ordered
-                // by due time then activation id (D3). P4 puts real latent
-                // nodes behind this; the ordering is fixed here so it does
-                // not have to change when they land.
-                let mut due: Vec<(u64, u64, usize)> = Vec::new();
+                // Wake every suspended activation whose time has come, in due
+                // time then activation id order (D3). Waking is a state flip:
+                // the continuation was resolved and parked at suspend time,
+                // so there is nothing to look up and nothing to re-fire.
+                //
+                // A suspension created *during* this tick cannot be woken by
+                // it — this phase runs before the advance loop, which is the
+                // no-reentrancy rule applied to latents and what makes
+                // `Delay(0)` mean "resume next tick".
+                let mut due: Vec<(f64, u64, usize)> = Vec::new();
                 for (i, t) in instance.threads.iter().enumerate() {
-                    if let ThreadState::Suspended(crate::node::Suspension::Until { time }) = t.state
-                    {
-                        if instance.time >= time {
-                            due.push((time.to_bits(), t.id.0, i));
+                    if let ThreadState::Suspended(s) = &t.state {
+                        if instance.time >= s.until {
+                            due.push((s.until, t.id.0, i));
                         }
                     }
                 }
-                due.sort();
+                // `total_cmp` rather than `to_bits`: ordering floats by their
+                // bit pattern is only right for positive finite values, and a
+                // due time is not guaranteed to be either.
+                due.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
                 for (_, _, i) in due {
                     instance.threads[i].state = ThreadState::Running;
+                    report.resumed += 1;
                 }
             }
             _ => {
@@ -192,8 +202,16 @@ fn advance(
     report: &mut TickReport,
 ) -> Result<(), ExecError> {
     loop {
+        // A statement that ran out of continuation hands control back to the
+        // innermost loop frame — the point of the frame being that the
+        // interpreter, not the node, remembers where a body returns to.
+        // Doing it here rather than at each `Continue`/`Done` site means a
+        // *resumed* activation unwinds the same way, which is what lets a
+        // Delay sit at the end of a loop body with nothing wired after it.
+        if instance.threads[thread].cursor.is_none() {
+            unwind(instance, thread);
+        }
         let Some(node_ix) = instance.threads[thread].cursor else {
-            instance.threads[thread].state = ThreadState::Finished;
             return Ok(());
         };
         let node = &plan.nodes[node_ix];
@@ -268,6 +286,7 @@ fn advance(
                 queue: &mut instance.queue,
                 state: node_state,
                 entered: entered.as_deref(),
+                now: instance.time,
                 frame,
             };
             let r = imp.fire(&mut ctx);
@@ -286,9 +305,6 @@ fn advance(
                 let next = plan.nodes[node_ix].exec.get(pin);
                 instance.threads[thread].cursor = next.map(|t| t.node);
                 instance.threads[thread].entered = next.map(|t| t.pin.clone());
-                if next.is_none() {
-                    unwind(plan, instance, thread);
-                }
             }
             FireResult::Loop(body) => {
                 let frames = &mut instance.threads[thread].frames;
@@ -314,12 +330,21 @@ fn advance(
                 pop_own_frame(&mut instance.threads[thread], node_ix);
                 instance.threads[thread].cursor = None;
                 instance.threads[thread].entered = None;
-                unwind(plan, instance, thread);
             }
             FireResult::Suspend(s) => {
-                // The cursor stays where it is: resuming re-fires this node,
-                // which re-derives its state from the frame stack. Latent
-                // state therefore needs no storage of its own (P4).
+                // Resolve the continuation *now*, exactly as `Continue` would,
+                // and park it on the activation. Two consequences worth
+                // naming: resuming never re-fires the latent node (so a Delay
+                // cannot suspend itself again), and the parked thread is
+                // complete plain data — cursor, entered pin, frame stack,
+                // locals — which is what makes serializing an instance
+                // mid-wait work.
+                //
+                // The node's own loop frame is deliberately *not* popped:
+                // suspending is not leaving a loop.
+                let next = s.resume.as_deref().and_then(|pin| plan.nodes[node_ix].exec.get(pin));
+                instance.threads[thread].cursor = next.map(|t| t.node);
+                instance.threads[thread].entered = next.map(|t| t.pin.clone());
                 instance.threads[thread].state = ThreadState::Suspended(s);
                 return Ok(());
             }
@@ -328,11 +353,9 @@ fn advance(
     }
 }
 
-/// A statement ended. Hand control back to the innermost loop frame — that is
-/// the point of the frame: the interpreter, not the node, remembers where a
-/// body returns to.
-fn unwind(plan: &Plan, instance: &mut GraphInstance, thread: usize) {
-    let _ = plan;
+/// A statement ended. Hand control back to the innermost loop frame, or
+/// finish the activation when there is none.
+fn unwind(instance: &mut GraphInstance, thread: usize) {
     let t = &mut instance.threads[thread];
     if t.cursor.is_some() {
         return;

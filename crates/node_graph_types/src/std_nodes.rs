@@ -43,6 +43,7 @@ pub const WHILE_LOOP: &str = "while_loop";
 pub const FOR_EACH_FLOAT: &str = "for_each_float";
 pub const FOR_EACH_INT: &str = "for_each_int";
 pub const FOR_EACH_ENTITY: &str = "for_each_entity";
+pub const DELAY: &str = "delay";
 pub const GATE: &str = "gate";
 pub const DO_ONCE: &str = "do_once";
 pub const FLIP_FLOP: &str = "flip_flop";
@@ -274,6 +275,14 @@ fn control() -> Vec<NodeDescriptor> {
             "Runs the body while Condition is true, re-checking it each pass",
             vec![exec_in(), b("condition", "Condition", false)],
             vec![exec("body", "Loop Body"), exec("completed", "Completed")],
+        ),
+        impure(
+            DELAY,
+            "Delay",
+            "Flow",
+            "Waits Duration seconds, then continues — the activation suspends meanwhile",
+            vec![exec_in(), f("duration", "Duration", 0.2)],
+            vec![PinDescriptor::new(EXEC_OUT_PIN, "Completed", PinType::Exec)],
         ),
         impure(
             GATE,
@@ -660,6 +669,10 @@ pub fn register_std_nodes(reg: &mut NodeRegistry) -> Result<(), RegistryError> {
 }
 
 #[cfg(test)]
+// Tests build documents the way an author does: start from the default and
+// fill in what matters. One giant struct literal per fixture would satisfy
+// clippy and read markedly worse.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;

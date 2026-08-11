@@ -145,6 +145,10 @@ fn detect_cycles(
 }
 
 #[cfg(test)]
+// Tests build documents the way an author does: start from the default and
+// fill in what matters. One giant struct literal per fixture would satisfy
+// clippy and read markedly worse.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::dev_nodes::register_dev_nodes;

@@ -46,6 +46,7 @@ const TESTED: &[(&str, &str)] = &[
     (n::SEQUENCE, "sequence_runs_each_output_in_order_skipping_gaps"),
     (n::FOR_LOOP, "branch_and_for_loop_basics"),
     (n::WHILE_LOOP, "while_loop_rechecks_its_condition_each_pass"),
+    (n::DELAY, "tests/latent.rs — the whole file"),
     (n::FOR_EACH_INT, "for_each_walks_an_array_with_element_and_index"),
     (n::FOR_EACH_FLOAT, "for_each_walks_an_array_with_element_and_index"),
     (n::FOR_EACH_ENTITY, "for_each_walks_an_array_with_element_and_index"),

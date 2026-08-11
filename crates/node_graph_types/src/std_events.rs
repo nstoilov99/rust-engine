@@ -178,6 +178,10 @@ pub fn payload_pins(properties: &std::collections::BTreeMap<String, PropValue>) 
 }
 
 #[cfg(test)]
+// Tests build documents the way an author does: start from the default and
+// fill in what matters. One giant struct literal per fixture would satisfy
+// clippy and read markedly worse.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

@@ -24,6 +24,7 @@ use node_graph_types::{EXEC_OUT_PIN, VAR_GET_TYPE_ID, VAR_SET_TYPE_ID, VAR_VALUE
 use crate::effect::{Effect, LogLevel, TransformSnapshot};
 use crate::node::{
     EvalCtx, ExecError, FireCtx, FireResult, ImpureNode, NodeImpl, NodeImpls, PureNode,
+    Suspension,
 };
 use crate::value::{EntityRef, Value};
 
@@ -51,6 +52,7 @@ pub fn register_impls(impls: &mut NodeImpls) {
         .insert(ids::SEQUENCE, NodeImpl::impure(Sequence))
         .insert(ids::FOR_LOOP, NodeImpl::impure(ForLoop))
         .insert(ids::WHILE_LOOP, NodeImpl::impure(WhileLoop))
+        .insert(ids::DELAY, NodeImpl::impure(Delay))
         .insert(ids::GATE, NodeImpl::impure(Gate))
         .insert(ids::DO_ONCE, NodeImpl::impure(DoOnce))
         .insert(ids::FLIP_FLOP, NodeImpl::impure(FlipFlop));
@@ -274,6 +276,31 @@ impl ImpureNode for ForEach {
                 FireResult::Loop("body")
             }
         }
+    }
+}
+
+/// The latent node (D1's suspend half). It computes *when*, names the exec
+/// output to continue on, and then holds nothing: the parked continuation and
+/// the whole thread state belong to the activation, so a Delay inside a loop
+/// keeps its frame, two concurrent activations of the same Delay wait
+/// independently, and an instance can be serialized mid-wait.
+///
+/// `duration <= 0` still suspends. Resuming inside the tick that suspended
+/// would be reentrancy, which D3 forbids, so a zero delay is a **yield to the
+/// next tick** — the useful reading, and the only one consistent with the
+/// event queue.
+struct Delay;
+
+impl ImpureNode for Delay {
+    fn fire(&self, ctx: &mut FireCtx<'_>) -> FireResult {
+        let seconds = match ctx.float("duration") {
+            Ok(v) if v.is_finite() => v.max(0.0),
+            // A NaN duration would never come due, which is a hang dressed up
+            // as a wait. Treat it as a yield.
+            Ok(_) => 0.0,
+            Err(e) => return FireResult::Stop(e),
+        };
+        FireResult::Suspend(Suspension::until(ctx.now() + seconds as f64, EXEC_OUT_PIN))
     }
 }
 
