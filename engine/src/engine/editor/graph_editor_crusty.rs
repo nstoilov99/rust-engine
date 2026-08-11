@@ -37,6 +37,7 @@ use super::graph_editor::{
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
 };
+use super::graph_exec_viz::GraphExecViz;
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -463,6 +464,11 @@ pub struct GraphEditorPanelCtx<'a> {
     /// True in float windows (no menu/winit edit path) — the panel handles
     /// keyboard editing itself. False when docked in the main window.
     pub handle_shortcuts: bool,
+    /// Live execution, when a running instance of *this* document is bound
+    /// (45-A P7). `None` — edit mode, nothing selected, a selection that runs
+    /// a different graph, a build without the interpreter — costs nothing and
+    /// draws nothing: every viz site below is inside an `if let`.
+    pub exec: Option<&'a GraphExecViz>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,6 +1327,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         focused,
         handle_shortcuts,
         keymap,
+        exec,
     } = ctx;
 
     // Finalize a gesture orphaned by a release that landed while this tab was
@@ -1350,7 +1357,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // available space, so the canvas shrinks by exactly the toolbar height and
     // everything measured off the canvas rect (F/A framing, the error overlay)
     // follows automatically.
-    graph_toolbar(ui, state, wire_prefs.style, wire_style_request);
+    graph_toolbar(ui, state, wire_prefs.style, wire_style_request, exec);
 
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
@@ -1408,6 +1415,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             zoom_max,
             &mut frame_request,
             keymap,
+            exec,
         )
     });
     // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
@@ -1606,6 +1614,7 @@ fn draw_and_interact(
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
     keymap: &Keymap,
+    exec: Option<&GraphExecViz>,
 ) -> Vec<NodeGeom> {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -1631,7 +1640,7 @@ fn draw_and_interact(
         }
     }
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
-    let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis);
+    let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis, exec);
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
     // Set when Alt+click removed a wire this frame, so nothing downstream
     // treats the same press as a reroute grab or a selection change.
@@ -1707,6 +1716,7 @@ fn draw_and_interact(
         frame,
         selection_outline,
         &mut widget_rects,
+        exec,
     );
 
     // Interactions.
@@ -1908,6 +1918,9 @@ fn draw_and_interact(
             }
         }
     }
+    // Set when the reroute-insert handle owns the pointer, so the value
+    // tooltip below does not talk over it.
+    let mut midpoint_hovered = false;
     if let Some(i) = hovered_wire.filter(|_| !alt_broke_wire) {
         if let Some(w) = wires.iter().find(|w| w.edge_index == i) {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
@@ -1915,6 +1928,7 @@ fn draw_and_interact(
                 let handle = Rect::from_center_size(mid, Vec2::splat(r * 2.0));
                 let id = ui.alloc_id(("graph_wire_mid", i));
                 let resp = ui.interact(id, handle);
+                midpoint_hovered = resp.hovered;
                 {
                     let mut p = ui.painter();
                     p.circle_filled(
@@ -1933,6 +1947,30 @@ fn draw_and_interact(
                     {
                         midpoint_grab = Some((edge, [pw.x, pw.y]));
                     }
+                }
+            }
+        }
+    }
+    // Value hover on a wire (45-A P7). Only with a bound instance, only on
+    // data wires — an exec wire carries control, not a value, and saying "-"
+    // for it would be noise. Anchored at the pointer rather than at the wire's
+    // midpoint: the wire is what is under the cursor, not the handle.
+    if let (Some(viz), Some(i), Some(sp)) = (
+        exec,
+        hovered_wire.filter(|_| !alt_broke_wire && !midpoint_hovered),
+        ui.ctx().input.pointer_pos,
+    ) {
+        if let Some(e) = state.doc.edges.get(i) {
+            let is_exec = wires
+                .iter()
+                .find(|w| w.edge_index == i)
+                .is_some_and(|w| w.is_exec());
+            if !is_exec {
+                if let Some(v) = pin_value(viz, state, e.to_node, &e.to_pin, false) {
+                    ui.tooltip_for(
+                        Rect::from_center_size(sp, Vec2::splat(MIDPOINT_R)),
+                        &format!("Value  {v}"),
+                    );
                 }
             }
         }
@@ -1992,6 +2030,16 @@ fn draw_and_interact(
                     {
                         tip.push('\n');
                         tip.push_str(&doc);
+                    }
+                    // The last value that crossed this pin, when a running
+                    // instance is bound (P7). Same spelling `Print` uses, so
+                    // the tooltip and the console agree.
+                    if let Some(v) = exec
+                        .filter(|_| pin.ty != PinType::Exec)
+                        .and_then(|viz| pin_value(viz, state, g.id, &pin.slug, pin.output))
+                    {
+                        tip.push_str("\nValue  ");
+                        tip.push_str(v);
                     }
                     ui.tooltip_for(scope.world_rect_to_screen(wr), &tip);
                 }
@@ -2262,6 +2310,7 @@ fn draw_and_interact(
                 src_rect: geoms.iter().find(|g| g.id == from_node).map(|g| g.rect),
                 dst_rect: None,
                 target_pin_index: 0,
+                converge_index: 0,
                 node_rects: &node_rects,
             };
             let width = if lod.bar_only() { 1.0 } else { WIRE_DATA };
@@ -2274,6 +2323,8 @@ fn draw_and_interact(
                 screen: wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope),
                 selected: false,
                 mismatched: false,
+                // A wire being dragged is not running: it does not exist yet.
+                pulse: 0.0,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
@@ -3874,6 +3925,7 @@ fn graph_toolbar(
     state: &GraphEditorState,
     style_now: WireStyle,
     request: &mut Option<WireStyle>,
+    exec: Option<&GraphExecViz>,
 ) {
     let st = ui.style();
     let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
@@ -3938,6 +3990,72 @@ fn graph_toolbar(
         st.palette.text_secondary,
         None,
         FontFamily::Mono,
+    );
+
+    // Live chip (45-A P7): which running instance the canvas is showing. It is
+    // the answer to "whose execution am I looking at" — without it a pulsing
+    // wire is a mystery, since two entities can run the same document. Absent
+    // entirely when nothing is bound: edit mode leaves no residue.
+    let Some(viz) = exec else { return };
+    // Two runs, not one string: "LIVE Duck" as a single accent label reads as
+    // a mode *called* Duck. The state is the accent word; the entity is a
+    // separate, plainly-colored noun after a thin separator.
+    let who = viz.instance.as_str();
+    let sep = if who.is_empty() { "" } else { " · " };
+    let state_w = ui
+        .painter()
+        .measure_text_family("LIVE", px, None, FontFamily::Mono)
+        .x;
+    let who_w = ui
+        .painter()
+        .measure_text_family(&format!("{sep}{who}"), px, None, FontFamily::Mono)
+        .x;
+    let dot_r = px * 0.28;
+    let inner = pad + dot_r * 2.0 + pad * 0.5 + state_w + who_w + pad;
+    // Two pads from the realm chip: they are different statements (what is
+    // running vs. what authority the document declares) and should not read as
+    // one segmented control.
+    let live_chip = Rect::from_min_size(
+        Pos2::new(chip.min.x - pad * 2.0 - inner, chip.min.y),
+        Vec2::new(inner, seg_h),
+    );
+    ui.painter()
+        .rect_filled(live_chip, st.rounding.small, st.palette.accent_soft);
+    ui.painter().rect_stroke(
+        live_chip,
+        st.rounding.small,
+        st.metrics.border,
+        st.palette.accent_active,
+    );
+    ui.painter().circle_filled(
+        Pos2::new(live_chip.min.x + pad + dot_r, live_chip.center().y),
+        dot_r,
+        st.palette.accent_active,
+    );
+    let text_x = live_chip.min.x + pad + dot_r * 2.0 + pad * 0.5;
+    let text_y = live_chip.center().y - px * 0.62;
+    ui.painter().text_family(
+        Pos2::new(text_x, text_y),
+        "LIVE",
+        px,
+        st.palette.accent_active,
+        None,
+        FontFamily::Mono,
+    );
+    if !who.is_empty() {
+        ui.painter().text_family(
+            Pos2::new(text_x + state_w, text_y),
+            &format!("{sep}{who}"),
+            px,
+            st.palette.text,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    ui.tooltip_for(
+        live_chip,
+        "Live execution on the selected entity.\n\
+         Hover a wire or pin for its last value.",
     );
 }
 
@@ -5281,6 +5399,11 @@ struct WireGeom {
     selected: bool,
     /// `TypeMismatch` — the only error that colors a wire.
     mismatched: bool,
+    /// Live execution pulse, `0.0` (the only value in edit mode) to `1.0`
+    /// (fired this instant). Layered onto the color and the width below —
+    /// never a re-route: the pulse travels the polyline the router already
+    /// produced, so a wire does not move when it runs.
+    pulse: f32,
 }
 
 impl WireGeom {
@@ -5310,8 +5433,10 @@ fn build_wires(
     prefs: &WirePrefs,
     scope: &CanvasScope,
     vis: Rect,
+    exec: Option<&GraphExecViz>,
 ) -> Vec<WireGeom> {
     let mut out = Vec::with_capacity(state.doc.edges.len());
+    let ranks = converge_ranks(&state.doc.edges);
     for (edge_index, e) in state.doc.edges.iter().enumerate() {
         let src = geoms.iter().find(|g| g.id == e.from_node);
         let dst = geoms.iter().find(|g| g.id == e.to_node);
@@ -5328,6 +5453,13 @@ fn build_wires(
             src_rect: Some(src.rect),
             dst_rect: Some(dst.rect),
             target_pin_index: dst.pin_row(&e.to_pin, false),
+            // P3's converging-exec finding, closed here: several edges into
+            // one exec input share a target pin row, so the row-keyed stagger
+            // put them in the same lane and their final approach coincided.
+            // Ranking each edge within its converging set gives them separate
+            // lanes. Data pins are single-wire by construction, so this is
+            // always 0 for them and their geometry is bit-identical to before.
+            converge_index: ranks[edge_index],
             node_rects,
         };
         // Cull **before** routing: `wire_bounds` is cheap (a branch decision
@@ -5356,9 +5488,92 @@ fn build_wires(
             screen: wire_screen_points(a, b, prefs, &meta, scope),
             selected: state.selected_edges.contains(e),
             mismatched: errors.edges.contains(e),
+            pulse: exec.map_or(0.0, |v| wire_pulse(v, state, e)),
         });
     }
     out
+}
+
+/// Each edge's rank among the edges landing on the *same* input pin, indexed
+/// by edge index.
+///
+/// Only exec inputs ever have more than one (data pins are single-wire), so
+/// this is 0 for every data wire and for every unshared exec wire. Computed in
+/// one pass for the whole document rather than per edge: the per-edge form is
+/// quadratic, and this runs every frame.
+fn converge_ranks(edges: &[Edge]) -> Vec<usize> {
+    let mut seen: BTreeMap<(u64, &str), usize> = BTreeMap::new();
+    edges
+        .iter()
+        .map(|e| {
+            let slot = seen.entry((e.to_node, e.to_pin.as_str())).or_insert(0);
+            let rank = *slot;
+            *slot += 1;
+            rank
+        })
+        .collect()
+}
+
+/// How brightly this wire is running. Resolved against the **real producer**:
+/// a reroute is transparent at run time, so the interpreter recorded the edge
+/// against whatever feeds the reroute's input, and both halves of a rerouted
+/// wire have to light from that one record.
+fn wire_pulse(viz: &GraphExecViz, state: &GraphEditorState, e: &Edge) -> f32 {
+    match real_producer(state, e.from_node, &e.from_pin) {
+        Some((node, pin)) => viz.pulse(node, &pin),
+        None => 0.0,
+    }
+}
+
+/// The last value that crossed this pin, when a running instance is bound.
+///
+/// An **input** pin borrows its wire's value: what arrived there is whatever
+/// its producer sent, and only the producer side is recorded (one output
+/// feeding three inputs is one wire's worth of truth). An unwired input has no
+/// wire and answers `None` — its constant is already drawn in its field.
+fn pin_value<'a>(
+    viz: &'a GraphExecViz,
+    state: &GraphEditorState,
+    node: u64,
+    slug: &str,
+    output: bool,
+) -> Option<&'a str> {
+    let (n, p) = if output {
+        real_producer(state, node, slug)?
+    } else {
+        let e = state
+            .doc
+            .edges
+            .iter()
+            .find(|e| e.to_node == node && e.to_pin == slug)?;
+        real_producer(state, e.from_node, &e.from_pin)?
+    };
+    viz.value(n, &p)
+}
+
+/// A chain of reroutes is longer than this only if the document is degenerate.
+const MAX_REROUTE_HOPS: usize = 64;
+
+/// Walk back through reroutes to the pin that actually produces this value.
+/// Returns `None` when the chain runs out of wire (an unwired reroute produces
+/// nothing) or loops.
+fn real_producer(state: &GraphEditorState, node: u64, pin: &str) -> Option<(u64, String)> {
+    let mut node = node;
+    let mut pin = pin.to_string();
+    for _ in 0..MAX_REROUTE_HOPS {
+        let n = state.doc.node(node)?;
+        if n.type_id != REROUTE_TYPE_ID {
+            return Some((node, pin));
+        }
+        let up = state
+            .doc
+            .edges
+            .iter()
+            .find(|e| e.to_node == node && e.to_pin == REROUTE_IN)?;
+        node = up.from_node;
+        pin = up.from_pin.clone();
+    }
+    None
 }
 
 /// Route in graph space, round the corners there (so the radius scales with
@@ -5425,8 +5640,22 @@ fn draw_wires(
         } else {
             wire_color(registry, &w.ty)
         };
+        // Execution pulse (45-A P7): a *layer* over whatever the wire already
+        // is, never a replacement — a mistyped wire that happens to be running
+        // still reads as broken, and a selected wire still reads as selected.
+        // `accent_active` is the live/active token by job (it is what a
+        // toggled tool and a running profiler use), which keeps the pulse
+        // distinct from selection's amber and from focus.
+        let color = if w.pulse > 0.0 {
+            mix(color, st.palette.accent_active, PULSE_TINT * w.pulse)
+        } else {
+            color
+        };
         // L4 collapses every wire to a hairline.
         let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
+        // Weight carries the pulse where color cannot: an exec wire is already
+        // white, so brightness alone would barely read.
+        let width = width * (1.0 + PULSE_WEIGHT * w.pulse);
         // A wire the cut is about to take goes red-dashed *during* the drag,
         // so the gesture is previewed and Esc-abortable.
         if cut_preview.contains(&w.edge_index) {
@@ -5454,6 +5683,26 @@ fn draw_wires(
             }
         }
     }
+}
+
+/// How far a full-strength pulse pulls a wire's color toward `accent_active`.
+/// Short of 1.0 on purpose: at full replacement every running wire is the same
+/// color and the type language the palette spent twelve hues on disappears.
+const PULSE_TINT: f32 = 0.75;
+/// How much a full-strength pulse thickens a wire, as a fraction of its normal
+/// width. Enough to read at a glance, not enough to change the canvas's rhythm.
+const PULSE_WEIGHT: f32 = 0.75;
+
+/// Linear blend, `t = 0` -> `a`. Straight lerp in crusty's linear-space color,
+/// which is where a blend is meant to happen.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::rgba(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
 }
 
 /// The point halfway along a polyline **by arc length**, not the midpoint of
@@ -5575,6 +5824,7 @@ fn draw_nodes(
     frame: u64,
     selection_outline: Color,
     widget_rects: &mut Vec<Rect>,
+    exec: Option<&GraphExecViz>,
 ) {
     let status = Palette::invariant_status();
     // Collected during the paint pass, applied after (the widget pass needs
@@ -5682,6 +5932,31 @@ fn draw_nodes(
             m.border,
             if g.missing || g.errored { status.error } else { st.palette.stroke },
         );
+
+        // Running (45-A P7): a node that fired recently gains an accent ring
+        // at the pulse's own strength. Under the selection outline on purpose
+        // — what you picked outranks what is happening. This is also the only
+        // thing a **subgraph host** can show: nothing inside it is an edge of
+        // the document being drawn, so its inner wires never pulse and the
+        // node has to carry the whole statement.
+        if let Some(a) = exec.map(|v| v.node_active(g.id)).filter(|a| *a > 0.0) {
+            // **Outside** the selection outline's offset, not on it: the two
+            // rings answer different questions ("what did I pick" vs "what is
+            // running"), and drawn at the same offset the selection simply
+            // painted over the pulse — a selected node stopped reporting that
+            // it was executing, which is the one time you most want to know.
+            let off = m.edge * 2.0;
+            let outer = Rect::from_min_max(
+                Pos2::new(srect.min.x - off, srect.min.y - off),
+                Pos2::new(srect.max.x + off, srect.max.y + off),
+            );
+            p.rect_stroke(
+                outer,
+                Rounding::same(round.nw + off),
+                m.edge,
+                st.palette.accent_active.with_alpha(a),
+            );
+        }
 
         // Selection: the node keeps its fill and gains an offset outline in
         // `selection.outline`; last-clicked at 100%, the rest of the set 55%.
@@ -6945,6 +7220,71 @@ mod tests {
             tint: None,
             title: None,
         }
+    }
+
+    /// 45-A P7. A reroute is transparent at run time, so the interpreter
+    /// records against the real producer — and *both* halves of a rerouted
+    /// wire have to light from that one record, or a wire visibly stops
+    /// mid-air at the dot.
+    #[test]
+    fn a_pulse_resolves_through_reroutes() {
+        let mut state = crate::engine::editor::graph_editor::test_state("graphs/t.graph");
+        state.doc.nodes = vec![
+            test_node(1, "add_int"),
+            test_node(2, REROUTE_TYPE_ID),
+            test_node(3, "print"),
+        ];
+        state.doc.edges = vec![
+            Edge {
+                from_node: 1,
+                from_pin: "result".into(),
+                to_node: 2,
+                to_pin: REROUTE_IN.into(),
+            },
+            Edge {
+                from_node: 2,
+                from_pin: REROUTE_OUT.into(),
+                to_node: 3,
+                to_pin: "text".into(),
+            },
+        ];
+
+        let mut viz = GraphExecViz::new("Duck");
+        viz.add_pulse(1, "result", 0.8);
+        viz.set_value(1, "result", "7".into());
+
+        // Both halves of the chain light from the one record…
+        assert_eq!(wire_pulse(&viz, &state, &state.doc.edges[0]), 0.8);
+        assert_eq!(wire_pulse(&viz, &state, &state.doc.edges[1]), 0.8);
+        // …and the value reaches the far end's input pin.
+        assert_eq!(pin_value(&viz, &state, 3, "text", false), Some("7"));
+        assert_eq!(pin_value(&viz, &state, 1, "result", true), Some("7"));
+        // An unwired input has no wire, so no value — its constant is already
+        // drawn in its own field.
+        assert_eq!(pin_value(&viz, &state, 1, "a", false), None);
+    }
+
+    /// The converge rank the router's second stagger key reads: a wire's
+    /// position within the set landing on the same input pin.
+    #[test]
+    fn converge_ranks_count_only_the_same_target_pin() {
+        let to = |from: u64, node: u64, pin: &str| Edge {
+            from_node: from,
+            from_pin: "exec_out".into(),
+            to_node: node,
+            to_pin: pin.into(),
+        };
+        // Three into 9.exec_in, one into a different pin, one into another
+        // node's identically-named pin.
+        let edges = vec![
+            to(1, 9, "exec_in"),
+            to(2, 9, "exec_in"),
+            to(3, 9, "other"),
+            to(4, 9, "exec_in"),
+            to(5, 8, "exec_in"),
+        ];
+        assert_eq!(converge_ranks(&edges), vec![0, 1, 0, 2, 0]);
+        assert!(converge_ranks(&[]).is_empty());
     }
 
     #[test]

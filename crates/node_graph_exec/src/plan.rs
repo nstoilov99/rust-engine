@@ -60,6 +60,23 @@ pub struct PlanNode {
     pub volatile: bool,
     /// Human name for reports: `"lib/calc.subgraph#3 (test_add)"`.
     pub name: String,
+    /// **Reverse mapping to the top-level document** (P7): the node id an
+    /// editor showing that document should light up for this plan node.
+    ///
+    /// For a node authored in the document itself this is its own id. For a
+    /// node inlined out of a subgraph it is the **host subgraph node** in the
+    /// top-level document — the subgraph node lights up as a whole, which is
+    /// the only honest answer while the editor is showing the host. Diving
+    /// into the subgraph's own tab shows nothing in v1: an inlined instance
+    /// belongs to *one* host, and the subgraph document is shared between all
+    /// of them, so per-instance highlighting there needs a chosen instance
+    /// (45.5's job, alongside watches).
+    pub doc_node: u64,
+    /// Was this node inlined out of a subgraph — i.e. is `doc_node` a host
+    /// rather than the node itself? Nested subgraphs are still reported
+    /// against the outermost host, which is the only node the top-level
+    /// document has.
+    pub inlined: bool,
     /// Input pin -> where its value comes from.
     pub inputs: BTreeMap<String, InputSource>,
     /// Exec output pin -> where it continues. Several exec outputs (of
@@ -91,6 +108,18 @@ pub struct Plan {
     /// apply its authority gate without re-reading the asset — and so a
     /// precompiled plan stays self-describing.
     pub realm: GraphRealm,
+}
+
+impl Plan {
+    /// The top-level document node a plan index maps back to, and whether it
+    /// got there by way of a subgraph host. See [`PlanNode::doc_node`].
+    ///
+    /// `None` for an index that is not in this plan — a trace outliving the
+    /// plan it was recorded against is a real case (hot reload recompiles
+    /// under a live instance), and it must read as "unknown", not panic.
+    pub fn doc_node(&self, index: usize) -> Option<(u64, bool)> {
+        self.nodes.get(index).map(|n| (n.doc_node, n.inlined))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -336,6 +365,11 @@ impl Flattener<'_> {
                     pure,
                     volatile,
                     name: format!("{path}#{} ({})", n.id, n.type_id),
+                    // The first hop of the scope path is the subgraph node in
+                    // the *top-level* document; deeper hops are inside
+                    // documents the host's editor is not showing.
+                    doc_node: scope_path.first().copied().unwrap_or(n.id),
+                    inlined: !scope_path.is_empty(),
                     inputs: BTreeMap::new(),
                     exec: BTreeMap::new(),
                     variable: d.variable_slug(n.id).map(|s| s.to_string()),

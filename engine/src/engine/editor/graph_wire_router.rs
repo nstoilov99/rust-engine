@@ -58,6 +58,15 @@ pub struct RouteMeta<'a> {
     pub dst_rect: Option<Rect>,
     /// Row index of the target pin — the Manhattan bundle stagger.
     pub target_pin_index: usize,
+    /// Rank of this wire among the wires landing on the **same** input pin.
+    ///
+    /// The row-keyed stagger cannot separate converging wires: exec fan-in is
+    /// legal (45-A P3), and two edges into one exec input share a row, hence a
+    /// lane, hence their whole final approach. Ranking within the converging
+    /// set is the second key that pulls them apart. Data inputs are
+    /// single-wire, so this is 0 for every data wire and their geometry is
+    /// unchanged.
+    pub converge_index: usize,
     /// Every node rect on the canvas, for the backward lane's broadphase.
     pub node_rects: &'a [Rect],
 }
@@ -65,7 +74,13 @@ pub struct RouteMeta<'a> {
 impl<'a> RouteMeta<'a> {
     /// The rect-less form used by the in-flight drag ghost.
     pub fn loose(node_rects: &'a [Rect]) -> Self {
-        Self { src_rect: None, dst_rect: None, target_pin_index: 0, node_rects }
+        Self {
+            src_rect: None,
+            dst_rect: None,
+            target_pin_index: 0,
+            converge_index: 0,
+            node_rects,
+        }
     }
 }
 
@@ -135,7 +150,11 @@ pub fn route(a: Pos2, b: Pos2, prefs: &WirePrefs, meta: &RouteMeta) -> Vec<Pos2>
         // stagger exists to prevent. Wrapping reuses a lane instead, which is
         // what the spec's "above bundle_max, draw coincident" describes.
         let lanes = prefs.bundle_max.max(1) as usize;
-        let bi = (meta.target_pin_index % lanes) as f32;
+        // Two keys, one lane index: the target row, then the wire's rank
+        // within the set converging on that row. Converging wires therefore
+        // take *adjacent* lanes instead of the same one, which is exactly the
+        // relationship the stagger already expresses between adjacent rows.
+        let bi = ((meta.target_pin_index + meta.converge_index) % lanes) as f32;
         let ho = (ho_base + bi * prefs.bundle_offset).min((dx * 0.5).max(MIN_STAGGER_CAP));
         return if source_anchored {
             vec![a, Pos2::new(a.x + ho, a.y), Pos2::new(a.x + ho, b.y), b]
@@ -443,6 +462,7 @@ mod tests {
             src_rect: Some(*src),
             dst_rect: Some(*dst),
             target_pin_index: bi,
+            converge_index: 0,
             node_rects: rects,
         }
     }
@@ -949,6 +969,43 @@ mod tests {
         }
         // A high index no longer collapses against the cap.
         assert!((turn(lanes + 1) - turn(1)).abs() < 1e-3);
+    }
+
+    /// **Converging wires get their own lanes** (45-A P3's finding, closed in
+    /// P7). Exec fan-in is legal, and every edge into one exec input shares a
+    /// target pin row: keyed on the row alone they turned at the same x and
+    /// their whole final approach coincided, which the execution pulse then
+    /// drew as one wire. The converge rank is the second key.
+    #[test]
+    fn converging_wires_do_not_share_a_lane() {
+        let p = prefs(WireStyle::Manhattan);
+        let dx = 400.0;
+        // Three sources landing on the *same* target pin row (index 2).
+        let turn = |ci: usize, dy: f32| {
+            let (a, b, src, dst) = pair(dx, dy);
+            let rects = [src, dst];
+            let m = RouteMeta {
+                converge_index: ci,
+                ..meta(&src, &dst, &rects, 2)
+            };
+            route(a, b, &p, &m)[1].x
+        };
+        let xs: Vec<f32> = (0..3).map(|i| turn(i, 100.0 + i as f32 * 22.0)).collect();
+        for w in xs.windows(2) {
+            assert!(
+                (w[0] - w[1]).abs() >= p.bundle_offset - 1e-3,
+                "converging wires still coincide: {xs:?}"
+            );
+        }
+
+        // Data wires are single-wire by construction, so rank 0 must leave the
+        // geometry exactly as it was before this key existed.
+        let (a, b, src, dst) = pair(dx, 100.0);
+        let rects = [src, dst];
+        let plain = meta(&src, &dst, &rects, 2);
+        assert_eq!(plain.converge_index, 0);
+        assert_eq!(route(a, b, &p, &plain), route(a, b, &p, &plain));
+        assert!((route(a, b, &p, &plain)[1].x - turn(0, 100.0)).abs() < 1e-6);
     }
 
     // ---------------------------------------------------------------

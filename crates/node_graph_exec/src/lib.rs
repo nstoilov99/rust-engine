@@ -45,10 +45,11 @@ pub mod instance;
 pub mod node;
 pub mod nodes;
 pub mod plan;
+pub mod trace;
 pub mod value;
 
 pub use effect::{Effect, EffectSink, LogLevel, NoWorld, TransformSnapshot, WorldRead};
-pub use exec::{tick, tick_with_budget, TickReport, DEFAULT_BUDGET};
+pub use exec::{tick, tick_traced, tick_with_budget, TickReport, DEFAULT_BUDGET};
 pub use instance::{
     Activation, ActivationId, Frame, GraphInstance, QueuedEvent, Rng, ThreadState,
 };
@@ -57,6 +58,7 @@ pub use node::{
     PureNode, Suspension, TickInput,
 };
 pub use plan::{compile, CompileError, Entry, InputSource, Plan, PlanNode, VarSlot};
+pub use trace::{NoTrace, TraceSink};
 pub use value::{EntityRef, Value};
 
 // Re-exported so a consumer needs one dependency, not two, to hold a document

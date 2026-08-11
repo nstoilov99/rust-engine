@@ -1087,6 +1087,8 @@ fn wire_preview(ui: &mut Ui, prefs: &super::graph_prefs::WirePrefs) {
             src_rect: Some(node(a.x, a.y)),
             dst_rect: Some(node(b.x, b.y)),
             target_pin_index: bi,
+            // The preview draws one wire per row, never a converging pair.
+            converge_index: 0,
             node_rects: &rects,
         };
         let color = wire_color(None, &ty);
@@ -2290,6 +2292,7 @@ mod tests {
                 src_rect: None,
                 dst_rect: None,
                 target_pin_index: bi,
+                converge_index: 0,
                 node_rects: &rects,
             },
         )

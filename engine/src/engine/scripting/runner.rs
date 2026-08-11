@@ -32,9 +32,15 @@ use std::sync::Arc;
 
 use nalgebra_glm as glm;
 use node_graph_exec::{
-    compile, nodes as std_impls, tick, Effect, EntityRef, ExecError, GraphInstance, NodeImpls,
-    Plan, TickInput, TransformSnapshot, WorldRead,
+    compile, nodes as std_impls, Effect, EntityRef, ExecError, GraphInstance, NodeImpls, Plan,
+    TickInput, TransformSnapshot, WorldRead,
 };
+/// The traced entry point is the editor's; a shipped game takes the plain one,
+/// which instantiates the interpreter against `NoTrace` (see [`super::trace`]).
+#[cfg(feature = "editor")]
+use node_graph_exec::{tick_traced, DEFAULT_BUDGET};
+#[cfg(not(feature = "editor"))]
+use node_graph_exec::tick;
 use node_graph_types::{GraphDoc, GraphRealm, NodeRegistry};
 
 use crate::engine::ecs::components::{EntityGuid, Name, Transform, TransformDirty};
@@ -62,6 +68,14 @@ pub struct GraphRuntime {
     /// error, or a budget kill. Reported once, then remembered so the console
     /// is not spammed every frame.
     pub disabled: Option<String>,
+    /// What this instance has been doing, for the graph editor's execution
+    /// visualization (P7). **Editor builds only** — in a shipped game the
+    /// field does not exist and the interpreter is instantiated against
+    /// `NoTrace`, so there is no recording path to strip. It rides on the
+    /// runtime component because a trace describes one instance and should be
+    /// born and die with it.
+    #[cfg(feature = "editor")]
+    pub trace: super::trace::GraphTrace,
 }
 
 /// Compiled plans, keyed by content-relative asset path.
@@ -340,9 +354,13 @@ impl System for GraphScriptRunnerSystem {
 
         let mut effects: Vec<(hecs::Entity, Vec<Effect>)> = Vec::new();
         for entity in entities {
-            let Ok(mut rt) = world.get::<&mut GraphRuntime>(entity) else {
+            let Ok(mut guard) = world.get::<&mut GraphRuntime>(entity) else {
                 continue;
             };
+            // One `&mut` up front so the instance and (in editor builds) its
+            // trace are two disjoint field borrows rather than two overlapping
+            // guard derefs.
+            let rt = &mut *guard;
             if rt.disabled.is_some() {
                 continue;
             }
@@ -359,18 +377,29 @@ impl System for GraphScriptRunnerSystem {
                     self_entity: entity,
                     aliases: &aliases,
                 };
-                tick(
-                    &plan,
-                    &mut rt.instance,
-                    &self.impls,
-                    TickInput { dt, time: now },
-                    &view,
-                    &mut out,
-                );
+                let input = TickInput { dt, time: now };
+                #[cfg(feature = "editor")]
+                {
+                    // Stamp the tick before it runs, so every hit recorded
+                    // during it carries this frame's time.
+                    rt.trace.begin_tick(now);
+                    tick_traced(
+                        &plan,
+                        &mut rt.instance,
+                        &self.impls,
+                        input,
+                        &view,
+                        &mut out,
+                        DEFAULT_BUDGET,
+                        &mut rt.trace,
+                    );
+                }
+                #[cfg(not(feature = "editor"))]
+                tick(&plan, &mut rt.instance, &self.impls, input, &view, &mut out);
             }
             rt.aliases = aliases;
             if let Some(err) = rt.instance.halted.clone() {
-                report_once(&mut rt, entity, world, &err);
+                report_once(rt, entity, world, &err);
             }
             if !out.is_empty() {
                 effects.push((entity, out));
@@ -433,6 +462,8 @@ impl GraphScriptRunnerSystem {
                     aliases: BTreeMap::new(),
                     generation,
                     disabled: Some(format!("{graph}: {e}")),
+                    #[cfg(feature = "editor")]
+                    trace: Default::default(),
                 }
             }
             Ok(plan) => {
@@ -451,6 +482,8 @@ impl GraphScriptRunnerSystem {
                     aliases: BTreeMap::new(),
                     generation,
                     disabled,
+                    #[cfg(feature = "editor")]
+                    trace: Default::default(),
                 }
             }
         }

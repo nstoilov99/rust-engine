@@ -18,6 +18,7 @@ use crate::node::{
     EvalCtx, ExecError, FireCtx, FireResult, LoopFrameView, NodeImpl, NodeImpls, TickInput,
 };
 use crate::plan::{InputSource, Plan};
+use crate::trace::{NoTrace, TraceSink};
 use crate::value::Value;
 
 /// The default per-tick firing budget (D1). Generous enough that no honest
@@ -63,6 +64,28 @@ pub fn tick_with_budget(
     world: &dyn WorldRead,
     effects: &mut dyn EffectSink,
     budget: u32,
+) -> TickReport {
+    tick_traced(
+        plan, instance, impls, tick_in, world, effects, budget, &mut NoTrace,
+    )
+}
+
+/// One tick, reporting what it did to `trace` (45-A P7).
+///
+/// Identical to [`tick_with_budget`] in every other respect. The sink is a
+/// type parameter rather than a trait object so that [`NoTrace`] — what every
+/// non-editor build passes — leaves no recording path in the generated code
+/// at all; see [`crate::trace`].
+#[allow(clippy::too_many_arguments)]
+pub fn tick_traced<T: TraceSink>(
+    plan: &Plan,
+    instance: &mut GraphInstance,
+    impls: &NodeImpls,
+    tick_in: TickInput,
+    world: &dyn WorldRead,
+    effects: &mut dyn EffectSink,
+    budget: u32,
+    trace: &mut T,
 ) -> TickReport {
     let mut report = TickReport::default();
     if instance.halted.is_some() {
@@ -132,7 +155,9 @@ pub fn tick_with_budget(
             i += 1;
             continue;
         }
-        match advance(plan, instance, i, impls, tick_in, world, effects, budget, &mut report) {
+        match advance(
+            plan, instance, i, impls, tick_in, world, effects, budget, &mut report, trace,
+        ) {
             Ok(()) => {}
             Err(e) => {
                 // A budget kill stops the whole instance, not just the
@@ -190,7 +215,7 @@ fn start_phase(
 
 /// Run one activation until it finishes, suspends, or the budget dies.
 #[allow(clippy::too_many_arguments)]
-fn advance(
+fn advance<T: TraceSink>(
     plan: &Plan,
     instance: &mut GraphInstance,
     thread: usize,
@@ -200,6 +225,7 @@ fn advance(
     effects: &mut dyn EffectSink,
     budget: u32,
     report: &mut TickReport,
+    trace: &mut T,
 ) -> Result<(), ExecError> {
     loop {
         // A statement that ran out of continuation hands control back to the
@@ -235,7 +261,7 @@ fn advance(
         let mut rng = instance.rng;
         let pulled = pull_inputs(
             plan, instance, thread, node_ix, impls, tick_in, world, budget, report, &mut memo,
-            &mut rng,
+            &mut rng, trace,
         );
         instance.rng = rng;
         let inputs = pulled?;
@@ -303,6 +329,9 @@ fn advance(
                 // owns, if it owns one.
                 pop_own_frame(&mut instance.threads[thread], node_ix);
                 let next = plan.nodes[node_ix].exec.get(pin);
+                if let Some(t) = next {
+                    trace.exec_edge(node_ix, pin, t.node);
+                }
                 instance.threads[thread].cursor = next.map(|t| t.node);
                 instance.threads[thread].entered = next.map(|t| t.pin.clone());
             }
@@ -321,6 +350,7 @@ fn advance(
                         instance.threads[thread].entered = None;
                     }
                     Some(t) => {
+                        trace.exec_edge(node_ix, body, t.node);
                         instance.threads[thread].cursor = Some(t.node);
                         instance.threads[thread].entered = Some(t.pin.clone());
                     }
@@ -342,6 +372,16 @@ fn advance(
                 //
                 // The node's own loop frame is deliberately *not* popped:
                 // suspending is not leaving a loop.
+                //
+                // **Not traced** (P7): the continuation is *resolved* here but
+                // not taken until the activation is due, and lighting the wire
+                // out of a `Delay(5)` five seconds before control reaches it
+                // would be a lie the visualization cannot walk back. Waking is
+                // a pure state flip in the latent phase with no edge in hand,
+                // so a truthful pulse there needs the resumed-from node parked
+                // on the activation — serializable instance state grown for an
+                // editor feature. Deferred to 45.5 with flow bubbles, which
+                // want the same data.
                 let next = s.resume.as_deref().and_then(|pin| plan.nodes[node_ix].exec.get(pin));
                 instance.threads[thread].cursor = next.map(|t| t.node);
                 instance.threads[thread].entered = next.map(|t| t.pin.clone());
@@ -387,7 +427,7 @@ fn bump_frame(t: &mut Activation, node_ix: usize) {
 
 /// Resolve one node's data inputs, evaluating the pure chain behind them.
 #[allow(clippy::too_many_arguments)]
-fn pull_inputs(
+fn pull_inputs<T: TraceSink>(
     plan: &Plan,
     instance: &GraphInstance,
     thread: usize,
@@ -399,6 +439,7 @@ fn pull_inputs(
     report: &mut TickReport,
     memo: &mut BTreeMap<usize, BTreeMap<String, Value>>,
     rng: &mut crate::instance::Rng,
+    trace: &mut T,
 ) -> Result<BTreeMap<String, Value>, ExecError> {
     let mut out = BTreeMap::new();
     let sources: Vec<(String, InputSource)> = plan.nodes[node_ix]
@@ -409,10 +450,19 @@ fn pull_inputs(
     for (slug, src) in sources {
         let v = match src {
             InputSource::Constant(v) => v,
-            InputSource::Pin { node, pin } => pull_output(
-                plan, instance, thread, node, &pin, impls, tick_in, world, budget, report, memo,
-                rng,
-            )?,
+            InputSource::Pin { node, pin } => {
+                let v = pull_output(
+                    plan, instance, thread, node, &pin, impls, tick_in, world, budget, report,
+                    memo, rng, trace,
+                )?;
+                // Capture at pull time: the wire's value is exactly what just
+                // came back, and recording it here costs a borrow rather than
+                // a second evaluation (P7). Keyed by the *producing* pin — a
+                // data output feeding three inputs is one wire's worth of
+                // truth, not three.
+                trace.data_value(node, &pin, &v);
+                v
+            }
         };
         out.insert(slug, v);
     }
@@ -422,7 +472,7 @@ fn pull_inputs(
 /// One output pin's value: an impure node's stored local, or a pure node's
 /// evaluation (memoized for this statement unless the node is volatile).
 #[allow(clippy::too_many_arguments)]
-fn pull_output(
+fn pull_output<T: TraceSink>(
     plan: &Plan,
     instance: &GraphInstance,
     thread: usize,
@@ -435,6 +485,7 @@ fn pull_output(
     report: &mut TickReport,
     memo: &mut BTreeMap<usize, BTreeMap<String, Value>>,
     rng: &mut crate::instance::Rng,
+    trace: &mut T,
 ) -> Result<Value, ExecError> {
     let node = &plan.nodes[node_ix];
     if !node.pure {
@@ -462,7 +513,7 @@ fn pull_output(
     // Data-edge cycles are rejected at validation (P1's `DataCycle` rule), so
     // this recursion is over a DAG by construction.
     let inputs = pull_inputs(
-        plan, instance, thread, node_ix, impls, tick_in, world, budget, report, memo, rng,
+        plan, instance, thread, node_ix, impls, tick_in, world, budget, report, memo, rng, trace,
     )?;
 
     let Some(NodeImpl::Pure(imp)) = impls.get(&node.type_id) else {

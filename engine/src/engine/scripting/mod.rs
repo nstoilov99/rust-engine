@@ -16,12 +16,20 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "graph-scripting")]
 pub mod runner;
 
+/// 45-A P7's execution recorder. Editor builds only — see the module docs for
+/// why a shipped game contains none of it.
+#[cfg(all(feature = "graph-scripting", feature = "editor"))]
+pub mod trace;
+
 /// P5 acceptance evidence: the real plugin, the real schedule, a real world.
 #[cfg(all(test, feature = "graph-scripting"))]
 mod acceptance;
 
 #[cfg(feature = "graph-scripting")]
 pub use runner::{GraphPlanCache, GraphRuntime, GraphScriptRunnerSystem};
+
+#[cfg(all(feature = "graph-scripting", feature = "editor"))]
+pub use trace::GraphTrace;
 
 /// Attaches a `.graph` asset to an entity. Serialized config only — the
 /// running state lives in a separate, never-serialized component created by

@@ -3488,6 +3488,17 @@ impl App {
             let graph_keymap_snapshot = self.editor.services.keymap.clone();
             let graph_keymap = &graph_keymap_snapshot;
             let graph_clipboard = &mut self.editor.scene.graph_clipboard;
+            // 45-A P7: bind each open graph tab to a running instance of it.
+            // The rule itself lives in the engine
+            // (`scripting::trace::viz_for_selection` — the selected entity
+            // that runs this graph); resolved once per frame here rather than
+            // once per tab draw, because the selection is the same for all of
+            // them. Empty in edit mode, with nothing selected, or in a build
+            // without the interpreter — and empty draws nothing.
+            let graph_exec = {
+                let picked: Vec<hecs::Entity> = sel.all().copied().collect();
+                graph_exec_bindings(&*world, &*world_resources, &picked, graph_editors.keys())
+            };
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // Edit-menu override when a docked graph tab has focus (P5 routing).
             let graph_edit_override = graph_focused_tab
@@ -3824,6 +3835,10 @@ impl App {
                                                 // Docked: keyboard editing runs
                                                 // through the main menu/winit path.
                                                 handle_shortcuts: false,
+                                                exec: graph_exec
+                                                    .iter()
+                                                    .find(|(k, _)| *k == key)
+                                                    .map(|(_, v)| v),
                                             },
                                         ),
                                         None => dock_crusty::missing_document_panel(
@@ -4937,6 +4952,11 @@ impl App {
         };
         let graph_prefs = editor.ui.settings.prefs.graph;
         let graph_sel_outline = editor.services.theme.palette.selection.outline;
+        // 45-A P7 execution binding, same rule as the docked path.
+        let graph_exec = {
+            let picked: Vec<hecs::Entity> = sel.all().copied().collect();
+            graph_exec_bindings(&*world, &*world_resources, &picked, graph_editors.keys())
+        };
         let mut graph_open_requests: Vec<String> = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
 
@@ -5113,6 +5133,10 @@ impl App {
                                     // the panel owns keyboard editing here.
                                     focused: true,
                                     handle_shortcuts: true,
+                                    exec: graph_exec
+                                        .iter()
+                                        .find(|(k, _)| *k == key)
+                                        .map(|(_, v)| v),
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
@@ -6754,6 +6778,52 @@ impl App {
 
         // Re-insert InputManager into resources
         self.core.game_world.resources_mut().insert(input_manager);
+    }
+}
+
+/// Bind open graph tabs to running instances (45-A P7).
+///
+/// One call per frame for all tabs: the hierarchy selection is the same for
+/// every one of them, and the rule ("the selected entity that runs this
+/// graph") lives in `scripting::trace::viz_for_selection`. Returns only the
+/// tabs that are bound, so an unbound tab is an absent entry rather than an
+/// empty one — the panel's `exec: None` path draws nothing at all.
+///
+/// A build without the interpreter has nothing to bind and says so here, once,
+/// instead of `cfg`-ing every call site.
+fn graph_exec_bindings<'a>(
+    world: &hecs::World,
+    resources: &rust_engine::engine::ecs::resources::Resources,
+    selected: &[hecs::Entity],
+    keys: impl IntoIterator<Item = &'a String>,
+) -> Vec<(String, rust_engine::engine::editor::graph_exec_viz::GraphExecViz)> {
+    #[cfg(not(feature = "graph-scripting"))]
+    {
+        let _ = (world, resources, selected, keys);
+        Vec::new()
+    }
+    #[cfg(feature = "graph-scripting")]
+    {
+        if selected.is_empty() {
+            return Vec::new();
+        }
+        // The same clock the runner stamps its trace with, so "how long ago"
+        // means the same thing on both sides of the seam.
+        let now = resources
+            .get::<rust_engine::engine::ecs::resources::Time>()
+            .map(|t| t.total)
+            .unwrap_or(0.0);
+        keys.into_iter()
+            .filter_map(|k| {
+                rust_engine::engine::scripting::trace::viz_for_selection(
+                    world,
+                    selected.iter().copied(),
+                    k,
+                    now,
+                )
+                .map(|v| (k.clone(), v))
+            })
+            .collect()
     }
 }
 

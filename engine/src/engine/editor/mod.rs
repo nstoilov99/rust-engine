@@ -69,6 +69,11 @@ pub mod graph_palette;
 pub mod graph_state_store;
 pub mod graph_prefs;
 pub mod graph_wire_router;
+/// 45-A P7 execution visualization, document-space. Editor-only by
+/// construction: nothing outside the editor has a canvas to draw a pulse on,
+/// and a shipped game must not carry the recorder that fills this in.
+#[cfg(feature = "editor")]
+pub mod graph_exec_viz;
 #[cfg(feature = "editor")]
 pub mod graph_editor_crusty;
 pub mod editor_prefs;
