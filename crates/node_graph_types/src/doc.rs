@@ -183,6 +183,53 @@ pub enum PropValue {
     Raw(String),
 }
 
+impl PropValue {
+    /// The stored constant a pin type starts at. `None` for the types with no
+    /// constant form — `Entity` is connection-only, and a texture/mesh/domain
+    /// pin means "whatever is wired here".
+    ///
+    /// Distinct from the interpreter's `Value::zero_of`, which answers the
+    /// same question for *runtime* values and therefore has an `Entity`
+    /// answer (`self`). This one is about what goes in the asset.
+    pub fn zero_of(ty: &PinType) -> Option<PropValue> {
+        Some(match ty {
+            PinType::Float => PropValue::Float(0.0),
+            PinType::Int => PropValue::Int(0),
+            PinType::Bool => PropValue::Bool(false),
+            PinType::String => PropValue::Str(String::new()),
+            PinType::Enum => PropValue::Enum(String::new()),
+            PinType::Vec2 => PropValue::Vec2([0.0; 2]),
+            PinType::Vec3 => PropValue::Vec3([0.0; 3]),
+            PinType::Vec4 => PropValue::Vec4([0.0, 0.0, 0.0, 1.0]),
+            PinType::Color => PropValue::Color([0.0, 0.0, 0.0, 1.0]),
+            PinType::Array(_) => PropValue::Array(Vec::new()),
+            PinType::Entity | PinType::Texture | PinType::Mesh | PinType::Exec => return None,
+            PinType::Domain(_) => return None,
+        })
+    }
+
+    /// Does this stored value already hold `ty`'s shape? Used when a variable
+    /// is retyped: an exact match survives, anything else is reset rather
+    /// than silently coerced.
+    pub fn matches_type(&self, ty: &PinType) -> bool {
+        matches!(
+            (self, ty),
+            (PropValue::Float(_), PinType::Float)
+                | (PropValue::Int(_), PinType::Int)
+                | (PropValue::Bool(_), PinType::Bool)
+                | (PropValue::Str(_), PinType::String)
+                | (PropValue::Enum(_), PinType::Enum)
+                | (PropValue::Vec2(_), PinType::Vec2)
+                | (PropValue::Vec3(_), PinType::Vec3)
+                | (PropValue::Vec4(_), PinType::Vec4)
+                | (PropValue::Color(_), PinType::Color)
+                | (PropValue::Array(_), PinType::Array(_))
+                | (PropValue::Asset(_), PinType::Texture)
+                | (PropValue::Asset(_), PinType::Mesh)
+        )
+    }
+}
+
 /// One node instance in a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeInst {

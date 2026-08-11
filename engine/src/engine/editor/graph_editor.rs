@@ -16,7 +16,7 @@ use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
     endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
-    GraphDoc, IfacePin, PinType,
+    GraphDoc, IfacePin, PinType, VarDecl,
     DocDescriptors, GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
@@ -62,6 +62,39 @@ pub enum GraphEdit {
     SetProperty {
         node: u64,
         key: String,
+        old: Option<PropValue>,
+        new: Option<PropValue>,
+    },
+    // --- Variables (45-A P6). Declarations live in a Vec, so removal is
+    //     index-based like the annotations below: valid because the undo
+    //     stack applies and reverts strictly LIFO, and it restores the exact
+    //     order a byte-stable save depends on. ---
+    /// A variable declaration was appended.
+    AddVariable(VarDecl),
+    /// A declaration was removed from `index`. The `var_get`/`var_set` nodes
+    /// that named it are deliberately left alone: they become
+    /// `UnknownVariable` validation errors, which is the honest degradation —
+    /// silently deleting an author's nodes would be worse than showing them
+    /// what broke.
+    RemoveVariable { index: usize, decl: VarDecl },
+    /// The display label changed. **Only the label** — the slug is forever
+    /// (Task 40 identity rules), which is exactly what lets every existing
+    /// `var_get`/`var_set` keep pointing at the same declaration across a
+    /// rename.
+    RenameVariable { slug: String, old: String, new: String },
+    /// The declared type changed, carrying the default with it because a
+    /// retype resets a default it can no longer hold.
+    RetypeVariable {
+        slug: String,
+        old_ty: PinType,
+        new_ty: PinType,
+        old_default: Option<PropValue>,
+        new_default: Option<PropValue>,
+    },
+    /// The declared initial value changed. Coalesced across a drag exactly
+    /// like `SetProperty`.
+    SetVariableDefault {
+        slug: String,
         old: Option<PropValue>,
         new: Option<PropValue>,
     },
@@ -171,6 +204,17 @@ impl GraphEdit {
                 doc.edges.extend(edges.iter().cloned());
             }
             GraphEdit::SetProperty { node, key, new, .. } => set_prop(doc, *node, key, new),
+            GraphEdit::AddVariable(v) => doc.variables.push(v.clone()),
+            GraphEdit::RemoveVariable { index, .. } => {
+                if *index < doc.variables.len() {
+                    doc.variables.remove(*index);
+                }
+            }
+            GraphEdit::RenameVariable { slug, new, .. } => set_var_label(doc, slug, new),
+            GraphEdit::RetypeVariable { slug, new_ty, new_default, .. } => {
+                set_var_type(doc, slug, new_ty, new_default)
+            }
+            GraphEdit::SetVariableDefault { slug, new, .. } => set_var_default(doc, slug, new),
             GraphEdit::AddComment(c) => doc.comments.push(c.clone()),
             GraphEdit::RemoveComment { index, .. } => {
                 doc.comments.remove(*index);
@@ -230,6 +274,20 @@ impl GraphEdit {
                 doc.edges.retain(|e| !edges.contains(e));
             }
             GraphEdit::SetProperty { node, key, old, .. } => set_prop(doc, *node, key, old),
+            GraphEdit::AddVariable(v) => {
+                // By slug rather than by popping: a composite may have added
+                // more than one, and slugs are unique by construction.
+                doc.variables.retain(|d| d.slug != v.slug);
+            }
+            GraphEdit::RemoveVariable { index, decl } => {
+                let at = (*index).min(doc.variables.len());
+                doc.variables.insert(at, decl.clone());
+            }
+            GraphEdit::RenameVariable { slug, old, .. } => set_var_label(doc, slug, old),
+            GraphEdit::RetypeVariable { slug, old_ty, old_default, .. } => {
+                set_var_type(doc, slug, old_ty, old_default)
+            }
+            GraphEdit::SetVariableDefault { slug, old, .. } => set_var_default(doc, slug, old),
             GraphEdit::AddComment(_) => {
                 doc.comments.pop();
             }
@@ -298,6 +356,11 @@ impl GraphEdit {
                 format!("Paste {} Node{}", nodes.len(), plural(nodes.len()))
             }
             GraphEdit::SetProperty { key, .. } => format!("Set {key}"),
+            GraphEdit::AddVariable(_) => "Add Variable".to_string(),
+            GraphEdit::RemoveVariable { .. } => "Delete Variable".to_string(),
+            GraphEdit::RenameVariable { .. } => "Rename Variable".to_string(),
+            GraphEdit::RetypeVariable { .. } => "Retype Variable".to_string(),
+            GraphEdit::SetVariableDefault { .. } => "Set Variable Default".to_string(),
             GraphEdit::AddComment(_) => "Add Comment".to_string(),
             GraphEdit::RemoveComment { .. } => "Delete Comment".to_string(),
             GraphEdit::MoveComment { .. } => "Move Comment".to_string(),
@@ -443,6 +506,53 @@ fn uniquify(base: &str, taken: &[IfacePin]) -> String {
     base.to_string()
 }
 
+fn set_var_label(doc: &mut GraphDoc, slug: &str, label: &str) {
+    if let Some(v) = doc.variables.iter_mut().find(|v| v.slug == slug) {
+        v.label = label.to_string();
+    }
+}
+
+fn set_var_type(doc: &mut GraphDoc, slug: &str, ty: &PinType, default: &Option<PropValue>) {
+    if let Some(v) = doc.variables.iter_mut().find(|v| v.slug == slug) {
+        v.ty = ty.clone();
+        v.default = default.clone();
+    }
+}
+
+fn set_var_default(doc: &mut GraphDoc, slug: &str, value: &Option<PropValue>) {
+    if let Some(v) = doc.variables.iter_mut().find(|v| v.slug == slug) {
+        v.default = value.clone();
+    }
+}
+
+/// A variable slug from a display name: lowercase, `_`-joined, alphanumeric.
+///
+/// Deliberately snake_case rather than the `-` form `slugify` produces for
+/// `#node-slug` chips — a variable slug sits beside pin and node-type slugs
+/// in the identity rules, and those are snake_case. An empty result becomes
+/// `var`, because "" is not a name.
+pub fn variable_slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut underscore = false;
+    for ch in name.chars() {
+        if ch.is_alphanumeric() {
+            for c in ch.to_lowercase() {
+                out.push(c);
+            }
+            underscore = false;
+        } else if !underscore && !out.is_empty() {
+            out.push('_');
+            underscore = true;
+        }
+    }
+    let out = out.trim_end_matches('_').to_string();
+    if out.is_empty() {
+        "var".to_string()
+    } else {
+        out
+    }
+}
+
 /// Indices of the comments anchored to any of `ids` — the collateral a node
 /// delete has to carry.
 pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
@@ -533,6 +643,12 @@ impl GraphEditStack {
         let desc = edit.description();
         self.undo.push(edit);
         Some(desc)
+    }
+
+    /// How many entries deep the undo history is — what a test asserts on
+    /// when the claim is "this gesture recorded exactly one entry".
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
     }
 
     pub fn can_undo(&self) -> bool {
@@ -783,6 +899,8 @@ pub struct GraphEditorState {
     /// In-flight inline property edit (canvas widgets). Coalesces a whole
     /// drag/toggle into one undo entry, flushed on pointer release.
     pub prop_edit: Option<PropEdit>,
+    /// In-flight coalesced edit of a variable default (45-A P6).
+    pub var_edit: Option<VarDefaultEdit>,
     /// World position captured when the node-create menu opened.
     pub create_menu_world: Option<[f32; 2]>,
     /// Search text of the node-create menu.
@@ -1097,6 +1215,12 @@ pub enum MarqueeMode {
 /// An inline property edit in progress: the value as it stood *before* the
 /// gesture, so the whole drag commits as one reversible edit.
 #[derive(Debug, Clone)]
+/// The in-flight coalesced edit of a variable's default.
+pub struct VarDefaultEdit {
+    pub slug: String,
+    pub old: Option<PropValue>,
+}
+
 pub struct PropEdit {
     pub node: u64,
     pub key: String,
@@ -1165,6 +1289,7 @@ impl GraphEditorState {
             marquee: None,
             marquee_mode: MarqueeMode::default(),
             prop_edit: None,
+            var_edit: None,
             create_menu_world: None,
             create_menu_search: String::new(),
             sel_comment: None,
@@ -1383,6 +1508,185 @@ impl GraphEditorState {
             GraphEdit::SetProperty { node: p.node, key: p.key, old: p.old, new },
             registry,
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Variables (45-A P6). Pure document editing — the panel that drives
+    // these is P6c; everything here is testable without a `Ui`.
+    // -----------------------------------------------------------------
+
+    /// Declare a variable from a display name. Returns the slug it was given.
+    ///
+    /// The slug is derived once and then frozen: `variable_slug` normalizes
+    /// the name, and a collision takes a `_2`, `_3` … suffix, matching how
+    /// interface pins and generated subgraph paths already disambiguate.
+    /// Renaming later changes only the label, so this is the single moment
+    /// the identity is decided.
+    pub fn add_variable(
+        &mut self,
+        name: &str,
+        ty: PinType,
+        registry: &NodeRegistry,
+    ) -> String {
+        let base = variable_slug(name);
+        let mut slug = base.clone();
+        let mut n = 2u32;
+        while self.doc.variables.iter().any(|v| v.slug == slug) {
+            slug = format!("{base}_{n}");
+            n += 1;
+        }
+        let label = if name.trim().is_empty() {
+            slug.clone()
+        } else {
+            name.trim().to_string()
+        };
+        let decl = VarDecl {
+            slug: slug.clone(),
+            label,
+            default: PropValue::zero_of(&ty),
+            ty,
+        };
+        let edit = GraphEdit::AddVariable(decl);
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        slug
+    }
+
+    /// Change a variable's display label. The slug is untouched — that is the
+    /// point of having one.
+    pub fn rename_variable(&mut self, slug: &str, label: &str, registry: &NodeRegistry) -> bool {
+        let Some(old) = self.doc.variable(slug).map(|v| v.label.clone()) else {
+            return false;
+        };
+        if old == label {
+            return false;
+        }
+        let edit = GraphEdit::RenameVariable {
+            slug: slug.to_string(),
+            old,
+            new: label.to_string(),
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    /// Change a variable's type.
+    ///
+    /// **The default survives only if it already holds the new type's shape**
+    /// (`Int` stays `Int`); otherwise it resets to the new type's zero, and to
+    /// `None` for the types with no constant form. Deliberately no coercion:
+    /// turning `2.7` into `2` on a Float→Int retype changes the author's value
+    /// without saying so, and retyping a number back is one gesture. The undo
+    /// entry carries both defaults, so nothing is lost either way.
+    ///
+    /// Every `var_get`/`var_set` naming this variable re-derives its pin type
+    /// through `DocDescriptors`, so wires that no longer type-check surface as
+    /// `TypeMismatch` on the next validation — which is why the panel warns
+    /// before calling this.
+    pub fn retype_variable(&mut self, slug: &str, ty: PinType, registry: &NodeRegistry) -> bool {
+        let Some(v) = self.doc.variable(slug) else {
+            return false;
+        };
+        if v.ty == ty {
+            return false;
+        }
+        let old_ty = v.ty.clone();
+        let old_default = v.default.clone();
+        let new_default = match &old_default {
+            Some(d) if d.matches_type(&ty) => old_default.clone(),
+            _ => PropValue::zero_of(&ty),
+        };
+        let edit = GraphEdit::RetypeVariable {
+            slug: slug.to_string(),
+            old_ty,
+            new_ty: ty,
+            old_default,
+            new_default,
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    /// Remove a declaration. The nodes that named it stay put and become
+    /// `UnknownVariable` errors — see `RemoveVariable`.
+    pub fn remove_variable(&mut self, slug: &str, registry: &NodeRegistry) -> bool {
+        let Some(index) = self.doc.variables.iter().position(|v| v.slug == slug) else {
+            return false;
+        };
+        let decl = self.doc.variables[index].clone();
+        let edit = GraphEdit::RemoveVariable { index, decl };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    /// How many `var_get`/`var_set` instances name this variable — what the
+    /// delete confirmation counts.
+    pub fn variable_usage_count(&self, slug: &str) -> usize {
+        self.doc
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.type_id.as_str(),
+                    crate::engine::node_graph::VAR_GET_TYPE_ID
+                        | crate::engine::node_graph::VAR_SET_TYPE_ID
+                ) && matches!(
+                    n.properties.get(crate::engine::node_graph::VAR_PROP),
+                    Some(PropValue::Str(s)) if s == slug
+                )
+            })
+            .count()
+    }
+
+    /// Begin (or continue) a coalesced edit of a variable's default.
+    ///
+    /// **Variable defaults coalesce exactly like node properties**: the panel
+    /// drives them with the same `DragValue`, so a single drag has to be a
+    /// single undo entry. The two paths are kept separate rather than merged
+    /// because their targets differ — one is keyed by (node, pin), the other
+    /// by slug — and switching between them flushes the other, so a drag on a
+    /// node pin followed by a drag on a variable never merges into one entry.
+    pub fn begin_var_default_edit(&mut self, slug: &str, registry: &NodeRegistry) {
+        if self.var_edit.as_ref().is_some_and(|v| v.slug == slug) {
+            return;
+        }
+        self.flush_var_default_edit(registry);
+        self.flush_prop_edit(registry);
+        let old = self.doc.variable(slug).and_then(|v| v.default.clone());
+        self.var_edit = Some(VarDefaultEdit { slug: slug.to_string(), old });
+    }
+
+    /// Commit the in-flight default edit as one `SetVariableDefault`. No-op
+    /// when nothing is pending or the value ended where it started.
+    pub fn flush_var_default_edit(&mut self, registry: &NodeRegistry) {
+        let Some(p) = self.var_edit.take() else {
+            return;
+        };
+        let new = self.doc.variable(&p.slug).and_then(|v| v.default.clone());
+        if new == p.old {
+            return;
+        }
+        self.commit(
+            GraphEdit::SetVariableDefault { slug: p.slug, old: p.old, new },
+            registry,
+        );
+    }
+
+    /// Set a variable's default through the coalescing path.
+    pub fn set_variable_default(
+        &mut self,
+        slug: &str,
+        value: Option<PropValue>,
+        registry: &NodeRegistry,
+    ) {
+        if self.doc.variable(slug).is_none() {
+            return;
+        }
+        self.begin_var_default_edit(slug, registry);
+        set_var_default(&mut self.doc, slug, &value);
     }
 
     /// Add a node of `type_id` at `pos` with descriptor input defaults as
@@ -3076,6 +3380,7 @@ pub mod tests_support {
             marquee: None,
             marquee_mode: MarqueeMode::default(),
             prop_edit: None,
+            var_edit: None,
             create_menu_world: None,
             create_menu_search: String::new(),
             sel_comment: None,
@@ -4978,51 +5283,9 @@ mod tests {
     }
 
     fn bare_state() -> GraphEditorState {
-        GraphEditorState {
-            path: "t.graph".into(),
-            doc: GraphDoc::default(),
-            errors: vec![],
-            ref_errors: vec![],
-            dirty: false,
-            last_saved_at: None,
-            view: CanvasView::default(),
-            selection: BTreeSet::new(),
-            primary: None,
-            selected_edges: BTreeSet::new(),
-            stack: GraphEditStack::new(),
-            node_drag: None,
-            connect_drag: None,
-            marquee: None,
-            marquee_mode: MarqueeMode::default(),
-            prop_edit: None,
-            create_menu_world: None,
-            create_menu_search: String::new(),
-            sel_comment: None,
-            sel_group: None,
-            annotation_drag: None,
-            editing: None,
-            annotation_resize: None,
-            annotation_menu: None,
-            error_cursor: 0,
-            error_popover: false,
-            wire_menu: None,
-            bookmarks: [None; BOOKMARK_SLOTS],
-            bookmark_next: 0,
-            purge_confirm: None,
-            toasts: Vec::new(),
-            cut_path: None,
-            node_menu: None,
-            palette: None,
-            find: None,
-            cheat_sheet: false,
-            canvas_menu: None,
-            breakpoints: Default::default(),
-            nav_back: Vec::new(),
-            nudge: None,
-            frame: 0,
-            frame_all_on_open: false,
-        }
+        super::test_state("t.graph")
     }
+
 
     /// Regression (finding 3): undo/redo cancels a live drag so the next frame
     /// can't overwrite the undone state or commit a bogus delta.
@@ -5238,5 +5501,57 @@ mod tests {
         s.undo(&mut doc);
         assert_eq!(doc.nodes[0].position, [0.0, 0.0]);
         assert_eq!(doc.nodes[1].position, [10.0, 0.0]);
+    }
+}
+
+/// A blank editor state. Test-only, at module level so the sibling test
+/// modules (the variables model, P6b) share one definition rather than
+/// drifting copies of a 40-field literal.
+#[cfg(test)]
+pub(crate) fn test_state(path: &str) -> GraphEditorState {
+    GraphEditorState {
+        path: path.to_string(),
+        doc: GraphDoc::default(),
+        errors: vec![],
+        ref_errors: vec![],
+        dirty: false,
+        last_saved_at: None,
+        view: CanvasView::default(),
+        selection: BTreeSet::new(),
+        primary: None,
+        selected_edges: BTreeSet::new(),
+        stack: GraphEditStack::new(),
+        node_drag: None,
+        connect_drag: None,
+        marquee: None,
+        marquee_mode: MarqueeMode::default(),
+        prop_edit: None,
+        var_edit: None,
+        create_menu_world: None,
+        create_menu_search: String::new(),
+        sel_comment: None,
+        sel_group: None,
+        annotation_drag: None,
+        editing: None,
+        annotation_resize: None,
+        annotation_menu: None,
+        error_cursor: 0,
+        error_popover: false,
+        wire_menu: None,
+        bookmarks: [None; BOOKMARK_SLOTS],
+        bookmark_next: 0,
+        purge_confirm: None,
+        toasts: Vec::new(),
+        cut_path: None,
+        node_menu: None,
+        palette: None,
+        find: None,
+        cheat_sheet: false,
+        canvas_menu: None,
+        breakpoints: Default::default(),
+        nav_back: Vec::new(),
+        nudge: None,
+        frame: 0,
+        frame_all_on_open: false,
     }
 }

@@ -35,7 +35,10 @@ use crate::registry::{
     VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN,
 };
 use crate::resolver::GraphResolver;
-use crate::std_events::{payload_pins, EVENT_CUSTOM_TYPE_ID};
+use crate::std_events::{
+    payload_pins, EVENT_ACTION_PROP, EVENT_CUSTOM_TYPE_ID, EVENT_INPUT_ACTION_TYPE_ID,
+    EVENT_NAME_PROP,
+};
 
 /// Where a node instance's pins come from. One variant per answer path, so
 /// adding a document-dependent type forces a decision here rather than a new
@@ -168,6 +171,51 @@ impl<'a> DocDescriptors<'a> {
                 Some(Cow::Owned(base))
             }
         }
+    }
+
+    /// What this node instance calls itself on the canvas.
+    ///
+    /// Doc-dependent types name themselves from their *configuration*, which
+    /// is what keeps a variable node readable without inventing new node
+    /// anatomy: `var_get` reads "Get Score", `event_custom` reads
+    /// "Event: Hit". Precedence is author over synthesis over descriptor —
+    /// an explicit `NodeInst::title` always wins, because someone typed it.
+    ///
+    /// A dangling reference still gets a name (`Get <missing>`): a node that
+    /// renders as the bare slug `var_get` tells the author nothing about what
+    /// broke, and validation is already reporting the real error.
+    pub fn display_name(&self, node_id: u64) -> Option<String> {
+        let n = self.doc.node(node_id)?;
+        if let Some(t) = n.title.as_ref().filter(|t| !t.trim().is_empty()) {
+            return Some(t.clone());
+        }
+        let config = |key: &str| match n.properties.get(key) {
+            Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) if !s.is_empty() => {
+                Some(s.clone())
+            }
+            _ => None,
+        };
+        let name = match NodeKind::of_type(&n.type_id) {
+            NodeKind::VarGet | NodeKind::VarSet => {
+                let verb = if n.type_id == VAR_SET_TYPE_ID { "Set" } else { "Get" };
+                let what = self
+                    .variable_of(node_id)
+                    .map(|d| d.label.clone())
+                    .or_else(|| self.variable_slug(node_id).map(|s| s.to_string()))
+                    .unwrap_or_else(|| "<missing>".to_string());
+                format!("{verb} {what}")
+            }
+            NodeKind::EventCustom => {
+                format!("Event: {}", config(EVENT_NAME_PROP).unwrap_or_else(|| "<unnamed>".into()))
+            }
+            _ if n.type_id == EVENT_INPUT_ACTION_TYPE_ID => {
+                format!("Input: {}", config(EVENT_ACTION_PROP).unwrap_or_else(|| "<unbound>".into()))
+            }
+            // Everything else is named by its descriptor, which the caller
+            // already has.
+            _ => return self.descriptor(node_id).map(|d| d.name.clone()),
+        };
+        Some(name)
     }
 
     /// The declared type of one pin, seeing through reroutes. Generalizes

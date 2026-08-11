@@ -791,7 +791,11 @@ fn build_geoms(
                         .collect::<Vec<_>>()
                 };
                 (
-                    d.name.clone(),
+                    // Doc-dependent types name themselves from their config
+                    // ("Get Score", "Event: Hit"), and an explicit
+                    // `NodeInst::title` beats both — see
+                    // `DocDescriptors::display_name`.
+                    docd.display_name(n.id).unwrap_or_else(|| d.name.clone()),
                     Some(d.category.clone()),
                     false,
                     pins(&d.inputs),

@@ -60,6 +60,10 @@ pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
 pub mod graph_editor;
+/// The 45-A P6b variables model: declarations, their edits and their undo
+/// behavior. Test-only — the panel that drives them is P6c.
+#[cfg(test)]
+mod graph_variables_tests;
 pub mod graph_layout;
 pub mod graph_palette;
 pub mod graph_state_store;
