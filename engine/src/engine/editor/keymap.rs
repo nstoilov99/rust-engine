@@ -385,6 +385,7 @@ actions! {
     FIT_GRAPH       => "graph.fit_graph", "Fit Graph", "View", Canvas, Live;
     PARENT_GRAPH    => "graph.parent_graph", "Go to Parent Graph", "View", GraphTab, Live;
     CHILD_GRAPH     => "graph.child_graph", "Go to Child Graph", "View", GraphTab, Live;
+    TOGGLE_VARIABLES => "graph.toggle_variables", "Variables Panel", "View", GraphTab, Live;
 
     // ── Bookmarks
     BOOKMARK_STORE    => "graph.bookmark_store", "Store Bookmark", "Bookmarks", Canvas, Live;
@@ -857,6 +858,11 @@ fn crusty_bindings() -> Vec<(Action, Vec<Chord>)> {
         (Action::FIT_GRAPH, c("Home")),
         (Action::PARENT_GRAPH, c("PageUp")),
         (Action::CHILD_GRAPH, c("PageDown")),
+        // Alt+V joins the Alt+A / Alt+L graph-tool family. **Not Ctrl+B**:
+        // that is `graph.bookmark_store` in `Canvas`, which shadows `GraphTab`
+        // whenever the canvas has the pointer — the binding would be dead
+        // exactly where it is needed rather than conflicting visibly.
+        (Action::TOGGLE_VARIABLES, c("Alt+V")),
         (Action::BOOKMARK_STORE, c("Ctrl+B")),
         (Action::BOOKMARK_RECALL_1, c("Shift+1")),
         (Action::BOOKMARK_RECALL_2, c("Shift+2")),

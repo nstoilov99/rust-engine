@@ -33,8 +33,9 @@ use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
-    GraphFragment, MarqueeMode, NodeDrag, ResizeHandle, ANNOTATION_MIN_H, ANNOTATION_MIN_W,
-    FindState, PaletteDragSource, PaletteState, BOOKMARK_SLOTS, TOAST_MS,
+    GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, ResizeHandle, VarConfirm, VarDrop,
+    ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
+    BOOKMARK_SLOTS, TOAST_MS,
 };
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
@@ -47,8 +48,13 @@ use super::theme::{
 };
 use super::widgets::segmented_control;
 use crate::engine::node_graph::{
-    DocDescriptors, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeRegistry,
-    PinType, PropValue, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
+    std_events::{
+        EVENT_ACTION_PROP, EVENT_INPUT_ACTION_TYPE_ID, EVENT_NAME_PROP, EVENT_PAYLOAD_PREFIX,
+        PAYLOAD_PIN_TYPES,
+    },
+    DocDescriptors, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeInst,
+    NodeKind, NodeRegistry, PinType, PropValue, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID,
+    SUBGRAPH_TYPE_ID, VAR_PROP,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,6 +80,10 @@ const BASE_COL_GAP: f32 = 12.0;
 const BASE_LABEL_GAP: f32 = 4.0;
 /// Reserved width for an inline value/widget cell.
 const BASE_VALUE_W: f32 = 56.0;
+/// Reserved width for a **config** row's cell. Wider than a pin's value cell
+/// because what it holds is a name — a variable slug, an event name, an input
+/// action — and 56 units truncates every one of them.
+const BASE_CONFIG_VALUE_W: f32 = 104.0;
 const BASE_COMMENT_BAR: f32 = 18.0;
 const BASE_GROUP_BAR: f32 = 20.0;
 /// Pin hit target: never smaller than this in world units…
@@ -379,6 +389,25 @@ impl GraphMetrics {
         BASE_PREVIEW_SIDE * self.scale
     }
 
+    /// Width of a config row's value cell, world units.
+    fn config_value_w(&self) -> f32 {
+        BASE_CONFIG_VALUE_W * self.scale
+    }
+
+    /// Center of body row `i`, counting the config band and the pin rows as
+    /// one sequence. **The only place a row index becomes a y.** Config rows
+    /// occupy `0..config_n`; pin row `i` is therefore `config_n + i`, which is
+    /// what keeps the pins, their wire anchors, the band separator and the
+    /// node's height from disagreeing by a row.
+    fn band_y(&self, min_y: f32, index: usize) -> f32 {
+        min_y + self.header_h + index as f32 * self.row_h + self.row_h * 0.5
+    }
+
+    /// Node height for a body of `config_n` config rows plus `rows` pin rows.
+    fn node_h(&self, config_n: usize, rows: usize, preview_h: f32) -> f32 {
+        self.header_h + (config_n + rows) as f32 * self.row_h + preview_h + self.body_pad
+    }
+
     /// Diameter of a reroute's dot, world units.
     fn reroute_d(&self) -> f32 {
         self.pin_r * 3.2
@@ -464,6 +493,14 @@ enum InlineKind {
     /// because the `GraphError` set is closed (recorded ruling) and stale
     /// enum data is something to fix, not a broken document.
     Enum { value: String, variants: Vec<String>, ok: bool },
+    /// A dropdown over a list that is **not** an `Enum` on disk: the `var`
+    /// config row picks a slug and stores it as [`PropValue::Str`], because
+    /// that is what `DocDescriptors::variable_of` reads. Same widget as
+    /// `Enum`, different write-back — which is exactly why it is a separate
+    /// variant rather than a flag: the storage shape is not a rendering
+    /// detail. `ok` is false for a dangling reference, which still *displays*
+    /// (the author has to see the name that broke).
+    Choice { value: String, variants: Vec<String>, ok: bool },
     /// Painted mono chip (asset path, free-string enum, vector tuple).
     Chip(String),
     /// Forward-compat data: warning-dashed `preserved` chip, never a blank.
@@ -489,6 +526,86 @@ impl InlineKind {
             other => InlineKind::Chip(prop_display(other)),
         }
     }
+}
+
+/// A **config row**: one reserved property that *shapes* a node rather than
+/// feeding it (45-A P6c ruling).
+///
+/// `var`, `event_name`, `action` and `payload.<slug>` are deliberately not
+/// pins — they decide what the node's pins *are*, so a pin could not carry
+/// them without a chicken-and-egg problem. They render as pin-less rows in a
+/// band **above** the pin rows, with a secondary-text label and the same
+/// inline widget vocabulary, and they write through the same coalesced
+/// `SetProperty` path (`begin_prop_edit` / `flush_prop_edit`) as any inline
+/// pin constant — so undo does not care which kind of row you edited.
+struct ConfigGeom {
+    /// Property key, which is also the widget id and the `SetProperty` key.
+    key: String,
+    label: String,
+    kind: InlineKind,
+    /// Row center, world space.
+    y: f32,
+}
+
+/// The reserved config rows a node instance shows, in render order.
+///
+/// Sourced from the type's `NodeKind` plus the reserved-key constants, so
+/// adding a doc-dependent type is one arm here rather than a new special case
+/// in the drawing code. Rows appear even when the property is missing — a
+/// freshly placed `event_custom` has no `event_name` yet, and a row is the
+/// only way to give it one.
+fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
+    let text_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Str(s)) => s.clone(),
+        Some(PropValue::Enum(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let mut out = Vec::new();
+    match NodeKind::of_type(&n.type_id) {
+        NodeKind::VarGet | NodeKind::VarSet => {
+            let value = text_of(VAR_PROP);
+            let variants: Vec<String> =
+                docd.doc().variables.iter().map(|v| v.slug.clone()).collect();
+            let ok = variants.contains(&value);
+            out.push((
+                VAR_PROP.to_string(),
+                "Variable".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+        }
+        NodeKind::EventCustom => {
+            out.push((
+                EVENT_NAME_PROP.to_string(),
+                "Name".to_string(),
+                InlineKind::Str(text_of(EVENT_NAME_PROP)),
+            ));
+            // One row per declared payload pin, in slug order (`properties` is
+            // a BTreeMap, which is also the order the pins come out in).
+            let variants: Vec<String> =
+                PAYLOAD_PIN_TYPES.iter().map(|s| s.to_string()).collect();
+            for key in n.properties.keys() {
+                let Some(slug) = key.strip_prefix(EVENT_PAYLOAD_PREFIX) else {
+                    continue;
+                };
+                let value = text_of(key);
+                let ok = variants.contains(&value);
+                out.push((
+                    key.clone(),
+                    slug.to_string(),
+                    InlineKind::Enum { value, variants: variants.clone(), ok },
+                ));
+            }
+        }
+        _ if n.type_id == EVENT_INPUT_ACTION_TYPE_ID => {
+            out.push((
+                EVENT_ACTION_PROP.to_string(),
+                "Action".to_string(),
+                InlineKind::Str(text_of(EVENT_ACTION_PROP)),
+            ));
+        }
+        _ => {}
+    }
+    out
 }
 
 struct PinGeom {
@@ -540,6 +657,8 @@ struct NodeGeom {
     breakpoint: bool,
     /// Opt-in preview slot; `None` — the common case — costs nothing.
     preview: Option<crate::engine::node_graph::PreviewKind>,
+    /// Pin-less reserved-property rows, drawn above the pin band.
+    config: Vec<ConfigGeom>,
     pins: Vec<PinGeom>,
 }
 
@@ -757,6 +876,7 @@ fn build_geoms(
                     reroute: true,
                     breakpoint: state.has_breakpoint(n.id),
                     preview: None,
+                    config: Vec::new(),
                     pins: vec![
                         pin(REROUTE_IN, false, min.x),
                         pin(REROUTE_OUT, true, min.x + d),
@@ -802,7 +922,19 @@ fn build_geoms(
                     pins(&d.outputs),
                 )
             } else {
-                (n.type_id.clone(), None, true, vec![], vec![])
+                // Nothing resolved — an unknown type, or a variable node whose
+                // declaration was deleted. The *name* is still knowable in the
+                // second case (`Get health`), and `DocDescriptors::display_name`
+                // exists precisely so a broken node does not render as the bare
+                // slug `var_get`, which tells the author nothing about what
+                // broke. Falls back to the type id when even that is unknown.
+                (
+                    docd.display_name(n.id).unwrap_or_else(|| n.type_id.clone()),
+                    None,
+                    true,
+                    vec![],
+                    vec![],
+                )
             };
 
             let tag = derive_tag(is_sub, desc, category.as_deref());
@@ -842,10 +974,30 @@ fn build_geoms(
             let ghost_in = ghosts.iter().filter(|(_, o)| !*o).count();
             let ghost_out = ghosts.iter().filter(|(_, o)| *o).count();
 
+            // Config rows sit in a band **above** the pins, so they shift the
+            // entire pin band down by `config.len()` rows. Every site that
+            // derives a row position from an index goes through `row_y`, and
+            // `row_y` is the only place the offset is applied — that is the
+            // whole defence against a one-row error putting wires beside
+            // their pins. (`PinGeom::row` is deliberately *not* offset: it is
+            // the router's bundle-stagger lane index — "which pin of this
+            // column" — not a geometric row.)
+            let config = config_rows(n, &docd);
+            let config_n = config.len();
+
             let rows = (inputs.len() + ghost_in)
                 .max(outputs.len() + ghost_out)
                 .max(1);
             let mut content_w: f32 = header_w;
+            for (_, label, _) in &config {
+                content_w = content_w.max(
+                    m.pad_x
+                        + p.measure_text(label, label_px, None).x
+                        + m.label_gap
+                        + m.config_value_w()
+                        + m.pad_x,
+                );
+            }
             for i in 0..rows.min(inputs.len().max(outputs.len()).max(1)) {
                 let left = inputs
                     .get(i)
@@ -875,9 +1027,20 @@ fn build_geoms(
             let preview_h = desc
                 .and_then(|d| d.preview)
                 .map_or(0.0, |_| m.preview_side() + m.body_pad);
-            let height = m.header_h + rows as f32 * m.row_h + preview_h + m.body_pad;
+            let height = m.node_h(config_n, rows, preview_h);
             let rect = Rect::from_min_size(min, Vec2::new(width, height));
-            let row_y = |i: usize| min.y + m.header_h + i as f32 * m.row_h + m.row_h * 0.5;
+            // `i` is a *pin* row index; the config band is added here, once.
+            let row_y = |i: usize| m.band_y(min.y, config_n + i);
+            let config: Vec<ConfigGeom> = config
+                .into_iter()
+                .enumerate()
+                .map(|(i, (key, label, kind))| ConfigGeom {
+                    key,
+                    label,
+                    kind,
+                    y: m.band_y(min.y, i),
+                })
+                .collect();
 
             let mut pins = Vec::new();
             let (in_count, out_count) = (inputs.len(), outputs.len());
@@ -956,6 +1119,7 @@ fn build_geoms(
                 errored: errors.nodes.contains(&n.id),
                 reroute: is_reroute,
                 preview: desc.and_then(|d| d.preview),
+                config,
                 pins,
             }
         })
@@ -1173,6 +1337,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         finish_node_drag(state, registry);
         finish_annotation_drag(state, registry);
         state.flush_prop_edit(registry);
+        // The variables panel's defaults coalesce on the same rule as node
+        // properties — one drag, one entry — so they close on the same beat.
+        state.flush_var_default_edit(registry);
     }
 
     if handle_shortcuts && focused {
@@ -1184,6 +1351,22 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // everything measured off the canvas rect (F/A framing, the error overlay)
     // follows automatically.
     graph_toolbar(ui, state, wire_prefs.style, wire_style_request);
+
+    // The variables strip takes its column out of the available space the same
+    // way the toolbar takes its row: the cursor moves right by the strip's
+    // width before the canvas allocates, so the canvas shrinks by exactly that
+    // much and every overlay measured off `out.rect` follows. Painted after
+    // the canvas (the two rects are disjoint, so paint order only decides who
+    // draws over a shared edge, and the strip should).
+    let strip = {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        let w = if state.vars.open { VARS_W * s } else { VARS_RAIL_W * s };
+        let c = ui.cursor();
+        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y));
+        ui.set_cursor(Pos2::new(c.x + w, c.y));
+        r
+    };
 
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
@@ -1233,6 +1416,28 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         view = v;
     }
     state.view = view;
+
+    // A row released over the canvas: remember where, and ask Get or Set.
+    // Taken here rather than inside the canvas body because the body runs
+    // before the strip is drawn, and the payload only has to be claimed once
+    // per frame — the drag survives frames on the context, not on either side.
+    if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
+        if let Some(sp) = ui.ctx().input.pointer_pos {
+            let v = state.view;
+            state.vars.drop = Some(VarDrop {
+                slug: p.slug,
+                label: p.label,
+                world: [
+                    v.pan.x + (sp.x - out.rect.min.x) / v.zoom,
+                    v.pan.y + (sp.y - out.rect.min.y) / v.zoom,
+                ],
+                screen: [sp.x, sp.y],
+            });
+        }
+    }
+    variables_panel(ui, strip, state, registry);
+    var_drop_popup(ui, state, registry);
+    var_confirm_dialog(ui, out.rect, state, registry);
 
     palette_popover(ui, state, registry, subgraph_assets);
     find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
@@ -1316,6 +1521,10 @@ fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
     state.palette.is_some()
         || state.find.is_some()
         || state.editing.is_some()
+        // The variables strip's two transient surfaces: the Get/Set choice and
+        // a confirmation. Both own Escape while they are up.
+        || state.vars.drop.is_some()
+        || state.vars.confirm.is_some()
         // Any crusty text field holding focus counts, wherever it lives — an
         // inspector name box, a search field in another panel. Single-key
         // shortcuts must never fire mid-typing.
@@ -1360,6 +1569,7 @@ fn handle_panel_keys(
                 state.paste_clipboard(clipboard, at, registry);
             }
             Action::DUPLICATE => state.duplicate_selection(registry),
+            Action::TOGGLE_VARIABLES => state.vars.open = !state.vars.open,
             _ => {}
         }
     }
@@ -2436,6 +2646,10 @@ fn draw_and_interact(
                 Action::FIND => {
                     state.find = Some(FindState { first_frame: true, ..Default::default() });
                 }
+                // `Canvas` walks out to `GraphTab`, so the strip toggles from
+                // the canvas too — which is where the pointer is when an
+                // author decides they want the list back.
+                Action::TOGGLE_VARIABLES => state.vars.open = !state.vars.open,
                 // Same cursor the count chip drives, so the two never disagree.
                 Action::NEXT_ERROR => *cycle_error_request = Some(true),
                 Action::PREV_ERROR => *cycle_error_request = Some(false),
@@ -3728,6 +3942,848 @@ fn graph_toolbar(
 }
 
 // ---------------------------------------------------------------------------
+// Variables strip (45-A P6c)
+// ---------------------------------------------------------------------------
+
+/// Expanded width of the variables strip, base units. Wide enough that a
+/// two-word name, a `Vec3[]` tag and the usage count sit in three columns
+/// without crowding the right edge (review finding, 2026-08-11).
+const VARS_W: f32 = 240.0;
+/// Collapsed rail width: the caret that brings the strip back, and the count.
+const VARS_RAIL_W: f32 = 22.0;
+/// Type chip side, base units.
+const VARS_CHIP: f32 = 9.0;
+
+/// What a dragged variable row carries onto the canvas.
+#[derive(Clone)]
+struct VarDragPayload {
+    slug: String,
+    label: String,
+}
+
+/// The element types the add / retype pickers offer, in order.
+///
+/// Deliberately the scalar set plus `Entity`: `Exec` is not data, `Enum` has
+/// no variant list to declare here, and textures/meshes/domain types belong to
+/// the editors that own them. The `Array` checkbox wraps whichever one is
+/// picked, which is how `Float[]` is authored without a second list.
+fn var_types() -> [(&'static str, PinType); 6] {
+    [
+        ("Float", PinType::Float),
+        ("Int", PinType::Int),
+        ("String", PinType::String),
+        ("Bool", PinType::Bool),
+        ("Vec3", PinType::Vec3),
+        ("Entity", PinType::Entity),
+    ]
+}
+
+/// The tag a variable row shows: `Float`, `Float[]`, and for anything the
+/// picker cannot make, its honest type slug.
+fn type_label(ty: &PinType) -> String {
+    match ty {
+        PinType::Array(inner) => format!("{}[]", type_label(inner)),
+        PinType::Float => "Float".to_string(),
+        PinType::Int => "Int".to_string(),
+        PinType::String => "String".to_string(),
+        PinType::Bool => "Bool".to_string(),
+        PinType::Vec2 => "Vec2".to_string(),
+        PinType::Vec3 => "Vec3".to_string(),
+        PinType::Vec4 => "Vec4".to_string(),
+        PinType::Color => "Color".to_string(),
+        PinType::Entity => "Entity".to_string(),
+        other => other.type_slug(),
+    }
+}
+
+/// Split a declared type into what the two controls hold: (picker index,
+/// array). A type the picker cannot express answers index 0 — the row's tag
+/// still shows the truth, and touching the picker is then an explicit retype.
+fn type_pick(ty: &PinType) -> (usize, bool) {
+    let (elem, array) = match ty {
+        PinType::Array(inner) => (inner.as_ref().clone(), true),
+        other => (other.clone(), false),
+    };
+    let i = var_types().iter().position(|(_, t)| *t == elem).unwrap_or(0);
+    (i, array)
+}
+
+/// Rebuild a `PinType` from the two controls.
+fn type_from_pick(index: usize, array: bool) -> PinType {
+    let ty = var_types()
+        .get(index)
+        .map(|(_, t)| t.clone())
+        .unwrap_or(PinType::Float);
+    if array {
+        PinType::Array(Box::new(ty))
+    } else {
+        ty
+    }
+}
+
+/// A button drawn at an exact rect (the strip lays itself out by hand, so the
+/// buttons have to as well).
+fn strip_button(ui: &mut Ui, id: Id, rect: Rect, label: &str, variant: u8) -> bool {
+    let mut clicked = false;
+    ui.run_at(
+        rect,
+        Direction::TopDown,
+        id,
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            let b = Button::new(label).exact_size(rect.size());
+            let b = match variant {
+                1 => b.primary(),
+                // Outline, not filled: a filled danger button is the design
+                // system's dialog treatment, and a row-level control that
+                // shouts red before anything is at stake is noise. The weight
+                // belongs on the confirmation, which is where the loss is.
+                2 => b.danger_outline(),
+                _ => b.ghost(),
+            };
+            clicked = b.show(ui).clicked;
+        },
+    );
+    clicked
+}
+
+/// One edit the strip asks for. Collected during the draw and applied after,
+/// so the drawing pass never holds a borrow across a document mutation — and
+/// so every mutation goes through one `match` that is easy to read against the
+/// P6b model ops.
+enum VarRequest {
+    Add(String, PinType),
+    Rename(String, String),
+    /// Retype straight through (no uses) or after a confirmation.
+    Retype(String, PinType),
+    /// Ask first: the count is the reason to ask.
+    ConfirmRetype(String, PinType, usize),
+    ConfirmDelete(String, usize),
+    SetDefault(String, PropValue),
+}
+
+/// The variables side strip: an elevated column beside the canvas listing the
+/// document's declarations, with the whole authoring loop on it — add, rename,
+/// retype, edit the default, delete, and drag a row onto the canvas.
+///
+/// **It contains no edit logic of its own.** Every mutation is one of the five
+/// P6b `GraphEditorState` operations, which is what keeps undo, validation and
+/// the no-coercion retype rule identical whether an edit came from here, from
+/// a config row, or from a test.
+fn variables_panel(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+) {
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let row_h = st.metrics.row_height;
+    let small = st.fonts.small;
+    {
+        let mut p = ui.painter();
+        p.rect_filled(rect, Rounding::ZERO, st.palette.elevated);
+        p.line_segment(
+            Pos2::new(rect.max.x, rect.min.y),
+            Pos2::new(rect.max.x, rect.max.y),
+            st.metrics.border,
+            st.palette.stroke,
+        );
+    }
+
+    if !state.vars.open {
+        // Collapsed: a rail carrying the caret back to the list and the count,
+        // so a graph with variables never hides that fact completely.
+        let btn = Rect::from_min_size(
+            Pos2::new(rect.min.x + st.metrics.border, rect.min.y + pad * 0.5),
+            Vec2::new(rect.width() - st.metrics.border * 2.0, st.metrics.control_height),
+        );
+        if strip_button(ui, Id::new("graph_vars_expand"), btn, "\u{203a}", 0) {
+            state.vars.open = true;
+        }
+        let n = state.doc.variables.len().to_string();
+        let mut p = ui.painter();
+        let w = p.measure_text_family(&n, small, None, FontFamily::Mono).x;
+        p.text_family(
+            Pos2::new(rect.center().x - w * 0.5, btn.max.y + pad * 0.5),
+            &n,
+            small,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+        return;
+    }
+
+    // Snapshot the document side so the draw pass reads a stable list while
+    // the requests it collects mutate it afterwards.
+    let vars: Vec<crate::engine::node_graph::VarDecl> = state.doc.variables.clone();
+    let uses: Vec<usize> = vars
+        .iter()
+        .map(|v| state.variable_usage_count(&v.slug))
+        .collect();
+    let mut request: Option<VarRequest> = None;
+    let mut collapse = false;
+    let mut select: Option<Option<String>> = None;
+
+    let w = rect.width() - pad;
+    let inner = Rect::from_min_max(
+        Pos2::new(rect.min.x + pad * 0.5, rect.min.y),
+        Pos2::new(rect.max.x - pad * 0.5, rect.max.y),
+    );
+    let selected = state.vars.selected.clone();
+    let mut new_var = state.vars.new_var.clone();
+    let mut rename_buf = state.vars.rename_buf.clone();
+
+    ui.run_at(
+        inner,
+        Direction::TopDown,
+        Id::new("graph_vars_strip"),
+        UiOptions { padding: Vec2::new(0.0, pad * 0.5), spacing: pad * 0.25 },
+        |ui| {
+            // ── Header: the section label, add, collapse.
+            let head = ui.allocate(Vec2::new(w, st.metrics.control_height));
+            ui.painter().text_family(
+                Pos2::new(head.min.x, head.center().y - small * 0.62),
+                "VARIABLES",
+                small,
+                st.palette.text_secondary,
+                None,
+                FontFamily::Mono,
+            );
+            let bh = st.metrics.control_height;
+            let caret = Rect::from_min_size(
+                Pos2::new(head.max.x - bh, head.min.y),
+                Vec2::splat(bh),
+            );
+            let plus = Rect::from_min_size(
+                Pos2::new(caret.min.x - bh - pad * 0.25, head.min.y),
+                Vec2::splat(bh),
+            );
+            if strip_button(ui, Id::new("graph_vars_add"), plus, "+", 0) {
+                new_var = match new_var {
+                    Some(_) => None,
+                    None => Some(NewVarDraft { first_frame: true, ..Default::default() }),
+                };
+            }
+            if strip_button(ui, Id::new("graph_vars_collapse"), caret, "\u{2039}", 0) {
+                collapse = true;
+            }
+
+            // ── Add draft.
+            if let Some(draft) = new_var.as_mut() {
+                // Three rows — name, type, actions — rather than two: at strip
+                // width a dropdown, a checkbox and a button on one line collide
+                // into a single unreadable band, and the commit action deserves
+                // its own row anyway.
+                let block =
+                    ui.allocate(Vec2::new(w, st.metrics.control_height * 3.0 + pad * 3.0));
+                {
+                    let mut p = ui.painter();
+                    p.rect_filled(block, st.rounding.small, st.palette.window);
+                    p.rect_stroke(
+                        block,
+                        st.rounding.small,
+                        st.metrics.border,
+                        st.palette.stroke_strong,
+                    );
+                }
+                let mut commit = false;
+                let mut cancel = false;
+                ui.run_at(
+                    Rect::from_min_max(
+                        block.min + Vec2::splat(pad * 0.5),
+                        block.max - Vec2::splat(pad * 0.5),
+                    ),
+                    Direction::TopDown,
+                    Id::new("graph_vars_new"),
+                    UiOptions { padding: Vec2::ZERO, spacing: pad * 0.75 },
+                    |ui| {
+                        let fw = w - pad;
+                        let out = TextEdit::new(&mut draft.name)
+                            .hint("New variable\u{2026}")
+                            .width(fw)
+                            .request_focus(draft.first_frame)
+                            .show_full(ui);
+                        commit |= out.submitted;
+                        cancel |= out.cancelled;
+                        draft.first_frame = false;
+                        let row = ui.allocate(Vec2::new(fw, st.metrics.control_height));
+                        ui.run_at(
+                            row,
+                            Direction::LeftToRight,
+                            Id::new("graph_vars_new_row"),
+                            UiOptions { padding: Vec2::ZERO, spacing: pad },
+                            |ui| {
+                                ComboBox::new("graph_vars_new_ty")
+                                    .selected_text(var_types()[draft.ty].0)
+                                    .width(fw * 0.46)
+                                    .show_ui(ui, |ui| {
+                                        for (i, (name, _)) in var_types().iter().enumerate() {
+                                            SelectableValue::new(&mut draft.ty, i, *name).show(ui);
+                                        }
+                                    });
+                                Checkbox::new(&mut draft.array, "Array").show(ui);
+                            },
+                        );
+                        let bw = (fw - pad) * 0.5;
+                        let actions = ui.allocate(Vec2::new(fw, st.metrics.control_height));
+                        ui.run_at(
+                            actions,
+                            Direction::LeftToRight,
+                            Id::new("graph_vars_new_actions"),
+                            UiOptions { padding: Vec2::ZERO, spacing: pad },
+                            |ui| {
+                                cancel |= Button::new("Cancel")
+                                    .exact_size(Vec2::new(bw, st.metrics.control_height))
+                                    .show(ui)
+                                    .clicked;
+                                commit |= Button::new("Add")
+                                    .primary()
+                                    .exact_size(Vec2::new(bw, st.metrics.control_height))
+                                    .show(ui)
+                                    .clicked;
+                            },
+                        );
+                    },
+                );
+                if commit && !draft.name.trim().is_empty() {
+                    request = Some(VarRequest::Add(
+                        draft.name.clone(),
+                        type_from_pick(draft.ty, draft.array),
+                    ));
+                    new_var = None;
+                } else if cancel {
+                    new_var = None;
+                }
+            }
+
+            // ── The list.
+            if vars.is_empty() && new_var.is_none() {
+                let row = ui.allocate(Vec2::new(w, row_h));
+                ui.painter().text(
+                    Pos2::new(row.min.x, row.center().y - small * 0.62),
+                    "No variables yet \u{2014} + to add one",
+                    small,
+                    st.palette.text_disabled,
+                    None,
+                );
+            }
+            for (i, v) in vars.iter().enumerate() {
+                let is_sel = selected.as_deref() == Some(v.slug.as_str());
+                let row = ui.allocate(Vec2::new(w, row_h));
+                let id = ui.alloc_id(("graph_var_row", v.slug.as_str()));
+                let resp = ui.interact(id, row);
+                let dragging = ui.dnd_drag_source::<VarDragPayload>(
+                    id,
+                    row,
+                    v.label.clone(),
+                    || VarDragPayload { slug: v.slug.clone(), label: v.label.clone() },
+                );
+                if resp.clicked {
+                    select = Some(if is_sel { None } else { Some(v.slug.clone()) });
+                }
+                let mut p = ui.painter();
+                if is_sel {
+                    p.rect_filled(row, st.rounding.small, st.palette.selection_fill);
+                } else if resp.hovered && !dragging {
+                    p.rect_filled(row, st.rounding.small, st.palette.hover);
+                }
+                // Type chip: the pin colour, so a row and the pin it drops as
+                // are recognisably the same thing.
+                let c = VARS_CHIP * s;
+                p.rect_filled(
+                    Rect::from_center_size(
+                        Pos2::new(row.min.x + pad * 0.5 + c * 0.5, row.center().y),
+                        Vec2::splat(c),
+                    ),
+                    Rounding::same(c * 0.3),
+                    pin_color(Some(registry), &v.ty),
+                );
+                let tag = type_label(&v.ty);
+                let tag_w = p.measure_text_family(&tag, small, None, FontFamily::Mono).x;
+                // `3×`, not a bare `3`: next to a type tag a lone digit reads
+                // as part of the type. The count column is fixed-width so the
+                // tags line up down the list instead of ragging.
+                let count = format!("{}\u{d7}", uses[i]);
+                let count_w = p
+                    .measure_text_family(&count, small, None, FontFamily::Mono)
+                    .x
+                    .max(p.measure_text_family("00\u{d7}", small, None, FontFamily::Mono).x);
+                p.text_family(
+                    Pos2::new(row.max.x - count_w, row.center().y - small * 0.62),
+                    &count,
+                    small,
+                    st.palette.text_disabled,
+                    None,
+                    FontFamily::Mono,
+                );
+                p.text_family(
+                    Pos2::new(
+                        row.max.x - count_w - pad - tag_w,
+                        row.center().y - small * 0.62,
+                    ),
+                    &tag,
+                    small,
+                    st.palette.text_secondary,
+                    None,
+                    FontFamily::Mono,
+                );
+                let lx = row.min.x + pad * 0.5 + c + pad * 0.5;
+                let avail = row.max.x - count_w - pad * 1.5 - tag_w - lx;
+                let label = clip_text(&mut p, &v.label, st.fonts.body, avail);
+                p.text(
+                    Pos2::new(lx, row.center().y - st.fonts.body * 0.62),
+                    &label,
+                    st.fonts.body,
+                    if is_sel { st.palette.selection_text } else { st.palette.text },
+                    None,
+                );
+
+                // ── Detail block for the selected row.
+                if !is_sel {
+                    continue;
+                }
+                if rename_buf.is_none() {
+                    rename_buf = Some(v.label.clone());
+                }
+                let block =
+                    ui.allocate(Vec2::new(w, st.metrics.control_height * 3.0 + pad * 3.0));
+                {
+                    // Inset, not another shade of the strip: the detail block
+                    // is a form attached to the row above it, and on
+                    // `elevated` a `header` fill was indistinguishable.
+                    let mut p = ui.painter();
+                    p.rect_filled(block, st.rounding.small, st.palette.window);
+                    // `stroke_strong`, not `stroke`: this block belongs to the
+                    // row above it, and a hairline in the weak tone read as
+                    // "some more controls" rather than as one enclosure.
+                    p.rect_stroke(
+                        block,
+                        st.rounding.small,
+                        st.metrics.border,
+                        st.palette.stroke_strong,
+                    );
+                }
+                let (mut pick, mut array) = type_pick(&v.ty);
+                let (pick0, array0) = (pick, array);
+                let mut delete = false;
+                let mut default_now: Option<PropValue> = None;
+                let mut rename_done = false;
+                let buf = rename_buf.get_or_insert_with(|| v.label.clone());
+                ui.run_at(
+                    Rect::from_min_max(
+                        block.min + Vec2::splat(pad * 0.5),
+                        block.max - Vec2::splat(pad * 0.5),
+                    ),
+                    Direction::TopDown,
+                    Id::new(("graph_var_detail", v.slug.as_str())),
+                    UiOptions { padding: Vec2::ZERO, spacing: pad * 0.5 },
+                    |ui| {
+                        let fw = w - pad;
+                        let out = TextEdit::new(buf).hint("Name").width(fw).show_full(ui);
+                        // Commit on Enter or when the field gives the keyboard
+                        // back — never per keystroke, which would put one undo
+                        // entry on the stack per letter typed.
+                        rename_done = out.submitted || !out.focused;
+                        let ty_row = ui.allocate(Vec2::new(fw, st.metrics.control_height));
+                        ui.run_at(
+                            ty_row,
+                            Direction::LeftToRight,
+                            Id::new(("graph_var_ty", v.slug.as_str())),
+                            UiOptions { padding: Vec2::ZERO, spacing: pad * 0.5 },
+                            |ui| {
+                                ComboBox::new(format!("graph_var_ty_{}", v.slug))
+                                    .selected_text(var_types()[pick].0)
+                                    .width(fw * 0.42)
+                                    .show_ui(ui, |ui| {
+                                        for (i, (name, _)) in var_types().iter().enumerate() {
+                                            SelectableValue::new(&mut pick, i, *name).show(ui);
+                                        }
+                                    });
+                                Checkbox::new(&mut array, "Array").show(ui);
+                            },
+                        );
+                        let d_row = ui.allocate(Vec2::new(fw, st.metrics.control_height));
+                        let label_w = fw * 0.36;
+                        ui.painter().text(
+                            Pos2::new(d_row.min.x, d_row.center().y - small * 0.62),
+                            "Default",
+                            small,
+                            st.palette.text_secondary,
+                            None,
+                        );
+                        let cell = Rect::from_min_size(
+                            Pos2::new(d_row.min.x + label_w, d_row.min.y),
+                            Vec2::new(fw - label_w - st.metrics.control_height - pad * 0.5,
+                                d_row.height()),
+                        );
+                        default_now = var_default_widget(ui, cell, v);
+                        let del = Rect::from_min_size(
+                            Pos2::new(d_row.max.x - st.metrics.control_height, d_row.min.y),
+                            Vec2::splat(st.metrics.control_height),
+                        );
+                        delete = strip_button(
+                            ui,
+                            Id::new(("graph_var_del", v.slug.as_str())),
+                            del,
+                            "\u{2715}",
+                            2,
+                        );
+                    },
+                );
+                let want = type_from_pick(pick, array);
+                if (pick, array) != (pick0, array0) && want != v.ty {
+                    request = Some(if uses[i] > 0 {
+                        VarRequest::ConfirmRetype(v.slug.clone(), want, uses[i])
+                    } else {
+                        VarRequest::Retype(v.slug.clone(), want)
+                    });
+                } else if delete {
+                    request = Some(VarRequest::ConfirmDelete(v.slug.clone(), uses[i]));
+                } else if let Some(val) = default_now {
+                    request = Some(VarRequest::SetDefault(v.slug.clone(), val));
+                } else if rename_done {
+                    let text = buf.trim().to_string();
+                    if !text.is_empty() && text != v.label {
+                        request = Some(VarRequest::Rename(v.slug.clone(), text));
+                    }
+                }
+            }
+        },
+    );
+
+    state.vars.new_var = new_var;
+    state.vars.rename_buf = rename_buf;
+    if collapse {
+        state.vars.open = false;
+    }
+    if let Some(sel) = select {
+        state.vars.selected = sel;
+        // A different row means a different name in the field.
+        state.vars.rename_buf = None;
+    }
+    match request {
+        Some(VarRequest::Add(name, ty)) => {
+            let slug = state.add_variable(&name, ty, registry);
+            state.vars.selected = Some(slug);
+            state.vars.rename_buf = None;
+        }
+        Some(VarRequest::Rename(slug, label)) => {
+            state.rename_variable(&slug, &label, registry);
+        }
+        Some(VarRequest::Retype(slug, ty)) => {
+            state.retype_variable(&slug, ty, registry);
+        }
+        Some(VarRequest::ConfirmRetype(slug, ty, uses)) => {
+            state.vars.confirm = Some(VarConfirm::Retype { slug, ty, uses });
+        }
+        Some(VarRequest::ConfirmDelete(slug, uses)) => {
+            state.vars.confirm = Some(VarConfirm::Delete { slug, uses });
+        }
+        Some(VarRequest::SetDefault(slug, value)) => {
+            state.set_variable_default(&slug, Some(value), registry);
+        }
+        None => {}
+    }
+}
+
+/// The default-value editor for one declaration: the P6a field widgets, keyed
+/// by the declared type. The types with no constant form say so rather than
+/// showing a zero they do not have.
+fn var_default_widget(
+    ui: &mut Ui,
+    cell: Rect,
+    decl: &crate::engine::node_graph::VarDecl,
+) -> Option<PropValue> {
+    let st = ui.style();
+    let mut changed: Option<PropValue> = None;
+    let d = decl.default.clone();
+    ui.run_at(
+        cell,
+        Direction::LeftToRight,
+        Id::new(("graph_var_default", decl.slug.as_str())),
+        UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item * 0.5 },
+        |ui| match (&decl.ty, d) {
+            (PinType::Float, Some(PropValue::Float(v))) => {
+                let mut x = v;
+                DragValue::new(&mut x).width(cell.width()).show(ui);
+                if x != v {
+                    changed = Some(PropValue::Float(x));
+                }
+            }
+            (PinType::Int, Some(PropValue::Int(v))) => {
+                let mut x = v as f32;
+                DragValue::new(&mut x)
+                    .speed(0.05)
+                    .decimals(0)
+                    .min_decimals(0)
+                    .width(cell.width())
+                    .show(ui);
+                if x.round() as i32 != v {
+                    changed = Some(PropValue::Int(x.round() as i32));
+                }
+            }
+            (PinType::Bool, Some(PropValue::Bool(v))) => {
+                let mut b = v;
+                Checkbox::new(&mut b, "").show(ui);
+                if b != v {
+                    changed = Some(PropValue::Bool(b));
+                }
+            }
+            (PinType::String, Some(PropValue::Str(v))) => {
+                let mut t = v.clone();
+                TextEdit::new(&mut t).width(cell.width()).show(ui);
+                if t != v {
+                    changed = Some(PropValue::Str(t));
+                }
+            }
+            (PinType::Vec3, Some(PropValue::Vec3(v))) => {
+                let mut out = v;
+                let w = (cell.width() - st.spacing.item) / 3.0;
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    let mut x = out[i];
+                    DragValue::new(&mut x)
+                        .prefix(format!("{axis} "))
+                        .width(w)
+                        .show(ui);
+                    out[i] = x;
+                }
+                if out != v {
+                    changed = Some(PropValue::Vec3(out));
+                }
+            }
+            // Entity has no constant form; an array literal editor is a stated
+            // non-goal (D9). Both say so instead of faking a field.
+            (_, value) => {
+                let text = match value {
+                    Some(v) => prop_display(&v),
+                    None => "\u{2014}".to_string(),
+                };
+                ui.painter().text_family(
+                    Pos2::new(cell.min.x, cell.center().y - st.fonts.small * 0.62),
+                    &text,
+                    st.fonts.small,
+                    st.palette.text_disabled,
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+        },
+    );
+    changed
+}
+
+/// The two-choice popup a variable drop opens: Get or Set, at the cursor.
+///
+/// Rule 1 surface — it registers on the modal stack, so the press that
+/// dismisses it is consumed rather than also landing on the canvas.
+fn var_drop_popup(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+) {
+    let Some(drop) = state.vars.drop.clone() else {
+        ui.ctx_mut().modal_dismiss(var_drop_modal_id());
+        return;
+    };
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let row_h = st.metrics.row_height;
+    let rows = [
+        (format!("Get {}", drop.label), false),
+        (format!("Set {}", drop.label), true),
+    ];
+    let mut w: f32 = 0.0;
+    {
+        let mut p = ui.painter();
+        for (text, _) in &rows {
+            w = w.max(p.measure_text(text, st.fonts.body, None).x);
+        }
+    }
+    let w = w + pad * 3.0;
+    let rect = Rect::from_min_size(
+        Pos2::new(drop.screen[0], drop.screen[1]),
+        Vec2::new(w, row_h * 2.0 + pad),
+    );
+    ui.ctx_mut().modal_push(var_drop_modal_id(), rect);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(
+            rect,
+            st.rounding.panel,
+            st.palette.elevated.with_alpha(st.palette.popover_alpha),
+        );
+        p.rect_stroke(rect, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut picked: Option<bool> = None;
+    for (i, (text, set)) in rows.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.min.x + pad * 0.5, rect.min.y + pad * 0.5 + i as f32 * row_h),
+            Vec2::new(w - pad, row_h),
+        );
+        let id = ui.alloc_id(("graph_var_drop", i));
+        let resp = ui.interact(id, row);
+        let mut p = ui.painter();
+        if resp.hovered {
+            p.rect_filled(row, st.rounding.small, st.palette.selection_fill);
+        }
+        p.text(
+            Pos2::new(row.min.x + pad * 0.5, row.center().y - st.fonts.body * 0.62),
+            text,
+            st.fonts.body,
+            st.palette.text,
+            None,
+        );
+        if resp.clicked {
+            picked = Some(*set);
+        }
+    }
+    if let Some(set) = picked {
+        state.add_variable_node(&drop.slug, set, drop.world, registry);
+        state.vars.drop = None;
+        ui.ctx_mut().modal_dismiss(var_drop_modal_id());
+        return;
+    }
+    if ui.ctx().input.key_pressed(Key::Escape)
+        || ui.ctx().modal_dismissed(var_drop_modal_id()).is_some()
+    {
+        state.vars.drop = None;
+        ui.ctx_mut().modal_dismiss(var_drop_modal_id());
+    }
+}
+
+fn var_drop_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("graph_var_drop")
+}
+
+/// Retype / delete confirmation. Both name the usage count, because the count
+/// is the consequence: a retype leaves stale wires for validation to flag, and
+/// a delete leaves `UnknownVariable` placeholders on the nodes that named it.
+fn var_confirm_dialog(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+) {
+    let Some(confirm) = state.vars.confirm.clone() else {
+        return;
+    };
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let label = |slug: &str| {
+        state
+            .doc
+            .variable(slug)
+            .map(|v| v.label.clone())
+            .unwrap_or_else(|| slug.to_string())
+    };
+    let plural = |n: usize| if n == 1 { "node" } else { "nodes" };
+    let (title, detail, danger) = match &confirm {
+        VarConfirm::Retype { slug, ty, uses } => (
+            format!("Retype \u{201c}{}\u{201d} to {}?", label(slug), type_label(ty)),
+            format!(
+                "{} {} read or write it. Wires that no longer type-check will be flagged.",
+                uses,
+                plural(*uses)
+            ),
+            false,
+        ),
+        VarConfirm::Delete { slug, uses } if *uses > 0 => (
+            format!("Delete \u{201c}{}\u{201d}?", label(slug)),
+            format!(
+                "{} {} will keep the name and report it as unknown.",
+                uses,
+                plural(*uses)
+            ),
+            true,
+        ),
+        VarConfirm::Delete { slug, .. } => (
+            format!("Delete \u{201c}{}\u{201d}?", label(slug)),
+            "Nothing uses it.".to_string(),
+            true,
+        ),
+    };
+    let font = st.fonts.body;
+    let w = {
+        let mut p = ui.painter();
+        p.measure_text(&title, font, None)
+            .x
+            .max(p.measure_text(&detail, st.fonts.small, None).x)
+            + pad * 2.0
+    };
+    let panel = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.min.y + rect.height() * 0.3),
+        Vec2::new(w.max(260.0), st.metrics.control_height * 3.0 + pad * 2.0),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled_translucent(
+            rect,
+            Rounding::ZERO,
+            Color::BLACK.with_alpha(st.palette.scrim_alpha),
+        );
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+        p.text(
+            Pos2::new(panel.min.x + pad, panel.min.y + pad),
+            &title,
+            font,
+            st.palette.text,
+            None,
+        );
+        p.text(
+            Pos2::new(panel.min.x + pad, panel.min.y + pad + font * 1.6),
+            &detail,
+            st.fonts.small,
+            st.palette.text_secondary,
+            None,
+        );
+    }
+    let bw = 84.0;
+    let by = panel.max.y - pad - st.metrics.control_height;
+    let (mut go, mut cancel) = (false, false);
+    ui.run_at(
+        Rect::from_min_size(
+            Pos2::new(panel.max.x - pad - bw * 2.0 - st.spacing.item, by),
+            Vec2::new(bw * 2.0 + st.spacing.item, st.metrics.control_height),
+        ),
+        Direction::LeftToRight,
+        Id::new("graph_var_confirm"),
+        UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item },
+        |ui| {
+            cancel = Button::new("Cancel")
+                .exact_size(Vec2::new(bw, st.metrics.control_height))
+                .show(ui)
+                .clicked;
+            let go_b = Button::new(if danger { "Delete" } else { "Retype" })
+                .exact_size(Vec2::new(bw, st.metrics.control_height));
+            let go_b = if danger { go_b.danger() } else { go_b.primary() };
+            go = go_b.show(ui).clicked;
+        },
+    );
+    if cancel || ui.ctx().input.key_pressed(Key::Escape) {
+        state.vars.confirm = None;
+        return;
+    }
+    if go {
+        match confirm {
+            VarConfirm::Retype { slug, ty, .. } => {
+                state.retype_variable(&slug, ty, registry);
+            }
+            VarConfirm::Delete { slug, .. } => {
+                if state.remove_variable(&slug, registry) && state.vars.selected.as_deref() == Some(slug.as_str()) {
+                    state.vars.selected = None;
+                    state.vars.rename_buf = None;
+                }
+            }
+        }
+        state.vars.confirm = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
 
@@ -4714,6 +5770,51 @@ fn draw_nodes(
         }
 
         let label_px = st.fonts.small * zoom;
+
+        // Config band: pin-less rows for the reserved properties that shape
+        // the node. Labels are secondary text (they name a setting, not a
+        // value that flows), and a hairline rule closes the band so the pin
+        // rows below it read as a different kind of thing.
+        for cfg in &g.config {
+            let cy = scope.world_to_screen(Pos2::new(g.rect.min.x, cfg.y)).y;
+            let cell_w = m.config_value_w() * zoom;
+            let cell = Rect::from_min_size(
+                Pos2::new(
+                    srect.max.x - m.pad_x * zoom - cell_w,
+                    cy - m.row_h * zoom * 0.4,
+                ),
+                Vec2::new(cell_w, m.row_h * zoom * 0.8),
+            );
+            if lod.pin_labels() {
+                p.text(
+                    Pos2::new(srect.min.x + m.pad_x * zoom, cy - label_px * 0.5),
+                    &cfg.label,
+                    label_px,
+                    st.palette.text_secondary,
+                    None,
+                );
+            }
+            if lod.inline_widgets() {
+                pending_widgets.push((g.id, cfg.key.clone(), cell, cfg.kind.clone()));
+            } else if lod.values() {
+                draw_inline_readonly(&mut p, cell, &cfg.kind, label_px, st, zoom, m);
+            }
+        }
+        if !g.config.is_empty() {
+            let y = scope
+                .world_to_screen(Pos2::new(
+                    g.rect.min.x,
+                    g.config[g.config.len() - 1].y + m.row_h * 0.5,
+                ))
+                .y;
+            p.line_segment(
+                Pos2::new(srect.min.x, y),
+                Pos2::new(srect.max.x, y),
+                m.border,
+                st.palette.stroke,
+            );
+        }
+
         for pin in &g.pins {
             let c = scope.world_to_screen(pin.dot_center);
             draw_pin(&mut p, pin, c, zoom, m, st, registry);
@@ -4888,7 +5989,7 @@ fn draw_inline_readonly(
                 FontFamily::Mono,
             );
         }
-        InlineKind::Enum { value, ok, .. } => {
+        InlineKind::Enum { value, ok, .. } | InlineKind::Choice { value, ok, .. } => {
             // Out-of-list values read as a warning, not an error.
             let col = if *ok { st.palette.text_mono } else { status.warning };
             p.rect_filled(cell, round, st.palette.input);
@@ -5033,7 +6134,8 @@ fn inline_widget(
                     changed = Some(PropValue::Str(t));
                 }
             }
-            InlineKind::Enum { value, variants, .. } => {
+            InlineKind::Enum { value, variants, .. }
+            | InlineKind::Choice { value, variants, .. } => {
                 // `SelectableValue` wants a `Copy` value, so the selection is
                 // carried as an index and mapped back to the string.
                 let now = variants.iter().position(|v| v == value);
@@ -5048,7 +6150,13 @@ fn inline_widget(
                     });
                 if picked != now.unwrap_or(usize::MAX) {
                     if let Some(v) = variants.get(picked) {
-                        changed = Some(PropValue::Enum(v.clone()));
+                        // The write-back shape follows the *variant*, not the
+                        // widget: `var` is a `Str` on disk and must stay one,
+                        // or `DocDescriptors` stops resolving the node.
+                        changed = Some(match kind {
+                            InlineKind::Choice { .. } => PropValue::Str(v.clone()),
+                            _ => PropValue::Enum(v.clone()),
+                        });
                     }
                 }
             }
@@ -5825,6 +6933,20 @@ fn cycle_error(
 mod tests {
     use super::*;
 
+    /// A bare node instance, for the geometry/config tests.
+    fn test_node(id: u64, type_id: &str) -> NodeInst {
+        NodeInst {
+            id,
+            type_id: type_id.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: BTreeMap::new(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        }
+    }
+
     #[test]
     fn lod_thresholds_match_the_spec_ladder() {
         assert_eq!(ZoomLod::from_zoom(2.20), ZoomLod::L0);
@@ -5989,6 +7111,7 @@ mod tests {
             reroute: true,
             breakpoint: false,
             preview: None,
+            config: Vec::new(),
             pins: vec![pin(REROUTE_IN, false), pin(REROUTE_OUT, true)],
         }
     }
@@ -6111,6 +7234,7 @@ mod tests {
             reroute: false,
             breakpoint: false,
             preview: None,
+            config: Vec::new(),
             pins: vec![],
         };
         assert_eq!(g.body_rect(ZoomLod::L2, &m).height(), 120.0);
@@ -6133,6 +7257,7 @@ mod tests {
             reroute: false,
             breakpoint: false,
             preview: None,
+            config: Vec::new(),
             pins: vec![],
         };
         assert_eq!(g.edge_color(), category_color("Math"));
@@ -6294,41 +7419,159 @@ mod tests {
         }
     }
 
-    /// **Known gap, pinned rather than papered over.** P1 encodes an
-    /// `event_custom` payload declaration as a reserved *property* —
-    /// `payload.<slug>` holding `Enum(<type slug>)` — and reserved config
-    /// properties (`payload.*`, `event_name`, `action`, `var`) are deliberately
-    /// **not pins**. The inline editor only draws rows for pins, and it sources
-    /// dropdown variants from the pin descriptor, so today these properties
-    /// have no row and no dropdown at all.
-    ///
-    /// Handing `InlineKind::of` a variants list is not the fix — the value
-    /// renders correctly the moment it has one. The missing piece is node
-    /// *anatomy*: a config row above the pins. That is a design decision for
-    /// the variables/config pass, not something to smuggle in here, so this
-    /// test records exactly where the line currently falls.
+    /// **The gap P6a pinned, now closed.** Reserved config properties
+    /// (`var`, `event_name`, `action`, `payload.*`) are still deliberately not
+    /// pins — they decide what the pins *are* — so P6c gave them their own
+    /// anatomy: pin-less rows in a band above the pin rows. This asserts the
+    /// rows exist, carry the right widget, and (for `var`) write back the
+    /// storage shape `DocDescriptors` reads.
     #[test]
-    fn reserved_config_properties_have_no_inline_row_yet() {
-        // With no variants — which is what the pin lookup yields for a
-        // property that is not a pin — it degrades to a chip.
-        let none: &[String] = &[];
-        assert!(matches!(
-            InlineKind::of(&PropValue::Enum("float".into()), none),
-            InlineKind::Chip(_)
-        ));
-        // Given the payload type list it would render as a proper dropdown,
-        // so only the row is missing.
-        let variants: Vec<String> = node_graph_types::std_events::PAYLOAD_PIN_TYPES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        match InlineKind::of(&PropValue::Enum("float".into()), &variants) {
-            InlineKind::Enum { ok, variants: v, .. } => {
+    fn reserved_config_properties_have_rows() {
+        use crate::engine::node_graph::{
+            std_events::{EVENT_CUSTOM_TYPE_ID, EVENT_PAYLOAD_PREFIX},
+            GraphDoc, VarDecl, VAR_GET_TYPE_ID,
+        };
+        let mut reg = NodeRegistry::new();
+        node_graph_types::register_std_events(&mut reg).unwrap();
+
+        let mut doc = GraphDoc {
+            variables: vec![VarDecl {
+                slug: "score".into(),
+                label: "Score".into(),
+                ty: PinType::Int,
+                default: Some(PropValue::Int(0)),
+            }],
+            ..GraphDoc::default()
+        };
+        let mut get = test_node(0, VAR_GET_TYPE_ID);
+        get.properties
+            .insert(VAR_PROP.into(), PropValue::Str("score".into()));
+        let mut dangling = test_node(1, VAR_GET_TYPE_ID);
+        dangling
+            .properties
+            .insert(VAR_PROP.into(), PropValue::Str("deleted".into()));
+        let mut custom = test_node(2, EVENT_CUSTOM_TYPE_ID);
+        custom
+            .properties
+            .insert(EVENT_NAME_PROP.into(), PropValue::Str("Hit".into()));
+        custom.properties.insert(
+            format!("{EVENT_PAYLOAD_PREFIX}amount"),
+            PropValue::Enum("int".into()),
+        );
+        let action = test_node(3, EVENT_INPUT_ACTION_TYPE_ID);
+        doc.nodes = vec![get, dangling, custom, action];
+        let docd = DocDescriptors::new(&doc, &reg);
+
+        // A variable node: one dropdown over the document's declarations,
+        // stored as `Str` — an `Enum` here would stop `variable_of` resolving.
+        let rows = config_rows(&doc.nodes[0], &docd);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, VAR_PROP);
+        match &rows[0].2 {
+            InlineKind::Choice { value, variants, ok } => {
+                assert_eq!(value, "score");
+                assert_eq!(variants, &vec!["score".to_string()]);
                 assert!(ok);
-                assert_eq!(v.len(), 9);
             }
-            other => panic!("expected a dropdown once variants exist, got {other:?}"),
+            other => panic!("expected a Choice, got {other:?}"),
         }
+        // A dangling reference still shows the name that broke, flagged.
+        match &config_rows(&doc.nodes[1], &docd)[0].2 {
+            InlineKind::Choice { value, ok, .. } => {
+                assert_eq!(value, "deleted");
+                assert!(!ok, "a dangling slug is flagged, not hidden");
+            }
+            other => panic!("expected a Choice, got {other:?}"),
+        }
+        // A custom event: the name, then one row per declared payload pin.
+        let rows = config_rows(&doc.nodes[2], &docd);
+        assert_eq!(
+            rows.iter().map(|(k, _, _)| k.as_str()).collect::<Vec<_>>(),
+            vec![EVENT_NAME_PROP, "payload.amount"]
+        );
+        assert!(matches!(rows[0].2, InlineKind::Str(_)));
+        match &rows[1].2 {
+            InlineKind::Enum { value, variants, ok } => {
+                assert_eq!(value, "int");
+                assert_eq!(variants.len(), PAYLOAD_PIN_TYPES.len());
+                assert!(ok);
+            }
+            other => panic!("expected a payload-type dropdown, got {other:?}"),
+        }
+        // An input-action event gets its row even with nothing stored yet —
+        // the row is how the property comes to exist.
+        let rows = config_rows(&doc.nodes[3], &docd);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, EVENT_ACTION_PROP);
+        assert!(matches!(&rows[0].2, InlineKind::Str(s) if s.is_empty()));
+
+        // A plain registered node has no config band at all.
+        assert!(config_rows(&test_node(9, "event_tick"), &docd).is_empty());
+    }
+
+    /// **The five-site invariant.** Config rows shift the whole pin band down,
+    /// and every site that turns a row index into geometry has to agree or
+    /// wires land beside their pins. All of them go through `band_y` /
+    /// `node_h`, so the agreement is checkable without a canvas: pin row `i`
+    /// sits exactly `config_n` rows below where it would with no band, the
+    /// band's closing rule is the top of the first pin row, and the node grew
+    /// by exactly the band.
+    #[test]
+    fn a_config_band_shifts_the_pin_band_by_whole_rows() {
+        let m = GraphMetrics::new(&Style::steel());
+        let y0 = 40.0;
+        for config_n in 0..4usize {
+            for i in 0..3usize {
+                assert!(
+                    (m.band_y(y0, config_n + i) - (m.band_y(y0, i) + config_n as f32 * m.row_h))
+                        .abs()
+                        < 1e-4,
+                    "pin row {i} with {config_n} config rows"
+                );
+            }
+            // The rule under the last config row is the top of the first pin
+            // row — one shared boundary, not two that drift.
+            if config_n > 0 {
+                let rule = m.band_y(y0, config_n - 1) + m.row_h * 0.5;
+                let first_pin_top = m.band_y(y0, config_n) - m.row_h * 0.5;
+                assert!((rule - first_pin_top).abs() < 1e-4);
+            }
+            // Height grows by exactly the band.
+            assert!(
+                (m.node_h(config_n, 2, 0.0) - (m.node_h(0, 2, 0.0) + config_n as f32 * m.row_h))
+                    .abs()
+                    < 1e-4
+            );
+            // …and the last pin row still fits inside the body.
+            let last = m.band_y(y0, config_n + 1) + m.row_h * 0.5;
+            assert!(last <= y0 + m.node_h(config_n, 2, 0.0));
+        }
+    }
+
+    /// The strip's two type controls and the declared type are one round trip:
+    /// what the picker shows is what the declaration says, and rebuilding from
+    /// the controls gives the declaration back.
+    #[test]
+    fn the_type_picker_round_trips_a_declared_type() {
+        for ty in [
+            PinType::Float,
+            PinType::Int,
+            PinType::String,
+            PinType::Bool,
+            PinType::Vec3,
+            PinType::Entity,
+            PinType::Array(Box::new(PinType::Float)),
+            PinType::Array(Box::new(PinType::Entity)),
+        ] {
+            let (i, array) = type_pick(&ty);
+            assert_eq!(type_from_pick(i, array), ty, "{ty:?}");
+        }
+        assert_eq!(type_label(&PinType::Array(Box::new(PinType::Float))), "Float[]");
+        // A type the picker cannot express still reads honestly in the row and
+        // does not silently become Float on the way past.
+        let domain = PinType::Domain("shader".into());
+        assert_eq!(type_label(&domain), "domain:shader");
+        assert_eq!(type_pick(&domain), (0, false));
     }
 
     /// An `Enum` pin becomes a dropdown only when its descriptor says what

@@ -973,6 +973,8 @@ pub struct GraphEditorState {
     /// Set when a graph opened with no remembered view: the first draw frames
     /// all its content instead of landing at the origin at 100%.
     pub frame_all_on_open: bool,
+    /// The variables side strip (45-A P6c). Session-only.
+    pub vars: VarPanel,
 }
 
 /// The add-node palette's session state.
@@ -1248,6 +1250,61 @@ pub struct AnnotationDrag {
     pub captured: Vec<(u64, [f32; 2])>,
 }
 
+/// The variables side strip's own session state (45-A P6c).
+///
+/// Grouped rather than flattened into [`GraphEditorState`] because none of it
+/// is document data: it is one panel's open/selected/in-flight-gesture state,
+/// and keeping it together makes "does the panel own this?" answerable by
+/// looking at one struct. Session-only, like `find` and the cheat sheet.
+#[derive(Debug, Clone, Default)]
+pub struct VarPanel {
+    /// The strip is expanded. Collapsed, it is a narrow rail with a caret.
+    pub open: bool,
+    /// Slug whose detail block (rename / retype / default / delete) is open.
+    /// At most one at a time — an accordion, not a grid of open forms.
+    pub selected: Option<String>,
+    /// The "new variable" draft row, when the `+` affordance is armed.
+    pub new_var: Option<NewVarDraft>,
+    /// Rename buffer for `selected`, so typing does not commit per keystroke.
+    pub rename_buf: Option<String>,
+    /// A drop landed on the canvas and is waiting for the Get/Set choice.
+    pub drop: Option<VarDrop>,
+    /// A destructive/lossy change waiting on confirmation.
+    pub confirm: Option<VarConfirm>,
+}
+
+/// The add-variable draft: what the row's fields hold before `Add` is pressed.
+#[derive(Debug, Clone, Default)]
+pub struct NewVarDraft {
+    pub name: String,
+    /// Index into the panel's offered scalar types.
+    pub ty: usize,
+    pub array: bool,
+    pub first_frame: bool,
+}
+
+/// A variable row dropped on the canvas: where it landed, awaiting Get/Set.
+#[derive(Debug, Clone)]
+pub struct VarDrop {
+    pub slug: String,
+    /// Display label, for the two choice rows.
+    pub label: String,
+    /// World position of the drop — where the node will land.
+    pub world: [f32; 2],
+    /// Screen anchor for the two-choice popup.
+    pub screen: [f32; 2],
+}
+
+/// A pending confirmation. Both arms carry the usage count, because the count
+/// is the whole reason to ask.
+#[derive(Debug, Clone)]
+pub enum VarConfirm {
+    /// Retype `slug` to `ty`; `uses` nodes read or write it today.
+    Retype { slug: String, ty: PinType, uses: usize },
+    /// Delete `slug`; `uses` nodes will become `UnknownVariable` errors.
+    Delete { slug: String, uses: usize },
+}
+
 /// In-flight inline text edit of a comment/group's text (P7).
 pub struct AnnotationEdit {
     pub is_group: bool,
@@ -1316,6 +1373,10 @@ impl GraphEditorState {
             nudge: None,
             frame: 0,
             frame_all_on_open: false,
+            // Open by default: 45-A's authoring story starts at the variable
+            // list, and a strip nobody can see teaches nobody it exists. One
+            // click (or Alt+V) collapses it back to the rail.
+            vars: VarPanel { open: true, ..Default::default() },
         })
     }
 
@@ -1736,6 +1797,48 @@ impl GraphEditorState {
         self.doc.nodes.push(node.clone());
         self.select_only(id);
         self.commit(GraphEdit::AddNode(node), registry);
+    }
+
+    /// Add a `var_get`/`var_set` instance at `pos`, already naming `slug`.
+    ///
+    /// The reserved [`VAR_PROP`](crate::engine::node_graph::VAR_PROP) property
+    /// is preset here rather than by a follow-up `SetProperty` for the same
+    /// reason `add_subgraph_node` presets its path: a node that spends one undo
+    /// step naming nothing is a node the author can land on by pressing Ctrl+Z
+    /// once, and its pins would resolve to nothing while it sat there. One
+    /// `AddNode` edit, one undo step.
+    pub fn add_variable_node(
+        &mut self,
+        slug: &str,
+        set: bool,
+        pos: [f32; 2],
+        registry: &NodeRegistry,
+    ) -> u64 {
+        let mut properties = std::collections::BTreeMap::new();
+        properties.insert(
+            crate::engine::node_graph::VAR_PROP.to_string(),
+            PropValue::Str(slug.to_string()),
+        );
+        let node = NodeInst {
+            id: self.doc.next_node_id(),
+            type_id: if set {
+                crate::engine::node_graph::VAR_SET_TYPE_ID
+            } else {
+                crate::engine::node_graph::VAR_GET_TYPE_ID
+            }
+            .to_string(),
+            type_version: 1,
+            position: pos,
+            properties,
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        let id = node.id;
+        self.doc.nodes.push(node.clone());
+        self.select_only(id);
+        self.commit(GraphEdit::AddNode(node), registry);
+        id
     }
 
     /// Delete the current selection: a selected comment or group frame (frame
@@ -3407,6 +3510,7 @@ pub mod tests_support {
             nudge: None,
             frame: 0,
             frame_all_on_open: false,
+            vars: VarPanel::default(),
         }
     }
 }
@@ -5553,5 +5657,6 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         nudge: None,
         frame: 0,
         frame_all_on_open: false,
+        vars: VarPanel::default(),
     }
 }
