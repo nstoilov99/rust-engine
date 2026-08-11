@@ -196,6 +196,11 @@ pub struct SceneEditorState {
         String,
         rust_engine::engine::editor::graph_editor::GraphEditorState,
     >,
+    /// Open `.curve` editors keyed by content-relative curve path (45-A P8b).
+    pub curve_editors: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::curve_editor::CurveEditorState,
+    >,
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
@@ -209,6 +214,19 @@ pub struct SceneEditorState {
     pub save_as_dialog: Option<SaveAsDialog>,
     /// Entity clipboard: serialized subtrees from Copy/Cut.
     pub clipboard: Vec<EntityData>,
+}
+
+/// The two per-frame document resolvers the graph canvas reads: `.graph`
+/// documents for subgraph interfaces, `.curve` documents for Timeline track
+/// pins (45-A D3/P8b). Returned together because they are rebuilt together and
+/// every panel that takes one takes the other.
+#[cfg(feature = "editor")]
+pub struct GraphResolverDocs {
+    pub docs: std::collections::BTreeMap<String, rust_engine::engine::node_graph::GraphDoc>,
+    pub curves: std::collections::BTreeMap<
+        String,
+        rust_engine::engine::node_graph::curve_asset::CurveDoc,
+    >,
 }
 
 /// General editor UI state: dock, profiler, icons, overlays.
@@ -762,6 +780,7 @@ impl App {
                 import_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
                 graph_editors: std::collections::HashMap::new(),
+                curve_editors: std::collections::HashMap::new(),
                 node_registry,
                 graph_clipboard: None,
                 input_action_editor: InputActionEditor::new(),
@@ -1129,6 +1148,12 @@ impl App {
         self.editor.ui.crusty_dock.open_tab(tab);
     }
 
+    /// Open a `.curve` file as a dock tab (45-A P8b).
+    pub fn open_curve_as_tab(&mut self, curve_key: String) {
+        let tab = EditorTab::CurveEditor(curve_key);
+        self.editor.ui.crusty_dock.open_tab(tab);
+    }
+
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
@@ -1215,6 +1240,10 @@ impl App {
                     state.save(&abs)?;
                 }
             }
+            SecondaryWindowKind::Curve => {
+                #[cfg(feature = "editor")]
+                self.save_curve_editor(key);
+            }
             SecondaryWindowKind::InputAction => {
                 if let Some(data) = self
                     .editor
@@ -1268,6 +1297,19 @@ impl App {
             if let Some(key) = self.active_graph_key() {
                 self.graph_edit(&key, action);
                 return;
+            }
+            // The curve editor claims the same focus routing (45-A P8b) — it
+            // just answers fewer verbs: there is no curve clipboard, so
+            // Cut/Copy/Paste/Duplicate fall through to the scene rather than
+            // being silently swallowed by the focused tab.
+            if let Some(key) = self.active_curve_key() {
+                if matches!(
+                    action,
+                    EditorAction::Undo | EditorAction::Redo | EditorAction::Delete
+                ) {
+                    self.curve_edit(&key, action);
+                    return;
+                }
             }
         }
         match action {
@@ -1524,6 +1566,10 @@ impl App {
                         if kind == SecondaryWindowKind::Graph {
                             self.close_graph_tab(&key);
                         }
+                        #[cfg(feature = "editor")]
+                        if kind == SecondaryWindowKind::Curve {
+                            self.close_curve_tab(&key);
+                        }
                     }
                     Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                         "Failed to save '{}': {}",
@@ -1540,6 +1586,11 @@ impl App {
                     }
                     SecondaryWindowKind::Graph => {
                         if let Some(state) = self.editor.scene.graph_editors.get_mut(&key) {
+                            state.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::Curve => {
+                        if let Some(state) = self.editor.scene.curve_editors.get_mut(&key) {
                             state.dirty = false;
                         }
                     }
@@ -1572,6 +1623,10 @@ impl App {
                 #[cfg(feature = "editor")]
                 if kind == SecondaryWindowKind::Graph {
                     self.close_graph_tab(&key);
+                }
+                #[cfg(feature = "editor")]
+                if kind == SecondaryWindowKind::Curve {
+                    self.close_curve_tab(&key);
                 }
             }
             EditorAction::GraphSaveGraph => {
@@ -1887,6 +1942,12 @@ impl App {
                     #[cfg(not(feature = "editor"))]
                     let _ = path;
                 }
+                ReloadEvent::CurveChanged { path } => {
+                    #[cfg(feature = "editor")]
+                    self.on_curve_changed(&path);
+                    #[cfg(not(feature = "editor"))]
+                    let _ = path;
+                }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
 
@@ -2019,6 +2080,9 @@ impl App {
                         #[cfg(feature = "editor")]
                         let saved_graph = if let Some(key) = self.active_graph_key() {
                             self.save_graph_editor(&key);
+                            true
+                        } else if let Some(key) = self.active_curve_key() {
+                            self.save_curve_editor(&key);
                             true
                         } else {
                             false
@@ -2764,6 +2828,14 @@ impl App {
                             self.open_graph_document(relative);
                             #[cfg(not(feature = "editor"))]
                             let _ = relative;
+                        } else if asset_type == AssetType::Curve {
+                            // Open the `.curve` editor tab (45-A P8b).
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            #[cfg(feature = "editor")]
+                            self.open_curve_document(relative);
+                            #[cfg(not(feature = "editor"))]
+                            let _ = relative;
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
                             self.open_input_action_as_tab(full_path);
@@ -3353,6 +3425,10 @@ impl App {
         // writes it into the same pref the Preferences window edits, so it
         // shows the overridden dot there and rides the debounced autosave.
         let mut graph_style_request: Option<WireStyle> = None;
+        // Curve tabs that asked to be saved this frame (toolbar button or the
+        // float window's own Ctrl+S). Saving reaches the plan/curve caches, so
+        // it has to happen outside the panel borrows.
+        let mut curve_save_requests: Vec<String> = Vec::new();
         let crusty_result = {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
@@ -3374,6 +3450,9 @@ impl App {
             };
             use rust_engine::engine::editor::graph_editor_crusty::{
                 graph_editor_panel, GraphEditorPanelCtx,
+            };
+            use rust_engine::engine::editor::curve_editor_crusty::{
+                curve_editor_panel, CurveEditorPanelCtx,
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
@@ -3413,7 +3492,8 @@ impl App {
             // and before `revalidate_graph_refs`, so a hydrated subgraph host
             // shows its cross-asset errors on this frame rather than the next.
             self.hydrate_restored_tabs();
-            let graph_resolver_docs = self.revalidate_graph_refs();
+            let GraphResolverDocs { docs: graph_resolver_docs, curves: graph_curve_docs } =
+                self.revalidate_graph_refs();
             let subgraph_assets: Vec<String> = {
                 let filter = rust_engine::engine::editor::AssetFilter {
                     asset_types: Some(vec![AssetType::Graph]),
@@ -3479,6 +3559,7 @@ impl App {
             let sel = &mut self.editor.scene.selection;
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
+            let curve_editors = &mut self.editor.scene.curve_editors;
             let graph_registry = &self.editor.scene.node_registry;
             // A frame-local snapshot: the preferences page edits the live
             // keymap mutably in the same block, and the graph panel only
@@ -3500,6 +3581,33 @@ impl App {
                 graph_exec_bindings(&*world, &*world_resources, &picked, graph_editors.keys())
             };
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
+            // The curve editor's own Edit-menu override — same rule, fewer
+            // verbs (no curve clipboard, so paste/duplicate stay the scene's).
+            let curve_edit_override = graph_focused_tab
+                .as_deref()
+                .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
+                .and_then(|ft| ft.strip_prefix("curve:"))
+                .and_then(|k| curve_editors.get(k))
+                .map(|st| {
+                    use rust_engine::engine::editor::menu_bar_crusty::EditMenuOverride;
+                    EditMenuOverride {
+                        undo_label: st
+                            .stack
+                            .undo_description()
+                            .map(|d| format!("Undo {d}"))
+                            .unwrap_or_else(|| "Undo".to_string()),
+                        can_undo: st.stack.can_undo(),
+                        redo_label: st
+                            .stack
+                            .redo_description()
+                            .map(|d| format!("Redo {d}"))
+                            .unwrap_or_else(|| "Redo".to_string()),
+                        can_redo: st.stack.can_redo(),
+                        has_selection: st.selected_key.is_some(),
+                        has_deletable: st.selected_key.is_some(),
+                        has_clipboard: false,
+                    }
+                });
             // Edit-menu override when a docked graph tab has focus (P5 routing).
             let graph_edit_override = graph_focused_tab
                 .as_deref()
@@ -3543,6 +3651,12 @@ impl App {
                         .iter()
                         .filter(|(_, s)| s.dirty)
                         .map(|(k, _)| format!("graph:{k}")),
+                )
+                .chain(
+                    curve_editors
+                        .iter()
+                        .filter(|(_, s)| s.dirty)
+                        .map(|(k, _)| format!("curve:{k}")),
                 )
                 .collect();
             // Both driven by the *active* runtime plugin set (39.8 §5.8/D7),
@@ -3640,7 +3754,9 @@ impl App {
                     MenuBarCtx {
                         dock_state: crusty_dock,
                         command_history: &*vp_command_history,
-                        edit_override: graph_edit_override.clone(),
+                        edit_override: graph_edit_override
+                            .clone()
+                            .or_else(|| curve_edit_override.clone()),
                         play_mode: current_play_mode,
                         build_dialog,
                         console_messages: &mut console.messages,
@@ -3823,6 +3939,7 @@ impl App {
                                                 keymap: graph_keymap,
                                                 clipboard: graph_clipboard,
                                                 resolver: &graph_resolver_docs,
+                                                curves: &graph_curve_docs,
                                                 subgraph_assets: &subgraph_assets,
                                                 open_subgraph: &mut graph_open_request,
                                                 selection_outline: graph_sel_outline,
@@ -3844,6 +3961,32 @@ impl App {
                                         None => dock_crusty::missing_document_panel(
                                             ui,
                                             "Graph", &key, None,
+                                        ),
+                                    }
+                                }
+                                Some(EditorTab::CurveEditor(key)) => {
+                                    match curve_editors.get_mut(&key) {
+                                        Some(state) => {
+                                            if curve_editor_panel(
+                                                ui,
+                                                rect,
+                                                CurveEditorPanelCtx {
+                                                    state,
+                                                    selection_outline: graph_sel_outline,
+                                                    focused: graph_focused_tab.as_deref()
+                                                        == Some(tab),
+                                                    // Docked: the menu/winit
+                                                    // path owns the keyboard.
+                                                    handle_shortcuts: false,
+                                                },
+                                            )
+                                            .save_requested
+                                            {
+                                                curve_save_requests.push(key.clone());
+                                            }
+                                        }
+                                        None => dock_crusty::missing_document_panel(
+                                            ui, "Curve", &key, None,
                                         ),
                                     }
                                 }
@@ -3976,6 +4119,9 @@ impl App {
         }
         if let Some(relative) = graph_open_request {
             self.open_graph_document(relative);
+        }
+        for key in std::mem::take(&mut curve_save_requests) {
+            self.save_curve_editor(&key);
         }
 
         // Commit (or veto) a crusty dock tab-close request.
@@ -4339,6 +4485,33 @@ impl App {
                 return;
             }
             self.close_graph_tab(key);
+        } else if let Some(key) = tab.strip_prefix("curve:") {
+            // Dirty curve → same veto-and-confirm as a dirty graph.
+            if self
+                .editor
+                .scene
+                .curve_editors
+                .get(key)
+                .is_some_and(|s| s.dirty)
+            {
+                let key = key.to_string();
+                let msg = format!("Save changes to '{key}' before closing?");
+                self.editor.services.dialogs.save_discard_cancel(
+                    format!("curve_close:{key}"),
+                    "Unsaved Curve",
+                    msg,
+                    EditorAction::SaveAndCloseEditor {
+                        kind: SecondaryWindowKind::Curve,
+                        key: key.clone(),
+                    },
+                    EditorAction::DiscardAndCloseEditor {
+                        kind: SecondaryWindowKind::Curve,
+                        key,
+                    },
+                );
+                return;
+            }
+            self.close_curve_tab(key);
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
             if let Some(key) = tab.strip_prefix("mesh:") {
@@ -4495,6 +4668,12 @@ impl App {
                     }
                     Some(("Graph", key.clone(), self.hydrate_graph(key)))
                 }
+                EditorTab::CurveEditor(key) => {
+                    if self.editor.scene.curve_editors.contains_key(key) {
+                        continue;
+                    }
+                    Some(("Curve", key.clone(), self.hydrate_curve(key)))
+                }
                 EditorTab::MeshEditor(key) => {
                     if self.editor.scene.mesh_editors.contains_key(key) {
                         continue;
@@ -4576,6 +4755,22 @@ impl App {
         Ok(())
     }
 
+    /// Load a `.curve` for a restored tab, without touching the dock. A file
+    /// that has gone missing fails loudly here — the Task 40 lesson: a
+    /// restored tab must degrade visibly, not into a blank document that
+    /// looks like data loss.
+    #[cfg(feature = "editor")]
+    fn hydrate_curve(&mut self, key: &str) -> Result<(), String> {
+        let abs = std::path::Path::new("content").join(key);
+        if !abs.exists() {
+            return Err("file missing".to_string());
+        }
+        let state =
+            rust_engine::engine::editor::curve_editor::CurveEditorState::open(&abs, key)?;
+        self.editor.scene.curve_editors.insert(key.to_string(), state);
+        Ok(())
+    }
+
     /// Input-action and mapping-context keys are absolute-ish path strings,
     /// not content-relative — `InputActionEditor::open` keys on the path it
     /// was handed. Their loaders fall back to an empty definition rather than
@@ -4641,25 +4836,116 @@ impl App {
         }
     }
 
+    /// Open a `.curve` by content-relative key: focus it if already open
+    /// (unless it lives in a float window), else load it and open a tab.
+    #[cfg(feature = "editor")]
+    fn open_curve_document(&mut self, relative: String) {
+        self.hydration_failed.remove(&format!("curve:{relative}"));
+        if !self.editor.scene.curve_editors.contains_key(&relative) {
+            match self.hydrate_curve(&relative) {
+                Ok(()) => self.open_curve_as_tab(relative),
+                Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to open curve '{relative}': {e}"
+                ))),
+            }
+        } else if !self.crusty_float_hosts_tab(&format!("curve:{relative}")) {
+            self.open_curve_as_tab(relative);
+        }
+    }
+
+    /// Content-relative key of the focused *main-dock* curve tab, if any. The
+    /// `active_graph_key` rule, verbatim: a tab torn off into a float window
+    /// owns its own keyboard, so it does not answer here.
+    #[cfg(feature = "editor")]
+    fn active_curve_key(&self) -> Option<String> {
+        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
+        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
+            return None;
+        }
+        let key = ft.strip_prefix("curve:")?.to_string();
+        self.editor
+            .scene
+            .curve_editors
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    /// Apply a document edit action to the curve editor `key`.
+    #[cfg(feature = "editor")]
+    fn curve_edit(&mut self, key: &str, action: EditorAction) {
+        let Some(st) = self.editor.scene.curve_editors.get_mut(key) else {
+            return;
+        };
+        match action {
+            EditorAction::Undo => st.undo(),
+            EditorAction::Redo => st.redo(),
+            EditorAction::Delete => {
+                // A half-finished drag would otherwise leave the stack
+                // describing a key that is no longer where it was recorded.
+                st.cancel_gestures();
+                if let Some((t, k)) = st.selected_key {
+                    st.remove_key(t, k);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Save the curve editor `key` (docked path). See [`save_curve_state`].
+    #[cfg(feature = "editor")]
+    fn save_curve_editor(&mut self, key: &str) {
+        save_curve_state(
+            &mut self.editor.scene.curve_editors,
+            &mut self.editor.console,
+            &mut self.core.game_world,
+            key,
+        );
+    }
+
+    /// Close a curve tab everywhere (main dock + any float window) and drop
+    /// its document.
+    #[cfg(feature = "editor")]
+    fn close_curve_tab(&mut self, key: &str) {
+        let tab = format!("curve:{key}");
+        self.editor.ui.crusty_dock.tree.close_tab(&tab);
+        for fw in self.crusty_floats.values_mut() {
+            fw.tree.close_tab(&tab);
+        }
+        self.editor.scene.curve_editors.remove(key);
+    }
+
     /// Rebuild the subgraph resolver from open docs + disk and refresh every
     /// open graph's cross-asset (`ref_errors`) validation. Returns the
     /// resolver doc map so callers can hand it to the canvas panels. Runs each
     /// frame (cheap for a handful of open graphs) and after a subgraph reload.
     #[cfg(feature = "editor")]
-    fn revalidate_graph_refs(
-        &mut self,
-    ) -> std::collections::BTreeMap<String, rust_engine::engine::node_graph::GraphDoc> {
-        use rust_engine::engine::editor::graph_editor::build_resolver_docs;
-        use rust_engine::engine::node_graph::validate_refs;
+    fn revalidate_graph_refs(&mut self) -> GraphResolverDocs {
+        use rust_engine::engine::editor::graph_editor::{build_curve_docs, build_resolver_docs};
+        use rust_engine::engine::node_graph::{validate_curves, validate_refs, DocDescriptors};
+        let root = std::path::Path::new("content");
         let scene = &mut self.editor.scene;
         let docs = build_resolver_docs(
             scene.graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
-            std::path::Path::new("content"),
+            root,
+        );
+        // 45-A P8b: the `.curve` half of the same question. Open curve tabs
+        // win over disk, so a track added in the curve editor grows the
+        // Timeline's pin immediately — the rule subgraphs already follow.
+        let curves = build_curve_docs(
+            scene.curve_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
+            &docs,
+            root,
         );
         for st in scene.graph_editors.values_mut() {
             st.ref_errors = validate_refs(&st.doc, &st.path, &scene.node_registry, &docs);
+            // A dangling `.curve` is cross-asset too, so it belongs to this
+            // pass and not to the doc-local `errors` recomputed on every
+            // keystroke. Same rule the compiler applies, shared code.
+            st.ref_errors.extend(validate_curves(
+                &DocDescriptors::new(&st.doc, &scene.node_registry).with_curves(&curves),
+            ));
         }
-        docs
+        GraphResolverDocs { docs, curves }
     }
 
     /// Hot-reload handler for a `.graph`/`.subgraph` write (P6): normalize the
@@ -4753,6 +5039,78 @@ impl App {
                 "Subgraph '{key}' changed; refreshed {} host graph(s)",
                 hosts.len()
             )));
+        }
+    }
+
+    /// Hot-reload handler for a `.curve` write (45-A P8b): the `.graph`
+    /// handler's shape, one asset kind over.
+    ///
+    /// Editing a curve changes what a Timeline's pins *are*, so the plan cache
+    /// goes wholesale — the same reasoning `save_curve_state` gives. The
+    /// editor's own resolver needs nothing: it is rebuilt from disk plus open
+    /// tabs every frame.
+    #[cfg(feature = "editor")]
+    fn on_curve_changed(&mut self, abs_path: &str) {
+        use rust_engine::engine::editor::curve_editor::CurveEditorState;
+        let key = asset_source::to_content_relative(abs_path);
+
+        // Suppress the watcher echo of our own save: one event per save,
+        // consumed by clearing the stamp, so a genuine external write that
+        // lands later still reloads.
+        let own_echo = self
+            .editor
+            .scene
+            .curve_editors
+            .get(&key)
+            .and_then(|s| s.last_saved_at)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+        if own_echo {
+            if let Some(st) = self.editor.scene.curve_editors.get_mut(&key) {
+                st.last_saved_at = None;
+            }
+            return;
+        }
+
+        #[cfg(feature = "graph-scripting")]
+        {
+            let res = self.core.game_world.resources_mut();
+            if let Some(curves) = res.get_mut::<rust_engine::engine::scripting::CurveCache>() {
+                curves.invalidate(&key);
+            }
+            if let Some(plans) = res.get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
+            {
+                plans.invalidate_all();
+            }
+        }
+
+        // Reload the changed doc if it is open and clean; warn if dirty. The
+        // view is preserved — a reload must not throw away where you were
+        // looking.
+        if let Some(st) = self.editor.scene.curve_editors.get_mut(&key) {
+            if st.dirty {
+                self.editor.console.messages.push(LogMessage::warning(format!(
+                    "Curve '{key}' changed on disk; keeping your unsaved edits"
+                )));
+                return;
+            }
+            let abs = std::path::Path::new("content").join(&key);
+            match CurveEditorState::open(&abs, &key) {
+                Ok(mut fresh) => {
+                    fresh.view = st.view;
+                    fresh.frame_pending = false;
+                    fresh.selected_track = st.selected_track.min(
+                        fresh.doc.tracks.len().saturating_sub(1),
+                    );
+                    *st = fresh;
+                    self.editor
+                        .console
+                        .messages
+                        .push(LogMessage::info(format!("Curve reloaded: {key}")));
+                }
+                Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to reload curve '{key}': {e}"
+                ))),
+            }
         }
     }
 
@@ -4931,9 +5289,16 @@ impl App {
         let graph_registry = &editor.scene.node_registry;
         let graph_keymap = &editor.services.keymap;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
+        let curve_editors = &mut editor.scene.curve_editors;
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
         let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
             graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
+            std::path::Path::new("content"),
+        );
+        // 45-A P8b: and the `.curve` resolver, on the same rule.
+        let graph_curve_docs = rust_engine::engine::editor::graph_editor::build_curve_docs(
+            curve_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
+            &graph_resolver_docs,
             std::path::Path::new("content"),
         );
         let subgraph_assets: Vec<String> = {
@@ -4959,6 +5324,9 @@ impl App {
         };
         let mut graph_open_requests: Vec<String> = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
+        // Curve tabs in float windows that asked to save (their own Ctrl+S or
+        // the toolbar). Applied after the window loop, like the graph opens.
+        let mut float_curve_saves: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -5121,6 +5489,7 @@ impl App {
                                     keymap: graph_keymap,
                                     clipboard: graph_clipboard,
                                     resolver: &graph_resolver_docs,
+                                    curves: &graph_curve_docs,
                                     subgraph_assets: &subgraph_assets,
                                     open_subgraph: &mut float_open_request,
                                     selection_outline: graph_sel_outline,
@@ -5140,6 +5509,32 @@ impl App {
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
+                        },
+                        Some(EditorTab::CurveEditor(key)) => match curve_editors.get_mut(&key)
+                        {
+                            Some(state) => {
+                                if rust_engine::engine::editor::curve_editor_crusty::
+                                    curve_editor_panel(
+                                        ui,
+                                        rect,
+                                        rust_engine::engine::editor::curve_editor_crusty::
+                                            CurveEditorPanelCtx {
+                                                state,
+                                                selection_outline: graph_sel_outline,
+                                                // A float window is a dedicated
+                                                // surface: keys only arrive when
+                                                // it is OS-focused, so the panel
+                                                // owns its keyboard here.
+                                                focused: true,
+                                                handle_shortcuts: true,
+                                            },
+                                    )
+                                    .save_requested
+                                {
+                                    float_curve_saves.push(key.clone());
+                                }
+                            }
+                            None => dock_crusty::missing_document_panel(ui, "Curve", &key, None),
                         },
                         Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
                             Some(entry) => entry.panel.draw(
@@ -5201,6 +5596,10 @@ impl App {
             }
         }
 
+        for key in std::mem::take(&mut float_curve_saves) {
+            save_curve_state(curve_editors, &mut editor.console, &mut core.game_world, &key);
+        }
+
         crusty_floats.retain(|_, fw| {
             let mut tabs = Vec::new();
             fw.tree.collect_tabs(&mut tabs);
@@ -5212,6 +5611,28 @@ impl App {
                     let key = t.strip_prefix("graph:")?;
                     graph_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
                 });
+                let dirty_curve = tabs.iter().find_map(|t| {
+                    let key = t.strip_prefix("curve:")?;
+                    curve_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
+                });
+                if let Some(key) = dirty_curve {
+                    let msg = format!("Save changes to '{key}' before closing?");
+                    editor.services.dialogs.save_discard_cancel(
+                        format!("curve_close:{key}"),
+                        "Unsaved Curve",
+                        msg,
+                        EditorAction::SaveAndCloseEditor {
+                            kind: SecondaryWindowKind::Curve,
+                            key: key.clone(),
+                        },
+                        EditorAction::DiscardAndCloseEditor {
+                            kind: SecondaryWindowKind::Curve,
+                            key,
+                        },
+                    );
+                    fw.close_requested = false;
+                    return true;
+                }
                 if let Some(key) = dirty_graph {
                     let msg = format!("Save changes to '{key}' before closing?");
                     editor.services.dialogs.save_discard_cancel(
@@ -5240,6 +5661,8 @@ impl App {
                     } else if let Some(key) = tab.strip_prefix("graph:") {
                         // Clean graph: drop the doc.
                         graph_editors.remove(key);
+                    } else if let Some(key) = tab.strip_prefix("curve:") {
+                        curve_editors.remove(key);
                     } else {
                         dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
                     }
@@ -6825,6 +7248,55 @@ fn graph_exec_bindings<'a>(
             })
             .collect()
     }
+}
+
+/// Write one open `.curve` to disk and make every consumer re-read it.
+///
+/// A free function because two callers need it under different borrows: the
+/// docked path holds `&mut self`, the float-window path holds `self`
+/// destructured into pieces.
+///
+/// Three caches, one write. The editor's own resolver map is rebuilt from the
+/// open document every frame, so Timeline pins in open graphs already track
+/// the edit; the runtime's `CurveCache` and the compiled `GraphPlanCache` are
+/// keyed by path and have to be told. The plan cache is cleared wholesale
+/// rather than per-graph: a track added or removed changes the pin list of
+/// every Timeline that names this curve, and the cache does not track that
+/// reference tree (the same reasoning `invalidate` gives for subgraphs).
+#[cfg(feature = "editor")]
+fn save_curve_state(
+    curve_editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::curve_editor::CurveEditorState,
+    >,
+    console: &mut ConsoleState,
+    world: &mut GameWorld,
+    key: &str,
+) {
+    let Some(st) = curve_editors.get_mut(key) else {
+        return;
+    };
+    // `save` settles its own in-flight gesture, so there is nothing to do
+    // here but name the file.
+    let abs = std::path::Path::new("content").join(&st.path);
+    if let Err(e) = st.save(&abs) {
+        console
+            .messages
+            .push(LogMessage::error(format!("Failed to save curve '{key}': {e}")));
+        return;
+    }
+    #[cfg(feature = "graph-scripting")]
+    {
+        let res = world.resources_mut();
+        if let Some(curves) = res.get_mut::<rust_engine::engine::scripting::CurveCache>() {
+            curves.invalidate(key);
+        }
+        if let Some(plans) = res.get_mut::<rust_engine::engine::scripting::GraphPlanCache>() {
+            plans.invalidate_all();
+        }
+    }
+    #[cfg(not(feature = "graph-scripting"))]
+    let _ = world;
 }
 
 /// Restore a graph's remembered pan/zoom and bookmarks from the user-local

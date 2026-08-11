@@ -39,6 +39,13 @@ pub enum ReloadEvent {
     GraphChanged {
         path: String,
     },
+    /// A `.curve` asset was modified (45-A P8b). Separate from
+    /// `GraphChanged` because the consumer's response differs: a curve reload
+    /// refreshes an open curve editor and drops the cached curve *and* every
+    /// compiled plan, since a track is a Timeline pin.
+    CurveChanged {
+        path: String,
+    },
 }
 
 /// Watches asset files and triggers hot-reload
@@ -110,6 +117,14 @@ impl HotReloadWatcher {
                                     || normalized_path.ends_with(".subgraph")
                                 {
                                     let _ = reload_sender.send(ReloadEvent::GraphChanged {
+                                        path: normalized_path.clone(),
+                                    });
+                                    continue;
+                                }
+
+                                // `.curve` assets, on the same terms.
+                                if normalized_path.ends_with(".curve") {
+                                    let _ = reload_sender.send(ReloadEvent::CurveChanged {
                                         path: normalized_path.clone(),
                                     });
                                     continue;

@@ -24,7 +24,7 @@ dev_nodes = []
 # leaf crate, so turning this off genuinely strips the interpreter from a
 # build. The `GraphRunner` *component* is unconditional (scenes must round-trip
 # either way); only the runtime is gated.
-graph-scripting = ["dep:node_graph_exec", "dep:curve_asset"]
+graph-scripting = ["dep:node_graph_exec"]
 tracy = ["tracy-client"]
 
 [dependencies]
@@ -117,8 +117,10 @@ node_graph_macros = { path = "../crates/node_graph_macros" }
 node_graph_types = { path = "../crates/node_graph_types" }
 node_graph_exec = { path = "../crates/node_graph_exec", optional = true }
 # 45-A P8: `.curve` assets — the engine owns file IO and AssetType, the crate
-# owns the data and its evaluation.
-curve_asset = { path = "../crates/curve_asset", optional = true }
+# owns the data and its evaluation. Unconditional since P8b: the curve editor
+# is an `editor` concern and the descriptor resolver in `node_graph_types`
+# (a hard dependency) already pulls it in, so gating bought nothing.
+curve_asset = { path = "../crates/curve_asset" }
 inventory = "0.3"
 
 # Desktop-wide color sampling for the crusty eyedropper (editor only)

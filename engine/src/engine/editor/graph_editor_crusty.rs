@@ -53,7 +53,8 @@ use crate::engine::node_graph::{
         EVENT_ACTION_PROP, EVENT_INPUT_ACTION_TYPE_ID, EVENT_NAME_PROP, EVENT_PAYLOAD_PREFIX,
         PAYLOAD_PIN_TYPES,
     },
-    DocDescriptors, Edge, ErrorAnchor, GraphError, GraphResolver, NodeDescriptor, NodeInst,
+    CurveResolver, DocDescriptors, Edge, ErrorAnchor, GraphDoc, GraphError, GraphResolver,
+    NodeDescriptor, NodeInst,
     NodeKind, NodeRegistry, PinType, PropValue, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID,
     SUBGRAPH_TYPE_ID, VAR_PROP,
 };
@@ -432,6 +433,27 @@ impl GraphMetrics {
     }
 }
 
+/// The two document resolvers a node's pins can depend on, bundled so every
+/// descriptor site in this file asks the same question the same way: subgraph
+/// interfaces from other `.graph` documents, Timeline track pins from a
+/// `.curve` (45-A D3/P8b). Passing one without the other is how a Timeline
+/// ends up drawing pins the compiler does not agree with.
+#[derive(Clone, Copy)]
+pub struct DocResolvers<'a> {
+    pub graphs: &'a dyn GraphResolver,
+    pub curves: &'a dyn CurveResolver,
+}
+
+impl<'a> DocResolvers<'a> {
+    /// Bind both to one document.
+    pub fn bind<'b>(&self, doc: &'b GraphDoc, registry: &'b NodeRegistry) -> DocDescriptors<'b>
+    where
+        'a: 'b,
+    {
+        DocDescriptors::with_resolver(doc, registry, self.graphs).with_curves(self.curves)
+    }
+}
+
 /// Everything the panel needs, bundled so the signature stays small.
 pub struct GraphEditorPanelCtx<'a> {
     pub state: &'a mut GraphEditorState,
@@ -439,6 +461,10 @@ pub struct GraphEditorPanelCtx<'a> {
     pub clipboard: &'a mut Option<GraphFragment>,
     /// Resolves subgraph references (open docs + disk) for pin derivation.
     pub resolver: &'a dyn GraphResolver,
+    /// Resolves `.curve` references the same way, so a Timeline node grows one
+    /// Float output per track (45-A P8b). Without it a Timeline draws base
+    /// pins only and its track wires have nowhere to land.
+    pub curves: &'a dyn CurveResolver,
     /// Content-relative paths of known `.subgraph` assets (create menu).
     pub subgraph_assets: &'a [String],
     /// Set to a content-relative path when a subgraph node is double-clicked;
@@ -806,7 +832,7 @@ impl<'a> IncidentEdges<'a> {
 fn build_geoms(
     state: &GraphEditorState,
     registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
+    resolver: &DocResolvers<'_>,
     errors: &ErrorIndex,
     m: &GraphMetrics,
     st: &Style,
@@ -820,7 +846,7 @@ fn build_geoms(
     // interfaces, variable and interface-binding synthesis and custom-event
     // payloads all arrive through it; the reroute branch below is the one
     // shape it cannot answer with a descriptor, by design.
-    let docd = DocDescriptors::with_resolver(&state.doc, registry, resolver);
+    let docd = resolver.bind(&state.doc, registry);
 
     state
         .doc
@@ -1317,6 +1343,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         registry,
         clipboard,
         resolver,
+        curves,
         subgraph_assets,
         open_subgraph,
         selection_outline,
@@ -1329,6 +1356,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         keymap,
         exec,
     } = ctx;
+    let resolver = &DocResolvers { graphs: resolver, curves };
 
     // Finalize a gesture orphaned by a release that landed while this tab was
     // not being drawn (e.g. the user switched tabs mid-drag): the pointer is
@@ -1599,7 +1627,7 @@ fn draw_and_interact(
     scope: &CanvasScope,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
+    resolver: &DocResolvers<'_>,
     annotation_menu_at: &mut Option<Pos2>,
     wire_menu_at: &mut Option<Pos2>,
     node_menu_at: &mut Option<Pos2>,
@@ -6457,24 +6485,25 @@ fn inline_widget(
 /// document instead of silently having no pins.
 fn pin_doc(
     registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
+    resolver: &DocResolvers<'_>,
     state: &GraphEditorState,
     node: u64,
     slug: &str,
     output: bool,
 ) -> Option<String> {
-    let d = DocDescriptors::with_resolver(&state.doc, registry, resolver).descriptor(node)?;
+    let d = resolver.bind(&state.doc, registry).descriptor(node)?;
     if output { d.output(slug) } else { d.input(slug) }?.doc.clone()
 }
 
 /// A node's doc line, if it declares one.
 fn node_doc(
     registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
+    resolver: &DocResolvers<'_>,
     state: &GraphEditorState,
     node: u64,
 ) -> Option<String> {
-    DocDescriptors::with_resolver(&state.doc, registry, resolver)
+    resolver
+        .bind(&state.doc, registry)
         .descriptor(node)?
         .doc
         .clone()
@@ -6588,14 +6617,14 @@ fn resolve_connection(
 fn auto_connect(
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
+    resolver: &DocResolvers<'_>,
     src: &PaletteDragSource,
     target: u64,
 ) {
     // Instance pins, not type pins: dropping a wire on a subgraph or a
     // variable node has to see the pins the canvas is drawing.
     let desc = {
-        let d = DocDescriptors::with_resolver(&state.doc, registry, resolver);
+        let d = resolver.bind(&state.doc, registry);
         match d.descriptor(target) {
             Some(d) => d.into_owned(),
             None => return,

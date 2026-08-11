@@ -57,6 +57,6 @@ pub use std_events::{
 };
 pub use std_nodes::{register_std_nodes, std_node_descriptors, COMPARE_OPS, SEQUENCE_PINS};
 pub use validate::{
-    endpoint_type, reroute_type, validate_doc, validate_doc_with, ErrorAnchor, ErrorSeverity,
-    GraphError,
+    endpoint_type, reroute_type, validate_curves, validate_doc, validate_doc_with, ErrorAnchor,
+    ErrorSeverity, GraphError,
 };

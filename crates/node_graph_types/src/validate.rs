@@ -271,6 +271,33 @@ pub fn validate_doc(doc: &GraphDoc, registry: &NodeRegistry) -> Vec<GraphError> 
     validate_doc_with(&DocDescriptors::new(doc, registry))
 }
 
+/// The one curve rule, in one place: a Timeline whose `.curve` does not
+/// resolve. Silent when the descriptor set was given no curves at all — "I
+/// was not asked to look" is not "it is missing" (see
+/// [`DocDescriptors::has_curves`]).
+fn timeline_curve_error(d: &DocDescriptors<'_>, node: u64) -> Option<GraphError> {
+    (d.has_curves() && d.curve_of(node).is_none()).then(|| GraphError::MissingCurve {
+        node,
+        path: d.curve_path(node).unwrap_or_default().to_string(),
+    })
+}
+
+/// Just the curve rule, over every Timeline in the document.
+///
+/// The editor needs this on its own: `.curve` resolution is a *cross-asset*
+/// question, so it belongs to the per-frame pass that already rebuilds the
+/// subgraph resolver — not to the doc-local `validate_doc` that runs on every
+/// keystroke. Sharing [`timeline_curve_error`] with [`validate_doc_with`] is
+/// what keeps the editor's verdict and the compiler's identical (45-A P8b).
+pub fn validate_curves(d: &DocDescriptors<'_>) -> Vec<GraphError> {
+    d.doc()
+        .nodes
+        .iter()
+        .filter(|n| NodeKind::of_type(&n.type_id) == NodeKind::Timeline)
+        .filter_map(|n| timeline_curve_error(d, n.id))
+        .collect()
+}
+
 /// The same rules against an explicit resolver. Only the data-cycle rule
 /// differs in practice: with a resolver it can see whether a subgraph node
 /// pulls its outputs through from its inputs, and therefore whether a cycle
@@ -309,14 +336,7 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
                 }
                 continue;
             }
-            NodeKind::Timeline => {
-                if d.has_curves() && d.curve_of(n.id).is_none() {
-                    errors.push(GraphError::MissingCurve {
-                        node: n.id,
-                        path: d.curve_path(n.id).unwrap_or_default().to_string(),
-                    });
-                }
-            }
+            NodeKind::Timeline => errors.extend(timeline_curve_error(d, n.id)),
             NodeKind::Registered | NodeKind::EventCustom => {}
         }
         match d.descriptor(n.id) {
@@ -1209,6 +1229,66 @@ mod tests {
             "{:?}",
             validate_doc_with(&d)
         );
+    }
+
+    /// The curve rule has exactly one implementation: whatever
+    /// `validate_doc_with` reports about a Timeline's `.curve`,
+    /// [`validate_curves`] reports too — that is what lets the editor run the
+    /// cross-asset half on its own frame budget without the two drifting.
+    #[test]
+    fn the_curve_rule_is_the_same_rule_both_ways() {
+        use crate::doc::PropValue;
+        use crate::registry::{CURVE_PROP, TIMELINE_TYPE_ID};
+        use crate::std_nodes::register_std_nodes;
+
+        let mut reg = NodeRegistry::new();
+        register_std_nodes(&mut reg);
+        let mut doc = GraphDoc::default();
+        let mut n = NodeInst {
+            id: 3,
+            type_id: TIMELINE_TYPE_ID.into(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: BTreeMap::new(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        n.properties
+            .insert(CURVE_PROP.into(), PropValue::Asset("curves/gone.curve".into()));
+        doc.nodes = vec![n];
+
+        // No resolver: the question was not asked, so neither path answers it.
+        let bare = DocDescriptors::new(&doc, &reg);
+        assert!(validate_curves(&bare).is_empty());
+        assert!(!validate_doc_with(&bare)
+            .iter()
+            .any(|e| matches!(e, GraphError::MissingCurve { .. })));
+
+        // A resolver that does not hold it: both paths say so, identically,
+        // and both quote the path the author typed.
+        let curves: BTreeMap<String, curve_asset::CurveDoc> = BTreeMap::new();
+        let d = DocDescriptors::new(&doc, &reg).with_curves(&curves);
+        let only = validate_curves(&d);
+        assert!(
+            matches!(only.as_slice(), [GraphError::MissingCurve { node: 3, path }]
+                if path == "curves/gone.curve"),
+            "{only:?}"
+        );
+        let full: Vec<_> = validate_doc_with(&d)
+            .into_iter()
+            .filter(|e| matches!(e, GraphError::MissingCurve { .. }))
+            .collect();
+        assert_eq!(full, only);
+
+        // Resolved: silence from both.
+        let mut curves = BTreeMap::new();
+        curves.insert("curves/gone.curve".to_string(), curve_asset::CurveDoc::default());
+        let d = DocDescriptors::new(&doc, &reg).with_curves(&curves);
+        assert!(validate_curves(&d).is_empty());
+        assert!(!validate_doc_with(&d)
+            .iter()
+            .any(|e| matches!(e, GraphError::MissingCurve { .. })));
     }
 
     /// `Array(Domain(..))` is still a domain pin: the registration check sees

@@ -26,7 +26,7 @@ pub mod trace;
 mod acceptance;
 
 #[cfg(feature = "graph-scripting")]
-pub use runner::{GraphPlanCache, GraphRuntime, GraphScriptRunnerSystem};
+pub use runner::{CurveCache, GraphPlanCache, GraphRuntime, GraphScriptRunnerSystem};
 
 #[cfg(all(feature = "graph-scripting", feature = "editor"))]
 pub use trace::GraphTrace;

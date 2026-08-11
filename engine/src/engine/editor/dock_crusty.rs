@@ -34,6 +34,7 @@ pub fn tab_id(tab: &EditorTab) -> String {
         EditorTab::InputSettings => "input_settings".to_string(),
         EditorTab::MeshEditor(key) => format!("mesh:{key}"),
         EditorTab::GraphEditor(key) => format!("graph:{key}"),
+        EditorTab::CurveEditor(key) => format!("curve:{key}"),
         EditorTab::InputActionEditor(key) => format!("ia:{key}"),
         EditorTab::InputContextEditor(key) => format!("mc:{key}"),
         EditorTab::Plugin(id) => format!("plugin:{id}"),
@@ -62,6 +63,7 @@ pub fn parse_tab(id: &str) -> Option<EditorTab> {
             "viewport" => key.parse().ok().map(|n| EditorTab::Viewport(SceneId(n))),
             "mesh" => Some(EditorTab::MeshEditor(key.to_string())),
             "graph" => Some(EditorTab::GraphEditor(key.to_string())),
+            "curve" => Some(EditorTab::CurveEditor(key.to_string())),
             "ia" => Some(EditorTab::InputActionEditor(key.to_string())),
             "mc" => Some(EditorTab::InputContextEditor(key.to_string())),
             // Always parses, even for a panel id nothing registers this

@@ -59,6 +59,11 @@ pub mod menu_bar_crusty;
 pub mod mesh_editor;
 #[cfg(feature = "editor")]
 pub mod mesh_editor_crusty;
+/// 45-A P8b: the `.curve` document editor — state + undo stack here, drawing
+/// in `curve_editor_crusty`. Mirrors the `graph_editor` / `mesh_editor` split.
+pub mod curve_editor;
+#[cfg(feature = "editor")]
+pub mod curve_editor_crusty;
 pub mod graph_editor;
 /// The 45-A P6b variables model: declarations, their edits and their undo
 /// behavior. Test-only — the panel that drives them is P6c.

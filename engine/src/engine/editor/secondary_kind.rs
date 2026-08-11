@@ -14,6 +14,8 @@
 pub enum SecondaryWindowKind {
     Mesh,
     Graph,
+    /// A `.curve` document editor (45-A P8b).
+    Curve,
     Hierarchy,
     Inspector,
     AssetBrowser,

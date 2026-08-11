@@ -3402,6 +3402,38 @@ pub fn build_resolver_docs<'a>(
     docs
 }
 
+/// The `.curve` half of the same idea (45-A P8b): every curve the resolver
+/// documents reference, with open curve editors winning over disk.
+///
+/// Open-wins is the rule `build_resolver_docs` already sets for subgraphs, and
+/// for the same reason — a Timeline's pins are its curve's track names, so an
+/// author who just added a track in the curve tab must see the pin appear on
+/// the node they are about to wire it to, not after a save. `BTreeMap<String,
+/// CurveDoc>` implements `CurveResolver`, so the returned map *is* the
+/// resolver.
+pub fn build_curve_docs<'a>(
+    open: impl Iterator<Item = (&'a str, &'a curve_asset::CurveDoc)>,
+    docs: &BTreeMap<String, GraphDoc>,
+    content_root: &Path,
+) -> BTreeMap<String, curve_asset::CurveDoc> {
+    let mut curves: BTreeMap<String, curve_asset::CurveDoc> =
+        open.map(|(k, d)| (k.to_string(), d.clone())).collect();
+    for path in docs.values().flat_map(|d| d.curve_refs()) {
+        if curves.contains_key(path) {
+            continue;
+        }
+        // Missing on disk is left absent → `MissingCurve` at validate, which
+        // says the path the author typed. Curves have no references of their
+        // own, so there is no frontier to walk.
+        if let Ok(text) = std::fs::read_to_string(content_root.join(path)) {
+            if let Ok(d) = curve_asset::parse_curve(&text) {
+                curves.insert(path.to_string(), d);
+            }
+        }
+    }
+    curves
+}
+
 /// Fit a [`CanvasView`] so the world-space box `[bbox_min, bbox_max]` fills the
 /// viewport with a small margin, centered. Framing never magnifies past 1.0×
 /// (a single node frames at 100%, not the max zoom), then clamps into the pref
@@ -5456,6 +5488,157 @@ mod tests {
         st.paste_fragment(&frag, Some([0.0, 0.0]), &reg);
         assert!(st.sel_comment.is_none(), "paste must clear annotation selection");
         assert!(!st.selection.is_empty(), "pasted nodes become the selection");
+    }
+
+    // -- 45-A P8b: the `.curve` resolver the graph canvas reads -------------
+
+    /// A Timeline node naming `path`, in a document of its own.
+    fn timeline_doc(path: &str) -> GraphDoc {
+        use crate::engine::node_graph::{CURVE_PROP, TIMELINE_TYPE_ID};
+        let mut doc = GraphDoc::default();
+        let mut n = NodeInst {
+            id: 1,
+            type_id: TIMELINE_TYPE_ID.into(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: BTreeMap::new(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        n.properties
+            .insert(CURVE_PROP.into(), PropValue::Asset(path.into()));
+        doc.nodes = vec![n];
+        doc
+    }
+
+    /// The editor resolver loads referenced curves from disk, and an open
+    /// curve tab wins over the file — the rule `build_resolver_docs` already
+    /// sets for subgraphs, so a track added in the curve editor grows the
+    /// Timeline's pin before the save rather than after it.
+    #[test]
+    fn curve_resolver_loads_from_disk_and_prefers_open_docs() {
+        use curve_asset::{CurveDoc, Track};
+
+        let dir = std::env::temp_dir().join(format!("p8b_resolver_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("curves")).expect("tmp dir");
+        let mut on_disk = CurveDoc::default();
+        on_disk.tracks = vec![Track::new("height", "Height")];
+        std::fs::write(
+            dir.join("curves/x.curve"),
+            curve_asset::serialize_curve(&on_disk).expect("ser"),
+        )
+        .expect("write");
+
+        let mut docs = BTreeMap::new();
+        docs.insert("g.graph".to_string(), timeline_doc("curves/x.curve"));
+
+        let from_disk = build_curve_docs(std::iter::empty(), &docs, &dir);
+        assert_eq!(from_disk["curves/x.curve"].slugs(), vec!["height"]);
+
+        // The same path open in a curve tab, with a second track.
+        let mut open = on_disk.clone();
+        open.tracks.push(Track::new("lean", "Lean"));
+        let merged = build_curve_docs(
+            std::iter::once(("curves/x.curve", &open)),
+            &docs,
+            &dir,
+        );
+        assert_eq!(
+            merged["curves/x.curve"].slugs(),
+            vec!["height", "lean"],
+            "the open document wins over the file"
+        );
+
+        // A curve nobody references is not loaded, and a missing one is simply
+        // absent (→ `MissingCurve` at validate, never a fabricated track).
+        let none = build_curve_docs(std::iter::empty(), &BTreeMap::new(), &dir);
+        assert!(none.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With curves resolved, a Timeline grows one Float output per track;
+    /// without them it keeps base pins only and says nothing (the
+    /// silent-opaque rule). A named-but-missing curve is an error, once.
+    #[test]
+    fn timeline_pins_follow_the_resolved_curve() {
+        use crate::engine::node_graph::{
+            register_std_nodes, validate_curves, DocDescriptors, GraphError, NodeRegistry, PinType,
+        };
+        use curve_asset::{CurveDoc, Track};
+
+        let mut reg = NodeRegistry::new();
+        register_std_nodes(&mut reg);
+        let doc = timeline_doc("curves/x.curve");
+
+        let base = DocDescriptors::new(&doc, &reg);
+        let base_outs = base.descriptor(1).expect("descriptor").outputs.len();
+        assert!(
+            validate_curves(&base).is_empty(),
+            "no resolver means no verdict, not a missing-curve error"
+        );
+
+        let mut curve = CurveDoc::default();
+        curve.tracks = vec![Track::new("height", "Height"), Track::new("lean", "Lean")];
+        let mut curves = BTreeMap::new();
+        curves.insert("curves/x.curve".to_string(), curve);
+
+        let d = DocDescriptors::new(&doc, &reg).with_curves(&curves);
+        let desc = d.descriptor(1).expect("descriptor");
+        assert_eq!(desc.outputs.len(), base_outs + 2, "one Float output per track");
+        for slug in ["height", "lean"] {
+            let pin = desc.output(slug).unwrap_or_else(|| panic!("pin {slug}"));
+            assert_eq!(pin.ty, PinType::Float);
+        }
+        assert!(validate_curves(&d).is_empty());
+
+        // Same resolver, a path it does not hold.
+        let dangling = timeline_doc("curves/gone.curve");
+        let d = DocDescriptors::new(&dangling, &reg).with_curves(&curves);
+        assert_eq!(d.descriptor(1).expect("descriptor").outputs.len(), base_outs);
+        assert!(matches!(
+            validate_curves(&d).as_slice(),
+            [GraphError::MissingCurve { node: 1, path }] if path == "curves/gone.curve"
+        ));
+    }
+
+    /// The shipped demo pair, end to end: `runner_demo.graph`'s Timeline
+    /// resolves `duck_hop.curve` through the editor's own resolver and gains
+    /// that curve's tracks as pins. Skipped where the content tree is not on
+    /// disk (a packaged build), because the claim is about the assets.
+    #[test]
+    fn the_demo_timeline_resolves_its_demo_curve() {
+        use crate::engine::node_graph::{
+            register_std_nodes, validate_curves, DocDescriptors, NodeRegistry,
+        };
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../content");
+        let graph_path = root.join("graphs/runner_demo.graph");
+        if !graph_path.exists() {
+            return;
+        }
+        let doc = load_graph(&graph_path).expect("runner_demo.graph");
+        let mut docs = BTreeMap::new();
+        docs.insert("graphs/runner_demo.graph".to_string(), doc.clone());
+        let curves = build_curve_docs(std::iter::empty(), &docs, &root);
+        assert!(
+            curves.contains_key("curves/duck_hop.curve"),
+            "the demo graph's curve reference resolves from the content tree"
+        );
+
+        let mut reg = NodeRegistry::new();
+        register_std_nodes(&mut reg);
+        let d = DocDescriptors::new(&doc, &reg).with_curves(&curves);
+        let timeline = doc
+            .nodes
+            .iter()
+            .find(|n| n.type_id == crate::engine::node_graph::TIMELINE_TYPE_ID)
+            .expect("a Timeline node");
+        let desc = d.descriptor(timeline.id).expect("descriptor");
+        for slug in curves["curves/duck_hop.curve"].slugs() {
+            assert!(desc.output(slug).is_some(), "track '{slug}' is a pin");
+        }
+        assert!(validate_curves(&d).is_empty(), "nothing dangling in the demo");
     }
 
     /// `frame_view` fits + centers the bbox and never magnifies past 1.0×.
