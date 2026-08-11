@@ -1,0 +1,20 @@
+[package]
+name = "node_graph_exec"
+version = "0.1.0"
+edition = "2021"
+
+# The portable graph interpreter (Task 45-A D1/D8).
+#
+# Dependency discipline is the whole point of this crate existing: it depends
+# on the document types and `serde`, and on nothing else. No engine, no ECS,
+# no Vulkan, no wall-clock — time and randomness are injected by the caller.
+# CI proves it by building this crate standalone and for
+# `wasm32-unknown-unknown`, the same way `game_shared` proves the M6
+# controller.
+
+[dependencies]
+node_graph_types = { path = "../node_graph_types" }
+serde = { workspace = true }
+
+[dev-dependencies]
+ron = "0.8"

@@ -10,9 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use super::descriptors::NodeKind;
-use super::doc::{GraphDoc, PropValue};
-use super::registry::NodeRegistry;
+use crate::descriptors::NodeKind;
+use crate::doc::{GraphDoc, PropValue};
+use crate::registry::NodeRegistry;
 
 /// What a migration step may do to a node instance.
 pub struct MigrationCtx<'a> {
@@ -146,11 +146,11 @@ pub fn migrate_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::node_graph::dev_nodes::register_dev_nodes;
-    use crate::engine::node_graph::doc::{NodeRealm, PinType};
-    use crate::engine::node_graph::io::{parse_graph, serialize_graph};
-    use crate::engine::node_graph::registry::{NodeDescriptor, PinDescriptor};
-    use crate::engine::node_graph::validate::validate_doc;
+    use crate::dev_nodes::register_dev_nodes;
+    use crate::doc::{NodeRealm, PinType};
+    use crate::io::{parse_graph, serialize_graph};
+    use crate::registry::{NodeDescriptor, PinDescriptor};
+    use crate::validate::validate_doc;
 
     /// Registry with a v2 node type whose v1→v2 migration renames the
     /// "dps" pin to "damage_per_second".
@@ -202,7 +202,7 @@ mod tests {
         if std::env::var("UPDATE_GRAPH_FIXTURES").is_ok() {
             let path = concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/src/engine/node_graph/fixtures/migration_v1_expected.graph"
+                "/src/fixtures/migration_v1_expected.graph"
             );
             std::fs::write(path, &actual).unwrap();
             return; // freshly written; the compiled-in copy is stale
@@ -231,7 +231,7 @@ mod tests {
         .unwrap();
         reg.register_migration("gappy", 1, |_| {});
         let mut doc = GraphDoc::default();
-        doc.nodes.push(crate::engine::node_graph::doc::NodeInst {
+        doc.nodes.push(crate::doc::NodeInst {
             id: 0,
             type_id: "gappy".into(),
             type_version: 1,
@@ -250,7 +250,7 @@ mod tests {
     fn newer_instance_rejected_unknown_type_untouched() {
         let reg = registry_v2();
         let mut doc = GraphDoc::default();
-        doc.nodes.push(crate::engine::node_graph::doc::NodeInst {
+        doc.nodes.push(crate::doc::NodeInst {
             id: 0,
             type_id: "totally_unknown".into(),
             type_version: 99,

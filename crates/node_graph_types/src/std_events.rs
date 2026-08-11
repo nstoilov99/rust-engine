@@ -5,14 +5,14 @@
 //! staged by the `graph_scripting` plugin (45-A P5), which is why nothing
 //! here registers itself. `event_custom` is the one doc-dependent member —
 //! its payload pins come from the instance's properties, so the pins you see
-//! on the canvas come from [`super::descriptors::DocDescriptors`], not from
+//! on the canvas come from [`crate::descriptors::DocDescriptors`], not from
 //! the descriptor below.
 //!
 //! Every event node is impure with exec outputs only: an entry point has
 //! nothing to be continued *from*.
 
-use super::doc::{NodeRealm, PinType, PropValue};
-use super::registry::{NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, EXEC_OUT_PIN};
+use crate::doc::{NodeRealm, PinType, PropValue};
+use crate::registry::{NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError, EXEC_OUT_PIN};
 
 pub const EVENT_BEGIN_PLAY_TYPE_ID: &str = "event_begin_play";
 pub const EVENT_TICK_TYPE_ID: &str = "event_tick";
@@ -27,7 +27,7 @@ pub const EVENT_NAME_PROP: &str = "event_name";
 /// Reserved property-key prefix on `event_custom`: `payload.<slug>` declares
 /// one payload **output** pin named `<slug>`, whose value is a
 /// [`PropValue::Enum`] holding the pin type's
-/// [`PinType::type_slug`](super::doc::PinType::type_slug).
+/// [`PinType::type_slug`](crate::doc::PinType::type_slug).
 ///
 /// A payload pin carries no constant — it is an output — so the property
 /// stores the *type* rather than a default. The `Enum` spelling is deliberate:
@@ -58,7 +58,9 @@ pub const PAYLOAD_PIN_TYPES: [&str; 9] = [
 /// > activation id) → input-action events (input order) → custom events
 /// > (FIFO) → Tick. Multiple entry nodes for the same event all fire, in doc
 /// > order. Custom events are same-entity scoped in v1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum EventPhase {
     /// Exactly once per instance lifetime.
     BeginPlay,

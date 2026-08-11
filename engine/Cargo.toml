@@ -108,6 +108,8 @@ game_shared = { path = "../game_shared" }
 
 # Node graph derive macros (Task 40 P8) + inventory auto-registration backend
 node_graph_macros = { path = "../crates/node_graph_macros" }
+node_graph_types = { path = "../crates/node_graph_types" }
+node_graph_exec = { path = "../crates/node_graph_exec" }
 inventory = "0.3"
 
 # Desktop-wide color sampling for the crusty eyedropper (editor only)

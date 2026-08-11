@@ -3,48 +3,47 @@
 //! materials, VFX, audio, AI) build their node libraries and evaluators on
 //! top of this; no domain logic lives here.
 //!
-//! Plan: `docs/roadmap/VULKANO-40-NODE-GRAPH-FRAMEWORK.md`.
+//! **The types live in `crates/node_graph_types` since Task 45-A P2** and are
+//! re-exported here whole. The move is structural, not cosmetic: the portable
+//! interpreter (`node_graph_exec`) compiles *documents*, and D8 requires it to
+//! build standalone and for wasm32 — which it cannot do if the document model
+//! is inside a crate that pulls in Vulkan.
+//!
+//! This module is therefore a shim plus the two pieces that genuinely belong
+//! to the engine build: the derive-macro marker types and the `inventory`
+//! auto-registration backend. Every path that worked before still works,
+//! including the `::rust_engine::engine::node_graph::…` paths the derive
+//! macros emit.
+//!
+//! Plans: `docs/roadmap/VULKANO-40-NODE-GRAPH-FRAMEWORK.md`,
+//! `docs/roadmap/VULKANO-45A-GRAPH-EXECUTION-CORE.md`.
 
 pub mod auto_register;
-pub mod descriptors;
-pub mod doc;
-#[cfg(any(test, feature = "dev_nodes"))]
-pub mod dev_nodes;
-pub mod io;
 pub mod markers;
-pub mod migrate;
-pub mod registry;
-pub mod resolver;
-pub mod std_events;
-pub mod validate;
 
 #[cfg(test)]
 mod macros_test;
 
-pub use descriptors::{DocDescriptors, NodeKind};
-pub use doc::{
-    CommentBox, Edge, GraphDoc, GraphRealm, GroupBox, IfacePin, NodeInst, NodeRealm, PinType,
-    PropValue, VarDecl, COMMENT_FONT_SCALE_MAX, COMMENT_FONT_SCALE_MIN, GRAPH_DOC_VERSION,
+/// The 45-A P2 engine-side integration spike: proves the interpreter's
+/// effect/world contract against a real `hecs` world. Test-only; P5 replaces
+/// it with the real runner.
+#[cfg(test)]
+mod exec_spike;
+
+// Modules, re-exported so `node_graph::doc::…` / `node_graph::registry::…`
+// paths keep resolving.
+pub use node_graph_types::{
+    descriptors, doc, io, migrate, registry, resolver, std_events, validate,
 };
-pub use io::{load_graph, parse_graph, save_graph, serialize_graph, GraphIoError};
-pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};
-pub use registry::{
-    MergeReport, MigrationFn, NodeDescriptor, NodeRegistry, PinDescriptor, PreviewKind,
-    RegistryError, StagedRegistry, EXEC_IN_PIN, EXEC_OUT_PIN, GRAPH_INPUT_TYPE_ID,
-    GRAPH_OUTPUT_TYPE_ID, RESERVED_TYPE_IDS,
-    REROUTE_IN,
-    REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID,
-    VAR_VALUE_PIN,
-};
-pub use resolver::{referencing_hosts, validate_refs, GraphResolver};
-pub use std_events::{
-    register_std_events, std_event_descriptors, EventPhase, EVENT_BEGIN_PLAY_TYPE_ID,
-    EVENT_CUSTOM_TYPE_ID, EVENT_DRAIN_ORDER, EVENT_INPUT_ACTION_TYPE_ID, EVENT_TICK_TYPE_ID,
-};
-pub use validate::{
-    endpoint_type, reroute_type, validate_doc, validate_doc_with, ErrorAnchor, ErrorSeverity,
-    GraphError,
-};
+
+// The dev node set is always *compiled* in the types crate (it is static
+// descriptor data, and the framework's own tests need it); what the engine's
+// `dev_nodes` feature gates is whether the editor and game can reach it —
+// registration happens through `DevNodesPlugin`.
+#[cfg(any(test, feature = "dev_nodes"))]
+pub use node_graph_types::dev_nodes;
+
+pub use node_graph_types::*;
 
 pub use auto_register::{register_inventory_nodes, NodeFactory};
 pub use markers::ExecPin;

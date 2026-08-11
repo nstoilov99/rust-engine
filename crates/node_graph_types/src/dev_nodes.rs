@@ -2,8 +2,8 @@
 //! library — just enough surface to exercise the framework and the graph
 //! editor before consumer tasks (41, 45, …) ship real nodes.
 
-use super::doc::{NodeRealm, PinType, PropValue};
-use super::registry::{NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError};
+use crate::doc::{NodeRealm, PinType, PropValue};
+use crate::registry::{NodeDescriptor, NodeRegistry, PinDescriptor, RegistryError};
 
 /// Register the dev node set directly. Kept for the framework's own unit
 /// tests; the editor and game reach these through `DevNodesPlugin` instead

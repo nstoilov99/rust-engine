@@ -28,14 +28,14 @@
 
 use std::borrow::Cow;
 
-use super::doc::{GraphDoc, NodeRealm, PinType, PropValue, VarDecl};
-use super::registry::{
+use crate::doc::{GraphDoc, NodeRealm, PinType, PropValue, VarDecl};
+use crate::registry::{
     NodeDescriptor, NodeRegistry, PinDescriptor, EXEC_IN_PIN, EXEC_OUT_PIN, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID, VAR_GET_TYPE_ID,
     VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN,
 };
-use super::resolver::GraphResolver;
-use super::std_events::{payload_pins, EVENT_CUSTOM_TYPE_ID};
+use crate::resolver::GraphResolver;
+use crate::std_events::{payload_pins, EVENT_CUSTOM_TYPE_ID};
 
 /// Where a node instance's pins come from. One variant per answer path, so
 /// adding a document-dependent type forces a decision here rather than a new
@@ -84,7 +84,7 @@ impl NodeKind {
     }
 
     /// Variable access nodes name a `VarDecl` through
-    /// [`VAR_PROP`](super::registry::VAR_PROP).
+    /// [`VAR_PROP`](crate::registry::VAR_PROP).
     pub fn is_variable(self) -> bool {
         matches!(self, NodeKind::VarGet | NodeKind::VarSet)
     }
@@ -229,7 +229,7 @@ impl<'a> DocDescriptors<'a> {
 /// declared interface. Purity follows the interface: an interface carrying
 /// exec pins is a statement that the subgraph has side effects.
 fn subgraph_descriptor(path: &str, sub: &GraphDoc) -> NodeDescriptor {
-    let pins = |v: &[super::doc::IfacePin]| {
+    let pins = |v: &[crate::doc::IfacePin]| {
         v.iter()
             .map(|p| PinDescriptor::new(&p.slug, &p.label, p.ty.clone()))
             .collect::<Vec<_>>()
@@ -334,10 +334,10 @@ impl GraphDoc {
     /// anywhere; anything else admits only its own realm.
     fn realm_as_node(&self) -> NodeRealm {
         match self.realm {
-            super::doc::GraphRealm::Editor => NodeRealm::Editor,
-            super::doc::GraphRealm::Client => NodeRealm::Client,
-            super::doc::GraphRealm::Server => NodeRealm::ServerSafe,
-            super::doc::GraphRealm::Shared => NodeRealm::Shared,
+            crate::doc::GraphRealm::Editor => NodeRealm::Editor,
+            crate::doc::GraphRealm::Client => NodeRealm::Client,
+            crate::doc::GraphRealm::Server => NodeRealm::ServerSafe,
+            crate::doc::GraphRealm::Shared => NodeRealm::Shared,
         }
     }
 }
@@ -345,10 +345,10 @@ impl GraphDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::node_graph::dev_nodes::register_dev_nodes;
-    use crate::engine::node_graph::doc::{Edge, IfacePin, NodeInst};
-    use crate::engine::node_graph::std_events::{register_std_events, EVENT_PAYLOAD_PREFIX};
-    use crate::engine::node_graph::validate::{endpoint_type, reroute_type};
+    use crate::dev_nodes::register_dev_nodes;
+    use crate::doc::{Edge, IfacePin, NodeInst};
+    use crate::std_events::{register_std_events, EVENT_PAYLOAD_PREFIX};
+    use crate::validate::{endpoint_type, reroute_type};
     use std::collections::BTreeMap;
 
     fn registry() -> NodeRegistry {

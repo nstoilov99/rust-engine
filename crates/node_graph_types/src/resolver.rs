@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::descriptors::DocDescriptors;
-use super::doc::{GraphDoc, PinType};
-use super::registry::{NodeRegistry, SUBGRAPH_TYPE_ID};
-use super::validate::GraphError;
+use crate::descriptors::DocDescriptors;
+use crate::doc::{GraphDoc, PinType};
+use crate::registry::{NodeRegistry, SUBGRAPH_TYPE_ID};
+use crate::validate::GraphError;
 
 pub trait GraphResolver {
     fn resolve(&self, content_rel_path: &str) -> Option<&GraphDoc>;
@@ -147,8 +147,8 @@ fn detect_cycles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::node_graph::dev_nodes::register_dev_nodes;
-    use crate::engine::node_graph::doc::{Edge, IfacePin, NodeInst};
+    use crate::dev_nodes::register_dev_nodes;
+    use crate::doc::{Edge, IfacePin, NodeInst};
 
     fn registry() -> NodeRegistry {
         let mut reg = NodeRegistry::new();

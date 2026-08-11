@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use super::doc::{GraphDoc, GRAPH_DOC_VERSION};
+use crate::doc::{GraphDoc, GRAPH_DOC_VERSION};
 
 #[derive(Debug)]
 pub enum GraphIoError {
@@ -152,7 +152,7 @@ pub fn save_graph(path: &Path, doc: &GraphDoc) -> Result<(), GraphIoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::node_graph::doc::*;
+    use crate::doc::*;
     use std::collections::BTreeMap;
 
     /// Saves are canonical: nodes in id order, positions whole-pixel — so a
@@ -236,8 +236,9 @@ mod tests {
             return;
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
+            .ancestors()
+            .nth(2)
+            .expect("crates/<crate> is two levels below the repo root")
             .join("content/graphs");
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
@@ -265,14 +266,15 @@ mod tests {
     /// what warnings are for); errors are not.
     #[test]
     fn committed_content_graphs_load_and_validate() {
-        use crate::engine::node_graph::{validate_doc, ErrorSeverity, NodeRegistry};
+        use crate::{validate_doc, ErrorSeverity, NodeRegistry};
 
         let mut reg = NodeRegistry::new();
-        crate::engine::node_graph::dev_nodes::register_dev_nodes(&mut reg).unwrap();
+        crate::dev_nodes::register_dev_nodes(&mut reg).unwrap();
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
+            .ancestors()
+            .nth(2)
+            .expect("crates/<crate> is two levels below the repo root")
             .join("content/graphs");
         let mut stack = vec![root];
         let mut checked = 0;
@@ -392,17 +394,17 @@ mod tests {
         let text = serialize_graph(&doc).unwrap();
 
         // The plugin is disabled: nothing is registered.
-        let empty = crate::engine::node_graph::NodeRegistry::new();
+        let empty = crate::NodeRegistry::new();
 
         let loaded = parse_graph(&text).expect("an unknown type must not break loading");
         assert_eq!(loaded, doc, "every node, property and edge survives loading");
 
         // Validation degrades to anchored errors, not data loss.
-        let errors = crate::engine::node_graph::validate_doc(&loaded, &empty);
+        let errors = crate::validate_doc(&loaded, &empty);
         let unknown: Vec<&str> = errors
             .iter()
             .filter_map(|e| match e {
-                crate::engine::node_graph::GraphError::UnknownNodeType { type_id, .. } => {
+                crate::GraphError::UnknownNodeType { type_id, .. } => {
                     Some(type_id.as_str())
                 }
                 _ => None,
@@ -413,7 +415,7 @@ mod tests {
         // Migration leaves unknown types alone rather than rejecting the doc.
         let mut migrating = loaded.clone();
         assert_eq!(
-            crate::engine::node_graph::migrate_doc(&mut migrating, &empty).unwrap(),
+            crate::migrate_doc(&mut migrating, &empty).unwrap(),
             vec![]
         );
 
@@ -544,7 +546,7 @@ mod tests {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/src/engine/node_graph/fixtures/container_v1_expected.graph"
+                    "/src/fixtures/container_v1_expected.graph"
                 ),
                 &actual,
             )
@@ -641,7 +643,7 @@ mod tests {
     #[test]
     fn write_fixture_if_requested() {
         if std::env::var("UPDATE_GRAPH_FIXTURES").is_ok() {
-            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine/node_graph/fixtures");
+            let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/fixtures");
             std::fs::write(
                 format!("{dir}/demo.graph"),
                 serialize_graph(&demo_doc()).unwrap(),

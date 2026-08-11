@@ -2771,12 +2771,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "node_graph_exec"
+version = "0.1.0"
+dependencies = [
+ "node_graph_types",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "node_graph_macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "node_graph_types"
+version = "0.1.0"
+dependencies = [
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -4066,7 +4083,9 @@ dependencies = [
  "log",
  "mint",
  "nalgebra-glm",
+ "node_graph_exec",
  "node_graph_macros",
+ "node_graph_types",
  "notify",
  "parking_lot",
  "puffin",

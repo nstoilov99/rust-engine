@@ -7,9 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::descriptors::{DocDescriptors, NodeKind};
-use super::doc::{Edge, GraphDoc, GraphRealm, NodeRealm, PinType};
-use super::registry::{
+use crate::descriptors::{DocDescriptors, NodeKind};
+use crate::doc::{Edge, GraphDoc, GraphRealm, NodeRealm, PinType};
+use crate::registry::{
     NodeRegistry, GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID,
 };
@@ -552,10 +552,10 @@ fn data_cycles(d: &DocDescriptors<'_>) -> Vec<GraphError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::node_graph::dev_nodes::register_dev_nodes;
-    use crate::engine::node_graph::doc::NodeInst;
-    use crate::engine::node_graph::registry::{NodeDescriptor, PinDescriptor};
-    use crate::engine::node_graph::registry::{GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_TYPE_ID, SUBGRAPH_TYPE_ID};
+    use crate::dev_nodes::register_dev_nodes;
+    use crate::doc::NodeInst;
+    use crate::registry::{NodeDescriptor, PinDescriptor};
+    use crate::registry::{GRAPH_INPUT_TYPE_ID, GRAPH_OUTPUT_TYPE_ID, SUBGRAPH_TYPE_ID};
     use std::collections::BTreeMap;
 
     /// Every variant anchors somewhere, and the two unknown-pin variants both
@@ -910,8 +910,8 @@ mod tests {
     // 45-A: interface binding, variables, data cycles
     // -----------------------------------------------------------------
 
-    fn iface_pin(slug: &str, ty: PinType) -> crate::engine::node_graph::IfacePin {
-        crate::engine::node_graph::IfacePin {
+    fn iface_pin(slug: &str, ty: PinType) -> crate::IfacePin {
+        crate::IfacePin {
             slug: slug.to_string(),
             label: slug.to_string(),
             ty,
@@ -983,20 +983,20 @@ mod tests {
     /// variable the document no longer declares reports that, by name.
     #[test]
     fn variable_nodes_validate_against_the_declaration() {
-        use crate::engine::node_graph::{VAR_GET_TYPE_ID, VAR_PROP, VAR_VALUE_PIN};
+        use crate::{VAR_GET_TYPE_ID, VAR_PROP, VAR_VALUE_PIN};
 
         let reg = registry();
         let mut doc = GraphDoc::default();
-        doc.variables = vec![crate::engine::node_graph::VarDecl {
+        doc.variables = vec![crate::VarDecl {
             slug: "score".into(),
             label: "Score".into(),
             ty: PinType::Float,
-            default: Some(crate::engine::node_graph::PropValue::Float(0.0)),
+            default: Some(crate::PropValue::Float(0.0)),
         }];
         let mut get = node(0, VAR_GET_TYPE_ID);
         get.properties.insert(
             VAR_PROP.into(),
-            crate::engine::node_graph::PropValue::Str("score".into()),
+            crate::PropValue::Str("score".into()),
         );
         doc.nodes = vec![get, node(1, "test_add")];
         doc.edges = vec![edge(0, VAR_VALUE_PIN, 1, "a")];
@@ -1127,7 +1127,7 @@ mod tests {
                 ..GraphDoc::default()
             },
         );
-        let d = crate::engine::node_graph::DocDescriptors::with_resolver(&host, &reg, &docs);
+        let d = crate::DocDescriptors::with_resolver(&host, &reg, &docs);
         let errs = validate_doc_with(&d);
         assert!(
             errs.iter().any(|e| matches!(
@@ -1151,7 +1151,7 @@ mod tests {
                 ..GraphDoc::default()
             },
         );
-        let d = crate::engine::node_graph::DocDescriptors::with_resolver(&host, &reg, &docs);
+        let d = crate::DocDescriptors::with_resolver(&host, &reg, &docs);
         assert!(
             !validate_doc_with(&d)
                 .iter()

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::doc::{NodeRealm, PinType, PropValue};
+use crate::doc::{NodeRealm, PinType, PropValue};
 
 /// Reserved node-type slug for subgraph instances — their pins derive from
 /// the referenced `.subgraph` asset's interface, not from a descriptor.
@@ -34,7 +34,7 @@ pub const GRAPH_INPUT_TYPE_ID: &str = "graph_input";
 pub const GRAPH_OUTPUT_TYPE_ID: &str = "graph_output";
 
 /// Reserved node-type slugs for variable access. Pins are synthesized from
-/// the document's [`VarDecl`](super::doc::VarDecl) named by the instance's
+/// the document's [`VarDecl`](crate::doc::VarDecl) named by the instance's
 /// reserved [`VAR_PROP`] property, so neither can be registered.
 ///
 /// `var_get` — pure, one output [`VAR_VALUE_PIN`] of the variable's type.
@@ -44,8 +44,8 @@ pub const VAR_GET_TYPE_ID: &str = "var_get";
 pub const VAR_SET_TYPE_ID: &str = "var_set";
 
 /// Reserved *property* key naming the variable a `var_get`/`var_set` reads or
-/// writes. Value is a [`PropValue::Str`](super::doc::PropValue::Str) holding
-/// the [`VarDecl::slug`](super::doc::VarDecl::slug).
+/// writes. Value is a [`PropValue::Str`](crate::doc::PropValue::Str) holding
+/// the [`VarDecl::slug`](crate::doc::VarDecl::slug).
 pub const VAR_PROP: &str = "var";
 
 /// The value pin of both variable nodes.
@@ -237,7 +237,7 @@ impl std::fmt::Display for RegistryError {
 impl std::error::Error for RegistryError {}
 
 /// A single migration step for one node type, from one version to the next.
-pub type MigrationFn = Box<dyn Fn(&mut super::migrate::MigrationCtx) + Send + Sync>;
+pub type MigrationFn = Box<dyn Fn(&mut crate::migrate::MigrationCtx) + Send + Sync>;
 
 /// One plugin's pending registry contributions, collected by `PluginContext`
 /// and merged in one shot by [`NodeRegistry::merge_staged`].
@@ -447,7 +447,7 @@ impl NodeRegistry {
         &mut self,
         type_id: &str,
         from_version: u32,
-        step: impl Fn(&mut super::migrate::MigrationCtx) + Send + Sync + 'static,
+        step: impl Fn(&mut crate::migrate::MigrationCtx) + Send + Sync + 'static,
     ) {
         self.migrations
             .insert((type_id.to_string(), from_version), Box::new(step));
