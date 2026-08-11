@@ -819,6 +819,14 @@ pub enum ComponentData {
         #[serde(default)]
         is_sensor: bool,
     },
+    /// A `.graph` asset attached to this entity (Task 45-A). Serialized
+    /// config only — the running instance is never written to a scene.
+    GraphRunner {
+        #[serde(default)]
+        graph: String,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     Player,
     StaticCollision,
     Parent {

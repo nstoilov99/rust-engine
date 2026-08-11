@@ -8,7 +8,7 @@ name = "game"
 path = "src/main.rs"
 
 [features]
-default = ["hud"]
+default = ["hud", "graph-scripting"]
 # In-game HUD (crusty-gui) in the standalone client.
 hud = ["rust_engine/hud"]
 # Editor UI is crusty-gui.
@@ -19,6 +19,10 @@ editor-debug = ["editor", "rust_engine/editor-debug"]
 # Registers the node_graph test/demo node set (Task 40) so the graph editor
 # is exercisable before consumer tasks ship real nodes.
 dev_nodes = ["rust_engine/dev_nodes"]
+# Graph scripting: the interpreter, the runner system and the
+# graph_scripting plugin. Default-on; turning it off strips the interpreter
+# from the binary entirely (the export policy relies on that being true).
+graph-scripting = ["rust_engine/graph-scripting"]
 tracy = ["rust_engine/tracy"]
 
 [dependencies]

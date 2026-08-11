@@ -162,6 +162,17 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         });
     }
 
+
+    // Task 45-A: the attached graph. Unconditional — a scene naming a graph
+    // must round-trip whether or not the runtime that executes it is even
+    // compiled in.
+    if let Ok(runner) = world.get::<&crate::engine::scripting::GraphRunner>(entity) {
+        components.push(ComponentData::GraphRunner {
+            graph: runner.graph.clone(),
+            enabled: runner.enabled,
+        });
+    }
+
     if let Ok(emitter) = world.get::<&AudioEmitter>(entity) {
         components.push(ComponentData::AudioEmitter {
             clip_path: emitter.clip_path.clone(),
@@ -605,6 +616,12 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     is_sensor: *is_sensor,
                     debug_draw_visible: false,
                     handle: None,
+                });
+            }
+            ComponentData::GraphRunner { graph, enabled } => {
+                builder.add(crate::engine::scripting::GraphRunner {
+                    graph: crate::engine::scripting::normalize_graph_path(graph),
+                    enabled: *enabled,
                 });
             }
             ComponentData::Player => {

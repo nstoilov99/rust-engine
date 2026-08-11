@@ -198,7 +198,7 @@ pub struct SceneEditorState {
     >,
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
-    pub node_registry: rust_engine::engine::node_graph::NodeRegistry,
+    pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
     /// Shared graph editor clipboard (copy/paste across open graphs).
     pub graph_clipboard: Option<rust_engine::engine::editor::graph_editor::GraphFragment>,
     /// Open input action editors (one per .inputaction file).
@@ -481,6 +481,14 @@ impl App {
             },
             Some(&project_config.plugins),
         );
+
+        // Shared with the graph runner after the plugins have filled it; see
+        // the note in `standalone.rs`. Restart-only plugin activation is what
+        // makes an immutable shared registry correct.
+        let node_registry = std::sync::Arc::new(node_registry);
+        game_world
+            .resources_mut()
+            .insert(std::sync::Arc::clone(&node_registry));
         // The console does not exist yet, so plugin diagnostics are collected
         // here and seeded into it below. P6 turns this data into the Plugin
         // Manager's Failed / Enabled-with-warnings rows; it has to flow now.
@@ -3532,6 +3540,10 @@ impl App {
                 .core
                 .plugin_set
                 .is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID);
+            let scripting_inactive = !self
+                .core
+                .plugin_set
+                .is_active(rust_engine::engine::plugins::GRAPH_SCRIPTING_ID);
             let gameplay_disabled = !self
                 .core
                 .plugin_set
@@ -3707,6 +3719,7 @@ impl App {
                                         icons,
                                         world_object: world_object_info.as_ref(),
                                         physics_inactive,
+                                        scripting_inactive,
                                     },
                                 ),
                                 Some(EditorTab::AssetBrowser) => asset_browser_panel(
@@ -4661,6 +4674,24 @@ impl App {
             return;
         }
 
+        // Drop the compiled plan (Task 45-A P5). Deliberately *after* the
+        // echo check: our own save produced the document the cache already
+        // holds, so re-compiling it would be work for nothing.
+        //
+        // Invalidation also bumps a generation counter, so any *running*
+        // instance restarts on its next tick and re-fires BeginPlay. Editing a
+        // graph while playing is a stated non-goal (D9); restarting is the
+        // simplest behavior that is never subtly wrong.
+        #[cfg(feature = "graph-scripting")]
+        if let Some(cache) = self
+            .core
+            .game_world
+            .resources_mut()
+            .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
+        {
+            cache.invalidate(&key);
+        }
+
         // Reload the changed doc if it's open and clean; warn if dirty.
         if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
             if st.dirty {
@@ -4859,6 +4890,8 @@ impl App {
             );
         let (world, world_resources) = core.game_world.world_and_resources_mut();
         let plugin_set = &mut core.plugin_set;
+        let float_scripting_inactive =
+            !plugin_set.is_active(rust_engine::engine::plugins::GRAPH_SCRIPTING_ID);
         let float_physics_inactive =
             !plugin_set.is_active(rust_engine::engine::plugins::PHYSICS_RAPIER_ID);
         let plugin_panel_titles: std::collections::HashMap<String, String> =
@@ -5020,6 +5053,7 @@ impl App {
                                 icons,
                                 world_object: world_object_info.as_ref(),
                                 physics_inactive: float_physics_inactive,
+                                scripting_inactive: float_scripting_inactive,
                             },
                         ),
                         Some(EditorTab::AssetBrowser) => asset_browser_panel(

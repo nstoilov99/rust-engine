@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use node_graph_types::{
     validate_doc_with, validate_refs, DocDescriptors, ErrorSeverity, EventPhase, GraphDoc,
+    GraphRealm,
     GraphError, GraphResolver, NodeRegistry, PropValue, VarDecl, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT, REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
 };
@@ -86,6 +87,10 @@ pub struct Plan {
     pub nodes: Vec<PlanNode>,
     pub entries: Vec<Entry>,
     pub variables: Vec<VarSlot>,
+    /// The document's declared realm. Carried on the plan so a consumer can
+    /// apply its authority gate without re-reading the asset — and so a
+    /// precompiled plan stays self-describing.
+    pub realm: GraphRealm,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,7 +221,7 @@ pub fn compile(
         })
         .collect();
 
-    Ok(Plan { nodes: out, entries, variables })
+    Ok(Plan { nodes: out, entries, variables, realm: doc.realm })
 }
 
 /// Validate the document and everything it references. A subgraph whose own

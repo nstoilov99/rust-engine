@@ -67,6 +67,7 @@ pub struct InspectorPanelCtx<'a> {
     /// Physics components still edit, save and load exactly as before — they
     /// just do nothing — so the inspector says so rather than pretending.
     pub physics_inactive: bool,
+    pub scripting_inactive: bool,
 }
 
 /// Shared color-picker context threaded to every color row: the saved
@@ -85,6 +86,7 @@ enum ComponentAction {
     RemovePointLight,
     RemoveRigidBody,
     RemoveCollider,
+    RemoveGraphRunner,
     RemoveAudioEmitter,
     RemoveAudioListener,
     RemoveParticleEffect,
@@ -113,8 +115,10 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                 icons,
                 world_object,
                 physics_inactive,
+                scripting_inactive,
             } = ctx;
             panel.physics_inactive = physics_inactive;
+            panel.scripting_inactive = scripting_inactive;
             let picker_icon = icons.get("color-picker").copied();
             let read_only = play_mode != PlayMode::Edit;
 
@@ -1280,6 +1284,14 @@ fn render_components(
     {
         action = Some(ComponentAction::RemoveCollider);
     }
+    if (panel.matches_filter("graph")
+        || panel.matches_filter("script")
+        || panel.matches_filter("runner"))
+        && p.has(ComponentPresence::GRAPH_RUNNER)
+        && edit_graph_runner(ui, world, entity, panel.scripting_inactive)
+    {
+        action = Some(ComponentAction::RemoveGraphRunner);
+    }
     if (panel.matches_filter("skeleton")
         || panel.matches_filter("bone")
         || panel.matches_filter("animation"))
@@ -1351,6 +1363,9 @@ fn render_components(
             }
             ComponentAction::RemoveAudioListener => {
                 let _ = world.remove_one::<AudioListener>(entity);
+            }
+            ComponentAction::RemoveGraphRunner => {
+                let _ = world.remove_one::<crate::engine::scripting::GraphRunner>(entity);
             }
             ComponentAction::RemoveParticleEffect => {
                 let _ = world.remove_one::<ParticleEffect>(entity);
@@ -1801,6 +1816,32 @@ fn edit_rigidbody(ui: &mut Ui, world: &mut World, entity: Entity, physics_inacti
             }
         });
         rb.lock_rotation = lock;
+    })
+}
+
+/// The `GraphRunner` row: which graph, and whether it runs. Deliberately
+/// minimal — an asset *picker* and the running-instance readout are P6/P7
+/// work, and a text field the author can paste a path into is enough to drive
+/// the whole runtime today.
+fn edit_graph_runner(ui: &mut Ui, world: &mut World, entity: Entity, inert: bool) -> bool {
+    let Ok(mut runner) = world.get::<&mut crate::engine::scripting::GraphRunner>(entity) else {
+        return false;
+    };
+    component_section(ui, "Graph Runner", cat("scripting"), true, |ui| {
+        if inert {
+            ui.label(
+                "The Graph Scripting plugin is disabled - this component is inert.",
+            );
+        }
+        property_row(ui, "Graph", |ui| {
+            let field_bg = ui.style().palette.input;
+            let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
+            TextEdit::new(&mut runner.graph)
+                .width(w)
+                .fill(field_bg)
+                .show_full(ui);
+        });
+        checkbox_row(ui, "Enabled", &mut runner.enabled);
     })
 }
 
@@ -2479,6 +2520,13 @@ fn render_add_component(
             }
             if !has_collider && entry(ui, "Collider", false) {
                 let _ = world.insert_one(entity, Collider::default());
+                added = true;
+            }
+            if !p.has(ComponentPresence::GRAPH_RUNNER) && entry(ui, "Graph Runner", false) {
+                let _ = world.insert_one(
+                    entity,
+                    crate::engine::scripting::GraphRunner::default(),
+                );
                 added = true;
             }
             if !p.has(ComponentPresence::AUDIO_EMITTER) && entry(ui, "Audio Emitter", false) {

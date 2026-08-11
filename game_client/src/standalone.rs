@@ -60,7 +60,7 @@ pub struct StandaloneApp {
     /// graph evaluator ships yet), but plugin registrations must land
     /// somewhere that outlives startup rather than being dropped.
     #[allow(dead_code)]
-    node_registry: rust_engine::engine::node_graph::NodeRegistry,
+    node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
     frame_number: u64,
     render_thread: Option<RenderThread>,
     /// Net session (M5); `Some` when launched with `--connect`.
@@ -237,6 +237,17 @@ impl StandaloneApp {
             },
             None,
         );
+
+        // The registry becomes shared *after* the plugins have filled it:
+        // building needs `&mut`, and the graph runner needs a read-only view
+        // from inside a system. An `Arc` gives both without a second copy that
+        // could drift — nothing mutates it afterwards, because plugin
+        // activation is restart-only (39.8).
+        let node_registry = std::sync::Arc::new(node_registry);
+        game_world
+            .resources_mut()
+            .insert(std::sync::Arc::clone(&node_registry));
+
         if let Some(failure) = plugin_set.failures().first() {
             // A shipped game missing a plugin it needs should not limp.
             return Err(format!(

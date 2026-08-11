@@ -30,6 +30,11 @@ pub mod dev_nodes;
 /// Export feature resolution (D9): Cargo features as the packaging tool.
 pub mod export;
 
+/// Graph execution (Task 45-A P5) — the first plugin with a real Cargo
+/// feature gate, so disabling it strips the interpreter from an export.
+#[cfg(feature = "graph-scripting")]
+pub mod graph_scripting;
+
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +43,14 @@ pub use export::{export_features, exported_plugins, ExportedPlugin, EXPORT_BASE_
 pub use rapier::{RapierPhysicsPlugin, PHYSICS_RAPIER_ID};
 #[cfg(feature = "dev_nodes")]
 pub use dev_nodes::DevNodesPlugin;
+#[cfg(feature = "graph-scripting")]
+pub use graph_scripting::{GraphScriptingPlugin, GRAPH_SCRIPTING_FEATURE};
+
+/// The `graph_scripting` manifest id. **Unconditional**: the editor asks
+/// `PluginSet::is_active` about it to grey out inert `GraphRunner` rows, and
+/// that question is just as meaningful — more so — in a build where the
+/// plugin was never compiled in.
+pub const GRAPH_SCRIPTING_ID: &str = "graph_scripting";
 #[cfg(feature = "editor")]
 pub use panel::{
     PluginPanel, PluginPanelCtx, PluginPanelEntry, PluginSettingsCtx, PluginSettingsEntry,

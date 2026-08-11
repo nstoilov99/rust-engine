@@ -157,6 +157,11 @@
             guid: Some("0e77795b-76c1-4c1a-8fd8-2fc7177e45b4"),
             components: [
                 (
+                    type: "GraphRunner",
+                    graph: "graphs/runner_demo.graph",
+                    enabled: true,
+                ),
+                (
                     type: "Transform",
                     position: (0.0, 2.402075, 0.0),
                     rotation: (0.0, 0.0, 0.0, 1.0),

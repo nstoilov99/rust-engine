@@ -35,7 +35,12 @@ use super::{PluginEntry, PluginKind, PluginManifest};
 
 /// Non-plugin features that must survive `--no-default-features`.
 ///
-/// Keep in step with `game_client`'s `[features] default`.
+/// Keep in step with `game_client`'s `[features] default` **minus anything a
+/// plugin already carries as its `cargo_feature`**. `graph-scripting` is
+/// default-on and in that default list, but it stays out of here on purpose:
+/// it is the feature `graph_scripting`'s manifest names, so the export
+/// resolver adds it exactly when that plugin is enabled. Listing it here too
+/// would make it unconditional and quietly undo the gate.
 pub const EXPORT_BASE_FEATURES: &[&str] = &["hud"];
 
 /// A runtime plugin that will be compiled into an export.

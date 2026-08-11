@@ -272,8 +272,12 @@ mod tests {
     fn committed_content_graphs_load_and_validate() {
         use crate::{validate_doc, ErrorSeverity, NodeRegistry};
 
+        // Every library a committed graph may draw on: the dev/fixture set
+        // and, since 45-A P5, the standard node library and its event entries.
         let mut reg = NodeRegistry::new();
         crate::dev_nodes::register_dev_nodes(&mut reg).unwrap();
+        crate::register_std_nodes(&mut reg).unwrap();
+        crate::register_std_events(&mut reg).unwrap();
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()

@@ -52,6 +52,10 @@ pub mod math;
 // Node graph framework (Task 40)
 pub mod node_graph;
 
+/// Graph scripting runtime binding (Task 45-A P5). The component is always
+/// compiled; the runner is behind the `graph-scripting` feature.
+pub mod scripting;
+
 // Skeletal animation system
 pub mod animation;
 

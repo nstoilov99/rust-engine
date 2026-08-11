@@ -71,6 +71,10 @@ impl EnginePlugin for ClientGamePlugin {
 pub fn client_plugin_set() -> PluginSet {
     let mut set = PluginSet::new();
     set.add(rust_engine::engine::plugins::RapierPhysicsPlugin);
+    #[cfg(feature = "graph-scripting")]
+    set.add(rust_engine::engine::plugins::GraphScriptingPlugin::new(
+        rust_engine::engine::assets::content_root::content_root(),
+    ));
     #[cfg(feature = "dev_nodes")]
     set.add(rust_engine::engine::plugins::DevNodesPlugin);
     set.add(ClientGamePlugin);

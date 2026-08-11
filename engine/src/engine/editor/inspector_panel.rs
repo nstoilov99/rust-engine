@@ -38,6 +38,7 @@ impl ComponentPresence {
     pub(crate) const AUDIO_LISTENER: u16 = 1 << 11;
     pub(crate) const PARTICLE_EFFECT: u16 = 1 << 12;
     pub(crate) const STATIC_COLLISION: u16 = 1 << 13;
+    pub(crate) const GRAPH_RUNNER: u16 = 1 << 14;
 
     pub(crate) fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -46,6 +47,12 @@ impl ComponentPresence {
         }
         if world.get::<&Transform>(entity).is_ok() {
             bits |= Self::TRANSFORM;
+        }
+        if world
+            .get::<&crate::engine::scripting::GraphRunner>(entity)
+            .is_ok()
+        {
+            bits |= Self::GRAPH_RUNNER;
         }
         if world.get::<&Camera>(entity).is_ok() {
             bits |= Self::CAMERA;
@@ -108,6 +115,9 @@ pub struct InspectorPanel {
     /// D7). A field rather than another parameter: the component editors are
     /// already deep in the call stack.
     pub(crate) physics_inactive: bool,
+    /// The same, for the `graph_scripting` plugin: a `GraphRunner` whose
+    /// runtime is disabled says so rather than looking functional.
+    pub(crate) scripting_inactive: bool,
     /// Unreal-style saved color swatches shared by all inspector color pickers.
     #[cfg(feature = "editor")]
     pub(crate) crusty_swatches: Vec<crusty_gui::math::Color>,
@@ -135,6 +145,7 @@ impl InspectorPanel {
             cached_presence: ComponentPresence::default(),
             presence_entity: None,
             physics_inactive: false,
+            scripting_inactive: false,
             #[cfg(feature = "editor")]
             crusty_swatches: Vec::new(),
             #[cfg(feature = "editor")]

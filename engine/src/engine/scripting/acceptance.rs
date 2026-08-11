@@ -1,0 +1,784 @@
+//! Acceptance evidence for the runtime binding (Task 45-A P5).
+//!
+//! These drive the *real* plugin, the *real* schedule and a real `hecs` world
+//! — the P2/P3 spike style — so what is asserted here is what the editor and
+//! the standalone game do, not a parallel implementation of it.
+
+use std::collections::BTreeMap;
+
+use nalgebra_glm as glm;
+use node_graph_types::{
+    Edge, GraphDoc, GraphRealm, NodeInst, PropValue, EVENT_BEGIN_PLAY_TYPE_ID, EVENT_TICK_TYPE_ID,
+    EXEC_IN_PIN, EXEC_OUT_PIN,
+};
+
+use crate::engine::ecs::components::{Name, Transform};
+use crate::engine::ecs::resources::{EditorState, PlayMode, Resources, Time};
+use crate::engine::ecs::schedule::Schedule;
+use crate::engine::node_graph::NodeRegistry;
+use crate::engine::plugins::{GraphScriptingPlugin, PluginSet, PluginTargets};
+use crate::engine::scripting::runner::{GraphLoader, GraphPlanCache, GraphRuntime};
+use crate::engine::scripting::GraphRunner;
+
+use node_graph_types::std_nodes as ids;
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+fn node(id: u64, type_id: &str) -> NodeInst {
+    NodeInst {
+        id,
+        type_id: type_id.to_string(),
+        type_version: 1,
+        position: [id as f32 * 180.0, 0.0],
+        properties: BTreeMap::new(),
+        subgraph: None,
+        tint: None,
+        title: None,
+    }
+}
+
+fn with(id: u64, type_id: &str, props: &[(&str, PropValue)]) -> NodeInst {
+    let mut n = node(id, type_id);
+    for (k, v) in props {
+        n.properties.insert(k.to_string(), v.clone());
+    }
+    n
+}
+
+fn edge(from: u64, fp: &str, to: u64, tp: &str) -> Edge {
+    Edge {
+        from_node: from,
+        from_pin: fp.to_string(),
+        to_node: to,
+        to_pin: tp.to_string(),
+    }
+}
+
+/// Every tick: read this entity's position, add 1 to X, write it back. A
+/// read-modify-write, so it proves the read seam and the write seam in one
+/// fixture and fails visibly if either is wrong.
+fn move_each_tick() -> GraphDoc {
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(2, EVENT_TICK_TYPE_ID),
+        node(3, ids::GET_POSITION),
+        node(4, ids::BREAK_VEC3),
+        with(5, ids::ADD_FLOAT, &[("b", PropValue::Float(1.0))]),
+        node(6, ids::MAKE_VEC3),
+        node(7, ids::SET_POSITION),
+    ];
+    doc.edges = vec![
+        edge(2, EXEC_OUT_PIN, 7, EXEC_IN_PIN),
+        edge(3, "position", 4, "value"),
+        edge(4, "x", 5, "a"),
+        edge(5, "result", 6, "x"),
+        edge(4, "y", 6, "y"),
+        edge(4, "z", 6, "z"),
+        edge(6, "result", 7, "position"),
+    ];
+    doc
+}
+
+/// Counts BeginPlay firings into a variable, so "exactly once" is a number
+/// rather than an inference from side effects.
+fn count_begin_play() -> GraphDoc {
+    let mut doc = GraphDoc::default();
+    doc.variables = vec![node_graph_types::VarDecl {
+        slug: "n".into(),
+        label: "N".into(),
+        ty: node_graph_types::PinType::Int,
+        default: Some(PropValue::Int(0)),
+    }];
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, node_graph_types::VAR_GET_TYPE_ID, &[(node_graph_types::VAR_PROP, PropValue::Str("n".into()))]),
+        with(2, ids::ADD_INT, &[("b", PropValue::Int(1))]),
+        with(3, node_graph_types::VAR_SET_TYPE_ID, &[(node_graph_types::VAR_PROP, PropValue::Str("n".into()))]),
+        node(4, ids::INT_TO_FLOAT),
+        node(5, ids::MAKE_VEC3),
+        node(6, ids::SET_POSITION),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 3, EXEC_IN_PIN),
+        edge(1, node_graph_types::VAR_VALUE_PIN, 2, "a"),
+        edge(2, "result", 3, node_graph_types::VAR_VALUE_PIN),
+        edge(3, EXEC_OUT_PIN, 6, EXEC_IN_PIN),
+        // Publish the count through the entity's X position, which the test
+        // can read without reaching into interpreter internals.
+        edge(1, node_graph_types::VAR_VALUE_PIN, 4, "value"),
+        edge(4, "result", 5, "x"),
+        edge(5, "result", 6, "position"),
+    ];
+    doc
+}
+
+/// A loader over an in-memory map — the same seam the engine fills with a
+/// disk/pak reader.
+struct MapLoader(BTreeMap<String, GraphDoc>);
+
+impl GraphLoader for MapLoader {
+    fn load(&self, content_rel: &str) -> Option<GraphDoc> {
+        self.0.get(content_rel).cloned()
+    }
+}
+
+/// The app, in miniature: plugin set, schedule, resources, world.
+struct Harness {
+    schedule: Schedule,
+    resources: Resources,
+    world: hecs::World,
+    registry: NodeRegistry,
+    time: f64,
+}
+
+impl Harness {
+    fn new(docs: &[(&str, GraphDoc)]) -> Self {
+        Self::with_root(docs, std::path::Path::new("content"))
+    }
+
+    fn with_root(docs: &[(&str, GraphDoc)], root: &std::path::Path) -> Self {
+        let mut resources = Resources::new();
+        resources.insert(Time::new());
+        let mut editor = EditorState::new();
+        editor.play_mode = PlayMode::Playing;
+        resources.insert(editor);
+
+        let map: BTreeMap<String, GraphDoc> = docs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
+        // The *real* plugin, pointed at in-memory documents — the system
+        // under test is the one the binaries register, not a stand-in.
+        let mut set = PluginSet::new();
+        set.add(GraphScriptingPlugin::with_loader(
+            root.to_path_buf(),
+            Box::new(move || Box::new(MapLoader(map.clone()))),
+        ));
+
+        let mut h = Self {
+            schedule: Schedule::new(),
+            resources,
+            world: hecs::World::new(),
+            registry: NodeRegistry::new(),
+            time: 0.0,
+        };
+        set.build_all(
+            PluginTargets {
+                schedule: &mut h.schedule,
+                resources: &mut h.resources,
+                node_registry: &mut h.registry,
+            },
+            None,
+        );
+        assert!(set.failures().is_empty(), "{:?}", set.failures());
+
+        // The runner reads the node registry from `Resources`, which is
+        // where the app puts the scene's registry.
+        h.resources
+            .insert(std::sync::Arc::new(std::mem::take(&mut h.registry)));
+        h
+    }
+
+    fn tick(&mut self, dt: f32) {
+        self.time += dt as f64;
+        if let Some(t) = self.resources.get_mut::<Time>() {
+            t.delta = dt;
+            t.total = self.time;
+            t.frame += 1;
+        }
+        let mut commands = crate::engine::ecs::commands::CommandBuffer::new();
+        self.schedule
+            .run_raw(&mut self.world, &mut self.resources, &mut commands);
+    }
+
+    fn ticks(&mut self, n: usize) {
+        for _ in 0..n {
+            self.tick(1.0 / 60.0);
+        }
+    }
+
+    fn spawn_runner(&mut self, name: &str, graph: &str) -> hecs::Entity {
+        self.world.spawn((
+            Name(name.to_string()),
+            Transform::new(glm::vec3(0.0, 0.0, 0.0)),
+            GraphRunner::new(graph),
+        ))
+    }
+
+    fn position(&self, e: hecs::Entity) -> glm::Vec3 {
+        self.world.get::<&Transform>(e).unwrap().position
+    }
+
+    fn stop_play(&mut self) {
+        if let Some(s) = self.resources.get_mut::<EditorState>() {
+            s.play_mode = PlayMode::Edit;
+        }
+    }
+
+    fn start_play(&mut self) {
+        if let Some(s) = self.resources.get_mut::<EditorState>() {
+            s.play_mode = PlayMode::Playing;
+        }
+    }
+
+    /// What stopping play really does to runtime state: the snapshot restore
+    /// clears the world and respawns from serialized data, so anything not
+    /// serialized is gone. Reproduced here without the editor's file I/O.
+    fn simulate_snapshot_restore(&mut self) {
+        let saved: Vec<(String, GraphRunner, glm::Vec3)> = self
+            .world
+            .query::<(&Name, &GraphRunner, &Transform)>()
+            .iter()
+            .map(|(_, (n, r, t))| (n.0.clone(), r.clone(), t.position))
+            .collect();
+        self.world.clear();
+        for (name, runner, pos) in saved {
+            self.world
+                .spawn((Name(name), Transform::new(pos), runner));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance
+// ---------------------------------------------------------------------------
+
+/// Play enter → the runner arms lazily, BeginPlay fires exactly once, and its
+/// effect lands on a real `Transform`.
+#[test]
+fn begin_play_arms_lazily_and_fires_exactly_once() {
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    let e = h.spawn_runner("Scripted", "graphs/t.graph");
+
+    // Nothing exists until the first playing tick — that is the whole of the
+    // lifecycle rule (addendum #3).
+    assert!(h.world.get::<&GraphRuntime>(e).is_err(), "not armed before the first tick");
+
+    h.tick(1.0 / 60.0);
+    assert!(h.world.get::<&GraphRuntime>(e).is_ok(), "armed on the first playing tick");
+
+    h.ticks(30);
+    assert_eq!(
+        h.position(e).x,
+        1.0,
+        "BeginPlay incremented the counter exactly once across 31 ticks"
+    );
+}
+
+/// Effects visibly apply, tick after tick: the entity actually moves.
+#[test]
+fn effects_apply_to_the_world_over_ticks() {
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]);
+    let e = h.spawn_runner("Mover", "graphs/t.graph");
+
+    h.tick(1.0 / 60.0);
+    assert_eq!(h.position(e).x, 1.0, "one tick, one nudge");
+    h.ticks(9);
+    assert_eq!(h.position(e).x, 10.0, "ten ticks, ten nudges — it really moves");
+    assert_eq!(h.position(e).y, 0.0, "and only along the axis the graph touches");
+}
+
+/// Play → stop → play: the snapshot restore drops runtime state, so BeginPlay
+/// re-arms and fires exactly once **again** — not twice, and not never.
+#[test]
+fn stopping_and_replaying_refires_begin_play_exactly_once() {
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    let e = h.spawn_runner("Scripted", "graphs/t.graph");
+    h.ticks(10);
+    assert_eq!(h.position(e).x, 1.0);
+
+    // Stop: no ticking, and the restore drops everything unserialized.
+    h.stop_play();
+    h.ticks(5);
+    h.simulate_snapshot_restore();
+    assert_eq!(
+        h.world.query::<&GraphRuntime>().iter().count(),
+        0,
+        "runtime state is never serialized, so the restore leaves none of it"
+    );
+
+    // Play again: a *new* entity, a *new* instance, one more BeginPlay.
+    h.start_play();
+    h.ticks(10);
+    let e2 = h
+        .world
+        .query::<&GraphRunner>()
+        .iter()
+        .map(|(e, _)| e)
+        .next()
+        .expect("the runner survived the restore");
+    let _ = e; // hecs reuses ids after `clear`, so identity proves nothing here
+    assert_eq!(
+        h.position(e2).x,
+        1.0,
+        "the fresh instance fired BeginPlay once, from a fresh variable"
+    );
+}
+
+/// An entity spawned *during* play arms on its next tick, exactly like one
+/// that was there all along. Same rule, no special case.
+#[test]
+fn an_entity_spawned_during_play_arms_and_fires() {
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    h.ticks(5);
+
+    let late = h.spawn_runner("Latecomer", "graphs/t.graph");
+    assert!(h.world.get::<&GraphRuntime>(late).is_err());
+    h.tick(1.0 / 60.0);
+    assert!(h.world.get::<&GraphRuntime>(late).is_ok(), "armed on its first tick");
+    h.ticks(5);
+    assert_eq!(h.position(late).x, 1.0, "and fired BeginPlay once");
+}
+
+/// The realm gate: a `Server`-realm graph on a client is refused visibly and
+/// does not run.
+#[test]
+fn the_realm_gate_refuses_a_server_graph_on_a_client() {
+    let mut server_graph = move_each_tick();
+    server_graph.realm = GraphRealm::Server;
+    let mut h = Harness::new(&[
+        ("graphs/server.graph", server_graph),
+        ("graphs/ok.graph", move_each_tick()),
+    ]);
+
+    let refused = h.spawn_runner("ServerSide", "graphs/server.graph");
+    let allowed = h.spawn_runner("ClientSide", "graphs/ok.graph");
+    h.ticks(5);
+
+    let rt = h.world.get::<&GraphRuntime>(refused).unwrap();
+    let why = rt.disabled.clone().expect("a refusal, with a reason");
+    assert!(why.contains("Server"), "the reason names the realm: {why}");
+    drop(rt);
+    assert_eq!(
+        h.position(refused),
+        glm::vec3(0.0, 0.0, 0.0),
+        "and nothing ran"
+    );
+
+    // A Shared/Client graph beside it is unaffected — the gate is per
+    // instance, not per app.
+    assert!(h.position(allowed).x > 0.0, "the graph next to it ran normally");
+}
+
+/// A missing or broken graph disables its instance with a reported reason
+/// rather than panicking or silently doing nothing — and the failure is
+/// cached, so it is not recompiled every frame.
+#[test]
+fn a_missing_graph_disables_its_instance_and_is_not_retried() {
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]);
+    let e = h.spawn_runner("Broken", "graphs/nope.graph");
+    h.ticks(3);
+
+    let rt = h.world.get::<&GraphRuntime>(e).unwrap();
+    assert!(
+        rt.disabled.as_deref().unwrap_or_default().contains("nope.graph"),
+        "{:?}",
+        rt.disabled
+    );
+    drop(rt);
+    assert_eq!(
+        h.resources.get::<GraphPlanCache>().map(|c| c.len()),
+        Some(1),
+        "the failure is cached, not retried sixty times a second"
+    );
+}
+
+/// Hot reload: invalidating the cache restarts live instances, which re-fires
+/// BeginPlay. Edit-during-play is a stated non-goal (D9) — restarting is the
+/// simplest correct answer, and this pins it as *chosen* behaviour.
+#[test]
+fn invalidating_the_cache_restarts_live_instances() {
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    let e = h.spawn_runner("Scripted", "graphs/t.graph");
+    h.ticks(5);
+    assert_eq!(h.position(e).x, 1.0);
+
+    if let Some(cache) = h.resources.get_mut::<GraphPlanCache>() {
+        cache.invalidate("graphs/t.graph");
+    }
+    h.ticks(5);
+    assert_eq!(
+        h.position(e).x,
+        1.0,
+        "the instance restarted: a fresh variable, one fresh BeginPlay"
+    );
+    assert!(h.world.get::<&GraphRuntime>(e).is_ok(), "and it is running again");
+}
+
+/// The runner never ticks outside play. `RunIfPlaying` is doing the work, but
+/// it is worth asserting: an editor that ran gameplay while you were laying
+/// out a level would be unusable.
+#[test]
+fn nothing_runs_in_edit_mode() {
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]);
+    h.stop_play();
+    let e = h.spawn_runner("Idle", "graphs/t.graph");
+    h.ticks(10);
+    assert!(h.world.get::<&GraphRuntime>(e).is_err(), "not even armed");
+    assert_eq!(h.position(e), glm::vec3(0.0, 0.0, 0.0));
+}
+
+/// A disabled runner is attached but inert — and re-enabling it arms it,
+/// which is what makes the checkbox a debugging switch.
+#[test]
+fn a_disabled_runner_is_inert_until_enabled() {
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    let e = h.spawn_runner("Off", "graphs/t.graph");
+    h.world.get::<&mut GraphRunner>(e).unwrap().enabled = false;
+    h.ticks(5);
+    assert!(h.world.get::<&GraphRuntime>(e).is_err());
+
+    h.world.get::<&mut GraphRunner>(e).unwrap().enabled = true;
+    h.ticks(2);
+    assert_eq!(h.position(e).x, 1.0, "enabling arms it");
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+/// The scene round-trip: `GraphRunner` survives, and the runtime state never
+/// reaches the file.
+#[test]
+fn scene_round_trip_keeps_the_runner_and_never_writes_runtime_state() {
+    use crate::engine::scene::scene_serializer;
+
+    let mut h = Harness::new(&[("graphs/t.graph", count_begin_play())]);
+    let e = h.spawn_runner("Scripted", "graphs/t.graph");
+    h.world
+        .get::<&mut GraphRunner>(e)
+        .unwrap()
+        .enabled = false;
+    h.ticks(2);
+
+    let roots: Vec<hecs::Entity> = h.world.query::<&Name>().iter().map(|(e, _)| e).collect();
+    let text = scene_serializer::serialize_scene_to_string(&h.world, "Test", &roots)
+        .expect("serialize");
+    assert!(text.contains("GraphRunner"), "the component reached the file");
+    assert!(text.contains("graphs/t.graph"));
+    assert!(
+        !text.contains("GraphRuntime") && !text.contains("plan"),
+        "runtime state must never be serialized: {text}"
+    );
+
+    let mut restored = hecs::World::new();
+    scene_serializer::load_scene_from_string(&mut restored, &text).expect("deserialize");
+    let (_, runner) = restored
+        .query::<&GraphRunner>()
+        .iter()
+        .map(|(e, r)| (e, r.clone()))
+        .next()
+        .expect("the runner came back");
+    assert_eq!(runner.graph, "graphs/t.graph");
+    assert!(!runner.enabled, "including the enabled flag");
+    assert_eq!(
+        restored.query::<&GraphRuntime>().iter().count(),
+        0,
+        "and no runtime state came with it"
+    );
+}
+
+/// **Reads see the world as it was at the start of the tick; writes land
+/// after.** Two entities running the same read-modify-write graph therefore
+/// cannot observe each other's half-applied frame — which is what makes a
+/// tick's effect stream a function of its inputs rather than of iteration
+/// order. Worth pinning: it is the difference between "deterministic" and
+/// "deterministic if you squint".
+#[test]
+fn reads_see_the_start_of_tick_world() {
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]);
+    let a = h.spawn_runner("A", "graphs/t.graph");
+    let b = h.spawn_runner("B", "graphs/t.graph");
+    h.ticks(5);
+    assert_eq!(h.position(a).x, 5.0);
+    assert_eq!(
+        h.position(b).x,
+        5.0,
+        "both advanced identically — neither saw the other mid-tick"
+    );
+}
+
+/// **With the plugin disabled** the standard descriptors are absent, so a
+/// document using them still loads and still saves but validates to
+/// `UnknownNodeType` — the Task 40 degradation, which the graph editor draws
+/// as placeholder nodes. Nothing crashes, and nothing is lost.
+#[test]
+fn a_disabled_plugin_leaves_graphs_readable_but_unrunnable() {
+    use crate::engine::plugins::PluginEntry;
+    use node_graph_types::{serialize_graph, validate_doc, GraphError};
+
+    let mut schedule = Schedule::new();
+    let mut resources = Resources::new();
+    let mut registry = NodeRegistry::new();
+    let mut set = PluginSet::new();
+    set.add(GraphScriptingPlugin::new("content"));
+    set.build_all(
+        PluginTargets {
+            schedule: &mut schedule,
+            resources: &mut resources,
+            node_registry: &mut registry,
+        },
+        // The manifest says off.
+        Some(&[PluginEntry {
+            id: crate::engine::plugins::GRAPH_SCRIPTING_ID.to_string(),
+            enabled: false,
+        }]),
+    );
+
+    assert!(
+        registry.get(ids::BRANCH).is_none() && registry.get(ids::PRINT).is_none(),
+        "no standard descriptors are registered"
+    );
+    assert!(
+        resources.get::<GraphPlanCache>().is_none(),
+        "and no plan cache — nothing was staged at all"
+    );
+
+    // The document still round-trips losslessly…
+    let doc = move_each_tick();
+    let text = serialize_graph(&doc).expect("a graph still saves");
+    assert_eq!(
+        node_graph_types::parse_graph(&text).expect("and still loads"),
+        doc
+    );
+
+    // …and validates to reportable placeholders rather than a parse failure.
+    let unknown: Vec<String> = validate_doc(&doc, &registry)
+        .into_iter()
+        .filter_map(|e| match e {
+            GraphError::UnknownNodeType { type_id, .. } => Some(type_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        unknown.contains(&ids::SET_POSITION.to_string()),
+        "unknown types degrade to anchored errors: {unknown:?}"
+    );
+}
+
+/// **The spawn alias protocol, end to end.** BeginPlay runs a ForLoop that
+/// spawns a prefab per iteration and immediately moves each spawned entity by
+/// its handle — so the alias must be bound to a real entity before the
+/// instance's next tick, which is the whole contract D1 describes.
+#[test]
+fn begin_play_spawns_in_a_loop_and_the_aliases_bind() {
+    use node_graph_types::{PinType, VarDecl, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN};
+
+    // A prefab on disk, in a content root of this test's own.
+    let root = std::env::temp_dir().join("rust_engine_p5_spawn");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("prefabs")).unwrap();
+    let prefab = crate::engine::scene::prefab::Prefab {
+        name: "Crate".to_string(),
+        description: "spawned by a graph".to_string(),
+        template: crate::engine::scene::scene_format::EntityData {
+            name: "Crate".to_string(),
+            guid: None,
+            components: vec![crate::engine::scene::scene_format::ComponentData::Transform {
+                position: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+        },
+    };
+    std::fs::write(
+        root.join("prefabs/crate.prefab"),
+        ron::ser::to_string_pretty(&prefab, ron::ser::PrettyConfig::default()).unwrap(),
+    )
+    .unwrap();
+    // `Prefab::load` asks the asset source whether we are running from a pak;
+    // in a shared test process the first caller wins and the rest must not
+    // panic for having lost that race.
+    crate::engine::assets::asset_source::init_filesystem_if_unset(root.clone());
+
+    // BeginPlay: for i in 0..2 { spawned = spawn(prefabs/crate.prefab at
+    // (i,0,0)); set_position(spawned, (i, 9, 0)) }  — the second statement
+    // acts on the handle the first produced.
+    let mut doc = GraphDoc::default();
+    doc.variables = vec![VarDecl {
+        slug: "last".into(),
+        label: "Last".into(),
+        ty: PinType::Entity,
+        default: None,
+    }];
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, ids::FOR_LOOP, &[("first", PropValue::Int(0)), ("last", PropValue::Int(1))]),
+        with(
+            2,
+            ids::SPAWN_PREFAB,
+            &[("path", PropValue::Str("prefabs/crate.prefab".into()))],
+        ),
+        with(3, VAR_SET_TYPE_ID, &[(VAR_PROP, PropValue::Str("last".into()))]),
+        node(4, ids::INT_TO_FLOAT),
+        with(5, ids::MAKE_VEC3, &[("y", PropValue::Float(9.0))]),
+        node(6, ids::SET_POSITION),
+        with(7, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("last".into()))]),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(1, "body", 2, EXEC_IN_PIN),
+        edge(2, EXEC_OUT_PIN, 3, EXEC_IN_PIN),
+        edge(3, EXEC_OUT_PIN, 6, EXEC_IN_PIN),
+        // spawn position x = the loop index
+        edge(1, "index", 4, "value"),
+        edge(4, "result", 5, "x"),
+        edge(5, "result", 2, "position"),
+        // the handle goes into the variable, and out of it into set_position
+        edge(2, "spawned", 3, VAR_VALUE_PIN),
+        edge(7, VAR_VALUE_PIN, 6, "entity"),
+        edge(5, "result", 6, "position"),
+    ];
+
+    let mut h = Harness::with_root(&[("graphs/spawn.graph", doc)], &root);
+    let owner = h.spawn_runner("Spawner", "graphs/spawn.graph");
+
+    h.tick(1.0 / 60.0);
+    let spawned: Vec<glm::Vec3> = h
+        .world
+        .query::<(&Name, &Transform)>()
+        .iter()
+        .filter(|(e, _)| *e != owner)
+        .map(|(_, (_, t))| t.position)
+        .collect();
+    assert_eq!(spawned.len(), 2, "two loop iterations, two entities");
+
+    // Every spawned entity got a guid, which scene serialization needs.
+    for (e, _) in h.world.query::<&Name>().iter() {
+        if e != owner {
+            assert!(
+                h.world.get::<&crate::engine::ecs::components::EntityGuid>(e).is_ok(),
+                "a graph-spawned entity is a first-class entity"
+            );
+        }
+    }
+
+    // The aliases bound: the runner recorded them, and the instance no longer
+    // considers them pending.
+    let rt = h.world.get::<&GraphRuntime>(owner).unwrap();
+    assert_eq!(rt.aliases.len(), 2, "both aliases bound to real entities");
+    assert!(
+        rt.instance.pending_aliases.is_empty(),
+        "and the handshake was drained"
+    );
+    drop(rt);
+
+    // On the next tick the `set_position` that used the *handle* lands — the
+    // alias was bound before the instance ticked again, which is the point.
+    h.tick(1.0 / 60.0);
+    let moved = h
+        .world
+        .query::<(&Name, &Transform)>()
+        .iter()
+        .filter(|(e, _)| *e != owner)
+        .filter(|(_, (_, t))| t.position.y == 9.0)
+        .count();
+    assert!(moved >= 1, "the graph moved an entity it had spawned by handle");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Destroying by handle removes the entity from the world.
+#[test]
+fn destroy_entity_removes_it() {
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![node(0, EVENT_TICK_TYPE_ID), node(1, ids::DESTROY_ENTITY)];
+    doc.edges = vec![edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN)];
+
+    let mut h = Harness::new(&[("graphs/kill.graph", doc)]);
+    let e = h.spawn_runner("Doomed", "graphs/kill.graph");
+    assert!(h.world.contains(e));
+    h.tick(1.0 / 60.0);
+    assert!(!h.world.contains(e), "the entity destroyed itself");
+}
+
+/// The committed demo graph, generated rather than hand-written so it is
+/// guaranteed valid and canonical:
+/// `UPDATE_GRAPH_FIXTURES=1 cargo test -p rust_engine --lib write_runner_demo`
+///
+/// What it does, and why each piece is there:
+/// - **BeginPlay** runs a ForLoop that prints three lines — control flow and
+///   a pure chain, visible in the console the moment play starts;
+/// - then a **Delay** chain prints once more a second later, which is the
+///   only way to see latency working from outside;
+/// - **Tick** walks the entity along +X, so the effect stream visibly moves
+///   something in the world every frame.
+#[test]
+fn write_runner_demo_if_requested() {
+    use node_graph_types::{serialize_graph, PinType, VarDecl, VAR_GET_TYPE_ID, VAR_PROP, VAR_SET_TYPE_ID, VAR_VALUE_PIN};
+
+    if std::env::var("UPDATE_GRAPH_FIXTURES").is_err() {
+        return;
+    }
+
+    let mut doc = GraphDoc::default();
+    doc.realm = GraphRealm::Shared;
+    doc.variables = vec![VarDecl {
+        slug: "steps".into(),
+        label: "Steps".into(),
+        ty: PinType::Int,
+        default: Some(PropValue::Int(0)),
+    }];
+    doc.nodes = vec![
+        // --- BeginPlay: a counted loop, then a delayed line ---------------
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, ids::FOR_LOOP, &[("first", PropValue::Int(1)), ("last", PropValue::Int(3))]),
+        node(2, ids::INT_TO_STRING),
+        with(3, ids::PRINT, &[]),
+        with(4, ids::DELAY, &[("duration", PropValue::Float(1.0))]),
+        with(5, ids::PRINT, &[("text", PropValue::Str("one second later".into()))]),
+        // --- Tick: walk along +X -------------------------------------------
+        node(6, EVENT_TICK_TYPE_ID),
+        node(7, ids::GET_POSITION),
+        node(8, ids::BREAK_VEC3),
+        with(9, ids::ADD_FLOAT, &[("b", PropValue::Float(0.02))]),
+        node(10, ids::MAKE_VEC3),
+        node(11, ids::SET_POSITION),
+        // --- …and count the steps in a variable ----------------------------
+        with(12, VAR_GET_TYPE_ID, &[(VAR_PROP, PropValue::Str("steps".into()))]),
+        with(13, ids::ADD_INT, &[("b", PropValue::Int(1))]),
+        with(14, VAR_SET_TYPE_ID, &[(VAR_PROP, PropValue::Str("steps".into()))]),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(1, "body", 3, EXEC_IN_PIN),
+        edge(1, "index", 2, "value"),
+        edge(2, "text", 3, "text"),
+        edge(1, "completed", 4, EXEC_IN_PIN),
+        edge(4, EXEC_OUT_PIN, 5, EXEC_IN_PIN),
+        edge(6, EXEC_OUT_PIN, 11, EXEC_IN_PIN),
+        edge(7, "position", 8, "value"),
+        edge(8, "x", 9, "a"),
+        edge(9, "result", 10, "x"),
+        edge(8, "y", 10, "y"),
+        edge(8, "z", 10, "z"),
+        edge(10, "result", 11, "position"),
+        edge(11, EXEC_OUT_PIN, 14, EXEC_IN_PIN),
+        edge(12, VAR_VALUE_PIN, 13, "a"),
+        edge(13, "result", 14, VAR_VALUE_PIN),
+    ];
+    // Lay it out so the committed asset opens readably rather than as a heap.
+    for (i, n) in doc.nodes.iter_mut().enumerate() {
+        n.position = [(i % 6) as f32 * 260.0, (i / 6) as f32 * 220.0];
+    }
+
+    // It must compile before it is committed — a demo that does not run is
+    // worse than no demo.
+    let mut h = Harness::new(&[("graphs/runner_demo.graph", doc.clone())]);
+    let e = h.spawn_runner("Demo", "graphs/runner_demo.graph");
+    h.ticks(3);
+    let rt = h.world.get::<&GraphRuntime>(e).unwrap();
+    assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+    drop(rt);
+    assert!(h.position(e).x > 0.0, "the demo actually moves its entity");
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content/graphs/runner_demo.graph");
+    std::fs::write(&root, serialize_graph(&doc).unwrap()).unwrap();
+    println!("wrote {}", root.display());
+}

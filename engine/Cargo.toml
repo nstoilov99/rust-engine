@@ -8,7 +8,7 @@ name = "rust_engine"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["graph-scripting"]
 # Runtime HUD: crusty-gui without any editor machinery.
 hud = ["dep:crusty-gui"]
 # Editor UI is crusty-gui.
@@ -19,6 +19,12 @@ editor-debug = ["editor"]
 # Registers the node_graph test/demo node set in the editor (Task 40) —
 # lets the graph editor be exercised before consumer tasks ship real nodes.
 dev_nodes = []
+# Graph scripting: the node-graph interpreter, the GraphRunner system and the
+# graph_scripting plugin. Default-on, and a real gate — `node_graph_exec` is a
+# leaf crate, so turning this off genuinely strips the interpreter from a
+# build. The `GraphRunner` *component* is unconditional (scenes must round-trip
+# either way); only the runtime is gated.
+graph-scripting = ["dep:node_graph_exec"]
 tracy = ["tracy-client"]
 
 [dependencies]
@@ -109,7 +115,7 @@ game_shared = { path = "../game_shared" }
 # Node graph derive macros (Task 40 P8) + inventory auto-registration backend
 node_graph_macros = { path = "../crates/node_graph_macros" }
 node_graph_types = { path = "../crates/node_graph_types" }
-node_graph_exec = { path = "../crates/node_graph_exec" }
+node_graph_exec = { path = "../crates/node_graph_exec", optional = true }
 inventory = "0.3"
 
 # Desktop-wide color sampling for the crusty eyedropper (editor only)

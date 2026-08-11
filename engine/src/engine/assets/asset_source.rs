@@ -30,6 +30,15 @@ pub fn init_filesystem(content_root: PathBuf) {
         .unwrap_or_else(|_| panic!("AssetSource already initialized"));
 }
 
+/// Initialize the filesystem source **if nothing has claimed it yet**.
+///
+/// Tests share one process, so the first one to touch an asset wins and the
+/// rest must not panic for having lost the race. Production code calls
+/// [`init_filesystem`], which is loud about a double init on purpose.
+pub fn init_filesystem_if_unset(content_root: PathBuf) {
+    let _ = ASSET_SOURCE.set(AssetSource::Filesystem { content_root });
+}
+
 pub fn init_pak(pak_path: &Path) {
     let reader = PakReader::open(pak_path)
         .unwrap_or_else(|e| panic!("Failed to open pak file {}: {}", pak_path.display(), e));

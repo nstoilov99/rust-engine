@@ -293,6 +293,15 @@ impl Prefab {
                 ComponentData::ParticleEffect { .. } => {
                     // ParticleEffect prefab instantiation handled via scene serializer
                 }
+                ComponentData::GraphRunner { graph, enabled } => {
+                    // A prefab may carry its own behavior; the runner arms it
+                    // on the first playing tick after it is spawned, exactly
+                    // like an entity that was in the scene all along.
+                    builder.add(crate::engine::scripting::GraphRunner {
+                        graph: crate::engine::scripting::normalize_graph_path(graph),
+                        enabled: *enabled,
+                    });
+                }
                 ComponentData::Parent { .. } => {
                     // Parent relationships are not applicable for prefabs
                     // They are handled separately during scene loading
