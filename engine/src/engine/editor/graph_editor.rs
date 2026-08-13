@@ -16,11 +16,16 @@ use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
     endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
-    GraphDoc, IfacePin, PinType, VarDecl,
+    GraphDoc, GraphResolver, IfacePin, PinType, VarDecl,
     DocDescriptors, GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT,
-    REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID,
+    REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID, EVENT_CUSTOM_TYPE_ID, EVENT_NAME_PROP,
+    EVENT_PAYLOAD_PREFIX,
 };
+
+/// The type a freshly added payload field takes (GS-1): the commonest one, and
+/// the row's own dropdown changes it in a click.
+pub const DEFAULT_PAYLOAD_TYPE: &str = "float";
 
 /// How far outside the collapsed selection's bounding box the auto-inserted
 /// `graph_input` / `graph_output` nodes land, in canvas world units. Far
@@ -553,6 +558,65 @@ pub fn variable_slug(name: &str) -> String {
     }
 }
 
+/// How many wires read one custom-event payload field, and across how many
+/// documents (GS-1).
+///
+/// A "reader" is a **wire out of a `<slug>` payload pin** on an `event_custom`
+/// node named `event_name`: every one of them stops carrying a value when the
+/// field goes away or changes name. `doc`/`doc_path` are the live editor
+/// document (the resolver's copy of it may be a frame stale, so it is skipped
+/// there and counted here).
+///
+/// **The boundary, stated:** the resolver enumerates the *open + resolvable*
+/// set — every open graph tab plus every subgraph they reference transitively
+/// (see `build_resolver_docs`). A `.graph` on disk that nobody has opened and
+/// nothing references is not in it and is not counted. That is the honest
+/// limit of what the editor can know without scanning the whole content tree,
+/// and it is why the dialog says "N listeners in M graphs" rather than
+/// claiming to have found them all.
+pub fn payload_reader_count(
+    doc: &GraphDoc,
+    doc_path: &str,
+    event_name: &str,
+    slug: &str,
+    resolver: &dyn GraphResolver,
+) -> (usize, usize) {
+    fn in_doc(d: &GraphDoc, event_name: &str, slug: &str) -> usize {
+        let listeners: BTreeSet<u64> = d
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.type_id == EVENT_CUSTOM_TYPE_ID
+                    && matches!(
+                        n.properties.get(EVENT_NAME_PROP),
+                        Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) if s == event_name
+                    )
+            })
+            .map(|n| n.id)
+            .collect();
+        if listeners.is_empty() {
+            return 0;
+        }
+        d.edges
+            .iter()
+            .filter(|e| listeners.contains(&e.from_node) && e.from_pin == slug)
+            .count()
+    }
+    let mut readers = in_doc(doc, event_name, slug);
+    let mut graphs = usize::from(readers > 0);
+    for (path, other) in resolver.documents() {
+        if path == doc_path {
+            continue;
+        }
+        let n = in_doc(other, event_name, slug);
+        if n > 0 {
+            readers += n;
+            graphs += 1;
+        }
+    }
+    (readers, graphs)
+}
+
 /// Indices of the comments anchored to any of `ids` — the collateral a node
 /// delete has to carry.
 pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
@@ -975,6 +1039,9 @@ pub struct GraphEditorState {
     pub frame_all_on_open: bool,
     /// The variables side strip (45-A P6c). Session-only.
     pub vars: VarPanel,
+    /// The custom-event payload band's draft/confirm state (GS-1).
+    /// Session-only, like `vars`.
+    pub payload: PayloadPanel,
 }
 
 /// The add-node palette's session state.
@@ -1295,6 +1362,74 @@ pub struct VarDrop {
     pub screen: [f32; 2],
 }
 
+/// The custom-event payload band's own session state (GS-1).
+///
+/// Grouped like [`VarPanel`], and for the same reason: none of it is document
+/// data — it is one band's in-flight name entry and its pending confirmation.
+#[derive(Debug, Clone, Default)]
+pub struct PayloadPanel {
+    /// In-flight name entry, either for the "+ field" ghost row or for a
+    /// rename of an existing row.
+    pub draft: Option<PayloadDraft>,
+    /// A change with readers, waiting on confirmation.
+    pub confirm: Option<PayloadConfirm>,
+}
+
+/// An in-flight payload-field name entry.
+///
+/// The widget only ever *reports* — it sets `submitted` and the panel decides
+/// what that means, because the decision (straight through, or a confirmation)
+/// needs the cross-document resolver the drawing pass does not carry.
+#[derive(Debug, Clone)]
+pub struct PayloadDraft {
+    pub node: u64,
+    /// `None` = the "+ field" ghost row; `Some(slug)` = renaming that field.
+    pub slug: Option<String>,
+    pub name: String,
+    /// Grab the keyboard on the first frame only.
+    pub first_frame: bool,
+    /// The field has held focus at least once. Focus arrives a frame after it
+    /// is requested, so "lost focus" only means anything after that: without
+    /// this the draft cancelled itself on the frame after it opened.
+    pub seen_focus: bool,
+    /// Enter was pressed — the panel picks it up after the draw.
+    pub submitted: bool,
+}
+
+/// A payload change that would break readers, waiting on confirmation. Both
+/// arms carry the counts, because the counts are the reason to ask.
+#[derive(Debug, Clone)]
+pub enum PayloadConfirm {
+    Remove {
+        node: u64,
+        slug: String,
+        readers: usize,
+        graphs: usize,
+    },
+    Rename {
+        node: u64,
+        slug: String,
+        /// The name as typed; the slug is derived on commit.
+        name: String,
+        readers: usize,
+        graphs: usize,
+    },
+}
+
+impl PayloadConfirm {
+    pub fn slug(&self) -> &str {
+        match self {
+            PayloadConfirm::Remove { slug, .. } | PayloadConfirm::Rename { slug, .. } => slug,
+        }
+    }
+    pub fn counts(&self) -> (usize, usize) {
+        match self {
+            PayloadConfirm::Remove { readers, graphs, .. }
+            | PayloadConfirm::Rename { readers, graphs, .. } => (*readers, *graphs),
+        }
+    }
+}
+
 /// A pending confirmation. Both arms carry the usage count, because the count
 /// is the whole reason to ask.
 #[derive(Debug, Clone)]
@@ -1377,6 +1512,7 @@ impl GraphEditorState {
             // list, and a strip nobody can see teaches nobody it exists. One
             // click (or Alt+V) collapses it back to the rail.
             vars: VarPanel { open: true, ..Default::default() },
+            payload: PayloadPanel::default(),
         })
     }
 
@@ -1451,6 +1587,16 @@ impl GraphEditorState {
         self.selected_edges.retain(|e| self.doc.edges.contains(e));
         self.sel_comment = self.sel_comment.filter(|&i| i < self.doc.comments.len());
         self.sel_group = self.sel_group.filter(|&i| i < self.doc.groups.len());
+        // A payload draft or confirmation names a node an undo may have taken
+        // away; both would otherwise sit there addressing nothing.
+        let doc = &self.doc;
+        self.payload.draft = self.payload.draft.take().filter(|d| doc.node(d.node).is_some());
+        self.payload.confirm = self.payload.confirm.take().filter(|c| {
+            doc.node(match c {
+                PayloadConfirm::Remove { node, .. } | PayloadConfirm::Rename { node, .. } => *node,
+            })
+            .is_some()
+        });
         // An in-flight drag holds pre-undo positions/indices; cancel it so the
         // next frame doesn't overwrite the undone state or commit a bogus move.
         self.cancel_interactions();
@@ -1734,6 +1880,163 @@ impl GraphEditorState {
             GraphEdit::SetVariableDefault { slug: p.slug, old: p.old, new },
             registry,
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Custom-event payload fields (GS-1). A `payload.<slug>` property on an
+    // `event_custom` node *is* one output pin — `DocDescriptors` synthesizes
+    // the pin from the property, so every op below is a property edit and the
+    // pin follows on the next frame with no separate bookkeeping.
+    //
+    // All three land as **one** undo entry with the gesture's own name, which
+    // is why they wrap their `SetProperty` in a `Composite`: `Set payload.dir`
+    // is what the machine did, "Add Payload Field" is what the author did.
+    // -----------------------------------------------------------------
+
+    /// Declare a payload field from a typed name. Returns the slug it took, or
+    /// `None` when the node is not a custom event.
+    ///
+    /// The slug rules are the variables' rules — `variable_slug` normalizes,
+    /// and a collision takes a `_2`, `_3` … suffix — because a payload slug is
+    /// a pin slug, and pin slugs sit in the same identity family. Edges key by
+    /// slug, so this is the one moment the field's identity is decided.
+    pub fn add_payload_field(
+        &mut self,
+        node: u64,
+        name: &str,
+        registry: &NodeRegistry,
+    ) -> Option<String> {
+        let n = self.doc.node(node)?;
+        if n.type_id != EVENT_CUSTOM_TYPE_ID {
+            return None;
+        }
+        let base = variable_slug(name);
+        let mut slug = base.clone();
+        let mut i = 2u32;
+        while n
+            .properties
+            .contains_key(&format!("{EVENT_PAYLOAD_PREFIX}{slug}"))
+        {
+            slug = format!("{base}_{i}");
+            i += 1;
+        }
+        let edit = GraphEdit::Composite {
+            label: "Add Payload Field".to_string(),
+            edits: vec![GraphEdit::SetProperty {
+                node,
+                key: format!("{EVENT_PAYLOAD_PREFIX}{slug}"),
+                old: None,
+                // Float by design: the commonest payload, and a type the
+                // dropdown in the same row changes in one click.
+                new: Some(PropValue::Enum(DEFAULT_PAYLOAD_TYPE.to_string())),
+            }],
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        Some(slug)
+    }
+
+    /// Remove a payload field. Edges that named its pin are **left alone** on
+    /// purpose: with the property gone the pin vanishes from synthesis, the
+    /// edge becomes an `UnknownPin` error, and the panel draws it as a dashed
+    /// ghost row — the wire keeps a landing spot and the author sees what
+    /// broke. Silently deleting their wires would be the worse degradation.
+    pub fn remove_payload_field(
+        &mut self,
+        node: u64,
+        slug: &str,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let key = format!("{EVENT_PAYLOAD_PREFIX}{slug}");
+        let Some(old) = self
+            .doc
+            .node(node)
+            .and_then(|n| n.properties.get(&key).cloned())
+        else {
+            return false;
+        };
+        let edit = GraphEdit::Composite {
+            label: "Remove Payload Field".to_string(),
+            edits: vec![GraphEdit::SetProperty { node, key, old: Some(old), new: None }],
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    /// Rename a payload field, carrying **this document's** incident edges with
+    /// it: the property key moves and every edge leaving the old pin is
+    /// re-pointed at the new one, as one entry.
+    ///
+    /// Edges in *other* documents cannot be rewritten from here (they belong to
+    /// files this tab does not own), which is exactly what the confirmation
+    /// says before this runs. Returns the slug taken, or `None` when nothing
+    /// changed.
+    pub fn rename_payload_field(
+        &mut self,
+        node: u64,
+        slug: &str,
+        name: &str,
+        registry: &NodeRegistry,
+    ) -> Option<String> {
+        let old_key = format!("{EVENT_PAYLOAD_PREFIX}{slug}");
+        let old_value = self.doc.node(node)?.properties.get(&old_key).cloned()?;
+        let base = variable_slug(name);
+        if base == slug {
+            return None;
+        }
+        let mut new_slug = base.clone();
+        let mut i = 2u32;
+        while self
+            .doc
+            .node(node)?
+            .properties
+            .contains_key(&format!("{EVENT_PAYLOAD_PREFIX}{new_slug}"))
+        {
+            new_slug = format!("{base}_{i}");
+            i += 1;
+        }
+        let new_key = format!("{EVENT_PAYLOAD_PREFIX}{new_slug}");
+        // Edges first (recorded with their indices, so an undo restores the
+        // exact vec order a byte-stable save depends on), then the two halves
+        // of the key move.
+        let doomed: Vec<(usize, Edge)> = self
+            .doc
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.from_node == node && e.from_pin == slug)
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        let mut edits = vec![
+            GraphEdit::SetProperty {
+                node,
+                key: old_key,
+                old: Some(old_value.clone()),
+                new: None,
+            },
+            GraphEdit::SetProperty {
+                node,
+                key: new_key,
+                old: None,
+                new: Some(old_value),
+            },
+        ];
+        if !doomed.is_empty() {
+            let rewired: Vec<Edge> = doomed
+                .iter()
+                .map(|(_, e)| Edge { from_pin: new_slug.clone(), ..e.clone() })
+                .collect();
+            edits.push(GraphEdit::Disconnect { edges: doomed });
+            edits.extend(rewired.into_iter().map(GraphEdit::Connect));
+        }
+        let edit = GraphEdit::Composite {
+            label: "Rename Payload Field".to_string(),
+            edits,
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        Some(new_slug)
     }
 
     /// Set a variable's default through the coalescing path.
@@ -3543,6 +3846,7 @@ pub mod tests_support {
             frame: 0,
             frame_all_on_open: false,
             vars: VarPanel::default(),
+            payload: PayloadPanel::default(),
         }
     }
 }
@@ -5789,6 +6093,165 @@ mod tests {
         assert_eq!(doc.nodes[0].position, [0.0, 0.0]);
         assert_eq!(doc.nodes[1].position, [10.0, 0.0]);
     }
+
+    // -- GS-1: custom-event payload fields ---------------------------------
+
+    /// An `event_custom` node named `event`, with the given payload fields.
+    fn event_node(id: u64, event: &str, fields: &[(&str, &str)]) -> NodeInst {
+        let mut n = node(id, [0.0, 0.0]);
+        n.type_id = EVENT_CUSTOM_TYPE_ID.to_string();
+        n.properties
+            .insert(EVENT_NAME_PROP.into(), PropValue::Str(event.into()));
+        for (slug, ty) in fields {
+            n.properties.insert(
+                format!("{EVENT_PAYLOAD_PREFIX}{slug}"),
+                PropValue::Enum((*ty).into()),
+            );
+        }
+        n
+    }
+
+    fn payload_edge(from: u64, slug: &str, to: u64) -> Edge {
+        Edge {
+            from_node: from,
+            from_pin: slug.to_string(),
+            to_node: to,
+            to_pin: "a".to_string(),
+        }
+    }
+
+    /// Add / remove / rename are each **one** undo entry, under the gesture's
+    /// own name, and each round-trips the document byte-identically.
+    #[test]
+    fn payload_field_edits_round_trip_as_one_entry() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![event_node(0, "Hit", &[("damage", "float")]), node(1, [0.0, 0.0])];
+        st.doc.edges = vec![payload_edge(0, "damage", 1)];
+        let before = st.doc.clone();
+        let bytes = |d: &GraphDoc| crate::engine::node_graph::serialize_graph(d).unwrap();
+
+        // --- add
+        assert_eq!(st.add_payload_field(0, "Instigator", &reg).as_deref(), Some("instigator"));
+        assert_eq!(
+            st.doc.nodes[0].properties.get("payload.instigator"),
+            Some(&PropValue::Enum(DEFAULT_PAYLOAD_TYPE.into())),
+            "a new field defaults to Float"
+        );
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Add Payload Field"));
+        assert_eq!(st.stack.undo_len(), 1, "one gesture, one entry");
+        st.undo(&reg);
+        assert_eq!(bytes(&st.doc), bytes(&before));
+
+        // --- rename, carrying this document's wires with it
+        assert_eq!(
+            st.rename_payload_field(0, "damage", "Hit Damage", &reg).as_deref(),
+            Some("hit_damage")
+        );
+        assert!(!st.doc.nodes[0].properties.contains_key("payload.damage"));
+        assert_eq!(
+            st.doc.nodes[0].properties.get("payload.hit_damage"),
+            Some(&PropValue::Enum("float".into()))
+        );
+        assert_eq!(
+            st.doc.edges,
+            vec![payload_edge(0, "hit_damage", 1)],
+            "incident edges follow the rename"
+        );
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Rename Payload Field"));
+        assert_eq!(st.stack.undo_len(), 1);
+        st.undo(&reg);
+        assert_eq!(bytes(&st.doc), bytes(&before), "including the edge order");
+
+        // --- remove: the wire is left pointing at a pin that no longer
+        //     exists, which is what makes it a ghost row instead of a silent
+        //     unwiring.
+        assert!(st.remove_payload_field(0, "damage", &reg));
+        assert!(!st.doc.nodes[0].properties.contains_key("payload.damage"));
+        assert_eq!(st.doc.edges.len(), 1, "the wire keeps its landing spot");
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Remove Payload Field"));
+        assert_eq!(st.stack.undo_len(), 1);
+        st.undo(&reg);
+        assert_eq!(bytes(&st.doc), bytes(&before));
+    }
+
+    /// Payload slugs follow the variable rules: snake_case, and a collision
+    /// takes a `_2`, `_3` … suffix — on both add and rename, because edges key
+    /// by slug and two fields may never share one.
+    #[test]
+    fn payload_slugs_are_snake_case_and_collision_suffixed() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.nodes = vec![event_node(0, "Hit", &[])];
+        assert_eq!(st.add_payload_field(0, "Damage", &reg).as_deref(), Some("damage"));
+        assert_eq!(st.add_payload_field(0, "damage", &reg).as_deref(), Some("damage_2"));
+        assert_eq!(st.add_payload_field(0, "Damage!", &reg).as_deref(), Some("damage_3"));
+        assert_eq!(st.add_payload_field(0, "", &reg).as_deref(), Some("var"));
+        // A rename onto a taken slug disambiguates rather than clobbering.
+        assert_eq!(
+            st.rename_payload_field(0, "damage_3", "damage", &reg).as_deref(),
+            Some("damage_4")
+        );
+        // A no-op rename records nothing.
+        assert_eq!(st.rename_payload_field(0, "damage", "Damage", &reg), None);
+        // Not a custom event: no payload fields at all.
+        st.doc.nodes.push(node(9, [0.0, 0.0]));
+        assert_eq!(st.add_payload_field(9, "x", &reg), None);
+    }
+
+    /// The reader count is what the confirmation is *for*: wires out of a
+    /// matching payload pin, in this document and in every document the
+    /// resolver can enumerate.
+    #[test]
+    fn payload_reader_count_spans_the_resolvable_documents() {
+        let mut here = GraphDoc::default();
+        here.nodes = vec![
+            event_node(0, "Hit", &[("damage", "float"), ("quiet", "float")]),
+            node(1, [0.0, 0.0]),
+            node(2, [0.0, 0.0]),
+        ];
+        here.edges = vec![payload_edge(0, "damage", 1), payload_edge(0, "damage", 2)];
+
+        // Another open graph listening to the same event, reading the field.
+        let mut there = GraphDoc::default();
+        there.nodes = vec![event_node(7, "Hit", &[("damage", "float")]), node(8, [0.0, 0.0])];
+        there.edges = vec![payload_edge(7, "damage", 8)];
+
+        // A third that listens to a *different* event — same slug, no relation.
+        let mut other = GraphDoc::default();
+        other.nodes = vec![event_node(3, "Land", &[("damage", "float")]), node(4, [0.0, 0.0])];
+        other.edges = vec![payload_edge(3, "damage", 4)];
+
+        let mut docs: BTreeMap<String, GraphDoc> = BTreeMap::new();
+        // The resolver carries a (possibly stale) copy of the open document
+        // too; it must be counted once, from the live one.
+        docs.insert("graphs/here.graph".into(), here.clone());
+        docs.insert("graphs/there.graph".into(), there);
+        docs.insert("graphs/other.graph".into(), other);
+
+        assert_eq!(
+            payload_reader_count(&here, "graphs/here.graph", "Hit", "damage", &docs),
+            (3, 2),
+            "two wires here + one there, across two graphs"
+        );
+        // An unwired field has no readers, so no ceremony.
+        assert_eq!(
+            payload_reader_count(&here, "graphs/here.graph", "Hit", "quiet", &docs),
+            (0, 0)
+        );
+        // Same-document only, when the resolver cannot enumerate anything.
+        struct Blind;
+        impl GraphResolver for Blind {
+            fn resolve(&self, _: &str) -> Option<&GraphDoc> {
+                None
+            }
+        }
+        assert_eq!(
+            payload_reader_count(&here, "graphs/here.graph", "Hit", "damage", &Blind),
+            (2, 1),
+            "an un-enumerable resolver answers with nothing rather than lying"
+        );
+    }
 }
 
 /// A blank editor state. Test-only, at module level so the sibling test
@@ -5841,5 +6304,6 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         frame: 0,
         frame_all_on_open: false,
         vars: VarPanel::default(),
+        payload: PayloadPanel::default(),
     }
 }

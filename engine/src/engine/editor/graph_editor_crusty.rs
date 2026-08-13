@@ -33,7 +33,9 @@ use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
-    GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, ResizeHandle, VarConfirm, VarDrop,
+    GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, PayloadConfirm, PayloadDraft,
+    payload_reader_count, variable_slug, ResizeHandle, VarConfirm, VarDrop,
+    DEFAULT_PAYLOAD_TYPE,
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
 };
@@ -50,8 +52,8 @@ use super::theme::{
 use super::widgets::segmented_control;
 use crate::engine::node_graph::{
     std_events::{
-        EVENT_ACTION_PROP, EVENT_INPUT_ACTION_TYPE_ID, EVENT_NAME_PROP, EVENT_PAYLOAD_PREFIX,
-        PAYLOAD_PIN_TYPES,
+        EVENT_ACTION_PROP, EVENT_CUSTOM_TYPE_ID, EVENT_INPUT_ACTION_TYPE_ID, EVENT_NAME_PROP,
+        EVENT_PAYLOAD_PREFIX, PAYLOAD_PIN_TYPES,
     },
     CurveResolver, DocDescriptors, Edge, ErrorAnchor, GraphDoc, GraphError, GraphResolver,
     NodeDescriptor, NodeInst,
@@ -86,6 +88,14 @@ const BASE_VALUE_W: f32 = 56.0;
 /// because what it holds is a name — a variable slug, an event name, an input
 /// action — and 56 units truncates every one of them.
 const BASE_CONFIG_VALUE_W: f32 = 104.0;
+/// The ✕ column on a payload row, world units. Reserved in the auto-width so
+/// the remove affordance never eats into the type dropdown.
+const BASE_CONFIG_REMOVE_W: f32 = 12.0;
+/// The config band's own surface: `input` tone washed this far over the node
+/// fill (DESIGN-graphscripting ▸ Surface 2). A colorless second channel — it
+/// survives colour-vision deficiency and low zoom, where "no dot + secondary
+/// label" does not.
+const CONFIG_BAND_WASH: f32 = 0.70;
 const BASE_COMMENT_BAR: f32 = 18.0;
 const BASE_GROUP_BAR: f32 = 20.0;
 /// Pin hit target: never smaller than this in world units…
@@ -246,6 +256,18 @@ impl ZoomLod {
     fn rows(self) -> bool {
         self >= Self::L2
     }
+    /// The config band exists (DESIGN-graphscripting ▸ Surface 2 ▸ low zoom).
+    ///
+    /// Deliberately **the same gate as the pin rows**, not a threshold of its
+    /// own: the band drops exactly where the node becomes title-only, and the
+    /// synthesized titles ("Get Health", "Event: Hit") already name the
+    /// configuration, so nothing is lost on the way down to the slab. Its two
+    /// steps above that are the ladder's existing ones — widgets flatten to
+    /// plain mono values with the inline pin widgets (L1), and the row labels
+    /// drop with the pin labels (L2).
+    fn config_band(self) -> bool {
+        self.rows()
+    }
     /// Any glyph may be submitted (L2 and up). Annotation titles are the one
     /// documented exception and ignore this.
     fn glyphs(self) -> bool {
@@ -394,6 +416,20 @@ impl GraphMetrics {
     /// Width of a config row's value cell, world units.
     fn config_value_w(&self) -> f32 {
         BASE_CONFIG_VALUE_W * self.scale
+    }
+
+    /// Width of a payload row's ✕ column, world units.
+    fn config_remove_w(&self) -> f32 {
+        BASE_CONFIG_REMOVE_W * self.scale
+    }
+
+    /// A config row's inner box: the row's height minus its breathing space,
+    /// spanning `x0..x1` and centred on `y`. One helper so the value cell, the
+    /// ✕ target and the "+ field" ghost row cannot disagree about a row's
+    /// vertical extent.
+    fn config_box(&self, x0: f32, x1: f32, y: f32) -> Rect {
+        let h = self.row_h * 0.8;
+        Rect::from_min_max(Pos2::new(x0, y - h * 0.5), Pos2::new(x1, y + h * 0.5))
     }
 
     /// Center of body row `i`, counting the config band and the pin rows as
@@ -577,6 +613,27 @@ struct ConfigGeom {
     kind: InlineKind,
     /// Row center, world space.
     y: f32,
+    /// The value cell, world space.
+    cell: Rect,
+    /// The label's own box, world space — a payload slug is clickable (rename),
+    /// a fixed label is not.
+    label_box: Rect,
+    /// The ✕ target, world space. `Some` only on payload rows: `Variable`,
+    /// `Name` and `Action` are the node's shape, not a list you edit.
+    remove: Option<Rect>,
+}
+
+impl ConfigGeom {
+    /// The payload slug this row declares, if it is a payload row.
+    fn payload_slug(&self) -> Option<&str> {
+        self.key.strip_prefix(EVENT_PAYLOAD_PREFIX)
+    }
+    /// Payload slugs are identifiers and render mono; the fixed labels
+    /// ("Variable", "Name", "Action") name a setting and stay sentence-case
+    /// sans — the same mono-means-technical rule as everywhere else.
+    fn mono_label(&self) -> bool {
+        self.payload_slug().is_some()
+    }
 }
 
 /// The reserved config rows a node instance shows, in render order.
@@ -691,6 +748,9 @@ struct NodeGeom {
     preview: Option<crate::engine::node_graph::PreviewKind>,
     /// Pin-less reserved-property rows, drawn above the pin band.
     config: Vec<ConfigGeom>,
+    /// The dashed "+ field" ghost row closing the band, world space. Custom
+    /// events only — it is the only node whose pins the author declares.
+    add_field: Option<Rect>,
     pins: Vec<PinGeom>,
 }
 
@@ -709,6 +769,19 @@ impl NodeGeom {
             .iter()
             .find(|p| p.output == output && p.slug == slug)
             .map_or(0, |p| p.row)
+    }
+
+    /// How many band rows this node has, the "+ field" ghost row included —
+    /// the number the pin band is shifted down by.
+    fn band_rows(&self) -> usize {
+        self.config.len() + usize::from(self.add_field.is_some())
+    }
+
+    /// The band's closing rule / the top of the first pin row, world y.
+    /// `None` when the node has no band at all.
+    fn band_bottom(&self, m: &GraphMetrics) -> Option<f32> {
+        let n = self.band_rows();
+        (n > 0).then(|| m.band_y(self.rect.min.y, n - 1) + m.row_h * 0.5)
     }
 
     /// The box actually drawn (and hit-tested) at this detail level: below
@@ -909,6 +982,7 @@ fn build_geoms(
                     breakpoint: state.has_breakpoint(n.id),
                     preview: None,
                     config: Vec::new(),
+                    add_field: None,
                     pins: vec![
                         pin(REROUTE_IN, false, min.x),
                         pin(REROUTE_OUT, true, min.x + d),
@@ -1015,18 +1089,35 @@ fn build_geoms(
             // the router's bundle-stagger lane index — "which pin of this
             // column" — not a geometric row.)
             let config = config_rows(n, &docd);
-            let config_n = config.len();
+            // The "+ field" ghost row is part of the band's geometry, not a
+            // decoration on top of it: it occupies a row, so it shifts the pin
+            // band exactly like a declared field does and the node grows by
+            // one row rather than overlapping its first pin.
+            let has_add_field = n.type_id == EVENT_CUSTOM_TYPE_ID;
+            let config_n = config.len() + usize::from(has_add_field);
 
             let rows = (inputs.len() + ghost_in)
                 .max(outputs.len() + ghost_out)
                 .max(1);
             let mut content_w: f32 = header_w;
-            for (_, label, _) in &config {
+            for (key, label, _) in &config {
+                let remove_w = if key.starts_with(EVENT_PAYLOAD_PREFIX) {
+                    m.config_remove_w() + m.label_gap
+                } else {
+                    0.0
+                };
                 content_w = content_w.max(
                     m.pad_x
-                        + p.measure_text(label, label_px, None).x
+                        + p.measure_text_family(
+                            label,
+                            label_px,
+                            None,
+                            if remove_w > 0.0 { FontFamily::Mono } else { FontFamily::Ui },
+                        )
+                        .x
                         + m.label_gap
                         + m.config_value_w()
+                        + remove_w
                         + m.pad_x,
                 );
             }
@@ -1066,13 +1157,32 @@ fn build_geoms(
             let config: Vec<ConfigGeom> = config
                 .into_iter()
                 .enumerate()
-                .map(|(i, (key, label, kind))| ConfigGeom {
-                    key,
-                    label,
-                    kind,
-                    y: m.band_y(min.y, i),
+                .map(|(i, (key, label, kind))| {
+                    let y = m.band_y(min.y, i);
+                    let payload = key.starts_with(EVENT_PAYLOAD_PREFIX);
+                    let right = min.x + width - m.pad_x;
+                    let remove = payload.then(|| {
+                        m.config_box(right - m.config_remove_w(), right, y)
+                    });
+                    let cell_right = match &remove {
+                        Some(r) => r.min.x - m.label_gap,
+                        None => right,
+                    };
+                    let cell =
+                        m.config_box(cell_right - m.config_value_w(), cell_right, y);
+                    let label_box =
+                        m.config_box(min.x + m.pad_x, cell.min.x - m.label_gap, y);
+                    ConfigGeom { key, label, kind, y, cell, label_box, remove }
                 })
                 .collect();
+            // …and the ghost row closes the band, one row below the last field.
+            let add_field = has_add_field.then(|| {
+                m.config_box(
+                    min.x + m.pad_x,
+                    min.x + width - m.pad_x,
+                    m.band_y(min.y, config.len()),
+                )
+            });
 
             let mut pins = Vec::new();
             let (in_count, out_count) = (inputs.len(), outputs.len());
@@ -1152,6 +1262,7 @@ fn build_geoms(
                 reroute: is_reroute,
                 preview: desc.and_then(|d| d.preview),
                 config,
+                add_field,
                 pins,
             }
         })
@@ -1255,6 +1366,35 @@ fn dashed_line(p: &mut Painter, a: Pos2, b: Pos2, w: f32, color: Color) {
             color,
         );
     }
+}
+
+/// A dashed rectangle — the "not a thing yet" outline the "+ field" ghost row
+/// wears, and the same dash language as the ghost pin rows it sits above.
+///
+/// Dashes are derived from each side's own length (rather than from x extent
+/// like [`dashed_line`], which is enough for a horizontal rule but collapses a
+/// vertical one to a single stroke).
+fn dashed_rect(p: &mut Painter, r: Rect, w: f32, color: Color) {
+    let dash = (w * 4.0).max(3.0);
+    let mut side = |a: Pos2, b: Pos2| {
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let n = (len / dash).clamp(2.0, 96.0) as usize;
+        for i in (0..n).step_by(2) {
+            let t0 = i as f32 / n as f32;
+            let t1 = ((i + 1) as f32 / n as f32).min(1.0);
+            p.line_segment(
+                Pos2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0),
+                Pos2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1),
+                w,
+                color,
+            );
+        }
+    };
+    let (a, b) = (r.min, r.max);
+    side(a, Pos2::new(b.x, a.y));
+    side(Pos2::new(b.x, a.y), b);
+    side(b, Pos2::new(a.x, b.y));
+    side(Pos2::new(a.x, b.y), a);
 }
 
 /// Vector pins carry their arity in the label (`Position ·3`) — the pin
@@ -1474,6 +1614,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     variables_panel(ui, strip, state, registry);
     var_drop_popup(ui, state, registry);
     var_confirm_dialog(ui, out.rect, state, registry);
+    payload_confirm_dialog(ui, out.rect, state, registry);
 
     palette_popover(ui, state, registry, subgraph_assets);
     find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
@@ -1561,6 +1702,9 @@ fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
         // a confirmation. Both own Escape while they are up.
         || state.vars.drop.is_some()
         || state.vars.confirm.is_some()
+        // The payload band's own confirmation and its in-flight name entry.
+        || state.payload.confirm.is_some()
+        || state.payload.draft.is_some()
         // Any crusty text field holding focus counts, wherever it lives — an
         // inspector name box, a search field in another panel. Single-key
         // shortcuts must never fire mid-typing.
@@ -2104,6 +2248,125 @@ fn draw_and_interact(
         state.break_pin_links(node, &pin, output, registry);
     }
 
+    // Config band: the ✕ on a payload row, the slug (rename) and the "+ field"
+    // ghost row. Before the node body so none of the three starts a drag, and
+    // only where the band is drawn — an affordance you cannot see must not be
+    // clickable.
+    let mut config_claimed = false;
+    // `(node, slug, new name)` — `None` is a removal. Collected here and
+    // resolved below, where the cross-document reader count can be asked.
+    let mut payload_request: Option<(u64, String, Option<String>)> = None;
+    // `widget_claimed` covers the embedded controls, the in-flight name entry
+    // among them: without it, clicking into the draft field to move the caret
+    // would land on the ghost row underneath and restart the draft empty.
+    if lod.config_band() && !alt && !widget_claimed {
+        for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
+            for cfg in &g.config {
+                let Some(slug) = cfg.payload_slug() else { continue };
+                if let Some(r) = cfg.remove {
+                    let id = ui.alloc_id(("graph_payload_x", g.id, slug));
+                    let resp = scope.interact(ui, id, r);
+                    if resp.hovered {
+                        ui.tooltip_for(scope.world_rect_to_screen(r), "Remove field");
+                    }
+                    if resp.pressed {
+                        payload_request = Some((g.id, slug.to_string(), None));
+                        config_claimed = true;
+                    }
+                }
+                // The slug itself opens a rename, pre-filled. **Double**-click,
+                // deliberately: a single press over the band still belongs to
+                // the node, so a custom event can be dragged by its own rows.
+                let id = ui.alloc_id(("graph_payload_name", g.id, slug));
+                let resp = scope.interact(ui, id, cfg.label_box);
+                if resp.hovered {
+                    ui.tooltip_for(
+                        scope.world_rect_to_screen(cfg.label_box),
+                        "Double-click to rename",
+                    );
+                }
+                if resp.double_clicked(ui) && lod.inline_widgets() {
+                    state.payload.draft = Some(PayloadDraft {
+                        node: g.id,
+                        slug: Some(slug.to_string()),
+                        name: slug.to_string(),
+                        first_frame: true,
+                        seen_focus: false,
+                        submitted: false,
+                    });
+                    config_claimed = true;
+                }
+            }
+            if let Some(r) = g.add_field {
+                let id = ui.alloc_id(("graph_payload_add", g.id));
+                let resp = scope.interact(ui, id, r);
+                if resp.hovered {
+                    ui.tooltip_for(
+                        scope.world_rect_to_screen(r),
+                        "Add a payload field \u{2014} Enter commits",
+                    );
+                }
+                if resp.pressed && lod.inline_widgets() {
+                    state.payload.draft = Some(PayloadDraft {
+                        node: g.id,
+                        slug: None,
+                        name: String::new(),
+                        first_frame: true,
+                        seen_focus: false,
+                        submitted: false,
+                    });
+                    config_claimed = true;
+                }
+            }
+        }
+    }
+
+    // A committed name entry (the field widget ran during the draw pass and
+    // only reported). Adding is never breaking, so it goes straight through;
+    // a rename joins the remove path, which asks about readers first.
+    if state.payload.draft.as_ref().is_some_and(|d| d.submitted) {
+        if let Some(d) = state.payload.draft.take() {
+            let name = d.name.trim().to_string();
+            match d.slug {
+                _ if name.is_empty() => {}
+                None => {
+                    state.add_payload_field(d.node, &name, registry);
+                }
+                Some(slug) if variable_slug(&name) == slug => {}
+                Some(slug) => payload_request = Some((d.node, slug, Some(name))),
+            }
+        }
+    }
+    if let Some((node, slug, rename)) = payload_request {
+        let event = state
+            .doc
+            .node(node)
+            .and_then(|n| match n.properties.get(EVENT_NAME_PROP) {
+                Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let (readers, graphs) =
+            payload_reader_count(&state.doc, &state.path, &event, &slug, resolver.graphs);
+        match rename {
+            // Zero readers is no ceremony: nothing downstream can notice.
+            Some(name) if readers == 0 => {
+                state.rename_payload_field(node, &slug, &name, registry);
+            }
+            Some(name) => {
+                state.payload.confirm =
+                    Some(PayloadConfirm::Rename { node, slug, name, readers, graphs });
+            }
+            None if readers == 0 => {
+                state.remove_payload_field(node, &slug, registry);
+            }
+            None => {
+                state.payload.confirm =
+                    Some(PayloadConfirm::Remove { node, slug, readers, graphs });
+            }
+        }
+    }
+
     // Node body: select + start drag.
     let mut begin_drag = false;
     let mut node_pressed = false;
@@ -2140,6 +2403,7 @@ fn draw_and_interact(
         }
         if resp.pressed && !alt
             && !pin_claimed
+            && !config_claimed
             && !widget_claimed
             && !wire_claimed
             && state.node_drag.is_none()
@@ -4929,6 +5193,131 @@ fn var_confirm_dialog(
     }
 }
 
+/// Remove / rename confirmation for a payload field with readers (GS-1).
+///
+/// Removing or renaming a field is a **breaking change and it says so**: the
+/// count is the consequence, and the copy names what happens to the wires that
+/// read it. A field with zero readers never reaches here — no ceremony for a
+/// change nothing can notice.
+fn payload_confirm_dialog(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+) {
+    let Some(confirm) = state.payload.confirm.clone() else {
+        return;
+    };
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let slug = confirm.slug().to_string();
+    let (readers, graphs) = confirm.counts();
+    let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
+    let (title, detail, verb, danger) = match &confirm {
+        PayloadConfirm::Remove { .. } => (
+            format!("Remove field \u{201c}{slug}\u{201d}?"),
+            format!(
+                "{readers} {} in {graphs} {} read this field. Their {slug} pins become ghost \
+                 rows until re-wired.",
+                plural(readers, "listener", "listeners"),
+                plural(graphs, "graph", "graphs"),
+            ),
+            "Remove Field",
+            true,
+        ),
+        PayloadConfirm::Rename { name, .. } => (
+            format!(
+                "Rename field \u{201c}{slug}\u{201d} to \u{201c}{}\u{201d}?",
+                variable_slug(name)
+            ),
+            format!(
+                "{readers} {} in {graphs} {} read this field. Wires in this graph follow the \
+                 rename; wires in other graphs cannot, and their {slug} pins become ghost rows \
+                 until re-wired.",
+                plural(readers, "listener", "listeners"),
+                plural(graphs, "graph", "graphs"),
+            ),
+            "Rename Field",
+            false,
+        ),
+    };
+    // The detail is two or three lines of consequence, so it wraps to a fixed
+    // measure instead of stretching the dialog off the canvas.
+    let font = st.fonts.body;
+    let text_w = (rect.width() * 0.32).clamp(240.0, 360.0);
+    let detail_h = {
+        let mut p = ui.painter();
+        p.measure_text(&detail, st.fonts.small, Some(text_w)).y
+    };
+    let panel = Rect::from_center_size(
+        Pos2::new(rect.center().x, rect.min.y + rect.height() * 0.3),
+        Vec2::new(
+            text_w + pad * 2.0,
+            font * 1.6 + detail_h + st.metrics.control_height + pad * 3.0,
+        ),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled_translucent(
+            rect,
+            Rounding::ZERO,
+            Color::BLACK.with_alpha(st.palette.scrim_alpha),
+        );
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+        p.text(
+            Pos2::new(panel.min.x + pad, panel.min.y + pad),
+            &title,
+            font,
+            st.palette.text,
+            None,
+        );
+        p.text(
+            Pos2::new(panel.min.x + pad, panel.min.y + pad + font * 1.6),
+            &detail,
+            st.fonts.small,
+            st.palette.text_secondary,
+            Some(text_w),
+        );
+    }
+    let bw = 92.0;
+    let by = panel.max.y - pad - st.metrics.control_height;
+    let (mut go, mut cancel) = (false, false);
+    ui.run_at(
+        Rect::from_min_size(
+            Pos2::new(panel.max.x - pad - bw * 2.0 - st.spacing.item, by),
+            Vec2::new(bw * 2.0 + st.spacing.item, st.metrics.control_height),
+        ),
+        Direction::LeftToRight,
+        Id::new("graph_payload_confirm"),
+        UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item },
+        |ui| {
+            cancel = Button::new("Cancel")
+                .exact_size(Vec2::new(bw, st.metrics.control_height))
+                .show(ui)
+                .clicked;
+            let b = Button::new(verb).exact_size(Vec2::new(bw, st.metrics.control_height));
+            let b = if danger { b.danger() } else { b.primary() };
+            go = b.show(ui).clicked;
+        },
+    );
+    if cancel || ui.ctx().input.key_pressed(Key::Escape) {
+        state.payload.confirm = None;
+        return;
+    }
+    if go {
+        match confirm {
+            PayloadConfirm::Remove { node, slug, .. } => {
+                state.remove_payload_field(node, &slug, registry);
+            }
+            PayloadConfirm::Rename { node, slug, name, .. } => {
+                state.rename_payload_field(node, &slug, &name, registry);
+            }
+        }
+        state.payload.confirm = None;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
@@ -5858,9 +6247,15 @@ fn draw_nodes(
     // Collected during the paint pass, applied after (the widget pass needs
     // `&mut Ui`, which the painter borrow would otherwise hold).
     let mut pending_widgets: Vec<(u64, String, Rect, InlineKind)> = Vec::new();
+    // Where the in-flight payload name entry draws, once we reach its node.
+    let mut draft_cell: Option<Rect> = None;
+    let pointer_world = scope.pointer_world(ui);
 
     for g in geoms {
         let body = g.body_rect(lod, m);
+        // Node-level, not row-level: the band's ✕ marks reveal together, so
+        // moving down a list of fields does not strobe one glyph at a time.
+        let band_hovered = pointer_world.is_some_and(|pw| g.rect.contains(pw));
         let clip = body.intersect(vis);
         if clip.width() <= 0.0 || clip.height() <= 0.0 {
             continue;
@@ -6075,44 +6470,163 @@ fn draw_nodes(
         let label_px = st.fonts.small * zoom;
 
         // Config band: pin-less rows for the reserved properties that shape
-        // the node. Labels are secondary text (they name a setting, not a
-        // value that flows), and a hairline rule closes the band so the pin
-        // rows below it read as a different kind of thing.
-        for cfg in &g.config {
-            let cy = scope.world_to_screen(Pos2::new(g.rect.min.x, cfg.y)).y;
-            let cell_w = m.config_value_w() * zoom;
-            let cell = Rect::from_min_size(
+        // the node. It gets **its own surface** — an `input`-tone wash over the
+        // node fill, closed by a hairline rule — so config reads as a form area
+        // and the pin rows below it as connection rows, at rest, at low zoom
+        // and under colour-vision deficiency (DESIGN-graphscripting ▸ S2).
+        // Labels are secondary text; payload slugs are identifiers and go mono.
+        if let Some(bottom) = g.band_bottom(m).filter(|_| lod.config_band()) {
+            let band = Rect::from_min_max(
+                Pos2::new(srect.min.x, srect.min.y + m.header_h * zoom),
                 Pos2::new(
-                    srect.max.x - m.pad_x * zoom - cell_w,
-                    cy - m.row_h * zoom * 0.4,
+                    srect.max.x,
+                    scope.world_to_screen(Pos2::new(g.rect.min.x, bottom)).y,
                 ),
-                Vec2::new(cell_w, m.row_h * zoom * 0.8),
             );
-            if lod.pin_labels() {
-                p.text(
-                    Pos2::new(srect.min.x + m.pad_x * zoom, cy - label_px * 0.5),
-                    &cfg.label,
-                    label_px,
-                    st.palette.text_secondary,
-                    None,
+            p.rect_filled(
+                band,
+                Rounding::ZERO,
+                fade(fade(bg, CONFIG_BAND_WASH, st.palette.header), dim, bg),
+            );
+            for cfg in &g.config {
+                let cy = scope.world_to_screen(Pos2::new(g.rect.min.x, cfg.y)).y;
+                let cell = scope.world_rect_to_screen(cfg.cell);
+                // The row label follows the **band**, not the pin labels: a
+                // config row is label + value, and the mockup's own low-zoom
+                // node keeps "Variable  Score" in a body whose pin labels have
+                // already gone. It leaves with the band, one rung later.
+                let at = Pos2::new(srect.min.x + m.pad_x * zoom, cy - label_px * 0.5);
+                if cfg.mono_label() {
+                    p.text_family(
+                        at,
+                        &cfg.label,
+                        label_px,
+                        st.palette.text_disabled,
+                        None,
+                        FontFamily::Mono,
+                    );
+                } else {
+                    p.text(at, &cfg.label, label_px, st.palette.text_secondary, None);
+                }
+                // A dangling reference flags on the widget itself: the value is
+                // still shown (the author has to see the name that broke) with
+                // a warning outline the live L0 control does not draw for
+                // itself. `draw_inline_readonly` already does this below L0.
+                if lod.inline_widgets()
+                    && matches!(
+                        &cfg.kind,
+                        InlineKind::Choice { ok: false, .. } | InlineKind::Enum { ok: false, .. }
+                    )
+                {
+                    p.rect_stroke(
+                        cell.expand(m.border),
+                        Rounding::same((m.radius * 0.5 * zoom).max(1.0)),
+                        m.border,
+                        status.warning,
+                    );
+                }
+                if lod.inline_widgets() {
+                    pending_widgets.push((g.id, cfg.key.clone(), cell, cfg.kind.clone()));
+                } else {
+                    // Down to the last rung the band has: a config *value* is
+                    // the row's whole content, so it outlives the row label
+                    // (which drops with the pin labels) and goes only when the
+                    // band itself goes. An empty band would be worse than none.
+                    draw_inline_readonly(&mut p, cell, &cfg.kind, label_px, st, zoom, m);
+                }
+                // The ✕ is quiet at rest and revealed by hovering the band —
+                // the system's hover-precedes rule. Removing a field is a
+                // structural edit, so it never sits there inviting a misclick.
+                if let Some(r) = cfg.remove.filter(|_| band_hovered) {
+                    let sr = scope.world_rect_to_screen(r);
+                    let hot = pointer_world.is_some_and(|pw| r.contains(pw));
+                    p.text(
+                        Pos2::new(sr.center().x - label_px * 0.35, sr.center().y - label_px * 0.5),
+                        "\u{2715}",
+                        label_px,
+                        if hot { st.palette.text } else { st.palette.text_disabled },
+                        None,
+                    );
+                }
+            }
+            // The "+ field" ghost row: dashed, inside the band, custom events
+            // only. Adding a field is never breaking, so it is the one band
+            // affordance that stays visible at rest.
+            if let Some(r) = g.add_field {
+                let sr = scope.world_rect_to_screen(r);
+                let hot = pointer_world.is_some_and(|pw| r.contains(pw));
+                let drafting = state
+                    .payload
+                    .draft
+                    .as_ref()
+                    .is_some_and(|d| d.node == g.id && d.slug.is_none());
+                dashed_rect(
+                    &mut p,
+                    sr,
+                    m.border,
+                    if drafting {
+                        st.palette.focus_ring
+                    } else if hot {
+                        st.palette.stroke_strong
+                    } else {
+                        st.palette.stroke
+                    },
                 );
+                if drafting {
+                    // Mid-add the row already wears the shape it is about to
+                    // take: a compact slug field where the slug will live, and
+                    // the type it will default to where the dropdown will be.
+                    // Only the ✕ is missing — there is nothing to remove yet.
+                    let cell = m.config_box(
+                        r.max.x - m.config_remove_w() - m.label_gap - m.config_value_w(),
+                        r.max.x - m.config_remove_w() - m.label_gap,
+                        r.center().y,
+                    );
+                    draft_cell = Some(scope.world_rect_to_screen(m.config_box(
+                        r.min.x + m.label_gap,
+                        (r.min.x + m.label_gap + m.config_value_w() * 0.5).min(cell.min.x - m.label_gap),
+                        r.center().y,
+                    )));
+                    draw_inline_readonly(
+                        &mut p,
+                        scope.world_rect_to_screen(cell),
+                        &InlineKind::Chip(DEFAULT_PAYLOAD_TYPE.to_string()),
+                        label_px,
+                        st,
+                        zoom,
+                        m,
+                    );
+                } else {
+                    let text = "+ field";
+                    let w = p.measure_text(text, label_px, None).x;
+                    p.text(
+                        Pos2::new(sr.center().x - w * 0.5, sr.center().y - label_px * 0.5),
+                        text,
+                        label_px,
+                        if hot { st.palette.text_secondary } else { st.palette.text_disabled },
+                        None,
+                    );
+                }
             }
-            if lod.inline_widgets() {
-                pending_widgets.push((g.id, cfg.key.clone(), cell, cfg.kind.clone()));
-            } else if lod.values() {
-                draw_inline_readonly(&mut p, cell, &cfg.kind, label_px, st, zoom, m);
+            // A rename in flight replaces the slug in place.
+            if let Some(slug) = state
+                .payload
+                .draft
+                .as_ref()
+                .filter(|d| d.node == g.id)
+                .and_then(|d| d.slug.clone())
+            {
+                if let Some(cfg) = g
+                    .config
+                    .iter()
+                    .find(|c| c.payload_slug() == Some(slug.as_str()))
+                {
+                    draft_cell = Some(scope.world_rect_to_screen(cfg.label_box));
+                }
             }
-        }
-        if !g.config.is_empty() {
-            let y = scope
-                .world_to_screen(Pos2::new(
-                    g.rect.min.x,
-                    g.config[g.config.len() - 1].y + m.row_h * 0.5,
-                ))
-                .y;
             p.line_segment(
-                Pos2::new(srect.min.x, y),
-                Pos2::new(srect.max.x, y),
+                Pos2::new(srect.min.x, band.max.y),
+                Pos2::new(srect.max.x, band.max.y),
                 m.border,
                 st.palette.stroke,
             );
@@ -6249,6 +6763,65 @@ fn draw_nodes(
         widget_rects.push(cell);
         inline_widget(ui, state, registry, node, &slug, cell, &kind, zoom);
     }
+    // The payload name entry is a widget like any other — it just lives in a
+    // row that is not a property yet (add) or is about to change key (rename).
+    if let Some(cell) = draft_cell {
+        widget_rects.push(cell);
+        payload_draft_widget(ui, state, cell, zoom);
+    }
+}
+
+/// The in-flight payload-field name entry: one text field drawn in the band
+/// row it belongs to.
+///
+/// It only ever **reports** — Enter sets `submitted` and the panel decides what
+/// that means, because "does this need a confirmation" is a cross-document
+/// question the drawing pass has no resolver for. Escape and losing focus both
+/// cancel, which is the canvas rule for every other in-flight gesture.
+fn payload_draft_widget(ui: &mut Ui, state: &mut GraphEditorState, cell: Rect, zoom: f32) {
+    let saved = ui.ctx().style;
+    {
+        let s = &mut ui.ctx_mut().style;
+        s.fonts.body *= zoom;
+        s.fonts.small *= zoom;
+        s.fonts.mono *= zoom;
+        s.spacing.item *= zoom;
+        s.metrics.control_height *= zoom;
+        s.metrics.row_height *= zoom;
+    }
+    let Some(draft) = state.payload.draft.as_mut() else {
+        ui.ctx_mut().style = saved;
+        return;
+    };
+    let first = draft.first_frame;
+    let (mut submitted, mut cancelled, mut focused) = (false, false, false);
+    let field_bg = ui.style().palette.input;
+    ui.run_at(
+        cell,
+        Direction::TopDown,
+        Id::new(("graph_payload_draft", draft.node)),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            let out = TextEdit::new(&mut draft.name)
+                .hint("field")
+                .width(cell.width())
+                .fill(field_bg)
+                .request_focus(first)
+                .show_full(ui);
+            submitted = out.submitted;
+            cancelled = out.cancelled;
+            focused = out.focused;
+        },
+    );
+    ui.ctx_mut().style = saved;
+    draft.first_frame = false;
+    draft.seen_focus |= focused;
+    let gave_up_focus = draft.seen_focus && !focused;
+    if submitted {
+        draft.submitted = true;
+    } else if cancelled || gave_up_focus {
+        state.payload.draft = None;
+    }
 }
 
 /// Non-editable inline value: a chip at L1, and the shapes L0 does not yet
@@ -6300,7 +6873,8 @@ fn draw_inline_readonly(
                 p.rect_stroke(cell, round, m.border, status.warning);
             }
             let w = cell.width() - m.label_gap * 2.0 * zoom;
-            let text = clip_text(p, value, px, w);
+            let shown = flagged_value(value, *ok);
+            let text = clip_text(p, &shown, px, w);
             p.text_family(
                 Pos2::new(cell.min.x + m.label_gap * zoom, cell.center().y - px * 0.5),
                 &text,
@@ -6329,6 +6903,19 @@ fn draw_inline_readonly(
                 FontFamily::Mono,
             );
         }
+    }
+}
+
+/// What a dropdown shows for a value that is not one of its variants — a
+/// deleted variable, a stale enum: **the name that broke, marked**. The name
+/// has to stay (it is the only clue to what the author meant) and the mark has
+/// to be readable without colour, which is why the `?` is in the text rather
+/// than only in the tint (DESIGN-graphscripting ▸ S2, dangling reference).
+fn flagged_value(value: &str, ok: bool) -> String {
+    if ok || value.is_empty() {
+        value.to_string()
+    } else {
+        format!("{value} ?")
     }
 }
 
@@ -6443,8 +7030,9 @@ fn inline_widget(
                 // carried as an index and mapped back to the string.
                 let now = variants.iter().position(|v| v == value);
                 let mut picked = now.unwrap_or(usize::MAX);
+                let shown = flagged_value(value, now.is_some());
                 ComboBox::new("graph_enum")
-                    .selected_text(value.as_str())
+                    .selected_text(shown.as_str())
                     .width(cell.width())
                     .show_ui(ui, |ui| {
                         for (i, v) in variants.iter().enumerate() {
@@ -7493,6 +8081,7 @@ mod tests {
             breakpoint: false,
             preview: None,
             config: Vec::new(),
+            add_field: None,
             pins: vec![pin(REROUTE_IN, false), pin(REROUTE_OUT, true)],
         }
     }
@@ -7616,6 +8205,7 @@ mod tests {
             breakpoint: false,
             preview: None,
             config: Vec::new(),
+            add_field: None,
             pins: vec![],
         };
         assert_eq!(g.body_rect(ZoomLod::L2, &m).height(), 120.0);
@@ -7639,6 +8229,7 @@ mod tests {
             breakpoint: false,
             preview: None,
             config: Vec::new(),
+            add_field: None,
             pins: vec![],
         };
         assert_eq!(g.edge_color(), category_color("Math"));
@@ -7927,6 +8518,212 @@ mod tests {
             let last = m.band_y(y0, config_n + 1) + m.row_h * 0.5;
             assert!(last <= y0 + m.node_h(config_n, 2, 0.0));
         }
+    }
+
+    /// A `NodeGeom` with `fields` payload rows and, optionally, the "+ field"
+    /// ghost row — enough to answer the band's geometry questions without a
+    /// canvas.
+    fn band_geom(m: &GraphMetrics, fields: usize, add_field: bool) -> NodeGeom {
+        let width = 200.0;
+        let rows = fields + usize::from(add_field);
+        let rect = Rect::from_min_size(
+            Pos2::new(0.0, 40.0),
+            Vec2::new(width, m.node_h(rows, 2, 0.0)),
+        );
+        let config = (0..fields)
+            .map(|i| {
+                let y = m.band_y(rect.min.y, i);
+                let right = rect.max.x - m.pad_x;
+                let remove = m.config_box(right - m.config_remove_w(), right, y);
+                let cell = m.config_box(
+                    remove.min.x - m.label_gap - m.config_value_w(),
+                    remove.min.x - m.label_gap,
+                    y,
+                );
+                ConfigGeom {
+                    key: format!("{EVENT_PAYLOAD_PREFIX}f{i}"),
+                    label: format!("f{i}"),
+                    kind: InlineKind::Enum {
+                        value: "float".into(),
+                        variants: vec!["float".into()],
+                        ok: true,
+                    },
+                    y,
+                    cell,
+                    label_box: m.config_box(rect.min.x + m.pad_x, cell.min.x - m.label_gap, y),
+                    remove: Some(remove),
+                }
+            })
+            .collect::<Vec<_>>();
+        let add = add_field.then(|| {
+            m.config_box(
+                rect.min.x + m.pad_x,
+                rect.max.x - m.pad_x,
+                m.band_y(rect.min.y, fields),
+            )
+        });
+        NodeGeom {
+            id: 0,
+            rect,
+            title: "Event: Hit".into(),
+            tag: "EVENT".into(),
+            category: Some("Event".into()),
+            tint: None,
+            missing: false,
+            errored: false,
+            reroute: false,
+            breakpoint: false,
+            preview: None,
+            config,
+            add_field: add,
+            pins: vec![],
+        }
+    }
+
+    /// **GS-1: the ghost row is band geometry, not decoration.** "+ field"
+    /// occupies a row, so it shifts the pin band and grows the node exactly
+    /// like a declared field does — otherwise it would draw over the first pin.
+    /// The band's fill and its closing rule share one boundary with the top of
+    /// that pin row, which is what keeps the surface from covering a wire
+    /// anchor.
+    #[test]
+    fn the_add_field_ghost_row_takes_a_band_row() {
+        let m = GraphMetrics::new(&Style::steel());
+        let plain = band_geom(&m, 2, false);
+        let with_add = band_geom(&m, 2, true);
+        assert_eq!(plain.band_rows(), 2);
+        assert_eq!(with_add.band_rows(), 3, "the ghost row counts");
+        assert!(
+            (with_add.rect.height() - (plain.rect.height() + m.row_h)).abs() < 1e-4,
+            "the node grows by exactly one row"
+        );
+        // The band closes one row lower, and that boundary is the top of the
+        // first pin row — the five-site invariant, with the ghost row in it.
+        let bottom = with_add.band_bottom(&m).unwrap();
+        assert!((bottom - (plain.band_bottom(&m).unwrap() + m.row_h)).abs() < 1e-4);
+        assert!(
+            (bottom - (m.band_y(with_add.rect.min.y, 3) - m.row_h * 0.5)).abs() < 1e-4,
+            "the rule is the top of the first pin row"
+        );
+        // Every band box lives strictly inside the band, so nothing the author
+        // can click sits at wire height.
+        for r in with_add
+            .config
+            .iter()
+            .flat_map(|c| [c.cell, c.label_box, c.remove.unwrap()])
+            .chain(with_add.add_field)
+        {
+            assert!(r.min.y >= with_add.rect.min.y + m.header_h - 1e-4);
+            assert!(r.max.y <= bottom + 1e-4, "{r:?} escapes the band");
+            assert!(r.min.x >= with_add.rect.min.x && r.max.x <= with_add.rect.max.x);
+        }
+        // The ✕ column never overlaps the value cell it sits beside.
+        let c = &with_add.config[0];
+        assert!(c.remove.unwrap().min.x >= c.cell.max.x);
+        assert!(c.cell.min.x >= c.label_box.max.x);
+        // A node with no band has no rule to draw.
+        assert_eq!(band_geom(&m, 0, false).band_bottom(&m), None);
+    }
+
+    /// Payload slugs are identifiers (mono); the fixed rows name a setting and
+    /// stay sentence-case sans. The ✕ belongs to the payload rows alone — the
+    /// `Variable` / `Name` / `Action` rows are the node's shape, not a list.
+    #[test]
+    fn payload_rows_render_mono_and_own_the_remove_affordance() {
+        let m = GraphMetrics::new(&Style::steel());
+        let g = band_geom(&m, 1, true);
+        assert_eq!(g.config[0].payload_slug(), Some("f0"));
+        assert!(g.config[0].mono_label());
+        let fixed = ConfigGeom {
+            key: VAR_PROP.into(),
+            label: "Variable".into(),
+            kind: InlineKind::Str(String::new()),
+            y: 0.0,
+            cell: Rect::from_min_size(Pos2::ZERO, Vec2::ZERO),
+            label_box: Rect::from_min_size(Pos2::ZERO, Vec2::ZERO),
+            remove: None,
+        };
+        assert_eq!(fixed.payload_slug(), None);
+        assert!(!fixed.mono_label(), "a fixed label is sentence-case sans");
+        assert!(fixed.remove.is_none());
+    }
+
+    /// A dangling reference keeps the name that broke and marks it in the
+    /// *text*, so the flag survives greyscale, deuteranopia and a screenshot.
+    #[test]
+    fn a_dangling_reference_is_marked_in_the_value_not_only_in_the_tint() {
+        assert_eq!(flagged_value("mana", false), "mana ?");
+        assert_eq!(flagged_value("mana", true), "mana");
+        assert_eq!(flagged_value("", false), "", "an empty cell is not \"?\"");
+    }
+
+    /// **The band's rung of the LOD ladder.** No new thresholds: config
+    /// widgets flatten with the inline pin widgets, the row labels drop with
+    /// the pin labels, and the band drops exactly where the node becomes
+    /// title-only — the synthesized title carries the configuration down to
+    /// the slab.
+    #[test]
+    fn the_config_band_follows_the_existing_lod_ladder() {
+        use ZoomLod::*;
+        for lod in [L4, L3, L2, L1, L0] {
+            assert_eq!(lod.config_band(), lod.rows(), "{lod:?}");
+        }
+        assert!(L0.inline_widgets(), "L0 — widgets live");
+        assert!(!L1.inline_widgets() && L1.values(), "L1 — plain mono values");
+        assert!(L2.config_band() && !L2.pin_labels(), "L2 — band, no row labels");
+        assert!(!L3.config_band(), "L3 — title only, the band drops");
+        // The value outlives the row label: a band with nothing in it would be
+        // worse than no band, so the flattened value is drawn wherever the
+        // band is drawn and the live widget is not.
+        for lod in [L2, L1] {
+            assert!(lod.config_band() && !lod.inline_widgets());
+        }
+    }
+
+    /// Removing a payload field leaves the wires that read it pointing at a
+    /// pin the descriptor no longer declares — which is exactly the existing
+    /// `UnknownPin` → ghost-row treatment, so the wire keeps a landing spot
+    /// and the node says what broke. Nothing new was needed for that; this
+    /// pins it, because the confirmation dialog promises it.
+    #[test]
+    fn a_removed_payload_field_degrades_to_the_ghost_row_treatment() {
+        use crate::engine::node_graph::{validate_doc, GraphDoc};
+        let mut reg = NodeRegistry::new();
+        node_graph_types::register_std_events(&mut reg).unwrap();
+        let mut state = crate::engine::editor::graph_editor::test_state("graphs/t.graph");
+        let mut ev = test_node(0, EVENT_CUSTOM_TYPE_ID);
+        ev.properties
+            .insert(EVENT_NAME_PROP.into(), PropValue::Str("Hit".into()));
+        ev.properties.insert(
+            format!("{EVENT_PAYLOAD_PREFIX}damage"),
+            PropValue::Enum("float".into()),
+        );
+        let mut sink = test_node(1, EVENT_CUSTOM_TYPE_ID);
+        sink.properties
+            .insert(EVENT_NAME_PROP.into(), PropValue::Str("Other".into()));
+        state.doc = GraphDoc { nodes: vec![ev, sink], ..GraphDoc::default() };
+        state.doc.edges = vec![Edge {
+            from_node: 0,
+            from_pin: "damage".into(),
+            to_node: 1,
+            to_pin: "gone".into(),
+        }];
+
+        // With the field declared, the pin exists and only the (already
+        // unknown) target pin ghosts.
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        assert!(!ix
+            .ghosts_for(0)
+            .iter()
+            .any(|(s, o)| s == "damage" && *o));
+
+        assert!(state.remove_payload_field(0, "damage", &reg));
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        assert!(
+            ix.ghosts_for(0).iter().any(|(s, o)| s == "damage" && *o),
+            "the wire's source pin becomes a ghost row"
+        );
+        assert_eq!(state.doc.edges.len(), 1, "and the wire itself survives");
     }
 
     /// The strip's two type controls and the declared type are one round trip:

@@ -15,11 +15,27 @@ use crate::validate::GraphError;
 
 pub trait GraphResolver {
     fn resolve(&self, content_rel_path: &str) -> Option<&GraphDoc>;
+
+    /// Every document this resolver can *enumerate*, path first.
+    ///
+    /// `resolve` answers "give me this path"; some questions are the other way
+    /// round — "which documents mention this thing" (the payload-field reader
+    /// count, GS-1). A resolver that only knows how to look a path up answers
+    /// with nothing rather than lying, which is why this has a default: the
+    /// enumerable set is a *boundary*, not a guarantee, and every caller has to
+    /// treat an empty answer as legal.
+    fn documents(&self) -> Vec<(&str, &GraphDoc)> {
+        Vec::new()
+    }
 }
 
 impl GraphResolver for BTreeMap<String, GraphDoc> {
     fn resolve(&self, content_rel_path: &str) -> Option<&GraphDoc> {
         self.get(content_rel_path)
+    }
+
+    fn documents(&self) -> Vec<(&str, &GraphDoc)> {
+        self.iter().map(|(k, v)| (k.as_str(), v)).collect()
     }
 }
 
