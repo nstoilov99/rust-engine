@@ -2487,6 +2487,15 @@ impl DamageZone {
 **Prerequisites:** Task 45-A (graph execution core) and ideally Task 45 — most
 of the deferred ledger unblocks only once the evaluator and the `NodeInst`
 schema additions exist.
+**Note (2026-08-14):** the GS design pass (commits `19bf0c6`..`ef0e8a3`,
+spec `docs/mockup/DESIGN-graphscripting.md`) already shipped several items
+this ledger listed — flow bubbles, watches, persisted breakpoints + full
+pause/step debugging, the config-row band, variables groups/filter/arrays,
+and the curve-editor v2 (tangent modes). Re-audit this ledger at kickoff
+against `docs/mockup/AUDIT-2026-08.md`, whose 34-item judgement list (icon
+accent tint per-preset, motion tokens unwired, segmented-control
+focus/pressed states, heading type slot, L2/L3 band spec amendment, etc.)
+is now part of this task's backlog.
 
 One consolidated pass over everything the Task 40 + design-system +
 input-model arcs deliberately deferred. The authoritative backlog is the
