@@ -329,6 +329,24 @@ pub struct EntityRef {
   do not assert "N ticks = N×dt seconds of curve" without accounting for that
   first sample. `finished` fires exactly once, and never for a looping
   Timeline.
+- **A pause holds the whole instance, and only the bound one** (GS-4). When
+  any activation parks on a breakpoint, no other activation of that instance
+  advances, no due latent wakes, no queued event drains and instance time does
+  not move — one graph is one timeline of effects, and a half-frozen one is a
+  state no unpaused run could reach. Conversely the `BreakSet` lives on
+  `GraphRuntime`, not on the shared `Plan`: only the instance a graph tab is
+  bound to ever pauses, so debugging one Duck does not stop the other three.
+  `Paused` is its own `ThreadState` (no due time, resumes only on command) and
+  parks *before* the node pulls its inputs, so the effect you stopped at has
+  provably not happened. Step is one firing for the whole instance; Stop ends
+  the session with no `halted` error, and the runtime component is rebuilt on
+  the next play, so everything re-arms by itself.
+- **The debugger's keys are F11 / F10, not the mockup's F5 / F10.** `App`
+  handles F5 (Play/Stop) and F6 (Pause/Resume play) as raw winit key events,
+  before any keymap context is consulted and without looking at modifiers —
+  so `Keymap::conflicts()` cannot see them and no `GraphTab` binding on F5 (or
+  Shift+F5, or Ctrl+F5) would survive. Resume ships on F11; the banner labels
+  its buttons from `Keymap::chord_label`, so a rebind re-labels them.
 - **A suspension captures the whole continuation**, loop frames included.
   That is why `Delay` inside `ForLoop` works, and also why an activation holds
   **at most one** suspension — a second latent on the same activation is a

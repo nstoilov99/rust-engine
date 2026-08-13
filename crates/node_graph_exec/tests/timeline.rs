@@ -45,8 +45,8 @@ impl CurveWorld {
             slug: "height".into(),
             label: "Height".into(),
             keys: vec![
-                Key { t: 0.0, value: 0.0, interp: Interp::Linear },
-                Key { t: 1.0, value: 10.0, interp: Interp::Linear },
+                Key { t: 0.0, value: 0.0, interp: Interp::Linear, tangent: Default::default() },
+                Key { t: 1.0, value: 10.0, interp: Interp::Linear, tangent: Default::default() },
             ],
         }];
         let mut curves = BTreeMap::new();

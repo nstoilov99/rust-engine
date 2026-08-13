@@ -3651,8 +3651,8 @@ impl App {
                             .map(|d| format!("Redo {d}"))
                             .unwrap_or_else(|| "Redo".to_string()),
                         can_redo: st.stack.can_redo(),
-                        has_selection: st.selected_key.is_some(),
-                        has_deletable: st.selected_key.is_some(),
+                        has_selection: st.has_selection(),
+                        has_deletable: st.has_selection(),
                         has_clipboard: false,
                     }
                 });
@@ -4972,9 +4972,7 @@ impl App {
                 // A half-finished drag would otherwise leave the stack
                 // describing a key that is no longer where it was recorded.
                 st.cancel_gestures();
-                if let Some((t, k)) = st.selected_key {
-                    st.remove_key(t, k);
-                }
+                st.delete_selection();
             }
             _ => {}
         }
