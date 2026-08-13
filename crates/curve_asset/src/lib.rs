@@ -42,12 +42,28 @@
 //! line when the neighbours are collinear, and is the same construction a
 //! curve editor's "auto" tangent gives — so what the editor draws is what the
 //! interpreter samples.
+//!
+//! # Tangents (v2)
+//!
+//! That construction is now the **default**, not the only option: a key
+//! carries a [`Tangent`] mode that decides the slope the Hermite uses at that
+//! end of a segment. [`Tangent::Auto`] is the formula above, byte-identical to
+//! v1; the rest are the modes a curve editor needs to let someone shape an
+//! ease by hand — [`Flat`](Tangent::Flat) (zero), [`Linear`](Tangent::Linear)
+//! (the chord to the neighbour, so a cubic segment between two Linear keys is
+//! a straight line), [`User`](Tangent::User) (one slope both sides) and
+//! [`Break`](Tangent::Break) (two, which is how a curve gets a corner without
+//! getting a second key).
+//!
+//! Tangents govern **cubic segments only**. Constant and Linear `interp` do
+//! not consult them — an ease you cannot see is worse than no ease — and the
+//! editor greys the control to say so.
 
 use serde::{Deserialize, Serialize};
 
 /// Container version of a `.curve` document. Bump when the *shape* changes;
 /// [`migrate_container`] gains a step, and old files keep loading.
-pub const CURVE_DOC_VERSION: u32 = 1;
+pub const CURVE_DOC_VERSION: u32 = 2;
 
 /// How the segment leaving a key behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -81,17 +97,89 @@ impl Interp {
     }
 }
 
+/// How a key's slope is decided, for the cubic segments touching it (v2).
+///
+/// Slopes are **value per second**, the same unit the Catmull-Rom formula
+/// produces, so a mode swap never rescales the curve: switching a key from
+/// Auto to User with the tangent it already had is a no-op by construction,
+/// which is what makes the editor's auto-promotion on an arm drag honest.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum Tangent {
+    /// Time-scaled Catmull-Rom finite difference — v1's only behaviour, and
+    /// still what a key gets when nobody has said otherwise.
+    #[default]
+    Auto,
+    /// Zero slope both sides: the curve arrives and leaves level. What
+    /// "Flatten" produces, and the shape of a hold.
+    Flat,
+    /// The chord to the neighbour on each side. A cubic segment whose two ends
+    /// are both Linear is a straight line — which is why "Straighten" is this
+    /// mode rather than a change of `interp`.
+    Linear,
+    /// One slope, both sides. Continuous through the key.
+    User { tangent: f32 },
+    /// Two slopes: the curve may arrive on one and leave on another. The only
+    /// mode that is deliberately **not** C1 — a corner is a thing people draw
+    /// on purpose.
+    Break { in_tan: f32, out_tan: f32 },
+}
+
+impl Tangent {
+    /// The four the UI offers, in the design's order. `Linear` is reachable
+    /// through the "Straighten" action rather than as a fifth segment.
+    pub const ALL: [Tangent; 4] = [
+        Tangent::Auto,
+        Tangent::User { tangent: 0.0 },
+        Tangent::Break { in_tan: 0.0, out_tan: 0.0 },
+        Tangent::Flat,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Tangent::Auto => "Auto",
+            Tangent::Flat => "Flat",
+            Tangent::Linear => "Linear",
+            Tangent::User { .. } => "User",
+            Tangent::Break { .. } => "Break",
+        }
+    }
+
+    /// Same *mode*, ignoring the slopes it carries — what a segmented control
+    /// compares to decide which segment is lit.
+    pub fn same_mode(&self, other: &Tangent) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// Is this the default? The one question serialization asks, so an Auto
+    /// key writes exactly the bytes it wrote in v1.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Tangent::Auto)
+    }
+
+    /// Does the key draw draggable arms? Only the two explicit modes: an arm
+    /// you cannot move would promise an edit the mode does not accept.
+    pub fn has_arms(&self) -> bool {
+        matches!(self, Tangent::User { .. } | Tangent::Break { .. })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Key {
     /// Seconds from the start of the curve.
     pub t: f32,
     pub value: f32,
     pub interp: Interp,
+    /// v2. **Skipped when `Auto`**, which is both the default and the
+    /// overwhelming majority: a curve nobody has hand-shaped writes exactly
+    /// the key bytes it wrote before this field existed, and a v1 file loads
+    /// as all-Auto without the migration having to touch a single key.
+    #[serde(default, skip_serializing_if = "Tangent::is_auto")]
+    pub tangent: Tangent,
 }
 
 impl Key {
     pub fn new(t: f32, value: f32) -> Self {
-        Self { t, value, interp: Interp::Linear }
+        Self { t, value, interp: Interp::Linear, tangent: Tangent::Auto }
     }
 }
 
@@ -157,17 +245,60 @@ impl Track {
             Interp::Constant => a.value,
             Interp::Linear => a.value + (b.value - a.value) * s,
             Interp::Cubic => {
-                let ma = self.tangent(i);
-                let mb = self.tangent(i + 1);
+                // The segment reads the *leaving* slope of its left key and
+                // the *arriving* slope of its right one — which is the whole
+                // reason Break can exist: the two are different questions.
+                let ma = self.out_tangent(i);
+                let mb = self.in_tangent(i + 1);
                 hermite(a.value, ma * h, b.value, mb * h, s)
             }
         }
     }
 
+    /// Slope of the curve **leaving** key `i`, value-per-second.
+    pub fn out_tangent(&self, i: usize) -> f32 {
+        match self.keys.get(i).map(|k| k.tangent) {
+            Some(Tangent::Flat) => 0.0,
+            Some(Tangent::User { tangent }) => tangent,
+            Some(Tangent::Break { out_tan, .. }) => out_tan,
+            // The chord *forward*; at the last key there is none, so it falls
+            // back to Auto's one-sided answer rather than to zero — a Linear
+            // key at the end should keep going the way it came, not flatten.
+            Some(Tangent::Linear) => self.chord(i, i + 1).unwrap_or_else(|| self.auto_tangent(i)),
+            _ => self.auto_tangent(i),
+        }
+    }
+
+    /// Slope of the curve **arriving** at key `i`, value-per-second.
+    pub fn in_tangent(&self, i: usize) -> f32 {
+        match self.keys.get(i).map(|k| k.tangent) {
+            Some(Tangent::Flat) => 0.0,
+            Some(Tangent::User { tangent }) => tangent,
+            Some(Tangent::Break { in_tan, .. }) => in_tan,
+            Some(Tangent::Linear) => i
+                .checked_sub(1)
+                .and_then(|prev| self.chord(prev, i))
+                .unwrap_or_else(|| self.auto_tangent(i)),
+            _ => self.auto_tangent(i),
+        }
+    }
+
+    /// The straight-line slope between two keys, if both exist and time
+    /// actually passes between them.
+    fn chord(&self, a: usize, b: usize) -> Option<f32> {
+        let (ka, kb) = (self.keys.get(a)?, self.keys.get(b)?);
+        let dt = kb.t - ka.t;
+        (dt > f32::EPSILON).then(|| (kb.value - ka.value) / dt)
+    }
+
     /// Catmull-Rom finite-difference tangent at key `i`, in value-per-second.
     /// One-sided at the ends, which is what makes the first and last segments
     /// behave rather than fly off.
-    fn tangent(&self, i: usize) -> f32 {
+    ///
+    /// **v1's tangent, unchanged.** Every v1 document is all-`Auto`, so this
+    /// is the only path they take and their sampling is bit-identical — the
+    /// property `auto_evaluation_is_bit_identical_to_v1` pins it.
+    pub fn auto_tangent(&self, i: usize) -> f32 {
         let n = self.keys.len();
         if n < 2 {
             return 0.0;
@@ -335,16 +466,26 @@ pub fn parse_curve(text: &str) -> Result<CurveDoc, CurveIoError> {
     Ok(doc)
 }
 
-/// The container migration seam. There is exactly one version today, so this
-/// is a no-op with a shape — the point is that v2 adds an arm here instead of
-/// inventing a mechanism under time pressure.
+/// The container migration seam: one step per version, each leaving the
+/// document at the next — the same chain `parse_graph` runs.
+///
+/// `from == 0` means the file had no version field at all, which is the
+/// earliest shape, i.e. v1.
 fn migrate_container(doc: &mut CurveDoc, from: u32) {
-    // Stated rather than looped: with one version there is nothing to step
-    // through. Adding v2 turns this into the same `while v < VERSION` chain
-    // `parse_graph` runs — one step per version, each leaving the document at
-    // the next. `from == 0` means the file had no version field at all, which
-    // is the earliest shape, i.e. v1.
-    doc.version = from.clamp(1, CURVE_DOC_VERSION);
+    let mut v = from.max(1);
+    while v < CURVE_DOC_VERSION {
+        match v {
+            // v1 -> v2: keys gained a tangent mode. **Lossless and empty by
+            // construction** — the field is `serde(default)`, so a v1 key has
+            // already deserialized as `Auto`, and `Auto` *is* v1's behaviour.
+            // The arm exists to say that out loud, and to be the place a step
+            // that did have work to do would have to declare itself.
+            1 => {}
+            _ => break,
+        }
+        v += 1;
+    }
+    doc.version = v.clamp(1, CURVE_DOC_VERSION);
 }
 
 /// Pretty RON, canonicalized first. Curves live in version control, so a save
@@ -373,7 +514,10 @@ mod tests {
         Track {
             slug: "t".into(),
             label: "T".into(),
-            keys: keys.iter().map(|(t, v, i)| Key { t: *t, value: *v, interp: *i }).collect(),
+            keys: keys
+                .iter()
+                .map(|(t, v, i)| Key { t: *t, value: *v, interp: *i, tangent: Tangent::Auto })
+                .collect(),
         }
     }
 
@@ -491,6 +635,250 @@ mod tests {
         let back = parse_curve(&text).expect("parse");
         assert_eq!(back, doc);
         assert_eq!(serialize_curve(&back).unwrap(), text, "saving twice does not churn");
+    }
+
+    // -- v2 tangents -------------------------------------------------------
+
+    /// The migration's whole claim: a v1 file loads as v2 with every key on
+    /// `Auto`, and **sampling is bit-identical** — not "close", identical, so
+    /// a curve authored before v2 cannot move by a float ulp when the engine
+    /// updates. Golden both ways: the v1 text loads, and re-serializing writes
+    /// the same bytes with only the version line changed.
+    #[test]
+    fn auto_evaluation_is_bit_identical_to_v1() {
+        const V1: &str = r#"(
+    version: 1,
+    tracks: [
+        (
+            slug: "height",
+            label: "Height",
+            keys: [
+                (t: 0.0, value: 0.0, interp: Cubic),
+                (t: 0.35, value: 1.4, interp: Cubic),
+                (t: 1.0, value: 0.0, interp: Linear),
+            ],
+        ),
+    ],
+)"#;
+        let doc = parse_curve(V1).expect("a v1 file still loads");
+        assert_eq!(doc.version, CURVE_DOC_VERSION, "…as v2");
+        assert!(
+            doc.tracks[0].keys.iter().all(|k| k.tangent == Tangent::Auto),
+            "every migrated key is Auto — the mode v1 had without a name for it"
+        );
+
+        // The v1 sampler, transcribed: Catmull-Rom finite difference both
+        // ends, no mode lookup anywhere. If the two ever disagree by a single
+        // bit, this fails.
+        fn v1_sample(keys: &[Key], t: f32) -> f32 {
+            let n = keys.len();
+            if n == 0 {
+                return 0.0;
+            }
+            if n == 1 || t < keys[0].t {
+                return keys[0].value;
+            }
+            if t >= keys[n - 1].t {
+                return keys[n - 1].value;
+            }
+            let i = keys
+                .windows(2)
+                .position(|w| t >= w[0].t && t < w[1].t)
+                .unwrap_or(n - 2);
+            let (a, b) = (keys[i], keys[i + 1]);
+            let h = b.t - a.t;
+            if h <= f32::EPSILON {
+                return b.value;
+            }
+            let s = ((t - a.t) / h).clamp(0.0, 1.0);
+            let tan = |i: usize| -> f32 {
+                let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
+                let dt = keys[hi].t - keys[lo].t;
+                if dt <= f32::EPSILON {
+                    return 0.0;
+                }
+                (keys[hi].value - keys[lo].value) / dt
+            };
+            match a.interp {
+                Interp::Constant => a.value,
+                Interp::Linear => a.value + (b.value - a.value) * s,
+                Interp::Cubic => hermite(a.value, tan(i) * h, b.value, tan(i + 1) * h, s),
+            }
+        }
+
+        let keys = &doc.tracks[0].keys;
+        for i in 0..=400 {
+            let t = i as f32 * 0.0035;
+            assert_eq!(
+                doc.tracks[0].sample(t).to_bits(),
+                v1_sample(keys, t).to_bits(),
+                "t={t}: v2 must sample a migrated curve exactly as v1 did"
+            );
+        }
+
+        // And the file it writes back is the v1 file with a new version line:
+        // an all-Auto document costs no bytes, because the field is skipped.
+        let text = serialize_curve(&doc).expect("serialize");
+        assert!(!text.contains("tangent"), "an Auto key writes no tangent:\n{text}");
+        // The golden, both ways: the only difference between what v2 writes
+        // and a v1 file of the same curve is the version line — so the same
+        // bytes with `version: 1` still parse, and to the same document.
+        let as_v1 = text.replace("version: 2", "version: 1");
+        assert_ne!(as_v1, text, "the version line is in there");
+        assert_eq!(parse_curve(&as_v1).expect("the v1 shape still parses"), doc);
+    }
+
+    /// A hand-shaped key round-trips, and *only* the keys that were shaped
+    /// carry the field.
+    #[test]
+    fn an_explicit_tangent_round_trips_and_the_others_stay_quiet() {
+        let mut doc = CurveDoc::default();
+        let mut t = track(&[
+            (0.0, 0.0, Interp::Cubic),
+            (1.0, 1.0, Interp::Cubic),
+            (2.0, 0.0, Interp::Cubic),
+        ]);
+        t.keys[1].tangent = Tangent::Break { in_tan: 3.0, out_tan: -7.5 };
+        doc.tracks = vec![t];
+
+        let text = serialize_curve(&doc).expect("serialize");
+        assert_eq!(text.matches("tangent").count(), 1, "one shaped key, one field:\n{text}");
+        let back = parse_curve(&text).expect("parse");
+        assert_eq!(back, doc);
+        assert_eq!(serialize_curve(&back).unwrap(), text, "saving twice does not churn");
+    }
+
+    /// Each mode's arithmetic, at the key where it is unambiguous: the slope
+    /// the segment leaves with is measurable as a finite difference just past
+    /// the key.
+    #[test]
+    fn every_tangent_mode_resolves_to_its_documented_slope() {
+        // Uneven spacing on purpose: Auto and Linear differ only when the
+        // neighbours are not symmetric.
+        let mut t = track(&[
+            (0.0, 0.0, Interp::Cubic),
+            (1.0, 2.0, Interp::Cubic),
+            (4.0, 2.0, Interp::Cubic),
+        ]);
+
+        // Auto: the time-scaled finite difference across the neighbours.
+        assert!((t.out_tangent(1) - (2.0 - 0.0) / (4.0 - 0.0)).abs() < 1e-6);
+        assert!((t.in_tangent(1) - t.out_tangent(1)).abs() < 1e-6, "Auto is one slope");
+
+        // Flat: zero, both sides.
+        t.keys[1].tangent = Tangent::Flat;
+        assert_eq!(t.out_tangent(1), 0.0);
+        assert_eq!(t.in_tangent(1), 0.0);
+
+        // Linear: the chord to each neighbour — different on each side.
+        t.keys[1].tangent = Tangent::Linear;
+        assert!((t.in_tangent(1) - 2.0).abs() < 1e-6, "chord from key 0: (2-0)/(1-0)");
+        assert!((t.out_tangent(1) - 0.0).abs() < 1e-6, "chord to key 2: (2-2)/(4-1)");
+
+        // User: one number, both sides.
+        t.keys[1].tangent = Tangent::User { tangent: -1.25 };
+        assert_eq!(t.in_tangent(1), -1.25);
+        assert_eq!(t.out_tangent(1), -1.25);
+
+        // Break: two, and they may disagree — that is the point.
+        t.keys[1].tangent = Tangent::Break { in_tan: 5.0, out_tan: -5.0 };
+        assert_eq!(t.in_tangent(1), 5.0);
+        assert_eq!(t.out_tangent(1), -5.0);
+
+        // The ends fall back rather than flattening: a Linear key with no
+        // neighbour on one side keeps the slope it does have.
+        t.keys[0].tangent = Tangent::Linear;
+        assert!((t.in_tangent(0) - t.auto_tangent(0)).abs() < 1e-6);
+    }
+
+    /// Two Linear-tangent keys make a cubic segment that is a *straight line*
+    /// — which is what "Straighten" promises, and the reason the action sets a
+    /// tangent mode instead of changing `interp`.
+    #[test]
+    fn a_cubic_segment_between_linear_tangents_is_straight() {
+        let mut t = track(&[
+            (0.0, 0.0, Interp::Cubic),
+            (2.0, 6.0, Interp::Cubic),
+            (3.0, 0.0, Interp::Cubic),
+        ]);
+        t.keys[0].tangent = Tangent::Linear;
+        t.keys[1].tangent = Tangent::Linear;
+        for i in 0..=20 {
+            let x = i as f32 * 0.1;
+            assert!((t.sample(x) - x * 3.0).abs() < 1e-4, "t={x}: {}", t.sample(x));
+        }
+    }
+
+    /// Flat means level: the curve arrives and leaves a Flat key with no
+    /// slope, so a hold between two of them never dips.
+    #[test]
+    fn flat_tangents_hold_level_through_the_key() {
+        let mut t = track(&[
+            (0.0, 0.0, Interp::Cubic),
+            (1.0, 1.0, Interp::Cubic),
+            (2.0, 0.0, Interp::Cubic),
+        ]);
+        for k in t.keys.iter_mut() {
+            k.tangent = Tangent::Flat;
+        }
+        // Symmetric around the peak, and the peak is the peak.
+        let l = t.sample(1.0 - 0.25);
+        let r = t.sample(1.0 + 0.25);
+        assert!((l - r).abs() < 1e-5, "{l} vs {r}");
+        assert!(t.sample(1.0) >= t.sample(0.9) && t.sample(1.0) >= t.sample(1.1));
+        // A hold between two equal Flat keys is exactly flat.
+        let hold = {
+            let mut h = track(&[(0.0, 4.0, Interp::Cubic), (1.0, 4.0, Interp::Cubic)]);
+            for k in h.keys.iter_mut() {
+                k.tangent = Tangent::Flat;
+            }
+            h
+        };
+        for i in 0..=10 {
+            assert!((hold.sample(i as f32 * 0.1) - 4.0).abs() < 1e-6);
+        }
+    }
+
+    /// A Break key is a corner: the slope on the way in and the slope on the
+    /// way out genuinely differ, and that discontinuity is legal — the one
+    /// place this crate does not promise C1.
+    #[test]
+    fn a_break_key_is_a_legal_corner() {
+        let mut t = track(&[
+            (0.0, 0.0, Interp::Cubic),
+            (1.0, 1.0, Interp::Cubic),
+            (2.0, 1.0, Interp::Cubic),
+        ]);
+        t.keys[1].tangent = Tangent::Break { in_tan: 4.0, out_tan: -4.0 };
+        // Value is continuous — a corner is not a jump.
+        let e = 1e-3;
+        assert!((t.sample(1.0 - e) - t.sample(1.0 + e)).abs() < 1e-2);
+        // Slope is not: measured either side of the key, the signs differ.
+        let slope_in = (t.sample(1.0) - t.sample(1.0 - e)) / e;
+        let slope_out = (t.sample(1.0 + e) - t.sample(1.0)) / e;
+        assert!(slope_in > 1.0, "arrives climbing: {slope_in}");
+        assert!(slope_out < -1.0, "leaves falling: {slope_out}");
+    }
+
+    /// Tangents are a cubic concern only. A Linear or Constant segment samples
+    /// the same whatever the keys' modes say — which is what lets the editor
+    /// grey the control rather than explain an invisible setting.
+    #[test]
+    fn tangent_modes_do_not_touch_linear_or_constant_segments() {
+        for interp in [Interp::Linear, Interp::Constant] {
+            let plain = track(&[(0.0, 0.0, interp), (2.0, 10.0, interp)]);
+            let mut shaped = plain.clone();
+            shaped.keys[0].tangent = Tangent::Break { in_tan: -99.0, out_tan: 42.0 };
+            shaped.keys[1].tangent = Tangent::Flat;
+            for i in 0..=20 {
+                let t = i as f32 * 0.1;
+                assert_eq!(
+                    plain.sample(t).to_bits(),
+                    shaped.sample(t).to_bits(),
+                    "{interp:?} at t={t} must ignore tangents"
+                );
+            }
+        }
     }
 
     #[test]

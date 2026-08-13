@@ -932,8 +932,8 @@ mod tests {
         let mut d = CurveDoc::default();
         let mut t = Track::new("h", "H");
         t.keys = vec![
-            Key { t: 0.0, value: -1.0, interp: Interp::Linear },
-            Key { t: 2.0, value: 3.0, interp: Interp::Linear },
+            Key { t: 0.0, value: -1.0, interp: Interp::Linear, tangent: Default::default() },
+            Key { t: 2.0, value: 3.0, interp: Interp::Linear, tangent: Default::default() },
         ];
         d.tracks = vec![t];
         d

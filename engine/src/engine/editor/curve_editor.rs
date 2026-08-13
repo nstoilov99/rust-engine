@@ -399,7 +399,10 @@ impl CurveEditorState {
             .or_else(|| tr.keys.first())
             .map(|k| k.interp)
             .unwrap_or_default();
-        let key = Key { t, value, interp };
+        // A new key inherits its neighbour's interpolation and starts on the
+        // default tangent: nobody has shaped it yet, and Auto is the mode that
+        // says so (v2).
+        let key = Key { t, value, interp, tangent: Default::default() };
         let edit = CurveEdit::AddKey { track, index, key };
         edit.apply(&mut self.doc);
         self.commit(edit);
@@ -459,7 +462,14 @@ impl CurveEditorState {
         // A neighbour closer than the gap on both sides leaves an empty range;
         // holding position is the only honest answer.
         let t = if lo <= hi { t.clamp(lo, hi) } else { d.from.t };
-        set_key(&mut self.doc, d.track, d.index, Key { t, value, interp: d.from.interp });
+        // A move changes where the key is, never what it is: interpolation and
+        // the hand-shaped tangent both ride along untouched.
+        set_key(
+            &mut self.doc,
+            d.track,
+            d.index,
+            Key { t, value, interp: d.from.interp, tangent: d.from.tangent },
+        );
     }
 
     /// Finish the drag: one `MoveKey` entry, or nothing at all if the key
@@ -537,9 +547,9 @@ mod tests {
         let mut d = CurveDoc::default();
         let mut t = Track::new("height", "Height");
         t.keys = vec![
-            Key { t: 0.0, value: 0.0, interp: Interp::Linear },
-            Key { t: 1.0, value: 10.0, interp: Interp::Linear },
-            Key { t: 2.0, value: 0.0, interp: Interp::Linear },
+            Key { t: 0.0, value: 0.0, interp: Interp::Linear, tangent: Default::default() },
+            Key { t: 1.0, value: 10.0, interp: Interp::Linear, tangent: Default::default() },
+            Key { t: 2.0, value: 0.0, interp: Interp::Linear, tangent: Default::default() },
         ];
         d.tracks = vec![t];
         d
@@ -573,7 +583,7 @@ mod tests {
         s.drag_to(1.5, 3.0);
         s.end_drag();
         assert_eq!(s.stack.undo_len(), 1, "one gesture, one entry");
-        assert_eq!(s.doc.tracks[0].keys[1], Key { t: 1.5, value: 3.0, interp: Interp::Linear });
+        assert_eq!(s.doc.tracks[0].keys[1], Key { t: 1.5, value: 3.0, interp: Interp::Linear, tangent: Default::default() });
 
         s.undo();
         assert_eq!(s.doc.tracks[0].keys[1].t, 1.0);
