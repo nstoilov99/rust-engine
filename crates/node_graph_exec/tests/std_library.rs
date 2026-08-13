@@ -263,6 +263,7 @@ fn while_loop_rechecks_its_condition_each_pass() {
         label: "N".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     let var = |id: u64, ty: &str| with(id, ty, &[(VAR_PROP, PropValue::Str("n".into()))]);
     doc.nodes = vec![
@@ -310,6 +311,7 @@ fn for_each_walks_an_array_with_element_and_index() {
             PropValue::Int(20),
             PropValue::Int(30),
         ])),
+        group: None,
     }];
     doc.nodes = vec![
         node(0, EVENT_BEGIN_PLAY_TYPE_ID),
@@ -349,6 +351,7 @@ fn for_each_walks_an_array_with_element_and_index() {
             label: "Xs".into(),
             ty: PinType::Array(Box::new(ty)),
             default: Some(PropValue::Array(vec![default])),
+            group: None,
         }];
         d.nodes = vec![
             node(0, EVENT_BEGIN_PLAY_TYPE_ID),

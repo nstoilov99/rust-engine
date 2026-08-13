@@ -103,6 +103,20 @@ pub enum GraphEdit {
         old: Option<PropValue>,
         new: Option<PropValue>,
     },
+    /// The panel group a declaration lists under (GS-2). **Display metadata**
+    /// — it moves no declaration and reaches no runtime, which is why it is
+    /// its own edit rather than a flavour of reorder.
+    SetVariableGroup {
+        slug: String,
+        old: Option<String>,
+        new: Option<String>,
+    },
+    /// A declaration moved within the list. Index-based like the annotation
+    /// ops, and valid for the same reason (the stack applies/reverts strictly
+    /// LIFO); `apply` removes at `from` and inserts at `to`, `revert` does the
+    /// exact inverse, so a gesture round-trips the vec order a byte-stable
+    /// save depends on.
+    ReorderVariable { from: usize, to: usize },
     // --- Annotations (P7). Comments/groups have no ids; index-based ops are
     //     valid because the undo stack applies/reverts strictly LIFO. ---
     /// A comment box was appended.
@@ -220,6 +234,8 @@ impl GraphEdit {
                 set_var_type(doc, slug, new_ty, new_default)
             }
             GraphEdit::SetVariableDefault { slug, new, .. } => set_var_default(doc, slug, new),
+            GraphEdit::SetVariableGroup { slug, new, .. } => set_var_group(doc, slug, new),
+            GraphEdit::ReorderVariable { from, to } => move_variable(doc, *from, *to),
             GraphEdit::AddComment(c) => doc.comments.push(c.clone()),
             GraphEdit::RemoveComment { index, .. } => {
                 doc.comments.remove(*index);
@@ -293,6 +309,8 @@ impl GraphEdit {
                 set_var_type(doc, slug, old_ty, old_default)
             }
             GraphEdit::SetVariableDefault { slug, old, .. } => set_var_default(doc, slug, old),
+            GraphEdit::SetVariableGroup { slug, old, .. } => set_var_group(doc, slug, old),
+            GraphEdit::ReorderVariable { from, to } => move_variable(doc, *to, *from),
             GraphEdit::AddComment(_) => {
                 doc.comments.pop();
             }
@@ -366,6 +384,10 @@ impl GraphEdit {
             GraphEdit::RenameVariable { .. } => "Rename Variable".to_string(),
             GraphEdit::RetypeVariable { .. } => "Retype Variable".to_string(),
             GraphEdit::SetVariableDefault { .. } => "Set Variable Default".to_string(),
+            GraphEdit::SetVariableGroup { new, .. } => {
+                if new.is_some() { "Group Variable" } else { "Ungroup Variable" }.to_string()
+            }
+            GraphEdit::ReorderVariable { .. } => "Reorder Variable".to_string(),
             GraphEdit::AddComment(_) => "Add Comment".to_string(),
             GraphEdit::RemoveComment { .. } => "Delete Comment".to_string(),
             GraphEdit::MoveComment { .. } => "Move Comment".to_string(),
@@ -530,6 +552,23 @@ fn set_var_default(doc: &mut GraphDoc, slug: &str, value: &Option<PropValue>) {
     }
 }
 
+fn set_var_group(doc: &mut GraphDoc, slug: &str, group: &Option<String>) {
+    if let Some(v) = doc.variables.iter_mut().find(|v| v.slug == slug) {
+        v.group = group.clone();
+    }
+}
+
+/// Move the declaration at `from` to `to`. Out-of-range indices are a no-op
+/// rather than a panic: an undo stack that outlived its document is a bug to
+/// survive, not to crash on.
+fn move_variable(doc: &mut GraphDoc, from: usize, to: usize) {
+    if from >= doc.variables.len() || to >= doc.variables.len() || from == to {
+        return;
+    }
+    let decl = doc.variables.remove(from);
+    doc.variables.insert(to, decl);
+}
+
 /// A variable slug from a display name: lowercase, `_`-joined, alphanumeric.
 ///
 /// Deliberately snake_case rather than the `-` form `slugify` produces for
@@ -555,6 +594,209 @@ pub fn variable_slug(name: &str) -> String {
         "var".to_string()
     } else {
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Variables panel view-model (GS-2)
+//
+// The list the strip draws is derived, never stored: groups are metadata on
+// the declarations, the filter is session state, and the order is the
+// document's. Deriving it here — with no `Ui` in sight — is what lets the
+// grouping, the filter partition and the counts be tested directly.
+// ---------------------------------------------------------------------------
+
+/// One line of the variables list, in render order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VarListRow {
+    /// A group header. `name` is `None` for the implicit trailing section that
+    /// collects ungrouped declarations — it only appears when some other row
+    /// *is* grouped, so an ungrouped document looks exactly as it always did.
+    Group { name: Option<String>, count: usize, collapsed: bool },
+    /// A declaration, by index into `doc.variables`.
+    Var(usize),
+}
+
+/// The derived list plus the numbers the header and footer quote.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VarListView {
+    pub rows: Vec<VarListRow>,
+    /// Declarations matching the filter (all of them when it is empty).
+    pub matches: usize,
+    pub total: usize,
+    /// `total - matches` — what the "N hidden by filter" line reports.
+    pub hidden: usize,
+}
+
+/// Does this declaration match `filter`? Substring, case-insensitive, over the
+/// label **and** the slug — the two names an author would think to type.
+pub fn variable_matches(decl: &VarDecl, filter: &str) -> bool {
+    let q = filter.trim().to_lowercase();
+    q.is_empty()
+        || decl.label.to_lowercase().contains(&q)
+        || decl.slug.to_lowercase().contains(&q)
+}
+
+/// Build the list: group headers over the *unchanged* declaration order, with
+/// non-matching rows dropped and headers that match nothing dropped with them.
+///
+/// Group order is first-declaration order, so grouping never reshuffles the
+/// list and the same file always draws the same way. Collapsed groups keep
+/// their header (and its count) and drop their rows.
+pub fn variables_view(
+    doc: &GraphDoc,
+    filter: &str,
+    collapsed: &BTreeSet<String>,
+) -> VarListView {
+    let total = doc.variables.len();
+    let matching: Vec<bool> = doc
+        .variables
+        .iter()
+        .map(|v| variable_matches(v, filter))
+        .collect();
+    let matches = matching.iter().filter(|m| **m).count();
+
+    // Group names in first-declaration order; `None` sorts last, always.
+    let mut order: Vec<Option<String>> = Vec::new();
+    for v in &doc.variables {
+        let key = v.group.clone();
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    let grouped = order.iter().any(|g| g.is_some());
+    order.sort_by_key(|g| g.is_none());
+
+    let mut rows = Vec::new();
+    for group in order {
+        let members: Vec<usize> = doc
+            .variables
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| v.group == group && matching[*i])
+            .map(|(i, _)| i)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // A document nobody grouped has no headers at all — the shipped look.
+        if grouped {
+            let is_collapsed = group
+                .as_deref()
+                .is_some_and(|g| collapsed.contains(g));
+            rows.push(VarListRow::Group {
+                name: group.clone(),
+                count: members.len(),
+                collapsed: is_collapsed,
+            });
+            if is_collapsed {
+                continue;
+            }
+        }
+        rows.extend(members.into_iter().map(VarListRow::Var));
+    }
+    VarListView { rows, matches, total, hidden: total - matches }
+}
+
+/// The `var_get`/`var_set` nodes that name `slug`, in document order — what
+/// the usage count counts and what "locate" cycles through.
+pub fn variable_node_ids(doc: &GraphDoc, slug: &str) -> Vec<u64> {
+    doc.nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.type_id.as_str(),
+                crate::engine::node_graph::VAR_GET_TYPE_ID
+                    | crate::engine::node_graph::VAR_SET_TYPE_ID
+            ) && matches!(n.properties.get(crate::engine::node_graph::VAR_PROP),
+                Some(PropValue::Str(s)) if s == slug)
+        })
+        .map(|n| n.id)
+        .collect()
+}
+
+/// The in-row warning a retyped variable earns: how many *wired* uses now
+/// disagree with the declaration, and what they expect.
+///
+/// Derived from the validation results rather than recomputed, so the row and
+/// the canvas can never disagree about whether something is wrong: every
+/// `TypeMismatch` whose edge touches this variable's value pin votes, and the
+/// type the wire's *other* end expects is the one named.
+pub fn variable_mismatch(doc: &GraphDoc, slug: &str, errors: &[GraphError]) -> Option<String> {
+    let ids = variable_node_ids(doc, slug);
+    if ids.is_empty() {
+        return None;
+    }
+    let mut count = 0usize;
+    let mut expected: Option<PinType> = None;
+    for e in errors {
+        let GraphError::TypeMismatch { edge, from_ty, to_ty } = e else {
+            continue;
+        };
+        // A Get feeds the wire (its type is `from`); a Set is fed by it.
+        let (mine, theirs) = if ids.contains(&edge.from_node) {
+            (from_ty, to_ty)
+        } else if ids.contains(&edge.to_node) {
+            (to_ty, from_ty)
+        } else {
+            continue;
+        };
+        if mine == theirs {
+            continue;
+        }
+        count += 1;
+        expected.get_or_insert_with(|| theirs.clone());
+    }
+    let expected = expected?;
+    Some(format!(
+        "{count} wired use{} expect{} {}",
+        if count == 1 { "" } else { "s" },
+        if count == 1 { "s" } else { "" },
+        pin_type_label(&expected)
+    ))
+}
+
+/// A pin type as the panel spells it (`Float`, `Vec3[]`). Lives here rather
+/// than in the drawing layer because the mismatch reason line is text the
+/// view-model produces and a test asserts on.
+pub fn pin_type_label(ty: &PinType) -> String {
+    match ty {
+        PinType::Array(inner) => format!("{}[]", pin_type_label(inner)),
+        PinType::Float => "Float".to_string(),
+        PinType::Int => "Int".to_string(),
+        PinType::String => "String".to_string(),
+        PinType::Bool => "Bool".to_string(),
+        PinType::Vec2 => "Vec2".to_string(),
+        PinType::Vec3 => "Vec3".to_string(),
+        PinType::Vec4 => "Vec4".to_string(),
+        PinType::Color => "Color".to_string(),
+        PinType::Entity => "Entity".to_string(),
+        PinType::Exec => "Exec".to_string(),
+        other => other.type_slug(),
+    }
+}
+
+/// What a retype would do to the stored default, in the words the confirmation
+/// uses. `None` when there is no default to say anything about.
+///
+/// The rule is P6b's, unchanged — an exact type match survives, anything else
+/// resets — and this only *reports* it, so the dialog can never promise an
+/// outcome the edit does not perform.
+pub fn retype_default_outcome(decl: &VarDecl, ty: &PinType) -> Option<String> {
+    let old = decl.default.as_ref()?;
+    let shown = prop_display(old);
+    if old.matches_type(ty) {
+        return Some(format!("Default {shown} is kept."));
+    }
+    match PropValue::zero_of(ty) {
+        Some(zero) => Some(format!(
+            "Default {shown} \u{2192} {} (reset \u{2014} no silent coercion).",
+            prop_display(&zero)
+        )),
+        None => Some(format!(
+            "Default {shown} is dropped \u{2014} {} has no literal.",
+            pin_type_label(ty)
+        )),
     }
 }
 
@@ -1039,6 +1281,9 @@ pub struct GraphEditorState {
     pub frame_all_on_open: bool,
     /// The variables side strip (45-A P6c). Session-only.
     pub vars: VarPanel,
+    /// A node the panel just framed, and when — it flashes for a moment so
+    /// the eye lands on it after the view moves (GS-2 locate).
+    pub flash: Option<(u64, Instant)>,
     /// The custom-event payload band's draft/confirm state (GS-1).
     /// Session-only, like `vars`.
     pub payload: PayloadPanel,
@@ -1338,6 +1583,16 @@ pub struct VarPanel {
     pub drop: Option<VarDrop>,
     /// A destructive/lossy change waiting on confirmation.
     pub confirm: Option<VarConfirm>,
+    /// The list filter (GS-2). Session state: it dims the canvas while it is
+    /// set, exactly like find-in-graph, and clears on Esc.
+    pub filter: String,
+    /// Collapsed group headers, by group name.
+    pub collapsed: BTreeSet<String>,
+    /// Per-slug locate cursor, so repeat clicks cycle a variable's uses
+    /// instead of re-framing the first one forever.
+    pub locate: BTreeMap<String, usize>,
+    /// In-flight "New group…" name entry from the `+` menu.
+    pub new_group: Option<String>,
 }
 
 /// The add-variable draft: what the row's fields hold before `Add` is pressed.
@@ -1348,6 +1603,10 @@ pub struct NewVarDraft {
     pub ty: usize,
     pub array: bool,
     pub first_frame: bool,
+    /// The draft committed or cancelled this frame and should be dropped. Set
+    /// by the block that draws it, read by the panel after — the draft lives
+    /// inside a scrolled list, so it cannot take itself down mid-layout.
+    pub done: bool,
 }
 
 /// A variable row dropped on the canvas: where it landed, awaiting Get/Set.
@@ -1512,6 +1771,7 @@ impl GraphEditorState {
             // list, and a strip nobody can see teaches nobody it exists. One
             // click (or Alt+V) collapses it back to the rail.
             vars: VarPanel { open: true, ..Default::default() },
+            flash: None,
             payload: PayloadPanel::default(),
         })
     }
@@ -1752,6 +2012,7 @@ impl GraphEditorState {
             label,
             default: PropValue::zero_of(&ty),
             ty,
+            group: None,
         };
         let edit = GraphEdit::AddVariable(decl);
         edit.apply(&mut self.doc);
@@ -1880,6 +2141,161 @@ impl GraphEditorState {
             GraphEdit::SetVariableDefault { slug: p.slug, old: p.old, new },
             registry,
         );
+    }
+
+    /// The next `var_get`/`var_set` to frame for this slug, advancing the
+    /// per-slug cursor so repeat clicks **cycle** the uses rather than
+    /// re-framing the first one forever. Document order, so the cycle is the
+    /// same one the count counted.
+    pub fn next_locate(&mut self, slug: &str) -> Option<u64> {
+        let ids = variable_node_ids(&self.doc, slug);
+        if ids.is_empty() {
+            return None;
+        }
+        let cursor = self.vars.locate.entry(slug.to_string()).or_insert(0);
+        let id = ids[*cursor % ids.len()];
+        *cursor = (*cursor + 1) % ids.len();
+        Some(id)
+    }
+
+    /// Assign (or clear, with `None`) a declaration's panel group — display
+    /// metadata, so nothing moves and nothing recompiles.
+    pub fn set_variable_group(
+        &mut self,
+        slug: &str,
+        group: Option<String>,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let Some(old) = self.doc.variable(slug).map(|v| v.group.clone()) else {
+            return false;
+        };
+        if old == group {
+            return false;
+        }
+        let edit = GraphEdit::SetVariableGroup { slug: slug.to_string(), old, new: group };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    /// Move a declaration to `to` in the list. **The only thing that changes
+    /// declaration order** — every other panel gesture leaves it alone, which
+    /// is what makes the order meaningful enough to drag.
+    pub fn reorder_variable(&mut self, from: usize, to: usize, registry: &NodeRegistry) -> bool {
+        if from >= self.doc.variables.len() || to >= self.doc.variables.len() || from == to {
+            return false;
+        }
+        let edit = GraphEdit::ReorderVariable { from, to };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
+    // --- Array literal entries (GS-2) --------------------------------
+    //
+    // An array default is one `PropValue::Array`, so every entry gesture is
+    // one `SetVariableDefault` — the path the scalar editor already uses, and
+    // therefore the same undo, the same validation, the same coalescing rule.
+    // Each *gesture* is one entry: adding, removing and reordering commit
+    // immediately (they are discrete), while typing into a component field
+    // rides the coalescing `set_variable_default` like any drag.
+
+    /// The array default of `slug`, or `None` when it is not an array.
+    fn array_default(&self, slug: &str) -> Option<Vec<PropValue>> {
+        match self.doc.variable(slug)?.default.as_ref() {
+            Some(PropValue::Array(v)) => Some(v.clone()),
+            _ => matches!(self.doc.variable(slug)?.ty, PinType::Array(_)).then(Vec::new),
+        }
+    }
+
+    /// Commit a whole new entry list as one undo entry with its own label.
+    fn commit_array(&mut self, slug: &str, items: Vec<PropValue>, registry: &NodeRegistry, label: &str) {
+        let old = self.doc.variable(slug).and_then(|v| v.default.clone());
+        let new = Some(PropValue::Array(items));
+        if old == new {
+            return;
+        }
+        // Any in-flight coalesced edit belongs to the previous gesture.
+        self.flush_var_default_edit(registry);
+        let edit = GraphEdit::Composite {
+            label: label.to_string(),
+            edits: vec![GraphEdit::SetVariableDefault {
+                slug: slug.to_string(),
+                old,
+                new,
+            }],
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+    }
+
+    /// Append one entry, seeded with the element type's zero.
+    pub fn add_array_entry(&mut self, slug: &str, registry: &NodeRegistry) -> bool {
+        let Some(mut items) = self.array_default(slug) else {
+            return false;
+        };
+        let elem = match &self.doc.variable(slug).map(|v| v.ty.clone()) {
+            Some(PinType::Array(inner)) => (**inner).clone(),
+            _ => return false,
+        };
+        // A type with no constant form (Entity) has no literal entry to add.
+        let Some(zero) = PropValue::zero_of(&elem) else {
+            return false;
+        };
+        items.push(zero);
+        self.commit_array(slug, items, registry, "Add Array Entry");
+        true
+    }
+
+    pub fn remove_array_entry(&mut self, slug: &str, index: usize, registry: &NodeRegistry) -> bool {
+        let Some(mut items) = self.array_default(slug) else {
+            return false;
+        };
+        if index >= items.len() {
+            return false;
+        }
+        items.remove(index);
+        self.commit_array(slug, items, registry, "Remove Array Entry");
+        true
+    }
+
+    pub fn move_array_entry(
+        &mut self,
+        slug: &str,
+        from: usize,
+        to: usize,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let Some(mut items) = self.array_default(slug) else {
+            return false;
+        };
+        if from >= items.len() || to >= items.len() || from == to {
+            return false;
+        }
+        let e = items.remove(from);
+        items.insert(to, e);
+        self.commit_array(slug, items, registry, "Reorder Array Entry");
+        true
+    }
+
+    /// Set one entry's value through the **coalescing** default path, so a
+    /// drag on a component field is one undo entry like every other drag.
+    pub fn set_array_entry(
+        &mut self,
+        slug: &str,
+        index: usize,
+        value: PropValue,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let Some(mut items) = self.array_default(slug) else {
+            return false;
+        };
+        if index >= items.len() || items[index] == value {
+            return false;
+        }
+        items[index] = value;
+        self.set_variable_default(slug, Some(PropValue::Array(items)), registry);
+        true
     }
 
     // -----------------------------------------------------------------
@@ -3846,6 +4262,7 @@ pub mod tests_support {
             frame: 0,
             frame_all_on_open: false,
             vars: VarPanel::default(),
+            flash: None,
             payload: PayloadPanel::default(),
         }
     }
@@ -6094,6 +6511,313 @@ mod tests {
         assert_eq!(doc.nodes[1].position, [10.0, 0.0]);
     }
 
+    // -- GS-2: variables panel ---------------------------------------------
+
+    fn var(slug: &str, ty: PinType, group: Option<&str>) -> VarDecl {
+        VarDecl {
+            slug: slug.to_string(),
+            label: slug.to_string(),
+            default: PropValue::zero_of(&ty),
+            ty,
+            group: group.map(str::to_string),
+        }
+    }
+
+    fn var_node(id: u64, slug: &str, set: bool) -> NodeInst {
+        let mut n = node(id, [0.0, 0.0]);
+        n.type_id = if set {
+            crate::engine::node_graph::VAR_SET_TYPE_ID
+        } else {
+            crate::engine::node_graph::VAR_GET_TYPE_ID
+        }
+        .to_string();
+        n.properties.insert(
+            crate::engine::node_graph::VAR_PROP.to_string(),
+            PropValue::Str(slug.to_string()),
+        );
+        n
+    }
+
+    /// A group is **display metadata**: unset it serializes to nothing at all
+    /// (so a document nobody grouped is byte-identical to one from before
+    /// groups existed), setting it moves no declaration, and undo restores the
+    /// file exactly.
+    #[test]
+    fn variable_groups_are_metadata_and_round_trip() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.variables = vec![
+            var("health", PinType::Float, None),
+            var("score", PinType::Int, None),
+        ];
+        let bytes = |d: &GraphDoc| crate::engine::node_graph::serialize_graph(d).unwrap();
+        let before = st.doc.clone();
+        assert!(
+            !bytes(&before).contains("group:"),
+            "an ungrouped document never writes the field"
+        );
+        // The claim that matters: a committed file nobody grouped still
+        // serializes to exactly the bytes on disk after the field was added.
+        let on_disk = Path::new("../content/graphs/runner_demo.graph");
+        if let Ok(text) = std::fs::read_to_string(on_disk) {
+            let doc = load_graph(on_disk).expect("the committed demo graph parses");
+            assert_eq!(bytes(&doc), text, "adding `group` must not rewrite old files");
+        }
+
+        assert!(st.set_variable_group("score", Some("State".into()), &reg));
+        assert_eq!(st.doc.variables[1].group.as_deref(), Some("State"));
+        assert_eq!(
+            st.doc.variables.iter().map(|v| v.slug.as_str()).collect::<Vec<_>>(),
+            vec!["health", "score"],
+            "grouping never reorders"
+        );
+        assert!(bytes(&st.doc).contains("group: Some(\"State\")"));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Group Variable"));
+        st.undo(&reg);
+        assert_eq!(bytes(&st.doc), bytes(&before));
+
+        // Clearing is the same edit the other way, with its own label.
+        st.redo(&reg);
+        assert!(st.set_variable_group("score", None, &reg));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Ungroup Variable"));
+        assert_eq!(bytes(&st.doc), bytes(&before));
+        // A no-op assignment records nothing.
+        assert!(!st.set_variable_group("score", None, &reg));
+    }
+
+    /// Reorder is the **only** gesture that changes declaration order, and it
+    /// is exactly reversible — the vec order is what a byte-stable save is.
+    #[test]
+    fn reorder_variable_round_trips_byte_identically() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.variables = vec![
+            var("a", PinType::Float, None),
+            var("b", PinType::Int, None),
+            var("c", PinType::Bool, None),
+        ];
+        let bytes = |d: &GraphDoc| crate::engine::node_graph::serialize_graph(d).unwrap();
+        let before = st.doc.clone();
+
+        assert!(st.reorder_variable(2, 0, &reg));
+        assert_eq!(
+            st.doc.variables.iter().map(|v| v.slug.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Reorder Variable"));
+        assert_eq!(st.stack.undo_len(), 1, "one drag, one entry");
+        st.undo(&reg);
+        assert_eq!(bytes(&st.doc), bytes(&before));
+        // Degenerate moves are refused rather than recorded.
+        assert!(!st.reorder_variable(1, 1, &reg));
+        assert!(!st.reorder_variable(0, 9, &reg));
+        assert_eq!(st.stack.undo_len(), 0);
+    }
+
+    /// Array entries ride the existing default path: one undo entry per
+    /// gesture, each named for the gesture, each byte-identical on undo.
+    #[test]
+    fn array_default_entries_edit_one_gesture_at_a_time() {
+        let reg = NodeRegistry::new();
+        let mut st = bare_state();
+        st.doc.variables = vec![var("path", PinType::Array(Box::new(PinType::Vec3)), None)];
+        let bytes = |d: &GraphDoc| crate::engine::node_graph::serialize_graph(d).unwrap();
+        let before = st.doc.clone();
+
+        assert!(st.add_array_entry("path", &reg));
+        assert!(st.add_array_entry("path", &reg));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Add Array Entry"));
+        assert_eq!(st.stack.undo_len(), 2, "one entry per gesture");
+        // The new entries take the element type's zero, not a guess.
+        assert_eq!(
+            st.doc.variables[0].default,
+            Some(PropValue::Array(vec![
+                PropValue::Vec3([0.0; 3]),
+                PropValue::Vec3([0.0; 3])
+            ]))
+        );
+
+        // A component edit coalesces like any other default drag.
+        assert!(st.set_array_entry("path", 1, PropValue::Vec3([1.0, 2.0, 3.0]), &reg));
+        st.flush_var_default_edit(&reg);
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Set Variable Default"));
+
+        assert!(st.move_array_entry("path", 1, 0, &reg));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Reorder Array Entry"));
+        assert_eq!(
+            st.doc.variables[0].default,
+            Some(PropValue::Array(vec![
+                PropValue::Vec3([1.0, 2.0, 3.0]),
+                PropValue::Vec3([0.0; 3])
+            ]))
+        );
+        assert!(st.remove_array_entry("path", 0, &reg));
+        assert_eq!(st.stack.undo_description().as_deref(), Some("Remove Array Entry"));
+
+        // Every gesture undoes back to the byte-identical start.
+        while st.stack.can_undo() {
+            st.undo(&reg);
+        }
+        assert_eq!(bytes(&st.doc), bytes(&before));
+
+        // Out-of-range and non-array targets are refused, never panics.
+        assert!(!st.remove_array_entry("path", 7, &reg));
+        st.doc.variables.push(var("n", PinType::Float, None));
+        assert!(!st.add_array_entry("n", &reg));
+        // An element type with no literal has no entry to add.
+        st.doc
+            .variables
+            .push(var("who", PinType::Array(Box::new(PinType::Entity)), None));
+        assert!(!st.add_array_entry("who", &reg));
+    }
+
+    /// The list the strip draws: group headers over the unchanged declaration
+    /// order, filtered rows, dropped empty headers, and the counts the header
+    /// and the "hidden" line quote.
+    #[test]
+    fn variables_view_groups_filters_and_counts() {
+        let mut doc = GraphDoc::default();
+        doc.variables = vec![
+            var("max_health", PinType::Float, Some("Config")),
+            var("score", PinType::Int, Some("State")),
+            var("loose", PinType::Bool, None),
+            var("move_speed", PinType::Float, Some("Config")),
+        ];
+        let none = BTreeSet::new();
+
+        let v = variables_view(&doc, "", &none);
+        assert_eq!(v.total, 4);
+        assert_eq!(v.matches, 4);
+        assert_eq!(v.hidden, 0);
+        // Group order is first-declaration order; ungrouped trails, always.
+        assert_eq!(
+            v.rows,
+            vec![
+                VarListRow::Group { name: Some("Config".into()), count: 2, collapsed: false },
+                VarListRow::Var(0),
+                VarListRow::Var(3),
+                VarListRow::Group { name: Some("State".into()), count: 1, collapsed: false },
+                VarListRow::Var(1),
+                VarListRow::Group { name: None, count: 1, collapsed: false },
+                VarListRow::Var(2),
+            ]
+        );
+
+        // Filtering drops non-matching rows *and* the headers left empty.
+        let v = variables_view(&doc, "sc", &none);
+        assert_eq!((v.matches, v.hidden), (1, 3));
+        assert_eq!(
+            v.rows,
+            vec![
+                VarListRow::Group { name: Some("State".into()), count: 1, collapsed: false },
+                VarListRow::Var(1),
+            ]
+        );
+        // The slug counts as a name: filtering is over both.
+        assert_eq!(variables_view(&doc, "MAX_", &none).matches, 1);
+
+        // A collapsed group keeps its header and its count, drops its rows.
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("Config".to_string());
+        let v = variables_view(&doc, "", &collapsed);
+        assert_eq!(
+            v.rows[0],
+            VarListRow::Group { name: Some("Config".into()), count: 2, collapsed: true }
+        );
+        assert_eq!(v.rows[1], VarListRow::Group { name: Some("State".into()), count: 1, collapsed: false });
+
+        // A document nobody grouped draws no headers at all — the shipped look.
+        doc.variables.iter_mut().for_each(|v| v.group = None);
+        let v = variables_view(&doc, "", &none);
+        assert!(v.rows.iter().all(|r| matches!(r, VarListRow::Var(_))));
+        assert_eq!(v.rows.len(), 4);
+    }
+
+    /// The in-row reason line is derived from the validation results, so the
+    /// row and the canvas cannot disagree about whether something is wrong.
+    #[test]
+    fn variable_mismatch_names_the_count_and_the_expected_type() {
+        let mut doc = GraphDoc::default();
+        doc.variables = vec![var("is_dead", PinType::Bool, None)];
+        doc.nodes = vec![var_node(1, "is_dead", false), node(2, [0.0, 0.0])];
+        let edge = |from: u64, to: u64| Edge {
+            from_node: from,
+            from_pin: "value".into(),
+            to_node: to,
+            to_pin: "a".into(),
+        };
+        let errors = vec![
+            GraphError::TypeMismatch {
+                edge: edge(1, 2),
+                from_ty: PinType::Bool,
+                to_ty: PinType::Float,
+            },
+            GraphError::TypeMismatch {
+                edge: edge(1, 3),
+                from_ty: PinType::Bool,
+                to_ty: PinType::Float,
+            },
+            // Someone else's problem: not this variable's wire.
+            GraphError::TypeMismatch {
+                edge: edge(9, 8),
+                from_ty: PinType::Int,
+                to_ty: PinType::Float,
+            },
+        ];
+        assert_eq!(
+            variable_mismatch(&doc, "is_dead", &errors).as_deref(),
+            Some("2 wired uses expect Float")
+        );
+        assert_eq!(variable_mismatch(&doc, "is_dead", &[]), None);
+        assert_eq!(variable_mismatch(&doc, "nobody", &errors), None);
+        // One use reads as one, and the verb agrees with it.
+        let single = vec![errors[0].clone()];
+        assert_eq!(
+            variable_mismatch(&doc, "is_dead", &single).as_deref(),
+            Some("1 wired use expects Float")
+        );
+    }
+
+    /// Locate walks the uses in document order and wraps — repeat clicks
+    /// cycle rather than re-framing the first one forever.
+    #[test]
+    fn locate_cycles_the_uses_in_document_order() {
+        let mut st = bare_state();
+        st.doc.variables = vec![var("health", PinType::Float, None)];
+        st.doc.nodes = vec![
+            var_node(7, "health", false),
+            node(8, [0.0, 0.0]),
+            var_node(3, "health", true),
+        ];
+        assert_eq!(variable_node_ids(&st.doc, "health"), vec![7, 3]);
+        assert_eq!(st.next_locate("health"), Some(7));
+        assert_eq!(st.next_locate("health"), Some(3));
+        assert_eq!(st.next_locate("health"), Some(7), "the cycle wraps");
+        assert_eq!(st.next_locate("nobody"), None);
+    }
+
+    /// The retype dialog promises exactly what the no-coercion rule performs.
+    #[test]
+    fn retype_outcome_states_what_the_rule_will_do() {
+        let mut decl = var("health", PinType::Float, None);
+        decl.default = Some(PropValue::Float(100.0));
+        // Same shape survives…
+        assert_eq!(
+            retype_default_outcome(&decl, &PinType::Float).as_deref(),
+            Some("Default 100 is kept.")
+        );
+        // …anything else resets to the new type's zero, and says so.
+        assert!(retype_default_outcome(&decl, &PinType::Int)
+            .unwrap()
+            .contains("reset"));
+        // A type with no literal drops it, and says that instead.
+        assert!(retype_default_outcome(&decl, &PinType::Entity)
+            .unwrap()
+            .contains("no literal"));
+        decl.default = None;
+        assert_eq!(retype_default_outcome(&decl, &PinType::Int), None);
+    }
+
     // -- GS-1: custom-event payload fields ---------------------------------
 
     /// An `event_custom` node named `event`, with the given payload fields.
@@ -6305,5 +7029,6 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         frame_all_on_open: false,
         vars: VarPanel::default(),
         payload: PayloadPanel::default(),
+        flash: None,
     }
 }

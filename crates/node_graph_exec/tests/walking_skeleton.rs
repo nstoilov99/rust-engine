@@ -288,6 +288,7 @@ fn the_acceptance_fixture_runs_branch_loop_variables_and_a_subgraph() {
         label: "Total".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     let mut sub_node = node(2, SUBGRAPH_TYPE_ID);
     sub_node.subgraph = Some("lib/double.subgraph".into());
@@ -472,6 +473,7 @@ fn variables_read_and_write_across_ticks() {
         label: "Count".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     let var_prop = |n: u64, ty: &str| {
         with(n, ty, &[(VAR_PROP, PropValue::Str("count".into()))])
@@ -757,6 +759,7 @@ fn determinism_holds_across_runs() {
         label: "Total".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     doc.nodes = vec![
         node(0, EVENT_TICK_TYPE_ID),
@@ -829,6 +832,7 @@ fn instance_state_is_plain_serializable_data() {
         label: "N".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(2)),
+        group: None,
     }];
     doc.nodes = vec![
         node(0, EVENT_TICK_TYPE_ID),

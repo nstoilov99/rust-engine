@@ -110,6 +110,7 @@ fn count_begin_play() -> GraphDoc {
         label: "N".into(),
         ty: node_graph_types::PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     doc.nodes = vec![
         node(0, EVENT_BEGIN_PLAY_TYPE_ID),
@@ -852,6 +853,7 @@ fn begin_play_spawns_in_a_loop_and_the_aliases_bind() {
         label: "Last".into(),
         ty: PinType::Entity,
         default: None,
+        group: None,
     }];
     doc.nodes = vec![
         node(0, EVENT_BEGIN_PLAY_TYPE_ID),
@@ -1154,6 +1156,7 @@ fn write_runner_demo_if_requested() {
             label: "Steps".into(),
             ty: PinType::Int,
             default: Some(PropValue::Int(0)),
+            group: None,
         },
         // The handle the ForLoop parks each spawn in; the Timeline reads it
         // back, which is what makes the alias protocol visible in the world.
@@ -1162,6 +1165,7 @@ fn write_runner_demo_if_requested() {
             label: "Hopper".into(),
             ty: PinType::Entity,
             default: None,
+            group: None,
         },
     ];
     doc.nodes = vec![

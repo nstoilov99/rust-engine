@@ -554,6 +554,7 @@ fn an_instance_serializes_mid_wait_and_resumes() {
         label: "Total".into(),
         ty: PinType::Int,
         default: Some(PropValue::Int(0)),
+        group: None,
     }];
     let var = |id: u64, ty: &str| with(id, ty, &[(VAR_PROP, PropValue::Str("total".into()))]);
     doc.nodes = vec![

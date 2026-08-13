@@ -201,8 +201,25 @@ impl<'a> DocDescriptors<'a> {
             }
             NodeKind::GraphInput => Some(Cow::Owned(interface_descriptor(self.doc, true))),
             NodeKind::GraphOutput => Some(Cow::Owned(interface_descriptor(self.doc, false))),
-            NodeKind::VarGet => Some(Cow::Owned(var_descriptor(self.variable_of(node_id)?, false))),
-            NodeKind::VarSet => Some(Cow::Owned(var_descriptor(self.variable_of(node_id)?, true))),
+            // A **dangling** reference still answers with a shape (GS-2
+            // ruling): the declaration is gone, but the node keeps its pins so
+            // the wires that named them keep a landing spot and the author can
+            // see what broke. The value pin is untyped — `Domain("")`, the
+            // same "not known" encoding an unwired reroute carries — never a
+            // guessed type. `validate_doc` still reports `UnknownVariable` on
+            // the node, and treats it as opaque for edge type-checking, so the
+            // synthesized pin cannot manufacture a second error about the
+            // first one.
+            NodeKind::VarGet | NodeKind::VarSet => {
+                let set = NodeKind::of_type(&n.type_id) == NodeKind::VarSet;
+                Some(Cow::Owned(match self.variable_of(node_id) {
+                    Some(decl) => var_descriptor(decl, set),
+                    None => dangling_var_descriptor(
+                        self.variable_slug(node_id).unwrap_or_default(),
+                        set,
+                    ),
+                }))
+            }
             NodeKind::EventCustom => {
                 let mut base = self.registry.get(&n.type_id)?.clone();
                 base.outputs.extend(payload_pins(&n.properties));
@@ -399,6 +416,25 @@ fn interface_descriptor(doc: &GraphDoc, is_input: bool) -> NodeDescriptor {
         doc: None,
         preview: None,
     }
+}
+
+/// The shape a `var_get`/`var_set` keeps when its declaration is missing.
+///
+/// Same anatomy as [`var_descriptor`] — exec pins on a Set, one value pin
+/// either way — with the value pin untyped and labelled with the slug the
+/// author typed. Without this a deleted variable took the node's pins with it,
+/// and every wire into or out of it silently vanished from the canvas: the one
+/// degradation the identity rules exist to prevent.
+fn dangling_var_descriptor(slug: &str, set: bool) -> NodeDescriptor {
+    let shown = if slug.is_empty() { "<missing>" } else { slug };
+    let decl = VarDecl {
+        slug: slug.to_string(),
+        label: shown.to_string(),
+        ty: PinType::Domain(String::new()),
+        default: None,
+        group: None,
+    };
+    var_descriptor(&decl, set)
 }
 
 /// A `var_get` / `var_set` descriptor synthesized from a [`VarDecl`].
@@ -643,6 +679,7 @@ mod tests {
             label: "Score".into(),
             ty: PinType::Int,
             default: Some(PropValue::Int(3)),
+            group: None,
         }];
         let mut get = node(0, VAR_GET_TYPE_ID);
         get.properties
@@ -681,12 +718,64 @@ mod tests {
             Some(PinType::Array(Box::new(PinType::String)))
         );
 
-        // A node naming a deleted variable resolves to nothing — and the
-        // slug survives so the error can name it.
+        // A node naming a deleted variable **keeps its shape** (GS-2): the
+        // pins survive so its wires keep a landing spot, the value pin is
+        // untyped rather than guessed, and the slug survives so the error can
+        // name it.
         let d = DocDescriptors::new(&doc, &reg);
-        assert!(d.descriptor(2).is_none());
+        let dangling = d.descriptor(2).expect("a dangling reference still has a shape");
+        assert_eq!(dangling.name, "Get deleted");
+        assert_eq!(
+            d.pin_type(2, VAR_VALUE_PIN, true),
+            Some(PinType::Domain(String::new())),
+            "untyped, never a guess"
+        );
         assert_eq!(d.variable_slug(2), Some("deleted"));
-        assert!(d.descriptor(3).is_none(), "no `var` property at all");
+        // No `var` property at all: still a shape, named for what is missing.
+        let bare = d.descriptor(3).expect("no `var` property is still a var node");
+        assert_eq!(bare.name, "Get <missing>");
+        assert_eq!(d.pin_type(3, VAR_VALUE_PIN, true), Some(PinType::Domain(String::new())));
+    }
+
+    /// The wires of a dangling variable node land on its synthesized pins —
+    /// and validation stays at one error about one problem: `UnknownVariable`
+    /// on the node, no `TypeMismatch` manufactured against the untyped pin.
+    #[test]
+    fn a_dangling_variable_node_keeps_its_wires_and_reports_once() {
+        use crate::validate::{validate_doc, GraphError};
+        let reg = registry();
+        let mut get = node(0, VAR_GET_TYPE_ID);
+        get.properties
+            .insert(VAR_PROP.to_string(), PropValue::Str("gone".into()));
+        let sink = node(1, "sink");
+        let doc = GraphDoc {
+            nodes: vec![get, sink],
+            edges: vec![crate::doc::Edge {
+                from_node: 0,
+                from_pin: VAR_VALUE_PIN.to_string(),
+                to_node: 1,
+                to_pin: "a".to_string(),
+            }],
+            ..GraphDoc::default()
+        };
+        let d = DocDescriptors::new(&doc, &reg);
+        assert!(
+            d.descriptor(0).unwrap().output(VAR_VALUE_PIN).is_some(),
+            "the wire has somewhere to land"
+        );
+        let errors = validate_doc(&doc, &reg);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, GraphError::UnknownVariable { node: 0, .. })),
+            "{errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, GraphError::TypeMismatch { .. } | GraphError::UnknownPin { .. })),
+            "one problem, one error: {errors:?}"
+        );
     }
 
     /// `event_custom` = the registered base descriptor plus payload pins

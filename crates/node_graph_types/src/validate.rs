@@ -454,7 +454,16 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
         // when curves were actually offered.
         let opaque = |n: &crate::doc::NodeInst| {
             let kind = NodeKind::of_type(&n.type_id);
-            kind == NodeKind::Subgraph || (kind == NodeKind::Timeline && d.curve_of(n.id).is_none())
+            kind == NodeKind::Subgraph
+                || (kind == NodeKind::Timeline && d.curve_of(n.id).is_none())
+                // A variable node whose declaration is gone is the same
+                // situation one list over: its pin's type lives in a
+                // declaration nobody has. `UnknownVariable` says it once, on
+                // the node; type-checking its wires against the untyped pin
+                // the descriptor synthesizes (GS-2) would bury that under a
+                // `TypeMismatch` per wire.
+                || (matches!(kind, NodeKind::VarGet | NodeKind::VarSet)
+                    && d.variable_of(n.id).is_none())
         };
         let from_desc = (!opaque(from)).then(|| d.descriptor(from.id)).flatten();
         let to_desc = (!opaque(to)).then(|| d.descriptor(to.id)).flatten();
@@ -1143,6 +1152,7 @@ mod tests {
             label: "Score".into(),
             ty: PinType::Float,
             default: Some(crate::PropValue::Float(0.0)),
+            group: None,
         }];
         let mut get = node(0, VAR_GET_TYPE_ID);
         get.properties.insert(
@@ -1510,6 +1520,7 @@ mod tests {
             label: "N".into(),
             ty: PinType::Float,
             default: Some(crate::PropValue::Float(0.0)),
+            group: None,
         }];
         let mut set = node(2, VAR_SET_TYPE_ID);
         set.properties

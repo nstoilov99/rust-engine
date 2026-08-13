@@ -308,6 +308,12 @@ pub struct VarDecl {
     /// the interpreter defines, not the schema.
     #[serde(default)]
     pub default: Option<PropValue>,
+    /// **Display metadata only** (GS-2): which panel group the row lists
+    /// under. It never reaches the runtime, never changes declaration order,
+    /// and is skipped on write when unset — so a document nobody grouped
+    /// serializes exactly as it did before groups existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Free-floating comment box (canvas world-space rect: min x/y, size w/h).

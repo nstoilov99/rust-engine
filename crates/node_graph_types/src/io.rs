@@ -484,18 +484,21 @@ mod tests {
                     label: "Score".to_string(),
                     ty: PinType::Int,
                     default: Some(PropValue::Int(7)),
+                    group: None,
                 },
                 VarDecl {
                     slug: "names".to_string(),
                     label: "Names".to_string(),
                     ty: PinType::Array(Box::new(PinType::String)),
                     default: Some(PropValue::Array(vec![PropValue::Str("a".to_string())])),
+                    group: None,
                 },
                 VarDecl {
                     slug: "target".to_string(),
                     label: "Target".to_string(),
                     ty: PinType::Entity,
                     default: None,
+                    group: None,
                 },
             ],
             ..GraphDoc::default()
