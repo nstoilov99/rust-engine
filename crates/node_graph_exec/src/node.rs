@@ -92,12 +92,36 @@ pub struct Suspension {
     /// means the activation unwinds on resume: back to its enclosing loop
     /// frame, or finished.
     pub resume: Option<String>,
+    /// Instance time the wait **started** at, stamped by the interpreter when
+    /// it parks the activation (GS-3). A node computes only its due time; how
+    /// far through the wait is, is a question only the pair answers, and the
+    /// editor's progress bar needs both ends. `serde(default)` so an instance
+    /// serialized before this existed resumes with a zero start — a bar that
+    /// reads full rather than a load that fails.
+    #[serde(default)]
+    pub since: f64,
 }
 
 impl Suspension {
-    /// Suspend until `until`, continuing on `pin`.
+    /// Suspend until `until`, continuing on `pin`. `since` is stamped by the
+    /// interpreter at park time — a node has no clock of its own.
     pub fn until(until: f64, pin: &str) -> Self {
-        Self { until, resume: Some(pin.to_string()) }
+        Self { until, resume: Some(pin.to_string()), since: 0.0 }
+    }
+
+    /// How far through the wait `now` is, in `[0, 1]`. A zero-length or
+    /// backwards wait reads as complete rather than dividing by zero.
+    pub fn fraction(&self, now: f64) -> f32 {
+        let span = self.until - self.since;
+        if span <= 0.0 {
+            return 1.0;
+        }
+        (((now - self.since) / span) as f32).clamp(0.0, 1.0)
+    }
+
+    /// Seconds left before this activation is due, never negative.
+    pub fn remaining(&self, now: f64) -> f32 {
+        ((self.until - now).max(0.0)) as f32
     }
 }
 

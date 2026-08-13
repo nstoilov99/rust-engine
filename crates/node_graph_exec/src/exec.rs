@@ -373,7 +373,10 @@ fn advance<T: TraceSink>(
                 instance.threads[thread].cursor = None;
                 instance.threads[thread].entered = None;
             }
-            FireResult::Suspend(s) => {
+            FireResult::Suspend(mut s) => {
+                // Stamp when the wait started: the node knew only when it
+                // ends, and "how far through" needs both (GS-3).
+                s.since = tick_in.time;
                 // Resolve the continuation *now*, exactly as `Continue` would,
                 // and park it on the activation. Two consequences worth
                 // naming: resuming never re-fires the latent node (so a Delay

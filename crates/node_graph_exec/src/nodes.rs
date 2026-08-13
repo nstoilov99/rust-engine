@@ -479,7 +479,7 @@ impl ImpureNode for Timeline {
         let iteration = ctx.loop_frame().map(|f| f.iteration).unwrap_or(0);
         if iteration % 2 == 1 {
             // Re-entered right after the Update chain: hand the tick back.
-            return FireResult::Suspend(Suspension { until: ctx.now(), resume: None });
+            return FireResult::Suspend(Suspension { until: ctx.now(), resume: None, since: ctx.now() });
         }
 
         let total = Timeline::duration(ctx);

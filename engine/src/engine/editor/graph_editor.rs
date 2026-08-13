@@ -1284,6 +1284,15 @@ pub struct GraphEditorState {
     /// A node the panel just framed, and when — it flashes for a moment so
     /// the eye lands on it after the view moves (GS-2 locate).
     pub flash: Option<(u64, Instant)>,
+    /// The instance this tab is bound to, picked explicitly from the LIVE
+    /// chip (`Entity::to_bits`). `None` = follow the selection, which is the
+    /// baseline rule. Session-only: entity handles do not survive a reload.
+    pub exec_bind: Option<u64>,
+    /// The chip's dropdown is open.
+    pub exec_picker: bool,
+    /// Pinned watches (GS-3). Editor annotations, not run state — they live
+    /// in the per-user sidecar and survive play/stop.
+    pub watches: Vec<Watch>,
     /// The custom-event payload band's draft/confirm state (GS-1).
     /// Session-only, like `vars`.
     pub payload: PayloadPanel,
@@ -1689,6 +1698,72 @@ impl PayloadConfirm {
     }
 }
 
+/// One pinned watch: a pin whose value is shown on the canvas as a chip.
+///
+/// The identity is `(node, pin, output)`; everything else is what the live
+/// layer has learned about it. `last` survives a stop — in edit mode the chip
+/// renders dashed with the last run's value, which is the whole reason a watch
+/// is an editor annotation rather than run state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Watch {
+    pub node: u64,
+    pub pin: String,
+    pub output: bool,
+    /// Last value seen, formatted the way the console spells it.
+    pub last: Option<String>,
+    /// When `last` last *changed*. Session-only, so a restored watch reads as
+    /// stale-unknown rather than pretending it updated when the editor opened.
+    pub changed_at: Option<Instant>,
+}
+
+impl Watch {
+    pub fn new(node: u64, pin: &str, output: bool) -> Self {
+        Self { node, pin: pin.to_string(), output, last: None, changed_at: None }
+    }
+
+    /// Is this the watch on `(node, pin, output)`?
+    pub fn is(&self, node: u64, pin: &str, output: bool) -> bool {
+        self.node == node && self.pin == pin && self.output == output
+    }
+
+    /// Take a fresh value, remembering *when it changed* rather than when it
+    /// was read: a value that keeps arriving unchanged is exactly what the
+    /// staleness tag is about.
+    pub fn observe(&mut self, value: &str) {
+        if self.last.as_deref() != Some(value) {
+            self.last = Some(value.to_string());
+            self.changed_at = Some(Instant::now());
+        }
+    }
+
+    /// Seconds since the value last changed, once past `after`. `None` while
+    /// it is fresh, or when nothing has ever arrived.
+    pub fn stale_for(&self, after: f32) -> Option<f32> {
+        let secs = self.changed_at?.elapsed().as_secs_f32();
+        (secs > after).then_some(secs)
+    }
+}
+
+/// How long a watched value may sit unchanged before the chip dims and starts
+/// reporting its age (DESIGN-graphscripting, Surface 3).
+pub const WATCH_STALE_SECS: f32 = 3.0;
+
+/// Longest watched value a chip shows before eliding.
+pub const WATCH_CHARS: usize = 24;
+
+/// A watch chip's text: elided to [`WATCH_CHARS`], em-dash when nothing has
+/// arrived yet. The full value goes in the tooltip.
+pub fn watch_chip_text(value: Option<&str>) -> String {
+    match value {
+        None => "\u{2014}".to_string(),
+        Some(v) if v.chars().count() <= WATCH_CHARS => v.to_string(),
+        Some(v) => {
+            let head: String = v.chars().take(WATCH_CHARS).collect();
+            format!("{head}\u{2026}")
+        }
+    }
+}
+
 /// A pending confirmation. Both arms carry the usage count, because the count
 /// is the whole reason to ask.
 #[derive(Debug, Clone)]
@@ -1772,6 +1847,9 @@ impl GraphEditorState {
             // click (or Alt+V) collapses it back to the rail.
             vars: VarPanel { open: true, ..Default::default() },
             flash: None,
+            exec_bind: None,
+            exec_picker: false,
+            watches: Vec::new(),
             payload: PayloadPanel::default(),
         })
     }
@@ -4263,6 +4341,9 @@ pub mod tests_support {
             frame_all_on_open: false,
             vars: VarPanel::default(),
             flash: None,
+            exec_bind: None,
+            exec_picker: false,
+            watches: Vec::new(),
             payload: PayloadPanel::default(),
         }
     }
@@ -6511,6 +6592,44 @@ mod tests {
         assert_eq!(doc.nodes[1].position, [10.0, 0.0]);
     }
 
+    // -- GS-3: watches -----------------------------------------------------
+
+    /// A watch reports staleness from when its value last **changed**, not
+    /// from when it was last read: a value that keeps arriving unchanged is
+    /// exactly what the age tag is about. And the chip's text elides long
+    /// values rather than pushing the node off the canvas.
+    #[test]
+    fn a_watch_ages_from_its_last_change_and_elides_long_values() {
+        let mut w = Watch::new(7, "value", true);
+        assert!(w.last.is_none());
+        assert_eq!(w.stale_for(0.0), None, "nothing has ever arrived");
+        assert_eq!(watch_chip_text(w.last.as_deref()), "\u{2014}");
+
+        w.observe("37.5");
+        let first = w.changed_at;
+        assert_eq!(w.last.as_deref(), Some("37.5"));
+        assert!(first.is_some());
+        // The same value again does not reset the clock…
+        w.observe("37.5");
+        assert_eq!(w.changed_at, first);
+        // …a different one does.
+        w.observe("36.0");
+        assert!(w.changed_at != first);
+        // Fresh by any real threshold, stale by a zero one.
+        assert_eq!(w.stale_for(WATCH_STALE_SECS), None);
+        assert!(w.stale_for(0.0).is_some());
+
+        assert!(w.is(7, "value", true));
+        assert!(!w.is(7, "value", false), "an input and an output are different pins");
+        assert!(!w.is(8, "value", true));
+
+        let long = "Entity(duck_2) at [1.0, 2.0, 3.0] holding a very long spelling";
+        let shown = watch_chip_text(Some(long));
+        assert_eq!(shown.chars().count(), WATCH_CHARS + 1);
+        assert!(shown.ends_with('\u{2026}'));
+        assert_eq!(watch_chip_text(Some("37.5")), "37.5");
+    }
+
     // -- GS-2: variables panel ---------------------------------------------
 
     fn var(slug: &str, ty: PinType, group: Option<&str>) -> VarDecl {
@@ -7030,5 +7149,8 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         vars: VarPanel::default(),
         payload: PayloadPanel::default(),
         flash: None,
+        exec_bind: None,
+        exec_picker: false,
+        watches: Vec::new(),
     }
 }

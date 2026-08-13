@@ -29,6 +29,23 @@ pub struct GraphUiState {
     pub view: Option<StoredView>,
     /// The five bookmark slots.
     pub bookmarks: [Option<StoredView>; 5],
+    /// Pinned watches (GS-3). Debug annotations belong beside the view, not in
+    /// the asset: two people debugging one graph watch different pins, and the
+    /// document must not record either. Skipped when empty so a graph nobody
+    /// watched writes exactly what it wrote before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub watches: Vec<StoredWatch>,
+}
+
+/// One pinned watch as it goes to disk: the pin's identity, plus the last
+/// value seen so an edit-mode chip has something to show before the next run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredWatch {
+    pub node: u64,
+    pub pin: String,
+    pub output: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<String>,
 }
 
 /// `CanvasView` in a serde-friendly shape (crusty's `Vec2` is not `Serialize`
@@ -104,15 +121,31 @@ impl GraphStateStore {
         out
     }
 
-    /// Record a graph's view + bookmarks. Called on tab close and editor exit.
-    pub fn store(&mut self, rel: &str, view: CanvasView, bookmarks: &[Option<CanvasView>; 5]) {
+    /// The watches remembered for a graph.
+    pub fn watches_for(&self, rel: &str) -> Vec<StoredWatch> {
+        self.graphs.get(rel).map(|g| g.watches.clone()).unwrap_or_default()
+    }
+
+    /// Record a graph's view + bookmarks + watches. Called on tab close and
+    /// editor exit.
+    pub fn store(
+        &mut self,
+        rel: &str,
+        view: CanvasView,
+        bookmarks: &[Option<CanvasView>; 5],
+        watches: Vec<StoredWatch>,
+    ) {
         let mut slots: [Option<StoredView>; 5] = [None; 5];
         for (i, b) in bookmarks.iter().enumerate() {
             slots[i] = b.map(StoredView::from_view);
         }
         self.graphs.insert(
             rel.to_string(),
-            GraphUiState { view: Some(StoredView::from_view(view)), bookmarks: slots },
+            GraphUiState {
+                view: Some(StoredView::from_view(view)),
+                bookmarks: slots,
+                watches,
+            },
         );
     }
 }
@@ -126,12 +159,41 @@ mod tests {
         CanvasView { pan: Vec2::new(x, 0.0), zoom: z }
     }
 
+    /// **GS-3: watches are user-local debug state.** They round-trip through
+    /// the sidecar with their last value, and a graph nobody watched writes
+    /// exactly the bytes it wrote before the column existed.
+    #[test]
+    fn watches_round_trip_and_stay_out_of_an_unwatched_file() {
+        let mut s = GraphStateStore::default();
+        s.store("graphs/a.graph", view(0.0, 1.0), &[None; 5], Vec::new());
+        let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
+        assert!(!text.contains("watches"), "no watches, no column");
+
+        s.store(
+            "graphs/a.graph",
+            view(0.0, 1.0),
+            &[None; 5],
+            vec![
+                StoredWatch { node: 7, pin: "value".into(), output: true, last: Some("37.5".into()) },
+                StoredWatch { node: 9, pin: "a".into(), output: false, last: None },
+            ],
+        );
+        let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
+        let back: GraphStateStore = ron::from_str(&text).unwrap();
+        assert_eq!(back, s);
+        let w = back.watches_for("graphs/a.graph");
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].last.as_deref(), Some("37.5"));
+        assert!(w[1].last.is_none(), "a watch that never saw a value stores none");
+        assert!(back.watches_for("graphs/never-opened.graph").is_empty());
+    }
+
     #[test]
     fn store_round_trips_views_and_bookmarks() {
         let mut s = GraphStateStore::default();
         let mut marks = [None; 5];
         marks[2] = Some(view(30.0, 0.5));
-        s.store("graphs/a.graph", view(10.0, 2.0), &marks);
+        s.store("graphs/a.graph", view(10.0, 2.0), &marks, Vec::new());
 
         let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
         let back: GraphStateStore = ron::from_str(&text).unwrap();
@@ -156,8 +218,8 @@ mod tests {
         std::fs::write(dir.join("graphs/kept.graph"), "()").unwrap();
 
         let mut s = GraphStateStore::default();
-        s.store("graphs/kept.graph", view(1.0, 1.0), &[None; 5]);
-        s.store("graphs/deleted.graph", view(2.0, 1.0), &[None; 5]);
+        s.store("graphs/kept.graph", view(1.0, 1.0), &[None; 5], Vec::new());
+        s.store("graphs/deleted.graph", view(2.0, 1.0), &[None; 5], Vec::new());
         assert_eq!(s.graphs.len(), 2);
 
         s.prune(&dir);

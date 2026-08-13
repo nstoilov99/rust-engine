@@ -37,11 +37,11 @@ use super::graph_editor::{
     payload_reader_count, variable_matches, variable_mismatch, variable_node_ids, variable_slug,
     variables_view,
     retype_default_outcome, pin_type_label, ResizeHandle, VarConfirm, VarDrop, VarListRow,
-    DEFAULT_PAYLOAD_TYPE,
+    DEFAULT_PAYLOAD_TYPE, watch_chip_text, Watch, WATCH_STALE_SECS,
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
 };
-use super::graph_exec_viz::GraphExecViz;
+use super::graph_exec_viz::{ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -166,6 +166,18 @@ pub fn preview_slice(count: usize, frame: u64, budget: usize) -> (usize, usize) 
 const FIND_DIM: f32 = 0.45;
 /// How long the locate flash takes to fade, ms.
 const FLASH_MS: f32 = 900.0;
+/// Exec wires that have not fired this session drop to this during a live
+/// session (DESIGN-graphscripting - S3: orientation by dimming the rest, not
+/// by tinting the hot path a new colour). Data wires never tint.
+const UNFIRED_EXEC_ALPHA: f32 = 0.5;
+/// Flow bubbles are hidden below this zoom: under it they are noise on a wire
+/// too thin to follow.
+const BUBBLE_MIN_ZOOM: f32 = 0.5;
+/// Bubble radius, screen px, and how many ride one wire.
+const BUBBLE_R: f32 = 3.0;
+const BUBBLES_PER_WIRE: usize = 2;
+/// Waiting-node progress bar height, screen px (3px, the design's number).
+const WAIT_BAR_PX: f32 = 3.0;
 /// Marquee fill alpha (1px accent border + 8% accent fill).
 const MARQUEE_FILL_ALPHA: f32 = 0.08;
 
@@ -536,6 +548,14 @@ pub struct GraphEditorPanelCtx<'a> {
     /// a different graph, a build without the interpreter — costs nothing and
     /// draws nothing: every viz site below is inside an `if let`.
     pub exec: Option<&'a GraphExecViz>,
+    /// Every instance running this document, for the LIVE chip's picker
+    /// (GS-3). Present even when nothing is bound — that is exactly the
+    /// "N RUNNING — select instance" state.
+    pub exec_instances: &'a [ExecInstance],
+    /// Set to this document's path when the toolbar's "Clear trace" was
+    /// pressed; the host clears the recorders of the instances running it,
+    /// which are the only things that own one.
+    pub exec_clear: &'a mut Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1500,6 +1520,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         handle_shortcuts,
         keymap,
         exec,
+        exec_instances,
+        exec_clear,
     } = ctx;
     let resolver = &DocResolvers { graphs: resolver, curves };
 
@@ -1530,7 +1552,21 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // available space, so the canvas shrinks by exactly the toolbar height and
     // everything measured off the canvas rect (F/A framing, the error overlay)
     // follows automatically.
-    graph_toolbar(ui, state, wire_prefs.style, wire_style_request, exec);
+    let mut clear_trace = false;
+    let mut live_chip_rect: Option<(Rect, bool)> = None;
+    graph_toolbar(
+        ui,
+        state,
+        wire_prefs.style,
+        wire_style_request,
+        exec,
+        exec_instances,
+        &mut clear_trace,
+        &mut live_chip_rect,
+    );
+    if clear_trace {
+        *exec_clear = Some(state.path.clone());
+    }
 
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
@@ -1630,6 +1666,18 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         }
     }
     var_drop_popup(ui, state, registry);
+    // The instance picker floats over the canvas like every other transient
+    // surface, and therefore draws with them.
+    if let Some((chip, just_opened)) = live_chip_rect.filter(|_| state.exec_picker) {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        if let Some(pick) =
+            instance_picker(ui, chip, exec_instances, exec, &st, s, just_opened)
+        {
+            state.exec_bind = pick;
+            state.exec_picker = false;
+        }
+    }
     var_confirm_dialog(ui, out.rect, state, registry);
     payload_confirm_dialog(ui, out.rect, state, registry);
 
@@ -1885,6 +1933,9 @@ fn draw_and_interact(
         &st,
         lod,
         selection_outline,
+        exec.is_some_and(|v| v.has_session()),
+        zoom,
+        (frame % 60) as f32 / 60.0,
     );
 
     // The variables filter dims the canvas on the **same rule** find-in-graph
@@ -1902,9 +1953,26 @@ fn draw_and_interact(
             .collect()
     });
 
+    // Watches take this frame's values before anything draws, so the chip and
+    // the tooltip cannot disagree about what the pin holds. Off-session this
+    // does nothing and the chips keep the last run's value — the layer's only
+    // edit-mode residue, and the reason a watch is an editor annotation.
+    if let Some(viz) = exec {
+        for i in 0..state.watches.len() {
+            let (node, pin, output) = {
+                let w = &state.watches[i];
+                (w.node, w.pin.clone(), w.output)
+            };
+            if let Some(v) = pin_value(viz, state, node, &pin, output).map(str::to_string) {
+                state.watches[i].observe(&v);
+            }
+        }
+    }
+
     // Nodes, pins and inline widgets. `widget_rects` records the screen boxes
     // owned by embedded controls so the node-drag pass can yield to them.
     let mut widget_rects: Vec<Rect> = Vec::new();
+    let mut watch_rects: Vec<(u64, String, bool, Rect)> = Vec::new();
     draw_nodes(
         ui,
         scope,
@@ -1922,6 +1990,7 @@ fn draw_and_interact(
         &mut widget_rects,
         exec,
         var_dim.as_ref(),
+        &mut watch_rects,
     );
 
     // Interactions.
@@ -2209,6 +2278,7 @@ fn draw_and_interact(
     let hit_w = m.pin_hit_w(zoom);
     let mut pin_claimed = false;
     let mut break_pin: Option<(u64, String, bool)> = None;
+    let mut watch_toggle: Option<(u64, String, bool)> = None;
     if lod.rows() {
         // Register interaction only for what is on screen: an off-canvas node
         // costs one rect intersection instead of a widget-memory entry and a
@@ -2221,6 +2291,15 @@ fn draw_and_interact(
                 );
                 let id = ui.alloc_id(("graph_pin", g.id, &pin.slug, pin.output));
                 let resp = scope.interact(ui, id, wr);
+                let watched = state
+                    .watches
+                    .iter()
+                    .any(|w| w.is(g.id, &pin.slug, pin.output));
+                // Right-click a data pin pins (or unpins) its value as a chip.
+                // Exec carries control, not a value, and has nothing to watch.
+                if resp.hovered && right_pressed && pin.ty != PinType::Exec {
+                    watch_toggle = Some((g.id, pin.slug.clone(), pin.output));
+                }
                 // Pin hover docs: type name always, descriptor line when the
                 // node type bothered to write one. Removes an inspector
                 // round-trip exactly when the user is wiring.
@@ -2236,15 +2315,31 @@ fn draw_and_interact(
                         tip.push('\n');
                         tip.push_str(&doc);
                     }
-                    // The last value that crossed this pin, when a running
-                    // instance is bound (P7). Same spelling `Print` uses, so
-                    // the tooltip and the console agree.
+                    // The live block (GS-3): the last value that crossed this
+                    // pin, how long ago, and the way to pin it. Same spelling
+                    // `Print` uses, so the tooltip and the console agree.
                     if let Some(v) = exec
                         .filter(|_| pin.ty != PinType::Exec)
                         .and_then(|viz| pin_value(viz, state, g.id, &pin.slug, pin.output))
                     {
-                        tip.push_str("\nValue  ");
+                        tip.push_str("\nLAST  ");
                         tip.push_str(v);
+                        if let Some(age) = exec.and_then(|viz| {
+                            real_producer(state, g.id, &pin.slug)
+                                .filter(|_| pin.output)
+                                .and_then(|(n, p)| viz.value_age(n, &p))
+                        }) {
+                            tip.push_str(&format!("  \u{b7} {age:.1} s ago"));
+                        }
+                    }
+                    if pin.ty != PinType::Exec {
+                        // The tooltip cannot be clicked, so it names the
+                        // gesture instead of pretending to be a button.
+                        tip.push_str(if watched {
+                            "\n\u{2715} Watch  \u{b7} right-click to unpin"
+                        } else {
+                            "\n+ Watch  \u{b7} right-click to pin"
+                        });
                     }
                     ui.tooltip_for(scope.world_rect_to_screen(wr), &tip);
                 }
@@ -2279,6 +2374,54 @@ fn draw_and_interact(
     }
     if let Some((node, pin, output)) = break_pin {
         state.break_pin_links(node, &pin, output, registry);
+    }
+    if let Some((node, pin, output)) = watch_toggle {
+        let before = state.watches.len();
+        state.watches.retain(|w| !w.is(node, &pin, output));
+        if state.watches.len() == before {
+            state.watches.push(Watch::new(node, &pin, output));
+            state.toast(format!("Watching {pin}"));
+        } else {
+            state.toast(format!("Unpinned {pin}"));
+        }
+    }
+
+    // A watch chip's ✕: hover-revealed like every other quiet remove in the
+    // system, and it un-pins rather than deleting anything.
+    let mut drop_watch: Option<(u64, String, bool)> = None;
+    for (node, pin, output, chip) in &watch_rects {
+        let id = ui.alloc_id(("graph_watch_chip", *node, pin.as_str(), *output));
+        let resp = ui.interact(id, *chip);
+        if resp.hovered {
+            let mut p = ui.painter();
+            let px = st.fonts.small * zoom;
+            let x = chip.max.x - px * 0.9;
+            p.rect_filled(
+                Rect::from_min_max(Pos2::new(x - px * 0.3, chip.min.y), chip.max),
+                st.rounding.small,
+                st.palette.input,
+            );
+            p.text(
+                Pos2::new(x, chip.center().y - px * 0.62),
+                "\u{2715}",
+                px,
+                st.palette.text,
+                None,
+            );
+            let full = state
+                .watches
+                .iter()
+                .find(|w| w.is(*node, pin, *output))
+                .and_then(|w| w.last.clone())
+                .unwrap_or_else(|| "no value yet".to_string());
+            ui.tooltip_for(*chip, &format!("{pin}  {full}\nClick to unpin"));
+        }
+        if resp.clicked {
+            drop_watch = Some((*node, pin.clone(), *output));
+        }
+    }
+    if let Some((node, pin, output)) = drop_watch {
+        state.watches.retain(|w| !w.is(node, &pin, output));
     }
 
     // Config band: the ✕ on a payload row, the slug (rename) and the "+ field"
@@ -2650,6 +2793,8 @@ fn draw_and_interact(
                 mismatched: false,
                 // A wire being dragged is not running: it does not exist yet.
                 pulse: 0.0,
+                taken: true,
+                rate: 0.0,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
@@ -4245,12 +4390,16 @@ const TOOLBAR_SEG_W: f32 = 168.0;
 /// explicit rule. The segmented control is the documented toggled-tool
 /// treatment (`accent_soft` fill + accent border), one of the few approved
 /// accent spends on this surface.
+#[allow(clippy::too_many_arguments)]
 fn graph_toolbar(
     ui: &mut Ui,
-    state: &GraphEditorState,
+    state: &mut GraphEditorState,
     style_now: WireStyle,
     request: &mut Option<WireStyle>,
     exec: Option<&GraphExecViz>,
+    instances: &[ExecInstance],
+    clear_trace: &mut bool,
+    chip_rect: &mut Option<(Rect, bool)>,
 ) {
     let st = ui.style();
     let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
@@ -4317,19 +4466,55 @@ fn graph_toolbar(
         FontFamily::Mono,
     );
 
-    // Live chip (45-A P7): which running instance the canvas is showing. It is
-    // the answer to "whose execution am I looking at" — without it a pulsing
-    // wire is a mystery, since two entities can run the same document. Absent
-    // entirely when nothing is bound: edit mode leaves no residue.
-    let Some(viz) = exec else { return };
+    // Live chip (45-A P7, extended in GS-3): which running instance the canvas
+    // is showing, and the picker for choosing another. It answers "whose
+    // execution am I looking at" — without it a pulsing wire is a mystery,
+    // since two entities can run the same document.
+    //
+    // Three states, per the design: LIVE (bound, alive) - KILLED (bound, dead;
+    // the canvas keeps its last trace for the post-mortem) - "N RUNNING"
+    // (instances exist, none picked, and the canvas stays a pure editor).
+    // Nothing running at all leaves no residue whatsoever.
+    let status = Palette::invariant_status();
+    let killed = exec.is_some_and(|v| {
+        v.killed.is_some() || instances.iter().any(|i| i.id == v.instance_id && i.killed)
+    });
+    let (word, word_col, chip_fill, chip_stroke) = match chip_state(exec.is_some(), killed, instances.len()) {
+        ChipState::Absent => {
+            state.exec_picker = false;
+            return;
+        }
+        ChipState::Killed => (
+            "\u{2715} KILLED".to_string(),
+            status.error,
+            status.error.with_alpha(0.10),
+            status.error,
+        ),
+        ChipState::Live => (
+            "LIVE".to_string(),
+            st.palette.accent_active,
+            st.palette.accent_soft,
+            st.palette.accent_active,
+        ),
+        ChipState::Unbound(n) => (
+            format!("{n} RUNNING"),
+            st.palette.text_secondary,
+            st.palette.panel,
+            st.palette.stroke,
+        ),
+    };
+    let who = match exec {
+        Some(v) => v.instance.clone(),
+        None => "select instance".to_string(),
+    };
     // Two runs, not one string: "LIVE Duck" as a single accent label reads as
     // a mode *called* Duck. The state is the accent word; the entity is a
     // separate, plainly-colored noun after a thin separator.
-    let who = viz.instance.as_str();
+    let who = who.as_str();
     let sep = if who.is_empty() { "" } else { " · " };
     let state_w = ui
         .painter()
-        .measure_text_family("LIVE", px, None, FontFamily::Mono)
+        .measure_text_family(&word, px, None, FontFamily::Mono)
         .x;
     let who_w = ui
         .painter()
@@ -4345,25 +4530,21 @@ fn graph_toolbar(
         Vec2::new(inner, seg_h),
     );
     ui.painter()
-        .rect_filled(live_chip, st.rounding.small, st.palette.accent_soft);
-    ui.painter().rect_stroke(
-        live_chip,
-        st.rounding.small,
-        st.metrics.border,
-        st.palette.accent_active,
-    );
+        .rect_filled(live_chip, st.rounding.small, chip_fill);
+    ui.painter()
+        .rect_stroke(live_chip, st.rounding.small, st.metrics.border, chip_stroke);
     ui.painter().circle_filled(
         Pos2::new(live_chip.min.x + pad + dot_r, live_chip.center().y),
         dot_r,
-        st.palette.accent_active,
+        if exec.is_some() { word_col } else { status.success },
     );
     let text_x = live_chip.min.x + pad + dot_r * 2.0 + pad * 0.5;
     let text_y = live_chip.center().y - px * 0.62;
     ui.painter().text_family(
         Pos2::new(text_x, text_y),
-        "LIVE",
+        &word,
         px,
-        st.palette.accent_active,
+        word_col,
         None,
         FontFamily::Mono,
     );
@@ -4377,11 +4558,228 @@ fn graph_toolbar(
             FontFamily::Mono,
         );
     }
-    ui.tooltip_for(
-        live_chip,
-        "Live execution on the selected entity.\n\
-         Hover a wire or pin for its last value.",
+    // The chip is the picker's button.
+    let chip_id = ui.alloc_id("graph_live_chip");
+    let resp = ui.interact(chip_id, live_chip);
+    let just_opened = resp.clicked && !state.exec_picker;
+    if resp.clicked {
+        state.exec_picker = !state.exec_picker;
+    }
+    if resp.hovered && !state.exec_picker {
+        ui.tooltip_for(
+            live_chip,
+            "Which running instance this canvas shows.\n\
+             Click to pick another; hover a wire or pin for its last value.",
+        );
+    }
+
+    // Clear trace: the taken-path tint and the pulse history are one session's
+    // statement, and sometimes the session should start *here*.
+    let clear_w = ui.painter().measure_text("Clear trace", px, None).x + pad * 2.0;
+    let clear = Rect::from_min_size(
+        Pos2::new(live_chip.min.x - pad - clear_w, live_chip.min.y),
+        Vec2::new(clear_w, seg_h),
     );
+    if strip_button(ui, Id::new("graph_clear_trace"), clear, "Clear trace", 0) {
+        *clear_trace = true;
+    }
+
+    // The dropdown itself is drawn by the panel *after* the canvas: the
+    // toolbar paints before it, so a surface opened here would be buried
+    // under the grid it is supposed to float over.
+    *chip_rect = Some((live_chip, just_opened));
+}
+
+/// What the LIVE chip is saying (GS-3). Pure, so the state machine the design
+/// specifies — bound-and-alive, bound-and-dead, running-but-unbound, nothing
+/// at all — is checkable without a canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipState {
+    /// Bound to a live instance.
+    Live,
+    /// Bound to one that died. The canvas keeps its last trace: a post-mortem
+    /// is exactly when you want to look at it.
+    Killed,
+    /// `n` instances exist and none is picked. The canvas stays a pure editor
+    /// and never aggregates them.
+    Unbound(usize),
+    /// Nothing is running: edit mode leaves no residue at all.
+    Absent,
+}
+
+fn chip_state(bound: bool, killed: bool, instances: usize) -> ChipState {
+    match (bound, killed) {
+        (true, true) => ChipState::Killed,
+        (true, false) => ChipState::Live,
+        (false, _) if instances > 0 => ChipState::Unbound(instances),
+        (false, _) => ChipState::Absent,
+    }
+}
+
+/// The LIVE chip's dropdown: every instance running this graph, nearest first.
+///
+/// Returns `Some(binding)` when a row was chosen - `Some(None)` for "follow
+/// the selection", which is the baseline rule and therefore the way back out
+/// of an explicit pick.
+fn instance_picker(
+    ui: &mut Ui,
+    anchor: Rect,
+    instances: &[ExecInstance],
+    exec: Option<&GraphExecViz>,
+    st: &Style,
+    s: f32,
+    // The press that opened the picker lands *outside* it — without this the
+    // modal stack would read its own opening click as a dismissal and the
+    // dropdown would close on the frame it appeared.
+    just_opened: bool,
+) -> Option<Option<u64>> {
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let row_h = st.metrics.control_height;
+    let w = (VARS_W * s).max(anchor.width());
+    let h = row_h * (instances.len() as f32 + 1.0) + row_h * 0.9;
+    let panel = Rect::from_min_size(
+        Pos2::new(anchor.max.x - w, anchor.max.y + pad * 0.25),
+        Vec2::new(w, h),
+    );
+    // Rule 1: a transient surface registers, so the press that dismisses it is
+    // consumed instead of also landing on the canvas.
+    ui.ctx_mut().modal_push(instance_picker_modal_id(), panel);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.widget, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut picked: Option<Option<u64>> = None;
+    let bound = exec.map(|v| v.instance_id);
+    let mut y = panel.min.y;
+    for inst in instances {
+        let row = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+        y += row_h;
+        let id = ui.alloc_id(("graph_instance_row", inst.id));
+        let resp = ui.interact(id, row);
+        let is_bound = bound == Some(inst.id);
+        let mut p = ui.painter();
+        if is_bound {
+            p.rect_filled(row, Rounding::ZERO, st.palette.selection_fill);
+        } else if resp.hovered {
+            p.rect_filled(row, Rounding::ZERO, st.palette.hover);
+        }
+        let dot_r = px * 0.28;
+        p.circle_filled(
+            Pos2::new(row.min.x + pad + dot_r, row.center().y),
+            dot_r,
+            if inst.killed {
+                Palette::invariant_status().error
+            } else if is_bound {
+                st.palette.accent_active
+            } else {
+                Palette::invariant_status().success
+            },
+        );
+        // Distance and recency, mono: two "Duck"s are told apart by where they
+        // are and when they last did something, not by their name.
+        let meta = if is_bound {
+            "selected".to_string()
+        } else {
+            let recency = match inst.last_active {
+                Some(a) if a < 60.0 => format!("{a:.0} s ago"),
+                _ => "idle".to_string(),
+            };
+            format!("{:.0} m \u{b7} {recency}", inst.distance)
+        };
+        let mw = p.measure_text_family(&meta, px, None, FontFamily::Mono).x;
+        p.text_family(
+            Pos2::new(row.max.x - pad - mw, row.center().y - px * 0.62),
+            &meta,
+            px,
+            if is_bound { st.palette.text_mono } else { st.palette.text_disabled },
+            None,
+            FontFamily::Mono,
+        );
+        let name = if inst.name.is_empty() { "(unnamed)" } else { inst.name.as_str() };
+        let avail = row.max.x - pad * 2.0 - mw - (row.min.x + pad * 2.0 + dot_r * 2.0);
+        let name = clip_text(&mut p, name, st.fonts.body, avail);
+        p.text(
+            Pos2::new(
+                row.min.x + pad * 2.0 + dot_r * 2.0,
+                row.center().y - st.fonts.body * 0.62,
+            ),
+            &name,
+            st.fonts.body,
+            if is_bound { st.palette.selection_text } else { st.palette.text },
+            None,
+        );
+        if resp.clicked {
+            picked = Some(Some(inst.id));
+        }
+    }
+    // The way back to following the selection, then the count as the footer's
+    // last line — the mockup's order, and the one that reads as a summary
+    // rather than as another option.
+    let follow = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+    let fid = ui.alloc_id("graph_instance_follow");
+    let fresp = ui.interact(fid, follow);
+    {
+        let mut p = ui.painter();
+        if fresp.hovered {
+            p.rect_filled(follow, Rounding::ZERO, st.palette.hover);
+        }
+        p.text(
+            Pos2::new(follow.min.x + pad, follow.center().y - px * 0.62),
+            "Follow selection",
+            px,
+            st.palette.text_secondary,
+            None,
+        );
+    }
+    if fresp.clicked {
+        picked = Some(None);
+    }
+    let footer = Rect::from_min_size(Pos2::new(panel.min.x, follow.max.y), Vec2::new(w, row_h * 0.9));
+    {
+        let mut p = ui.painter();
+        p.line_segment(
+            Pos2::new(footer.min.x, footer.min.y),
+            Pos2::new(footer.max.x, footer.min.y),
+            st.metrics.border,
+            st.palette.stroke,
+        );
+        p.text(
+            Pos2::new(footer.min.x + pad, footer.center().y - px * 0.62),
+            &format!(
+                "{} instance{} running this graph",
+                instances.len(),
+                if instances.len() == 1 { "" } else { "s" }
+            ),
+            px,
+            st.palette.text_disabled,
+            None,
+        );
+    }
+    // Light dismiss, decided here rather than read off the modal stack: the
+    // press that *opens* this panel necessarily lands outside it, and asking
+    // the stack "was there a press outside" cannot tell that press from the
+    // one that should close it. Escape, or a press anywhere else, ends it.
+    let pressed_outside = ui.ctx().input.pointer_pressed
+        && ui
+            .ctx()
+            .input
+            .pointer_pos
+            .is_some_and(|p| !panel.contains(p) && !anchor.contains(p));
+    if !just_opened && (ui.ctx().input.key_pressed(Key::Escape) || pressed_outside) {
+        ui.ctx_mut().modal_dismiss(instance_picker_modal_id());
+        // Keep the binding, close the surface: "put it away" is not "unbind".
+        return Some(exec.map(|v| v.instance_id));
+    }
+    if picked.is_some() {
+        ui.ctx_mut().modal_dismiss(instance_picker_modal_id());
+    }
+    picked
+}
+
+fn instance_picker_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("graph_instance_picker")
 }
 
 // ---------------------------------------------------------------------------
@@ -6797,6 +7195,11 @@ struct WireGeom {
     selected: bool,
     /// `TypeMismatch` — the only error that colors a wire.
     mismatched: bool,
+    /// This exec wire has fired at some point this session (GS-3). `true` for
+    /// every wire when no session is running, so nothing dims in edit mode.
+    taken: bool,
+    /// Firings per second on the producing pin, for the bubble rate cap.
+    rate: f32,
     /// Live execution pulse, `0.0` (the only value in edit mode) to `1.0`
     /// (fired this instant). Layered onto the color and the width below —
     /// never a re-route: the pulse travels the polyline the router already
@@ -6887,6 +7290,8 @@ fn build_wires(
             selected: state.selected_edges.contains(e),
             mismatched: errors.edges.contains(e),
             pulse: exec.map_or(0.0, |v| wire_pulse(v, state, e)),
+            taken: exec.is_none_or(|v| !v.has_session() || wire_taken(v, state, e)),
+            rate: exec.map_or(0.0, |v| wire_rate(v, state, e)),
         });
     }
     out
@@ -6919,6 +7324,24 @@ fn converge_ranks(edges: &[Edge]) -> Vec<usize> {
 fn wire_pulse(viz: &GraphExecViz, state: &GraphEditorState, e: &Edge) -> f32 {
     match real_producer(state, e.from_node, &e.from_pin) {
         Some((node, pin)) => viz.pulse(node, &pin),
+        None => 0.0,
+    }
+}
+
+/// Has this exec edge been travelled this session? Resolved against the real
+/// producer, exactly like the pulse: a reroute is transparent at run time, so
+/// both halves of a rerouted wire answer from the one record.
+fn wire_taken(viz: &GraphExecViz, state: &GraphEditorState, e: &Edge) -> bool {
+    match real_producer(state, e.from_node, &e.from_pin) {
+        Some((node, pin)) => viz.is_taken(node, &pin, e.to_node),
+        None => false,
+    }
+}
+
+/// Firings per second on this wire's producing pin.
+fn wire_rate(viz: &GraphExecViz, state: &GraphEditorState, e: &Edge) -> f32 {
+    match real_producer(state, e.from_node, &e.from_pin) {
+        Some((node, pin)) => viz.rate(node, &pin),
         None => 0.0,
     }
 }
@@ -7012,6 +7435,12 @@ fn draw_wires(
     st: &Style,
     lod: ZoomLod,
     selection_outline: Color,
+    // A live session is bound: the switch for every debug-only layer.
+    live: bool,
+    zoom: f32,
+    // Bubble animation phase in `[0, 1)`, derived from the frame counter so
+    // the flow moves without the panel needing a clock of its own.
+    phase: f32,
 ) {
     let mut p = ui.painter();
     // Selected and hovered wires paint last so they are never buried under a
@@ -7049,8 +7478,29 @@ fn draw_wires(
         } else {
             color
         };
+        // Taken-path inversion (GS-3): during a live session an exec wire that
+        // has not fired drops to 50%, and one that has holds its normal 92%.
+        // Only exec — a data wire carries a value, not a path, and tinting it
+        // would say something untrue about control flow.
+        let color = if !w.taken && w.is_exec() {
+            color.with_alpha(color.a * UNFIRED_EXEC_ALPHA)
+        } else {
+            color
+        };
         // L4 collapses every wire to a hairline.
         let width = if lod.bar_only() { 1.0 } else { w.width(is_hovered) };
+        // Flow bubbles ride the wire that is firing right now.
+        // Above the cap the wire holds steady-hot (the pulse tint above
+        // already does that) instead of strobing dots nobody can follow.
+        if live
+            && w.is_exec()
+            && w.pulse > 0.0
+            && zoom >= BUBBLE_MIN_ZOOM
+            && w.rate > 0.0
+            && w.rate < STEADY_HOT_HZ
+        {
+            draw_bubbles(&mut p, w, phase, st.palette.accent_active);
+        }
         // Weight carries the pulse where color cannot: an exec wire is already
         // white, so brightness alone would barely read.
         let width = width * (1.0 + PULSE_WEIGHT * w.pulse);
@@ -7080,6 +7530,46 @@ fn draw_wires(
                 );
             }
         }
+    }
+}
+
+/// Flow bubbles: dots riding an exec wire in the direction control took
+/// (GS-3). Debug sessions only, exec only, above [`BUBBLE_MIN_ZOOM`], and only
+/// while the wire is actually firing.
+///
+/// **The rate cap is the honest part.** Above [`STEADY_HOT_HZ`] firings a
+/// second the dots are a flicker rather than a flow, so the wire holds
+/// steady-hot instead — one bright statement rather than twenty lies about
+/// individual firings.
+fn draw_bubbles(p: &mut Painter, w: &WireGeom, phase: f32, color: Color) {
+    if w.screen.len() < 2 {
+        return;
+    }
+    // Arc-length table, so the dots move at a constant speed along a polyline
+    // whose segments are not equal (every router style produces those).
+    let mut lens: Vec<f32> = Vec::with_capacity(w.screen.len());
+    let mut total = 0.0;
+    lens.push(0.0);
+    for pair in w.screen.windows(2) {
+        total += ((pair[1].x - pair[0].x).powi(2) + (pair[1].y - pair[0].y).powi(2)).sqrt();
+        lens.push(total);
+    }
+    if total <= 1.0 {
+        return;
+    }
+    for i in 0..BUBBLES_PER_WIRE {
+        let t = (phase + i as f32 / BUBBLES_PER_WIRE as f32).fract();
+        let want = t * total;
+        let Some(seg) = lens.windows(2).position(|l| want >= l[0] && want <= l[1]) else {
+            continue;
+        };
+        let span = (lens[seg + 1] - lens[seg]).max(1e-3);
+        let f = (want - lens[seg]) / span;
+        let (a, b) = (w.screen[seg], w.screen[seg + 1]);
+        let at = Pos2::new(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f);
+        // Fading tail: the leading dot is brightest, so the direction reads.
+        let alpha = 0.9 - 0.2 * i as f32;
+        p.circle_filled(at, BUBBLE_R, color.with_alpha(alpha));
     }
 }
 
@@ -7226,6 +7716,9 @@ fn draw_nodes(
     // Nodes the variables filter matched. `Some` means a filter is active:
     // everything outside the set dims, on the find-in-graph rule.
     var_dim: Option<&BTreeSet<u64>>,
+    // Watch chip boxes, collected for the interaction pass (the ✕ is
+    // hover-revealed and lives where the chip was drawn).
+    watch_rects: &mut Vec<(u64, String, bool, Rect)>,
 ) {
     let status = Palette::invariant_status();
     // Collected during the paint pass, applied after (the widget pass needs
@@ -7247,6 +7740,13 @@ fn draw_nodes(
         let srect = scope.world_rect_to_screen(body);
         let selected = state.selection.contains(&g.id);
         let round = Rounding::same(m.radius * zoom);
+        // A runtime kill flags its node like a validation error does: the
+        // border and the badge gutter are the existing precedence slot, and
+        // the reason line goes underneath (GS-3).
+        let killed_here = exec
+            .and_then(|v| v.killed.as_ref())
+            .is_some_and(|k| k.node == Some(g.id));
+        let errored = g.errored || killed_here;
         let edge_col = if g.missing { status.error } else { g.edge_color() };
         // Find-in-graph dims what does not match, rather than hiding it —
         // context is what makes a search result mean anything.
@@ -7344,7 +7844,7 @@ fn draw_nodes(
             srect,
             round,
             m.border,
-            if g.missing || g.errored { status.error } else { st.palette.stroke },
+            if g.missing || errored { status.error } else { st.palette.stroke },
         );
 
         // Running (45-A P7): a node that fired recently gains an accent ring
@@ -7417,7 +7917,7 @@ fn draw_nodes(
             // Badges never stack: one glyph in the header's left gutter, by
             // precedence — error/missing outranks a breakpoint, because a node
             // that cannot run is more urgent than one you meant to stop at.
-            let gutter = if !g.errored && !g.missing && g.breakpoint {
+            let gutter = if !errored && !g.missing && g.breakpoint {
                 let r = m.pin_r * zoom * 0.8;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
@@ -7433,7 +7933,7 @@ fn draw_nodes(
                     .collect();
                 p.convex_polygon_filled(pts, status.error);
                 r * 2.0 + m.label_gap * zoom
-            } else if g.errored || g.missing {
+            } else if errored || g.missing {
                 let r = m.pin_r * zoom * 0.8;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
@@ -7478,6 +7978,90 @@ fn draw_nodes(
                 None,
                 FontFamily::Mono,
             );
+        }
+
+        // Waiting (GS-3): one indicator per node, never per activation. A 3px
+        // accent bar under the title carries elapsed, mono carries remaining,
+        // and a ×n chip names concurrent activations — two bars would imply
+        // two nodes. Drawn while the rows are, so the LOD ladder takes it away
+        // with them.
+        if let Some(wait) = exec.filter(|_| lod.rows()).and_then(|v| v.wait(g.id)) {
+            let bar = Rect::from_min_max(
+                Pos2::new(srect.min.x, srect.min.y + m.header_h * zoom),
+                Pos2::new(
+                    srect.max.x,
+                    srect.min.y + m.header_h * zoom + (WAIT_BAR_PX * m.scale * zoom).max(1.0),
+                ),
+            );
+            p.rect_filled(bar, Rounding::ZERO, st.palette.input);
+            p.rect_filled(
+                Rect::from_min_max(
+                    bar.min,
+                    Pos2::new(bar.min.x + bar.width() * wait.fraction, bar.max.y),
+                ),
+                Rounding::ZERO,
+                st.palette.accent_active,
+            );
+            if lod.glyphs() {
+                let px = st.fonts.small * zoom;
+                let text = format!("{:.1}s", wait.remaining);
+                let tw = p.measure_text_family(&text, px, None, FontFamily::Mono).x;
+                // Right of the title, left of the category tag: the countdown
+                // belongs to the node's identity line, not to its body.
+                let tag_w = p
+                    .measure_text_family(&g.tag, m.tag_px * zoom, None, FontFamily::Mono)
+                    .x;
+                p.text_family(
+                    Pos2::new(
+                        srect.max.x - m.pad_x * zoom - tag_w - m.label_gap * zoom * 2.0 - tw,
+                        srect.min.y + (m.header_h * zoom - px) * 0.5,
+                    ),
+                    &text,
+                    px,
+                    st.palette.focus_ring,
+                    None,
+                    FontFamily::Mono,
+                );
+                if wait.count > 1 {
+                    let chip_text = format!("\u{d7}{}", wait.count);
+                    let cw = p.measure_text_family(&chip_text, px, None, FontFamily::Mono).x;
+                    let title_w = p.measure_text(&g.title, st.fonts.body * zoom, None).x;
+                    let chip = Rect::from_min_size(
+                        Pos2::new(
+                            srect.min.x + m.pad_x * zoom + title_w + m.label_gap * zoom,
+                            srect.min.y + (m.header_h * zoom - px * 1.6) * 0.5,
+                        ),
+                        Vec2::new(cw + m.label_gap * zoom * 2.0, px * 1.6),
+                    );
+                    p.rect_filled(chip, Rounding::same(m.radius * 0.4 * zoom), st.palette.accent_soft);
+                    p.text_family(
+                        Pos2::new(chip.min.x + m.label_gap * zoom, chip.center().y - px * 0.62),
+                        &chip_text,
+                        px,
+                        st.palette.focus_ring,
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
+            }
+        }
+
+        // Runtime kill (GS-3): the error anchors to the node that raised it —
+        // border and badge come from the existing error path (the host sets
+        // `errored`), and the reason goes *under* the node as one mono line,
+        // the same reason-at-rest rule the variables panel follows.
+        if let Some(kill) = exec.and_then(|v| v.killed.as_ref()).filter(|k| k.node == Some(g.id)) {
+            let px = st.fonts.small * zoom;
+            if lod.glyphs() {
+                p.text_family(
+                    Pos2::new(srect.min.x, srect.max.y + m.label_gap * zoom * 1.5),
+                    &kill.reason,
+                    px,
+                    status.error,
+                    None,
+                    FontFamily::Mono,
+                );
+            }
         }
 
         if !lod.rows() {
@@ -7731,6 +8315,83 @@ fn draw_nodes(
                     }
                 }
             }
+        }
+    }
+
+    // Watch chips (GS-3). Drawn after the nodes so a chip is never buried by
+    // the node it hangs off, and only where its pin actually is: the chip is a
+    // label on a wire's source, not a floating annotation.
+    if lod.pin_labels() {
+        let mut p = ui.painter();
+        for w in &state.watches {
+            let Some(g) = geoms.iter().find(|g| g.id == w.node) else {
+                continue;
+            };
+            let Some(pin) = g.pins.iter().find(|q| q.output == w.output && q.slug == w.pin) else {
+                continue;
+            };
+            if !overlaps(g.rect, vis) {
+                continue;
+            }
+            let c = scope.world_to_screen(pin.dot_center);
+            let text = watch_chip_text(w.last.as_deref());
+            let px = st.fonts.small * zoom;
+            let tw = p.measure_text_family(&text, px, None, FontFamily::Mono).x;
+            let h = m.row_h * zoom * 0.82;
+            let gap = m.label_gap * zoom * 2.0;
+            let chip = if w.output {
+                Rect::from_min_size(
+                    Pos2::new(scope.world_rect_to_screen(g.rect).max.x + gap, c.y - h * 0.5),
+                    Vec2::new(tw + gap * 2.0, h),
+                )
+            } else {
+                Rect::from_min_size(
+                    Pos2::new(
+                        scope.world_rect_to_screen(g.rect).min.x - gap - (tw + gap * 2.0),
+                        c.y - h * 0.5,
+                    ),
+                    Vec2::new(tw + gap * 2.0, h),
+                )
+            };
+            // States, per the design: dashed until a value has ever arrived
+            // (and in edit mode, where the last run's value is residue rather
+            // than truth); dimmed with an age tag once it has sat unchanged.
+            let live_value = exec.is_some() && w.last.is_some();
+            let stale = w.stale_for(WATCH_STALE_SECS);
+            let alpha = if stale.is_some() || !live_value { 0.55 } else { 1.0 };
+            p.rect_filled(chip, st.rounding.small, st.palette.input);
+            if live_value {
+                p.rect_stroke(chip, st.rounding.small, m.border, st.palette.stroke_strong);
+            } else {
+                dashed_rect(&mut p, chip, m.border, st.palette.stroke_strong);
+            }
+            // 2px type-coloured left edge — which wire this value came off.
+            p.rect_filled(
+                Rect::from_min_size(chip.min, Vec2::new((m.edge * zoom).max(1.0), chip.height())),
+                Rounding::ZERO,
+                pin_color(Some(registry), &pin.ty),
+            );
+            p.text_family(
+                Pos2::new(chip.min.x + gap, chip.center().y - px * 0.62),
+                &text,
+                px,
+                st.palette.text_mono.with_alpha(alpha),
+                None,
+                FontFamily::Mono,
+            );
+            if let Some(secs) = stale {
+                let age = format!("{secs:.0}s");
+                let aw = p.measure_text_family(&age, px * 0.9, None, FontFamily::Mono).x;
+                p.text_family(
+                    Pos2::new(chip.max.x - gap * 0.5 - aw, chip.center().y - px * 0.62),
+                    &age,
+                    px * 0.9,
+                    st.palette.text_disabled,
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            watch_rects.push((w.node, w.pin.clone(), w.output, chip));
         }
     }
 
@@ -9668,6 +10329,22 @@ mod tests {
         assert_eq!(fixed.payload_slug(), None);
         assert!(!fixed.mono_label(), "a fixed label is sentence-case sans");
         assert!(fixed.remove.is_none());
+    }
+
+    /// **GS-3: the chip's state machine.** Bound-and-alive, bound-and-dead,
+    /// running-but-unbound, and nothing at all — the fourth is what keeps edit
+    /// mode free of debug residue.
+    #[test]
+    fn the_live_chip_names_all_four_states() {
+        assert_eq!(chip_state(true, false, 3), ChipState::Live);
+        assert_eq!(chip_state(true, true, 3), ChipState::Killed);
+        assert_eq!(chip_state(false, false, 3), ChipState::Unbound(3));
+        assert_eq!(chip_state(false, false, 0), ChipState::Absent);
+        // A dead instance is still bound: the canvas holds its last trace.
+        assert_eq!(chip_state(true, true, 1), ChipState::Killed);
+        // Killed-but-unbound is not a state the chip can be in; the instances
+        // exist, so it says how many and waits to be pointed at one.
+        assert_eq!(chip_state(false, true, 2), ChipState::Unbound(2));
     }
 
     /// **GS-2: where a dragged row would land.** The insertion index follows

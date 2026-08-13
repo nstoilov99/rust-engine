@@ -1038,7 +1038,7 @@ impl App {
         let root = std::path::Path::new("content");
         let mut store = GraphStateStore::load(root);
         for (rel, st) in self.editor.scene.graph_editors.iter() {
-            store.store(rel, st.view, &st.bookmarks);
+            store.store(rel, st.view, &st.bookmarks, stored_watches(st));
         }
         if let Err(e) = store.save() {
             eprintln!("Warning: failed to save graph UI state: {e}");
@@ -3421,6 +3421,9 @@ impl App {
         // declared out here so it outlives the layout block and can be applied
         // once the panel borrows are released.
         let mut graph_open_request: Option<String> = None;
+        // Set by a graph toolbar's "Clear trace"; applied after the UI, where
+        // the world is reachable (GS-3).
+        let mut graph_clear_trace: Option<String> = None;
         // Toolbar quick-switch: the panel reports a style pick, the host
         // writes it into the same pref the Preferences window edits, so it
         // shows the overridden dot there and rides the debounced autosave.
@@ -3567,6 +3570,15 @@ impl App {
             // also the behaviour you want — the chord that committed the
             // rebind must not immediately fire its new action.
             let graph_keymap_snapshot = self.editor.services.keymap.clone();
+            // Editor camera position, snapshotted for the GS-3 instance picker
+            // (its distance column). Render space is Y-up; the world the
+            // entities live in is Z-up, so it converts on the way out.
+            let graph_camera = {
+                let p = rust_engine::engine::utils::coords::convert_position_yup_to_zup(
+                    vp.camera.position,
+                );
+                [p.x, p.y, p.z]
+            };
             let graph_keymap = &graph_keymap_snapshot;
             let graph_clipboard = &mut self.editor.scene.graph_clipboard;
             // 45-A P7: bind each open graph tab to a running instance of it.
@@ -3576,10 +3588,25 @@ impl App {
             // once per tab draw, because the selection is the same for all of
             // them. Empty in edit mode, with nothing selected, or in a build
             // without the interpreter — and empty draws nothing.
+            // Where the person asking "which Duck is that" is standing.
+            let graph_camera_pos = graph_camera;
             let graph_exec = {
                 let picked: Vec<hecs::Entity> = sel.all().copied().collect();
-                graph_exec_bindings(&*world, &*world_resources, &picked, graph_editors.keys())
+                let binds: Vec<(String, Option<u64>)> = graph_editors
+                    .iter()
+                    .map(|(k, st)| (k.clone(), st.exec_bind))
+                    .collect();
+                graph_exec_bindings(&*world, &*world_resources, &picked, &binds)
             };
+            // Every instance of every open graph, for the LIVE chip's picker
+            // (GS-3). Present even when nothing is bound — "N RUNNING" is a
+            // state, not an absence.
+            let graph_instances = graph_instance_lists(
+                &*world,
+                &*world_resources,
+                graph_camera_pos,
+                graph_editors.keys(),
+            );
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
@@ -3956,6 +3983,11 @@ impl App {
                                                     .iter()
                                                     .find(|(k, _)| *k == key)
                                                     .map(|(_, v)| v),
+                                                exec_instances: graph_instances
+                                                    .get(&key)
+                                                    .map(Vec::as_slice)
+                                                    .unwrap_or(&[]),
+                                                exec_clear: &mut graph_clear_trace,
                                             },
                                         ),
                                         None => dock_crusty::missing_document_panel(
@@ -4119,6 +4151,12 @@ impl App {
         }
         if let Some(relative) = graph_open_request {
             self.open_graph_document(relative);
+        }
+        // "Clear trace" (GS-3): the taken-path tint and the pulse history are
+        // one session's statement, and the recorder that owns them lives on
+        // the instance — so the panel names the graph and the host does it.
+        if let Some(key) = graph_clear_trace.take() {
+            self.clear_graph_traces(&key);
         }
         for key in std::mem::take(&mut curve_save_requests) {
             self.save_curve_editor(&key);
@@ -4645,7 +4683,7 @@ impl App {
         };
         let root = std::path::Path::new("content");
         let mut store = GraphStateStore::load(root);
-        store.store(key, st.view, &st.bookmarks);
+        store.store(key, st.view, &st.bookmarks, stored_watches(st));
         if let Err(e) = store.save() {
             eprintln!("Warning: failed to save graph UI state: {e}");
         }
@@ -5336,11 +5374,29 @@ impl App {
         };
         let graph_prefs = editor.ui.settings.prefs.graph;
         let graph_sel_outline = editor.services.theme.palette.selection.outline;
+        let graph_camera = {
+            let p = rust_engine::engine::utils::coords::convert_position_yup_to_zup(
+                editor.viewport.camera.position,
+            );
+            [p.x, p.y, p.z]
+        };
         // 45-A P7 execution binding, same rule as the docked path.
+        let graph_camera_pos = graph_camera;
         let graph_exec = {
             let picked: Vec<hecs::Entity> = sel.all().copied().collect();
-            graph_exec_bindings(&*world, &*world_resources, &picked, graph_editors.keys())
+            let binds: Vec<(String, Option<u64>)> = graph_editors
+                .iter()
+                .map(|(k, st)| (k.clone(), st.exec_bind))
+                .collect();
+            graph_exec_bindings(&*world, &*world_resources, &picked, &binds)
         };
+        let graph_instances = graph_instance_lists(
+            &*world,
+            &*world_resources,
+            graph_camera_pos,
+            graph_editors.keys(),
+        );
+        let mut graph_clear_trace: Option<String> = None;
         let mut graph_open_requests: Vec<String> = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
         // Curve tabs in float windows that asked to save (their own Ctrl+S or
@@ -5525,6 +5581,11 @@ impl App {
                                         .iter()
                                         .find(|(k, _)| *k == key)
                                         .map(|(_, v)| v),
+                                    exec_instances: graph_instances
+                                        .get(&key)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
+                                    exec_clear: &mut graph_clear_trace,
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
@@ -7233,38 +7294,87 @@ impl App {
 ///
 /// A build without the interpreter has nothing to bind and says so here, once,
 /// instead of `cfg`-ing every call site.
-fn graph_exec_bindings<'a>(
+fn graph_exec_bindings(
     world: &hecs::World,
     resources: &rust_engine::engine::ecs::resources::Resources,
     selected: &[hecs::Entity],
-    keys: impl IntoIterator<Item = &'a String>,
+    binds: &[(String, Option<u64>)],
 ) -> Vec<(String, rust_engine::engine::editor::graph_exec_viz::GraphExecViz)> {
     #[cfg(not(feature = "graph-scripting"))]
     {
-        let _ = (world, resources, selected, keys);
+        let _ = (world, resources, selected, binds);
         Vec::new()
     }
     #[cfg(feature = "graph-scripting")]
     {
-        if selected.is_empty() {
-            return Vec::new();
-        }
         // The same clock the runner stamps its trace with, so "how long ago"
         // means the same thing on both sides of the seam.
         let now = resources
             .get::<rust_engine::engine::ecs::resources::Time>()
             .map(|t| t.total)
             .unwrap_or(0.0);
-        keys.into_iter()
-            .filter_map(|k| {
-                rust_engine::engine::scripting::trace::viz_for_selection(
-                    world,
-                    selected.iter().copied(),
-                    k,
-                    now,
-                )
-                .map(|v| (k.clone(), v))
+        binds
+            .iter()
+            .filter_map(|(k, pick)| {
+                // An explicit pick wins; a stale one (the entity is gone, or
+                // no longer runs this graph) falls back to the selection rule
+                // rather than blanking the canvas.
+                let viz = pick
+                    .and_then(|bits| {
+                        rust_engine::engine::scripting::trace::viz_for_entity(world, bits, k, now)
+                    })
+                    .or_else(|| {
+                        rust_engine::engine::scripting::trace::viz_for_selection(
+                            world,
+                            selected.iter().copied(),
+                            k,
+                            now,
+                        )
+                    })?;
+                Some((k.clone(), viz))
             })
+            .collect()
+    }
+}
+
+/// Every instance running each open graph, for the LIVE chip's picker (GS-3).
+///
+/// Distances are measured from the editor camera, which is where the person
+/// asking "which Duck is that" is standing.
+#[cfg(feature = "editor")]
+fn graph_instance_lists<'a>(
+    world: &hecs::World,
+    resources: &rust_engine::engine::ecs::resources::Resources,
+    camera: [f32; 3],
+    keys: impl IntoIterator<Item = &'a String>,
+) -> std::collections::HashMap<
+    String,
+    Vec<rust_engine::engine::editor::graph_exec_viz::ExecInstance>,
+> {
+    #[cfg(not(feature = "graph-scripting"))]
+    {
+        let _ = (world, resources, camera, keys);
+        Default::default()
+    }
+    #[cfg(feature = "graph-scripting")]
+    {
+        let now = resources
+            .get::<rust_engine::engine::ecs::resources::Time>()
+            .map(|t| t.total)
+            .unwrap_or(0.0);
+        keys.into_iter()
+            .map(|k| {
+                (
+                    k.clone(),
+                    rust_engine::engine::scripting::trace::instances_for(
+                        world,
+                        k,
+                        Some(camera),
+                        now,
+                    ),
+                )
+            })
+            .filter(|(_, v)| !v.is_empty())
             .collect()
     }
 }
@@ -7318,6 +7428,53 @@ fn save_curve_state(
     let _ = world;
 }
 
+/// Forget every recorded session for the instances running `graph_path`.
+///
+/// Every instance, not just the bound one: the button is next to a chip that
+/// names one entity, but the trace it clears is what the *canvas* shows, and
+/// switching instances immediately afterwards should not resurrect the tint
+/// the user just dismissed.
+#[cfg(all(feature = "editor", feature = "graph-scripting"))]
+impl App {
+    fn clear_graph_traces(&mut self, graph_path: &str) {
+        use rust_engine::engine::scripting::{normalize_graph_path, runner::GraphRuntime};
+        let want = normalize_graph_path(graph_path);
+        for (_, rt) in self
+            .core
+            .game_world
+            .hecs_mut()
+            .query_mut::<&mut GraphRuntime>()
+        {
+            if normalize_graph_path(&rt.graph) == want {
+                rt.trace.clear();
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "editor", not(feature = "graph-scripting")))]
+impl App {
+    fn clear_graph_traces(&mut self, _graph_path: &str) {}
+}
+
+/// A tab's watches in the shape the sidecar stores (GS-3).
+#[cfg(feature = "editor")]
+fn stored_watches(
+    state: &rust_engine::engine::editor::graph_editor::GraphEditorState,
+) -> Vec<rust_engine::engine::editor::graph_state_store::StoredWatch> {
+    use rust_engine::engine::editor::graph_state_store::StoredWatch;
+    state
+        .watches
+        .iter()
+        .map(|w| StoredWatch {
+            node: w.node,
+            pin: w.pin.clone(),
+            output: w.output,
+            last: w.last.clone(),
+        })
+        .collect()
+}
+
 /// Restore a graph's remembered pan/zoom and bookmarks from the user-local
 /// sidecar. With no entry the tab frames its own content on the first draw —
 /// landing on an empty corner of a graph you have never opened is a worse
@@ -7326,8 +7483,17 @@ fn restore_graph_ui_state(
     state: &mut rust_engine::engine::editor::graph_editor::GraphEditorState,
     relative: &str,
 ) {
+    use rust_engine::engine::editor::graph_editor::Watch;
     let store = GraphStateStore::load(std::path::Path::new("content"));
     state.bookmarks = store.bookmarks_for(relative);
+    // Watches come back with their last value and *no* freshness: a restored
+    // chip is residue from a previous session, and pretending it just updated
+    // would be the one lie the staleness tag exists to prevent.
+    state.watches = store
+        .watches_for(relative)
+        .into_iter()
+        .map(|w| Watch { last: w.last, ..Watch::new(w.node, &w.pin, w.output) })
+        .collect();
     match store.view_for(relative) {
         Some(v) => state.view = v,
         None => state.frame_all_on_open = true,
