@@ -751,6 +751,15 @@ impl Keymap {
         (km, problems)
     }
 
+    /// Does this keymap differ from its own preset? The question the
+    /// settings sidebar's modified dot asks — rebuilding the preset is
+    /// cheaper than tracking a dirty flag through every rebind path, and it
+    /// cannot drift out of sync with one.
+    pub fn is_customized(&self) -> bool {
+        let base = Keymap::from_preset(self.preset);
+        self.chords != base.chords || self.mouse_profile != base.mouse_profile
+    }
+
     pub fn to_file(&self) -> KeymapFile {
         KeymapFile {
             preset: self.preset,

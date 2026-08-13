@@ -31,7 +31,7 @@ use super::project_config::{ProjectConfig, PROJECT_FILE, SERVER_WORLD_SCENE};
 use crate::engine::utils::window_config::VSyncMode;
 
 const SIDEBAR_W: f32 = 158.0;
-const HEADER_H: f32 = 34.0;
+const HEADER_H: f32 = 36.0;
 const FOOTER_H: f32 = 28.0;
 const CAT_ROW_H: f32 = 24.0;
 const SECTION_H: f32 = 26.0;
@@ -136,6 +136,21 @@ const PROJECT_CATS: &[(&str, &[&str])] = &[
 /// rather than drawing setting rows.
 const PLUGINS_CAT: usize = PROJECT_CATS.len() - 1;
 
+/// Category index the Edit menu's `Plugins…` row deep-links to.
+pub const fn plugins_category() -> usize {
+    PLUGINS_CAT
+}
+
+/// Category index of Editor Preferences ▸ Keyboard Shortcuts — what the Edit
+/// menu's `Keyboard Shortcuts…` row opens. Looked up by label so inserting a
+/// category above it cannot silently point the menu somewhere else.
+pub fn shortcuts_category() -> usize {
+    PREFS_CATS
+        .iter()
+        .position(|(name, _)| *name == "Keyboard Shortcuts")
+        .unwrap_or(0)
+}
+
 /// UI + persistence state for both settings windows. Owned by the app;
 /// `flush_prefs` must be called once per frame for the debounced autosave.
 pub struct SettingsState {
@@ -179,6 +194,14 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    /// Select an Editor Preferences category (the Edit menu's deep link).
+    /// Clearing the search with it matters: a filtered window that opens on a
+    /// category with no matching rows looks broken.
+    pub fn select_prefs_category(&mut self, index: usize) {
+        self.prefs_cat = index;
+        self.prefs_search.clear();
+    }
+
     pub fn new(prefs: EditorPrefs, project: ProjectConfig, vsync: VSyncMode) -> Self {
         Self {
             prefs_applied: prefs.clone(),
@@ -622,6 +645,15 @@ fn keymap_row(
 
     ui.horizontal(|ui| {
         let start = ui.cursor();
+        // Reserve the whole row *first*. Everything below draws through the
+        // painter at explicit offsets, and a row whose only allocation was a
+        // small chord cell — or, for an unbound action, none at all — let the
+        // parent cursor advance by less than a row, so the next group header
+        // landed on top of it. The settings shell's row height is the
+        // contract here (DESIGN-panels ▸ settings anatomy: 28px rows).
+        let row_w = ui.available().width();
+        let _ = ui.allocate(Vec2::new(row_w, ROW_H));
+        ui.set_cursor(start);
         if modified {
             ui.painter().rect_filled(
                 Rect::from_center_size(
@@ -1161,6 +1193,12 @@ pub fn editor_prefs_window(ui: &mut Ui, state: &mut SettingsState, keymap: &mut 
                     || p.console_show_error != d.console_show_error,
                 p.play != super::play_settings::PlaySettings::default(),
                 state.vsync != VSyncMode::default(),
+                // Keyboard Shortcuts (8): the keymap's own modified state is
+                // the `Keymap`'s, not `EditorPrefs`'; the page carries its own
+                // per-row dots and Reset All. A slot is still required — the
+                // array is indexed by *category*, and omitting it silently
+                // shifted every dot after Performance by one.
+                keymap.is_customized(),
                 p.graph != d.graph,
             ];
 
@@ -1532,7 +1570,10 @@ fn draw_prefs_rows(
         }
     }
 
-    if vis(8) {
+    // 8 is Keyboard Shortcuts — its ~50 generated rows are `draw_keymap_rows`,
+    // not a block here. Graph is 9, and numbering it 8 put the wire prefs on
+    // the shortcuts page and left the Graph page blank.
+    if vis(9) {
         draw_graph_rows(ui, f, p, &d);
     }
 }

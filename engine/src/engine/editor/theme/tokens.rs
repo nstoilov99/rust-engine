@@ -187,7 +187,10 @@ pub fn asset_deep_color(kind: &str) -> Color {
 
 #[inline]
 fn category_hue(name: &str) -> Hue {
-    if name == "Dev" || name == "Debug" {
+    // Only `Dev` is neutral (DESIGN.md ▸ palette architecture): every other
+    // unreserved name hashes, and the hash never lands on neutral, so gray
+    // always means fixture-or-unknown.
+    if name == "Dev" {
         return neutral();
     }
     PALETTES
@@ -852,8 +855,10 @@ mod tests {
         assert_eq!(category_color("Event"), ramp()[0].deep);
         assert_eq!(category_color("Interface"), ramp()[11].deep);
         assert_eq!(category_color("Dev"), neutral().deep);
-        assert_eq!(category_color("Debug"), neutral().deep);
         assert_eq!(category_tag_color("Dev"), neutral().bright);
+        // …and *only* Dev: an unreserved name hashes, and the hash can never
+        // land on neutral, so gray keeps meaning fixture-or-unknown.
+        assert_ne!(category_color("Debug"), neutral().deep);
     }
 
     #[test]

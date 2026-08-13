@@ -239,11 +239,20 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 if ui.menu_item("Editor Preferences\u{2026}") {
                     action = MenuAction::OpenEditorPreferences;
                 }
-                let _ = ui.menu_item_enabled("Keyboard Shortcuts\u{2026}", false);
+                // Both rows deep-link into the settings shell rather than
+                // opening a second window: the surfaces already exist
+                // (Preferences ▸ Keyboard Shortcuts, Project Settings ▸
+                // Plugins), and DESIGN-panels lists them as configuration
+                // affordances, not as future work.
+                if ui.menu_item("Keyboard Shortcuts\u{2026}") {
+                    action = MenuAction::OpenKeyboardShortcuts;
+                }
                 if ui.menu_item("Project Settings\u{2026}") {
                     action = MenuAction::OpenProjectSettings;
                 }
-                let _ = ui.menu_item_enabled("Plugins", false);
+                if ui.menu_item("Plugins\u{2026}") {
+                    action = MenuAction::OpenPlugins;
+                }
             });
 
             ui.menu_button("View", |ui| {

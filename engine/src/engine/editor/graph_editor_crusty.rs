@@ -78,7 +78,7 @@ const BASE_PIN_INSET: f32 = 6.0;
 /// Draw radius 4.5 (9px across); the exec triangle is 11px across.
 const BASE_PIN_R: f32 = 4.5;
 const BASE_EXEC_W: f32 = 11.0;
-const BASE_DIAMOND_W: f32 = 8.0;
+const BASE_DIAMOND_W: f32 = 9.0;
 const BASE_COLOR_SQ_W: f32 = 9.0;
 const BASE_TAG_PX: f32 = 9.0;
 const BASE_PAD_X: f32 = 8.0;
@@ -8747,17 +8747,33 @@ fn draw_nodes(
                 w.stale_for(WATCH_STALE_SECS)
             };
             let alpha = if stale.is_some() || !live_value { 0.55 } else { 1.0 };
-            p.rect_filled(chip, st.rounding.small, st.palette.input);
+            // A stale chip dims *as a chip* — fill, border, type edge and text
+            // together. Dimming only the number left a full-strength frame
+            // around a faded value, which reads as a rendering fault rather
+            // than as "this is old" (DESIGN-graphscripting ▸ Surface 3).
+            //
+            // `input` at 94%, translucent rather than glass: the chip floats
+            // over the canvas and has to admit what is behind it.
+            p.rect_filled_translucent(
+                chip,
+                st.rounding.small,
+                st.palette.input.with_alpha(0.94 * alpha),
+            );
             if live_value {
-                p.rect_stroke(chip, st.rounding.small, m.border, st.palette.stroke_strong);
+                p.rect_stroke(
+                    chip,
+                    st.rounding.small,
+                    m.border,
+                    st.palette.stroke_strong.with_alpha(alpha),
+                );
             } else {
-                dashed_rect(&mut p, chip, m.border, st.palette.stroke_strong);
+                dashed_rect(&mut p, chip, m.border, st.palette.stroke_strong.with_alpha(alpha));
             }
             // 2px type-coloured left edge — which wire this value came off.
             p.rect_filled(
                 Rect::from_min_size(chip.min, Vec2::new((m.edge * zoom).max(1.0), chip.height())),
                 Rounding::ZERO,
-                pin_color(Some(registry), &pin.ty),
+                pin_color(Some(registry), &pin.ty).with_alpha(alpha),
             );
             p.text_family(
                 Pos2::new(chip.min.x + gap, chip.center().y - px * 0.62),

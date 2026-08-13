@@ -440,7 +440,7 @@ pub fn tab_context_menu(
         ui.separator();
         // Ship disabled until Task 58.5 (multi-window viewport & tabs v2);
         // rows stay in place, dimmed, so the menu never changes shape.
-        let _ = ui.menu_item_enabled("Unpin Tab", false);
+        let _ = ui.menu_item_enabled("Unpin", false);
         let _ = ui.menu_item_enabled("Split Right", false);
         let _ = ui.menu_item_enabled("Move to New Window", false);
         ui.separator();

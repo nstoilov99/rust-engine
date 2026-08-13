@@ -739,7 +739,12 @@ pub fn segmented_control(
             ui.painter()
                 .rect_stroke(seg, rounding, style.metrics.border, pal.stroke);
         } else if hovered {
+            // State ladder: hover is fill one step lighter *and* a
+            // `stroke_strong` border — the fill alone leaves the segment
+            // reading as a different surface rather than a hovered control.
             ui.painter().rect_filled(seg, rounding, pal.hover);
+            ui.painter()
+                .rect_stroke(seg, rounding, style.metrics.border, pal.stroke_strong);
         }
 
         let text_color = if !enabled {

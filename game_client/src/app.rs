@@ -2659,6 +2659,17 @@ impl App {
             MenuAction::OpenProjectSettings => {
                 self.editor.ui.settings.project_open = true;
             }
+            MenuAction::OpenKeyboardShortcuts => {
+                self.editor.ui.settings.prefs_open = true;
+                self.editor.ui.settings.select_prefs_category(
+                    rust_engine::engine::editor::settings_crusty::shortcuts_category(),
+                );
+            }
+            MenuAction::OpenPlugins => {
+                self.editor.ui.settings.project_open = true;
+                self.editor.ui.settings.project_cat =
+                    rust_engine::engine::editor::settings_crusty::plugins_category();
+            }
             MenuAction::SaveLayout => {
                 match self.editor.ui.crusty_dock.save_to_default() {
                     Ok(()) => println!(

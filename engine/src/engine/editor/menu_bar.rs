@@ -35,6 +35,10 @@ pub enum MenuAction {
     OpenEditorPreferences,
     /// Open the Project Settings window (project.ron)
     OpenProjectSettings,
+    /// Open Editor Preferences at the Keyboard Shortcuts category.
+    OpenKeyboardShortcuts,
+    /// Open Project Settings at the Plugin Manager (39.8 P6b).
+    OpenPlugins,
     /// Save the current layout
     SaveLayout,
     /// Reset dock layout to default

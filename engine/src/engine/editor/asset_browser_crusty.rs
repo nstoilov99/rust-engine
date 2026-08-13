@@ -1432,7 +1432,11 @@ fn render_grid_card(
             style.palette.text
         };
         let name_size = 10.5;
-        let text = truncate_to_width(ui, &row.label, name_size, label_rect.width());
+        // Extension dropped on a *tile* - the type row directly below states
+        // it, and repeating it costs the characters that decide whether a
+        // generated name still reads (DESIGN-panels, Asset tiles). The list
+        // view keeps the full filename: a list of files is a list of files.
+        let text = truncate_to_width(ui, &row.name, name_size, label_rect.width());
         ui.painter().text(
             Pos2::new(label_rect.min.x, label_rect.min.y),
             &text,

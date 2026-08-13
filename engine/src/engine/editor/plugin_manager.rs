@@ -37,7 +37,7 @@ const ROW_H: f32 = 44.0;
 const GROUP_H: f32 = 24.0;
 const FILTER_H: f32 = 40.0;
 const BANNER_H: f32 = 32.0;
-const FOOTER_H: f32 = 24.0;
+const FOOTER_H: f32 = 26.0;
 
 // ── Model ────────────────────────────────────────────────────────────────
 
@@ -429,7 +429,12 @@ fn state_glyph(state: &RowState, ui: &Ui) -> (&'static str, crusty_gui::math::Co
         RowState::BlockedMissingDependency { .. } => ("\u{2298}", st.warning, 12.0),
         RowState::NotInThisBuild => ("\u{2298}", pal.text_disabled, 12.0),
         RowState::EnabledWithWarnings => ("\u{25B2}", st.warning, 9.0),
-        RowState::PendingEnable | RowState::PendingDisable => ("\u{25CF}", st.warning, 8.0),
+        // Pending = changed-but-not-applied, which is `status.overridden`'s
+        // orange in the mockup - distinct from the warning yellow the RESTART
+        // chip and the footer notice carry.
+        RowState::PendingEnable | RowState::PendingDisable => {
+            ("\u{25CF}", st.overridden, 8.0)
+        }
         RowState::Enabled => ("\u{25CF}", st.success, 8.0),
         RowState::Disabled => ("\u{25CB}", pal.text_disabled, 9.0),
     }
@@ -454,25 +459,38 @@ fn state_text(row: &PluginRow) -> String {
     }
 }
 
+/// How a row chip is coloured. Error and warning are different *states*, and
+/// a plugin that failed to load is not a caution.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChipTone {
+    Error,
+    Warning,
+    Muted,
+}
+
 /// Chips shown after the name.
-fn row_chips(row: &PluginRow) -> Vec<(&'static str, bool)> {
-    let mut chips: Vec<(&'static str, bool)> = Vec::new();
+fn row_chips(row: &PluginRow) -> Vec<(&'static str, ChipTone)> {
+    let mut chips: Vec<(&'static str, ChipTone)> = Vec::new();
     match &row.state {
-        RowState::Failed { .. } => chips.push(("FAILED", true)),
-        RowState::BlockedMissingDependency { .. } => chips.push(("BLOCKED", true)),
-        RowState::NotInThisBuild => chips.push(("NOT IN BUILD", false)),
+        // A plugin that failed to load is an *error*, not a caution - the
+        // mockup's chip is error red, and the row's second line already is.
+        RowState::Failed { .. } => chips.push(("FAILED", ChipTone::Error)),
+        RowState::BlockedMissingDependency { .. } => {
+            chips.push(("BLOCKED", ChipTone::Warning))
+        }
+        RowState::NotInThisBuild => chips.push(("NOT IN BUILD", ChipTone::Muted)),
         _ => {}
     }
     if row.state.pending() {
-        chips.push(("RESTART", true));
+        chips.push(("RESTART", ChipTone::Warning));
     }
     // Delta 3: the kind chip answers "what does this cost an export?" — but
     // an orphan is not in this build, so we do not actually know its kind and
     // must not assert one.
     if !matches!(row.state, RowState::NotInThisBuild) {
         chips.push(match row.kind {
-            PluginKind::EditorOnly => ("EDITOR-ONLY", false),
-            PluginKind::Runtime => ("SHIPS", false),
+            PluginKind::EditorOnly => ("EDITOR-ONLY", ChipTone::Muted),
+            PluginKind::Runtime => ("SHIPS", ChipTone::Muted),
         });
     }
     chips
@@ -627,6 +645,10 @@ pub fn plugin_manager_page(
     );
     ui.painter().text_family(
         Pos2::new(footer.min.x + 12.0, footer.center().y - 5.0),
+        // The mockup also carries a plugins *folder* path and says "N
+        // enabled"; neither survives 39.8's model - plugins are compile-time,
+        // and an enabled plugin is not loaded until the relaunch. "Loaded" is
+        // the number this can honestly report (see AUDIT-2026-08, stale).
         &format!(
             "{} plugins \u{00B7} {} loaded",
             model.rows.len(),
@@ -835,7 +857,7 @@ fn draw_list(
             .text(Pos2::new(x, rect.min.y + 7.0), &row.name, 13.0, name_color, None);
         x += ui.painter().measure_text(&row.name, 13.0, None).x + 7.0;
         if !row.version.is_empty() {
-            let v = format!("v{}", row.version);
+            let v = row.version.clone();
             ui.painter().text_family(
                 Pos2::new(x, rect.min.y + 10.0),
                 &v,
@@ -850,7 +872,7 @@ fn draw_list(
                 .x
                 + 6.0;
         }
-        for (text, loud) in row_chips(row) {
+        for (text, tone) in row_chips(row) {
             let cw = ui
                 .painter()
                 .measure_text_family(text, 8.5, None, FontFamily::Mono)
@@ -862,7 +884,11 @@ fn draw_list(
             if chip.max.x > rect.max.x - 52.0 {
                 break;
             }
-            let color = if loud { st.warning } else { pal.text_disabled };
+            let color = match tone {
+                ChipTone::Error => st.error,
+                ChipTone::Warning => st.warning,
+                ChipTone::Muted => pal.text_disabled,
+            };
             ui.painter()
                 .rect_stroke(chip, style.rounding.small, 1.0, color);
             ui.painter().text_family(

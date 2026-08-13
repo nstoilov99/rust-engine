@@ -638,8 +638,9 @@ fn color_row(
 
 // ── Asset reference field ────────────────────────────────────────────────
 
-/// 52px framed thumbnail with a 2px bottom type edge.
-const REF_THUMB: f32 = 52.0;
+/// 44px framed thumbnail with a 2px bottom type edge (DESIGN-panels ▸ Asset
+/// reference fields).
+const REF_THUMB: f32 = 44.0;
 /// Session-wide Copy/Paste Reference clipboard (path string).
 fn asset_ref_clipboard_id() -> Id {
     Id::new("asset_ref_clipboard")
