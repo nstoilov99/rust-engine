@@ -39,6 +39,7 @@
 //!             index entries
 //! ```
 
+pub mod debug;
 pub mod effect;
 pub mod exec;
 pub mod instance;
@@ -48,8 +49,9 @@ pub mod plan;
 pub mod trace;
 pub mod value;
 
+pub use debug::{BreakSet, DebugCommand, DebugCtl};
 pub use effect::{Effect, EffectSink, LogLevel, NoWorld, TransformSnapshot, WorldRead};
-pub use exec::{tick, tick_traced, tick_with_budget, TickReport, DEFAULT_BUDGET};
+pub use exec::{tick, tick_debug, tick_traced, tick_with_budget, TickReport, DEFAULT_BUDGET};
 pub use instance::{
     Activation, ActivationId, Frame, GraphInstance, QueuedEvent, Rng, ThreadState,
 };

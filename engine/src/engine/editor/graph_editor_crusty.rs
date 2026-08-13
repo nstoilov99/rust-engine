@@ -41,7 +41,7 @@ use super::graph_editor::{
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
 };
-use super::graph_exec_viz::{ExecInstance, GraphExecViz, STEADY_HOT_HZ};
+use super::graph_exec_viz::{DebugRequest, ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
 use super::graph_wire_router::{
@@ -767,8 +767,10 @@ struct NodeGeom {
     errored: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
-    /// Carries an inert breakpoint mark (`F9`).
-    breakpoint: bool,
+    /// The breakpoint mark, if any: `Some(true)` armed, `Some(false)`
+    /// disabled (GS-4). Whether it is *hit* or *invalid* is not geometry — it
+    /// comes from the bound instance at draw time.
+    breakpoint: Option<bool>,
     /// Opt-in preview slot; `None` — the common case — costs nothing.
     preview: Option<crate::engine::node_graph::PreviewKind>,
     /// Pin-less reserved-property rows, drawn above the pin band.
@@ -1004,7 +1006,7 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
-                    breakpoint: state.has_breakpoint(n.id),
+                    breakpoint: state.breakpoints.get(&n.id).copied(),
                     preview: None,
                     config: Vec::new(),
                     add_field: None,
@@ -1071,10 +1073,25 @@ fn build_geoms(
             let tag = derive_tag(is_sub, desc, category.as_deref());
 
             // --- auto width: widest of the header row and every pin row ---
-            let tag_w = p
+            let mut tag_w = p
                 .measure_text_family(&tag, m.tag_px, None, FontFamily::Mono)
                 .x;
+            // A node carrying a breakpoint reserves its debug header now
+            // (GS-4): the badge gutter, and enough of the tag slot for the
+            // PAUSED chip that replaces the category while execution is parked
+            // on it. Sizing for it up front is what stops a hit from eliding
+            // the node's own title at the moment you most need to read it —
+            // and it costs only the marked nodes a few pixels, which is
+            // exactly what the mockup's wider hit card does.
+            let mut gutter_w = 0.0;
+            if state.has_breakpoint(n.id) {
+                tag_w = tag_w.max(
+                    p.measure_text_family("PAUSED", m.tag_px, None, FontFamily::Mono).x,
+                );
+                gutter_w = m.pin_r * BREAK_BADGE_R * 2.0 + m.label_gap;
+            }
             let header_w = m.pad_x
+                + gutter_w
                 + p.measure_text(&title, title_px, None).x
                 + m.col_gap
                 + tag_w
@@ -1169,7 +1186,7 @@ fn build_geoms(
             let width = content_w.clamp(m.min_w, m.max_w);
 
             // Title fits whatever the (possibly capped) header leaves it.
-            let title_avail = width - m.pad_x * 2.0 - tag_w - m.col_gap;
+            let title_avail = width - m.pad_x * 2.0 - gutter_w - tag_w - m.col_gap;
             let title = middle_truncate(p, &title, title_px, title_avail);
 
             let preview_h = desc
@@ -1277,7 +1294,7 @@ fn build_geoms(
             NodeGeom {
                 id: n.id,
                 rect,
-                breakpoint: state.has_breakpoint(n.id),
+                breakpoint: state.breakpoints.get(&n.id).copied(),
                 title,
                 tag,
                 category,
@@ -1545,7 +1562,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     }
 
     if handle_shortcuts && focused {
-        handle_panel_keys(ui, state, registry, clipboard, keymap);
+        handle_panel_keys(ui, state, registry, clipboard, keymap, exec);
     }
 
     // The graph toolbar sits above the canvas and takes its row out of the
@@ -1567,6 +1584,10 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     if clear_trace {
         *exec_clear = Some(state.path.clone());
     }
+    // The PAUSED banner takes its row the same way the toolbar does, so the
+    // canvas below shrinks by exactly its height and every overlay measured
+    // off the canvas rect follows without knowing it exists.
+    paused_banner(ui, state, registry, resolver, keymap, exec);
 
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
@@ -1790,6 +1811,7 @@ fn handle_panel_keys(
     registry: &NodeRegistry,
     clipboard: &mut Option<GraphFragment>,
     keymap: &Keymap,
+    exec: Option<&GraphExecViz>,
 ) {
     if overlay_has_focus(ui, state) {
         return;
@@ -1815,6 +1837,18 @@ fn handle_panel_keys(
             }
             Action::DUPLICATE => state.duplicate_selection(registry),
             Action::TOGGLE_VARIABLES => state.vars.open = !state.vars.open,
+            // The debugger transport again, for the tab that has focus with
+            // the pointer somewhere else — the canvas dispatch below only runs
+            // while the pointer is over the graph.
+            Action::DEBUG_RESUME | Action::DEBUG_STEP | Action::DEBUG_STOP
+                if exec.is_some_and(|v| v.paused.is_some()) =>
+            {
+                state.debug_request = Some(match action {
+                    Action::DEBUG_STEP => DebugRequest::Step,
+                    Action::DEBUG_STOP => DebugRequest::Stop,
+                    _ => DebugRequest::Resume,
+                });
+            }
             _ => {}
         }
     }
@@ -1973,6 +2007,7 @@ fn draw_and_interact(
     // owned by embedded controls so the node-drag pass can yield to them.
     let mut widget_rects: Vec<Rect> = Vec::new();
     let mut watch_rects: Vec<(u64, String, bool, Rect)> = Vec::new();
+    let mut badge_rects: Vec<(u64, Rect)> = Vec::new();
     draw_nodes(
         ui,
         scope,
@@ -1991,6 +2026,7 @@ fn draw_and_interact(
         exec,
         var_dim.as_ref(),
         &mut watch_rects,
+        &mut badge_rects,
     );
 
     // Interactions.
@@ -2424,6 +2460,43 @@ fn draw_and_interact(
         state.watches.retain(|w| !w.is(node, &pin, output));
     }
 
+    // The badge gutter (GS-4): click a mark to arm or disarm it, Alt+click to
+    // remove it. Alt is the destroy verb everywhere else in this canvas — on a
+    // node header it breaks the links — so the slot claims the press to keep
+    // the two apart, and a mark is *created* with F9 or the node menu rather
+    // than by clicking an empty gutter that draws nothing.
+    let mut badge_claimed = false;
+    let mut badge_edit: Option<(u64, bool)> = None;
+    for (id, rect) in &badge_rects {
+        let iid = ui.alloc_id(("graph_break_badge", *id));
+        let resp = ui.interact(iid, *rect);
+        if resp.hovered {
+            let armed = state.breakpoint_armed(*id);
+            ui.tooltip_for(
+                *rect,
+                if armed {
+                    "Breakpoint armed\nClick to disable · Alt+click to remove"
+                } else {
+                    "Breakpoint disabled\nClick to arm · Alt+click to remove"
+                },
+            );
+        }
+        if resp.pressed {
+            badge_claimed = true;
+        }
+        if resp.clicked {
+            badge_edit = Some((*id, alt));
+        }
+    }
+    if let Some((id, remove)) = badge_edit {
+        if remove {
+            state.remove_breakpoint(id);
+            state.toast("Breakpoint removed");
+        } else {
+            state.cycle_breakpoint(id);
+        }
+    }
+
     // Config band: the ✕ on a payload row, the slug (rename) and the "+ field"
     // ghost row. Before the node body so none of the three starts a drag, and
     // only where the band is drawn — an affordance you cannot see must not be
@@ -2568,7 +2641,7 @@ fn draw_and_interact(
         }
         // Alt-click the header breaks every link the node has — the pin
         // gesture, extended to the whole node.
-        if resp.pressed && alt && !pin_claimed {
+        if resp.pressed && alt && !pin_claimed && !badge_claimed {
             let header = Rect::from_min_size(
                 g.rect.min,
                 Vec2::new(g.rect.width(), m.header_h),
@@ -2579,6 +2652,7 @@ fn draw_and_interact(
         }
         if resp.pressed && !alt
             && !pin_claimed
+            && !badge_claimed
             && !config_claimed
             && !widget_claimed
             && !wire_claimed
@@ -3129,6 +3203,19 @@ fn draw_and_interact(
                 Action::COMPILE => state.compile(registry),
                 Action::TOGGLE_BREAKPOINT => state.toggle_breakpoint(),
                 Action::CLEAR_BREAKPOINTS => state.clear_breakpoints(),
+                // Debugger transport (GS-4). Gated on there being a paused
+                // session: outside one these keys mean nothing, and silence is
+                // the right nothing — a toast on every stray F10 would be
+                // worse than no answer.
+                Action::DEBUG_RESUME | Action::DEBUG_STEP | Action::DEBUG_STOP
+                    if exec.is_some_and(|v| v.paused.is_some()) =>
+                {
+                    state.debug_request = Some(match action {
+                        Action::DEBUG_STEP => DebugRequest::Step,
+                        Action::DEBUG_STOP => DebugRequest::Stop,
+                        _ => DebugRequest::Resume,
+                    });
+                }
                 Action::RENAME => {
                     state.begin_rename();
                 }
@@ -4381,6 +4468,11 @@ fn place_palette_pick(
 const TOOLBAR_H: f32 = 30.0;
 /// Width of the 3-way wire-style segmented control, base units.
 const TOOLBAR_SEG_W: f32 = 168.0;
+/// Height of the PAUSED banner's row (GS-4), base units — the mockup's 32px
+/// bar plus the half-pad of breathing room that keeps it off the toolbar rule.
+const BANNER_H: f32 = 40.0;
+/// Breakpoint octagon radius, as a multiple of the pin radius (GS-4).
+const BREAK_BADGE_R: f32 = 1.15;
 
 /// The graph tab's toolbar: a 3-way wire-style quick switch on the left and
 /// the document's realm as a read-only mono chip on the right.
@@ -4588,6 +4680,164 @@ fn graph_toolbar(
     // toolbar paints before it, so a surface opened here would be buried
     // under the grid it is supposed to float over.
     *chip_rect = Some((live_chip, just_opened));
+}
+
+/// The PAUSED banner (GS-4) — **inside the tab**, docked under the graph
+/// toolbar, never global chrome.
+///
+/// A pause belongs to one instance of one document; a window-level bar would
+/// claim the whole editor is stopped, and with two graph tabs open it would
+/// have to name which one. Docking it here also means it takes its row out of
+/// the canvas exactly like the toolbar does, so nothing measured off the
+/// canvas has to know it exists.
+///
+/// Anatomy is the mockup's: PAUSED · node · instance and hit count · Resume /
+/// Step / Stop, each with its chord in mono.
+#[allow(clippy::too_many_arguments)]
+fn paused_banner(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    exec: Option<&GraphExecViz>,
+) {
+    let (Some(pause), Some(viz)) = (exec.and_then(|v| v.paused), exec) else {
+        return;
+    };
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let status = Palette::invariant_status();
+    let pad = BASE_PAD_X * s;
+    let w = ui.available().width();
+    let row = ui.allocate(Vec2::new(w, BANNER_H * s));
+    let rect = Rect::from_min_max(
+        Pos2::new(row.min.x + pad, row.min.y + pad * 0.5),
+        Pos2::new(row.max.x - pad, row.max.y - pad * 0.5),
+    );
+    ui.painter()
+        .rect_filled(row, Rounding::ZERO, st.palette.window);
+    ui.painter()
+        // Half a chip's tint: the wash is the same token, but a full-width bar
+        // covers twenty times a chip's area and would otherwise outshout the
+        // canvas it is reporting on. The 1px border carries the identity.
+        .rect_filled(rect, st.rounding.small, status.warning.with_alpha(0.05));
+    ui.painter()
+        .rect_stroke(rect, st.rounding.small, st.metrics.border, status.warning);
+
+    let px = st.fonts.small;
+    let body = st.fonts.body;
+    let mut x = rect.min.x + pad;
+    let word_w = ui
+        .painter()
+        .measure_text_family("PAUSED", px, None, FontFamily::Mono)
+        .x;
+    ui.painter().text_family(
+        Pos2::new(x, rect.center().y - px * 0.62),
+        "PAUSED",
+        px,
+        status.warning,
+        None,
+        FontFamily::Mono,
+    );
+    x += word_w + pad;
+
+    // The node, by the name the canvas gives it — a synthesized title
+    // ("Branch", "Get Health") is what the author is looking at, so the banner
+    // must not fall back to a type id.
+    let title = resolver
+        .bind(&state.doc, registry)
+        .display_name(pause.node)
+        .unwrap_or_else(|| "node".to_string());
+    let title_w = ui.painter().measure_text(&title, body, None).x;
+    ui.painter().text(
+        Pos2::new(x, rect.center().y - body * 0.62),
+        &title,
+        body,
+        st.palette.text,
+        None,
+    );
+    x += title_w + pad * 1.6;
+
+    // Instance and hit count in one mono run: which Duck, and how many times
+    // this session has stopped here.
+    let who = if viz.instance.is_empty() { "instance" } else { viz.instance.as_str() };
+    let sub = format!("{who} \u{00B7} hit {}\u{00D7}", pause.hits.max(1));
+    ui.painter().text_family(
+        Pos2::new(x, rect.center().y - px * 0.62),
+        &sub,
+        px,
+        st.palette.text_disabled,
+        None,
+        FontFamily::Mono,
+    );
+
+    // Buttons, right to left so the primary lands where the eye already is.
+    let mut req: Option<DebugRequest> = None;
+    let mut right = rect.max.x - pad;
+    for (label, action, kind) in [
+        ("Stop", None, 0u8),
+        ("Step", Some(Action::DEBUG_STEP), 0),
+        ("Resume", Some(Action::DEBUG_RESUME), 1),
+    ] {
+        let chord = action.and_then(|a| keymap.chord_label(a)).unwrap_or_default();
+        let lw = ui.painter().measure_text(label, body, None).x;
+        let cw = if chord.is_empty() {
+            0.0
+        } else {
+            ui.painter().measure_text_family(&chord, px * 0.9, None, FontFamily::Mono).x
+                + pad * 0.5
+        };
+        let bw = lw + cw + pad * 1.6;
+        let b = Rect::from_min_max(
+            Pos2::new(right - bw, rect.min.y + pad * 0.4),
+            Pos2::new(right, rect.max.y - pad * 0.4),
+        );
+        right = b.min.x - pad * 0.6;
+        let bid = ui.alloc_id(("graph_paused_btn", label));
+        let resp = ui.interact(bid, b);
+        let fill = match (kind, resp.hovered) {
+            (1, false) => st.palette.active,
+            (1, true) => st.palette.hover,
+            (_, true) => st.palette.hover,
+            _ => Color::TRANSPARENT,
+        };
+        let mut p = ui.painter();
+        p.rect_filled(b, st.rounding.small, fill);
+        p.rect_stroke(
+            b,
+            st.rounding.small,
+            st.metrics.border,
+            if kind == 1 { st.palette.stroke_strong } else { st.palette.stroke },
+        );
+        p.text(
+            Pos2::new(b.min.x + pad * 0.8, b.center().y - body * 0.62),
+            label,
+            body,
+            if kind == 1 { st.palette.text } else { st.palette.text_secondary },
+            None,
+        );
+        if !chord.is_empty() {
+            p.text_family(
+                Pos2::new(b.min.x + pad * 0.8 + lw + pad * 0.5, b.center().y - px * 0.56),
+                &chord,
+                px * 0.9,
+                st.palette.text_disabled,
+                None,
+                FontFamily::Mono,
+            );
+        }
+        if resp.clicked {
+            req = Some(match label {
+                "Resume" => DebugRequest::Resume,
+                "Step" => DebugRequest::Step,
+                _ => DebugRequest::Stop,
+            });
+        }
+    }
+    if let Some(r) = req {
+        state.debug_request = Some(r);
+    }
 }
 
 /// What the LIVE chip is saying (GS-3). Pure, so the state machine the design
@@ -7697,6 +7947,88 @@ fn wire_under(wires: &[WireGeom], pointer: Option<Pos2>) -> Option<usize> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The breakpoint ladder's four states (GS-4), in precedence order below the
+/// error disc. Kept as an enum so the drawing is one match and the ladder is
+/// one testable function rather than a chain of conditions at the paint site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakBadge {
+    /// Execution is parked here: solid warning octagon.
+    Hit,
+    /// Armed and resolvable: solid error octagon.
+    Armed,
+    /// Armed but resolves to nothing that can fire: hollow warning + `!`.
+    Invalid,
+    /// Kept, not armed: hollow grey.
+    Disabled,
+}
+
+/// Which badge a node's mark draws, given what the bound instance is doing.
+///
+/// `None` here means "not a breakpoint badge" — the caller falls through to
+/// the error disc, which is the rung above everything but a hit.
+fn break_badge(
+    mark: Option<bool>,
+    errored: bool,
+    paused_here: bool,
+    invalid: bool,
+) -> Option<BreakBadge> {
+    match () {
+        _ if paused_here && mark.is_some() => Some(BreakBadge::Hit),
+        _ if errored => None,
+        _ if mark == Some(true) && invalid => Some(BreakBadge::Invalid),
+        _ if mark == Some(true) => Some(BreakBadge::Armed),
+        _ if mark == Some(false) => Some(BreakBadge::Disabled),
+        _ => None,
+    }
+}
+
+/// Paint one breakpoint octagon. Filled for the two "this will stop"
+/// states, a hollow ring for the two that will not — the same fill-means-live
+/// convention the pin dots use.
+fn draw_break_badge(
+    p: &mut Painter,
+    st: &Style,
+    c: Pos2,
+    r: f32,
+    badge: BreakBadge,
+    text_px: f32,
+) {
+    let status = Palette::invariant_status();
+    let pts: Vec<Pos2> = (0..8)
+        .map(|i| {
+            let a = std::f32::consts::TAU * (i as f32 + 0.5) / 8.0;
+            Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    let (col, filled) = match badge {
+        BreakBadge::Hit => (status.warning, true),
+        BreakBadge::Armed => (status.error, true),
+        BreakBadge::Invalid => (status.warning, false),
+        BreakBadge::Disabled => (st.palette.text_disabled, false),
+    };
+    if filled {
+        p.convex_polygon_filled(pts, col);
+    } else {
+        // A true stroke rather than a donut: the header fill behind a badge is
+        // not always the same colour (the category band reaches it), so
+        // punching a hole with a second fill would show a seam.
+        let w = (r * 0.24).max(1.0);
+        for i in 0..8 {
+            p.line_segment(pts[i], pts[(i + 1) % 8], w, col);
+        }
+    }
+    if badge == BreakBadge::Invalid {
+        let px = text_px * 0.8;
+        p.text(
+            Pos2::new(c.x - px * 0.16, c.y - px * 0.56),
+            "!",
+            px,
+            col,
+            None,
+        );
+    }
+}
+
 fn draw_nodes(
     ui: &mut Ui,
     scope: &CanvasScope,
@@ -7719,6 +8051,9 @@ fn draw_nodes(
     // Watch chip boxes, collected for the interaction pass (the ✕ is
     // hover-revealed and lives where the chip was drawn).
     watch_rects: &mut Vec<(u64, String, bool, Rect)>,
+    // Badge gutter slots of nodes carrying a breakpoint mark, for the click
+    // that arms/disarms it (GS-4).
+    badge_rects: &mut Vec<(u64, Rect)>,
 ) {
     let status = Palette::invariant_status();
     // Collected during the paint pass, applied after (the widget pass needs
@@ -7747,6 +8082,12 @@ fn draw_nodes(
             .and_then(|v| v.killed.as_ref())
             .is_some_and(|k| k.node == Some(g.id));
         let errored = g.errored || killed_here;
+        // GS-4. `paused_here` does not require a mark: Step re-parks on
+        // whatever node comes next, and "you are here" is exactly what the
+        // border and the chip are for. The octagon does need one — drawing a
+        // breakpoint glyph where there is no breakpoint would be a lie.
+        let paused_here = exec.is_some_and(|v| v.paused_on(g.id));
+        let invalid_break = exec.is_some_and(|v| v.break_invalid(g.id));
         let edge_col = if g.missing { status.error } else { g.edge_color() };
         // Find-in-graph dims what does not match, rather than hiding it —
         // context is what makes a search result mean anything.
@@ -7844,7 +8185,13 @@ fn draw_nodes(
             srect,
             round,
             m.border,
-            if g.missing || errored { status.error } else { st.palette.stroke },
+            match () {
+                // Paused outranks errored on the border for the same reason it
+                // does in the gutter: the stop is now.
+                _ if paused_here => status.warning,
+                _ if g.missing || errored => status.error,
+                _ => st.palette.stroke,
+            },
         );
 
         // Running (45-A P7): a node that fired recently gains an accent ring
@@ -7915,23 +8262,42 @@ fn draw_nodes(
         if lod.glyphs() {
             let title_px = st.fonts.body * zoom;
             // Badges never stack: one glyph in the header's left gutter, by
-            // precedence — error/missing outranks a breakpoint, because a node
-            // that cannot run is more urgent than one you meant to stop at.
-            let gutter = if !errored && !g.missing && g.breakpoint {
-                let r = m.pin_r * zoom * 0.8;
+            // precedence — **hit > error > invalid > armed > disabled**
+            // (GS-4). A node stopped at outranks a node that cannot run,
+            // because the stop is happening now and the error has been true
+            // since before you pressed play; everything below error is a mark
+            // you left for yourself.
+            let badge = break_badge(
+                g.breakpoint,
+                errored || g.missing,
+                paused_here,
+                invalid_break,
+            );
+            let gutter = if let Some(badge) = badge {
+                // Larger than the error disc on purpose: an octagon of the
+                // same radius reads smaller (its corners are cut away), and at
+                // the disc's size the facets vanish into a dot. ~40% of the
+                // header's height, which is the mockup's proportion.
+                let r = m.pin_r * zoom * BREAK_BADGE_R;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
                     srect.min.y + m.header_h * zoom * 0.5,
                 );
                 // An octagon, per the Badges spec: a stop sign reads as "halt"
                 // at a glance and cannot be confused with the error disc.
-                let pts: Vec<Pos2> = (0..8)
-                    .map(|i| {
-                        let a = std::f32::consts::TAU * (i as f32 + 0.5) / 8.0;
-                        Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
-                    })
-                    .collect();
-                p.convex_polygon_filled(pts, status.error);
+                draw_break_badge(&mut p, st, c, r, badge, title_px);
+                // The click target is the slot, not the glyph: an octagon of
+                // six screen pixels is a dot to hit at 60% zoom.
+                badge_rects.push((
+                    g.id,
+                    Rect::from_min_max(
+                        Pos2::new(srect.min.x, srect.min.y),
+                        Pos2::new(
+                            c.x + r + m.label_gap * zoom * 0.5,
+                            srect.min.y + m.header_h * zoom,
+                        ),
+                    ),
+                ));
                 r * 2.0 + m.label_gap * zoom
             } else if errored || g.missing {
                 let r = m.pin_r * zoom * 0.8;
@@ -7951,30 +8317,45 @@ fn draw_nodes(
             } else {
                 0.0
             };
+            // 9px mono category tag, bright tone, right side of the header —
+            // or, while this is the node execution is parked on, the mono
+            // PAUSED chip in its place (GS-4). One slot, one occupant: the
+            // category is a permanent fact and can wait a moment, and squeezing
+            // both in overflows the header on any node with a short title.
+            let tag_px = m.tag_px * zoom;
+            let (tag, tag_col) = if paused_here {
+                ("PAUSED", status.warning)
+            } else {
+                (g.tag.as_str(), fade(g.tag_color(), dim, bg))
+            };
+            let tag_w = p.measure_text_family(tag, tag_px, None, FontFamily::Mono).x;
+            // The title is truncated *here*, against what the badge gutter and
+            // this particular tag actually leave — the geometry pass sized the
+            // node for the category tag and no badge, and both change under a
+            // live session (a wider PAUSED chip, a gutter that appears when a
+            // mark is set). Measuring at paint is the only place both are known.
+            let title_avail =
+                srect.width() - m.pad_x * zoom * 2.0 - gutter - tag_w - m.label_gap * zoom;
+            let title = middle_truncate(&mut p, &g.title, title_px, title_avail.max(0.0));
             // Dimming reaches the *text*, not only the fills: a card whose
             // title still reads at full strength does not look excluded from
             // a search, which is the whole job of the 45% state.
             p.text(
                 srect.min
                     + Vec2::new(m.pad_x * zoom + gutter, (m.header_h * zoom - title_px) * 0.5),
-                &g.title,
+                &title,
                 title_px,
                 fade(st.palette.text, dim, bg),
                 None,
             );
-            // 9px mono category tag, bright tone, right side of the header.
-            let tag_px = m.tag_px * zoom;
-            let tag_w = p
-                .measure_text_family(&g.tag, tag_px, None, FontFamily::Mono)
-                .x;
             p.text_family(
                 Pos2::new(
                     srect.max.x - m.pad_x * zoom - tag_w,
                     srect.min.y + (m.header_h * zoom - tag_px) * 0.5,
                 ),
-                &g.tag,
+                tag,
                 tag_px,
-                fade(g.tag_color(), dim, bg),
+                tag_col,
                 None,
                 FontFamily::Mono,
             );
@@ -8357,7 +8738,14 @@ fn draw_nodes(
             // (and in edit mode, where the last run's value is residue rather
             // than truth); dimmed with an age tag once it has sat unchanged.
             let live_value = exec.is_some() && w.last.is_some();
-            let stale = w.stale_for(WATCH_STALE_SECS);
+            // …but a paused session cannot go stale (GS-4): the value stopped
+            // changing because the graph stopped running, and dimming the one
+            // frame you deliberately froze would be the opposite of the help.
+            let stale = if exec.is_some_and(|v| v.paused.is_some()) {
+                None
+            } else {
+                w.stale_for(WATCH_STALE_SECS)
+            };
             let alpha = if stale.is_some() || !live_value { 0.55 } else { 1.0 };
             p.rect_filled(chip, st.rounding.small, st.palette.input);
             if live_value {
@@ -9760,7 +10148,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: true,
-            breakpoint: false,
+            breakpoint: None,
             preview: None,
             config: Vec::new(),
             add_field: None,
@@ -9884,7 +10272,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
-            breakpoint: false,
+            breakpoint: None,
             preview: None,
             config: Vec::new(),
             add_field: None,
@@ -9908,7 +10296,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
-            breakpoint: false,
+            breakpoint: None,
             preview: None,
             config: Vec::new(),
             add_field: None,
@@ -10255,7 +10643,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
-            breakpoint: false,
+            breakpoint: None,
             preview: None,
             config,
             add_field: add,
@@ -10345,6 +10733,32 @@ mod tests {
         // Killed-but-unbound is not a state the chip can be in; the instances
         // exist, so it says how many and waits to be pointed at one.
         assert_eq!(chip_state(false, true, 2), ChipState::Unbound(2));
+    }
+
+    /// **GS-4: the badge gutter's precedence ladder.**
+    /// hit > error > invalid > armed > disabled, one slot, never stacked.
+    #[test]
+    fn the_breakpoint_badge_ladder_never_stacks() {
+        use BreakBadge::*;
+        // A hit outranks everything, including an error on the same node: the
+        // stop is happening now.
+        assert_eq!(break_badge(Some(true), true, true, false), Some(Hit));
+        assert_eq!(break_badge(Some(false), false, true, false), Some(Hit));
+        // …but a hit with no mark draws no octagon — Step parks wherever it
+        // lands, and a breakpoint glyph there would claim a mark that is not
+        // set. The border and the PAUSED chip still say where execution is.
+        assert_eq!(break_badge(None, false, true, false), None);
+        // Error outranks every resting mark.
+        assert_eq!(break_badge(Some(true), true, false, false), None);
+        assert_eq!(break_badge(Some(false), true, false, false), None);
+        // Then the marks themselves.
+        assert_eq!(break_badge(Some(true), false, false, true), Some(Invalid));
+        assert_eq!(break_badge(Some(true), false, false, false), Some(Armed));
+        assert_eq!(break_badge(Some(false), false, false, false), Some(Disabled));
+        // A *disabled* mark is never invalid: it arms nothing, so there is
+        // nothing to fail to resolve.
+        assert_eq!(break_badge(Some(false), false, false, true), Some(Disabled));
+        assert_eq!(break_badge(None, false, false, false), None);
     }
 
     /// **GS-2: where a dragged row would land.** The insertion index follows

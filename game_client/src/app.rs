@@ -1038,7 +1038,13 @@ impl App {
         let root = std::path::Path::new("content");
         let mut store = GraphStateStore::load(root);
         for (rel, st) in self.editor.scene.graph_editors.iter() {
-            store.store(rel, st.view, &st.bookmarks, stored_watches(st));
+            store.store(
+                rel,
+                st.view,
+                &st.bookmarks,
+                stored_watches(st),
+                stored_breakpoints(st),
+            );
         }
         if let Err(e) = store.save() {
             eprintln!("Warning: failed to save graph UI state: {e}");
@@ -3424,6 +3430,10 @@ impl App {
         // Set by a graph toolbar's "Clear trace"; applied after the UI, where
         // the world is reachable (GS-3).
         let mut graph_clear_trace: Option<String> = None;
+        // Which instance each graph tab is debugging, what it armed, and what
+        // it asked the debugger for (GS-4). Applied after the UI for the same
+        // reason "Clear trace" is: it writes to the running instances.
+        let mut graph_debug: Vec<GraphDebugPlan> = Vec::new();
         // Toolbar quick-switch: the panel reports a style pick, the host
         // writes it into the same pref the Preferences window edits, so it
         // shows the overridden dot there and rides the debounced autosave.
@@ -3590,14 +3600,25 @@ impl App {
             // without the interpreter — and empty draws nothing.
             // Where the person asking "which Duck is that" is standing.
             let graph_camera_pos = graph_camera;
+            // GS-4 rides along: each tab's armed marks resolve against the
+            // instance it is bound to (so the canvas can flag the ones that
+            // resolve to nothing), and the debugger command it raised last
+            // frame travels out to be delivered after the UI, where the world
+            // is reachable mutably.
+            let graph_debug_tabs: Vec<GraphDebugTab> = graph_editors
+                .iter_mut()
+                .map(|(k, st)| GraphDebugTab {
+                    path: k.clone(),
+                    bind: st.exec_bind,
+                    armed: st.armed_breakpoints(),
+                    request: st.debug_request.take(),
+                })
+                .collect();
             let graph_exec = {
                 let picked: Vec<hecs::Entity> = sel.all().copied().collect();
-                let binds: Vec<(String, Option<u64>)> = graph_editors
-                    .iter()
-                    .map(|(k, st)| (k.clone(), st.exec_bind))
-                    .collect();
-                graph_exec_bindings(&*world, &*world_resources, &picked, &binds)
+                graph_exec_bindings(&*world, &*world_resources, &picked, &graph_debug_tabs)
             };
+            graph_debug.extend(graph_debug_plan(&graph_debug_tabs, &graph_exec));
             // Every instance of every open graph, for the LIVE chip's picker
             // (GS-3). Present even when nothing is bound — "N RUNNING" is a
             // state, not an absence.
@@ -4158,6 +4179,11 @@ impl App {
         if let Some(key) = graph_clear_trace.take() {
             self.clear_graph_traces(&key);
         }
+        // GS-4: the bound instance gets this tab's breakpoints; every other
+        // instance of the same graph gets an empty set, every frame.
+        if !graph_debug.is_empty() {
+            self.apply_graph_debug(&graph_debug);
+        }
         for key in std::mem::take(&mut curve_save_requests) {
             self.save_curve_editor(&key);
         }
@@ -4683,7 +4709,13 @@ impl App {
         };
         let root = std::path::Path::new("content");
         let mut store = GraphStateStore::load(root);
-        store.store(key, st.view, &st.bookmarks, stored_watches(st));
+        store.store(
+            key,
+            st.view,
+            &st.bookmarks,
+            stored_watches(st),
+            stored_breakpoints(st),
+        );
         if let Err(e) = store.save() {
             eprintln!("Warning: failed to save graph UI state: {e}");
         }
@@ -5382,14 +5414,20 @@ impl App {
         };
         // 45-A P7 execution binding, same rule as the docked path.
         let graph_camera_pos = graph_camera;
+        let graph_debug_tabs: Vec<GraphDebugTab> = graph_editors
+            .iter_mut()
+            .map(|(k, st)| GraphDebugTab {
+                path: k.clone(),
+                bind: st.exec_bind,
+                armed: st.armed_breakpoints(),
+                request: st.debug_request.take(),
+            })
+            .collect();
         let graph_exec = {
             let picked: Vec<hecs::Entity> = sel.all().copied().collect();
-            let binds: Vec<(String, Option<u64>)> = graph_editors
-                .iter()
-                .map(|(k, st)| (k.clone(), st.exec_bind))
-                .collect();
-            graph_exec_bindings(&*world, &*world_resources, &picked, &binds)
+            graph_exec_bindings(&*world, &*world_resources, &picked, &graph_debug_tabs)
         };
+        let graph_debug = graph_debug_plan(&graph_debug_tabs, &graph_exec);
         let graph_instances = graph_instance_lists(
             &*world,
             &*world_resources,
@@ -5678,6 +5716,19 @@ impl App {
 
         for key in std::mem::take(&mut float_curve_saves) {
             save_curve_state(curve_editors, &mut editor.console, &mut core.game_world, &key);
+        }
+
+        // GS-4, float-window path: same delivery as the docked one — the bound
+        // instance gets this tab's breakpoints, everyone else gets an empty
+        // set — done here because the world is mutably reachable again.
+        for tab in &graph_debug {
+            rust_engine::engine::scripting::trace::arm_debug(
+                core.game_world.hecs_mut(),
+                &tab.path,
+                tab.instance,
+                &tab.armed,
+                tab.request,
+            );
         }
 
         crusty_floats.retain(|_, fw| {
@@ -7298,7 +7349,7 @@ fn graph_exec_bindings(
     world: &hecs::World,
     resources: &rust_engine::engine::ecs::resources::Resources,
     selected: &[hecs::Entity],
-    binds: &[(String, Option<u64>)],
+    binds: &[GraphDebugTab],
 ) -> Vec<(String, rust_engine::engine::editor::graph_exec_viz::GraphExecViz)> {
     #[cfg(not(feature = "graph-scripting"))]
     {
@@ -7315,13 +7366,17 @@ fn graph_exec_bindings(
             .unwrap_or(0.0);
         binds
             .iter()
-            .filter_map(|(k, pick)| {
+            .filter_map(|tab| {
+                let k = tab.path.as_str();
                 // An explicit pick wins; a stale one (the entity is gone, or
                 // no longer runs this graph) falls back to the selection rule
                 // rather than blanking the canvas.
-                let viz = pick
+                let viz = tab
+                    .bind
                     .and_then(|bits| {
-                        rust_engine::engine::scripting::trace::viz_for_entity(world, bits, k, now)
+                        rust_engine::engine::scripting::trace::viz_for_entity(
+                            world, bits, k, now, &tab.armed,
+                        )
                     })
                     .or_else(|| {
                         rust_engine::engine::scripting::trace::viz_for_selection(
@@ -7329,12 +7384,60 @@ fn graph_exec_bindings(
                             selected.iter().copied(),
                             k,
                             now,
+                            &tab.armed,
                         )
                     })?;
-                Some((k.clone(), viz))
+                Some((k.to_string(), viz))
             })
             .collect()
     }
+}
+
+/// One graph tab's debug state, as the host reads it before drawing (GS-4).
+#[cfg(feature = "editor")]
+struct GraphDebugTab {
+    path: String,
+    /// The instance explicitly picked in the LIVE chip, if any.
+    bind: Option<u64>,
+    /// Armed document nodes — disabled marks never leave the editor.
+    armed: Vec<u64>,
+    /// What the banner or a shortcut asked for last frame.
+    request: Option<rust_engine::engine::editor::graph_exec_viz::DebugRequest>,
+}
+
+/// What the host will write into the running instances after the UI (GS-4):
+/// the graph, the one instance that gets its breakpoints, and any command.
+#[cfg(feature = "editor")]
+struct GraphDebugPlan {
+    path: String,
+    /// `None` = nothing bound, which arms nothing anywhere.
+    instance: Option<u64>,
+    armed: Vec<u64>,
+    request: Option<rust_engine::engine::editor::graph_exec_viz::DebugRequest>,
+}
+
+/// Pair each tab with the instance its canvas is actually showing.
+///
+/// The binding rule already ran (an explicit pick, else the selected entity);
+/// reusing its answer is what guarantees the breakpoints go to the instance
+/// whose execution the person is looking at, rather than to a second one the
+/// arming code picked by its own rule.
+#[cfg(feature = "editor")]
+fn graph_debug_plan(
+    tabs: &[GraphDebugTab],
+    exec: &[(String, rust_engine::engine::editor::graph_exec_viz::GraphExecViz)],
+) -> Vec<GraphDebugPlan> {
+    tabs.iter()
+        .map(|t| GraphDebugPlan {
+            path: t.path.clone(),
+            instance: exec
+                .iter()
+                .find(|(k, _)| *k == t.path)
+                .map(|(_, v)| v.instance_id),
+            armed: t.armed.clone(),
+            request: t.request,
+        })
+        .collect()
 }
 
 /// Every instance running each open graph, for the LIVE chip's picker (GS-3).
@@ -7436,6 +7539,27 @@ fn save_curve_state(
 /// the user just dismissed.
 #[cfg(all(feature = "editor", feature = "graph-scripting"))]
 impl App {
+    /// Deliver each graph tab's breakpoints and debugger command to the
+    /// instance it is bound to (GS-4).
+    ///
+    /// Runs after the UI for the same reason "Clear trace" does: it writes to
+    /// live instances, and the panel borrows are gone by here. One frame of
+    /// latency, on both the arm and the command — a person pressing Resume
+    /// cannot perceive it, and the alternative is threading `&mut World`
+    /// through the layout pass.
+    fn apply_graph_debug(&mut self, plan: &[GraphDebugPlan]) {
+        use rust_engine::engine::scripting::trace::arm_debug;
+        for tab in plan {
+            arm_debug(
+                self.core.game_world.hecs_mut(),
+                &tab.path,
+                tab.instance,
+                &tab.armed,
+                tab.request,
+            );
+        }
+    }
+
     fn clear_graph_traces(&mut self, graph_path: &str) {
         use rust_engine::engine::scripting::{normalize_graph_path, runner::GraphRuntime};
         let want = normalize_graph_path(graph_path);
@@ -7455,6 +7579,7 @@ impl App {
 #[cfg(all(feature = "editor", not(feature = "graph-scripting")))]
 impl App {
     fn clear_graph_traces(&mut self, _graph_path: &str) {}
+    fn apply_graph_debug(&mut self, _plan: &[GraphDebugPlan]) {}
 }
 
 /// A tab's watches in the shape the sidecar stores (GS-3).
@@ -7472,6 +7597,19 @@ fn stored_watches(
             output: w.output,
             last: w.last.clone(),
         })
+        .collect()
+}
+
+/// A tab's breakpoints in the shape the sidecar stores (GS-4).
+#[cfg(feature = "editor")]
+fn stored_breakpoints(
+    state: &rust_engine::engine::editor::graph_editor::GraphEditorState,
+) -> Vec<rust_engine::engine::editor::graph_state_store::StoredBreakpoint> {
+    use rust_engine::engine::editor::graph_state_store::StoredBreakpoint;
+    state
+        .breakpoints
+        .iter()
+        .map(|(node, enabled)| StoredBreakpoint { node: *node, enabled: *enabled })
         .collect()
 }
 
@@ -7493,6 +7631,15 @@ fn restore_graph_ui_state(
         .watches_for(relative)
         .into_iter()
         .map(|w| Watch { last: w.last, ..Watch::new(w.node, &w.pin, w.output) })
+        .collect();
+    // Breakpoints come back exactly as they were left, armed or disabled
+    // (GS-4). A mark whose node has since been deleted is dropped rather than
+    // kept as an id nothing draws.
+    state.breakpoints = store
+        .breakpoints_for(relative)
+        .into_iter()
+        .filter(|b| state.doc.node(b.node).is_some())
+        .map(|b| (b.node, b.enabled))
         .collect();
     match store.view_for(relative) {
         Some(v) => state.view = v,

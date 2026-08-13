@@ -1250,15 +1250,18 @@ pub struct GraphEditorState {
     /// The `?` cheat sheet is open. Session-only, like `find` — a reference
     /// card is not document state.
     pub cheat_sheet: bool,
-    /// Nodes carrying an inert breakpoint mark.
+    /// Breakpoints: document node -> **armed**. `false` is the mockup's
+    /// disabled state — a mark you keep but do not want to stop at, which is
+    /// why a disabled breakpoint is a state and not a deletion.
     ///
-    /// **Session-only, deliberately.** The user-local sidecar is keyed by asset
-    /// path and already carries bookmarks and the view transform, so a debug
-    /// section would fit — but the badge has to be resolved per node on every
-    /// draw, and until Task 45-A's evaluator exists a persisted breakpoint
-    /// cannot do anything on reload anyway. Persisting a mark that provably
-    /// never fires would be inventing durability we cannot honour.
-    pub breakpoints: std::collections::HashSet<u64>,
+    /// Persisted in the per-user sidecar beside the watches (GS-4). It moved
+    /// there the moment the marks could actually do something: before the
+    /// interpreter could pause, remembering one across a reload would have
+    /// been durability we could not honour.
+    ///
+    /// Ordered, because it goes to disk: a `HashSet`'s iteration order would
+    /// rewrite the file on every save with the same content in a new order.
+    pub breakpoints: std::collections::BTreeMap<u64, bool>,
     /// Per-tab navigation back-stack for PageUp. Session-only: which graph you
     /// descended *from* is a property of this browsing session, not of the
     /// asset.
@@ -1293,6 +1296,10 @@ pub struct GraphEditorState {
     /// Pinned watches (GS-3). Editor annotations, not run state — they live
     /// in the per-user sidecar and survive play/stop.
     pub watches: Vec<Watch>,
+    /// Resume / Step / Stop, raised by the banner or a shortcut and taken by
+    /// the host, which owns the world the bound instance lives in (GS-4).
+    /// Session-only and one-shot: a command is an event.
+    pub debug_request: Option<crate::engine::editor::graph_exec_viz::DebugRequest>,
     /// The custom-event payload band's draft/confirm state (GS-1).
     /// Session-only, like `vars`.
     pub payload: PayloadPanel,
@@ -1850,6 +1857,7 @@ impl GraphEditorState {
             exec_bind: None,
             exec_picker: false,
             watches: Vec::new(),
+            debug_request: None,
             payload: PayloadPanel::default(),
         })
     }
@@ -3810,14 +3818,30 @@ impl GraphEditorState {
         }
     }
 
-    /// `F9` — toggle an inert breakpoint on the last-clicked node.
+    /// `F9` — add or remove a breakpoint on the last-clicked node.
+    ///
+    /// Presence, not armed-ness: F9 is how a mark comes into existence and how
+    /// it goes away. Arming and disarming an existing one is the gutter click,
+    /// which is where the mark you are looking at already is.
     pub fn toggle_breakpoint(&mut self) {
         let Some(id) = self.primary.or_else(|| self.selection.iter().copied().next()) else {
             return;
         };
-        if !self.breakpoints.remove(&id) {
-            self.breakpoints.insert(id);
+        if self.breakpoints.remove(&id).is_none() {
+            self.breakpoints.insert(id, true);
         }
+    }
+
+    /// Gutter click — armed ⇄ disabled, keeping the mark.
+    pub fn cycle_breakpoint(&mut self, id: u64) {
+        if let Some(armed) = self.breakpoints.get_mut(&id) {
+            *armed = !*armed;
+        }
+    }
+
+    /// Alt+click on the gutter — destroy, per the input contract's Alt verb.
+    pub fn remove_breakpoint(&mut self, id: u64) {
+        self.breakpoints.remove(&id);
     }
 
     /// `Ctrl+Shift+F9` — clear every mark, reporting the count. Silent when
@@ -3835,8 +3859,24 @@ impl GraphEditorState {
         });
     }
 
+    /// Does this node carry a mark at all — armed or disabled?
     pub fn has_breakpoint(&self, id: u64) -> bool {
-        self.breakpoints.contains(&id)
+        self.breakpoints.contains_key(&id)
+    }
+
+    /// Is the mark on this node armed? A disabled one draws hollow and arms
+    /// nothing.
+    pub fn breakpoint_armed(&self, id: u64) -> bool {
+        self.breakpoints.get(&id).copied().unwrap_or(false)
+    }
+
+    /// The marks that go to the runner — armed only, in document order.
+    pub fn armed_breakpoints(&self) -> Vec<u64> {
+        self.breakpoints
+            .iter()
+            .filter(|(_, armed)| **armed)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// `F2` — open the inline editor on the selected annotation.
@@ -4344,6 +4384,7 @@ pub mod tests_support {
             exec_bind: None,
             exec_picker: false,
             watches: Vec::new(),
+            debug_request: None,
             payload: PayloadPanel::default(),
         }
     }
@@ -5795,6 +5836,35 @@ mod tests {
         assert_eq!(st.toasts.last().map(|t| t.text.as_str()), Some("Valid"));
     }
 
+    /// **GS-4: a mark has three states, and only one of them arms.** F9 owns
+    /// presence, the gutter click owns armed-ness, Alt+click destroys — and
+    /// only armed marks are handed to the runtime.
+    #[test]
+    fn a_breakpoint_arms_disarms_and_only_the_armed_ones_reach_the_runtime() {
+        let mut st = bare_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [200.0, 0.0])];
+        st.primary = Some(1);
+        st.toggle_breakpoint();
+        assert!(st.breakpoint_armed(1), "a new mark is armed — F9 means stop here");
+        assert_eq!(st.armed_breakpoints(), vec![1]);
+
+        st.cycle_breakpoint(1);
+        assert!(st.has_breakpoint(1), "disabled keeps the mark");
+        assert!(!st.breakpoint_armed(1));
+        assert!(st.armed_breakpoints().is_empty(), "and arms nothing");
+
+        st.cycle_breakpoint(1);
+        assert!(st.breakpoint_armed(1), "clicking again re-arms it");
+        // Cycling a node with no mark is a no-op, not a creation: the gutter
+        // slot only draws where a mark already is.
+        st.cycle_breakpoint(0);
+        assert!(!st.has_breakpoint(0));
+
+        st.remove_breakpoint(1);
+        assert!(!st.has_breakpoint(1), "Alt+click destroys, per the input contract");
+        assert!(st.armed_breakpoints().is_empty());
+    }
+
     #[test]
     fn f9_toggles_a_breakpoint_on_the_last_clicked_node() {
         let mut st = bare_state();
@@ -7152,5 +7222,6 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         exec_bind: None,
         exec_picker: false,
         watches: Vec::new(),
+        debug_request: None,
     }
 }

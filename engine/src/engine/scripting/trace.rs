@@ -259,6 +259,122 @@ pub fn add_live_state(
     }
 }
 
+/// Fold one instance's **debug** state — the pause it is parked in and the
+/// armed marks that resolve to nothing — into its viz (GS-4).
+///
+/// Separate from [`add_live_state`] because it reads the *runtime*, not the
+/// instance: the hit counter lives beside the trace, and the armed set is the
+/// tab's, not the graph's.
+pub fn add_debug_state(
+    out: &mut GraphExecViz,
+    rt: &super::runner::GraphRuntime,
+    armed: &[u64],
+) {
+    use crate::engine::editor::graph_exec_viz::PauseInfo;
+    if let Some((plan_node, id)) = rt.instance.paused() {
+        if let Some((node, _)) = rt.plan.doc_node(plan_node) {
+            out.paused = Some(PauseInfo {
+                node,
+                activation: id.0,
+                hits: rt.break_hits.get(&plan_node).copied().unwrap_or(0),
+            });
+        }
+    }
+    for id in armed {
+        if plan_breaks(&rt.plan, *id).is_empty() {
+            out.invalid_breaks.insert(*id);
+        }
+    }
+}
+
+/// Which plan nodes a document node's breakpoint arms.
+///
+/// Impure only — a pure node is pulled, never fired, so pausing "before" it is
+/// not a moment that exists. A node inlined out of a subgraph counts under its
+/// **host**, so a mark on a subgraph node pauses before the first thing inside
+/// it does something; that is the same statement the host's activity ring
+/// makes, and the only one available while the editor is showing the host.
+///
+/// Empty means the mark cannot fire — pruned as unreachable, compiled away, or
+/// pure — which is the editor's invalid state.
+pub fn plan_breaks(plan: &Plan, doc_node: u64) -> Vec<usize> {
+    plan.nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.doc_node == doc_node && !n.pure)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Deliver the bound tab's breakpoints and its pending command (GS-4).
+///
+/// **The bound instance only.** Every other instance of the same graph has its
+/// set cleared here, every frame: two entities running one graph are two
+/// timelines, and freezing the one you are not reading would stop half the
+/// scene to debug the other half. If one of them is still parked from an
+/// earlier binding it is resumed rather than left frozen — losing the tab that
+/// paused it must not strand it.
+///
+/// Returns the number of instances that were re-pointed, for tests.
+pub fn arm_debug(
+    world: &mut hecs::World,
+    graph_path: &str,
+    bound: Option<u64>,
+    armed: &[u64],
+    request: Option<crate::engine::editor::graph_exec_viz::DebugRequest>,
+) -> usize {
+    use crate::engine::editor::graph_exec_viz::DebugRequest;
+    use node_graph_exec::DebugCommand;
+    // The editor's request enum crosses the seam here, once: the panel must
+    // not name an interpreter type (it draws in builds without one), and the
+    // host must not have to know how the two spell the same three verbs.
+    let command = match request {
+        Some(DebugRequest::Resume) => DebugCommand::Resume,
+        Some(DebugRequest::Step) => DebugCommand::Step,
+        Some(DebugRequest::Stop) => DebugCommand::Stop,
+        None => DebugCommand::Run,
+    };
+    let want = super::normalize_graph_path(graph_path);
+    let mut touched = 0;
+    for (entity, (runner, rt)) in world
+        .query::<(&super::GraphRunner, &mut super::runner::GraphRuntime)>()
+        .iter()
+    {
+        if super::normalize_graph_path(&runner.graph) != want {
+            continue;
+        }
+        touched += 1;
+        if bound != Some(entity.to_bits().get()) {
+            rt.breaks.clear();
+            // Parked, and no longer anybody's: let it go.
+            if rt.instance.is_paused() {
+                rt.debug = DebugCommand::Resume;
+            }
+            continue;
+        }
+        let mut set = node_graph_exec::BreakSet::new();
+        for id in armed {
+            for ix in plan_breaks(&rt.plan, *id) {
+                set.insert(ix);
+            }
+        }
+        // Disarming the mark you are parked on releases the instance. The
+        // alternative — a paused graph with nothing to resume it — is a
+        // deadlock the UI would give no way out of.
+        let stranded = rt
+            .instance
+            .paused()
+            .is_some_and(|(node, _)| !set.contains(node));
+        rt.breaks = set;
+        if command != DebugCommand::Run {
+            rt.debug = command;
+        } else if stranded {
+            rt.debug = DebugCommand::Resume;
+        }
+    }
+    touched
+}
+
 /// Which document node an `ExecError` is about. The error carries the plan
 /// node's *name*, which is what the plan indexes by — so this is a lookup, not
 /// a guess, and an unmatched name answers `None` rather than blaming a node at
@@ -313,6 +429,7 @@ pub fn viz_for_selection(
     selected: impl IntoIterator<Item = hecs::Entity>,
     graph_path: &str,
     now: f64,
+    armed: &[u64],
 ) -> Option<GraphExecViz> {
     let want = super::normalize_graph_path(graph_path);
     for entity in selected {
@@ -336,6 +453,7 @@ pub fn viz_for_selection(
         let mut viz = rt.trace.viz(&rt.plan, now, &label);
         viz.instance_id = entity.to_bits().get();
         add_live_state(&mut viz, &rt.instance, &rt.plan);
+        add_debug_state(&mut viz, &rt, armed);
         return Some(viz);
     }
     None
@@ -396,6 +514,7 @@ pub fn viz_for_entity(
     bits: u64,
     graph_path: &str,
     now: f64,
+    armed: &[u64],
 ) -> Option<GraphExecViz> {
     let entity = hecs::Entity::from_bits(bits)?;
     let want = super::normalize_graph_path(graph_path);
@@ -414,6 +533,7 @@ pub fn viz_for_entity(
     let mut viz = rt.trace.viz(&rt.plan, now, &label);
     viz.instance_id = bits;
     add_live_state(&mut viz, &rt.instance, &rt.plan);
+    add_debug_state(&mut viz, &rt, armed);
     Some(viz)
 }
 
@@ -712,6 +832,7 @@ mod tests {
             locals: Default::default(),
             payload: Default::default(),
             resume_edge: Some((node, "exec_out".to_string())),
+            resume_skip: false,
             state: ThreadState::Suspended(Suspension {
                 until,
                 resume: Some("exec_out".to_string()),
@@ -740,6 +861,104 @@ mod tests {
         assert!((timeline.fraction - 0.5).abs() < 1e-3);
         assert!(viz.wait(99).is_none());
         assert!(viz.has_session(), "a wait is a live session even before anything fires");
+    }
+
+    /// **GS-4: which marks the interpreter can actually honour.**
+    ///
+    /// A document node resolves to the impure plan nodes it compiled into.
+    /// Nothing to resolve to — pruned, compiled away, or a pure node that is
+    /// pulled rather than fired — is the mockup's invalid state, and the
+    /// canvas says so instead of drawing an armed mark that will never fire.
+    #[test]
+    fn an_unresolvable_mark_is_invalid_rather_than_silently_dead() {
+        let mut plan = Plan::default();
+        plan.nodes = vec![
+            plan_node("event_tick", 6, false),
+            plan_node("set_position", 7, false),
+            // Inlined out of a subgraph: it counts under its host, so a mark
+            // on the host node pauses before the first thing inside it runs.
+            plan_node("print", 40, true),
+        ];
+        // …and a pure node, which never fires and therefore cannot be paused
+        // before.
+        let mut pure = plan_node("add_float", 9, false);
+        pure.pure = true;
+        plan.nodes.push(pure);
+
+        assert_eq!(plan_breaks(&plan, 7), vec![1]);
+        assert_eq!(plan_breaks(&plan, 40), vec![2], "a subgraph host resolves inward");
+        assert!(plan_breaks(&plan, 9).is_empty(), "a pure node is not a stop point");
+        assert!(plan_breaks(&plan, 999).is_empty(), "and a pruned node is not either");
+
+        let rt = super::super::runner::GraphRuntime {
+            graph: "graphs/t.graph".into(),
+            plan: std::sync::Arc::new(plan.clone()),
+            instance: node_graph_exec::GraphInstance::new(
+                &plan,
+                node_graph_exec::EntityRef::SelfEntity,
+                1,
+            ),
+            aliases: Default::default(),
+            generation: 0,
+            disabled: None,
+            trace: Default::default(),
+            breaks: Default::default(),
+            debug: Default::default(),
+            break_hits: Default::default(),
+        };
+        let mut viz = GraphExecViz::new("Duck");
+        add_debug_state(&mut viz, &rt, &[7, 9, 999]);
+        assert!(!viz.break_invalid(7), "the one that resolves draws armed");
+        assert!(viz.break_invalid(9), "the pure one is flagged");
+        assert!(viz.break_invalid(999));
+        assert!(viz.paused.is_none(), "nothing is parked, so no banner");
+    }
+
+    /// The pause reaches the canvas as one `PauseInfo` — document node, the
+    /// activation, and the session's hit count for the banner's "hit 3×".
+    #[test]
+    fn a_parked_activation_becomes_the_banner_and_the_hit_node() {
+        use node_graph_exec::{Activation, ActivationId, ThreadState};
+        let mut plan = Plan::default();
+        plan.nodes = vec![plan_node("event_tick", 6, false), plan_node("branch", 7, false)];
+        let mut instance =
+            node_graph_exec::GraphInstance::new(&plan, node_graph_exec::EntityRef::SelfEntity, 1);
+        instance.threads = vec![Activation {
+            id: ActivationId(4),
+            entry: 0,
+            cursor: Some(1),
+            entered: None,
+            frames: Vec::new(),
+            locals: Default::default(),
+            payload: Default::default(),
+            resume_edge: None,
+            resume_skip: false,
+            state: ThreadState::Paused { node: 1 },
+        }];
+        let mut hits = std::collections::BTreeMap::new();
+        hits.insert(1usize, 3u32);
+        let rt = super::super::runner::GraphRuntime {
+            graph: "graphs/t.graph".into(),
+            plan: std::sync::Arc::new(plan.clone()),
+            instance,
+            aliases: Default::default(),
+            generation: 0,
+            disabled: None,
+            trace: Default::default(),
+            breaks: Default::default(),
+            debug: Default::default(),
+            break_hits: hits,
+        };
+
+        let mut viz = GraphExecViz::new("Duck");
+        add_debug_state(&mut viz, &rt, &[7]);
+        let p = viz.paused.expect("the canvas knows it is parked");
+        assert_eq!(p.node, 7, "in document space, like everything else here");
+        assert_eq!(p.activation, 4);
+        assert_eq!(p.hits, 3);
+        assert!(viz.paused_on(7) && !viz.paused_on(6));
+        assert!(viz.has_session(), "a pause is a live session even with no trace");
+        assert!(!viz.break_invalid(7));
     }
 
     /// A runtime kill anchors to the node that raised it, with the reason

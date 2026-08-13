@@ -1037,6 +1037,84 @@ fn a_timeline_drives_a_real_transform_from_a_curve_asset() {
 /// `duck_hop.curve` and `graph_cube.prefab` off the real content tree and
 /// checks the plan's three acceptance behaviours in one run:
 ///
+/// **GS-4, end to end: only the debugged instance stops.**
+///
+/// Two entities run one graph. The tab is bound to one of them, arms a mark on
+/// the node that moves it, and that entity freezes exactly where it stood — the
+/// other keeps walking. This is the whole reason breakpoints live on the
+/// runtime component rather than on the plan: a plan is shared by every
+/// instance, and freezing the scene to read one of them would take the
+/// reference away from the person reading it.
+#[test]
+fn breakpoints_stop_only_the_bound_instance() {
+    use crate::engine::editor::graph_exec_viz::DebugRequest;
+    use crate::engine::scripting::trace::arm_debug;
+
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]);
+    let watched = h.spawn_runner("Watched", "graphs/t.graph");
+    let other = h.spawn_runner("Other", "graphs/t.graph");
+    h.ticks(4);
+    assert!(h.position(watched).x > 0.0, "both are moving to start with");
+    assert!(h.position(other).x > 0.0);
+
+    // Arm node 7 (Set Position) on the bound instance only — the same call
+    // the host makes after the UI, with the same arguments.
+    let armed = [7u64];
+    let bound = Some(watched.to_bits().get());
+    let touched = arm_debug(&mut h.world, "graphs/t.graph", bound, &armed, None);
+    assert_eq!(touched, 2, "both instances are re-pointed every frame — one armed, one cleared");
+    h.ticks(3);
+
+    let frozen = h.position(watched).x;
+    let moving = h.position(other).x;
+    assert!(
+        h.world
+            .get::<&GraphRuntime>(watched)
+            .map(|rt| rt.instance.is_paused())
+            .unwrap_or(false),
+        "the bound instance parked on the mark"
+    );
+    h.ticks(10);
+    assert_eq!(h.position(watched).x, frozen, "and it has not moved since");
+    assert!(
+        h.position(other).x > moving + 0.005,
+        "while the other instance of the same graph ran free: {} then {}",
+        moving,
+        h.position(other).x
+    );
+    assert!(
+        !h.world
+            .get::<&GraphRuntime>(other)
+            .map(|rt| rt.instance.is_paused())
+            .unwrap_or(true),
+        "…and never parked at all"
+    );
+
+    // Step: exactly one firing, so the entity moves once and stops again.
+    arm_debug(&mut h.world, "graphs/t.graph", bound, &armed, Some(DebugRequest::Step));
+    h.ticks(1);
+    let stepped = h.position(watched).x;
+    assert!(stepped > frozen, "one step, one move");
+    h.ticks(5);
+    assert_eq!(h.position(watched).x, stepped, "…and it re-parked");
+
+    // Resume with the mark cleared: it runs on and stays running.
+    arm_debug(&mut h.world, "graphs/t.graph", bound, &[], Some(DebugRequest::Resume));
+    h.ticks(5);
+    assert!(h.position(watched).x > stepped + 0.005, "resumed for good");
+
+    // Stop ends that instance's session without an error: nothing halted, and
+    // nothing moves it again.
+    arm_debug(&mut h.world, "graphs/t.graph", bound, &[], Some(DebugRequest::Stop));
+    h.ticks(2);
+    let stopped_at = h.position(watched).x;
+    h.ticks(10);
+    assert_eq!(h.position(watched).x, stopped_at, "the session is over");
+    let rt = h.world.get::<&GraphRuntime>(watched).unwrap();
+    assert!(rt.instance.stopped);
+    assert!(rt.instance.halted.is_none(), "Stop is not a kill — no error framing");
+}
+
 /// 1. *BeginPlay spawns prefabs in a ForLoop* — three cubes, spaced by the
 ///    loop index, each placed through the spawn pin;
 /// 2. *Delay chains fire* — the Timeline's Play is wired downstream of the

@@ -38,7 +38,7 @@ use node_graph_exec::{
 /// The traced entry point is the editor's; a shipped game takes the plain one,
 /// which instantiates the interpreter against `NoTrace` (see [`super::trace`]).
 #[cfg(feature = "editor")]
-use node_graph_exec::{tick_traced, DEFAULT_BUDGET};
+use node_graph_exec::{tick_debug, DEFAULT_BUDGET};
 #[cfg(not(feature = "editor"))]
 use node_graph_exec::tick;
 use node_graph_types::{GraphDoc, GraphRealm, NodeRegistry};
@@ -76,6 +76,26 @@ pub struct GraphRuntime {
     /// born and die with it.
     #[cfg(feature = "editor")]
     pub trace: super::trace::GraphTrace,
+    /// Where this instance pauses (GS-4), as plan indices — resolved from the
+    /// bound tab's document ids by [`super::trace::arm_debug`].
+    ///
+    /// **Only the bound instance ever carries one.** Two entities running one
+    /// graph are two timelines; freezing both because you are reading one of
+    /// them would stop the half of the scene you were using as a reference,
+    /// and there is exactly one banner and one Resume button. Every other
+    /// instance runs free, and unbinding clears the set.
+    #[cfg(feature = "editor")]
+    pub breaks: node_graph_exec::BreakSet,
+    /// A debugger command waiting for the next tick. Consumed there — a
+    /// command is an event, and leaving it set would make Resume mean "never
+    /// stop again".
+    #[cfg(feature = "editor")]
+    pub debug: node_graph_exec::DebugCommand,
+    /// Plan node -> how many times this session parked on it, for the banner's
+    /// "hit 3×". Counts transitions, which is why the interpreter reports the
+    /// hit rather than the editor inferring it from a held state.
+    #[cfg(feature = "editor")]
+    pub break_hits: BTreeMap<usize, u32>,
 }
 
 /// Compiled plans, keyed by content-relative asset path.
@@ -520,7 +540,18 @@ impl System for GraphScriptRunnerSystem {
                     // Stamp the tick before it runs, so every hit recorded
                     // during it carries this frame's time.
                     rt.trace.begin_tick(now);
-                    tick_traced(
+                    // GS-4: the debug channel. Unarmed unless this instance is
+                    // the one a graph tab is bound to — `breaks` is empty for
+                    // everything else, so `armed()` is false and the tick is
+                    // the pre-breakpoint tick. A parked instance keeps the
+                    // channel open even with an empty set, or clearing the mark
+                    // you are parked on would freeze it for good.
+                    let armed = !rt.breaks.is_empty() || rt.instance.is_paused();
+                    let dbg = node_graph_exec::DebugCtl {
+                        breaks: armed.then_some(&rt.breaks),
+                        command: std::mem::take(&mut rt.debug),
+                    };
+                    let report = tick_debug(
                         &plan,
                         &mut rt.instance,
                         &self.impls,
@@ -529,7 +560,11 @@ impl System for GraphScriptRunnerSystem {
                         &mut out,
                         DEFAULT_BUDGET,
                         &mut rt.trace,
+                        dbg,
                     );
+                    for (node, _) in &report.paused {
+                        *rt.break_hits.entry(*node).or_insert(0) += 1;
+                    }
                 }
                 #[cfg(not(feature = "editor"))]
                 tick(&plan, &mut rt.instance, &self.impls, input, &view, &mut out);
@@ -619,6 +654,12 @@ impl GraphScriptRunnerSystem {
                     disabled: Some(format!("{graph}: {e}")),
                     #[cfg(feature = "editor")]
                     trace: Default::default(),
+                    #[cfg(feature = "editor")]
+                    breaks: Default::default(),
+                    #[cfg(feature = "editor")]
+                    debug: Default::default(),
+                    #[cfg(feature = "editor")]
+                    break_hits: Default::default(),
                 }
             }
             Ok(plan) => {
@@ -639,6 +680,12 @@ impl GraphScriptRunnerSystem {
                     disabled,
                     #[cfg(feature = "editor")]
                     trace: Default::default(),
+                    #[cfg(feature = "editor")]
+                    breaks: Default::default(),
+                    #[cfg(feature = "editor")]
+                    debug: Default::default(),
+                    #[cfg(feature = "editor")]
+                    break_hits: Default::default(),
                 }
             }
         }

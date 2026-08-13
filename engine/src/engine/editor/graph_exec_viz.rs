@@ -44,6 +44,35 @@ pub struct KillInfo {
     pub reason: String,
 }
 
+/// What the PAUSED banner asked the runtime for (GS-4).
+///
+/// A mirror of the interpreter's own command enum rather than a re-export, for
+/// the reason this whole module exists: the panel draws the same way in a
+/// build without the graph-scripting plugin, so it cannot name a type from the
+/// interpreter crate. The host translates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugRequest {
+    Resume,
+    Step,
+    Stop,
+}
+
+/// The instance is parked on a breakpoint (GS-4).
+///
+/// One per instance, never per activation: the banner has one Resume button
+/// because the whole instance holds, so naming a second parked activation
+/// would imply a second thing to resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PauseInfo {
+    /// Document node the activation parked *before* firing.
+    pub node: u64,
+    /// Which activation, for the report — not shown, but it is what makes two
+    /// consecutive pauses on one node distinguishable.
+    pub activation: u64,
+    /// How many times this session has parked on that node ("hit 3×").
+    pub hits: u32,
+}
+
 /// One entity running this graph, for the LIVE chip's instance picker.
 ///
 /// Plain data with an `id` rather than an `Entity`: the panel must not depend
@@ -88,6 +117,13 @@ pub struct GraphExecViz {
     waiting: BTreeMap<u64, WaitInfo>,
     /// Set when this instance was stopped by a runtime error.
     pub killed: Option<KillInfo>,
+    /// Set while this instance sits on a breakpoint (GS-4).
+    pub paused: Option<PauseInfo>,
+    /// Armed document nodes that resolve to nothing the interpreter can pause
+    /// before — pruned as unreachable, compiled away, or simply not an impure
+    /// node. The mark draws as the invalid state (warning + `!`) rather than
+    /// pretending it will fire.
+    pub invalid_breaks: BTreeSet<u64>,
     /// `(source node, output pin)` -> seconds since that value crossed.
     ages: BTreeMap<u64, BTreeMap<String, f32>>,
     /// `(source node, output pin)` -> pulse intensity in `[0, 1]`, already
@@ -180,6 +216,18 @@ impl GraphExecViz {
             && self.taken.is_empty()
             && self.waiting.is_empty()
             && self.killed.is_none()
+            && self.paused.is_none()
+    }
+
+    /// Is this the node the instance is parked on? The top of the badge
+    /// gutter's precedence ladder (GS-4).
+    pub fn paused_on(&self, node: u64) -> bool {
+        self.paused.is_some_and(|p| p.node == node)
+    }
+
+    /// Is this armed mark unresolvable — the mockup's warning + `!` state?
+    pub fn break_invalid(&self, node: u64) -> bool {
+        self.invalid_breaks.contains(&node)
     }
 
     // --- GS-3 -----------------------------------------------------------
@@ -205,7 +253,10 @@ impl GraphExecViz {
     /// Any session history at all — the switch between "editor" and "editor
     /// with a live layer over it".
     pub fn has_session(&self) -> bool {
-        !self.taken.is_empty() || !self.waiting.is_empty() || self.killed.is_some()
+        !self.taken.is_empty()
+            || !self.waiting.is_empty()
+            || self.killed.is_some()
+            || self.paused.is_some()
     }
 
     pub fn set_rate(&mut self, node: u64, pin: &str, hz: f32) {

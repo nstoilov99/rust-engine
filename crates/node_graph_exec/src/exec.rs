@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 
 use node_graph_types::{EventPhase, EVENT_DRAIN_ORDER};
 
+use crate::debug::{DebugCommand, DebugCtl};
 use crate::effect::{EffectSink, WorldRead};
-use crate::instance::{Activation, Frame, GraphInstance, QueuedEvent, ThreadState};
+use crate::instance::{Activation, ActivationId, Frame, GraphInstance, QueuedEvent, ThreadState};
 use crate::node::{
     EvalCtx, ExecError, FireCtx, FireResult, LoopFrameView, NodeImpl, NodeImpls, TickInput,
 };
@@ -35,6 +36,10 @@ pub struct TickReport {
     pub activations: u32,
     /// Suspended activations woken this tick.
     pub resumed: u32,
+    /// Breakpoint hits **created** this tick: `(plan node, activation)`
+    /// (GS-4). A tick that merely holds an already-parked instance reports
+    /// none — this is the transition, which is what a hit counter counts.
+    pub paused: Vec<(usize, ActivationId)>,
     /// The error that halted the instance, if one did.
     pub halted: Option<ExecError>,
 }
@@ -87,9 +92,53 @@ pub fn tick_traced<T: TraceSink>(
     budget: u32,
     trace: &mut T,
 ) -> TickReport {
+    tick_debug(
+        plan,
+        instance,
+        impls,
+        tick_in,
+        world,
+        effects,
+        budget,
+        trace,
+        DebugCtl::default(),
+    )
+}
+
+/// One tick, with breakpoints (GS-4).
+///
+/// Identical to [`tick_traced`] when `dbg` is [`DebugCtl::default`], which is
+/// what every non-debugging caller passes: an unarmed control makes exactly
+/// one `Option` test per tick and none per node.
+///
+/// See [`crate::debug`] for what pausing means — the short version is that a
+/// paused activation holds the **whole instance**, because one graph is one
+/// timeline of effects.
+#[allow(clippy::too_many_arguments)]
+pub fn tick_debug<T: TraceSink>(
+    plan: &Plan,
+    instance: &mut GraphInstance,
+    impls: &NodeImpls,
+    tick_in: TickInput,
+    world: &dyn WorldRead,
+    effects: &mut dyn EffectSink,
+    budget: u32,
+    trace: &mut T,
+    dbg: DebugCtl<'_>,
+) -> TickReport {
     let mut report = TickReport::default();
     if instance.halted.is_some() {
         report.halted = instance.halted.clone();
+        return report;
+    }
+    // A session the debugger ended does nothing at all, quietly.
+    if instance.stopped {
+        return report;
+    }
+    // The debug gate, and the only thing an unarmed tick pays for it: one
+    // test. Everything past this point is the interpreter as it was.
+    let mut step_left: Option<u32> = None;
+    if dbg.armed() && !debug_gate(instance, dbg.command, &mut step_left) {
         return report;
     }
     instance.time += tick_in.dt as f64;
@@ -166,7 +215,18 @@ pub fn tick_traced<T: TraceSink>(
             continue;
         }
         match advance(
-            plan, instance, i, impls, tick_in, world, effects, budget, &mut report, trace,
+            plan,
+            instance,
+            i,
+            impls,
+            tick_in,
+            world,
+            effects,
+            budget,
+            &mut report,
+            trace,
+            dbg,
+            &mut step_left,
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -183,6 +243,60 @@ pub fn tick_traced<T: TraceSink>(
         i += 1;
     }
     report
+}
+
+/// Apply the tick's [`DebugCommand`] to a possibly-parked instance (GS-4).
+///
+/// Returns whether the tick should proceed. `false` means the instance is
+/// **held**: nothing advances, no latent wakes, no event drains, and instance
+/// time does not move — pausing freezes the clock a wait is measured against,
+/// so a five-second Delay does not come due while you read the graph.
+fn debug_gate(
+    instance: &mut GraphInstance,
+    command: DebugCommand,
+    step_left: &mut Option<u32>,
+) -> bool {
+    // Stop needs no pause to act on: it ends the session from wherever it is.
+    if command == DebugCommand::Stop {
+        for t in &mut instance.threads {
+            if !matches!(t.state, ThreadState::Finished | ThreadState::Failed(_)) {
+                t.state = ThreadState::Finished;
+            }
+        }
+        instance.queue.clear();
+        instance.stopped = true;
+        return false;
+    }
+    if !instance.is_paused() {
+        // Resume and Step with nothing parked are what they say: nothing.
+        return true;
+    }
+    match command {
+        DebugCommand::Run => false,
+        DebugCommand::Resume | DebugCommand::Step => {
+            for t in &mut instance.threads {
+                if matches!(t.state, ThreadState::Paused { .. }) {
+                    t.state = ThreadState::Running;
+                    t.resume_skip = true;
+                }
+            }
+            // One firing for the **instance**, not one per activation: two
+            // parked activations stepped together would advance the timeline
+            // twice for one press.
+            if command == DebugCommand::Step {
+                *step_left = Some(1);
+            }
+            true
+        }
+        DebugCommand::Stop => unreachable!("handled above"),
+    }
+}
+
+/// Park an activation before it fires `node_ix`, and report the hit.
+fn park(instance: &mut GraphInstance, thread: usize, node_ix: usize, report: &mut TickReport) {
+    let id = instance.threads[thread].id;
+    instance.threads[thread].state = ThreadState::Paused { node: node_ix };
+    report.paused.push((node_ix, id));
 }
 
 /// Start one activation per entry node matching `phase` (and `name`, when the
@@ -217,6 +331,7 @@ fn start_phase(
             locals: BTreeMap::new(),
             payload: payload.clone(),
             resume_edge: None,
+            resume_skip: false,
             state: ThreadState::Running,
         });
         started += 1;
@@ -237,6 +352,8 @@ fn advance<T: TraceSink>(
     budget: u32,
     report: &mut TickReport,
     trace: &mut T,
+    dbg: DebugCtl<'_>,
+    step_left: &mut Option<u32>,
 ) -> Result<(), ExecError> {
     loop {
         // A statement that ran out of continuation hands control back to the
@@ -252,6 +369,31 @@ fn advance<T: TraceSink>(
             return Ok(());
         };
         let node = &plan.nodes[node_ix];
+
+        // --- the breakpoint gate, before anything this firing would do ----
+        // Above the budget charge (a paused instance spends none), above the
+        // input pull (a pure chain can be pulled again on resume) and above
+        // the effect (which cannot be un-emitted). Parking here means the
+        // continuation is exactly the one the activation already had, so
+        // resuming needs nothing but a state flip — the same suspend-time
+        // continuation trick `Suspend` uses.
+        if dbg.armed() {
+            // Checked before `resume_skip` is consumed: an activation that
+            // never got its one firing (a sibling spent the step budget) must
+            // keep its pass, or resuming would re-park it on the spot.
+            if *step_left == Some(0) {
+                park(instance, thread, node_ix, report);
+                return Ok(());
+            }
+            let skip = std::mem::take(&mut instance.threads[thread].resume_skip);
+            if !skip && dbg.breaks.is_some_and(|b| b.contains(node_ix)) {
+                park(instance, thread, node_ix, report);
+                return Ok(());
+            }
+            if let Some(left) = step_left.as_mut() {
+                *left -= 1;
+            }
+        }
 
         // The budget is charged per firing *and* per pure evaluation, so an
         // exec cycle and a pathological pure chain both hit the same wall.
@@ -376,7 +518,15 @@ fn advance<T: TraceSink>(
             FireResult::Suspend(mut s) => {
                 // Stamp when the wait started: the node knew only when it
                 // ends, and "how far through" needs both (GS-3).
-                s.since = tick_in.time;
+                //
+                // **Instance** time, not the engine's: `until` is instance
+                // time (a node computes `ctx.now() + duration`), and a wait
+                // whose two ends are measured on different clocks reads as
+                // complete the moment it starts — which is what the engine
+                // clock produced here, since an instance's own clock starts at
+                // zero whenever it arms. Freezing instance time under a pause
+                // now also freezes the bar, correctly (GS-4).
+                s.since = instance.time;
                 // Resolve the continuation *now*, exactly as `Continue` would,
                 // and park it on the activation. Two consequences worth
                 // naming: resuming never re-fires the latent node (so a Delay

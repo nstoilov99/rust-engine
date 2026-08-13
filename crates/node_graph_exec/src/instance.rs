@@ -36,6 +36,14 @@ pub enum ThreadState {
     Running,
     /// Waiting; the runner resumes it when the condition is met (P4).
     Suspended(Suspension),
+    /// Parked on a breakpoint at plan node `node`, which is also where
+    /// `cursor` sits — the activation stopped *before* firing it (GS-4).
+    ///
+    /// Distinct from [`Suspended`](ThreadState::Suspended) and deliberately
+    /// so: a suspension has a due time and wakes itself, a pause has neither
+    /// and waits for a person. Sharing the state would make "resume" mean two
+    /// different things and would let a debugger's pause expire.
+    Paused { node: usize },
     /// Finished normally.
     Finished,
     /// Stopped by an error. Kept rather than dropped so the editor can show
@@ -76,6 +84,15 @@ pub struct Activation {
     /// so an instance still serializes mid-wait.
     #[serde(default)]
     pub resume_edge: Option<(usize, String)>,
+    /// Set while unparking from a breakpoint: fire the node the activation is
+    /// parked on **without** re-checking its breakpoint, once (GS-4).
+    ///
+    /// Without it, resuming would re-park on the same node forever. It is
+    /// consumed by the first firing after the unpark, so every node past the
+    /// parked one breaks normally — including the parked node itself, the next
+    /// time control reaches it.
+    #[serde(default)]
+    pub resume_skip: bool,
     pub state: ThreadState,
 }
 
@@ -156,6 +173,12 @@ pub struct GraphInstance {
     /// Set when the budget or an error stopped the instance. A stopped
     /// instance ticks no further; the runner reports it once.
     pub halted: Option<ExecError>,
+    /// The debugger ended this session (GS-4's Stop). Like `halted` in effect
+    /// — the instance ticks no further — and unlike it in framing: no error,
+    /// no console line, no ⊗ badge, because nothing went wrong. The runtime
+    /// component is rebuilt on the next play, so it re-arms by itself.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 impl GraphInstance {
@@ -179,6 +202,7 @@ impl GraphInstance {
             next_activation: 0,
             next_alias: 0,
             halted: None,
+            stopped: false,
         }
     }
 
@@ -207,5 +231,19 @@ impl GraphInstance {
             .iter()
             .filter(|t| !matches!(t.state, ThreadState::Finished | ThreadState::Failed(_)))
             .count()
+    }
+
+    /// The activation parked on a breakpoint, if any: `(plan node, id)`
+    /// (GS-4). The first one in start order — activations are one timeline and
+    /// the editor names one node, so "the first" is the only stable answer.
+    pub fn paused(&self) -> Option<(usize, ActivationId)> {
+        self.threads.iter().find_map(|t| match t.state {
+            ThreadState::Paused { node } => Some((node, t.id)),
+            _ => None,
+        })
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused().is_some()
     }
 }

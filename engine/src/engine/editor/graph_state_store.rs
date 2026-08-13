@@ -9,9 +9,11 @@
 //! reasoning that kept `WirePrefs` in `editor_prefs.ron`: one save path, one
 //! place to delete when something goes wrong.
 //!
-//! Breakpoints and watches will live here too, and are deliberately absent
-//! until Task 45-A gives them meaning — a speculative column is a migration
-//! waiting to happen.
+//! Watches (GS-3) and breakpoints (GS-4) live here too, and arrived only once
+//! the runtime could act on them: a speculative column is a migration waiting
+//! to happen, and a persisted breakpoint that provably never fires is
+//! durability nobody can honour. Both are skipped when empty, so a graph with
+//! neither writes exactly the file it wrote before they existed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +37,21 @@ pub struct GraphUiState {
     /// watched writes exactly what it wrote before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub watches: Vec<StoredWatch>,
+    /// Breakpoints (GS-4). Beside the watches for the same reason: two people
+    /// debugging one graph stop at different nodes, and the asset must record
+    /// neither. Skipped when empty, so a graph nobody has marked writes exactly
+    /// the bytes it wrote before this column existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub breakpoints: Vec<StoredBreakpoint>,
+}
+
+/// One breakpoint on disk: which node, and whether it is armed. Disabled marks
+/// persist too — a mark you switched off is one you intend to switch back on,
+/// and dropping it at save would make "disable" a slow "delete".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredBreakpoint {
+    pub node: u64,
+    pub enabled: bool,
 }
 
 /// One pinned watch as it goes to disk: the pin's identity, plus the last
@@ -126,14 +143,20 @@ impl GraphStateStore {
         self.graphs.get(rel).map(|g| g.watches.clone()).unwrap_or_default()
     }
 
-    /// Record a graph's view + bookmarks + watches. Called on tab close and
-    /// editor exit.
+    /// The breakpoints remembered for a graph.
+    pub fn breakpoints_for(&self, rel: &str) -> Vec<StoredBreakpoint> {
+        self.graphs.get(rel).map(|g| g.breakpoints.clone()).unwrap_or_default()
+    }
+
+    /// Record a graph's view + bookmarks + watches + breakpoints. Called on tab
+    /// close and editor exit.
     pub fn store(
         &mut self,
         rel: &str,
         view: CanvasView,
         bookmarks: &[Option<CanvasView>; 5],
         watches: Vec<StoredWatch>,
+        breakpoints: Vec<StoredBreakpoint>,
     ) {
         let mut slots: [Option<StoredView>; 5] = [None; 5];
         for (i, b) in bookmarks.iter().enumerate() {
@@ -145,6 +168,7 @@ impl GraphStateStore {
                 view: Some(StoredView::from_view(view)),
                 bookmarks: slots,
                 watches,
+                breakpoints,
             },
         );
     }
@@ -165,7 +189,7 @@ mod tests {
     #[test]
     fn watches_round_trip_and_stay_out_of_an_unwatched_file() {
         let mut s = GraphStateStore::default();
-        s.store("graphs/a.graph", view(0.0, 1.0), &[None; 5], Vec::new());
+        s.store("graphs/a.graph", view(0.0, 1.0), &[None; 5], Vec::new(), Vec::new());
         let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
         assert!(!text.contains("watches"), "no watches, no column");
 
@@ -177,6 +201,7 @@ mod tests {
                 StoredWatch { node: 7, pin: "value".into(), output: true, last: Some("37.5".into()) },
                 StoredWatch { node: 9, pin: "a".into(), output: false, last: None },
             ],
+            Vec::new(),
         );
         let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
         let back: GraphStateStore = ron::from_str(&text).unwrap();
@@ -188,12 +213,51 @@ mod tests {
         assert!(back.watches_for("graphs/never-opened.graph").is_empty());
     }
 
+    /// **GS-4: breakpoints are user-local too**, armed *and* disabled, and a
+    /// graph nobody marked writes the bytes it wrote before the column
+    /// existed — byte-stability being the whole reason `skip_serializing_if`
+    /// is on both debug columns.
+    #[test]
+    fn breakpoints_round_trip_and_stay_out_of_an_unmarked_file() {
+        let mut s = GraphStateStore::default();
+        s.store("graphs/a.graph", view(0.0, 1.0), &[None; 5], Vec::new(), Vec::new());
+        let bare = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
+        assert!(!bare.contains("breakpoints"), "no marks, no column");
+
+        s.store(
+            "graphs/a.graph",
+            view(0.0, 1.0),
+            &[None; 5],
+            Vec::new(),
+            vec![
+                StoredBreakpoint { node: 7, enabled: true },
+                StoredBreakpoint { node: 9, enabled: false },
+            ],
+        );
+        let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
+        let back: GraphStateStore = ron::from_str(&text).unwrap();
+        assert_eq!(back, s);
+        let b = back.breakpoints_for("graphs/a.graph");
+        assert_eq!(b.len(), 2);
+        assert!(b[0].enabled, "armed survives");
+        assert!(!b[1].enabled, "and so does disabled — it is a state, not a deletion");
+        assert!(back.breakpoints_for("graphs/never-opened.graph").is_empty());
+
+        // Clearing them puts the file back byte-for-byte.
+        s.store("graphs/a.graph", view(0.0, 1.0), &[None; 5], Vec::new(), Vec::new());
+        assert_eq!(
+            ron::ser::to_string_pretty(&s, Default::default()).unwrap(),
+            bare,
+            "removing every mark writes the pre-GS-4 file exactly"
+        );
+    }
+
     #[test]
     fn store_round_trips_views_and_bookmarks() {
         let mut s = GraphStateStore::default();
         let mut marks = [None; 5];
         marks[2] = Some(view(30.0, 0.5));
-        s.store("graphs/a.graph", view(10.0, 2.0), &marks, Vec::new());
+        s.store("graphs/a.graph", view(10.0, 2.0), &marks, Vec::new(), Vec::new());
 
         let text = ron::ser::to_string_pretty(&s, Default::default()).unwrap();
         let back: GraphStateStore = ron::from_str(&text).unwrap();
@@ -218,8 +282,8 @@ mod tests {
         std::fs::write(dir.join("graphs/kept.graph"), "()").unwrap();
 
         let mut s = GraphStateStore::default();
-        s.store("graphs/kept.graph", view(1.0, 1.0), &[None; 5], Vec::new());
-        s.store("graphs/deleted.graph", view(2.0, 1.0), &[None; 5], Vec::new());
+        s.store("graphs/kept.graph", view(1.0, 1.0), &[None; 5], Vec::new(), Vec::new());
+        s.store("graphs/deleted.graph", view(2.0, 1.0), &[None; 5], Vec::new(), Vec::new());
         assert_eq!(s.graphs.len(), 2);
 
         s.prune(&dir);

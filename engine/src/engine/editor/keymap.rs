@@ -405,6 +405,9 @@ actions! {
     // ── Debugging
     TOGGLE_BREAKPOINT => "graph.toggle_breakpoint", "Toggle Breakpoint", "Debugging", Canvas, Live;
     CLEAR_BREAKPOINTS => "graph.clear_breakpoints", "Clear All Breakpoints", "Debugging", GraphTab, Live;
+    DEBUG_RESUME      => "graph.debug_resume", "Resume Execution", "Debugging", GraphTab, Live;
+    DEBUG_STEP        => "graph.debug_step", "Step One Node", "Debugging", GraphTab, Live;
+    DEBUG_STOP        => "graph.debug_stop", "Stop Session", "Debugging", GraphTab, Live;
 
     // ── Input model (structural, listed for the cheat sheet)
     CANCEL => "editor.cancel", "Dismiss / Abort / Revert", "Input Model", Global, Fixed;
@@ -876,6 +879,26 @@ fn crusty_bindings() -> Vec<(Action, Vec<Chord>)> {
         (Action::PURGE_UNUSED, c("Ctrl+Alt+K")),
         (Action::TOGGLE_BREAKPOINT, c("F9")),
         (Action::CLEAR_BREAKPOINTS, c("Ctrl+Shift+F9")),
+        // **Not F5**, which the mockup asks for and this editor cannot give:
+        // `App` handles F5 as Play/Stop at the winit level, before any keymap
+        // context is consulted and without looking at modifiers — so F5,
+        // Shift+F5 and Ctrl+F5 all toggle play, and a GraphTab binding on any
+        // of them would resume the debugger *and* end the session that owns
+        // it. F6 is Pause/Resume play for the same reason. F11 is free, keeps
+        // the debugger in the function-key family the other two Debugging
+        // actions already live in, and is one key from Step.
+        //
+        // Step keeps the mockup's F10 exactly: nothing binds it, and no
+        // Canvas-context binding shadows it (the P6c lesson — a Canvas chord
+        // wins over a GraphTab one whenever the pointer is over the canvas,
+        // which is where a person pressing Step has their pointer).
+        //
+        // Stop ships unbound, as the mockup draws it: a session-ending verb
+        // with a hair-trigger function key is a bad trade, and the row is in
+        // Preferences for anyone who wants one.
+        (Action::DEBUG_RESUME, c("F11")),
+        (Action::DEBUG_STEP, c("F10")),
+        (Action::DEBUG_STOP, vec![]),
         (Action::CANCEL, c("Esc")),
     ]
 }
@@ -989,7 +1012,10 @@ mod tests {
         let km = Keymap::from_preset(Preset::Crusty);
         for a in Action::all() {
             // Quick-place's key comes from the node descriptor, not the keymap.
-            if a == Action::QUICK_PLACE {
+            // Stop-session ships unbound on purpose (GS-4): the mockup draws it
+            // as a button with no chord, and ending a session on a stray
+            // function key is a bad trade.
+            if a == Action::QUICK_PLACE || a == Action::DEBUG_STOP {
                 continue;
             }
             assert!(
@@ -1382,6 +1408,55 @@ mod tests {
         );
         assert_eq!(km.mouse_profile, MouseProfile::Unreal, "the dialect follows");
         assert_eq!(km, Keymap::from_preset(Preset::Unreal), "nothing lingers");
+    }
+
+    /// **GS-4's keymap evidence.** The mockup asks for Resume F5 / Step F10.
+    /// F10 ships as drawn; F5 cannot, and the reason is not a conflict this
+    /// map can see: `App` handles F5 (Play/Stop) and F6 (Pause/Resume play)
+    /// as raw winit key events, before any context is consulted and ignoring
+    /// modifiers, so nothing here would ever hear them. Resume therefore ships
+    /// on F11 — and the banner draws whatever the map says, so a rebind
+    /// re-labels the button rather than lying about it.
+    #[test]
+    fn the_debug_actions_are_conflict_free_and_unshadowed() {
+        for p in Preset::ALL {
+            let km = Keymap::from_preset(p);
+            assert!(km.conflicts().is_empty(), "{p:?}: {:?}", km.conflicts());
+
+            for (action, want) in
+                [(Action::DEBUG_RESUME, "F11"), (Action::DEBUG_STEP, "F10")]
+            {
+                let chord = Chord::parse(want).unwrap();
+                assert_eq!(km.chord_label(action).as_deref(), Some(want));
+                // The P6c lesson: a Canvas binding shadows a GraphTab one
+                // whenever the pointer is over the canvas — which is exactly
+                // where the pointer is when someone presses Step. Resolving
+                // from the innermost context is the only honest check.
+                assert_eq!(
+                    km.resolve(chord, Context::Canvas),
+                    Some(action),
+                    "{want} must survive the Canvas context, not just GraphTab"
+                );
+            }
+
+            // Nothing claims the play-transport keys, in any context.
+            for taken in ["F5", "F6", "Shift+F5", "Ctrl+F5"] {
+                let chord = Chord::parse(taken).unwrap();
+                assert_eq!(
+                    km.resolve(chord, Context::Canvas),
+                    None,
+                    "{taken} belongs to the play transport, which the keymap never sees"
+                );
+            }
+
+            // Stop ships unbound, as the mockup draws it — listed, rebindable,
+            // and not on a hair trigger.
+            assert!(km.chords_for(Action::DEBUG_STOP).is_empty());
+            assert!(
+                km.rows().iter().any(|r| r.action == Action::DEBUG_STOP),
+                "an unbound action is still a row in Preferences"
+            );
+        }
     }
 
     #[test]
