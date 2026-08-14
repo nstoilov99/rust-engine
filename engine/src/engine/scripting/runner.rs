@@ -27,7 +27,7 @@
 //! is still deterministic: effects apply in emission order, per instance, in
 //! stable entity order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nalgebra_glm as glm;
@@ -41,12 +41,14 @@ use node_graph_exec::{
 use node_graph_exec::{tick_debug, DEFAULT_BUDGET};
 #[cfg(not(feature = "editor"))]
 use node_graph_exec::tick;
-use node_graph_types::{GraphDoc, GraphRealm, NodeRegistry};
+use node_graph_types::{EventPhase, GraphDoc, GraphRealm, NodeRegistry};
 
 use crate::engine::ecs::components::{EntityGuid, Name, Transform, TransformDirty};
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
+use crate::engine::input::subsystem::InputSubsystem;
 
+use super::log_sink::{GraphLogEntry, GraphLogSink};
 use super::GraphRunner;
 
 /// The runtime half of a running graph. **Never serialized**: it holds a
@@ -68,6 +70,14 @@ pub struct GraphRuntime {
     /// error, or a budget kill. Reported once, then remembered so the console
     /// is not spammed every frame.
     pub disabled: Option<String>,
+    /// The input actions this plan's `event_input_action` entries name,
+    /// deduplicated in entry order (which is doc order within the phase).
+    ///
+    /// Computed **once, at arm time** from the plan's entry index rather than
+    /// re-derived per frame, and empty for the overwhelming majority of graphs
+    /// — which is precisely what lets [`GraphScriptRunnerSystem`] skip reading
+    /// the input subsystem at all on a frame where nothing is listening.
+    pub input_actions: Vec<String>,
     /// What this instance has been doing, for the graph editor's execution
     /// visualization (P7). **Editor builds only** — in a shipped game the
     /// field does not exist and the interpreter is instantiated against
@@ -391,6 +401,54 @@ impl WorldRead for LiveWorld<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Input actions (D3's reserved drain slot)
+// ---------------------------------------------------------------------------
+
+/// The action names a plan listens for, deduplicated, in entry order.
+///
+/// Read off the compiled entry index — the compiler already buckets entries by
+/// [`EventPhase`] and resolves each one's `action` property into `Entry::name`
+/// — so nothing here re-walks the document. An entry with no name is skipped:
+/// the interpreter's matcher requires a named entry to match a named event, so
+/// an `event_input_action` whose property was never filled in can never fire,
+/// and pretending otherwise would make it fire on *every* action.
+fn input_actions_of(plan: &Plan) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in &plan.entries {
+        if entry.phase != EventPhase::InputAction {
+            continue;
+        }
+        let Some(name) = entry.name.as_deref() else {
+            continue;
+        };
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Every action name the live instances are listening for.
+///
+/// **Empty is the point.** It is the exact condition the runner tests before
+/// touching [`InputSubsystem`], so a world whose graphs contain no
+/// `event_input_action` pays one archetype scan and never reads input state at
+/// all. Public so a test can assert that condition directly rather than
+/// inferring it from behaviour.
+pub fn wanted_input_actions(world: &hecs::World) -> BTreeSet<String> {
+    let mut wanted = BTreeSet::new();
+    for (_, rt) in world.query::<&GraphRuntime>().iter() {
+        if rt.disabled.is_some() {
+            continue;
+        }
+        for action in &rt.input_actions {
+            wanted.insert(action.clone());
+        }
+    }
+    wanted
+}
+
+// ---------------------------------------------------------------------------
 // The system
 // ---------------------------------------------------------------------------
 
@@ -466,6 +524,12 @@ impl System for GraphScriptRunnerSystem {
             let _ = world.remove_one::<GraphRuntime>(e);
         }
 
+        // Console lines this tick produced, collected while the world is
+        // borrowed and handed to the sink once at the end. One flush rather
+        // than a `Resources` lookup per line, and it keeps every reporting
+        // path below free of a second mutable borrow.
+        let mut logs: Vec<GraphLogEntry> = Vec::new();
+
         for (entity, graph) in needs_runtime {
             let runtime = self.arm(&graph, generation, resources);
             // An instance that refused to arm — a compile error, a realm
@@ -473,7 +537,7 @@ impl System for GraphScriptRunnerSystem {
             // names — must say so. Silence here reads as "the graph does
             // nothing", which is the one diagnosis that is never true.
             if let Some(why) = runtime.disabled.clone() {
-                report_disabled(entity, world, &why);
+                report_disabled(entity, world, &graph, &why, &mut logs);
             }
             let _ = world.insert_one(entity, runtime);
         }
@@ -492,6 +556,60 @@ impl System for GraphScriptRunnerSystem {
             .collect();
         for e in mismatched {
             let _ = world.remove_one::<GraphRuntime>(e);
+        }
+
+        // 1c. Deliver this frame's input actions (D3's reserved drain slot).
+        //
+        //     **Before** the tick loop, because the interpreter drains the
+        //     queue at the head of a tick: enqueue here and the event reaches
+        //     its entry on *this* frame, in the documented order (input
+        //     actions ahead of custom events, both ahead of Tick). Enqueue
+        //     after, and every press would arrive a frame late.
+        //
+        //     Press semantics, matching `PlayerInputSystem`'s jump: an action
+        //     is delivered on the frame `just_pressed` is true — active now,
+        //     inactive last frame — so holding a key fires the entry once, not
+        //     every frame. `event_input_action` has a single exec output in the
+        //     shipped descriptor, so "fires on press" is the only reading it
+        //     supports; a Pressed/Released split is a descriptor change and is
+        //     recorded as a design upgrade rather than smuggled in here.
+        //
+        //     Names match the input system's exactly and case-sensitively:
+        //     the entry's `action` property is the same string an
+        //     `.inputaction` asset declares, and quietly case-folding would
+        //     make a typo work in the editor and fail in a shipped game.
+        let wanted = wanted_input_actions(world);
+        // The whole pass costs one archetype scan when no plan asks for input:
+        // the subsystem is never read, so a world of ordinary graphs pays
+        // nothing for a feature it does not use.
+        let fired: Vec<String> = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            match resources.get::<InputSubsystem>() {
+                Some(input) => wanted.into_iter().filter(|a| input.just_pressed(a)).collect(),
+                // No input subsystem (a headless or server world): no presses,
+                // rather than a panic or a silent per-frame lookup failure.
+                None => Vec::new(),
+            }
+        };
+        if !fired.is_empty() {
+            for (_, rt) in world.query::<&mut GraphRuntime>().iter() {
+                if rt.disabled.is_some() {
+                    continue;
+                }
+                // Iterated in the runtime's own order, not the fired set's, so
+                // an instance listening for several actions enqueues them in
+                // doc order — the same order its entries fire in.
+                for action in &rt.input_actions {
+                    if fired.iter().any(|f| f == action) {
+                        rt.instance.queue_event(
+                            EventPhase::InputAction,
+                            Some(action.clone()),
+                            BTreeMap::new(),
+                        );
+                    }
+                }
+            }
         }
 
         // 2. Tick each instance and collect what it emitted. Entity order is
@@ -571,7 +689,7 @@ impl System for GraphScriptRunnerSystem {
             }
             rt.aliases = aliases;
             if let Some(err) = rt.instance.halted.clone() {
-                report_once(rt, entity, world, &err);
+                report_once(rt, entity, world, &err, &mut logs);
             }
             if !out.is_empty() {
                 effects.push((entity, out));
@@ -585,9 +703,21 @@ impl System for GraphScriptRunnerSystem {
         let mut despawns: Vec<hecs::Entity> = Vec::new();
         for (owner, list) in &effects {
             for effect in list {
-                self.apply(world, *owner, effect, &mut spawns, &mut despawns);
+                self.apply(world, *owner, effect, &mut spawns, &mut despawns, &mut logs);
             }
         }
+
+        // Hand the tick's console lines over before the structural pass takes
+        // its own `Resources` borrow. Absent sink = a shipped game, where the
+        // `println!`s above are the whole story and this is one failed lookup.
+        if !logs.is_empty() {
+            if let Some(sink) = resources.get_mut::<GraphLogSink>() {
+                for entry in logs {
+                    sink.push(entry);
+                }
+            }
+        }
+
         // Rapier registration rides along with the structural pass: a body
         // created mid-play has to be *told* to Rapier, and a despawned one
         // has to be taken back out or it keeps colliding invisibly. Optional
@@ -652,6 +782,7 @@ impl GraphScriptRunnerSystem {
                     aliases: BTreeMap::new(),
                     generation,
                     disabled: Some(format!("{graph}: {e}")),
+                    input_actions: Vec::new(),
                     #[cfg(feature = "editor")]
                     trace: Default::default(),
                     #[cfg(feature = "editor")]
@@ -671,6 +802,7 @@ impl GraphScriptRunnerSystem {
                 // graph do not share a random stream but a replay does.
                 let seed = fnv(graph);
                 let instance = GraphInstance::new(&plan, EntityRef::SelfEntity, seed);
+                let input_actions = input_actions_of(&plan);
                 GraphRuntime {
                     graph: graph.to_string(),
                     plan,
@@ -678,6 +810,7 @@ impl GraphScriptRunnerSystem {
                     aliases: BTreeMap::new(),
                     generation,
                     disabled,
+                    input_actions,
                     #[cfg(feature = "editor")]
                     trace: Default::default(),
                     #[cfg(feature = "editor")]
@@ -698,6 +831,7 @@ impl GraphScriptRunnerSystem {
         effect: &Effect,
         spawns: &mut Vec<PendingSpawn>,
         despawns: &mut Vec<hecs::Entity>,
+        logs: &mut Vec<GraphLogEntry>,
     ) {
         let resolve = |world: &hecs::World, e: EntityRef| -> Option<hecs::Entity> {
             match e {
@@ -720,7 +854,13 @@ impl GraphScriptRunnerSystem {
                     .unwrap_or_default();
                 // Tagged with the graph, as D6 asks: a print with no idea
                 // which asset produced it is a print you cannot act on.
+                //
+                // stdout *and* the sink, not one or the other: a shipped game
+                // has a terminal and no console, the editor has a console and
+                // no terminal, and the line should be readable in whichever
+                // one the person is looking at.
                 println!("[graph {graph} on {who}] {level:?}: {text}");
+                logs.push(GraphLogEntry::new(*level, &graph, &who, text.clone()));
             }
             Effect::SetPosition { entity, position } => {
                 if let Some(e) = resolve(world, *entity) {
@@ -854,12 +994,34 @@ fn collect_subtree(world: &hecs::World, entity: hecs::Entity, out: &mut Vec<hecs
 /// Say why an instance will not run, on the console the author is watching.
 /// Not "once" like [`report_once`]: this fires at arm time, and arming only
 /// happens when there is no runtime — so it cannot repeat per frame.
-fn report_disabled(entity: hecs::Entity, world: &hecs::World, why: &str) {
+///
+/// It reaches the editor by the same sink a `Print` does. A refusal is the one
+/// message that *must* not be stdout-only: the graph produced no effects, so
+/// there is nothing else on screen to notice.
+fn report_disabled(
+    entity: hecs::Entity,
+    world: &hecs::World,
+    graph: &str,
+    why: &str,
+    logs: &mut Vec<GraphLogEntry>,
+) {
     let who = world
         .get::<&Name>(entity)
         .map(|n| n.0.clone())
         .unwrap_or_else(|_| format!("{entity:?}"));
     println!("[graph] {who} will not run — {why}");
+    // `why` is already prefixed with the asset path; the sink entry carries it
+    // in its own field, so the console line does not say it twice.
+    let reason = why
+        .strip_prefix(graph)
+        .map(|r| r.trim_start_matches(':').trim_start())
+        .unwrap_or(why);
+    logs.push(GraphLogEntry::new(
+        node_graph_exec::LogLevel::Error,
+        graph,
+        &who,
+        format!("will not run — {reason}"),
+    ));
 }
 
 /// Report a halted instance once, then remember that we did.
@@ -868,6 +1030,7 @@ fn report_once(
     entity: hecs::Entity,
     world: &hecs::World,
     err: &ExecError,
+    logs: &mut Vec<GraphLogEntry>,
 ) {
     if rt.disabled.is_some() {
         return;
@@ -878,6 +1041,12 @@ fn report_once(
         .unwrap_or_else(|_| format!("{entity:?}"));
     let msg = format!("{}: {err}", rt.graph);
     println!("[graph] {who} stopped — {msg}");
+    logs.push(GraphLogEntry::new(
+        node_graph_exec::LogLevel::Error,
+        &rt.graph,
+        &who,
+        format!("stopped — {err}"),
+    ));
     rt.disabled = Some(msg);
 }
 

@@ -2341,6 +2341,14 @@ home when the owning task is scheduled.
 - Broader gameplay node API beyond the 46-node starter library.
 - `event_custom` cross-entity targeting — v1 is same-entity only (resolved
   question 3); an explicit target pin is the follow-up.
+- **`event_input_action` Pressed/Released split.** The GS-1 mockup draws the
+  Input node with two exec outputs; the shipped descriptor has one, and the
+  runner delivers it on `just_pressed` (the predicate `PlayerInputSystem`
+  uses for jump). Held and released are therefore unreachable from a graph.
+  Adding the second output is a descriptor change — saved graphs reference
+  the current shape — so it wants a `type_version` bump with a migration,
+  which is why the delivery fix kept the shipped shape. A payload pin
+  carrying the action's analog value belongs in the same change.
 
 *Owned by Task 41 (Animation)*
 - **Timeline/Delay coupling**: both are latents on one activation, so a

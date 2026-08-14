@@ -1766,6 +1766,25 @@ impl App {
 
         self.core.game_world.run_schedule(&mut self.core.schedule);
 
+        // Graph `Print` output, and the runner's own refusals, reach the
+        // Console here. There is no logger in this binary, so the runner parks
+        // its lines in a bounded sink and this is the one place that empties
+        // it — immediately after the schedule, so a print and the frame that
+        // produced it land together.
+        #[cfg(feature = "graph-scripting")]
+        {
+            use rust_engine::engine::scripting::log_sink;
+            let console = &mut self.editor.console.messages;
+            if let Some(sink) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<log_sink::GraphLogSink>()
+            {
+                log_sink::drain_into_console(sink, console);
+            }
+        }
+
         // Update debug draw persistent line lifetimes
         #[cfg(debug_assertions)]
         self.core.debug_draw_buffer.update(delta_time);

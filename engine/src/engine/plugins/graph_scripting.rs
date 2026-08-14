@@ -37,6 +37,8 @@ use crate::engine::ecs::access::SystemDescriptor;
 use crate::engine::ecs::components::{Transform, TransformDirty};
 use crate::engine::ecs::resources::Time;
 use crate::engine::ecs::schedule::{RunIfPlaying, Stage};
+use crate::engine::input::subsystem::InputSubsystem;
+use crate::engine::scripting::log_sink::GraphLogSink;
 use crate::engine::scripting::runner::{
     AssetGraphLoader, CurveCache, GraphLoader, GraphPlanCache, GraphRuntime,
     GraphScriptRunnerSystem,
@@ -124,6 +126,15 @@ impl EnginePlugin for GraphScriptingPlugin {
         // pins and its values cannot come from different files.
         ctx.insert_resource(CurveCache::new());
 
+        // 2b. Where `Print` output waits for the Console panel (D6). **Editor
+        //     builds only.** The plugin is compiled into both binaries, but a
+        //     shipped game has a terminal and no console: the runner's
+        //     `println!` is the whole delivery there, and a queue nobody
+        //     drains would be an allocation per print for nothing. The runner
+        //     pushes only if the resource exists, so absence is the no-op.
+        #[cfg(feature = "editor")]
+        ctx.insert_resource(crate::engine::scripting::log_sink::GraphLogSink::new());
+
         // 3. The runner. `RunIfPlaying` for the same reason physics uses it —
         //    standalone forces `Playing` at startup, so a shipped game always
         //    passes.
@@ -160,8 +171,19 @@ impl EnginePlugin for GraphScriptingPlugin {
             Stage::Update,
             SystemDescriptor::new("GraphScriptRunnerSystem")
                 .reads_resource::<Time>()
+                // `event_input_action` entries are fed from here: the runner
+                // asks `just_pressed` for the actions its live plans name.
+                // Read-only, and only on a frame where some plan names one.
+                // No ordering edge is needed against `EnhancedInputSystem` —
+                // it runs in `Stage::First` and stages are sequenced, so this
+                // always sees the input state of the frame it is in.
+                .reads_resource::<InputSubsystem>()
                 .writes_resource::<GraphPlanCache>()
                 .writes_resource::<CurveCache>()
+                // Present in editor builds only; declaring the write
+                // unconditionally is honest either way — the system writes it
+                // whenever it is there.
+                .writes_resource::<GraphLogSink>()
                 .reads::<GraphRunner>()
                 .writes::<GraphRuntime>()
                 .writes::<Transform>()

@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "graph-scripting")]
 pub mod runner;
 
+/// Where `Print` output waits for a console to collect it. Compiled with the
+/// runner (it holds interpreter types); only the editor *inserts* one.
+#[cfg(feature = "graph-scripting")]
+pub mod log_sink;
+
 /// 45-A P7's execution recorder. Editor builds only — see the module docs for
 /// why a shipped game contains none of it.
 #[cfg(all(feature = "graph-scripting", feature = "editor"))]
@@ -25,6 +30,8 @@ pub mod trace;
 #[cfg(all(test, feature = "graph-scripting"))]
 mod acceptance;
 
+#[cfg(feature = "graph-scripting")]
+pub use log_sink::{GraphLogEntry, GraphLogSink};
 #[cfg(feature = "graph-scripting")]
 pub use runner::{CurveCache, GraphPlanCache, GraphRuntime, GraphScriptRunnerSystem};
 

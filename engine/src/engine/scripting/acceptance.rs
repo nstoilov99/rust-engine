@@ -104,6 +104,17 @@ fn move_each_tick() -> GraphDoc {
 /// Counts BeginPlay firings into a variable, so "exactly once" is a number
 /// rather than an inference from side effects.
 fn count_begin_play() -> GraphDoc {
+    count_entry(node(0, EVENT_BEGIN_PLAY_TYPE_ID))
+}
+
+/// Counts activations of one entry node into a variable and publishes the
+/// count through the entity's X position — a number the test can read without
+/// reaching into interpreter internals.
+///
+/// Parameterized over the entry node so "fired exactly N times" is asserted
+/// the same way for BeginPlay and for an input action; a second counting
+/// fixture would be the same graph with one node swapped.
+fn count_entry(entry: NodeInst) -> GraphDoc {
     let mut doc = GraphDoc::default();
     doc.variables = vec![node_graph_types::VarDecl {
         slug: "n".into(),
@@ -113,7 +124,7 @@ fn count_begin_play() -> GraphDoc {
         group: None,
     }];
     doc.nodes = vec![
-        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        entry,
         with(1, node_graph_types::VAR_GET_TYPE_ID, &[(node_graph_types::VAR_PROP, PropValue::Str("n".into()))]),
         with(2, ids::ADD_INT, &[("b", PropValue::Int(1))]),
         with(3, node_graph_types::VAR_SET_TYPE_ID, &[(node_graph_types::VAR_PROP, PropValue::Str("n".into()))]),
@@ -149,6 +160,69 @@ impl GraphLoader for MapLoader {
     }
 }
 
+/// A keyboard, as the input pipeline sees one. The subsystem's own tests use
+/// the same shape; nothing here mocks the *subsystem*, which is the point —
+/// the runner is tested against the real trigger/phase pipeline.
+#[derive(Default)]
+struct MockKeyboard {
+    pressed: Vec<crate::engine::input::action::KeyCode>,
+}
+
+impl crate::engine::input::input_reader::InputReader for MockKeyboard {
+    fn is_key_pressed(&self, key: crate::engine::input::action::KeyCode) -> bool {
+        self.pressed.contains(&key)
+    }
+    fn is_key_just_pressed(&self, _: crate::engine::input::action::KeyCode) -> bool {
+        false
+    }
+    fn is_mouse_pressed(&self, _: crate::engine::input::action::MouseButton) -> bool {
+        false
+    }
+    fn mouse_delta(&self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+    fn scroll_delta(&self) -> f32 {
+        0.0
+    }
+    fn is_gamepad_pressed(&self, _: crate::engine::input::action::GamepadButton) -> bool {
+        false
+    }
+    fn gamepad_axis(&self, _: crate::engine::input::action::GamepadAxisType) -> f32 {
+        0.0
+    }
+}
+
+/// Two digital actions on two keys. Named in lower case on purpose: the
+/// runner matches an entry's `action` property against these strings exactly,
+/// and a test whose names differ only by content would not notice a
+/// case-folding regression.
+fn test_action_set() -> crate::engine::input::enhanced_action::InputActionSet {
+    use crate::engine::input::action::{InputSource, KeyCode};
+    use crate::engine::input::enhanced_action::*;
+    use crate::engine::input::trigger::InputTrigger;
+    use crate::engine::input::value::InputValueType;
+
+    let mut set = InputActionSet::new();
+    for name in ["fire", "reload"] {
+        set.add_action(
+            InputActionDefinition::new(name, InputValueType::Digital)
+                .with_trigger(InputTrigger::Pressed),
+        );
+    }
+    set.add_context(
+        MappingContext::new("gameplay", 0)
+            .with_entry(
+                MappingContextEntry::new("fire")
+                    .with_binding(EnhancedBinding::digital(InputSource::Key(KeyCode::Space))),
+            )
+            .with_entry(
+                MappingContextEntry::new("reload")
+                    .with_binding(EnhancedBinding::digital(InputSource::Key(KeyCode::KeyR))),
+            ),
+    );
+    set
+}
+
 /// The app, in miniature: plugin set, schedule, resources, world.
 struct Harness {
     schedule: Schedule,
@@ -156,6 +230,10 @@ struct Harness {
     world: hecs::World,
     registry: NodeRegistry,
     time: f64,
+    /// Keys held this frame. Empty unless [`Harness::with_input`] installed a
+    /// subsystem, in which case [`Harness::tick`] pumps it before the schedule
+    /// — which is where `EnhancedInputSystem` runs for real (`Stage::First`).
+    held: Vec<crate::engine::input::action::KeyCode>,
 }
 
 impl Harness {
@@ -209,6 +287,7 @@ impl Harness {
             world: hecs::World::new(),
             registry: NodeRegistry::new(),
             time: 0.0,
+            held: Vec::new(),
         };
         set.build_all(
             PluginTargets {
@@ -227,6 +306,43 @@ impl Harness {
         h
     }
 
+    /// Give this harness a real [`InputSubsystem`] over [`test_action_set`],
+    /// with the `gameplay` context active.
+    fn with_input(mut self) -> Self {
+        let mut subsystem =
+            crate::engine::input::subsystem::InputSubsystem::new(test_action_set());
+        subsystem.add_context("gameplay");
+        self.resources.insert(subsystem);
+        self
+    }
+
+    fn hold(&mut self, key: crate::engine::input::action::KeyCode) {
+        if !self.held.contains(&key) {
+            self.held.push(key);
+        }
+    }
+
+    fn release_all(&mut self) {
+        self.held.clear();
+    }
+
+    /// What `EnhancedInputSystem` does in `Stage::First`, before the runner's
+    /// `Stage::Update`: run the real modifier/trigger pipeline over this
+    /// frame's keys so `just_pressed` means what it means in the app.
+    fn pump_input(&mut self, dt: f32) {
+        let Some(mut subsystem) =
+            self.resources.remove::<crate::engine::input::subsystem::InputSubsystem>()
+        else {
+            return;
+        };
+        let reader = MockKeyboard {
+            pressed: self.held.clone(),
+        };
+        let mut events = crate::engine::ecs::events::Events::default();
+        subsystem.tick(&reader, dt, &mut events);
+        self.resources.insert(subsystem);
+    }
+
     fn tick(&mut self, dt: f32) {
         self.time += dt as f64;
         if let Some(t) = self.resources.get_mut::<Time>() {
@@ -234,6 +350,7 @@ impl Harness {
             t.total = self.time;
             t.frame += 1;
         }
+        self.pump_input(dt);
         let mut commands = crate::engine::ecs::commands::CommandBuffer::new();
         self.schedule
             .run_raw(&mut self.world, &mut self.resources, &mut commands);
@@ -1371,6 +1488,255 @@ fn write_runner_demo_if_requested() {
     let path = content.join("graphs/runner_demo.graph");
     std::fs::write(&path, serialize_graph(&doc).unwrap()).unwrap();
     println!("wrote {}", path.display());
+}
+
+// ---------------------------------------------------------------------------
+// GAP 1 — Print reaches the editor
+// ---------------------------------------------------------------------------
+
+/// BeginPlay → Print(`text`). The smallest graph whose entire observable
+/// output is a console line.
+fn print_on_begin_play(text: &str) -> GraphDoc {
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, ids::PRINT, &[("text", PropValue::Str(text.into()))]),
+    ];
+    doc.edges = vec![edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN)];
+    doc
+}
+
+/// A `Print` lands in the sink the editor drains, structured — the graph and
+/// the entity are *fields*, not a string the console has to parse back apart.
+#[cfg(feature = "editor")]
+#[test]
+fn a_print_reaches_the_log_sink_with_its_tag_fields() {
+    use crate::engine::scripting::log_sink::GraphLogSink;
+
+    let mut h = Harness::new(&[("graphs/t.graph", print_on_begin_play("hello"))]);
+    h.spawn_runner("Duck", "graphs/t.graph");
+    h.ticks(3);
+
+    let sink = h
+        .resources
+        .get::<GraphLogSink>()
+        .expect("the plugin inserts one in editor builds");
+    let entries: Vec<_> = sink.iter().collect();
+    assert_eq!(entries.len(), 1, "BeginPlay printed once, not once per tick");
+    let e = entries[0];
+    assert_eq!(e.level, node_graph_exec::LogLevel::Info);
+    assert_eq!(e.graph, "graphs/t.graph");
+    assert_eq!(e.entity, "Duck");
+    assert_eq!(e.text, "hello");
+    assert_eq!(
+        e.line(),
+        "[graph graphs/t.graph on Duck] hello",
+        "the P7 console tag, unchanged"
+    );
+}
+
+/// A refusal to arm reaches the same sink. This is the message that *must*
+/// not be stdout-only: the graph emitted no effects, so there is nothing else
+/// on screen to notice.
+#[cfg(feature = "editor")]
+#[test]
+fn a_refusal_reaches_the_log_sink_as_an_error() {
+    use crate::engine::scripting::log_sink::GraphLogSink;
+
+    let mut h = Harness::new(&[]);
+    h.spawn_runner("Broken", "graphs/missing.graph");
+    h.ticks(3);
+
+    let sink = h.resources.get::<GraphLogSink>().unwrap();
+    let entries: Vec<_> = sink.iter().collect();
+    assert_eq!(entries.len(), 1, "reported once, not once per frame");
+    assert_eq!(entries[0].level, node_graph_exec::LogLevel::Error);
+    assert_eq!(entries[0].graph, "graphs/missing.graph");
+    assert!(
+        entries[0].text.starts_with("will not run — "),
+        "{}",
+        entries[0].text
+    );
+    assert!(
+        !entries[0].text.starts_with("graphs/missing.graph"),
+        "the path is a field; the text must not re-state it as a prefix: {}",
+        entries[0].text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP 2 — input actions reach their entry nodes
+// ---------------------------------------------------------------------------
+
+/// An `event_input_action` entry listening for `action`.
+fn input_entry_id(id: u64, action: &str) -> NodeInst {
+    with(
+        id,
+        node_graph_types::EVENT_INPUT_ACTION_TYPE_ID,
+        &[(node_graph_types::EVENT_ACTION_PROP, PropValue::Str(action.into()))],
+    )
+}
+
+/// …at the id [`count_entry`] expects.
+fn input_entry(action: &str) -> NodeInst {
+    input_entry_id(0, action)
+}
+
+/// One press, one activation — and none while the key is held down.
+///
+/// Press semantics are `InputSubsystem::just_pressed`, the same predicate
+/// `PlayerInputSystem` uses for jump: active this frame, inactive last. The
+/// shipped `event_input_action` descriptor has a single exec output, so "on
+/// press" is the only reading it supports.
+#[test]
+fn an_input_action_entry_fires_once_per_press() {
+    use crate::engine::input::action::KeyCode;
+
+    let mut h = Harness::new(&[("graphs/t.graph", count_entry(input_entry("fire")))]).with_input();
+    let e = h.spawn_runner("Shooter", "graphs/t.graph");
+
+    h.ticks(2);
+    assert_eq!(h.position(e).x, 0.0, "nothing pressed, nothing fired");
+
+    // The plan's listening set is precomputed at arm time.
+    assert_eq!(
+        h.world.get::<&GraphRuntime>(e).unwrap().input_actions,
+        vec!["fire".to_string()]
+    );
+
+    h.hold(KeyCode::Space);
+    h.tick(1.0 / 60.0);
+    assert_eq!(h.position(e).x, 1.0, "the press fired the entry on that frame");
+
+    h.ticks(5);
+    assert_eq!(h.position(e).x, 1.0, "…and holding it fires nothing more");
+
+    h.release_all();
+    h.ticks(3);
+    assert_eq!(h.position(e).x, 1.0, "releasing is not a press");
+
+    h.hold(KeyCode::Space);
+    h.tick(1.0 / 60.0);
+    assert_eq!(h.position(e).x, 2.0, "a second press is a second activation");
+}
+
+/// A different action does not deliver. Names match exactly: the entry's
+/// `action` property is the same string an `.inputaction` asset declares.
+#[test]
+fn another_action_does_not_reach_this_entry() {
+    use crate::engine::input::action::KeyCode;
+
+    let mut h = Harness::new(&[("graphs/t.graph", count_entry(input_entry("fire")))]).with_input();
+    let e = h.spawn_runner("Shooter", "graphs/t.graph");
+    h.ticks(2);
+
+    h.hold(KeyCode::KeyR); // "reload"
+    h.ticks(5);
+    assert_eq!(h.position(e).x, 0.0, "'reload' is not 'fire'");
+
+    // …and the case has to match too.
+    let mut h = Harness::new(&[("graphs/t.graph", count_entry(input_entry("Fire")))]).with_input();
+    let e = h.spawn_runner("Shouter", "graphs/t.graph");
+    h.ticks(2);
+    h.hold(KeyCode::Space);
+    h.ticks(5);
+    assert_eq!(
+        h.position(e).x,
+        0.0,
+        "matching is case-sensitive — a typo must fail in the editor, not only in a shipped game"
+    );
+}
+
+/// D3's drain order, from the enqueue side: an input action and a custom
+/// event pending on the *same* tick deliver input first.
+///
+/// The interpreter has its own test for the ordering; this one proves the
+/// runner puts the input event in the queue early enough for that order to
+/// apply — enqueue it after the instances tick and every press would arrive a
+/// frame late, behind a custom event queued a frame earlier.
+#[cfg(feature = "editor")]
+#[test]
+fn an_input_action_drains_before_a_custom_event_queued_for_the_same_tick() {
+    use crate::engine::input::action::KeyCode;
+    use crate::engine::scripting::log_sink::GraphLogSink;
+
+    let mut doc = GraphDoc::default();
+    doc.nodes = vec![
+        // BeginPlay emits "ping", which lands in the queue for the *next*
+        // tick — the tick the press is delivered on.
+        node(0, EVENT_BEGIN_PLAY_TYPE_ID),
+        with(1, ids::EMIT_EVENT, &[("name", PropValue::Str("ping".into()))]),
+        with(
+            2,
+            node_graph_types::EVENT_CUSTOM_TYPE_ID,
+            &[(node_graph_types::EVENT_NAME_PROP, PropValue::Str("ping".into()))],
+        ),
+        with(3, ids::PRINT, &[("text", PropValue::Str("custom".into()))]),
+        input_entry_id(4, "fire"),
+        with(5, ids::PRINT, &[("text", PropValue::Str("input".into()))]),
+    ];
+    doc.edges = vec![
+        edge(0, EXEC_OUT_PIN, 1, EXEC_IN_PIN),
+        edge(2, EXEC_OUT_PIN, 3, EXEC_IN_PIN),
+        edge(4, EXEC_OUT_PIN, 5, EXEC_IN_PIN),
+    ];
+
+    let mut h = Harness::new(&[("graphs/t.graph", doc)]).with_input();
+    h.spawn_runner("Duck", "graphs/t.graph");
+
+    // Tick 1: BeginPlay runs and queues "ping" for tick 2. Nothing pressed.
+    h.tick(1.0 / 60.0);
+    // Tick 2: the press and the custom event are both pending.
+    h.hold(KeyCode::Space);
+    h.tick(1.0 / 60.0);
+
+    let sink = h.resources.get::<GraphLogSink>().unwrap();
+    let texts: Vec<&str> = sink.iter().map(|e| e.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["input", "custom"],
+        "input actions drain ahead of custom events (D3)"
+    );
+}
+
+/// The zero-cost skip, asserted **by shape**: the runner reads
+/// `InputSubsystem` only when [`wanted_input_actions`] is non-empty, and that
+/// set is built from a per-plan list computed once at arm time. A graph with
+/// no `event_input_action` entry therefore contributes nothing to it, and the
+/// guard immediately above the resource lookup short-circuits.
+#[test]
+fn a_plan_with_no_input_entries_contributes_nothing_to_the_input_scan() {
+    use crate::engine::input::action::KeyCode;
+    use crate::engine::scripting::runner::wanted_input_actions;
+
+    let mut h = Harness::new(&[("graphs/t.graph", move_each_tick())]).with_input();
+    let e = h.spawn_runner("Mover", "graphs/t.graph");
+    h.ticks(2);
+
+    assert!(
+        h.world.get::<&GraphRuntime>(e).unwrap().input_actions.is_empty(),
+        "nothing in this plan listens for an action"
+    );
+    assert!(
+        wanted_input_actions(&h.world).is_empty(),
+        "…so the set that guards the input read is empty, and it is never read"
+    );
+
+    // And pressing things changes nothing about what this graph does.
+    let before = h.position(e).x;
+    h.hold(KeyCode::Space);
+    h.ticks(3);
+    assert_eq!(h.position(e).x, before + 3.0, "three ticks, three nudges, no more");
+
+    // The same probe with a listening instance is non-empty — the guard is a
+    // real condition, not a constant.
+    let mut h = Harness::new(&[("graphs/t.graph", count_entry(input_entry("fire")))]).with_input();
+    h.spawn_runner("Shooter", "graphs/t.graph");
+    h.ticks(1);
+    assert_eq!(
+        wanted_input_actions(&h.world).into_iter().collect::<Vec<_>>(),
+        vec!["fire".to_string()]
+    );
 }
 
 /// The prefab the demo spawns, written alongside the graph for the same
