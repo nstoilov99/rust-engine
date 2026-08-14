@@ -277,16 +277,40 @@ pub const GRID_MAJOR_STEP: f32 = 128.0;
 /// The minor grid stops being drawn below this zoom (it turns to mush).
 pub const GRID_MINOR_MIN_ZOOM: f32 = 0.40;
 
-/// Grid lines are white at a fixed alpha — not a surface token, because the
-/// grid must read identically on every preset's canvas. Named here so widget
-/// code never spells the value (and never spells a hex).
-pub fn grid_minor() -> Color {
-    Color::WHITE.with_alpha(0.05)
+/// White fraction of a minor grid line (design: `rgba(255,255,255,.05)`).
+const GRID_MINOR_MIX: f32 = 0.05;
+/// …of a major grid line, while the minor grid is drawn.
+const GRID_MAJOR_MIX: f32 = 0.09;
+/// …of the major grid *alone*, below [`GRID_MINOR_MIN_ZOOM`]: with no minor
+/// lines under it, the design lifts the survivor a notch (mockup: `.07`).
+const GRID_MAJOR_ONLY_MIX: f32 = 0.07;
+
+/// Mix `t` of white into `over` **in sRGB space** and return an opaque color.
+///
+/// The mockups draw the grid as a CSS gradient — `rgba(255,255,255,.05)` over
+/// the canvas — and CSS composites in gamma space. crusty's framebuffer is
+/// linear, where the same 5% alpha lands roughly five times brighter (5% of
+/// *linear* white over a near-black canvas is ~26% sRGB). Handing the renderer
+/// a translucent white therefore cannot reproduce the design at any alpha that
+/// is still legible as "5%". So the blend is done here, the way the design
+/// does it, and the resolved opaque color is what gets painted.
+fn srgb_mix_white(over: Color, t: f32) -> Color {
+    let [r, g, b, _] = over.to_srgb_u8();
+    let lift = |c: u8| (c as f32 + (255.0 - c as f32) * t).round().clamp(0.0, 255.0) as u8;
+    rgb(lift(r), lift(g), lift(b))
 }
 
-/// Major grid line: same white, 9%.
-pub fn grid_major() -> Color {
-    Color::WHITE.with_alpha(0.09)
+/// Minor grid line over the canvas surface it is drawn on. Not a surface token
+/// of its own — the grid is a fixed white fraction of whatever canvas a preset
+/// gives it, which is what keeps it reading identically across presets.
+pub fn grid_minor(over: Color) -> Color {
+    srgb_mix_white(over, GRID_MINOR_MIX)
+}
+
+/// Major grid line: same white, 9% — or 7% when it is the only grid left
+/// (below [`GRID_MINOR_MIN_ZOOM`]).
+pub fn grid_major(over: Color, alone: bool) -> Color {
+    srgb_mix_white(over, if alone { GRID_MAJOR_ONLY_MIX } else { GRID_MAJOR_MIX })
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +794,37 @@ mod tests {
                 issues.iter().map(|i| format!("  {i}")).collect::<Vec<_>>().join("\n")
             );
         }
+    }
+
+    /// Bug: the canvas grid read several times stronger than the design. The
+    /// tokens said 5%/9% white, but they said it as *alpha*, and crusty
+    /// composites in linear light — 5% of linear white over a near-black canvas
+    /// lands around 26% once it is displayed. The design's mockup is a CSS
+    /// gradient, i.e. a gamma-space mix, so the tokens do that mix themselves
+    /// and hand over an opaque color.
+    ///
+    /// Asserted against the arithmetic the mockup performs on Steel's canvas:
+    /// `#0E0E11` + 5% white → `#1A1A1D`, + 9% → `#242427`.
+    #[test]
+    fn grid_lines_mix_in_gamma_space_like_the_mockup() {
+        let canvas = Palette::steel().surfaces.input;
+        let [cr, cg, cb, _] = canvas.to_srgb_u8();
+        for (color, mix) in [
+            (grid_minor(canvas), GRID_MINOR_MIX),
+            (grid_major(canvas, false), GRID_MAJOR_MIX),
+            (grid_major(canvas, true), GRID_MAJOR_ONLY_MIX),
+        ] {
+            assert_eq!(color.a, 1.0, "resolved, not translucent — the whole point");
+            let [r, g, b, _] = color.to_srgb_u8();
+            for (got, base) in [(r, cr), (g, cg), (b, cb)] {
+                let want = (base as f32 + (255.0 - base as f32) * mix).round() as u8;
+                assert_eq!(got, want, "{mix} mix over {base}");
+            }
+        }
+        assert!(
+            grid_major(canvas, true).to_srgb_u8()[0] < grid_major(canvas, false).to_srgb_u8()[0],
+            "alone below 40% zoom the major grid is quieter than when it leads a minor one"
+        );
     }
 
     #[test]

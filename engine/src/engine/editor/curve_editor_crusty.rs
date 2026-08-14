@@ -1240,6 +1240,9 @@ fn draw_axes(ui: &mut Ui, scope: &CanvasScope, vpu: f32, s: f32, st: &Style) {
     let t_step = nice_step(TICK_PX * s / (PX_PER_SECOND * scope.zoom()));
     let v_step = nice_step(TICK_PX * s / (vpu * scope.zoom()));
     let small = st.fonts.small;
+    // The grid is a white fraction *of the surface it sits on*, mixed in gamma
+    // space — see `tokens::grid_minor`. The plot's surface is `window`.
+    let plot_bg = st.palette.window;
     let mut p = ui.painter();
 
     // Time ticks + labels along the bottom.
@@ -1256,7 +1259,7 @@ fn draw_axes(ui: &mut Ui, scope: &CanvasScope, vpu: f32, s: f32, st: &Style) {
             Pos2::new(x, r.min.y),
             Pos2::new(x, r.max.y),
             st.metrics.border,
-            if zero { grid_major() } else { grid_minor() },
+            if zero { grid_major(plot_bg, false) } else { grid_minor(plot_bg) },
         );
         let label = format!("{t:.*}s", decimals(t_step));
         p.text_family(
@@ -1283,7 +1286,7 @@ fn draw_axes(ui: &mut Ui, scope: &CanvasScope, vpu: f32, s: f32, st: &Style) {
             Pos2::new(r.min.x, y),
             Pos2::new(r.max.x, y),
             st.metrics.border,
-            if zero { grid_major() } else { grid_minor() },
+            if zero { grid_major(plot_bg, false) } else { grid_minor(plot_bg) },
         );
         let label = format!("{v:.*}", decimals(v_step));
         p.text_family(

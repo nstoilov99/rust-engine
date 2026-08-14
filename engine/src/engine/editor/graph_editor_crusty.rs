@@ -86,6 +86,11 @@ const BASE_COL_GAP: f32 = 12.0;
 const BASE_LABEL_GAP: f32 = 4.0;
 /// Reserved width for an inline value/widget cell.
 const BASE_VALUE_W: f32 = 56.0;
+/// …and the most one may grow to when its content is text. A number fits 56
+/// units; a string constant ("one second later") does not, and a field that
+/// paints past the node it belongs to is worse than a wide node. Past this the
+/// text elides inside the cell — a node is not a text editor.
+const BASE_VALUE_W_MAX: f32 = 150.0;
 /// Reserved width for a **config** row's cell. Wider than a pin's value cell
 /// because what it holds is a name — a variable slug, an event name, an input
 /// action — and 56 units truncates every one of them.
@@ -234,19 +239,23 @@ pub enum ZoomLod {
     L4,
     /// 15–35% — header block + type edge only; no glyphs.
     L3,
-    /// 35–60% — pin labels drop; the node title survives.
+    /// 35–45% — pin labels drop; the node title survives.
     L2,
-    /// 60–90% — inline widgets fall back to plain values.
+    /// 45–60% — inline widgets fall back to plain values.
     L1,
-    /// 90–220% — everything.
+    /// 60–220% — everything, widgets live.
     L0,
 }
 
 impl ZoomLod {
     pub fn from_zoom(zoom: f32) -> Self {
-        if zoom >= 0.90 {
+        // L0 starts where rows are comfortably readable — editing is allowed
+        // wherever a field can be read (user report 2026-08-14: an
+        // uneditable-looking field at 83% zoom reads as a broken editor,
+        // not as a zoom level).
+        if zoom >= 0.60 {
             Self::L0
-        } else if zoom >= 0.60 {
+        } else if zoom >= 0.45 {
             Self::L1
         } else if zoom >= 0.35 {
             Self::L2
@@ -433,6 +442,16 @@ impl GraphMetrics {
     /// Width of a config row's value cell, world units.
     fn config_value_w(&self) -> f32 {
         BASE_CONFIG_VALUE_W * self.scale
+    }
+
+    /// Width an inline pin cell needs for `text` — the reserved [`value_w`] for
+    /// anything that fits, grown to hold longer text up to a cap. Both the
+    /// auto-sizer and the drawing pass go through this, which is what keeps a
+    /// widget inside the node the sizer measured for it.
+    ///
+    /// [`value_w`]: Self::value_w
+    fn text_value_w(&self, text_w: f32) -> f32 {
+        (text_w + self.label_gap * 2.0).clamp(self.value_w, BASE_VALUE_W_MAX * self.scale)
     }
 
     /// Width of a payload row's ✕ column, world units.
@@ -736,6 +755,10 @@ struct PinGeom {
     connected: bool,
     /// Inline constant on an unconnected input, if any.
     inline: Option<InlineKind>,
+    /// Width the inline cell was *sized for*, world units. Carried on the pin
+    /// rather than recomputed at paint time so the widget cannot end up wider
+    /// than the node the auto-sizer measured around it.
+    value_w: f32,
     /// A dashed placeholder for a pin the descriptor no longer declares, so
     /// the edge pointing at it has somewhere to land instead of vanishing.
     ghost: bool,
@@ -992,6 +1015,7 @@ fn build_geoms(
                         }
                     }),
                     inline: None,
+                    value_w: m.value_w,
                     ghost: false,
                     hit_w: Some(d * REROUTE_PIN_HIT),
                     untyped,
@@ -1168,8 +1192,12 @@ fn build_geoms(
                     .get(i)
                     .map(|(slug, label, _)| {
                         let mut w = m.label_inset() + p.measure_text(label, label_px, None).x;
-                        if inline_of(slug).is_some() {
-                            w += m.label_gap + m.value_w;
+                        // The cell's own width, plus the right padding the
+                        // drawing pass reserves for it. Budgeting `value_w`
+                        // flat (and forgetting `pad_x`) is what let a String
+                        // constant paint past the node's edge.
+                        if let Some(kind) = inline_of(slug) {
+                            w = inline_row_w(w, inline_cell_w(p, &kind, m, st), m);
                         }
                         w
                     })
@@ -1231,6 +1259,9 @@ fn build_geoms(
             for (i, (slug, label, ty)) in inputs.into_iter().enumerate() {
                 let y = row_y(i);
                 let inline = inline_of(&slug);
+                let value_w = inline
+                    .as_ref()
+                    .map_or(m.value_w, |k| inline_cell_w(p, k, m, st));
                 pins.push(PinGeom {
                     connected: incoming.contains(slug.as_str()),
                     wire_anchor: Pos2::new(min.x, y),
@@ -1241,6 +1272,7 @@ fn build_geoms(
                     output: false,
                     row: i,
                     inline,
+                    value_w,
                     ghost: false,
                     hit_w: None,
                     untyped: false,
@@ -1258,6 +1290,7 @@ fn build_geoms(
                     output: true,
                     row: i,
                     inline: None,
+                    value_w: m.value_w,
                     ghost: false,
                     hit_w: None,
                     untyped: false,
@@ -1285,6 +1318,7 @@ fn build_geoms(
                     dot_center: Pos2::new(dot, y),
                     connected: true,
                     inline: None,
+                    value_w: m.value_w,
                     ghost: true,
                     hit_w: None,
                     untyped: false,
@@ -2077,7 +2111,7 @@ fn draw_and_interact(
     // *hover* interactions off the canvas underneath one, which consumption
     // alone would not.
     let widget_claimed = pointer_screen
-        .is_some_and(|p| ui.ctx().modal_contains(p) || widget_rects.iter().any(|r| r.contains(p)));
+        .is_some_and(|p| ui.ctx().modal_contains(p) || widget_owns(p, &widget_rects));
 
     // Frame shortcuts. F frames the selection, Home fits the whole graph.
     // (Bare `A` used to mean fit-graph; the ratified table gives that job to
@@ -2617,10 +2651,25 @@ fn draw_and_interact(
     }
 
     // Node body: select + start drag.
+    //
+    // Skipped entirely while an embedded control owns the pointer. `interact`
+    // does not merely *ask* whether a rect is pressed — it claims
+    // `active_widget` for the id it is given, and the node body is drawn under
+    // every inline widget. Asking here therefore took the press away from the
+    // `DragValue`/`Checkbox` that ran a moment ago in `draw_nodes`, and those
+    // widgets live entirely on `active_widget` (scrub *and* click-to-type read
+    // it on the frames after the press). That is why an inline value could be
+    // hovered but never edited — and why letting the pointer wander off the
+    // field mid-press handed the leftover claim to the node as a drag. Guarding
+    // the *gestures* is not enough; the question itself has to go unasked. The
+    // config band has followed this rule since GS-1.
     let mut begin_drag = false;
     let mut node_pressed = false;
     let mut break_node: Option<u64> = None;
     for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
+        if widget_claimed {
+            break;
+        }
         let id = ui.alloc_id(("graph_node", g.id));
         let body = g.body_rect(lod, &m);
         let resp = scope.interact(ui, id, body);
@@ -2746,7 +2795,12 @@ fn draw_and_interact(
     let ann_free = ann_free && !resize_claimed;
 
     // Groups first (front-most annotation is the last drawn = highest index).
+    // A group bar runs under the nodes it holds, so it asks the same question
+    // the node body does and has to hold its tongue on the same condition.
     for i in (0..state.doc.groups.len()).rev() {
+        if widget_claimed {
+            break;
+        }
         let r = state.doc.groups[i].rect;
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], m.group_bar));
         if !overlaps(bar, vis) {
@@ -2778,6 +2832,9 @@ fn draw_and_interact(
         }
     }
     for i in (0..state.doc.comments.len()).rev() {
+        if widget_claimed {
+            break;
+        }
         let r = state.doc.comments[i].rect;
         let bar_h = m.comment_bar * state.doc.comments[i].clamped_font_scale();
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], bar_h));
@@ -2986,8 +3043,12 @@ fn draw_and_interact(
     );
 
     // Double-click empty canvas also opens the palette — the same gesture
-    // that opens an asset picker anywhere else in the editor.
-    if !node_pressed && !pin_claimed && !wire_claimed && state.palette.is_none() {
+    // that opens an asset picker anywhere else in the editor. `!widget_claimed`
+    // is load-bearing rather than decorative: this rect is the whole visible
+    // canvas, so without it the background would claim every press an inline
+    // widget just took (see the node-body loop).
+    if !node_pressed && !pin_claimed && !wire_claimed && !widget_claimed && state.palette.is_none()
+    {
         let id = ui.alloc_id("graph_canvas_bg");
         let resp = scope.interact(ui, id, vis);
         if resp.double_clicked(ui) {
@@ -6952,10 +7013,19 @@ fn payload_confirm_dialog(
 // ---------------------------------------------------------------------------
 
 /// Two-level world grid: minor 16px @ 5% white, major 128px @ 9%. The minor
-/// grid drops below 40% zoom, where it would only add noise. Never accent.
+/// grid drops below 40% zoom, where it would only add noise (and the surviving
+/// major grid lifts to 7%, per the design). Never accent.
+///
+/// Both levels are painted as **opaque** colors mixed in gamma space
+/// ([`grid_minor`] / [`grid_major`]), not as translucent white: crusty
+/// composites in linear light, where a 5% white lands ~5× brighter than the
+/// design's CSS gradient of the same number. Each line is also snapped to a
+/// whole pixel — a 1px stroke straddling two pixel columns spreads its ink and
+/// reads as a fat smudge instead of the design's hairline.
 fn draw_grid(ui: &mut Ui, scope: &CanvasScope, st: &Style, vis: Rect, zoom: f32) {
+    let canvas = st.palette.input;
     let mut p = ui.painter();
-    p.rect_filled(scope.rect(), Rounding::ZERO, st.palette.input);
+    p.rect_filled(scope.rect(), Rounding::ZERO, canvas);
 
     let mut level = |step: f32, color: Color| {
         // Guard against a pathological view producing millions of lines.
@@ -6966,28 +7036,37 @@ fn draw_grid(ui: &mut Ui, scope: &CanvasScope, st: &Style, vis: Rect, zoom: f32)
         }
         for i in (vis.min.x / step).floor() as i32..=(vis.max.x / step).ceil() as i32 {
             let wx = i as f32 * step;
+            let x = pixel_center(scope.world_to_screen(Pos2::new(wx, vis.min.y)).x);
             p.line_segment(
-                scope.world_to_screen(Pos2::new(wx, vis.min.y)),
-                scope.world_to_screen(Pos2::new(wx, vis.max.y)),
+                Pos2::new(x, scope.world_to_screen(Pos2::new(wx, vis.min.y)).y),
+                Pos2::new(x, scope.world_to_screen(Pos2::new(wx, vis.max.y)).y),
                 1.0,
                 color,
             );
         }
         for i in (vis.min.y / step).floor() as i32..=(vis.max.y / step).ceil() as i32 {
             let wy = i as f32 * step;
+            let y = pixel_center(scope.world_to_screen(Pos2::new(vis.min.x, wy)).y);
             p.line_segment(
-                scope.world_to_screen(Pos2::new(vis.min.x, wy)),
-                scope.world_to_screen(Pos2::new(vis.max.x, wy)),
+                Pos2::new(scope.world_to_screen(Pos2::new(vis.min.x, wy)).x, y),
+                Pos2::new(scope.world_to_screen(Pos2::new(vis.max.x, wy)).x, y),
                 1.0,
                 color,
             );
         }
     };
 
-    if zoom >= GRID_MINOR_MIN_ZOOM {
-        level(GRID_MINOR_STEP, grid_minor());
+    let minor = zoom >= GRID_MINOR_MIN_ZOOM;
+    if minor {
+        level(GRID_MINOR_STEP, grid_minor(canvas));
     }
-    level(GRID_MAJOR_STEP, grid_major());
+    level(GRID_MAJOR_STEP, grid_major(canvas, !minor));
+}
+
+/// Centre of the pixel `v` falls in — a 1px stroke drawn here covers exactly
+/// that pixel instead of half-covering two.
+fn pixel_center(v: f32) -> f32 {
+    v.floor() + 0.5
 }
 
 /// Group frames + comment boxes, behind wires and nodes (P7). Their titles are
@@ -8671,15 +8750,11 @@ fn draw_nodes(
                 // Inline value cell, right-aligned inside the row.
                 if let Some(kind) = &pin.inline {
                     // Flows after the label, but never past the width the
-                    // auto-sizer reserved for it.
-                    let cell = Rect::from_min_size(
-                        Pos2::new(
-                            (x + lw + m.label_gap * zoom)
-                                .min(srect.max.x - m.pad_x * zoom - m.value_w * zoom),
-                            c.y - m.row_h * zoom * 0.4,
-                        ),
-                        Vec2::new(m.value_w * zoom, m.row_h * zoom * 0.8),
-                    );
+                    // auto-sizer reserved for it — `pin.value_w` is the very
+                    // number the node was sized around, so the cell lands
+                    // inside the node by construction.
+                    let cell =
+                        inline_cell_rect(srect, x + lw, pin.value_w, c.y, m, zoom);
                     if lod.inline_widgets()
                         && matches!(
                             kind,
@@ -8973,8 +9048,9 @@ fn draw_inline_readonly(
         other => {
             let text = match other {
                 InlineKind::Float(x) => format!("{x}"),
+                InlineKind::Int(i) => i.to_string(),
                 InlineKind::Bool(b) => b.to_string(),
-                InlineKind::Chip(s) => s.clone(),
+                InlineKind::Str(s) | InlineKind::Chip(s) => s.clone(),
                 _ => String::new(),
             };
             p.rect_filled(cell, round, st.palette.input);
@@ -9007,6 +9083,67 @@ fn flagged_value(value: &str, ok: bool) -> String {
 
 fn chan(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Does an embedded control own the pointer? `rects` are the screen boxes the
+/// drawing pass handed to real crusty widgets this frame.
+///
+/// The canvas is drawn back-to-front but *interacts* front-to-back, and the
+/// embedded widgets run first (inside `draw_nodes`). Every canvas-level
+/// gesture below them therefore has to ask this before it so much as calls
+/// `interact` — that call claims `active_widget` for whatever id it is given,
+/// which is how a node body used to swallow the press a `DragValue` had just
+/// taken, leaving the field hoverable but not editable.
+fn widget_owns(pointer: Pos2, rects: &[Rect]) -> bool {
+    rects.iter().any(|r| r.contains(pointer))
+}
+
+/// Width a pin row needs once an inline cell of `value_w` is added to a label
+/// row already `label_row_w` wide (label inset + glyphs). The trailing `pad_x`
+/// is the same one [`inline_cell_rect`] keeps clear on the right — the two
+/// have to agree or the cell gets clamped over its own label, or off the node.
+fn inline_row_w(label_row_w: f32, value_w: f32, m: &GraphMetrics) -> f32 {
+    label_row_w + m.label_gap + value_w + m.pad_x
+}
+
+/// Screen rect of an inline value cell. It flows after the row label, but is
+/// clamped so its right edge never passes the node's padding — with the width
+/// [`inline_row_w`] reserved, the clamp is what guarantees "inside the node"
+/// even when the label ran long.
+fn inline_cell_rect(
+    node: Rect,
+    label_end_x: f32,
+    value_w: f32,
+    row_center_y: f32,
+    m: &GraphMetrics,
+    zoom: f32,
+) -> Rect {
+    let w = value_w * zoom;
+    let x = (label_end_x + m.label_gap * zoom).min(node.max.x - m.pad_x * zoom - w);
+    Rect::from_min_size(
+        Pos2::new(x, row_center_y - m.row_h * zoom * 0.4),
+        Vec2::new(w, m.row_h * zoom * 0.8),
+    )
+}
+
+/// Width the inline cell of `kind` needs, world units.
+///
+/// Only text-shaped constants grow past the reserved [`GraphMetrics::value_w`]:
+/// a number, a checkbox and a dropdown all fit 56 units, a string does not.
+/// Measured at **both** fonts the cell can be painted in — the live `TextEdit`
+/// at L0 draws body-size, the L1 fallback draws small mono — because the sizer
+/// has to hold whichever the zoom picks.
+fn inline_cell_w(p: &mut Painter, kind: &InlineKind, m: &GraphMetrics, st: &Style) -> f32 {
+    match kind {
+        InlineKind::Str(s) => {
+            let body = p.measure_text(s, st.fonts.body, None).x;
+            let mono = p
+                .measure_text_family(s, st.fonts.small, None, FontFamily::Mono)
+                .x;
+            m.text_value_w(body.max(mono))
+        }
+        _ => m.value_w,
+    }
 }
 
 /// Tail-trim `s` (with an ellipsis) until it fits `max_w` — value cells are
@@ -10006,9 +10143,11 @@ mod tests {
     fn lod_thresholds_match_the_spec_ladder() {
         assert_eq!(ZoomLod::from_zoom(2.20), ZoomLod::L0);
         assert_eq!(ZoomLod::from_zoom(0.90), ZoomLod::L0);
-        assert_eq!(ZoomLod::from_zoom(0.899), ZoomLod::L1);
-        assert_eq!(ZoomLod::from_zoom(0.60), ZoomLod::L1);
-        assert_eq!(ZoomLod::from_zoom(0.599), ZoomLod::L2);
+        assert_eq!(ZoomLod::from_zoom(0.83), ZoomLod::L0); // user-report zoom: editable
+        assert_eq!(ZoomLod::from_zoom(0.599), ZoomLod::L1);
+        assert_eq!(ZoomLod::from_zoom(0.60), ZoomLod::L0);
+        assert_eq!(ZoomLod::from_zoom(0.45), ZoomLod::L1);
+        assert_eq!(ZoomLod::from_zoom(0.449), ZoomLod::L2);
         assert_eq!(ZoomLod::from_zoom(0.35), ZoomLod::L2);
         assert_eq!(ZoomLod::from_zoom(0.349), ZoomLod::L3);
         assert_eq!(ZoomLod::from_zoom(0.15), ZoomLod::L3);
@@ -10093,6 +10232,7 @@ mod tests {
             dot_center: Pos2::ZERO,
             connected: false,
             inline: None,
+            value_w: 0.0,
             hit_w: None,
             untyped: false,
         };
@@ -10150,6 +10290,7 @@ mod tests {
             dot_center: Pos2::new(if output { c.x + band } else { c.x - band }, c.y),
             connected: false,
             inline: None,
+            value_w: 0.0,
             ghost: false,
             hit_w: Some(d * REROUTE_PIN_HIT),
             untyped,
@@ -10220,6 +10361,84 @@ mod tests {
             Some(7),
             "so the body takes the press and the reroute drags like any node"
         );
+    }
+
+    /// Bug: the Print node's `Text` field painted past the node's right edge.
+    /// The sizer budgeted a flat `value_w` for every inline cell (and forgot
+    /// the trailing padding), so a String constant that needed more simply
+    /// overflowed. Sizer and painter now share `inline_row_w`/`inline_cell_rect`
+    /// — this pins them together for cells from "fits easily" to "over the cap".
+    #[test]
+    fn a_long_string_constant_keeps_its_widget_inside_the_node() {
+        let m = GraphMetrics::new(&Style::steel());
+        let label_w = 26.0; // "Text"
+        let row_center = 40.0;
+        for text_w in [10.0, 56.0, 120.0, 400.0, 4000.0] {
+            let value_w = m.text_value_w(text_w);
+            let label_row = m.label_inset() + label_w;
+            let node_w = inline_row_w(label_row, value_w, &m).clamp(m.min_w, m.max_w);
+            for zoom in [0.9, 1.0, 2.2] {
+                let node = Rect::from_min_size(
+                    Pos2::new(100.0, 20.0),
+                    Vec2::new(node_w * zoom, 80.0 * zoom),
+                );
+                let cell = inline_cell_rect(
+                    node,
+                    node.min.x + label_row * zoom,
+                    value_w,
+                    row_center,
+                    &m,
+                    zoom,
+                );
+                assert!(
+                    cell.max.x <= node.max.x - m.pad_x * zoom + 0.01,
+                    "text_w {text_w} @ {zoom}: cell {:?} ran past node {:?}",
+                    cell.max.x,
+                    node.max.x
+                );
+                assert!(cell.min.x >= node.min.x, "cell must start inside the node");
+                assert!(cell.width() > 0.0);
+            }
+        }
+    }
+
+    /// The cap is what stops a paragraph-length constant from stretching a node
+    /// across the canvas; the floor is what keeps a numeric cell the size the
+    /// design draws it.
+    #[test]
+    fn an_inline_cell_grows_for_text_but_only_up_to_the_cap() {
+        let m = GraphMetrics::new(&Style::steel());
+        assert_eq!(m.text_value_w(0.0), m.value_w, "short text keeps the reserved width");
+        assert!(m.text_value_w(90.0) > m.value_w, "a wider string widens the cell");
+        assert_eq!(
+            m.text_value_w(10_000.0),
+            BASE_VALUE_W_MAX * m.scale,
+            "past the cap the text elides instead of growing the node"
+        );
+    }
+
+    /// Bug: an inline `DragValue`/`Checkbox` could be hovered but never edited.
+    /// The canvas asks `interact` about the node body *after* the widgets have
+    /// run, and asking claims the press — so the widget lost it on the very
+    /// frame it was taken. Every canvas gesture now yields where a widget rect
+    /// covers the pointer; this is that precedence, stated once.
+    #[test]
+    fn a_press_inside_an_inline_widget_belongs_to_the_widget() {
+        let cell = Rect::from_min_size(Pos2::new(50.0, 20.0), Vec2::new(56.0, 14.0));
+        let rects = [cell];
+        assert!(
+            widget_owns(cell.center(), &rects),
+            "the field's own box is the field's press — the node body under it may not ask"
+        );
+        assert!(
+            widget_owns(Pos2::new(50.5, 20.5), &rects),
+            "including its edges, where a slow click lands"
+        );
+        assert!(
+            !widget_owns(Pos2::new(49.0, 27.0), &rects),
+            "a pixel outside is the node's again, or box-select would never start"
+        );
+        assert!(!widget_owns(Pos2::new(80.0, 60.0), &[]), "no widgets, no claim");
     }
 
     #[test]
