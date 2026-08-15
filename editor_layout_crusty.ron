@@ -4,12 +4,14 @@
         ratio: 0.6136719,
         first: Split((
             direction: Vertical,
-            ratio: 0.6270023,
+            ratio: 0.6300534,
             first: Leaf((
                 tabs: [
                     "viewport:0",
+                    "curve:curves/duck_hop.curve",
+                    "graph:graphs/runner_demo.graph",
                 ],
-                active: 0,
+                active: 2,
                 tabs_hidden: false,
             )),
             second: Leaf((
@@ -18,7 +20,7 @@
                     "console",
                     "profiler",
                 ],
-                active: 0,
+                active: 1,
                 tabs_hidden: false,
             )),
         )),
@@ -42,7 +44,7 @@
         )),
     )),
     state: (
-        focused_tab: Some("hierarchy"),
+        focused_tab: Some("profiler"),
     ),
     play_settings: (
         mode: ListenServer,
