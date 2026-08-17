@@ -14,15 +14,15 @@ use std::sync::Arc;
 use node_graph_types::GraphDoc;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::animation::components::{LocalBoneTransform, SkeletonInstance};
+use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::assets::model_loader::{BoneData, RawAnimationClip};
 use crate::engine::ecs::components::MeshRenderer;
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 use crate::engine::scripting::normalize_graph_path;
 
-use super::machine::{evaluate_pose, AnimMachine, AnimParams};
-use super::plan::{compile_anim_graph, AnimGraphPlan, PlanState};
+use super::machine::{evaluate_pose, AnimMachine, AnimParams, PoseScratch};
+use super::plan::{compile_anim_graph, AnimGraphPlan, PlanClip};
 
 // ---------------------------------------------------------------------------
 // Components
@@ -259,14 +259,14 @@ impl AnimClipCache {
 pub struct AnimGraphSystem {
     loader: Box<dyn AnimAssetLoader + Send + Sync>,
     /// Reused blend scratch so steady-state frames allocate nothing.
-    scratch: Vec<LocalBoneTransform>,
+    scratch: PoseScratch,
 }
 
 impl AnimGraphSystem {
     pub fn new(loader: Box<dyn AnimAssetLoader + Send + Sync>) -> Self {
         Self {
             loader,
-            scratch: Vec::new(),
+            scratch: PoseScratch::new(),
         }
     }
 
@@ -315,11 +315,13 @@ impl AnimGraphSystem {
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
             for st in &plan.states {
-                if clips.get(&st.clip).and_then(|s| s.select(st.clip_name.as_deref())).is_none() {
-                    return refused(format!(
-                        "{graph}: state '{}': clip '{}' could not be loaded",
-                        st.name, st.clip
-                    ));
+                for c in st.tree.clips() {
+                    if clip_of(clips, c).is_none() {
+                        return refused(format!(
+                            "{graph}: state '{}': clip '{}' could not be loaded",
+                            st.name, c.clip
+                        ));
+                    }
                 }
             }
         }
@@ -335,9 +337,9 @@ impl AnimGraphSystem {
     }
 }
 
-/// The clip a plan state plays, out of the cache.
-fn clip_of<'a>(cache: &'a AnimClipCache, st: &PlanState) -> Option<&'a RawAnimationClip> {
-    cache.get(&st.clip)?.select(st.clip_name.as_deref())
+/// The clip a plan reference names, out of the cache.
+fn clip_of<'a>(cache: &'a AnimClipCache, c: &PlanClip) -> Option<&'a RawAnimationClip> {
+    cache.get(&c.clip)?.select(c.clip_name.as_deref())
 }
 
 impl System for AnimGraphSystem {
@@ -427,7 +429,9 @@ impl System for AnimGraphSystem {
             rt.machine.tick(&plan, &mut rt.params, dt);
             evaluate_pose(
                 &rt.machine,
-                |state| plan.states.get(state).and_then(|st| clip_of(clips, st)),
+                &plan,
+                &rt.params,
+                |c| clip_of(clips, c),
                 &mut skeleton.local_transforms,
                 &mut self.scratch,
             );

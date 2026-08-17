@@ -5,7 +5,10 @@
 //! graph document container from Task 40 — with an animation node library:
 //! ENTRY, State and Transition are all nodes, parameters are the document's
 //! `variables`. No exec wires exist in this domain; the flowing value is a
-//! Pose (per CONTEXT.md).
+//! Pose (per CONTEXT.md). A state's pose comes from a single clip or from a
+//! blend tree (clip nodes, 1D/2D blends with minimal sync groups) embedded
+//! as a region keyed by the state's node id — the same container transitions
+//! use for their rule graphs.
 //!
 //! Evaluation is engine-side by decision (ADR 0001): it samples `.anim` clip
 //! assets through the existing keyframe sampling functions and writes the
@@ -30,10 +33,11 @@ pub mod runner;
 #[cfg(test)]
 mod acceptance;
 
-pub use machine::{evaluate_pose, AnimMachine, AnimParams, Crossfade, ParamValue};
+pub use machine::{evaluate_pose, AnimMachine, AnimParams, Crossfade, ParamValue, PoseScratch};
 pub use plan::{
     compile_anim_graph, trigger_pin_type, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl,
-    PlanRule, PlanState, PlanTransition, RuleExpr, TransitionFrom, TRIGGER_PARAM_DOMAIN,
+    PlanClip, PlanRule, PlanState, PlanTransition, PlanTree, RuleExpr, TransitionFrom,
+    TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,

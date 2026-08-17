@@ -27,8 +27,10 @@ use super::machine::ParamValue;
 /// The ENTRY node — a real node on the canvas, exactly one per machine. Its
 /// single outgoing edge names the starting state.
 pub const ANIM_ENTRY_TYPE_ID: &str = "anim_entry";
-/// A State: plays the `.anim` clip its [`CLIP_PROP`] names. (Blend trees and
-/// nested machines widen this in later slices.)
+/// A State: either a leaf that plays the `.anim` clip its [`CLIP_PROP`]
+/// names, or — when the document carries a region keyed by the state's id —
+/// a blend tree evaluated recursively into one Pose. (Nested machines widen
+/// this in a later slice.)
 pub const ANIM_STATE_TYPE_ID: &str = "anim_state";
 /// A Transition between two states, carrying blend duration and priority as
 /// node data.
@@ -44,6 +46,53 @@ pub const ANIM_RULE_RESULT_TYPE_ID: &str = "anim_rule_result";
 /// The RESULT node's one input pin.
 pub const RULE_RESULT_PIN: &str = "value";
 
+/// Blend-tree node library. A state's tree lives in an embedded region keyed
+/// by the STATE node id — the same container v3 mechanism transitions use
+/// for rules, so descend/duplicate/delete semantics come for free.
+///
+/// A clip leaf: plays the `.anim` its [`CLIP_PROP`] names ([`CLIP_NAME_PROP`]
+/// selects inside the container).
+pub const ANIM_CLIP_TYPE_ID: &str = "anim_clip";
+/// A 1D blend (walk → run): driven by the Float parameter its
+/// [`BLEND_PARAM_PROP`] names; children on [`blend_in_pin`] pins, placed on
+/// the axis by [`blend_threshold_prop`] properties.
+pub const ANIM_BLEND1D_TYPE_ID: &str = "anim_blend1d";
+/// A 2D directional blend (8-way movement): driven by the Float parameters
+/// [`BLEND_PARAM_X_PROP`]/[`BLEND_PARAM_Y_PROP`]; children on
+/// [`blend_in_pin`] pins, each owning a direction ([`blend_x_prop`]/
+/// [`blend_y_prop`]). Only the input's direction matters, not its magnitude.
+pub const ANIM_BLEND2D_TYPE_ID: &str = "anim_blend2d";
+/// The single Pose sink of a state's tree — exactly one per non-empty tree
+/// region, and its input must be wired (a state must produce a pose; there
+/// is no "always-true" reading here).
+pub const ANIM_POSE_RESULT_TYPE_ID: &str = "anim_pose_result";
+/// The Pose pin: every tree node's output, and the RESULT sink's input.
+pub const POSE_PIN: &str = "pose";
+/// Blend node properties: the driving parameter(s), bound **by name** (an
+/// editor dropdown), not wired — tree regions stay single-typed, only Pose
+/// flows.
+pub const BLEND_PARAM_PROP: &str = "param";
+pub const BLEND_PARAM_X_PROP: &str = "param_x";
+pub const BLEND_PARAM_Y_PROP: &str = "param_y";
+
+/// A blend node's child input pins are indexed: `in_0`, `in_1`, …
+pub fn blend_in_pin(i: usize) -> String {
+    format!("in_{i}")
+}
+
+/// The 1D threshold property paired with `in_i`: `threshold_0`, …
+pub fn blend_threshold_prop(i: usize) -> String {
+    format!("threshold_{i}")
+}
+
+/// The 2D direction properties paired with `in_i`: `x_0`/`y_0`, …
+pub fn blend_x_prop(i: usize) -> String {
+    format!("x_{i}")
+}
+pub fn blend_y_prop(i: usize) -> String {
+    format!("y_{i}")
+}
+
 /// State pins: machine-topology flow in/out. (Not Pose wires — those belong
 /// to blend trees inside a state.)
 pub const STATE_IN_PIN: &str = "in";
@@ -53,10 +102,12 @@ pub const STATE_OUT_PIN: &str = "out";
 pub const TRANSITION_FROM_PIN: &str = "from";
 pub const TRANSITION_TO_PIN: &str = "to";
 
-/// State properties. `clip` is the content-relative `.anim` path (required);
-/// `clip_name` picks a clip inside the container (default: the first);
-/// `speed` is a playback-rate multiplier (default 1.0 — 0.0 holds the first
-/// frame as a pose).
+/// State properties. `clip` is the content-relative `.anim` path (required
+/// on a leaf state — a state with a tree region ignores it); `clip_name`
+/// picks a clip inside the container (default: the first); `speed` is a
+/// playback-rate multiplier on the state's clock (default 1.0 — 0.0 holds
+/// the first frame as a pose). Both clip properties also apply to
+/// [`ANIM_CLIP_TYPE_ID`] nodes inside a tree.
 pub const CLIP_PROP: &str = "clip";
 pub const CLIP_NAME_PROP: &str = "clip_name";
 pub const SPEED_PROP: &str = "speed";
@@ -104,6 +155,60 @@ pub struct ParamDecl {
     pub default: ParamValue,
 }
 
+/// A clip reference inside a blend tree (and what a clip-only leaf state
+/// compiles to).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanClip {
+    /// Content-relative `.anim` path.
+    pub clip: String,
+    /// Clip inside the container; `None` = the first.
+    pub clip_name: Option<String>,
+}
+
+/// A state's compiled pose producer — recursive tree evaluation per the
+/// spec: clips at the leaves, 1D/2D blends above them. Children are sorted
+/// at compile time (by threshold / by direction angle), so at most two of
+/// them — the bracketing pair — are ever active at once.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanTree {
+    Clip(PlanClip),
+    /// 1D blend: `children` sorted by threshold ascending. Outside the range
+    /// the nearest endpoint plays pure.
+    Blend1D {
+        /// The declared Float parameter driving the blend.
+        param: String,
+        children: Vec<(f32, PlanTree)>,
+    },
+    /// 2D directional blend: `children` sorted by direction angle (radians
+    /// in `[0, 2π)`, precomputed from each child's `x`/`y`). The input
+    /// direction blends the two angularly-adjacent children; a zero input
+    /// holds the first child.
+    Blend2D {
+        param_x: String,
+        param_y: String,
+        children: Vec<(f32, PlanTree)>,
+    },
+}
+
+impl PlanTree {
+    /// Every clip reference in the tree, depth-first.
+    pub fn clips(&self) -> Vec<&PlanClip> {
+        fn walk<'a>(t: &'a PlanTree, out: &mut Vec<&'a PlanClip>) {
+            match t {
+                PlanTree::Clip(c) => out.push(c),
+                PlanTree::Blend1D { children, .. } | PlanTree::Blend2D { children, .. } => {
+                    for (_, c) in children {
+                        walk(c, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
+}
+
 /// A compiled State: what to play and how fast.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanState {
@@ -111,11 +216,10 @@ pub struct PlanState {
     pub node_id: u64,
     /// Author-facing name (node title, falling back to `State <id>`).
     pub name: String,
-    /// Content-relative `.anim` path.
-    pub clip: String,
-    /// Clip inside the container; `None` = the first.
-    pub clip_name: Option<String>,
-    /// Playback-rate multiplier.
+    /// The pose producer: a single clip for a leaf state, a blend tree when
+    /// the document carries a region keyed by this state's node id.
+    pub tree: PlanTree,
+    /// Playback-rate multiplier on the state's clock.
     pub speed: f32,
 }
 
@@ -215,7 +319,12 @@ pub struct AnimGraphPlan {
 impl AnimGraphPlan {
     /// Deduplicated content-relative `.anim` paths this plan samples.
     pub fn clip_refs(&self) -> Vec<&str> {
-        let mut refs: Vec<&str> = self.states.iter().map(|s| s.clip.as_str()).collect();
+        let mut refs: Vec<&str> = self
+            .states
+            .iter()
+            .flat_map(|s| s.tree.clips())
+            .map(|c| c.clip.as_str())
+            .collect();
         refs.sort_unstable();
         refs.dedup();
         refs
@@ -261,51 +370,8 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
         ));
     }
 
-    // States, in document order (index = plan identity).
-    let mut states: Vec<PlanState> = Vec::new();
-    for n in doc.nodes.iter().filter(|n| n.type_id == ANIM_STATE_TYPE_ID) {
-        let name = n
-            .title
-            .clone()
-            .unwrap_or_else(|| format!("State {}", n.id));
-        let clip = str_prop(&n.properties, CLIP_PROP)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| format!("state '{name}' names no clip (property `{CLIP_PROP}`)"))?;
-        states.push(PlanState {
-            node_id: n.id,
-            name,
-            clip: crate::engine::scripting::normalize_graph_path(clip),
-            clip_name: str_prop(&n.properties, CLIP_NAME_PROP)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
-        });
-    }
-    if states.is_empty() {
-        return Err("an animation graph needs at least one state".to_string());
-    }
-    let state_index =
-        |id: u64| -> Option<usize> { states.iter().position(|s| s.node_id == id) };
-
-    // ENTRY: exactly one node, exactly one outgoing edge, into a state.
-    let mut entries = doc.nodes.iter().filter(|n| n.type_id == ANIM_ENTRY_TYPE_ID);
-    let entry_node = entries
-        .next()
-        .ok_or_else(|| "an animation graph needs an ENTRY node".to_string())?;
-    if entries.next().is_some() {
-        return Err("an animation graph has exactly one ENTRY node".to_string());
-    }
-    let mut entry_edges = doc.edges.iter().filter(|e| e.from_node == entry_node.id);
-    let entry_edge = entry_edges
-        .next()
-        .ok_or_else(|| "the ENTRY node is not wired to a state".to_string())?;
-    if entry_edges.next().is_some() {
-        return Err("the ENTRY node has exactly one outgoing wire".to_string());
-    }
-    let entry = state_index(entry_edge.to_node)
-        .ok_or_else(|| "the ENTRY node must be wired to a state".to_string())?;
-
-    // Parameters, from the document's variables.
+    // Parameters first, from the document's variables — states need them to
+    // validate the parameters their blend trees read.
     let mut parameters: Vec<ParamDecl> = Vec::new();
     for v in &doc.variables {
         if parameters.iter().any(|p| p.slug == v.slug) {
@@ -346,6 +412,65 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
             default,
         });
     }
+
+    // States, in document order (index = plan identity). A state with a
+    // non-empty region compiles it as a blend tree; a leaf state plays the
+    // clip its `clip` property names.
+    let mut states: Vec<PlanState> = Vec::new();
+    for n in doc.nodes.iter().filter(|n| n.type_id == ANIM_STATE_TYPE_ID) {
+        let name = n
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("State {}", n.id));
+        let tree = match doc.regions.get(&n.id).filter(|r| !r.nodes.is_empty()) {
+            Some(region) => compile_tree(region, &name, &parameters)?,
+            None => {
+                let clip = str_prop(&n.properties, CLIP_PROP)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "state '{name}' names no clip (property `{CLIP_PROP}`) and has \
+                             no blend tree"
+                        )
+                    })?;
+                PlanTree::Clip(PlanClip {
+                    clip: crate::engine::scripting::normalize_graph_path(clip),
+                    clip_name: str_prop(&n.properties, CLIP_NAME_PROP)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                })
+            }
+        };
+        states.push(PlanState {
+            node_id: n.id,
+            name,
+            tree,
+            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
+        });
+    }
+    if states.is_empty() {
+        return Err("an animation graph needs at least one state".to_string());
+    }
+    let state_index =
+        |id: u64| -> Option<usize> { states.iter().position(|s| s.node_id == id) };
+
+    // ENTRY: exactly one node, exactly one outgoing edge, into a state.
+    let mut entries = doc.nodes.iter().filter(|n| n.type_id == ANIM_ENTRY_TYPE_ID);
+    let entry_node = entries
+        .next()
+        .ok_or_else(|| "an animation graph needs an ENTRY node".to_string())?;
+    if entries.next().is_some() {
+        return Err("an animation graph has exactly one ENTRY node".to_string());
+    }
+    let mut entry_edges = doc.edges.iter().filter(|e| e.from_node == entry_node.id);
+    let entry_edge = entry_edges
+        .next()
+        .ok_or_else(|| "the ENTRY node is not wired to a state".to_string())?;
+    if entry_edges.next().is_some() {
+        return Err("the ENTRY node has exactly one outgoing wire".to_string());
+    }
+    let entry = state_index(entry_edge.to_node)
+        .ok_or_else(|| "the ENTRY node must be wired to a state".to_string())?;
 
     // Transitions: resolve both endpoints through their pins. A source may
     // be a state or an Any State node; a target is always a state.
@@ -696,5 +821,280 @@ impl RuleCx<'_> {
             ));
         }
         Ok(expr)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blend-tree compiler (the embedded pose network inside a state)
+// ---------------------------------------------------------------------------
+
+/// The node types a blend tree may contain besides the RESULT sink. The same
+/// whitelist posture as rules: anything else — rule nodes, effects, exec
+/// flow, node types that do not exist yet — is refused by not being on it.
+const TREE_NODE_TYPES: [&str; 4] = [
+    ANIM_CLIP_TYPE_ID,
+    ANIM_BLEND1D_TYPE_ID,
+    ANIM_BLEND2D_TYPE_ID,
+    REROUTE_TYPE_ID,
+];
+
+/// Compile a state's embedded tree region into a [`PlanTree`].
+///
+/// Unlike a rule, a tree has no "unwired = default" reading: a state must
+/// produce a pose, so an unwired RESULT is a refusal, not a fallback.
+fn compile_tree(
+    region: &GraphRegion,
+    state: &str,
+    parameters: &[ParamDecl],
+) -> Result<PlanTree, String> {
+    for n in &region.nodes {
+        if n.type_id != ANIM_POSE_RESULT_TYPE_ID && !TREE_NODE_TYPES.contains(&n.type_id.as_str())
+        {
+            return Err(format!(
+                "state '{state}': tree node {} ('{}') is not a blend-tree node — a state's \
+                 tree is clip nodes, 1D/2D blends and reroutes",
+                n.id, n.type_id
+            ));
+        }
+    }
+
+    // Exactly one RESULT sink.
+    let mut results = region
+        .nodes
+        .iter()
+        .filter(|n| n.type_id == ANIM_POSE_RESULT_TYPE_ID);
+    let result = results
+        .next()
+        .ok_or_else(|| format!("state '{state}': blend tree has no RESULT node"))?;
+    if results.next().is_some() {
+        return Err(format!(
+            "state '{state}': a blend tree has exactly one RESULT node"
+        ));
+    }
+
+    // Fan-in is meaningless in a value network.
+    for e in &region.edges {
+        let wires = region
+            .edges
+            .iter()
+            .filter(|o| o.to_node == e.to_node && o.to_pin == e.to_pin)
+            .count();
+        if wires > 1 {
+            return Err(format!(
+                "state '{state}': tree node {} input '{}' has {wires} wires",
+                e.to_node, e.to_pin
+            ));
+        }
+    }
+
+    let edge = region
+        .edges
+        .iter()
+        .find(|e| e.to_node == result.id && e.to_pin == POSE_PIN)
+        .ok_or_else(|| {
+            format!("state '{state}': nothing is wired into the blend tree's RESULT")
+        })?;
+    let mut cx = TreeCx {
+        region,
+        parameters,
+        state,
+        stack: Vec::new(),
+    };
+    cx.output(edge.from_node, &edge.from_pin)
+}
+
+/// Backward walk from the RESULT input. Only Pose flows in a tree, so there
+/// is no wire typing to check — just structure: pins exist, driving
+/// parameters are declared Floats, children carry their placement data.
+struct TreeCx<'a> {
+    region: &'a GraphRegion,
+    parameters: &'a [ParamDecl],
+    state: &'a str,
+    /// Nodes currently being compiled — a wire back into one is a cycle.
+    stack: Vec<u64>,
+}
+
+impl TreeCx<'_> {
+    /// A blend node's driving parameter: bound by name, must be a declared
+    /// Float (a Bool or Trigger has no axis to place children on).
+    fn float_param(&self, node: &NodeInst, key: &str) -> Result<String, String> {
+        let state = self.state;
+        let slug = match node.properties.get(key) {
+            Some(PropValue::Str(s)) if !s.is_empty() => s.clone(),
+            _ => {
+                return Err(format!(
+                    "state '{state}': blend node {} names no parameter (property `{key}`)",
+                    node.id
+                ))
+            }
+        };
+        match self.parameters.iter().find(|p| p.slug == slug) {
+            None => Err(format!(
+                "state '{state}': parameter '{slug}' is not declared"
+            )),
+            Some(p) if p.ty != AnimParamType::Float => Err(format!(
+                "state '{state}': blend node {}: parameter '{slug}' is not a Float",
+                node.id
+            )),
+            Some(_) => Ok(slug),
+        }
+    }
+
+    /// A blend node's wired children as `(pin index, subtree)`, sorted by
+    /// pin index. Indices need not be contiguous — they are names.
+    fn children(&mut self, node_id: u64) -> Result<Vec<(usize, PlanTree)>, String> {
+        let state = self.state;
+        let mut wires: Vec<(usize, u64, String)> = Vec::new();
+        for e in self.region.edges.iter().filter(|e| e.to_node == node_id) {
+            let idx = e
+                .to_pin
+                .strip_prefix("in_")
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "state '{state}': blend node {node_id} has no input '{}'",
+                        e.to_pin
+                    )
+                })?;
+            wires.push((idx, e.from_node, e.from_pin.clone()));
+        }
+        wires.sort_by_key(|(i, ..)| *i);
+        let mut children = Vec::new();
+        for (idx, from, from_pin) in wires {
+            children.push((idx, self.output(from, &from_pin)?));
+        }
+        Ok(children)
+    }
+
+    /// The subtree a node produces on `from_pin`.
+    fn output(&mut self, node_id: u64, from_pin: &str) -> Result<PlanTree, String> {
+        let state = self.state;
+        let node = self.region.node(node_id).ok_or_else(|| {
+            format!("state '{state}': tree wire names node {node_id}, which does not exist")
+        })?;
+        if self.stack.contains(&node_id) {
+            return Err(format!(
+                "state '{state}': the blend tree contains a cycle through node {node_id}"
+            ));
+        }
+        self.stack.push(node_id);
+        let (out_pin, tree) = match node.type_id.as_str() {
+            ANIM_CLIP_TYPE_ID => {
+                let clip = str_prop(&node.properties, CLIP_PROP)
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "state '{state}': clip node {node_id} names no clip \
+                             (property `{CLIP_PROP}`)"
+                        )
+                    })?;
+                (
+                    POSE_PIN,
+                    PlanTree::Clip(PlanClip {
+                        clip: crate::engine::scripting::normalize_graph_path(clip),
+                        clip_name: str_prop(&node.properties, CLIP_NAME_PROP)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                    }),
+                )
+            }
+            ANIM_BLEND1D_TYPE_ID => {
+                let param = self.float_param(node, BLEND_PARAM_PROP)?;
+                let mut children = Vec::new();
+                for (idx, sub) in self.children(node_id)? {
+                    let threshold = float_prop(&node.properties, &blend_threshold_prop(idx))
+                        .ok_or_else(|| {
+                            format!(
+                                "state '{state}': blend node {node_id} child `in_{idx}` has \
+                                 no threshold (property `threshold_{idx}`)"
+                            )
+                        })?;
+                    children.push((threshold, sub));
+                }
+                if children.len() < 2 {
+                    return Err(format!(
+                        "state '{state}': blend node {node_id} needs at least two wired children"
+                    ));
+                }
+                children.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if children.windows(2).any(|w| w[0].0 == w[1].0) {
+                    return Err(format!(
+                        "state '{state}': blend node {node_id} has two children sharing a \
+                         threshold"
+                    ));
+                }
+                (POSE_PIN, PlanTree::Blend1D { param, children })
+            }
+            ANIM_BLEND2D_TYPE_ID => {
+                let param_x = self.float_param(node, BLEND_PARAM_X_PROP)?;
+                let param_y = self.float_param(node, BLEND_PARAM_Y_PROP)?;
+                let mut children = Vec::new();
+                for (idx, sub) in self.children(node_id)? {
+                    let (Some(x), Some(y)) = (
+                        float_prop(&node.properties, &blend_x_prop(idx)),
+                        float_prop(&node.properties, &blend_y_prop(idx)),
+                    ) else {
+                        return Err(format!(
+                            "state '{state}': blend node {node_id} child `in_{idx}` has no \
+                             direction (properties `x_{idx}`/`y_{idx}`)"
+                        ));
+                    };
+                    if x == 0.0 && y == 0.0 {
+                        return Err(format!(
+                            "state '{state}': blend node {node_id} child `in_{idx}` has a \
+                             zero direction"
+                        ));
+                    }
+                    children.push((y.atan2(x).rem_euclid(std::f32::consts::TAU), sub));
+                }
+                if children.len() < 2 {
+                    return Err(format!(
+                        "state '{state}': blend node {node_id} needs at least two wired children"
+                    ));
+                }
+                children.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if children.windows(2).any(|w| w[0].0 == w[1].0) {
+                    return Err(format!(
+                        "state '{state}': blend node {node_id} has two children sharing a \
+                         direction"
+                    ));
+                }
+                (
+                    POSE_PIN,
+                    PlanTree::Blend2D {
+                        param_x,
+                        param_y,
+                        children,
+                    },
+                )
+            }
+            // A reroute is a Pose pass-through.
+            REROUTE_TYPE_ID => {
+                let e = self
+                    .region
+                    .edges
+                    .iter()
+                    .find(|e| e.to_node == node_id && e.to_pin == REROUTE_IN)
+                    .ok_or_else(|| {
+                        format!("state '{state}': reroute {node_id} has nothing wired in")
+                    })?;
+                let (from, pin) = (e.from_node, e.from_pin.clone());
+                (REROUTE_OUT, self.output(from, &pin)?)
+            }
+            other => {
+                // RESULT as a source lands here too: it is a sink.
+                return Err(format!(
+                    "state '{state}': tree node {node_id} ('{other}') has no outputs"
+                ));
+            }
+        };
+        self.stack.pop();
+        if from_pin != out_pin {
+            return Err(format!(
+                "state '{state}': tree node {node_id} ('{}') has no output '{from_pin}'",
+                node.type_id
+            ));
+        }
+        Ok(tree)
     }
 }

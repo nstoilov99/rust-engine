@@ -4,9 +4,9 @@
 
 **Blocked by:** 01 — Tracer: a two-state machine animates an entity.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 1D blend weights across the full parameter range verified at the evaluator seam (endpoints play pure clips, midpoints blend proportionally)
-- [ ] 2D directional blend produces the expected weighted poses for cardinal and diagonal inputs
-- [ ] Sync group keeps cyclic clips phase-aligned as the blend weight changes over time
-- [ ] A blend-tree state crossfades against a plain clip state correctly (weights account for the transition, poses stay sane on a synthetic skeleton)
+- [x] 1D blend weights across the full parameter range verified at the evaluator seam (endpoints play pure clips, midpoints blend proportionally)
+- [x] 2D directional blend produces the expected weighted poses for cardinal and diagonal inputs
+- [x] Sync group keeps cyclic clips phase-aligned as the blend weight changes over time
+- [x] A blend-tree state crossfades against a plain clip state correctly (weights account for the transition, poses stay sane on a synthetic skeleton)

@@ -26,7 +26,7 @@ use crate::engine::ecs::components::MeshRenderer;
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 
-use super::machine::{evaluate_pose, AnimMachine, AnimParams};
+use super::machine::{evaluate_pose, AnimMachine, AnimParams, PoseScratch};
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
@@ -156,6 +156,164 @@ fn constant_clip(name: &str, x: f32) -> RawAnimationClip {
             scale_keys: vec![],
         }],
     }
+}
+
+/// A Float parameter declaration (default 0.0).
+fn float_decl(slug: &str) -> VarDecl {
+    VarDecl {
+        slug: slug.into(),
+        label: slug.into(),
+        ty: PinType::Float,
+        default: Some(PropValue::Float(0.0)),
+        group: None,
+    }
+}
+
+/// A clip node inside a state's tree region.
+fn clip_node(id: u64, path: &str) -> NodeInst {
+    with(
+        id,
+        plan::ANIM_CLIP_TYPE_ID,
+        None,
+        &[(plan::CLIP_PROP, PropValue::Asset(path.into()))],
+    )
+}
+
+/// Walk/Run under a 1D blend on `speed` (thresholds 0 and 6), wired into the
+/// tree's RESULT — the canonical walk→run tree.
+fn walk_run_tree() -> GraphRegion {
+    GraphRegion {
+        nodes: vec![
+            clip_node(0, "anims/walk.anim"),
+            clip_node(1, "anims/run.anim"),
+            with(
+                2,
+                plan::ANIM_BLEND1D_TYPE_ID,
+                None,
+                &[
+                    (plan::BLEND_PARAM_PROP, PropValue::Str("speed".into())),
+                    ("threshold_0", PropValue::Float(0.0)),
+                    ("threshold_1", PropValue::Float(6.0)),
+                ],
+            ),
+            node(3, plan::ANIM_POSE_RESULT_TYPE_ID, None),
+        ],
+        edges: vec![
+            edge(0, plan::POSE_PIN, 2, "in_0"),
+            edge(1, plan::POSE_PIN, 2, "in_1"),
+            edge(2, plan::POSE_PIN, 3, plan::POSE_PIN),
+        ],
+    }
+}
+
+/// ENTRY → a single "Move" state whose pose is [`walk_run_tree`]. The state
+/// names no clip — the tree is its pose producer.
+fn blend1d_doc() -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("speed")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(2, plan::ANIM_STATE_TYPE_ID, Some("Move"), &[]),
+    ];
+    doc.edges = vec![edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN)];
+    doc.regions.insert(2, walk_run_tree());
+    doc
+}
+
+/// ENTRY → "Strafe" with an 8-way-style 2D directional blend on
+/// `dir_x`/`dir_y`: E/N/W/S clips at the cardinal directions.
+fn blend2d_doc() -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("dir_x"), float_decl("dir_y")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(2, plan::ANIM_STATE_TYPE_ID, Some("Strafe"), &[]),
+    ];
+    doc.edges = vec![edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN)];
+    doc.regions.insert(
+        2,
+        GraphRegion {
+            nodes: vec![
+                clip_node(0, "anims/east.anim"),
+                clip_node(1, "anims/north.anim"),
+                clip_node(2, "anims/west.anim"),
+                clip_node(3, "anims/south.anim"),
+                with(
+                    4,
+                    plan::ANIM_BLEND2D_TYPE_ID,
+                    None,
+                    &[
+                        (plan::BLEND_PARAM_X_PROP, PropValue::Str("dir_x".into())),
+                        (plan::BLEND_PARAM_Y_PROP, PropValue::Str("dir_y".into())),
+                        ("x_0", PropValue::Float(1.0)),
+                        ("y_0", PropValue::Float(0.0)),
+                        ("x_1", PropValue::Float(0.0)),
+                        ("y_1", PropValue::Float(1.0)),
+                        ("x_2", PropValue::Float(-1.0)),
+                        ("y_2", PropValue::Float(0.0)),
+                        ("x_3", PropValue::Float(0.0)),
+                        ("y_3", PropValue::Float(-1.0)),
+                    ],
+                ),
+                node(5, plan::ANIM_POSE_RESULT_TYPE_ID, None),
+            ],
+            edges: vec![
+                edge(0, plan::POSE_PIN, 4, "in_0"),
+                edge(1, plan::POSE_PIN, 4, "in_1"),
+                edge(2, plan::POSE_PIN, 4, "in_2"),
+                edge(3, plan::POSE_PIN, 4, "in_3"),
+                edge(4, plan::POSE_PIN, 5, plan::POSE_PIN),
+            ],
+        },
+    );
+    doc
+}
+
+/// A cyclic clip whose bone-0 x value *is* its own normalized phase: keys
+/// run linearly 0→1 over the duration, so a sampled value reads back where
+/// in its cycle the clip was sampled.
+fn phase_clip(name: &str, duration: f32) -> RawAnimationClip {
+    RawAnimationClip {
+        name: name.to_string(),
+        duration_seconds: duration,
+        channels: vec![AnimationChannel {
+            bone_index: 0,
+            position_keys: vec![(0.0, Vec3::ZERO), (duration, Vec3::new(1.0, 0.0, 0.0))],
+            rotation_keys: vec![],
+            scale_keys: vec![],
+        }],
+    }
+}
+
+/// A clip resolver over a `(path, clip)` table — the test-side stand-in for
+/// the runner's clip cache.
+fn resolver<'a>(
+    clips: &'a [(&'a str, RawAnimationClip)],
+) -> impl Fn(&plan::PlanClip) -> Option<&'a RawAnimationClip> {
+    move |c| clips.iter().find(|(p, _)| *p == c.clip).map(|(_, cl)| cl)
+}
+
+/// Mutable properties of node `nid` inside the region owned by `owner`.
+fn region_node_props(
+    doc: &mut GraphDoc,
+    owner: u64,
+    nid: u64,
+) -> &mut BTreeMap<String, PropValue> {
+    &mut doc
+        .regions
+        .get_mut(&owner)
+        .unwrap()
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == nid)
+        .unwrap()
+        .properties
 }
 
 fn synthetic_bones() -> Vec<BoneData> {
@@ -830,22 +988,19 @@ fn a_held_any_state_rule_does_not_restart_its_target() {
 #[test]
 fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     let plan = compile_anim_graph(&two_state_doc()).expect("compiles");
-    let idle = constant_clip("Idle", 0.0);
-    let walk = constant_clip("Walk", 10.0);
-    let clip_for = |state: usize| -> Option<&RawAnimationClip> {
-        match plan.states[state].name.as_str() {
-            "Idle" => Some(&idle),
-            _ => Some(&walk),
-        }
-    };
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 10.0)),
+    ];
+    let clip_for = resolver(&clips);
 
     let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
     let mut pose = vec![LocalBoneTransform::default(); 2];
-    let mut scratch = Vec::new();
+    let mut scratch = PoseScratch::new();
 
     m.tick(&plan, &mut params, 0.1);
-    evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
     assert_eq!(pose[0].translation.x, 0.0, "entry state pose");
 
     params.set_bool("walk", true);
@@ -853,7 +1008,7 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
-    evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
     assert!(
         (pose[0].translation.x - 5.0).abs() < 1e-4,
         "halfway through the fade the pose is halfway between the clips, got {}",
@@ -864,8 +1019,397 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
 
     // Fade done → pure Walk pose.
     m.tick(&plan, &mut params, 0.3);
-    evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
     assert!((pose[0].translation.x - 10.0).abs() < 1e-4);
+}
+
+// ---------------------------------------------------------------------------
+// Blend trees (1D/2D blends, sync groups, crossfading against trees)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_state_region_compiles_to_a_blend_tree() {
+    let compiled = compile_anim_graph(&blend1d_doc()).expect("compiles");
+    let plan::PlanTree::Blend1D { param, children } = &compiled.states[0].tree else {
+        panic!("expected a 1D blend, got {:?}", compiled.states[0].tree);
+    };
+    assert_eq!(param, "speed");
+    assert_eq!(
+        children.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+        vec![0.0, 6.0],
+        "children sorted by threshold"
+    );
+    assert!(children
+        .iter()
+        .all(|(_, c)| matches!(c, plan::PlanTree::Clip(_))));
+    assert_eq!(
+        compiled.clip_refs(),
+        vec!["anims/run.anim", "anims/walk.anim"],
+        "clip refs walk the tree"
+    );
+}
+
+#[test]
+fn blend1d_endpoints_play_pure_clips_and_midpoints_blend_proportionally() {
+    let plan = compile_anim_graph(&blend1d_doc()).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/run.anim", constant_clip("Run", 10.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Move");
+
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    for (speed, expected) in [
+        (0.0, 2.0),   // low endpoint: pure Walk
+        (-5.0, 2.0),  // below the range clamps to the endpoint
+        (6.0, 10.0),  // high endpoint: pure Run
+        (50.0, 10.0), // above the range clamps
+        (3.0, 6.0),   // midpoint: 50/50
+        (1.5, 4.0),   // quarter: 0.75·Walk + 0.25·Run
+    ] {
+        params.set_float("speed", speed);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        assert!(
+            (pose[0].translation.x - expected).abs() < 1e-4,
+            "speed {speed}: pose {} expected {expected}",
+            pose[0].translation.x
+        );
+    }
+    // The unanimated bone is untouched by any child.
+    assert_eq!(pose[1].translation, Vec3::ZERO);
+}
+
+#[test]
+fn blend2d_blends_the_directionally_adjacent_children() {
+    let plan = compile_anim_graph(&blend2d_doc()).expect("compiles");
+    let clips = [
+        ("anims/east.anim", constant_clip("East", 10.0)),
+        ("anims/north.anim", constant_clip("North", 20.0)),
+        ("anims/west.anim", constant_clip("West", 30.0)),
+        ("anims/south.anim", constant_clip("South", 40.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    m.tick(&plan, &mut params, 0.1);
+
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    for (x, y, expected, why) in [
+        (1.0, 0.0, 10.0, "cardinal east is pure"),
+        (0.0, 1.0, 20.0, "cardinal north is pure"),
+        (-1.0, 0.0, 30.0, "cardinal west is pure"),
+        (0.0, -1.0, 40.0, "cardinal south is pure"),
+        (0.7, 0.7, 15.0, "north-east splits east/north 50/50"),
+        (-0.7, 0.7, 25.0, "north-west splits north/west 50/50"),
+        (0.7, -0.7, 25.0, "south-east splits south/east across the wrap"),
+        (0.1, 0.1, 15.0, "magnitude does not matter, only direction"),
+        (0.0, 0.0, 10.0, "a zero input has no direction — holds the first child"),
+    ] {
+        params.set_float("dir_x", x);
+        params.set_float("dir_y", y);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        assert!(
+            (pose[0].translation.x - expected).abs() < 1e-3,
+            "({x}, {y}): pose {} expected {expected} — {why}",
+            pose[0].translation.x
+        );
+    }
+}
+
+#[test]
+fn sync_group_keeps_cyclic_clips_phase_aligned_as_weights_shift() {
+    // Walk (1.0s) and Run (0.4s) each report their own normalized phase as a
+    // pose value. Phase-matched, both always read the same number, so the
+    // blend reads that number too — whatever the weights are. The reference
+    // is the first sorted child (Walk): expected phase = t mod 1.0.
+    let plan = compile_anim_graph(&blend1d_doc()).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", phase_clip("Walk", 1.0)),
+        ("anims/run.anim", phase_clip("Run", 0.4)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    for step in 0..30 {
+        // Sweep pure-Walk → pure-Run while the clock runs: the dominant clip
+        // changes mid-sweep, and the phase must never jump.
+        params.set_float("speed", 6.0 * step as f32 / 29.0);
+        m.tick(&plan, &mut params, 0.05);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        let expected = m.time().rem_euclid(1.0);
+        assert!(
+            (pose[0].translation.x - expected).abs() < 1e-3,
+            "step {step}: pose {} expected phase {expected}",
+            pose[0].translation.x
+        );
+    }
+    // Sanity that the assertion has teeth: at the sweep's end (pure Run) an
+    // unsynced Run on the raw clock would read a different value.
+    let unsynced = m.time().rem_euclid(0.4) / 0.4;
+    assert!((unsynced - m.time().rem_euclid(1.0)).abs() > 0.1);
+}
+
+#[test]
+fn a_blend_tree_state_crossfades_against_a_plain_clip_state() {
+    // two_state_doc's Walk state becomes a blend-tree state: Idle (plain
+    // clip) crossfades into a walk/run tree over 0.5s.
+    let mut doc = two_state_doc();
+    doc.variables.push(float_decl("speed"));
+    doc.node_mut(3).unwrap().properties.remove(plan::CLIP_PROP);
+    doc.regions.insert(3, walk_run_tree());
+    let plan = compile_anim_graph(&doc).expect("compiles");
+
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/run.anim", constant_clip("Run", 10.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+
+    params.set_float("speed", 3.0); // the tree blends to 6.0
+    params.set_bool("walk", true);
+    m.tick(&plan, &mut params, 0.1); // fade starts, elapsed 0.0
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    assert!(
+        (pose[0].translation.x - 3.0).abs() < 1e-4,
+        "halfway: 0.5·Idle(0) + 0.5·tree(6) = 3, got {}",
+        pose[0].translation.x
+    );
+    assert_eq!(pose[1].translation, Vec3::ZERO, "unanimated bone untouched");
+
+    // Fade done → the tree alone.
+    m.tick(&plan, &mut params, 0.3);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    assert!((pose[0].translation.x - 6.0).abs() < 1e-4);
+}
+
+#[test]
+fn nested_blends_evaluate_recursively() {
+    // An inner 1D blend (on `lean`) as a child of the outer 1D blend (on
+    // `speed`): Walk vs (A↔B).
+    let mut doc = blend1d_doc();
+    doc.variables.push(float_decl("lean"));
+    doc.regions.insert(
+        2,
+        GraphRegion {
+            nodes: vec![
+                clip_node(0, "anims/walk.anim"),
+                clip_node(1, "anims/a.anim"),
+                clip_node(2, "anims/b.anim"),
+                with(
+                    3,
+                    plan::ANIM_BLEND1D_TYPE_ID,
+                    None,
+                    &[
+                        (plan::BLEND_PARAM_PROP, PropValue::Str("lean".into())),
+                        ("threshold_0", PropValue::Float(0.0)),
+                        ("threshold_1", PropValue::Float(1.0)),
+                    ],
+                ),
+                with(
+                    4,
+                    plan::ANIM_BLEND1D_TYPE_ID,
+                    None,
+                    &[
+                        (plan::BLEND_PARAM_PROP, PropValue::Str("speed".into())),
+                        ("threshold_0", PropValue::Float(0.0)),
+                        ("threshold_1", PropValue::Float(6.0)),
+                    ],
+                ),
+                node(5, plan::ANIM_POSE_RESULT_TYPE_ID, None),
+            ],
+            edges: vec![
+                edge(1, plan::POSE_PIN, 3, "in_0"),
+                edge(2, plan::POSE_PIN, 3, "in_1"),
+                edge(0, plan::POSE_PIN, 4, "in_0"),
+                edge(3, plan::POSE_PIN, 4, "in_1"),
+                edge(4, plan::POSE_PIN, 5, plan::POSE_PIN),
+            ],
+        },
+    );
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/a.anim", constant_clip("A", 10.0)),
+        ("anims/b.anim", constant_clip("B", 20.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    m.tick(&plan, &mut params, 0.1);
+
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    for (speed, lean, expected) in [
+        (0.0, 0.5, 2.0),  // outer low endpoint: pure Walk
+        (6.0, 0.5, 15.0), // outer high endpoint: the inner blend, 50/50
+        (6.0, 1.0, 20.0), // inner endpoint through the outer endpoint
+        (3.0, 0.5, 8.5),  // 0.5·Walk(2) + 0.5·inner(15)
+    ] {
+        params.set_float("speed", speed);
+        params.set_float("lean", lean);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        assert!(
+            (pose[0].translation.x - expected).abs() < 1e-4,
+            "speed {speed} lean {lean}: pose {} expected {expected}",
+            pose[0].translation.x
+        );
+    }
+}
+
+#[test]
+fn blend_tree_compile_refusals_are_author_errors() {
+    // A rule node — or anything else off the whitelist — inside a tree.
+    let mut doc = blend1d_doc();
+    doc.regions
+        .get_mut(&2)
+        .unwrap()
+        .nodes
+        .push(node(9, VAR_GET_TYPE_ID, None));
+    let err = compile_anim_graph(&doc).unwrap_err();
+    assert!(err.contains("not a blend-tree node"), "{err}");
+
+    // Exactly one RESULT sink.
+    let mut doc = blend1d_doc();
+    doc.regions
+        .get_mut(&2)
+        .unwrap()
+        .nodes
+        .push(node(9, plan::ANIM_POSE_RESULT_TYPE_ID, None));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("exactly one RESULT"));
+
+    // A non-empty tree with no RESULT at all.
+    let mut doc = blend1d_doc();
+    let region = doc.regions.get_mut(&2).unwrap();
+    region.nodes.retain(|n| n.type_id != plan::ANIM_POSE_RESULT_TYPE_ID);
+    region.edges.clear();
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("no RESULT"));
+
+    // A RESULT with nothing wired in: a state must produce a pose — no
+    // "always-true" reading exists here.
+    let mut doc = blend1d_doc();
+    doc.regions
+        .get_mut(&2)
+        .unwrap()
+        .edges
+        .retain(|e| e.to_node != 3);
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("nothing is wired into"));
+
+    // Fan-in: two wires into the RESULT.
+    let mut doc = blend1d_doc();
+    doc.regions
+        .get_mut(&2)
+        .unwrap()
+        .edges
+        .push(edge(0, plan::POSE_PIN, 3, plan::POSE_PIN));
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("has 2 wires"));
+
+    // Fewer than two wired children.
+    let mut doc = blend1d_doc();
+    doc.regions
+        .get_mut(&2)
+        .unwrap()
+        .edges
+        .retain(|e| e.to_pin != "in_1");
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("at least two"));
+
+    // A wired child with no threshold.
+    let mut doc = blend1d_doc();
+    region_node_props(&mut doc, 2, 2).remove("threshold_1");
+    let err = compile_anim_graph(&doc).unwrap_err();
+    assert!(err.contains("threshold_1"), "{err}");
+
+    // Two children sharing a threshold.
+    let mut doc = blend1d_doc();
+    region_node_props(&mut doc, 2, 2)
+        .insert("threshold_1".into(), PropValue::Float(0.0));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("sharing a threshold"));
+
+    // The driving parameter must exist…
+    let mut doc = blend1d_doc();
+    region_node_props(&mut doc, 2, 2)
+        .insert(plan::BLEND_PARAM_PROP.into(), PropValue::Str("missing".into()));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("not declared"));
+
+    // …and be a Float.
+    let mut doc = blend1d_doc();
+    doc.variables[0].ty = PinType::Bool;
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("not a Float"));
+
+    // A cycle refuses rather than hanging the compiler.
+    let mut doc = blend1d_doc();
+    let region = doc.regions.get_mut(&2).unwrap();
+    region.edges.retain(|e| e.to_pin != "in_0");
+    region.edges.push(edge(2, plan::POSE_PIN, 2, "in_0"));
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("cycle"));
+
+    // A clip node that names no clip.
+    let mut doc = blend1d_doc();
+    region_node_props(&mut doc, 2, 0).remove(plan::CLIP_PROP);
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("names no clip"));
+
+    // 2D: a child with a zero direction…
+    let mut doc = blend2d_doc();
+    region_node_props(&mut doc, 2, 4)
+        .insert("x_1".into(), PropValue::Float(0.0));
+    region_node_props(&mut doc, 2, 4)
+        .insert("y_1".into(), PropValue::Float(0.0));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("zero direction"));
+
+    // …and two children sharing a direction (collinear counts).
+    let mut doc = blend2d_doc();
+    region_node_props(&mut doc, 2, 4)
+        .insert("x_1".into(), PropValue::Float(2.0));
+    region_node_props(&mut doc, 2, 4)
+        .insert("y_1".into(), PropValue::Float(0.0));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("sharing a direction"));
+}
+
+#[test]
+fn a_blend_tree_round_trips_and_dies_with_its_state() {
+    let doc = blend1d_doc();
+    let back = parse_graph(&serialize_graph(&doc).unwrap()).unwrap();
+    assert_eq!(back, doc, "the tree region serializes with the parent");
+    assert_eq!(
+        compile_anim_graph(&back).expect("compiles"),
+        compile_anim_graph(&doc).expect("compiles")
+    );
+
+    let mut doc = doc;
+    assert!(doc.remove_node(2));
+    assert!(doc.regions.get(&2).is_none(), "the tree died with its state");
 }
 
 // ---------------------------------------------------------------------------
@@ -885,14 +1429,15 @@ impl AnimAssetLoader for MapAssets {
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
-        let name = match content_rel {
-            "anims/idle.anim" => "Idle",
-            "anims/walk.anim" => "Walk",
+        let (name, x) = match content_rel {
+            "anims/idle.anim" => ("Idle", 0.0),
+            "anims/walk.anim" => ("Walk", 10.0),
+            "anims/run.anim" => ("Run", 20.0),
             _ => return None,
         };
         Some(ClipSet {
             bone_names: vec!["root".into(), "child".into()],
-            clips: vec![constant_clip(name, if name == "Idle" { 0.0 } else { 10.0 })],
+            clips: vec![constant_clip(name, x)],
         })
     }
 
@@ -996,6 +1541,39 @@ fn the_system_arms_ticks_and_restarts_on_invalidation() {
             "the edited document is what runs"
         );
     }
+}
+
+#[test]
+fn the_system_runs_a_blend_tree_state_end_to_end() {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), blend1d_doc());
+    let mut h = Harness::new(assets);
+
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arms (both tree clips prefetched) and evaluates
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+    }
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("speed", 3.0);
+    h.tick();
+    let sk = h.world.get::<&SkeletonInstance>(e).unwrap();
+    let x = sk.local_transforms[0].translation.x;
+    assert!(
+        (x - 15.0).abs() < 1e-3,
+        "the 50/50 walk/run blend reached the skeleton: {x}"
+    );
 }
 
 #[test]
