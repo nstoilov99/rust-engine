@@ -13,7 +13,7 @@ use crate::engine::animation::components::LocalBoneTransform;
 use crate::engine::animation::sampling;
 use crate::engine::assets::model_loader::RawAnimationClip;
 
-use super::plan::{AnimGraphPlan, ParamDecl, TransitionCondition};
+use super::plan::{AnimGraphPlan, CmpOp, MathOp, ParamDecl, RuleExpr, TransitionFrom};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -24,6 +24,10 @@ use super::plan::{AnimGraphPlan, ParamDecl, TransitionCondition};
 pub enum ParamValue {
     Float(f32),
     Bool(bool),
+    /// A one-shot: `true` = set (fired by gameplay, not yet consumed). It
+    /// stays set across frames until a transition whose rule reads it fires
+    /// — consume-on-transition, so one-shots are never silently lost.
+    Trigger(bool),
 }
 
 /// The typed parameter blackboard — gameplay's entire surface onto an
@@ -69,6 +73,19 @@ impl AnimParams {
         }
     }
 
+    /// Set a Trigger parameter. `false` = refused (undeclared or not a
+    /// Trigger). Idempotent while set: firing twice before a consume is one
+    /// buffered shot, not two.
+    pub fn fire_trigger(&mut self, slug: &str) -> bool {
+        match self.values.get_mut(slug) {
+            Some(v @ ParamValue::Trigger(_)) => {
+                *v = ParamValue::Trigger(true);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn get_float(&self, slug: &str) -> Option<f32> {
         match self.values.get(slug) {
             Some(ParamValue::Float(f)) => Some(*f),
@@ -80,6 +97,79 @@ impl AnimParams {
         match self.values.get(slug) {
             Some(ParamValue::Bool(b)) => Some(*b),
             _ => None,
+        }
+    }
+
+    /// Is the Trigger currently set (fired and not yet consumed)?
+    pub fn trigger_set(&self, slug: &str) -> Option<bool> {
+        match self.values.get(slug) {
+            Some(ParamValue::Trigger(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Spend a Trigger. The machine's seam, called when a transition whose
+    /// rule reads the trigger fires — gameplay never consumes.
+    pub(crate) fn consume_trigger(&mut self, slug: &str) {
+        if let Some(v @ ParamValue::Trigger(_)) = self.values.get_mut(slug) {
+            *v = ParamValue::Trigger(false);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rule evaluation
+// ---------------------------------------------------------------------------
+
+impl RuleExpr {
+    /// Evaluate a Bool-typed expression. The compiler guarantees the typing,
+    /// so the Float-only variants land in the benign `false` arm only if a
+    /// plan was built by hand against the rules.
+    pub fn eval_bool(&self, params: &AnimParams) -> bool {
+        match self {
+            RuleExpr::ConstBool(b) => *b,
+            RuleExpr::ParamBool(slug) => params.get_bool(slug).unwrap_or(false),
+            RuleExpr::ParamTrigger(slug) => params.trigger_set(slug).unwrap_or(false),
+            RuleExpr::Compare(op, a, b) => {
+                let (a, b) = (a.eval_float(params), b.eval_float(params));
+                match op {
+                    CmpOp::Equal => a == b,
+                    CmpOp::NotEqual => a != b,
+                    CmpOp::Less => a < b,
+                    CmpOp::LessEqual => a <= b,
+                    CmpOp::Greater => a > b,
+                    CmpOp::GreaterEqual => a >= b,
+                }
+            }
+            RuleExpr::And(a, b) => a.eval_bool(params) && b.eval_bool(params),
+            RuleExpr::Or(a, b) => a.eval_bool(params) || b.eval_bool(params),
+            RuleExpr::Not(a) => !a.eval_bool(params),
+            RuleExpr::ConstFloat(_) | RuleExpr::ParamFloat(_) | RuleExpr::Math(..) => false,
+        }
+    }
+
+    /// Evaluate a Float-typed expression (same typing guarantee, `0.0` arm).
+    fn eval_float(&self, params: &AnimParams) -> f32 {
+        match self {
+            RuleExpr::ConstFloat(f) => *f,
+            RuleExpr::ParamFloat(slug) => params.get_float(slug).unwrap_or(0.0),
+            RuleExpr::Math(op, a, b) => {
+                let (a, b) = (a.eval_float(params), b.eval_float(params));
+                match op {
+                    MathOp::Add => a + b,
+                    MathOp::Sub => a - b,
+                    MathOp::Mul => a * b,
+                    // The std library's division answer: 0 when b is 0.
+                    MathOp::Div => {
+                        if b == 0.0 {
+                            0.0
+                        } else {
+                            a / b
+                        }
+                    }
+                }
+            }
+            _ => 0.0,
         }
     }
 }
@@ -159,10 +249,11 @@ impl AnimMachine {
 
     /// Advance one frame: clip clocks first, then transition rules.
     ///
-    /// Interruption rule v1: while a crossfade runs, no ordinary transition
-    /// may start — they wait for it to finish. (Any State transitions, the
-    /// one sanctioned interrupter, arrive with the rule-graph slice.)
-    pub fn tick(&mut self, plan: &AnimGraphPlan, params: &AnimParams, dt: f32) {
+    /// Interruption rule v1: while a crossfade runs, only an **Any State**
+    /// transition may start — ordinary transitions wait for the fade to
+    /// finish. `params` is mutable because firing consumes the triggers the
+    /// firing rule reads (consume-on-transition); rules themselves stay pure.
+    pub fn tick(&mut self, plan: &AnimGraphPlan, params: &mut AnimParams, dt: f32) {
         // A machine armed against an empty/refused plan has nothing to do —
         // never index into a plan that has no states.
         let Some(state) = plan.states.get(self.current) else {
@@ -180,22 +271,36 @@ impl AnimMachine {
             }
         }
 
-        if self.fade.is_some() {
-            return;
-        }
         // Transitions are pre-sorted (priority, then node id): the first
-        // passing rule out of the current state wins, deterministically.
+        // candidate whose rule passes wins, deterministically — Any State
+        // competes with ordinary transitions on the same priority scale.
+        let fading = self.fade.is_some();
+        let current = self.current;
         let fired = plan
             .transitions
             .iter()
-            .filter(|t| t.from == self.current)
-            .find(|t| match &t.condition {
-                TransitionCondition::Always => true,
-                TransitionCondition::BoolParam(slug) => params.get_bool(slug).unwrap_or(false),
-            });
+            .filter(|t| match t.from {
+                TransitionFrom::State(s) => !fading && s == current,
+                // Skipping self-targets is what keeps a held Any State rule
+                // (Died = true) from restarting its state every frame — and,
+                // mid-fade, from re-interrupting into the fade's own target.
+                TransitionFrom::AnyState => t.to != current,
+            })
+            .find(|t| t.rule.as_ref().is_none_or(|r| r.expr.eval_bool(params)));
         if let Some(t) = fired {
+            // Consume-on-transition: the fire spends every trigger the rule
+            // reads, exactly once — they were consulted, they are consumed.
+            if let Some(rule) = &t.rule {
+                for slug in &rule.triggers {
+                    params.consume_trigger(slug);
+                }
+            }
+            // On an Any State interrupt this replaces the running fade: the
+            // new outgoing side is the interrupted fade's *target* (the
+            // dominant clip by then); the old outgoing state's residual
+            // contribution is dropped — the accepted v1 simplification.
             self.fade = (t.duration > 0.0).then(|| Crossfade {
-                from: self.current,
+                from: current,
                 from_time: self.time,
                 elapsed: 0.0,
                 duration: t.duration,

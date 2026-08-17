@@ -424,7 +424,7 @@ impl System for AnimGraphSystem {
                 continue;
             }
             let plan = rt.plan.clone();
-            rt.machine.tick(&plan, &rt.params, dt);
+            rt.machine.tick(&plan, &mut rt.params, dt);
             evaluate_pose(
                 &rt.machine,
                 |state| plan.states.get(state).and_then(|st| clip_of(clips, st)),

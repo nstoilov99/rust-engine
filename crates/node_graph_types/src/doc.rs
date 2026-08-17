@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 /// - **v2** — Task 45-A P1: `GraphDoc::variables` and `NodeInst::title`. Both
 ///   default, so a v1 document still *parses*; the migration exists so a
 ///   loaded v1 doc is stamped v2 and every consumer sees exactly one shape.
-pub const GRAPH_DOC_VERSION: u32 = 2;
+/// - **v3** — Task 41: `GraphDoc::regions` — embedded per-node graph regions
+///   ("virtual subgraphs", animation transition rules). Defaulted and skipped
+///   when empty, so a document without regions serializes as it did before.
+pub const GRAPH_DOC_VERSION: u32 = 3;
 
 /// The realm a graph targets. Validated against each node type's
 /// [`NodeRealm`] so authority violations are caught at edit time, before any
@@ -390,6 +393,36 @@ pub struct GroupBox {
     pub collapsed: bool,
 }
 
+/// An embedded graph region — a "virtual subgraph" living *inside* a parent
+/// document (container v3, Task 41): no file on disk, serialized inline,
+/// versioned/migrated with the parent, one undo history because it is one
+/// document. The animation domain stores a transition's boolean rule graph
+/// this way, keyed by the transition node's id in [`GraphDoc::regions`].
+///
+/// Node ids are **region-local**: two regions may both contain a node 0, and
+/// region ids never collide with the parent's. That is what makes a region a
+/// self-contained unit — duplicating the owner node is cloning the map entry
+/// under the new owner id, no id remapping.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GraphRegion {
+    #[serde(default)]
+    pub nodes: Vec<NodeInst>,
+    /// Edges between region nodes (region-local ids on both ends).
+    #[serde(default)]
+    pub edges: Vec<Edge>,
+}
+
+impl GraphRegion {
+    pub fn node(&self, id: u64) -> Option<&NodeInst> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Next free region-local node id.
+    pub fn next_node_id(&self) -> u64 {
+        self.nodes.iter().map(|n| n.id).max().map_or(0, |m| m + 1)
+    }
+}
+
 /// A graph document — the serialized form of `.graph` and `.subgraph`
 /// assets. A subgraph is simply a doc with non-empty `inputs`/`outputs`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -412,6 +445,12 @@ pub struct GraphDoc {
     /// Per-graph variables (container v2).
     #[serde(default)]
     pub variables: Vec<VarDecl>,
+    /// Embedded graph regions (container v3), keyed by **owner node id** —
+    /// the node whose double-click descends into the region (Task 41: the
+    /// transition whose rule this is). A region must die with its owner:
+    /// delete nodes through [`GraphDoc::remove_node`] so it does.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub regions: BTreeMap<u64, GraphRegion>,
 }
 
 impl Default for GraphDoc {
@@ -426,6 +465,7 @@ impl Default for GraphDoc {
             inputs: Vec::new(),
             outputs: Vec::new(),
             variables: Vec::new(),
+            regions: BTreeMap::new(),
         }
     }
 }
@@ -447,6 +487,22 @@ impl GraphDoc {
     /// Next free doc-local node id.
     pub fn next_node_id(&self) -> u64 {
         self.nodes.iter().map(|n| n.id).max().map_or(0, |m| m + 1)
+    }
+
+    /// Remove a node together with everything that belongs to it: incident
+    /// edges, its embedded region, and comments anchored to it. This is *the*
+    /// way to delete a node — piecemeal removal is how a region outlives its
+    /// owner. `true` if the node existed.
+    pub fn remove_node(&mut self, id: u64) -> bool {
+        let before = self.nodes.len();
+        self.nodes.retain(|n| n.id != id);
+        if self.nodes.len() == before {
+            return false;
+        }
+        self.edges.retain(|e| e.from_node != id && e.to_node != id);
+        self.regions.remove(&id);
+        self.comments.retain(|c| c.anchor != Some(id));
+        true
     }
 
     /// Content-relative paths of all referenced subgraphs (deduplicated).

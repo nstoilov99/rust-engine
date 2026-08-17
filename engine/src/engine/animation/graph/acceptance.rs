@@ -1,17 +1,22 @@
-//! Acceptance evidence for the animation-graph tracer (Task 41, ticket 01).
+//! Acceptance evidence for the animation graph (Task 41: ticket 01 tracer,
+//! ticket 02 rule graphs / triggers / Any State).
 //!
 //! Tests sit at the seams the spec pre-agreed: the document (round-trip
-//! through the shared container io), the machine (document + parameter
-//! writes + ticks in → active state and blend weights out), pose values on a
-//! synthetic skeleton (CPU only, no GPU, no asset files), and the system
-//! (arming, invalidation, coexistence with the single-clip player).
+//! through the shared container io, embedded rule regions as one unit with
+//! their transition), the machine (document + parameter writes + ticks in →
+//! active state and blend weights out — rules, trigger consumption and Any
+//! State interruption included), pose values on a synthetic skeleton (CPU
+//! only, no GPU, no asset files), and the system (arming, invalidation,
+//! coexistence with the single-clip player).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use glam::{Mat4, Vec3};
+use node_graph_types::std_nodes::{AND, COMPARE_FLOAT, MUL_FLOAT, NOT};
 use node_graph_types::{
-    parse_graph, serialize_graph, Edge, GraphDoc, GraphRealm, NodeInst, PinType, PropValue, VarDecl,
+    parse_graph, serialize_graph, Edge, GraphDoc, GraphRealm, GraphRegion, NodeInst, PinType,
+    PropValue, VarDecl, VAR_GET_TYPE_ID, VAR_PROP, VAR_VALUE_PIN,
 };
 
 use crate::engine::animation::components::{LocalBoneTransform, SkeletonInstance};
@@ -22,7 +27,7 @@ use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 
 use super::machine::{evaluate_pose, AnimMachine, AnimParams};
-use super::plan::{self, compile_anim_graph, TransitionCondition};
+use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
     AnimGraphSystem, ClipSet,
@@ -62,8 +67,37 @@ fn edge(from: u64, fp: &str, to: u64, tp: &str) -> Edge {
     }
 }
 
-/// The tracer machine: ENTRY → Idle, one transition Idle → Walk while the
-/// Bool parameter `walk` is true, 0.5s crossfade.
+/// The smallest real rule: one parameter read wired into RESULT, as an
+/// embedded region. Region node ids are region-local (0 and 1 here, in every
+/// region, colliding with nothing).
+fn param_rule(slug: &str) -> GraphRegion {
+    GraphRegion {
+        nodes: vec![
+            with(
+                0,
+                VAR_GET_TYPE_ID,
+                None,
+                &[(VAR_PROP, PropValue::Str(slug.into()))],
+            ),
+            node(1, plan::ANIM_RULE_RESULT_TYPE_ID, None),
+        ],
+        edges: vec![edge(0, VAR_VALUE_PIN, 1, plan::RULE_RESULT_PIN)],
+    }
+}
+
+/// A Trigger parameter declaration.
+fn trigger_decl(slug: &str) -> VarDecl {
+    VarDecl {
+        slug: slug.into(),
+        label: slug.into(),
+        ty: plan::trigger_pin_type(),
+        default: None,
+        group: None,
+    }
+}
+
+/// The tracer machine: ENTRY → Idle, one transition Idle → Walk whose rule
+/// reads the Bool parameter `walk`, 0.5s crossfade.
 fn two_state_doc() -> GraphDoc {
     let mut doc = GraphDoc {
         realm: GraphRealm::Client,
@@ -97,7 +131,6 @@ fn two_state_doc() -> GraphDoc {
             &[
                 (plan::DURATION_PROP, PropValue::Float(0.5)),
                 (plan::PRIORITY_PROP, PropValue::Int(0)),
-                (plan::WHEN_BOOL_PROP, PropValue::Str("walk".into())),
             ],
         ),
     ];
@@ -106,6 +139,7 @@ fn two_state_doc() -> GraphDoc {
         edge(2, plan::STATE_OUT_PIN, 4, plan::TRANSITION_FROM_PIN),
         edge(4, plan::TRANSITION_TO_PIN, 3, plan::STATE_IN_PIN),
     ];
+    doc.regions.insert(4, param_rule("walk"));
     doc
 }
 
@@ -173,10 +207,9 @@ fn the_committed_demo_document_loads_and_compiles() {
     assert_eq!(plan.states[plan.entry].speed, 0.0, "Idle holds a pose");
     assert_eq!(plan.transitions.len(), 1);
     assert_eq!(plan.transitions[0].duration, 0.4);
-    assert_eq!(
-        plan.transitions[0].condition,
-        TransitionCondition::BoolParam("walk".into())
-    );
+    let rule = plan.transitions[0].rule.as_ref().expect("the walk rule compiled");
+    assert_eq!(rule.expr, RuleExpr::ParamBool("walk".into()));
+    assert!(rule.triggers.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +223,9 @@ fn compiles_states_transition_and_parameters() {
     assert_eq!(plan.states[plan.entry].name, "Idle", "ENTRY wires the start state");
     let t = &plan.transitions[0];
     assert_eq!((t.duration, t.priority), (0.5, 0));
-    assert_eq!(t.condition, TransitionCondition::BoolParam("walk".into()));
-    assert_eq!(plan.states[t.from].name, "Idle");
+    let rule = t.rule.as_ref().expect("the wired rule compiled");
+    assert_eq!(rule.expr, RuleExpr::ParamBool("walk".into()));
+    assert_eq!(t.from, TransitionFrom::State(plan.entry), "Idle is the source");
     assert_eq!(plan.states[t.to].name, "Walk");
     assert_eq!(plan.parameters.len(), 1);
     assert_eq!(plan.clip_refs(), vec!["anims/idle.anim", "anims/walk.anim"]);
@@ -214,12 +248,12 @@ fn compile_refusals_are_author_errors() {
     doc.node_mut(2).unwrap().properties.remove(plan::CLIP_PROP);
     assert!(compile_anim_graph(&doc).unwrap_err().contains("no clip"));
 
-    // A condition naming an undeclared parameter.
+    // A rule reading an undeclared parameter.
     let mut doc = two_state_doc();
     doc.variables.clear();
     assert!(compile_anim_graph(&doc).unwrap_err().contains("not declared"));
 
-    // A parameter type outside this slice.
+    // A parameter type outside the animation blackboard.
     let mut doc = two_state_doc();
     doc.variables[0].ty = PinType::String;
     assert!(compile_anim_graph(&doc)
@@ -239,9 +273,9 @@ fn compile_refusals_are_author_errors() {
 #[test]
 fn entry_state_is_active_on_the_first_tick() {
     let plan = compile_anim_graph(&two_state_doc()).expect("compiles");
-    let params = AnimParams::from_decls(&plan.parameters);
+    let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     assert_eq!(plan.states[m.current_state()].name, "Idle");
     assert_eq!(m.blend_weight(), 1.0, "no crossfade at rest");
     assert!(m.crossfade().is_none());
@@ -255,20 +289,20 @@ fn parameter_flip_starts_a_crossfade_that_follows_the_stated_duration() {
 
     // Sits in Idle while the parameter is false.
     for _ in 0..5 {
-        m.tick(&plan, &params, 0.1);
+        m.tick(&plan, &mut params, 0.1);
     }
     assert_eq!(plan.states[m.current_state()].name, "Idle");
 
     // Gameplay writes the parameter — never the state.
     assert!(params.set_bool("walk", true));
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     assert_eq!(plan.states[m.current_state()].name, "Walk");
     assert_eq!(m.blend_weight(), 0.0, "the target blends in from zero");
 
     // Weight climbs linearly over the 0.5s duration: 0.1s per tick.
     let mut weights = Vec::new();
     for _ in 0..4 {
-        m.tick(&plan, &params, 0.1);
+        m.tick(&plan, &mut params, 0.1);
         weights.push(m.blend_weight());
     }
     for (i, w) in weights.iter().enumerate() {
@@ -278,7 +312,7 @@ fn parameter_flip_starts_a_crossfade_that_follows_the_stated_duration() {
 
     // One more tick reaches the duration; the fade retires and the machine
     // is fully in Walk.
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     assert!(m.crossfade().is_none());
     assert_eq!(m.blend_weight(), 1.0);
     assert_eq!(plan.states[m.current_state()].name, "Walk");
@@ -293,22 +327,20 @@ fn ordinary_transitions_wait_out_a_running_crossfade() {
         5,
         plan::ANIM_TRANSITION_TYPE_ID,
         None,
-        &[
-            (plan::DURATION_PROP, PropValue::Float(0.5)),
-            (plan::WHEN_BOOL_PROP, PropValue::Str("walk".into())),
-        ],
+        &[(plan::DURATION_PROP, PropValue::Float(0.5))],
     ));
     doc.edges.push(edge(3, plan::STATE_OUT_PIN, 5, plan::TRANSITION_FROM_PIN));
     doc.edges.push(edge(5, plan::TRANSITION_TO_PIN, 2, plan::STATE_IN_PIN));
+    doc.regions.insert(5, param_rule("walk"));
     let plan = compile_anim_graph(&doc).expect("compiles");
     let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
 
     params.set_bool("walk", true);
-    m.tick(&plan, &params, 0.1); // Idle → Walk fires, fade starts
+    m.tick(&plan, &mut params, 0.1); // Idle → Walk fires, fade starts
     let from = m.crossfade().expect("fading").from;
-    m.tick(&plan, &params, 0.1);
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     assert_eq!(plan.states[m.current_state()].name, "Walk", "still Walk mid-fade");
     assert_eq!(m.crossfade().expect("still fading").from, from, "no re-transition");
 }
@@ -323,7 +355,7 @@ fn priority_resolves_deterministically_and_zero_duration_switches_instantly() {
         Some("Third"),
         &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
     ));
-    doc.node_mut(4).unwrap().properties.remove(plan::WHEN_BOOL_PROP);
+    doc.regions.remove(&4); // no rule = always-true
     doc.node_mut(4)
         .unwrap()
         .properties
@@ -338,9 +370,9 @@ fn priority_resolves_deterministically_and_zero_duration_switches_instantly() {
     doc.edges.push(edge(7, plan::TRANSITION_TO_PIN, 6, plan::STATE_IN_PIN));
 
     let plan = compile_anim_graph(&doc).expect("compiles");
-    let params = AnimParams::from_decls(&plan.parameters);
+    let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     assert_eq!(
         plan.states[m.current_state()].name, "Third",
         "priority 1 beats priority 2"
@@ -359,6 +391,436 @@ fn parameter_writes_are_typed_and_declared_only() {
     assert!(!params.set_float("walk", 1.0), "a Bool refuses a Float write");
     assert!(!params.set_bool("run", true), "undeclared slugs are refused");
     assert_eq!(params.get_bool("walk"), Some(true));
+}
+
+// ---------------------------------------------------------------------------
+// Rule graphs (document unit, purity, typing)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicating_a_transition_carries_its_rule_and_deleting_never_orphans_it() {
+    let mut doc = two_state_doc();
+
+    // Duplicate the transition the way an editor would: clone the node under
+    // a fresh id and clone the region entry under that id. Region node ids
+    // are region-local, so no remapping exists to get wrong.
+    let dup = doc.next_node_id();
+    let mut copy = doc.node(4).unwrap().clone();
+    copy.id = dup;
+    doc.nodes.push(copy);
+    let rule = doc.regions.get(&4).cloned().expect("the original rule");
+    doc.regions.insert(dup, rule);
+    doc.edges.push(edge(2, plan::STATE_OUT_PIN, dup, plan::TRANSITION_FROM_PIN));
+    doc.edges.push(edge(dup, plan::TRANSITION_TO_PIN, 3, plan::STATE_IN_PIN));
+
+    // The copy compiles to the same rule as the original…
+    let compiled = compile_anim_graph(&doc).expect("compiles");
+    assert_eq!(compiled.transitions.len(), 2);
+    assert_eq!(compiled.transitions[0].rule, compiled.transitions[1].rule);
+
+    // …the document round-trips with both rules inline…
+    let back = parse_graph(&serialize_graph(&doc).unwrap()).unwrap();
+    assert_eq!(back, doc, "embedded rules serialize with the parent");
+
+    // …and deleting a transition takes exactly its own rule with it.
+    assert!(doc.remove_node(dup));
+    assert!(doc.regions.get(&dup).is_none(), "no orphaned rule");
+    assert!(doc.regions.get(&4).is_some(), "the original is untouched");
+    assert_eq!(compile_anim_graph(&doc).unwrap().transitions.len(), 1);
+}
+
+#[test]
+fn rule_purity_is_enforced() {
+    // Effect (print), exec flow (branch), event emitter (emit_event) and
+    // latent (delay) nodes are refused by name — as is any node type outside
+    // the pure whitelist, which is what rejects Server-realm nodes (and node
+    // types that do not exist yet) outright.
+    for bad in ["print", "branch", "emit_event", "delay", "srv_apply_damage"] {
+        let mut doc = two_state_doc();
+        doc.regions.get_mut(&4).unwrap().nodes.push(node(9, bad, None));
+        let err = compile_anim_graph(&doc).unwrap_err();
+        assert!(err.contains(bad) && err.contains("not a rule node"), "{err}");
+    }
+
+    // Exactly one RESULT sink.
+    let mut doc = two_state_doc();
+    doc.regions
+        .get_mut(&4)
+        .unwrap()
+        .nodes
+        .push(node(9, plan::ANIM_RULE_RESULT_TYPE_ID, None));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("exactly one RESULT"));
+
+    // A non-empty rule with no RESULT at all.
+    let mut doc = two_state_doc();
+    let region = doc.regions.get_mut(&4).unwrap();
+    region.nodes.retain(|n| n.type_id != plan::ANIM_RULE_RESULT_TYPE_ID);
+    region.edges.clear();
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("no RESULT"));
+
+    // A cycle refuses rather than hanging the compiler.
+    let mut doc = two_state_doc();
+    *doc.regions.get_mut(&4).unwrap() = GraphRegion {
+        nodes: vec![
+            node(0, NOT, None),
+            node(1, plan::ANIM_RULE_RESULT_TYPE_ID, None),
+        ],
+        edges: vec![
+            edge(0, "result", 0, "a"),
+            edge(0, "result", 1, plan::RULE_RESULT_PIN),
+        ],
+    };
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("cycle"));
+
+    // Fan-in: two wires into one input.
+    let mut doc = two_state_doc();
+    let region = doc.regions.get_mut(&4).unwrap();
+    region.nodes.push(node(2, NOT, None));
+    region.edges.push(edge(2, "result", 1, plan::RULE_RESULT_PIN));
+    assert!(compile_anim_graph(&doc)
+        .unwrap_err()
+        .contains("has 2 wires"));
+}
+
+#[test]
+fn rule_type_mismatches_are_refused() {
+    // A Bool parameter fed into a float comparison input.
+    let mut doc = two_state_doc();
+    let region = doc.regions.get_mut(&4).unwrap();
+    region.nodes.push(node(2, COMPARE_FLOAT, None));
+    region.edges = vec![
+        edge(0, VAR_VALUE_PIN, 2, "a"),
+        edge(2, "result", 1, plan::RULE_RESULT_PIN),
+    ];
+    let err = compile_anim_graph(&doc).unwrap_err();
+    assert!(err.contains("produces a Bool where a Float is expected"), "{err}");
+
+    // A Float parameter wired straight into the Bool RESULT.
+    let mut doc = two_state_doc();
+    doc.variables.push(VarDecl {
+        slug: "speed".into(),
+        label: "Speed".into(),
+        ty: PinType::Float,
+        default: None,
+        group: None,
+    });
+    doc.regions.get_mut(&4).unwrap().nodes[0]
+        .properties
+        .insert(VAR_PROP.into(), PropValue::Str("speed".into()));
+    let err = compile_anim_graph(&doc).unwrap_err();
+    assert!(err.contains("produces a Float where a Bool is expected"), "{err}");
+}
+
+#[test]
+fn an_unwired_rule_input_is_always_true() {
+    // RESULT present, nothing wired into it: the hollow socket dot.
+    let mut doc = two_state_doc();
+    doc.regions.get_mut(&4).unwrap().edges.clear();
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    assert_eq!(plan.transitions[0].rule, None);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(
+        plan.states[m.current_state()].name, "Walk",
+        "fires with no parameter written at all"
+    );
+
+    // No region at all reads the same way.
+    let mut doc = two_state_doc();
+    doc.regions.remove(&4);
+    assert_eq!(compile_anim_graph(&doc).unwrap().transitions[0].rule, None);
+}
+
+#[test]
+fn a_compound_rule_fires_exactly_when_its_expression_passes() {
+    // Speed × 2 > 6 ∧ walk — parameter reads through math, a comparison and
+    // boolean logic, with pin constants on the unwired inputs.
+    let mut doc = two_state_doc();
+    doc.variables.push(VarDecl {
+        slug: "speed".into(),
+        label: "Speed".into(),
+        ty: PinType::Float,
+        default: Some(PropValue::Float(0.0)),
+        group: None,
+    });
+    doc.regions.insert(
+        4,
+        GraphRegion {
+            nodes: vec![
+                with(0, VAR_GET_TYPE_ID, None, &[(VAR_PROP, PropValue::Str("speed".into()))]),
+                with(1, MUL_FLOAT, None, &[("b", PropValue::Float(2.0))]),
+                with(
+                    2,
+                    COMPARE_FLOAT,
+                    None,
+                    &[
+                        ("op", PropValue::Enum("greater".into())),
+                        ("b", PropValue::Float(6.0)),
+                    ],
+                ),
+                with(3, VAR_GET_TYPE_ID, None, &[(VAR_PROP, PropValue::Str("walk".into()))]),
+                // Region-local id 4 collides with the transition's own doc id
+                // on purpose: the namespaces are separate.
+                node(4, AND, None),
+                node(5, plan::ANIM_RULE_RESULT_TYPE_ID, None),
+            ],
+            edges: vec![
+                edge(0, VAR_VALUE_PIN, 1, "a"),
+                edge(1, "result", 2, "a"),
+                edge(2, "result", 4, "a"),
+                edge(3, VAR_VALUE_PIN, 4, "b"),
+                edge(4, "result", 5, plan::RULE_RESULT_PIN),
+            ],
+        },
+    );
+
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+
+    params.set_bool("walk", true);
+    params.set_float("speed", 3.0); // 3×2 = 6, not > 6
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+
+    params.set_float("speed", 3.5); // 7 > 6, but walk must hold too
+    params.set_bool("walk", false);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+
+    params.set_bool("walk", true);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Walk");
+}
+
+// ---------------------------------------------------------------------------
+// Triggers (buffering, consume-on-transition)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trigger_writes_are_typed_and_declared_only() {
+    let mut doc = two_state_doc();
+    doc.variables.push(trigger_decl("go"));
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let mut params = AnimParams::from_decls(&plan.parameters);
+
+    assert!(!params.fire_trigger("walk"), "a Bool refuses a fire");
+    assert!(!params.set_bool("go", true), "a Trigger refuses a Bool write");
+    assert!(!params.fire_trigger("jump"), "undeclared slugs are refused");
+    assert_eq!(params.trigger_set("go"), Some(false), "unset until fired");
+    assert!(params.fire_trigger("go"));
+    assert!(params.fire_trigger("go"), "re-firing while set is one buffered shot");
+    assert_eq!(params.trigger_set("go"), Some(true));
+    assert_eq!(params.get_bool("go"), None, "a trigger is not a Bool");
+}
+
+#[test]
+fn a_trigger_buffers_across_frames_and_is_consumed_exactly_once() {
+    // Idle → Walk on `walk` (0.5s fade), Walk → Idle on the Trigger `go`.
+    let mut doc = two_state_doc();
+    doc.variables.push(trigger_decl("go"));
+    doc.nodes.push(with(
+        5,
+        plan::ANIM_TRANSITION_TYPE_ID,
+        None,
+        &[(plan::DURATION_PROP, PropValue::Float(0.0))],
+    ));
+    doc.edges.push(edge(3, plan::STATE_OUT_PIN, 5, plan::TRANSITION_FROM_PIN));
+    doc.edges.push(edge(5, plan::TRANSITION_TO_PIN, 2, plan::STATE_IN_PIN));
+    doc.regions.insert(5, param_rule("go"));
+
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let t5 = plan.transitions.iter().find(|t| t.node_id == 5).unwrap();
+    assert_eq!(
+        t5.rule.as_ref().unwrap().triggers,
+        vec!["go".to_string()],
+        "the rule's trigger reads are collected at compile time"
+    );
+
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+
+    // Start the Idle → Walk fade, then fire the trigger mid-fade: ordinary
+    // transitions wait out a crossfade, and the shot must not be lost.
+    params.set_bool("walk", true);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Walk");
+    params.set_bool("walk", false); // fades run to completion regardless
+    assert!(params.fire_trigger("go"));
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(
+        plan.states[m.current_state()].name, "Walk",
+        "blocked by the running fade"
+    );
+    assert_eq!(params.trigger_set("go"), Some(true), "buffered, not lost");
+
+    // The tick that retires the fade also lets the transition fire — and the
+    // fire consumes the trigger.
+    m.tick(&plan, &mut params, 0.3);
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+    assert_eq!(params.trigger_set("go"), Some(false), "consumed by the fire");
+
+    // Consumed means spent: nothing re-fires on later frames.
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+}
+
+#[test]
+fn only_the_firing_transition_consumes_a_trigger() {
+    // Idle → Walk always-true at priority 0; Idle → Third reads the Trigger
+    // `go` at priority 5. Both pass — Walk fires. Losing a priority contest
+    // is not firing: the trigger must stay buffered.
+    let mut doc = two_state_doc();
+    doc.variables.push(trigger_decl("go"));
+    doc.regions.remove(&4); // Idle → Walk becomes always-true
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_STATE_TYPE_ID,
+        Some("Third"),
+        &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
+    ));
+    doc.nodes.push(with(
+        7,
+        plan::ANIM_TRANSITION_TYPE_ID,
+        None,
+        &[(plan::PRIORITY_PROP, PropValue::Int(5))],
+    ));
+    doc.edges.push(edge(2, plan::STATE_OUT_PIN, 7, plan::TRANSITION_FROM_PIN));
+    doc.edges.push(edge(7, plan::TRANSITION_TO_PIN, 6, plan::STATE_IN_PIN));
+    doc.regions.insert(7, param_rule("go"));
+
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    params.fire_trigger("go");
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Walk", "priority 0 won");
+    assert_eq!(
+        params.trigger_set("go"),
+        Some(true),
+        "a read that did not fire consumes nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Any State
+// ---------------------------------------------------------------------------
+
+/// `two_state_doc` plus a Dead state and Any State → Dead on the Trigger
+/// `died`, priority −1, 0.2s fade.
+fn any_state_doc() -> GraphDoc {
+    let mut doc = two_state_doc();
+    doc.variables.push(trigger_decl("died"));
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_STATE_TYPE_ID,
+        Some("Dead"),
+        &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
+    ));
+    doc.nodes.push(node(7, plan::ANIM_ANY_STATE_TYPE_ID, None));
+    doc.nodes.push(with(
+        8,
+        plan::ANIM_TRANSITION_TYPE_ID,
+        None,
+        &[
+            (plan::DURATION_PROP, PropValue::Float(0.2)),
+            (plan::PRIORITY_PROP, PropValue::Int(-1)),
+        ],
+    ));
+    doc.edges.push(edge(7, plan::STATE_OUT_PIN, 8, plan::TRANSITION_FROM_PIN));
+    doc.edges.push(edge(8, plan::TRANSITION_TO_PIN, 6, plan::STATE_IN_PIN));
+    doc.regions.insert(8, param_rule("died"));
+    doc
+}
+
+#[test]
+fn any_state_fires_from_whatever_state_is_active() {
+    let plan = compile_anim_graph(&any_state_doc()).expect("compiles");
+    let t8 = plan.transitions.iter().find(|t| t.node_id == 8).unwrap();
+    assert_eq!(t8.from, TransitionFrom::AnyState);
+
+    // From Idle — no Idle → Dead edge exists.
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    params.fire_trigger("died");
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
+    assert_eq!(params.trigger_set("died"), Some(false), "consumed by the fire");
+
+    // From Walk — nor a Walk → Dead one.
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    params.set_bool("walk", true);
+    for _ in 0..7 {
+        m.tick(&plan, &mut params, 0.1); // into Walk and out the fade
+    }
+    assert_eq!(plan.states[m.current_state()].name, "Walk");
+    assert!(m.crossfade().is_none());
+    params.fire_trigger("died");
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
+
+    // Priority is one scale: with both rules passing from Idle, the Any
+    // State transition's −1 beats the ordinary transition's 0.
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    params.set_bool("walk", true);
+    params.fire_trigger("died");
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
+}
+
+#[test]
+fn only_any_state_interrupts_a_running_crossfade() {
+    let plan = compile_anim_graph(&any_state_doc()).expect("compiles");
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+
+    // Start Idle → Walk (0.5s) and kill mid-fade.
+    params.set_bool("walk", true);
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    assert!(m.crossfade().is_some());
+    params.fire_trigger("died");
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(
+        plan.states[m.current_state()].name, "Dead",
+        "an Any State transition interrupts the fade"
+    );
+    let fade = m.crossfade().expect("a fresh fade into Dead");
+    assert_eq!(
+        plan.states[fade.from].name, "Walk",
+        "the new outgoing side is the interrupted fade's target"
+    );
+    assert_eq!(fade.duration, 0.2);
+    assert_eq!(fade.elapsed, 0.0);
+}
+
+#[test]
+fn a_held_any_state_rule_does_not_restart_its_target() {
+    // Strip the rule: an always-true Any State → Dead. Without the
+    // self-target skip this would restart Dead every single frame.
+    let mut doc = any_state_doc();
+    doc.regions.remove(&8);
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1); // fade (0.2s) retires
+    assert!(m.crossfade().is_none());
+    let t = m.time();
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
+    assert!(m.time() > t, "Dead keeps playing — never re-entered");
+    assert!(m.crossfade().is_none(), "and never re-fades");
 }
 
 // ---------------------------------------------------------------------------
@@ -382,15 +844,15 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     let mut pose = vec![LocalBoneTransform::default(); 2];
     let mut scratch = Vec::new();
 
-    m.tick(&plan, &params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
     evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
     assert_eq!(pose[0].translation.x, 0.0, "entry state pose");
 
     params.set_bool("walk", true);
-    m.tick(&plan, &params, 0.1); // fade starts, elapsed 0.0
-    m.tick(&plan, &params, 0.1);
-    m.tick(&plan, &params, 0.1);
-    m.tick(&plan, &params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
+    m.tick(&plan, &mut params, 0.1); // fade starts, elapsed 0.0
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.1);
+    m.tick(&plan, &mut params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
     evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
     assert!(
         (pose[0].translation.x - 5.0).abs() < 1e-4,
@@ -401,7 +863,7 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     assert_eq!(pose[1].translation, Vec3::ZERO);
 
     // Fade done → pure Walk pose.
-    m.tick(&plan, &params, 0.3);
+    m.tick(&plan, &mut params, 0.3);
     evaluate_pose(&m, clip_for, &mut pose, &mut scratch);
     assert!((pose[0].translation.x - 10.0).abs() < 1e-4);
 }
@@ -621,3 +1083,4 @@ fn a_missing_clip_refuses_to_arm_with_a_reason() {
     let why = rt.disabled.as_deref().expect("refused");
     assert!(why.contains("Walk") && why.contains("missing.anim"), "{why}");
 }
+

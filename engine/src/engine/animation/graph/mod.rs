@@ -32,8 +32,8 @@ mod acceptance;
 
 pub use machine::{evaluate_pose, AnimMachine, AnimParams, Crossfade, ParamValue};
 pub use plan::{
-    compile_anim_graph, AnimGraphPlan, AnimParamType, ParamDecl, PlanState, PlanTransition,
-    TransitionCondition,
+    compile_anim_graph, trigger_pin_type, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl,
+    PlanRule, PlanState, PlanTransition, RuleExpr, TransitionFrom, TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,

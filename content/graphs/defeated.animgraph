@@ -1,5 +1,5 @@
 (
-    version: 2,
+    version: 3,
     realm: Client,
     nodes: [
         (
@@ -45,7 +45,6 @@
             properties: {
                 "duration": Float(0.4),
                 "priority": Int(0),
-                "when_bool": Str("walk"),
             },
             subgraph: None,
             tint: None,
@@ -84,4 +83,40 @@
             default: Some(Bool(false)),
         ),
     ],
+    regions: {
+        3: (
+            nodes: [
+                (
+                    id: 0,
+                    type_id: "var_get",
+                    type_version: 1,
+                    position: (-160.0, 0.0),
+                    properties: {
+                        "var": Str("walk"),
+                    },
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+                (
+                    id: 1,
+                    type_id: "anim_rule_result",
+                    type_version: 1,
+                    position: (120.0, 0.0),
+                    properties: {},
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+            ],
+            edges: [
+                (
+                    from_node: 0,
+                    from_pin: "value",
+                    to_node: 1,
+                    to_pin: "value",
+                ),
+            ],
+        ),
+    },
 )

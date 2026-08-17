@@ -4,11 +4,11 @@
 
 **Blocked by:** 01 — Tracer: a two-state machine animates an entity.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Rule graphs serialize inline with the parent document; duplicating or copy-pasting a transition carries its rule; deleting a transition never orphans one
-- [ ] Validation rejects effect/exec/event/latent nodes inside a rule, enforces a single RESULT, rejects parameter type mismatches, and rejects Server-realm nodes
-- [ ] A transition with an unwired Bool input evaluates as always-true
-- [ ] A Trigger stays set across frames until consumed by a firing transition, and is consumed exactly once
-- [ ] Multiple passing rules on one state resolve by priority, deterministically, verified at the evaluator seam
-- [ ] Any State transitions fire regardless of active state and can interrupt a running transition; ordinary transitions wait
+- [x] Rule graphs serialize inline with the parent document; duplicating or copy-pasting a transition carries its rule; deleting a transition never orphans one
+- [x] Validation rejects effect/exec/event/latent nodes inside a rule, enforces a single RESULT, rejects parameter type mismatches, and rejects Server-realm nodes
+- [x] A transition with an unwired Bool input evaluates as always-true
+- [x] A Trigger stays set across frames until consumed by a firing transition, and is consumed exactly once
+- [x] Multiple passing rules on one state resolve by priority, deterministically, verified at the evaluator seam
+- [x] Any State transitions fire regardless of active state and can interrupt a running transition; ordinary transitions wait

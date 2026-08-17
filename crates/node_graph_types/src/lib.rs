@@ -32,8 +32,9 @@ pub mod validate;
 
 pub use descriptors::{DocDescriptors, NodeKind};
 pub use doc::{
-    CommentBox, Edge, GraphDoc, GraphRealm, GroupBox, IfacePin, NodeInst, NodeRealm, PinType,
-    PropValue, VarDecl, COMMENT_FONT_SCALE_MAX, COMMENT_FONT_SCALE_MIN, GRAPH_DOC_VERSION,
+    CommentBox, Edge, GraphDoc, GraphRealm, GraphRegion, GroupBox, IfacePin, NodeInst, NodeRealm,
+    PinType, PropValue, VarDecl, COMMENT_FONT_SCALE_MAX, COMMENT_FONT_SCALE_MIN,
+    GRAPH_DOC_VERSION,
 };
 pub use io::{load_graph, parse_graph, save_graph, serialize_graph, GraphIoError};
 pub use migrate::{migrate_doc, MigrationCtx, MigrationError, MigrationRecord};
