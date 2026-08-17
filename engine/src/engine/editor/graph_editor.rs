@@ -16,7 +16,7 @@ use crusty_gui::widgets::CanvasView;
 
 use crate::engine::node_graph::{
     endpoint_type, load_graph, migrate_doc, save_graph, validate_doc, CommentBox, Edge,
-    GraphDoc, GraphResolver, IfacePin, PinType, VarDecl,
+    GraphDoc, GraphRegion, GraphResolver, IfacePin, PinType, VarDecl,
     DocDescriptors, GraphError, GroupBox, NodeInst, NodeRegistry, PropValue, GRAPH_INPUT_TYPE_ID,
     GRAPH_OUTPUT_TYPE_ID, REROUTE_IN, REROUTE_OUT,
     REROUTE_TYPE_ID, SUBGRAPH_TYPE_ID, EVENT_CUSTOM_TYPE_ID, EVENT_NAME_PROP,
@@ -45,11 +45,15 @@ pub enum GraphEdit {
     /// Nodes and their incident edges were removed together. Each carries its
     /// original index so undo restores the exact vec order (byte-stable
     /// saves). `comments` is the anchored-note collateral: a note anchored to
-    /// a deleted node dies with it, and comes back with it.
+    /// a deleted node dies with it, and comes back with it. `regions` is the
+    /// embedded-region collateral (Task 41): a transition's rule graph lives
+    /// keyed under the node's id and must die and return with it — keyed, not
+    /// indexed, because `GraphDoc::regions` is a map.
     RemoveNodes {
         nodes: Vec<(usize, NodeInst)>,
         edges: Vec<(usize, Edge)>,
         comments: Vec<(usize, CommentBox)>,
+        regions: Vec<(u64, GraphRegion)>,
     },
     /// An edge was created.
     Connect(Edge),
@@ -59,8 +63,14 @@ pub enum GraphEdit {
     Disconnect { edges: Vec<(usize, Edge)> },
     /// Nodes moved by a fixed world-space delta (drag-coalesced).
     MoveNodes { ids: Vec<u64>, delta: [f32; 2] },
-    /// A fragment (nodes + internal edges) was pasted/duplicated.
-    Paste { nodes: Vec<NodeInst>, edges: Vec<Edge> },
+    /// A fragment (nodes + internal edges) was pasted/duplicated. `regions`
+    /// carries the pasted nodes' embedded regions, keyed by the *new* node
+    /// ids — a duplicated transition arrives with its rule, never orphaned.
+    Paste {
+        nodes: Vec<NodeInst>,
+        edges: Vec<Edge>,
+        regions: Vec<(u64, GraphRegion)>,
+    },
     /// An inline input constant changed (P2 canvas widgets). `None` on either
     /// side means "no stored property", so setting a first value and clearing
     /// one back to the descriptor default are both round-trippable.
@@ -189,7 +199,7 @@ impl GraphEdit {
     pub fn apply(&self, doc: &mut GraphDoc) {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.push(n.clone()),
-            GraphEdit::RemoveNodes { nodes, edges, comments } => {
+            GraphEdit::RemoveNodes { nodes, edges, comments, regions } => {
                 let ids: BTreeSet<u64> = nodes.iter().map(|(_, n)| n.id).collect();
                 doc.nodes.retain(|n| !ids.contains(&n.id));
                 doc.edges.retain(|e| !edges.iter().any(|(_, re)| re == e));
@@ -200,6 +210,9 @@ impl GraphEdit {
                     i += 1;
                     keep
                 });
+                for (id, _) in regions {
+                    doc.regions.remove(id);
+                }
             }
             GraphEdit::Connect(e) => doc.edges.push(e.clone()),
             GraphEdit::Disconnect { edges } => {
@@ -218,9 +231,12 @@ impl GraphEdit {
                 }
             }
             GraphEdit::MoveNodes { ids, delta } => move_nodes(doc, ids, *delta),
-            GraphEdit::Paste { nodes, edges } => {
+            GraphEdit::Paste { nodes, edges, regions } => {
                 doc.nodes.extend(nodes.iter().cloned());
                 doc.edges.extend(edges.iter().cloned());
+                for (id, r) in regions {
+                    doc.regions.insert(*id, r.clone());
+                }
             }
             GraphEdit::SetProperty { node, key, new, .. } => set_prop(doc, *node, key, new),
             GraphEdit::AddVariable(v) => doc.variables.push(v.clone()),
@@ -277,22 +293,28 @@ impl GraphEdit {
     fn revert(&self, doc: &mut GraphDoc) {
         match self {
             GraphEdit::AddNode(n) => doc.nodes.retain(|x| x.id != n.id),
-            GraphEdit::RemoveNodes { nodes, edges, comments } => {
+            GraphEdit::RemoveNodes { nodes, edges, comments, regions } => {
                 // Reinsert at original indices, ascending so each index still
                 // refers to the correct slot once earlier ones are back.
                 reinsert_indexed(&mut doc.nodes, nodes);
                 reinsert_indexed(&mut doc.edges, edges);
                 reinsert_indexed(&mut doc.comments, comments);
+                for (id, r) in regions {
+                    doc.regions.insert(*id, r.clone());
+                }
             }
             GraphEdit::Connect(e) => doc.edges.retain(|x| x != e),
             GraphEdit::Disconnect { edges } => reinsert_indexed(&mut doc.edges, edges),
             GraphEdit::MoveNodes { ids, delta } => {
                 move_nodes(doc, ids, [-delta[0], -delta[1]])
             }
-            GraphEdit::Paste { nodes, edges } => {
+            GraphEdit::Paste { nodes, edges, regions } => {
                 let ids: BTreeSet<u64> = nodes.iter().map(|n| n.id).collect();
                 doc.nodes.retain(|n| !ids.contains(&n.id));
                 doc.edges.retain(|e| !edges.contains(e));
+                for (id, _) in regions {
+                    doc.regions.remove(id);
+                }
             }
             GraphEdit::SetProperty { node, key, old, .. } => set_prop(doc, *node, key, old),
             GraphEdit::AddVariable(v) => {
@@ -772,6 +794,12 @@ pub fn pin_type_label(ty: &PinType) -> String {
         PinType::Color => "Color".to_string(),
         PinType::Entity => "Entity".to_string(),
         PinType::Exec => "Exec".to_string(),
+        // The animation Trigger parameter (Task 41) — a first-class type in
+        // the variables panel, so it wears its declared name, not its
+        // wire-format slug.
+        PinType::Domain(d) if d == crate::engine::animation::graph::TRIGGER_PARAM_DOMAIN => {
+            "Trigger".to_string()
+        }
         other => other.type_slug(),
     }
 }
@@ -867,6 +895,37 @@ pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
         .enumerate()
         .filter(|(_, c)| c.anchor.is_some_and(|a| ids.contains(&a)))
         .map(|(i, _)| i)
+        .collect()
+}
+
+/// Would `edge` wire machine flow **directly** from a state-family `out`
+/// into a state's `in`? Then the drop means "make a transition here" — the
+/// state-machine drag gesture — and this answers the `(source, target)` pair
+/// [`GraphEditorState::insert_transition_between`] should join. A plain
+/// connect would author an edge the compiler silently ignores, which is the
+/// one thing an editor must never let a gesture mean.
+pub fn transition_shortcut(doc: &GraphDoc, edge: &Edge) -> Option<(u64, u64)> {
+    use crate::engine::animation::graph::plan::{
+        ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+    };
+    let from = doc.node(edge.from_node)?;
+    let to = doc.node(edge.to_node)?;
+    let from_is_source = (from.type_id == ANIM_STATE_TYPE_ID
+        || from.type_id == ANIM_ANY_STATE_TYPE_ID)
+        && edge.from_pin == STATE_OUT_PIN;
+    let to_is_state = to.type_id == ANIM_STATE_TYPE_ID && edge.to_pin == STATE_IN_PIN;
+    (from_is_source && to_is_state).then_some((from.id, to.id))
+}
+
+/// The embedded regions keyed by any of `ids` — the other collateral a node
+/// delete has to carry (Task 41: a transition's rule dies and returns with
+/// its transition).
+pub fn region_collateral(
+    doc: &GraphDoc,
+    ids: impl IntoIterator<Item = u64>,
+) -> Vec<(u64, GraphRegion)> {
+    ids.into_iter()
+        .filter_map(|id| Some((id, doc.regions.get(&id)?.clone())))
         .collect()
 }
 
@@ -1011,6 +1070,11 @@ pub struct GraphFragment {
     pub edges: Vec<Edge>,
     pub comments: Vec<CommentBox>,
     pub groups: Vec<GroupBox>,
+    /// Embedded regions of the copied nodes, keyed by the *fragment* node id
+    /// (remapped with everything else on paste). Additive and defaulted, so a
+    /// pre-region clipboard payload still parses — the container-v3 rule.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub regions: BTreeMap<u64, GraphRegion>,
 }
 
 /// The clipboard envelope: a kind tag and a version around the payload, so
@@ -1094,7 +1158,6 @@ impl GraphFragment {
     /// endpoint outside the fragment are dropped, and counted: silent loss is
     /// fine, unreported loss is not.
     fn instantiate(&self, first_id: u64, offset: [f32; 2]) -> Instantiated {
-        use std::collections::BTreeMap;
         let mut remap: BTreeMap<u64, u64> = BTreeMap::new();
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for (i, n) in self.nodes.iter().enumerate() {
@@ -1144,7 +1207,15 @@ impl GraphFragment {
                 g
             })
             .collect();
-        Instantiated { nodes, edges, comments, groups, dropped }
+        // Regions re-key to the new owner ids; their *contents* are
+        // region-local and copy untouched — that locality is the whole point
+        // of the container-v3 design.
+        let regions = self
+            .regions
+            .iter()
+            .filter_map(|(owner, r)| Some((*remap.get(owner)?, r.clone())))
+            .collect();
+        Instantiated { nodes, edges, comments, groups, regions, dropped }
     }
 }
 
@@ -1154,6 +1225,7 @@ struct Instantiated {
     edges: Vec<Edge>,
     comments: Vec<CommentBox>,
     groups: Vec<GroupBox>,
+    regions: Vec<(u64, GraphRegion)>,
     /// Boundary edges that could not come along.
     dropped: usize,
 }
@@ -1303,6 +1375,115 @@ pub struct GraphEditorState {
     /// The custom-event payload band's draft/confirm state (GS-1).
     /// Session-only, like `vars`.
     pub payload: PayloadPanel,
+    /// Which node library this document authors against (Task 41). Derived
+    /// from the file extension at open; never changes over a document's life.
+    pub domain: GraphDomain,
+    /// Domain-compiler refusals — for an `.animgraph`, `compile_anim_graph`'s
+    /// error, anchored to the node it names. Editor-side rather than a new
+    /// `GraphError` variant because that set is closed by design ruling; the
+    /// panel folds these into the same anchored-error UI (badge, count chip,
+    /// F8 cycle).
+    pub domain_errors: Vec<DomainError>,
+}
+
+/// The graph editor is one product over several node libraries; the domain
+/// says which library, palette and validation profile a document uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphDomain {
+    /// `.graph` / `.subgraph` — the script library.
+    #[default]
+    Script,
+    /// `.animgraph` — the animation state-machine library.
+    Animation,
+}
+
+impl GraphDomain {
+    pub fn of_path(path: &str) -> Self {
+        if path.ends_with(".animgraph") {
+            GraphDomain::Animation
+        } else {
+            GraphDomain::Script
+        }
+    }
+
+    pub fn is_animation(self) -> bool {
+        self == GraphDomain::Animation
+    }
+
+    /// This domain's compile refusals for `doc`, anchored. Scripts answer
+    /// none: their compile errors surface through the interpreter's own path.
+    pub fn compile_errors(self, doc: &GraphDoc) -> Vec<DomainError> {
+        match self {
+            GraphDomain::Script => Vec::new(),
+            GraphDomain::Animation => {
+                match crate::engine::animation::graph::compile_anim_graph(doc) {
+                    Ok(_) => Vec::new(),
+                    Err(message) => {
+                        let node = anchor_anim_refusal(doc, &message);
+                        vec![DomainError { node, message }]
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One domain-compiler refusal: a `String` a person can act on (the animation
+/// compiler's posture), plus the node it is about when the text names one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainError {
+    /// `None` = document-level: it lists in the compiler-row popover.
+    pub node: Option<u64>,
+    pub message: String,
+}
+
+/// Resolve which node an animation-compiler refusal is about, from the
+/// refusal text itself — the compiler anchors its messages by convention
+/// ("state '<name>': …", "transition <id>: …"), and this is the editor-side
+/// half of that contract.
+pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
+    use crate::engine::animation::graph::plan::{
+        ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
+    };
+    // The display name the compiler used: node title, or its typed fallback.
+    let named = |type_id: &str, fallback: &str, name: &str| -> Option<u64> {
+        doc.nodes
+            .iter()
+            .filter(|n| n.type_id == type_id)
+            .find(|n| match &n.title {
+                Some(t) => t == name,
+                None => format!("{fallback} {}", n.id) == name,
+            })
+            .map(|n| n.id)
+    };
+    let quoted = |prefix: &str| -> Option<&str> {
+        let rest = msg.strip_prefix(prefix)?.strip_prefix('\'')?;
+        rest.split('\'').next()
+    };
+    if let Some(rest) = msg.strip_prefix("transition ") {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let id: u64 = digits.parse().ok()?;
+        return doc
+            .nodes
+            .iter()
+            .any(|n| n.id == id && n.type_id == ANIM_TRANSITION_TYPE_ID)
+            .then_some(id);
+    }
+    if let Some(name) = quoted("state ") {
+        return named(ANIM_STATE_TYPE_ID, "State", name);
+    }
+    if let Some(name) = quoted("play-once slot ") {
+        return named(ANIM_PLAY_ONCE_TYPE_ID, "Slot", name);
+    }
+    // The ENTRY-wiring family ("the ENTRY node is not wired to a state", …)
+    // anchors on the ENTRY node itself when there is exactly one.
+    if msg.contains("ENTRY node") {
+        let mut entries = doc.nodes.iter().filter(|n| n.type_id == ANIM_ENTRY_TYPE_ID);
+        if let (Some(e), None) = (entries.next(), entries.next()) {
+            return Some(e.id);
+        }
+    }
+    None
 }
 
 /// The add-node palette's session state.
@@ -1805,10 +1986,14 @@ impl GraphEditorState {
         let mut doc = load_graph(abs_path).map_err(|e| e.to_string())?;
         migrate_doc(&mut doc, registry).map_err(|e| e.to_string())?;
         let errors = validate_doc(&doc, registry);
+        let domain = GraphDomain::of_path(content_rel_key);
+        let domain_errors = domain.compile_errors(&doc);
         Ok(Self {
             path: content_rel_key.to_string(),
             doc,
             errors,
+            domain,
+            domain_errors,
             ref_errors: Vec::new(),
             dirty: false,
             last_saved_at: None,
@@ -1883,6 +2068,7 @@ impl GraphEditorState {
     /// Re-validate the doc and refresh the dirty flag. Call after every edit.
     pub fn after_edit(&mut self, registry: &NodeRegistry) {
         self.errors = validate_doc(&self.doc, registry);
+        self.domain_errors = self.domain.compile_errors(&self.doc);
         self.dirty = self.stack.is_dirty();
     }
 
@@ -2581,6 +2767,60 @@ impl GraphEditorState {
         self.commit(GraphEdit::AddNode(node), registry);
     }
 
+    /// Insert a Transition joining `from` (a state or Any State) to `to` (a
+    /// state), placed midway between them — the state-machine drag gesture's
+    /// other half. One composite, one undo ("Add Transition"). Returns the
+    /// new node's id. The transition is deliberately **not** selected: at
+    /// rest it renders as its chip, which is the thing the gesture made.
+    pub fn insert_transition_between(
+        &mut self,
+        from: u64,
+        to: u64,
+        registry: &NodeRegistry,
+    ) -> u64 {
+        use crate::engine::animation::graph::plan::{
+            ANIM_TRANSITION_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN, TRANSITION_FROM_PIN,
+            TRANSITION_TO_PIN,
+        };
+        let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+        let pos = match (self.doc.node(from), self.doc.node(to)) {
+            (Some(a), Some(b)) => mid(a.position, b.position),
+            _ => [0.0, 0.0],
+        };
+        let node = NodeInst {
+            id: self.doc.next_node_id(),
+            type_id: ANIM_TRANSITION_TYPE_ID.to_string(),
+            type_version: 1,
+            position: pos,
+            properties: std::collections::BTreeMap::new(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        let id = node.id;
+        let edit = GraphEdit::Composite {
+            label: "Add Transition".to_string(),
+            edits: vec![
+                GraphEdit::AddNode(node),
+                GraphEdit::Connect(Edge {
+                    from_node: from,
+                    from_pin: STATE_OUT_PIN.to_string(),
+                    to_node: id,
+                    to_pin: TRANSITION_FROM_PIN.to_string(),
+                }),
+                GraphEdit::Connect(Edge {
+                    from_node: id,
+                    from_pin: TRANSITION_TO_PIN.to_string(),
+                    to_node: to,
+                    to_pin: STATE_IN_PIN.to_string(),
+                }),
+            ],
+        };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        id
+    }
+
     /// Add a subgraph-instance node referencing `subgraph_path` at `pos`
     /// (its pins derive from the referenced asset's interface at draw time).
     pub fn add_subgraph_node(
@@ -2707,7 +2947,12 @@ impl GraphEditorState {
             .into_iter()
             .map(|i| (i, self.doc.comments[i].clone()))
             .collect();
-        let edit = GraphEdit::RemoveNodes { nodes, edges, comments };
+        let edit = GraphEdit::RemoveNodes {
+            nodes,
+            edges,
+            comments,
+            regions: region_collateral(&self.doc, ids.iter().copied()),
+        };
         edit.apply(&mut self.doc);
         self.selection.clear();
         self.commit(edit, registry);
@@ -3046,6 +3291,7 @@ impl GraphEditorState {
                 .into_iter()
                 .map(|i| (i, self.doc.comments[i].clone()))
                 .collect(),
+            regions: region_collateral(&self.doc, [id]),
         }];
         if let Some(up) = upstream.as_ref() {
             for (_, e) in removed.iter().filter(|(_, e)| e.from_node == id) {
@@ -3450,6 +3696,7 @@ impl GraphEditorState {
                     .into_iter()
                     .map(|i| (i, self.doc.comments[i].clone()))
                     .collect(),
+                regions: region_collateral(&self.doc, inside.iter().copied()),
             },
             GraphEdit::AddNode(NodeInst {
                 id,
@@ -3743,7 +3990,12 @@ impl GraphEditorState {
         let n = nodes.len();
         let edit = GraphEdit::Composite {
             label: format!("Purge {n} Node{}", if n == 1 { "" } else { "s" }),
-            edits: vec![GraphEdit::RemoveNodes { nodes, edges, comments }],
+            edits: vec![GraphEdit::RemoveNodes {
+                nodes,
+                edges,
+                comments,
+                regions: region_collateral(&self.doc, set.iter().copied()),
+            }],
         };
         edit.apply(&mut self.doc);
         self.selection.retain(|id| !set.contains(id));
@@ -4089,8 +4341,16 @@ impl GraphEditorState {
             .cloned()
             .into_iter()
             .collect();
+        // A copied node's embedded region travels with it — copying a
+        // transition without its rule would copy half the thought, the same
+        // rule anchored comments follow.
+        let regions: BTreeMap<u64, GraphRegion> = self
+            .selection
+            .iter()
+            .filter_map(|id| Some((*id, self.doc.regions.get(id)?.clone())))
+            .collect();
 
-        let frag = GraphFragment { nodes, edges, comments, groups };
+        let frag = GraphFragment { nodes, edges, comments, groups, regions };
         (!frag.is_empty()).then_some(frag)
     }
 
@@ -4179,6 +4439,7 @@ impl GraphEditorState {
         let mut edits = vec![GraphEdit::Paste {
             nodes: out.nodes.clone(),
             edges: out.edges,
+            regions: out.regions,
         }];
         for c in out.comments {
             edits.push(GraphEdit::AddComment(c));
@@ -4338,6 +4599,8 @@ pub mod tests_support {
         GraphEditorState {
             path: "t.graph".into(),
             doc: GraphDoc::default(),
+            domain: GraphDomain::default(),
+            domain_errors: vec![],
             errors: vec![],
             ref_errors: vec![],
             dirty: false,
@@ -5087,6 +5350,7 @@ mod tests {
             edges: vec![edge(0, 7)],
             comments: vec![anchored],
             groups: vec![group(0.0)],
+            regions: BTreeMap::new(),
         };
 
         let text = frag.to_ron().expect("serialize");
@@ -6112,6 +6376,7 @@ mod tests {
                 nodes: vec![(1, node(1, [10.0, 10.0]))],
                 edges: vec![(0, edge(0, 1))],
                 comments: vec![],
+                regions: vec![],
             },
             GraphEdit::Connect(Edge {
                 from_node: 0,
@@ -6124,6 +6389,7 @@ mod tests {
             GraphEdit::Paste {
                 nodes: vec![node(7, [1.0, 1.0]), node(8, [2.0, 2.0])],
                 edges: vec![edge(7, 8)],
+                regions: vec![],
             },
             // Set a first value where none was stored…
             GraphEdit::SetProperty {
@@ -6278,6 +6544,7 @@ mod tests {
             nodes: vec![(1, node(1, [1.0, 1.0]))],
             edges: vec![(0, edge(0, 1)), (1, edge(1, 2))],
             comments: vec![],
+            regions: vec![],
         };
         edit.apply(&mut doc);
         assert_eq!(doc.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![0, 2]);
@@ -7165,6 +7432,221 @@ mod tests {
             "an un-enumerable resolver answers with nothing rather than lying"
         );
     }
+
+    // --- Task 41: an embedded region is part of its owner node. -----------
+
+    /// A one-node rule region, distinctive enough that equality means it
+    /// actually round-tripped.
+    fn rule_region() -> GraphRegion {
+        GraphRegion {
+            nodes: vec![NodeInst {
+                id: 0,
+                type_id: "var_get".to_string(),
+                type_version: 1,
+                position: [12.0, 34.0],
+                properties: [(
+                    crate::engine::node_graph::VAR_PROP.to_string(),
+                    PropValue::Str("speed".to_string()),
+                )]
+                .into(),
+                subgraph: None,
+                tint: None,
+                title: None,
+            }],
+            edges: vec![Edge {
+                from_node: 0,
+                from_pin: "value".to_string(),
+                to_node: 1,
+                to_pin: "value".to_string(),
+            }],
+        }
+    }
+
+    /// Deleting a node with an embedded region takes the region with it, and
+    /// undo brings the document back exactly — a transition and its rule are
+    /// one unit (spec story 21).
+    #[test]
+    fn deleting_a_node_takes_its_region_and_undo_restores_it() {
+        let reg = NodeRegistry::new();
+        let mut st = tests_support::empty_state();
+        st.doc.nodes = vec![node(0, [0.0, 0.0]), node(1, [50.0, 0.0])];
+        st.doc.edges = vec![edge(0, 1)];
+        st.doc.regions.insert(1, rule_region());
+        let before = st.doc.clone();
+
+        st.selection.insert(1);
+        st.delete_selection(&reg);
+        assert!(st.doc.regions.is_empty(), "the region died with its owner");
+        assert!(st.doc.node(1).is_none());
+
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "undo restores nodes, edges and the region");
+
+        st.redo(&reg);
+        assert!(st.doc.regions.is_empty(), "redo removes it again");
+    }
+
+    /// Duplicating a node clones its region under the duplicate's id; undoing
+    /// the paste removes only the clone.
+    #[test]
+    fn duplicate_carries_the_region_under_the_new_id() {
+        let reg = NodeRegistry::new();
+        let mut st = tests_support::empty_state();
+        st.doc.nodes = vec![node(3, [0.0, 0.0])];
+        st.doc.regions.insert(3, rule_region());
+        st.selection.insert(3);
+
+        st.duplicate_selection(&reg);
+        assert_eq!(st.doc.nodes.len(), 2);
+        let dup = st.doc.nodes.last().unwrap().id;
+        assert_ne!(dup, 3);
+        assert_eq!(
+            st.doc.regions.get(&dup),
+            Some(&rule_region()),
+            "the clone owns an identical region"
+        );
+        assert_eq!(st.doc.regions.len(), 2);
+
+        st.undo(&reg);
+        assert_eq!(st.doc.regions.len(), 1, "undo removes only the clone's region");
+        assert!(st.doc.regions.contains_key(&3));
+    }
+
+    /// The clipboard fragment carries regions across serialize/parse, and a
+    /// pre-region payload (no `regions` field) still parses — the additive-
+    /// field rule the container itself follows.
+    #[test]
+    fn fragments_round_trip_regions_and_accept_old_payloads() {
+        let mut frag = GraphFragment {
+            nodes: vec![node(5, [0.0, 0.0])],
+            ..GraphFragment::default()
+        };
+        frag.regions.insert(5, rule_region());
+        let text = frag.to_ron().unwrap();
+        assert_eq!(GraphFragment::from_ron(&text), Some(frag));
+
+        // A region-less fragment serializes without the field at all — its
+        // payload is byte-shaped like a pre-region one, and parses.
+        let old = GraphFragment {
+            nodes: vec![node(5, [0.0, 0.0])],
+            ..GraphFragment::default()
+        };
+        let old_text = old.to_ron().unwrap();
+        assert!(!old_text.contains("regions"));
+        assert_eq!(GraphFragment::from_ron(&old_text), Some(old));
+    }
+
+    /// The state-machine drag: a flow wire dropped state → state (or Any
+    /// State → state) reads as "make a transition here"; one undo takes the
+    /// whole gesture back.
+    #[test]
+    fn a_state_to_state_wire_becomes_a_transition() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, STATE_IN_PIN,
+            STATE_OUT_PIN,
+        };
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/duck.animgraph");
+        let mut n = |id: u64, ty: &str, pos: [f32; 2]| NodeInst {
+            id,
+            type_id: ty.to_string(),
+            type_version: 1,
+            position: pos,
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        st.doc.nodes = vec![
+            n(0, ANIM_STATE_TYPE_ID, [0.0, 0.0]),
+            n(1, ANIM_STATE_TYPE_ID, [400.0, 80.0]),
+            n(2, ANIM_ANY_STATE_TYPE_ID, [0.0, 200.0]),
+        ];
+        let flow = |a: u64, b: u64| Edge {
+            from_node: a,
+            from_pin: STATE_OUT_PIN.to_string(),
+            to_node: b,
+            to_pin: STATE_IN_PIN.to_string(),
+        };
+        // The shortcut recognizes both source families…
+        assert_eq!(transition_shortcut(&st.doc, &flow(0, 1)), Some((0, 1)));
+        assert_eq!(transition_shortcut(&st.doc, &flow(2, 1)), Some((2, 1)));
+        // …and nothing else.
+        assert_eq!(transition_shortcut(&st.doc, &flow(0, 2)), None, "Any State has no `in`");
+
+        let before = st.doc.clone();
+        let t = st.insert_transition_between(0, 1, &reg);
+        let node = st.doc.node(t).expect("inserted");
+        assert_eq!(node.type_id, ANIM_TRANSITION_TYPE_ID);
+        assert_eq!(node.position, [200.0, 40.0], "midway between the states");
+        assert_eq!(st.doc.edges.len(), 2, "state → transition → state");
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "one undo takes the whole gesture back");
+    }
+
+    /// The animation compiler's refusal strings anchor to the node they name
+    /// — the editor-side half of the "state '<name>': …" contract.
+    #[test]
+    fn anim_refusals_anchor_to_the_node_they_name() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID,
+            ANIM_TRANSITION_TYPE_ID,
+        };
+        let mut doc = GraphDoc::default();
+        let mut n = |id: u64, ty: &str, title: Option<&str>| {
+            doc.nodes.push(NodeInst {
+                id,
+                type_id: ty.to_string(),
+                type_version: 1,
+                position: [0.0, 0.0],
+                properties: Default::default(),
+                subgraph: None,
+                tint: None,
+                title: title.map(str::to_string),
+            });
+        };
+        n(0, ANIM_ENTRY_TYPE_ID, None);
+        n(1, ANIM_STATE_TYPE_ID, Some("Idle"));
+        n(2, ANIM_STATE_TYPE_ID, None); // display name "State 2"
+        n(3, ANIM_TRANSITION_TYPE_ID, None);
+        n(4, ANIM_PLAY_ONCE_TYPE_ID, Some("Attack"));
+
+        let a = |msg: &str| anchor_anim_refusal(&doc, msg);
+        assert_eq!(a("state 'Idle' names no clip (property `clip`) and has no blend tree"), Some(1));
+        assert_eq!(a("state 'State 2': blend tree has no RESULT node"), Some(2));
+        assert_eq!(a("transition 3 has no source state"), Some(3));
+        assert_eq!(a("transition 3: rule has no RESULT node"), Some(3));
+        assert_eq!(a("play-once slot 'Attack' names no clip (property `clip`)"), Some(4));
+        assert_eq!(a("the ENTRY node is not wired to a state"), Some(0));
+        assert_eq!(a("parameter 'speed' is declared twice"), None);
+        assert_eq!(a("transition 99 has no source state"), None, "unknown ids stay unanchored");
+    }
+
+    /// An `.animgraph` state recomputes its domain errors on every edit; a
+    /// `.graph` never grows any.
+    #[test]
+    fn after_edit_refreshes_domain_errors_for_the_animation_domain() {
+        use crate::engine::animation::graph::new_animgraph_doc;
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/duck.animgraph");
+        assert!(st.domain.is_animation());
+        st.doc = new_animgraph_doc();
+        st.after_edit(&reg);
+        assert_eq!(st.domain_errors.len(), 1);
+        assert_eq!(st.domain_errors[0].node, Some(1), "anchored to the clipless state");
+
+        // Naming a clip clears the refusal.
+        st.doc.node_mut(1).unwrap().properties.insert(
+            crate::engine::animation::graph::plan::CLIP_PROP.to_string(),
+            PropValue::Asset("anims/idle.anim".to_string()),
+        );
+        st.after_edit(&reg);
+        assert!(st.domain_errors.is_empty());
+
+        let mut script = test_state("graphs/t.graph");
+        script.after_edit(&reg);
+        assert!(script.domain_errors.is_empty());
+    }
 }
 
 /// A blank editor state. Test-only, at module level so the sibling test
@@ -7175,6 +7657,8 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
     GraphEditorState {
         path: path.to_string(),
         doc: GraphDoc::default(),
+        domain: GraphDomain::of_path(path),
+        domain_errors: vec![],
         errors: vec![],
         ref_errors: vec![],
         dirty: false,

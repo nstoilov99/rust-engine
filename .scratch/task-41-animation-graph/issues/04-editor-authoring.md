@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 — Tracer (document shape the editor saves must be what the runtime accepts); 02 — Rule graphs (chips summarize embedded rules).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A new `.animgraph` is creatable from the editor, opens in the graph editor with the animation node library, and saves a document the runtime evaluates
-- [ ] ENTRY, State, Any State, and Transition nodes are placeable and wireable; duration and priority editable on a transition
-- [ ] At-rest chips show rule summary · duration and priority, with filled/hollow always-true dot and "⋯ n" elision; chip summarization/elision text has unit tests
-- [ ] Validation errors anchor to the offending nodes; annotations, auto-layout, and alignment work in animation graphs
-- [ ] Visual pass per the repo's screenshot-review workflow (Pose wire and category colors match the design-system spec)
+- [x] A new `.animgraph` is creatable from the editor (asset browser folder menu ▸ New Animation Graph, seeded ENTRY→Idle at Client realm), opens in the graph editor with the animation node library (its own `NodeRegistry`, selected by extension), and saves a document the runtime evaluates (save → `AnimGraphPlanCache` invalidation; hot-reload reloads clean open tabs)
+- [x] ENTRY, State, Any State, and Transition nodes are placeable and wireable (`anim_flow` registered as a flow-like domain: fan-in + cycles legal; a state→state wire drop auto-inserts a Transition); duration and priority editable on a selected transition's config rows
+- [x] At-rest chips show rule summary · duration and priority tag, with filled/hollow always-true dot and "⋯ n" elision; `graph_anim_chip` summarizer/elision has 9 unit tests
+- [x] Compiler refusals anchor to the node they name (`DomainError` through the shared `ErrorIndex` — badge, count chip, F8); annotations, auto-layout, and alignment run on the shared, domain-free code paths
+- [x] Visual pass per the screenshot workflow (`.scratch/t04_demo_tab.png` + crops): Animation category rose (paired with the animation asset slot), `anim_flow` gold, `anim_pose` rose, `anim_trigger` ember; chips verified filled/hollow/elided on screen

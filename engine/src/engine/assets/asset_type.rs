@@ -33,6 +33,10 @@ pub enum AssetType {
     InputMappingContext,
     /// Node graph documents (*.graph) and reusable subgraphs (*.subgraph)
     Graph,
+    /// Animation state-machine graphs (*.animgraph) — Task 41. Its own type
+    /// (not `Graph`) so the browser colors it with the animation family and
+    /// the editor opens it with the animation node library.
+    AnimGraph,
     /// Float-track curves (*.curve) — Timeline tracks today, animation
     /// channels when Task 41 grows the same asset.
     Curve,
@@ -65,6 +69,7 @@ impl AssetType {
             "inputaction" => AssetType::InputAction,
             "mappingcontext" => AssetType::InputMappingContext,
             "graph" | "subgraph" => AssetType::Graph,
+            "animgraph" => AssetType::AnimGraph,
             "curve" => AssetType::Curve,
             // Legacy RON files - refined by filename pattern in from_path
             "ron" => AssetType::Unknown,
@@ -120,6 +125,7 @@ impl AssetType {
             AssetType::InputAction => "Input Action",
             AssetType::InputMappingContext => "Input Mapping Context",
             AssetType::Graph => "Node Graph",
+            AssetType::AnimGraph => "Animation Graph",
             AssetType::Curve => "Curve",
             AssetType::Unknown => "Unknown",
         }
@@ -140,6 +146,7 @@ impl AssetType {
             AssetType::InputAction => &["inputaction"],
             AssetType::InputMappingContext => &["mappingcontext"],
             AssetType::Graph => &["graph", "subgraph"],
+            AssetType::AnimGraph => &["animgraph"],
             AssetType::Curve => &["curve"],
             AssetType::Unknown => &[],
         }
@@ -160,6 +167,7 @@ impl AssetType {
             AssetType::InputAction,
             AssetType::InputMappingContext,
             AssetType::Graph,
+            AssetType::AnimGraph,
             AssetType::Curve,
         ]
     }
@@ -250,6 +258,10 @@ mod tests {
         assert_eq!(
             AssetType::from_path(Path::new("graphs/lib/calc.subgraph")),
             AssetType::Graph
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("graphs/duck.animgraph")),
+            AssetType::AnimGraph
         );
         // Mesh sidecars stay hidden; binary meshes classify as Mesh
         assert_eq!(

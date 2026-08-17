@@ -32,7 +32,8 @@ use crusty_gui::widgets::{
 use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
-    AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
+    AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, DomainError, GraphDomain,
+    GraphEdit, GraphEditorState,
     GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, PayloadConfirm, PayloadDraft,
     payload_reader_count, variable_matches, variable_mismatch, variable_node_ids, variable_slug,
     variables_view,
@@ -309,9 +310,46 @@ impl ZoomLod {
 // Error anchoring
 // ---------------------------------------------------------------------------
 
+/// One entry of the anchored-error UI. `GraphError` is a closed set by
+/// design ruling, so a *domain compiler's* refusal (Task 41: the animation
+/// compiler's `String`, already anchored editor-side) joins the index as its
+/// own arm rather than a new variant — same badge, same count chip, same F8.
+#[derive(Debug, Clone, PartialEq)]
+enum IndexedError {
+    Graph(GraphError),
+    Domain(DomainError),
+}
+
+impl IndexedError {
+    fn anchor(&self) -> ErrorAnchor {
+        match self {
+            IndexedError::Graph(e) => e.anchor(),
+            IndexedError::Domain(e) => match e.node {
+                Some(id) => ErrorAnchor::Node(id),
+                None => ErrorAnchor::Document,
+            },
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            IndexedError::Graph(e) => format!("{e}"),
+            IndexedError::Domain(e) => e.message.clone(),
+        }
+    }
+
+    fn cycle_chain(&self) -> Option<&[String]> {
+        match self {
+            IndexedError::Graph(e) => e.cycle_chain(),
+            IndexedError::Domain(_) => None,
+        }
+    }
+}
+
 /// This frame's errors, resolved to the thing each one is *about*. Built once
-/// from `state.errors` + `state.ref_errors` and read by both the geometry
-/// pass (ghost rows change a node's shape) and the paint pass.
+/// from `state.errors` + `state.ref_errors` + `state.domain_errors` and read
+/// by both the geometry pass (ghost rows change a node's shape) and the paint
+/// pass.
 #[derive(Default)]
 struct ErrorIndex {
     /// Nodes carrying a border + gutter badge.
@@ -323,15 +361,25 @@ struct ErrorIndex {
     /// Ghost rows to append, `node -> [(slug, is_output)]`.
     ghosts: BTreeMap<u64, Vec<(String, bool)>>,
     /// Errors with nowhere on the canvas to live — the compiler rows.
-    document: Vec<GraphError>,
+    document: Vec<IndexedError>,
     /// Every error, in a stable order, for the count chip's cycle.
-    ordered: Vec<GraphError>,
+    ordered: Vec<IndexedError>,
 }
 
 impl ErrorIndex {
-    fn build(doc_errors: &[GraphError], ref_errors: &[GraphError]) -> Self {
+    fn build(
+        doc_errors: &[GraphError],
+        ref_errors: &[GraphError],
+        domain_errors: &[DomainError],
+    ) -> Self {
         let mut ix = ErrorIndex::default();
-        for e in doc_errors.iter().chain(ref_errors.iter()) {
+        let all = doc_errors
+            .iter()
+            .chain(ref_errors.iter())
+            .cloned()
+            .map(IndexedError::Graph)
+            .chain(domain_errors.iter().cloned().map(IndexedError::Domain));
+        for e in all {
             match e.anchor() {
                 ErrorAnchor::Node(id) => {
                     ix.nodes.insert(id);
@@ -350,7 +398,7 @@ impl ErrorIndex {
                 }
                 ErrorAnchor::Document => ix.document.push(e.clone()),
             }
-            ix.ordered.push(e.clone());
+            ix.ordered.push(e);
         }
         ix
     }
@@ -688,10 +736,26 @@ impl ConfigGeom {
 /// freshly placed `event_custom` has no `event_name` yet, and a row is the
 /// only way to give it one.
 fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
+    use crate::engine::animation::graph::plan::{
+        ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP,
+        CLIP_PROP, DURATION_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
+        SLOT_TRIGGER_PROP, SPEED_PROP,
+    };
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
         Some(PropValue::Enum(s)) => s.clone(),
+        // A clip reference is an `Asset` when the editor wrote it and a `Str`
+        // when a hand went in — the compiler reads both, so both display.
+        Some(PropValue::Asset(s)) => s.clone(),
         _ => String::new(),
+    };
+    let float_of = |key: &str, default: f32| match n.properties.get(key) {
+        Some(PropValue::Float(f)) => *f,
+        _ => default,
+    };
+    let int_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Int(i)) => *i,
+        _ => 0,
     };
     let mut out = Vec::new();
     match NodeKind::of_type(&n.type_id) {
@@ -736,6 +800,97 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                 InlineKind::Str(text_of(EVENT_ACTION_PROP)),
             ));
         }
+        // Task 41 — the animation library's node data. Config rows, not pins:
+        // a clip path or a speed is node configuration, and a pin dot would
+        // promise a wire that no output type can ever legally feed.
+        _ if n.type_id == ANIM_STATE_TYPE_ID => {
+            if docd
+                .doc()
+                .regions
+                .get(&n.id)
+                .is_some_and(|r| !r.nodes.is_empty())
+            {
+                // A state with a blend tree ignores its clip (the compiler's
+                // rule); the row says what the state *is* instead of showing
+                // a field that would do nothing.
+                out.push((
+                    CLIP_PROP.to_string(),
+                    "Tree".to_string(),
+                    InlineKind::Chip("blend tree".to_string()),
+                ));
+            } else {
+                out.push((
+                    CLIP_PROP.to_string(),
+                    "Clip".to_string(),
+                    InlineKind::Str(text_of(CLIP_PROP)),
+                ));
+                // The in-container clip name only rows when the document
+                // carries one — data is never hidden, and the common
+                // one-clip-per-file case does not pay a row for it.
+                if !text_of(CLIP_NAME_PROP).is_empty() {
+                    out.push((
+                        CLIP_NAME_PROP.to_string(),
+                        "Clip Name".to_string(),
+                        InlineKind::Str(text_of(CLIP_NAME_PROP)),
+                    ));
+                }
+            }
+            out.push((
+                SPEED_PROP.to_string(),
+                "Speed".to_string(),
+                InlineKind::Float(float_of(SPEED_PROP, 1.0)),
+            ));
+        }
+        _ if n.type_id == ANIM_TRANSITION_TYPE_ID => {
+            out.push((
+                DURATION_PROP.to_string(),
+                "Duration".to_string(),
+                InlineKind::Float(float_of(DURATION_PROP, 0.0)),
+            ));
+            out.push((
+                PRIORITY_PROP.to_string(),
+                "Priority".to_string(),
+                InlineKind::Int(int_of(PRIORITY_PROP)),
+            ));
+        }
+        _ if n.type_id == ANIM_PLAY_ONCE_TYPE_ID => {
+            out.push((
+                CLIP_PROP.to_string(),
+                "Clip".to_string(),
+                InlineKind::Str(text_of(CLIP_PROP)),
+            ));
+            // The starting Trigger: a dropdown over the declared Trigger
+            // parameters, stored as `Str` — the `var` config row's shape.
+            let value = text_of(SLOT_TRIGGER_PROP);
+            let variants: Vec<String> = docd
+                .doc()
+                .variables
+                .iter()
+                .filter(|v| v.ty == crate::engine::animation::graph::trigger_pin_type())
+                .map(|v| v.slug.clone())
+                .collect();
+            let ok = variants.contains(&value);
+            out.push((
+                SLOT_TRIGGER_PROP.to_string(),
+                "Trigger".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+            out.push((
+                SPEED_PROP.to_string(),
+                "Speed".to_string(),
+                InlineKind::Float(float_of(SPEED_PROP, 1.0)),
+            ));
+            out.push((
+                SLOT_FADE_IN_PROP.to_string(),
+                "Fade In".to_string(),
+                InlineKind::Float(float_of(SLOT_FADE_IN_PROP, 0.0)),
+            ));
+            out.push((
+                SLOT_FADE_OUT_PROP.to_string(),
+                "Fade Out".to_string(),
+                InlineKind::Float(float_of(SLOT_FADE_OUT_PROP, 0.0)),
+            ));
+        }
         _ => {}
     }
     out
@@ -774,6 +929,18 @@ struct PinGeom {
     untyped: bool,
 }
 
+/// The at-rest presentation of a transition node (Task 41): an edge chip —
+/// "Speed > 3.0 · 0.20s" with a filled/hollow Bool socket dot — instead of
+/// the standard node anatomy. The node is storage; the chip is the
+/// presentation (mockup 2d). Selecting the transition unfolds it into a
+/// small standard card whose config rows edit duration and priority.
+struct ChipGeom {
+    /// The summary line, from `graph_anim_chip`.
+    text: String,
+    /// Filled dot = a wired rule; hollow = always-true.
+    wired: bool,
+}
+
 struct NodeGeom {
     id: u64,
     /// Full node box at L2 and up.
@@ -790,6 +957,8 @@ struct NodeGeom {
     errored: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
+    /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
+    chip: Option<ChipGeom>,
     /// The breakpoint mark, if any: `Some(true)` armed, `Some(false)`
     /// disabled (GS-4). Whether it is *hit* or *invalid* is not geometry — it
     /// comes from the bound instance at draw time.
@@ -839,8 +1008,9 @@ impl NodeGeom {
     fn body_rect(&self, lod: ZoomLod, m: &GraphMetrics) -> Rect {
         // A reroute has no header to collapse to; it is drawn as the same disc
         // at every zoom. Falling through to the header-height branch gave it a
-        // hit box nearly twice as tall as the dot, hanging below it.
-        if self.reroute || lod.rows() {
+        // hit box nearly twice as tall as the dot, hanging below it. A chip is
+        // already smaller than a header, so it keeps its own box the same way.
+        if self.reroute || self.chip.is_some() || lod.rows() {
             self.rect
         } else {
             Rect::from_min_size(self.rect.min, Vec2::new(self.rect.width(), m.header_h))
@@ -1030,6 +1200,7 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
+                    chip: None,
                     breakpoint: state.breakpoints.get(&n.id).copied(),
                     preview: None,
                     config: Vec::new(),
@@ -1037,6 +1208,75 @@ fn build_geoms(
                     pins: vec![
                         pin(REROUTE_IN, false, min.x),
                         pin(REROUTE_OUT, true, min.x + d),
+                    ],
+                };
+            }
+
+            // Task 41: an unselected transition renders as its at-rest chip —
+            // rule summary · duration · priority tag, sized around that one
+            // mono line. Selecting it unfolds the standard card (with its
+            // Duration/Priority config rows) through the normal path below.
+            if n.type_id == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID
+                && !state.selection.contains(&n.id)
+            {
+                use crate::engine::animation::graph::plan::{
+                    TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
+                };
+                let resolved = super::graph_anim_chip::transition_chip(&state.doc, n.id);
+                let text = resolved.text();
+                let tw = p
+                    .measure_text_family(&text, label_px, None, FontFamily::Mono)
+                    .x;
+                let dot_d = m.pin_r * 2.0;
+                let w = m.pad_x + dot_d + m.label_gap + tw + m.pad_x;
+                let h = m.row_h;
+                let rect = Rect::from_min_size(min, Vec2::new(w, h));
+                let cy = min.y + h * 0.5;
+                let flow = PinType::Domain(
+                    crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string(),
+                );
+                let empty: BTreeSet<&str> = BTreeSet::new();
+                let incoming = incident.incoming.get(&n.id).unwrap_or(&empty);
+                let outgoing = incident.outgoing.get(&n.id).unwrap_or(&empty);
+                let pin = |slug: &str, output: bool, x: f32, dot: f32| PinGeom {
+                    slug: slug.to_string(),
+                    label: String::new(),
+                    ty: flow.clone(),
+                    output,
+                    row: 0,
+                    wire_anchor: Pos2::new(x, cy),
+                    dot_center: Pos2::new(dot, cy),
+                    connected: if output {
+                        outgoing.contains(slug)
+                    } else {
+                        incoming.contains(slug)
+                    },
+                    inline: None,
+                    value_w: m.value_w,
+                    ghost: false,
+                    hit_w: None,
+                    untyped: false,
+                };
+                return NodeGeom {
+                    id: n.id,
+                    rect,
+                    title: docd
+                        .display_name(n.id)
+                        .unwrap_or_else(|| "Transition".to_string()),
+                    tag: String::new(),
+                    category: Some(crate::engine::animation::graph::ANIM_CATEGORY.to_string()),
+                    tint: n.tint,
+                    missing: false,
+                    errored: errors.nodes.contains(&n.id),
+                    reroute: false,
+                    chip: Some(ChipGeom { text, wired: resolved.wired }),
+                    breakpoint: state.breakpoints.get(&n.id).copied(),
+                    preview: None,
+                    config: Vec::new(),
+                    add_field: None,
+                    pins: vec![
+                        pin(TRANSITION_FROM_PIN, false, min.x, min.x + m.pin_inset),
+                        pin(TRANSITION_TO_PIN, true, min.x + w, min.x + w - m.pin_inset),
                     ],
                 };
             }
@@ -1094,7 +1334,12 @@ fn build_geoms(
                 )
             };
 
-            let tag = derive_tag(is_sub, desc, category.as_deref());
+            // Animation nodes wear the mockup's role words (STATE / ENTRY /
+            // ANY / SLOT) instead of the derived PURE/EVENT tags, which
+            // describe exec flow and mean nothing in a domain without any.
+            let tag = crate::engine::animation::graph::anim_node_tag(&n.type_id)
+                .map(str::to_string)
+                .unwrap_or_else(|| derive_tag(is_sub, desc, category.as_deref()));
 
             // --- auto width: widest of the header row and every pin row ---
             let mut tag_w = p
@@ -1162,9 +1407,12 @@ fn build_geoms(
             let has_add_field = n.type_id == EVENT_CUSTOM_TYPE_ID;
             let config_n = config.len() + usize::from(has_add_field);
 
+            // A pin-less node with a config band (the play-once slot) does
+            // not pay for an empty pin row; everything else keeps at least
+            // one row so a bare node still has a body.
             let rows = (inputs.len() + ghost_in)
                 .max(outputs.len() + ghost_out)
-                .max(1);
+                .max(usize::from(config_n == 0));
             let mut content_w: f32 = header_w;
             for (key, label, _) in &config {
                 let remove_w = if key.starts_with(EVENT_PAYLOAD_PREFIX) {
@@ -1336,6 +1584,7 @@ fn build_geoms(
                 missing,
                 errored: errors.nodes.contains(&n.id),
                 reroute: is_reroute,
+                chip: None,
                 preview: desc.and_then(|d| d.preview),
                 config,
                 add_field,
@@ -1497,8 +1746,10 @@ fn pin_label(pin: &PinGeom) -> String {
 /// target, so a second wire into it is a second place execution can arrive
 /// from, not a second value. Data inputs keep the single-wire rule.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn validate_connection(
     state: &GraphEditorState,
+    registry: &NodeRegistry,
     a_node: u64,
     a_slug: &str,
     a_out: bool,
@@ -1531,7 +1782,11 @@ fn validate_connection(
         .edges
         .iter()
         .any(|e| e.to_node == to_node && e.to_pin == to_pin);
-    if occupied && *to_ty != PinType::Exec {
+    // Exec and flow-like domain inputs may fan in (Task 41: several
+    // transitions arriving at one state); a data input takes one wire.
+    let fan_in = *to_ty == PinType::Exec
+        || matches!(to_ty, PinType::Domain(k) if registry.domain_is_flow(k));
+    if occupied && !fan_in {
         return None;
     }
     // An identical wire is not a second arrival, it is the same one.
@@ -1575,6 +1830,14 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         exec_clear,
     } = ctx;
     let resolver = &DocResolvers { graphs: resolver, curves };
+    // Subgraph instances are a script-library concept; the animation
+    // palette's file-backed nesting is a state referencing another
+    // `.animgraph` (a later slice), not a subgraph row.
+    let subgraph_assets: &[String] = if state.domain.is_animation() {
+        &[]
+    } else {
+        subgraph_assets
+    };
 
     // Finalize a gesture orphaned by a release that landed while this tab was
     // not being drawn (e.g. the user switched tabs mid-drag): the pointer is
@@ -1694,7 +1957,13 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // before the strip is drawn, and the payload only has to be claimed once
     // per frame — the drag survives frames on the context, not on either side.
     if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
-        if let Some(sp) = ui.ctx().input.pointer_pos {
+        if state.domain.is_animation() {
+            // Parameters are read *inside* a transition's rule, not on the
+            // machine canvas — a top-level Get would compile to nothing.
+            // The rule canvas (peek overlay) is the later slice that makes
+            // this drop meaningful.
+            state.toast("Parameters are read inside transition rules");
+        } else if let Some(sp) = ui.ctx().input.pointer_pos {
             let v = state.view;
             state.vars.drop = Some(VarDrop {
                 slug: p.slug,
@@ -1757,7 +2026,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // F8 / Shift+F8 walk the anchored errors. The chip's own cursor drives
     // it, so clicking and keying stay in step.
     if let Some(forward) = cycle_error_request {
-        let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
+        let errors = ErrorIndex::build(&state.errors, &state.ref_errors, &state.domain_errors);
         if !forward {
             // Backwards = step back two, then forward one.
             let n = errors
@@ -1792,9 +2061,15 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 
     // Ctrl+G writes a new asset, so it runs outside the draw pass.
     if collapse_request {
-        match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
-            Ok(rel) => println!("graph: collapsed selection into {rel}"),
-            Err(e) => println!("graph: collapse to subgraph failed: {e}"),
+        if state.domain.is_animation() {
+            // Subgraphs are the script library's factoring tool; a machine
+            // factors into a nested `.animgraph` (a later slice).
+            state.toast("An animation graph has no subgraphs");
+        } else {
+            match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
+                Ok(rel) => println!("graph: collapsed selection into {rel}"),
+                Err(e) => println!("graph: collapse to subgraph failed: {e}"),
+            }
         }
     }
 }
@@ -1928,7 +2203,7 @@ fn draw_and_interact(
     let vis = scope.visible_world_rect();
     // Errors are resolved to their anchors before geometry, because ghost
     // rows change a node's shape.
-    let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
+    let errors = ErrorIndex::build(&state.errors, &state.ref_errors, &state.domain_errors);
     let geoms = {
         let mut p = ui.painter();
         build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
@@ -2882,6 +3157,7 @@ fn draw_and_interact(
                 (Some(h), Some(sty)) => {
                     if validate_connection(
                         state,
+                        registry,
                         from_node,
                         &from_pin,
                         from_output,
@@ -5113,21 +5389,44 @@ struct VarDragPayload {
     label: String,
 }
 
-/// The element types the add / retype pickers offer, in order.
+/// The element types the add / retype pickers offer, in order — per domain.
 ///
-/// Deliberately the scalar set plus `Entity`: `Exec` is not data, `Enum` has
-/// no variant list to declare here, and textures/meshes/domain types belong to
-/// the editors that own them. The `Array` checkbox wraps whichever one is
-/// picked, which is how `Float[]` is authored without a second list.
-fn var_types() -> [(&'static str, PinType); 6] {
-    [
-        ("Float", PinType::Float),
-        ("Int", PinType::Int),
-        ("String", PinType::String),
-        ("Bool", PinType::Bool),
-        ("Vec3", PinType::Vec3),
-        ("Entity", PinType::Entity),
-    ]
+/// Script graphs: the scalar set plus `Entity` — `Exec` is not data, `Enum`
+/// has no variant list to declare here, and textures/meshes/domain types
+/// belong to the editors that own them. The `Array` checkbox wraps whichever
+/// one is picked, which is how `Float[]` is authored without a second list.
+///
+/// Animation graphs: exactly the parameter contract (Task 41) — Float, Bool
+/// and Trigger, nothing else. The compiler refuses every other type, so the
+/// picker offering one would be a lie; Trigger is the domain-typed one-shot
+/// (`plan::trigger_pin_type`).
+fn var_types(domain: GraphDomain) -> &'static [(&'static str, PinType)] {
+    use std::sync::OnceLock;
+    match domain {
+        GraphDomain::Script => {
+            static TYPES: OnceLock<Vec<(&'static str, PinType)>> = OnceLock::new();
+            TYPES.get_or_init(|| {
+                vec![
+                    ("Float", PinType::Float),
+                    ("Int", PinType::Int),
+                    ("String", PinType::String),
+                    ("Bool", PinType::Bool),
+                    ("Vec3", PinType::Vec3),
+                    ("Entity", PinType::Entity),
+                ]
+            })
+        }
+        GraphDomain::Animation => {
+            static TYPES: OnceLock<Vec<(&'static str, PinType)>> = OnceLock::new();
+            TYPES.get_or_init(|| {
+                vec![
+                    ("Float", PinType::Float),
+                    ("Bool", PinType::Bool),
+                    ("Trigger", crate::engine::animation::graph::trigger_pin_type()),
+                ]
+            })
+        }
+    }
 }
 
 /// The tag a variable row shows: `Float`, `Float[]`, and for anything the
@@ -5141,18 +5440,21 @@ fn type_label(ty: &PinType) -> String {
 /// Split a declared type into what the two controls hold: (picker index,
 /// array). A type the picker cannot express answers index 0 — the row's tag
 /// still shows the truth, and touching the picker is then an explicit retype.
-fn type_pick(ty: &PinType) -> (usize, bool) {
+fn type_pick(domain: GraphDomain, ty: &PinType) -> (usize, bool) {
     let (elem, array) = match ty {
         PinType::Array(inner) => (inner.as_ref().clone(), true),
         other => (other.clone(), false),
     };
-    let i = var_types().iter().position(|(_, t)| *t == elem).unwrap_or(0);
+    let i = var_types(domain)
+        .iter()
+        .position(|(_, t)| *t == elem)
+        .unwrap_or(0);
     (i, array)
 }
 
 /// Rebuild a `PinType` from the two controls.
-fn type_from_pick(index: usize, array: bool) -> PinType {
-    let ty = var_types()
+fn type_from_pick(domain: GraphDomain, index: usize, array: bool) -> PinType {
+    let ty = var_types(domain)
         .get(index)
         .map(|(_, t)| t.clone())
         .unwrap_or(PinType::Float);
@@ -5476,7 +5778,7 @@ fn variables_panel(
                 // The add draft sits at the top of the list, unchanged from
                 // the baseline: name, type, array, Cancel/Add.
                 if let Some(draft) = new_var.as_mut() {
-                    if let Some(req) = add_draft_block(ui, w, &st, pad, draft) {
+                    if let Some(req) = add_draft_block(ui, w, &st, pad, state.domain, draft) {
                         request = Some(req);
                     }
                 }
@@ -6005,6 +6307,7 @@ fn add_draft_block(
     w: f32,
     st: &Style,
     pad: f32,
+    domain: GraphDomain,
     draft: &mut NewVarDraft,
 ) -> Option<VarRequest> {
     let block = ui.allocate(Vec2::new(w, st.metrics.control_height * 3.0 + pad * 3.0));
@@ -6039,15 +6342,21 @@ fn add_draft_block(
                 Id::new("graph_vars_new_row"),
                 UiOptions { padding: Vec2::ZERO, spacing: pad },
                 |ui| {
+                    let types = var_types(domain);
+                    let picked = draft.ty.min(types.len() - 1);
                     ComboBox::new("graph_vars_new_ty")
-                        .selected_text(var_types()[draft.ty].0)
+                        .selected_text(types[picked].0)
                         .width(fw * 0.46)
                         .show_ui(ui, |ui| {
-                            for (i, (name, _)) in var_types().iter().enumerate() {
+                            for (i, (name, _)) in types.iter().enumerate() {
                                 SelectableValue::new(&mut draft.ty, i, *name).show(ui);
                             }
                         });
-                    Checkbox::new(&mut draft.array, "Array").show(ui);
+                    // Animation parameters have no array form — the compiler
+                    // refuses one, so the checkbox does not exist there.
+                    if domain == GraphDomain::Script {
+                        Checkbox::new(&mut draft.array, "Array").show(ui);
+                    }
                 },
             );
             let bw = (fw - pad) * 0.5;
@@ -6075,7 +6384,7 @@ fn add_draft_block(
         draft.done = true;
         return Some(VarRequest::Add(
             draft.name.clone(),
-            type_from_pick(draft.ty, draft.array),
+            type_from_pick(domain, draft.ty, draft.array),
         ));
     }
     if cancel {
@@ -6215,26 +6524,30 @@ fn footer_inspector(
     y = name_row.max.y + pad * 0.5;
     let ty_row = Rect::from_min_size(Pos2::new(inner.min.x, y), Vec2::new(inner.width(), ch));
     field_label(ui, ty_row, "Type", label_w, st);
-    let (mut pick, mut array) = type_pick(&decl.ty);
+    let (mut pick, mut array) = type_pick(state.domain, &decl.ty);
     let (pick0, array0) = (pick, array);
+    let domain = state.domain;
     ui.run_at(
         Rect::from_min_max(Pos2::new(inner.min.x + label_w, y), ty_row.max),
         Direction::LeftToRight,
         Id::new(("graph_var_ty", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: pad * 0.5 },
         |ui| {
+            let types = var_types(domain);
             ComboBox::new(format!("graph_var_ty_{}", decl.slug))
-                .selected_text(var_types()[pick].0)
+                .selected_text(types[pick.min(types.len() - 1)].0)
                 .width((ty_row.width() - label_w) * 0.56)
                 .show_ui(ui, |ui| {
-                    for (i, (name, _)) in var_types().iter().enumerate() {
+                    for (i, (name, _)) in types.iter().enumerate() {
                         SelectableValue::new(&mut pick, i, *name).show(ui);
                     }
                 });
-            Checkbox::new(&mut array, "Array").show(ui);
+            if domain == GraphDomain::Script {
+                Checkbox::new(&mut array, "Array").show(ui);
+            }
         },
     );
-    let want = type_from_pick(pick, array);
+    let want = type_from_pick(domain, pick, array);
     if (pick, array) != (pick0, array0) && want != decl.ty && request.is_none() {
         request = Some(if uses > 0 {
             VarRequest::ConfirmRetype(decl.slug.clone(), want, uses)
@@ -6268,7 +6581,12 @@ fn footer_inspector(
         );
     } else if PropValue::zero_of(&decl.ty).is_none() {
         // No literal form: the chip says why, instead of a broken "—".
-        runtime_chip(ui, cell, st);
+        let text = if state.domain.is_animation() {
+            "fired by gameplay"
+        } else {
+            "bound at runtime"
+        };
+        runtime_chip(ui, cell, st, text);
     } else if let Some(v) = var_default_widget(ui, cell, decl) {
         if request.is_none() {
             request = Some(VarRequest::SetDefault(decl.slug.clone(), v));
@@ -6313,9 +6631,8 @@ fn field_label(ui: &mut Ui, row: Rect, text: &str, _label_w: f32, st: &Style) {
 
 /// The dashed "bound at runtime" chip an `Entity` default wears. An entity has
 /// no literal, and saying so teaches more than an em dash.
-fn runtime_chip(ui: &mut Ui, cell: Rect, st: &Style) {
+fn runtime_chip(ui: &mut Ui, cell: Rect, st: &Style, text: &str) {
     let small = st.fonts.small;
-    let text = "bound at runtime";
     let mut p = ui.painter();
     let w = p.measure_text(text, small, None).x + st.spacing.padding;
     let chip = Rect::from_min_size(
@@ -8211,6 +8528,58 @@ fn draw_nodes(
             continue;
         }
 
+        // Task 41: the at-rest transition chip. One mono line over a small
+        // rounded card, with the Bool socket dot at its left — filled when a
+        // rule is wired, hollow for always-true (mockup 2b's dot on 2d's
+        // collapse). Selection swaps to the standard card via geometry, so
+        // this branch only ever draws the rest state.
+        if let Some(chip) = &g.chip {
+            let bg = st.palette.input;
+            if lod.bar_only() {
+                let bar = Rect::from_min_size(
+                    srect.min,
+                    Vec2::new(srect.width(), (L4_BAR_H * m.scale * zoom).max(1.0)),
+                );
+                p.rect_filled(bar, Rounding::ZERO, edge_col);
+                continue;
+            }
+            let round = Rounding::same((m.radius * 0.7 * zoom).min(srect.height() * 0.5));
+            p.rect_filled(srect, round, fade(st.palette.elevated, dim, bg));
+            p.rect_stroke(
+                srect,
+                round,
+                m.border,
+                if errored { status.error } else { st.palette.stroke_strong },
+            );
+            // The socket dot: ember — the Bool family — per the mockup.
+            let dot_c = Pos2::new(
+                srect.min.x + (m.pad_x + m.pin_r) * zoom,
+                srect.center().y,
+            );
+            let dot_r = m.pin_r * zoom;
+            let ember = fade(pin_color(Some(registry), &PinType::Bool), dim, bg);
+            if chip.wired {
+                p.circle_filled(dot_c, dot_r, ember);
+            } else {
+                p.circle_stroke(dot_c, dot_r, (m.ring_w * zoom).max(1.0), ember);
+            }
+            if lod.glyphs() {
+                let px = st.fonts.small * zoom;
+                p.text_family(
+                    Pos2::new(
+                        dot_c.x + dot_r + m.label_gap * zoom,
+                        srect.center().y - px * 0.62,
+                    ),
+                    &chip.text,
+                    px,
+                    fade(st.palette.text, dim, bg),
+                    None,
+                    FontFamily::Mono,
+                );
+            }
+            continue;
+        }
+
         // L4: the node is a bar of its type color, nothing more.
         if lod.bar_only() {
             let bar = Rect::from_min_size(
@@ -9403,6 +9772,7 @@ fn resolve_connection(
     };
     if let Some(edge) = validate_connection(
         state,
+        registry,
         from_node,
         &from_pin,
         from_output,
@@ -9414,6 +9784,15 @@ fn resolve_connection(
         &tty,
         pin_is_untyped(geoms, tn, &ts, to),
     ) {
+        // The state-machine drag (Task 41): a flow wire dropped state → state
+        // means "make a transition here", never a bare edge the compiler
+        // would silently ignore.
+        if state.domain.is_animation() {
+            if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
+                state.insert_transition_between(a, b, registry);
+                return true;
+            }
+        }
         state.doc.edges.push(edge.clone());
         state.commit(GraphEdit::Connect(edge), registry);
         return true;
@@ -9471,6 +9850,21 @@ fn auto_connect(
     //   dragging a second continuation off it replaces the first rather than
     //   authoring a document validation is about to refuse.
     let is_exec = pin.ty == PinType::Exec;
+    // A flow-like domain pin (Task 41) fans in and out freely, so a new wire
+    // never breaks an existing one — and a state-to-state drop means "make a
+    // transition here" (the state-machine drag), same as a pin-to-pin drop.
+    if matches!(&pin.ty, PinType::Domain(k) if registry.domain_is_flow(k)) {
+        if state.domain.is_animation() {
+            if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
+                state.insert_transition_between(a, b, registry);
+                return;
+            }
+        }
+        let edit = GraphEdit::Connect(edge);
+        edit.apply(&mut state.doc);
+        state.commit(edit, registry);
+        return;
+    }
     let existing: Vec<Edge> = if is_exec {
         state
             .doc
@@ -9959,7 +10353,7 @@ fn error_chip(
     // the node that pulled them in, and the two stay visually separate.
     let mut rows: Vec<String> = Vec::new();
     for e in &errors.document {
-        rows.push(format!("{e}"));
+        rows.push(e.text());
     }
     let mut w: f32 = 0.0;
     for r in &rows {
@@ -10025,7 +10419,7 @@ fn cycle_error(
         return;
     }
     // Skip the doc-level ones: there is nothing on the canvas to frame.
-    let anchored: Vec<&GraphError> = errors
+    let anchored: Vec<&IndexedError> = errors
         .ordered
         .iter()
         .filter(|e| e.anchor() != ErrorAnchor::Document)
@@ -10305,6 +10699,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: true,
+            chip: None,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10468,7 +10863,7 @@ mod tests {
         // Dragging a Float output onto the empty reroute's input...
         assert!(
             validate_connection(
-                &st, 1, "o", true, &PinType::Float, false,
+                &st, &NodeRegistry::new(), 1, "o", true, &PinType::Float, false,
                 7, REROUTE_IN, false, &PinType::Domain(String::new()), true,
             )
             .is_some(),
@@ -10477,7 +10872,7 @@ mod tests {
         // ...and dragging out of the empty reroute onto a Float input.
         assert!(
             validate_connection(
-                &st, 7, REROUTE_OUT, true, &PinType::Domain(String::new()), true,
+                &st, &NodeRegistry::new(), 7, REROUTE_OUT, true, &PinType::Domain(String::new()), true,
                 1, "i", false, &PinType::Float, false,
             )
             .is_some(),
@@ -10486,7 +10881,7 @@ mod tests {
         // Strictness is untouched where both sides really are typed.
         assert!(
             validate_connection(
-                &st, 1, "o", true, &PinType::Float, false,
+                &st, &NodeRegistry::new(), 1, "o", true, &PinType::Float, false,
                 2, "i", false, &PinType::Exec, false,
             )
             .is_none(),
@@ -10507,6 +10902,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10531,6 +10927,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10878,6 +11275,7 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
             breakpoint: None,
             preview: None,
             config,
@@ -11086,14 +11484,14 @@ mod tests {
 
         // With the field declared, the pin exists and only the (already
         // unknown) target pin ghosts.
-        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[], &[]);
         assert!(!ix
             .ghosts_for(0)
             .iter()
             .any(|(s, o)| s == "damage" && *o));
 
         assert!(state.remove_payload_field(0, "damage", &reg));
-        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[], &[]);
         assert!(
             ix.ghosts_for(0).iter().any(|(s, o)| s == "damage" && *o),
             "the wire's source pin becomes a ghost row"
@@ -11116,15 +11514,15 @@ mod tests {
             PinType::Array(Box::new(PinType::Float)),
             PinType::Array(Box::new(PinType::Entity)),
         ] {
-            let (i, array) = type_pick(&ty);
-            assert_eq!(type_from_pick(i, array), ty, "{ty:?}");
+            let (i, array) = type_pick(GraphDomain::Script, &ty);
+            assert_eq!(type_from_pick(GraphDomain::Script, i, array), ty, "{ty:?}");
         }
         assert_eq!(type_label(&PinType::Array(Box::new(PinType::Float))), "Float[]");
         // A type the picker cannot express still reads honestly in the row and
         // does not silently become Float on the way past.
         let domain = PinType::Domain("shader".into());
         assert_eq!(type_label(&domain), "domain:shader");
-        assert_eq!(type_pick(&domain), (0, false));
+        assert_eq!(type_pick(GraphDomain::Script, &domain), (0, false));
     }
 
     /// An `Enum` pin becomes a dropdown only when its descriptor says what

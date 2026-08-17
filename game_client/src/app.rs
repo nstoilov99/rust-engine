@@ -207,6 +207,10 @@ pub struct SceneEditorState {
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
+    /// The animation node library (Task 41): its own registry, selected by
+    /// file extension — a script palette never offers a State and an
+    /// animation palette never offers a Print, with no filter to maintain.
+    pub anim_node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
     /// Shared graph editor clipboard (copy/paste across open graphs).
     pub graph_clipboard: Option<rust_engine::engine::editor::graph_editor::GraphFragment>,
     /// Open input action editors (one per .inputaction file).
@@ -217,6 +221,22 @@ pub struct SceneEditorState {
     pub save_as_dialog: Option<SaveAsDialog>,
     /// Entity clipboard: serialized subtrees from Copy/Cut.
     pub clipboard: Vec<EntityData>,
+}
+
+impl SceneEditorState {
+    /// The registry a graph document authored at `key` validates and lists
+    /// its palette against — the animation library for `.animgraph`, the
+    /// script registry for everything else.
+    pub fn graph_registry(
+        &self,
+        key: &str,
+    ) -> &std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry> {
+        if key.ends_with(".animgraph") {
+            &self.anim_node_registry
+        } else {
+            &self.node_registry
+        }
+    }
 }
 
 /// The two per-frame document resolvers the graph canvas reads: `.graph`
@@ -811,6 +831,9 @@ impl App {
                 graph_editors: std::collections::HashMap::new(),
                 curve_editors: std::collections::HashMap::new(),
                 node_registry,
+                anim_node_registry: std::sync::Arc::new(
+                    rust_engine::engine::animation::graph::anim_node_registry(),
+                ),
                 graph_clipboard: None,
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
@@ -2885,8 +2908,12 @@ impl App {
                                     self.open_mesh_as_tab(relative);
                                 }
                             }
-                        } else if asset_type == AssetType::Graph {
-                            // Open node graph editor tab (Task 40 P4/P6).
+                        } else if asset_type == AssetType::Graph
+                            || asset_type == AssetType::AnimGraph
+                        {
+                            // Open node graph editor tab (Task 40 P4/P6;
+                            // `.animgraph` rides the same path with its own
+                            // node library, Task 41).
                             let relative =
                                 asset_source::to_content_relative(&meta_path.to_string_lossy());
                             #[cfg(feature = "editor")]
@@ -3421,6 +3448,40 @@ impl App {
                         .join(&parent_path);
 
                     match asset_type {
+                        AssetType::AnimGraph => {
+                            // Task 41: a fresh state machine — ENTRY wired to
+                            // an Idle state, Client realm — written to disk,
+                            // then opened like any double-clicked graph.
+                            let base_name = "NewAnimGraph";
+                            let mut new_name = format!("{}.animgraph", base_name);
+                            let mut counter = 1;
+                            while full_parent.join(&new_name).exists() {
+                                new_name = format!("{}_{}.animgraph", base_name, counter);
+                                counter += 1;
+                            }
+                            let file_path = full_parent.join(&new_name);
+                            let doc = rust_engine::engine::animation::graph::new_animgraph_doc();
+                            match rust_engine::engine::node_graph::save_graph(&file_path, &doc) {
+                                Ok(()) => {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Created animation graph: {new_name}"
+                                    )));
+                                    self.editor.scene.asset_browser.request_rescan();
+                                    #[cfg(feature = "editor")]
+                                    {
+                                        let relative = asset_source::to_content_relative(
+                                            &parent_path.join(&new_name).to_string_lossy(),
+                                        );
+                                        self.open_graph_document(relative);
+                                    }
+                                }
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to create animation graph: {e}"
+                                    )));
+                                }
+                            }
+                        }
                         AssetType::InputAction => {
                             let base_name = "NewInputAction";
                             let mut new_name = format!("{}.inputaction", base_name);
@@ -3653,6 +3714,7 @@ impl App {
             let graph_editors = &mut self.editor.scene.graph_editors;
             let curve_editors = &mut self.editor.scene.curve_editors;
             let graph_registry = &self.editor.scene.node_registry;
+            let anim_graph_registry = &self.editor.scene.anim_node_registry;
             // A frame-local snapshot: the preferences page edits the live
             // keymap mutably in the same block, and the graph panel only
             // reads. A rebind therefore takes effect next frame, which is
@@ -4063,7 +4125,11 @@ impl App {
                                             ui,
                                             GraphEditorPanelCtx {
                                                 state,
-                                                registry: graph_registry,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
                                                 keymap: graph_keymap,
                                                 clipboard: graph_clipboard,
                                                 resolver: &graph_resolver_docs,
@@ -4698,7 +4764,13 @@ impl App {
         let Some(st) = scene.graph_editors.get_mut(key) else {
             return;
         };
-        let reg = &scene.node_registry;
+        // Disjoint field borrows on purpose — a helper call would borrow the
+        // whole scene across `st`.
+        let reg = if key.ends_with(".animgraph") {
+            &scene.anim_node_registry
+        } else {
+            &scene.node_registry
+        };
         let clip = &mut scene.graph_clipboard;
         // Never act across a half-finished gesture: undo/redo/save would
         // otherwise skip an untracked mutation, or mark a save cursor over
@@ -4737,7 +4809,11 @@ impl App {
             // A save cursor must describe committed content, so any live
             // gesture is settled before the write.
             if st.gesture_in_flight() {
-                let reg = &self.editor.scene.node_registry;
+                let reg = if key.ends_with(".animgraph") {
+                    &self.editor.scene.anim_node_registry
+                } else {
+                    &self.editor.scene.node_registry
+                };
                 st.flush_prop_edit(reg);
                 st.cancel_interactions();
             }
@@ -4759,6 +4835,19 @@ impl App {
         // no longer contains, across restarts, for the rest of the session.
         //
         // Same shape as `save_curve_state` (P8b): write, then invalidate.
+        if key.ends_with(".animgraph") {
+            // Task 41: the animation plan cache is this document's consumer;
+            // the generation bump restarts live machines on their next tick.
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::animation::graph::AnimGraphPlanCache>()
+            {
+                cache.invalidate(key);
+            }
+            return;
+        }
         #[cfg(feature = "graph-scripting")]
         if let Some(cache) = self
             .core
@@ -4922,7 +5011,7 @@ impl App {
         let mut state = rust_engine::engine::editor::graph_editor::GraphEditorState::open(
             &abs,
             key,
-            &self.editor.scene.node_registry,
+            self.editor.scene.graph_registry(key),
         )?;
         restore_graph_ui_state(&mut state, key);
         self.editor.scene.graph_editors.insert(key.to_string(), state);
@@ -4988,7 +5077,7 @@ impl App {
             match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
                 &abs,
                 &relative,
-                &self.editor.scene.node_registry,
+                self.editor.scene.graph_registry(&relative),
             ) {
                 Ok(mut state) => {
                     restore_graph_ui_state(&mut state, &relative);
@@ -5108,13 +5197,18 @@ impl App {
             &docs,
             root,
         );
+        let script_reg = std::sync::Arc::clone(&scene.node_registry);
+        let anim_reg = std::sync::Arc::clone(&scene.anim_node_registry);
         for st in scene.graph_editors.values_mut() {
-            st.ref_errors = validate_refs(&st.doc, &st.path, &scene.node_registry, &docs);
+            // The document's own library (Task 41): an `.animgraph` resolves
+            // and validates against the animation registry.
+            let reg = if st.domain.is_animation() { &anim_reg } else { &script_reg };
+            st.ref_errors = validate_refs(&st.doc, &st.path, reg, &docs);
             // A dangling `.curve` is cross-asset too, so it belongs to this
             // pass and not to the doc-local `errors` recomputed on every
             // keystroke. Same rule the compiler applies, shared code.
             st.ref_errors.extend(validate_curves(
-                &DocDescriptors::new(&st.doc, &scene.node_registry).with_curves(&curves),
+                &DocDescriptors::new(&st.doc, reg).with_curves(&curves),
             ));
         }
         GraphResolverDocs { docs, curves }
@@ -5128,26 +5222,7 @@ impl App {
         use rust_engine::engine::editor::graph_editor::GraphEditorState;
         use rust_engine::engine::node_graph::referencing_hosts;
         let key = asset_source::to_content_relative(abs_path);
-
-        // A `.animgraph` write (Task 41). No editor opens these yet — a save
-        // *is* an external edit — so the whole response is dropping the
-        // compiled plan: the generation bump restarts live machines against
-        // the new document on their next tick, and a stale plan never runs.
-        if key.ends_with(".animgraph") {
-            if let Some(cache) = self
-                .core
-                .game_world
-                .resources_mut()
-                .get_mut::<rust_engine::engine::animation::graph::AnimGraphPlanCache>()
-            {
-                cache.invalidate(&key);
-            }
-            self.editor
-                .console
-                .messages
-                .push(LogMessage::info(format!("Animation graph reloaded: {key}")));
-            return;
-        }
+        let is_anim = key.ends_with(".animgraph");
 
         // Suppress the watcher echo of our own just-completed save: consume
         // exactly one event per save (clear the stamp), so a genuine external
@@ -5174,18 +5249,35 @@ impl App {
         // Invalidation also bumps a generation counter, so any *running*
         // instance restarts on its next tick and re-fires BeginPlay. Editing a
         // graph while playing is a stated non-goal (D9); restarting is the
-        // simplest behavior that is never subtly wrong.
+        // simplest behavior that is never subtly wrong. An `.animgraph` write
+        // (Task 41) drops the animation plan cache the same way — live
+        // machines restart against the new document on their next tick.
+        if is_anim {
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::animation::graph::AnimGraphPlanCache>()
+            {
+                cache.invalidate(&key);
+            }
+        }
         #[cfg(feature = "graph-scripting")]
-        if let Some(cache) = self
-            .core
-            .game_world
-            .resources_mut()
-            .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
-        {
-            cache.invalidate(&key);
+        if !is_anim {
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
+            {
+                cache.invalidate(&key);
+            }
         }
 
-        // Reload the changed doc if it's open and clean; warn if dirty.
+        // Reload the changed doc if it's open and clean; warn if dirty. The
+        // registry Arc is cloned up front: the helper borrows the scene the
+        // `get_mut` is already holding.
+        let reload_reg = std::sync::Arc::clone(self.editor.scene.graph_registry(&key));
         if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
             if st.dirty {
                 self.editor.console.messages.push(LogMessage::warning(format!(
@@ -5193,7 +5285,7 @@ impl App {
                 )));
             } else {
                 let abs = std::path::Path::new("content").join(&key);
-                match GraphEditorState::open(&abs, &key, &self.editor.scene.node_registry) {
+                match GraphEditorState::open(&abs, &key, &reload_reg) {
                     Ok(mut fresh) => {
                         // Preserve the view and any selection whose ids survive.
                         fresh.view = st.view;
@@ -5479,6 +5571,7 @@ impl App {
         let mesh_editors = &mut editor.scene.mesh_editors;
         let graph_editors = &mut editor.scene.graph_editors;
         let graph_registry = &editor.scene.node_registry;
+        let anim_graph_registry = &editor.scene.anim_node_registry;
         let graph_keymap = &editor.services.keymap;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
         let curve_editors = &mut editor.scene.curve_editors;
@@ -5701,7 +5794,11 @@ impl App {
                                 ui,
                                 GraphEditorPanelCtx {
                                     state,
-                                    registry: graph_registry,
+                                    registry: if key.ends_with(".animgraph") {
+                                        anim_graph_registry
+                                    } else {
+                                        graph_registry
+                                    },
                                     keymap: graph_keymap,
                                     clipboard: graph_clipboard,
                                     resolver: &graph_resolver_docs,

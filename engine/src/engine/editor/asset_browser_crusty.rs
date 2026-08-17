@@ -96,8 +96,9 @@ pub(super) fn type_color(t: AssetType) -> Color {
         | AssetType::Graph => "scripting",
         // A curve is animation data — it shares a slot with `.anim` because
         // Task 41 grows this exact asset into animation channels, and the two
-        // reading alike is the point rather than an accident.
-        AssetType::Curve => "animation",
+        // reading alike is the point rather than an accident. An `.animgraph`
+        // is the same family: the machine that plays those clips.
+        AssetType::Curve | AssetType::AnimGraph => "animation",
         _ => "geometry",
     })
 }
@@ -1088,12 +1089,16 @@ fn render_folder_node(
         let ctx_path = node.path.clone();
         let ctx_name = node.name.clone();
         let mut new_folder = false;
+        let mut new_animgraph = false;
         let mut rename = false;
         let mut reveal = false;
         let mut delete = false;
         ui.context_menu_for(("ab_folder_ctx", hash_key(&node.path)), body_rect, |ui| {
             if ui.menu_item("New Folder") {
                 new_folder = true;
+            }
+            if ui.menu_item("New Animation Graph") {
+                new_animgraph = true;
             }
             if !is_root {
                 if ui.menu_item("Rename") {
@@ -1115,6 +1120,12 @@ fn render_folder_node(
         });
         if new_folder {
             panel.events.push(AssetBrowserEvent::CreateFolder {
+                parent_path: ctx_path.clone(),
+            });
+        }
+        if new_animgraph {
+            panel.events.push(AssetBrowserEvent::CreateAsset {
+                asset_type: AssetType::AnimGraph,
                 parent_path: ctx_path.clone(),
             });
         }

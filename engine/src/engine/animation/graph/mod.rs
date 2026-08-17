@@ -26,6 +26,7 @@
 //! - [`runner`] — the ECS binding: `AnimGraphRunner` component, plan/clip
 //!   caches, and the system that ticks machines into skeletons.
 
+pub mod library;
 pub mod machine;
 pub mod plan;
 pub mod runner;
@@ -33,6 +34,10 @@ pub mod runner;
 #[cfg(test)]
 mod acceptance;
 
+pub use library::{
+    anim_node_registry, anim_node_tag, new_animgraph_doc, ANIM_CATEGORY, ANIM_FLOW_DOMAIN,
+    ANIM_POSE_DOMAIN,
+};
 pub use machine::{
     collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, Crossfade,
     ParamValue, PlayOnceSlot, PoseScratch,
