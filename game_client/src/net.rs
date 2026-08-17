@@ -2,6 +2,7 @@
 //! the main thread and routes drained `NetEvent`s into cache-diff
 //! replication. Enabled with `--connect`.
 
+use crate::anim_bridge::AnimBridge;
 use crate::interp::NetClock;
 use crate::prediction::Prediction;
 use crate::replication::Replication;
@@ -84,6 +85,9 @@ pub struct NetSession {
     replication: Replication,
     clock: NetClock,
     prediction: Prediction,
+    /// Derives animation parameters from gameplay state (ADR 0002): local
+    /// player from prediction, proxies from replicated motion/combat.
+    anim: AnimBridge,
     /// Reused buffer for the input samples one frame's prediction produced.
     outgoing: Vec<ClientInput>,
     last_update: Option<Instant>,
@@ -193,6 +197,7 @@ impl NetSession {
             replication: Replication::default(),
             clock: NetClock::default(),
             prediction: Prediction::new(),
+            anim: AnimBridge::default(),
             outgoing: Vec::new(),
             last_update: None,
             last_ack: None,
@@ -284,6 +289,10 @@ impl NetSession {
 
         let server_now = self.clock.server_time_us(local_time_us());
         self.replication.interpolate(world, server_now);
+        // After interpolation, so remote derivation measures this frame's
+        // rendered motion; the machines tick in the schedule's PreUpdate.
+        self.anim
+            .update(world, dt, &self.prediction, &self.replication);
         self.update_projectiles(world, server_now);
     }
 

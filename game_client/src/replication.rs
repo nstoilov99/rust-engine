@@ -7,18 +7,51 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::anim_bridge::CharacterRig;
 use crate::interp::InterpBuffer;
 use game_shared::components::NetProxy;
+use game_shared::motion::MotionConfig;
 use game_shared::net::protocol::{CoarseState, EntityKind, EntityState, WorldSnapshot};
 use game_shared::net::schema::{derive_proxy_guid, REALM_ID, TOMBSTONE_TTL_SECS};
 use hecs::World;
 use nalgebra_glm as glm;
+use rust_engine::engine::animation::graph::AnimGraphRunner;
 use rust_engine::engine::ecs::components::{EntityGuid, MeshRenderer, Name, Transform};
-use rust_engine::engine::rendering::rendering_3d::mesh::{PRIMITIVE_CUBE, PRIMITIVE_SPHERE};
+use rust_engine::engine::ecs::hierarchy::{despawn_recursive, set_parent};
+use rust_engine::engine::rendering::rendering_3d::mesh::PRIMITIVE_CUBE;
 
 /// Marker on the local player entity bound to the own player row
 /// (contract §2.1: the own row is bound, never proxied).
 pub struct NetLocalPlayer;
+
+/// The character graph every net player runs — local and proxies alike, on
+/// every client (ADR 0002: animation is derived, never replicated).
+const CHARACTER_GRAPH: &str = "graphs/character.animgraph";
+
+/// Attach the character visual to a net player entity: a mesh child carrying
+/// the animation graph, offset so the model's feet sit under the replicated
+/// capsule-center position. A child, not components on the entity itself,
+/// because the per-frame net pose write owns the parent transform.
+fn spawn_character_rig(world: &mut World, owner: hecs::Entity) {
+    let cfg = MotionConfig::default();
+    let foot_offset = cfg.capsule_half_seg + cfg.capsule_radius + cfg.skin;
+    let rig = world.spawn((
+        Transform::new(glm::vec3(0.0, 0.0, -foot_offset)),
+        MeshRenderer {
+            mesh_path: "Defeated.mesh".to_string(),
+            material_paths: vec![
+                "Defeated_Beta_HighLimbsGeoSG3.material".to_string(),
+                "Defeated_Beta_Joints_MAT1.material".to_string(),
+            ],
+            ..Default::default()
+        },
+        Name::new("Character Rig"),
+        AnimGraphRunner::new(CHARACTER_GRAPH),
+        CharacterRig,
+    ));
+    set_parent(world, rig, owner);
+    rust_engine::engine::ecs::hierarchy::mark_transform_dirty(world, rig);
+}
 
 /// `(entity_id, generation) → hecs::Entity` for everything replication owns
 /// (proxies plus the local-player binding).
@@ -279,8 +312,8 @@ impl Replication {
         }
     }
 
-    /// Latest known combat state of a live proxy incarnation (target frame).
-    #[allow(dead_code)] // consumer is the M7 HUD (packages 5–7)
+    /// Latest known combat state of a live proxy incarnation (M7 HUD target
+    /// frame; the anim bridge derives remote death from it).
     pub fn combat_state(&self, entity_id: u64, generation: u32) -> Option<&CombatState> {
         self.combat.get(&(entity_id, generation))
     }
@@ -394,7 +427,7 @@ impl Replication {
                     self.combat.remove(&(entity_id, generation));
                     self.coarse.remove(&(entity_id, generation));
                     if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
-                        let _ = world.despawn(e);
+                        despawn_recursive(world, e);
                         let kind = if destroyed { "destroyed" } else { "out of scope" };
                         println!("net: despawn {entity_id} gen {generation} ({kind})");
                     }
@@ -422,7 +455,7 @@ impl Replication {
         self.combat.remove(&(entity_id, generation));
         self.coarse.remove(&(entity_id, generation));
         if let Some(e) = self.index.map.remove(&(entity_id, generation)) {
-            let _ = world.despawn(e);
+            despawn_recursive(world, e);
         }
     }
 
@@ -442,14 +475,11 @@ impl Replication {
             None => {
                 let entity = world.spawn((
                     transform_from(row),
-                    MeshRenderer {
-                        mesh_path: PRIMITIVE_SPHERE.to_string(),
-                        ..Default::default()
-                    },
                     Name::new("Local Player (net)"),
                     EntityGuid(derive_proxy_guid(REALM_ID, row.entity_id, row.generation)),
                     NetLocalPlayer,
                 ));
+                spawn_character_rig(world, entity);
                 self.index.map.insert((row.entity_id, row.generation), entity);
                 self.local_player = Some(entity);
                 println!("net: local player bound to entity {own_id}");
@@ -468,16 +498,9 @@ impl Replication {
     }
 
     fn spawn_proxy(&mut self, world: &mut World, s: &EntityState) {
-        let (mesh, label) = match s.kind {
-            EntityKind::Player => (PRIMITIVE_SPHERE, "Net Player"),
-            EntityKind::Npc => (PRIMITIVE_CUBE, "Net NPC"),
-        };
+        let label = proxy_label(s.kind);
         let entity = world.spawn((
             transform_from(s),
-            MeshRenderer {
-                mesh_path: mesh.to_string(),
-                ..Default::default()
-            },
             Name::new(format!("{label} {}", s.entity_id)),
             EntityGuid(derive_proxy_guid(REALM_ID, s.entity_id, s.generation)),
             NetProxy {
@@ -486,6 +509,7 @@ impl Replication {
                 generation: s.generation,
             },
         ));
+        attach_proxy_visual(world, entity, s.kind);
         self.index.map.insert((s.entity_id, s.generation), entity);
         // Spawn pose is the first sample, so interpolation starts anchored.
         let mut buf = InterpBuffer::default();
@@ -495,20 +519,13 @@ impl Replication {
         println!("net: spawn {label} {} gen {}", s.entity_id, s.generation);
     }
 
-    /// M8 D3: far-tier light proxy — same mesh and GUID scheme as a full
+    /// M8 D3: far-tier light proxy — same visual and GUID scheme as a full
     /// proxy (tier hand-offs keep the entity), but no interp buffer and no
     /// combat state, so it is untargetable and HUD-invisible by construction.
     fn spawn_coarse_proxy(&mut self, world: &mut World, c: &CoarseState) {
-        let (mesh, label) = match c.kind {
-            EntityKind::Player => (PRIMITIVE_SPHERE, "Net Player"),
-            EntityKind::Npc => (PRIMITIVE_CUBE, "Net NPC"),
-        };
+        let label = proxy_label(c.kind);
         let entity = world.spawn((
             Transform::new(glm::vec3(c.pos[0], c.pos[1], c.pos[2])),
-            MeshRenderer {
-                mesh_path: mesh.to_string(),
-                ..Default::default()
-            },
             Name::new(format!("{label} {} (far)", c.entity_id)),
             EntityGuid(derive_proxy_guid(REALM_ID, c.entity_id, c.generation)),
             NetProxy {
@@ -517,12 +534,38 @@ impl Replication {
                 generation: c.generation,
             },
         ));
+        attach_proxy_visual(world, entity, c.kind);
         self.index.map.insert((c.entity_id, c.generation), entity);
         self.coarse.insert(
             (c.entity_id, c.generation),
             CoarseTrack::new(c.pos, c.server_time_us),
         );
         println!("net: spawn {label} {} gen {} (far)", c.entity_id, c.generation);
+    }
+}
+
+fn proxy_label(kind: EntityKind) -> &'static str {
+    match kind {
+        EntityKind::Player => "Net Player",
+        EntityKind::Npc => "Net NPC",
+    }
+}
+
+/// A player proxy gets the animated character rig (both tiers — hand-offs
+/// keep the entity, so the visual must not depend on tier); an NPC stays the
+/// M5 cube.
+fn attach_proxy_visual(world: &mut World, entity: hecs::Entity, kind: EntityKind) {
+    match kind {
+        EntityKind::Player => spawn_character_rig(world, entity),
+        EntityKind::Npc => {
+            let _ = world.insert_one(
+                entity,
+                MeshRenderer {
+                    mesh_path: PRIMITIVE_CUBE.to_string(),
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 
@@ -770,6 +813,35 @@ mod tests {
         let (pos, yaw) = t.eval(Instant::now() + Duration::from_secs(10));
         assert_eq!(pos, [10.0, 0.0, 0.0]); // clamped at the newest sample
         assert!(yaw.abs() < 1e-6); // facing +X
+    }
+
+    #[test]
+    fn player_proxy_gets_a_character_rig_and_despawns_with_it() {
+        use rust_engine::engine::ecs::hierarchy::Parent;
+
+        let mut r = Replication::default();
+        let mut world = World::new();
+        let mut s = state(1, 1);
+        s.kind = EntityKind::Player;
+        r.apply_snapshot(&mut world, &snap(vec![s], None));
+
+        assert_eq!(world.len(), 2, "proxy + rig child");
+        let (rig, owner) = world
+            .query::<(&CharacterRig, &Parent)>()
+            .iter()
+            .map(|(e, (_, p))| (e, p.0))
+            .next()
+            .expect("player proxy carries a rig");
+        assert_eq!(owner, r.index.get(1, 1).unwrap());
+        assert_eq!(
+            world.get::<&AnimGraphRunner>(rig).unwrap().graph,
+            CHARACTER_GRAPH,
+            "the rig runs the shipped character graph"
+        );
+
+        // Out of scope: the rig must not outlive its proxy.
+        r.apply_snapshot(&mut world, &snap(vec![], None));
+        assert_eq!(world.len(), 0);
     }
 
     #[test]

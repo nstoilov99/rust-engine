@@ -3,6 +3,7 @@
 //! This is a minimal entry point that delegates to the App struct.
 //! All game logic is organized in the game modules.
 
+mod anim_bridge;
 #[cfg(feature = "editor")]
 mod app;
 mod asset_resolve;
