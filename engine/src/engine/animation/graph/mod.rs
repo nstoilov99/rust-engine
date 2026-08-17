@@ -35,8 +35,8 @@ pub mod runner;
 mod acceptance;
 
 pub use library::{
-    anim_node_registry, anim_node_tag, new_animgraph_doc, ANIM_CATEGORY, ANIM_FLOW_DOMAIN,
-    ANIM_POSE_DOMAIN,
+    anim_node_registry, anim_node_tag, anim_rule_registry, new_animgraph_doc, ANIM_CATEGORY,
+    ANIM_FLOW_DOMAIN, ANIM_POSE_DOMAIN,
 };
 pub use machine::{
     collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, Crossfade,

@@ -171,6 +171,17 @@ pub enum GraphEdit {
     /// (one edge out, a node and two edges in) is the motivating case.
     /// Applied in order, reverted in reverse.
     Composite { label: String, edits: Vec<GraphEdit> },
+    /// An edit inside the embedded region keyed under `owner` (Task 41
+    /// ticket 05: the rule canvas). The inner edit speaks region-local node
+    /// ids and applies against the region's nodes/edges as if they were a
+    /// document — which is what makes rule editing **one history with the
+    /// machine's**: the peek records here, and Ctrl+Z at either level pops
+    /// the same stack.
+    ///
+    /// Apply creates the region entry on demand; both directions prune an
+    /// entry left empty, because absent and empty both mean always-true and
+    /// only one of them serializes — an undo must round-trip the bytes.
+    InRegion { owner: u64, edit: Box<GraphEdit> },
 }
 
 /// Which annotation an edit targets. Comments and groups have no ids, so
@@ -286,6 +297,9 @@ impl GraphEdit {
                     e.apply(doc);
                 }
             }
+            GraphEdit::InRegion { owner, edit } => {
+                in_region(doc, *owner, |scratch| edit.apply(scratch));
+            }
         }
     }
 
@@ -373,6 +387,9 @@ impl GraphEdit {
                     e.revert(doc);
                 }
             }
+            GraphEdit::InRegion { owner, edit } => {
+                in_region(doc, *owner, |scratch| edit.revert(scratch));
+            }
         }
     }
 
@@ -436,7 +453,31 @@ impl GraphEdit {
                 if new.is_some() { "Anchor Comment" } else { "Un-anchor Comment" }.to_string()
             }
             GraphEdit::Composite { label, .. } => label.clone(),
+            // "Add Node in Rule" — the verb stays the inner edit's, the
+            // suffix says which canvas it happened on.
+            GraphEdit::InRegion { edit, .. } => format!("{} in Rule", edit.description()),
         }
+    }
+}
+
+/// Run `f` over the region keyed under `owner`, viewed as a scratch document
+/// — the region's nodes and edges are moved into a bare [`GraphDoc`], the
+/// inner edit runs against it with the exact same semantics it has at top
+/// level, and the results move back. Creates the entry on demand and prunes
+/// it when it ends empty (absent and empty both mean the same thing, and
+/// only one spelling may reach a save).
+fn in_region(doc: &mut GraphDoc, owner: u64, f: impl FnOnce(&mut GraphDoc)) {
+    let region = doc.regions.entry(owner).or_default();
+    let mut scratch = GraphDoc {
+        nodes: std::mem::take(&mut region.nodes),
+        edges: std::mem::take(&mut region.edges),
+        ..GraphDoc::default()
+    };
+    f(&mut scratch);
+    region.nodes = scratch.nodes;
+    region.edges = scratch.edges;
+    if region.nodes.is_empty() && region.edges.is_empty() {
+        doc.regions.remove(&owner);
     }
 }
 
@@ -1016,6 +1057,15 @@ impl GraphEditStack {
         self.undo.len()
     }
 
+    /// Drain every recorded edit, oldest first, leaving the stack clean —
+    /// the rule scope's per-frame handoff (ticket 05): the projection records
+    /// as usual, the parent history takes the entries.
+    pub fn take_edits(&mut self) -> Vec<GraphEdit> {
+        self.redo.clear();
+        self.saved = Some(0);
+        std::mem::take(&mut self.undo)
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -1384,6 +1434,10 @@ pub struct GraphEditorState {
     /// panel folds these into the same anchored-error UI (badge, count chip,
     /// F8 cycle).
     pub domain_errors: Vec<DomainError>,
+    /// The open rule peek/scope, when a transition's embedded rule is being
+    /// edited (Task 41 ticket 05). Session-only — which rule you are inside
+    /// is a property of this browsing session, like `nav_back`.
+    pub rule_scope: Option<RuleScope>,
 }
 
 /// The graph editor is one product over several node libraries; the domain
@@ -1395,6 +1449,12 @@ pub enum GraphDomain {
     Script,
     /// `.animgraph` — the animation state-machine library.
     Animation,
+    /// The projection of one transition's embedded rule region (ticket 05) —
+    /// the domain a peek's child editor runs as. Never comes from a path:
+    /// only [`GraphEditorState::open_rule_scope`] constructs it. `owner` is
+    /// the transition's id in the parent document, kept so the projection's
+    /// refusals are phrased exactly like the machine compiler's.
+    AnimationRule { owner: u64 },
 }
 
 impl GraphDomain {
@@ -1406,8 +1466,19 @@ impl GraphDomain {
         }
     }
 
+    /// The machine canvas specifically — chips, transitions, flow wires.
     pub fn is_animation(self) -> bool {
         self == GraphDomain::Animation
+    }
+
+    /// Any animation canvas — machine or embedded rule. What gates the
+    /// script-only affordances (subgraph rows, collapse-to-subgraph) and
+    /// selects the Float/Bool/Trigger variable types.
+    pub fn is_animation_family(self) -> bool {
+        matches!(
+            self,
+            GraphDomain::Animation | GraphDomain::AnimationRule { .. }
+        )
     }
 
     /// This domain's compile refusals for `doc`, anchored. Scripts answer
@@ -1420,7 +1491,35 @@ impl GraphDomain {
                     Ok(_) => Vec::new(),
                     Err(message) => {
                         let node = anchor_anim_refusal(doc, &message);
-                        vec![DomainError { node, message }]
+                        // A refusal naming a node inside the transition's
+                        // rule ("rule node 3") carries the region-local id
+                        // too, so F8 can descend into the peek.
+                        let region_node = anchor_rule_refusal(&message);
+                        vec![DomainError { node, region_node, message }]
+                    }
+                }
+            }
+            // The projection compiles as a bare rule: same code path, same
+            // message shapes as the machine compiler, but "rule node {id}"
+            // here *is* a top-level node of the projection, so it anchors
+            // directly.
+            GraphDomain::AnimationRule { owner } => {
+                use crate::engine::animation::graph::plan::{
+                    compile_parameters, compile_rule_region,
+                };
+                let compile = || -> Result<(), String> {
+                    let params = compile_parameters(doc)?;
+                    let region = GraphRegion {
+                        nodes: doc.nodes.clone(),
+                        edges: doc.edges.clone(),
+                    };
+                    compile_rule_region(&region, owner, &params).map(|_| ())
+                };
+                match compile() {
+                    Ok(()) => Vec::new(),
+                    Err(message) => {
+                        let node = anchor_rule_refusal(&message);
+                        vec![DomainError { node, region_node: None, message }]
                     }
                 }
             }
@@ -1434,6 +1533,10 @@ impl GraphDomain {
 pub struct DomainError {
     /// `None` = document-level: it lists in the compiler-row popover.
     pub node: Option<u64>,
+    /// Region-local node id when the refusal names a node *inside* `node`'s
+    /// embedded region ("transition 5: rule node 3 …"). F8 descends: it opens
+    /// the rule peek on `node` and flashes this node in it (ticket 05).
+    pub region_node: Option<u64>,
     pub message: String,
 }
 
@@ -1484,6 +1587,307 @@ pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// The region-local node a refusal names, when it names one — the compiler's
+/// rule messages read "transition {tid}: rule node {id} …". Paired with
+/// [`anchor_anim_refusal`]'s owner id, this is what lets F8 descend into the
+/// peek rather than stopping at the chip (ticket 05).
+pub fn anchor_rule_refusal(msg: &str) -> Option<u64> {
+    let rest = msg.split("rule node ").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Rule scope (Task 41 ticket 05): peek-overlay editing of an embedded rule.
+// ---------------------------------------------------------------------------
+
+/// One open rule scope: a transition's embedded rule region, projected into a
+/// child editor state the drawing layer runs like any other canvas.
+///
+/// The child's document is a *projection* — region nodes/edges as top-level
+/// content plus a copy of the parent's variables so `var_get` resolves. The
+/// child records edits into its own stack exactly as the machinery always
+/// does; [`GraphEditorState::drain_rule_scope`] then moves them onto the
+/// **parent's** stack (wrapped [`GraphEdit::InRegion`], applied to the real
+/// region) every frame, which is what makes a transition and its rule one
+/// undo history. The child's stack is therefore always empty between frames;
+/// undo/redo while scoped route to the parent and rebuild the projection.
+pub struct RuleScope {
+    /// The transition node (parent document id) whose rule this is.
+    pub owner: u64,
+    /// `false` = peek overlay over the dimmed machine (mockup 3b); `true` =
+    /// promoted (⤢) to the full canvas with a breadcrumb (3a's reading).
+    pub full: bool,
+    /// The projection editor. Boxed: a `GraphEditorState` is large, and the
+    /// scope is usually absent.
+    pub child: Box<GraphEditorState>,
+    /// A RESULT sink seeded into the projection of an absent/empty region,
+    /// **not yet recorded**: it is recorded lazily in front of the author's
+    /// first real edit, so peeking into an always-true transition never
+    /// dirties the document. Holds the node as seeded so the deferred
+    /// `AddNode` replays it exactly.
+    pub seed: Option<NodeInst>,
+}
+
+/// The registry a rule projection authors against — built once. The palette
+/// listing exactly this registry is the placement gate: machine nodes are not
+/// in it, so they cannot land inside a rule, and the rule nodes are not in
+/// the machine registry, so they cannot land on the machine canvas.
+pub fn rule_scope_registry() -> &'static NodeRegistry {
+    static REG: std::sync::OnceLock<NodeRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(crate::engine::animation::graph::anim_rule_registry)
+}
+
+/// Where the seeded RESULT lands on an empty rule canvas: to the right, where
+/// the mockup draws the sink, with room to build the condition leftward.
+const RULE_SEED_POS: [f32; 2] = [260.0, 60.0];
+
+fn rule_seed_node(id: u64) -> NodeInst {
+    NodeInst {
+        id,
+        type_id: crate::engine::animation::graph::plan::ANIM_RULE_RESULT_TYPE_ID.to_string(),
+        type_version: 1,
+        position: RULE_SEED_POS,
+        properties: Default::default(),
+        subgraph: None,
+        tint: None,
+        title: None,
+    }
+}
+
+/// Does this edit only touch `doc.variables`? Those pass through to the
+/// parent unwrapped — declarations live on the document, not in a region —
+/// and the projection's copy stays in step because both sides applied the
+/// same edit.
+fn edit_targets_variables(edit: &GraphEdit) -> bool {
+    match edit {
+        GraphEdit::AddVariable(_)
+        | GraphEdit::RemoveVariable { .. }
+        | GraphEdit::RenameVariable { .. }
+        | GraphEdit::RetypeVariable { .. }
+        | GraphEdit::SetVariableDefault { .. }
+        | GraphEdit::SetVariableGroup { .. }
+        | GraphEdit::ReorderVariable { .. } => true,
+        GraphEdit::Composite { edits, .. } => {
+            !edits.is_empty() && edits.iter().all(edit_targets_variables)
+        }
+        _ => false,
+    }
+}
+
+/// Can this edit live inside a region — nodes, edges and properties only?
+/// A region has no comments, groups or nested regions to hold anything else.
+fn edit_is_region_safe(edit: &GraphEdit) -> bool {
+    match edit {
+        GraphEdit::AddNode(_)
+        | GraphEdit::Connect(_)
+        | GraphEdit::Disconnect { .. }
+        | GraphEdit::MoveNodes { .. }
+        | GraphEdit::SetProperty { .. } => true,
+        GraphEdit::RemoveNodes { comments, regions, .. } => {
+            comments.is_empty() && regions.is_empty()
+        }
+        GraphEdit::Paste { regions, .. } => regions.is_empty(),
+        GraphEdit::Composite { edits, .. } => edits.iter().all(edit_is_region_safe),
+        _ => false,
+    }
+}
+
+/// Find hits inside embedded rule regions: `(owner transition, region-local
+/// node)` for every rule node matching `find`, in document order. What lets
+/// Ctrl+F reach nodes the canvas is not showing (spec story 22) — activating
+/// one opens the peek on its transition.
+pub fn region_find_matches(doc: &GraphDoc, find: &FindState) -> Vec<(u64, u64)> {
+    use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+    let mut out = Vec::new();
+    for n in doc.nodes.iter().filter(|n| n.type_id == ANIM_TRANSITION_TYPE_ID) {
+        let Some(region) = doc.regions.get(&n.id) else { continue };
+        for rn in &region.nodes {
+            // The display name a user would type: the title if set, else the
+            // parameter a `var_get` reads, else nothing but the type id.
+            let title = rn.title.clone().unwrap_or_else(|| {
+                match rn.properties.get(crate::engine::node_graph::VAR_PROP) {
+                    Some(PropValue::Str(s)) => s.clone(),
+                    _ => String::new(),
+                }
+            });
+            if find.matches(&title, &rn.type_id) {
+                out.push((n.id, rn.id));
+            }
+        }
+    }
+    out
+}
+
+impl GraphEditorState {
+    /// The transition to descend into via the keyboard (`PageDown`): the
+    /// primary selected node, when it is a transition on a machine canvas.
+    pub fn rule_descend_target(&self) -> Option<u64> {
+        use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+        if !self.domain.is_animation() {
+            return None;
+        }
+        let id = self.primary.or_else(|| self.selection.iter().copied().next())?;
+        (self.doc.node(id)?.type_id == ANIM_TRANSITION_TYPE_ID).then_some(id)
+    }
+
+    /// Open (or refocus) the rule peek on `owner`. Answers `false` when
+    /// `owner` is not a transition of an animation document. `registry` is
+    /// the parent's — needed to settle a previously open scope first.
+    pub fn open_rule_scope(&mut self, owner: u64, registry: &NodeRegistry) -> bool {
+        use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+        if !self.domain.is_animation() {
+            return false;
+        }
+        if !self
+            .doc
+            .node(owner)
+            .is_some_and(|n| n.type_id == ANIM_TRANSITION_TYPE_ID)
+        {
+            return false;
+        }
+        if self.rule_scope.as_ref().is_some_and(|s| s.owner == owner) {
+            return true;
+        }
+        // Switching transitions: settle the old peek's edits first.
+        self.close_rule_scope(registry);
+        // The machine's transient surfaces close under the peek, and the
+        // transition selects so its card unfolds and its states light.
+        self.cancel_interactions();
+        self.palette = None;
+        self.find = None;
+        self.node_menu = None;
+        self.canvas_menu = None;
+        self.wire_menu = None;
+        self.annotation_menu = None;
+        self.select_only(owner);
+
+        let region = self.doc.regions.get(&owner).cloned().unwrap_or_default();
+        let mut doc = GraphDoc {
+            realm: crate::engine::node_graph::GraphRealm::Client,
+            nodes: region.nodes,
+            edges: region.edges,
+            variables: self.doc.variables.clone(),
+            ..GraphDoc::default()
+        };
+        let mut seed = None;
+        if doc.nodes.is_empty() {
+            let n = rule_seed_node(0);
+            doc.nodes.push(n.clone());
+            seed = Some(n);
+        }
+        let mut child = GraphEditorState::from_doc(
+            format!("{}#rule:{owner}", self.path),
+            doc,
+            GraphDomain::AnimationRule { owner },
+            rule_scope_registry(),
+        );
+        child.frame_all_on_open = true;
+        self.rule_scope = Some(RuleScope { owner, full: false, child: Box::new(child), seed });
+        true
+    }
+
+    /// Close the scope, settling anything it still holds: in-flight child
+    /// gestures revert (Rule 3 — closing is not committing), already-recorded
+    /// child edits drain onto the parent history.
+    pub fn close_rule_scope(&mut self, registry: &NodeRegistry) {
+        if let Some(scope) = &mut self.rule_scope {
+            scope.child.cancel_interactions();
+        }
+        self.drain_rule_scope(registry);
+        self.rule_scope = None;
+    }
+
+    /// Move every edit the child recorded onto the parent history: variable
+    /// edits pass through as themselves, node/edge/property edits wrap as
+    /// [`GraphEdit::InRegion`] (recording the pending RESULT seed first, the
+    /// moment the region stops being look-only). Called once per frame by the
+    /// panel and before any parent-history operation.
+    pub fn drain_rule_scope(&mut self, registry: &NodeRegistry) {
+        let Some(mut scope) = self.rule_scope.take() else { return };
+        let edits = scope.child.stack.take_edits();
+        let mut recorded = false;
+        for edit in edits {
+            if edit_targets_variables(&edit) {
+                edit.apply(&mut self.doc);
+                self.stack.record(edit);
+                recorded = true;
+            } else if edit_is_region_safe(&edit) {
+                if let Some(seed) = scope.seed.take() {
+                    let planted =
+                        GraphEdit::InRegion { owner: scope.owner, edit: Box::new(GraphEdit::AddNode(seed)) };
+                    planted.apply(&mut self.doc);
+                    self.stack.record(planted);
+                }
+                let wrapped = GraphEdit::InRegion { owner: scope.owner, edit: Box::new(edit) };
+                wrapped.apply(&mut self.doc);
+                self.stack.record(wrapped);
+                recorded = true;
+            } else {
+                // Annotations cannot live in a region; the UI gates them out,
+                // and anything that slips through reverts on the projection
+                // so the two documents never disagree.
+                edit.revert(&mut scope.child.doc);
+            }
+        }
+        self.rule_scope = Some(scope);
+        if recorded {
+            self.after_edit(registry);
+        }
+    }
+
+    /// Rebuild the projection from the parent document — after a parent-side
+    /// undo/redo rewrote the region under it. Closes the scope when the owner
+    /// transition itself is gone (the undo took the transition, and a peek
+    /// into nothing has nothing to show).
+    pub fn rebuild_rule_scope(&mut self) {
+        use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+        let Some(mut scope) = self.rule_scope.take() else { return };
+        if !self
+            .doc
+            .node(scope.owner)
+            .is_some_and(|n| n.type_id == ANIM_TRANSITION_TYPE_ID)
+        {
+            return; // owner gone — scope stays closed
+        }
+        let region = self.doc.regions.get(&scope.owner).cloned().unwrap_or_default();
+        scope.child.cancel_interactions();
+        scope.child.doc.nodes = region.nodes;
+        scope.child.doc.edges = region.edges;
+        scope.child.doc.variables = self.doc.variables.clone();
+        scope.seed = None;
+        if scope.child.doc.nodes.is_empty() {
+            let n = rule_seed_node(0);
+            scope.child.doc.nodes.push(n.clone());
+            scope.seed = Some(n);
+        }
+        scope.child.stack = GraphEditStack::new();
+        scope.child.prune_selection();
+        scope.child.after_edit(rule_scope_registry());
+        self.rule_scope = Some(scope);
+    }
+
+    /// F8 landing on an error inside a rule: open the peek on the owner and
+    /// put the eye on the named node in it.
+    pub fn open_rule_scope_at(
+        &mut self,
+        owner: u64,
+        region_node: u64,
+        registry: &NodeRegistry,
+    ) -> bool {
+        if !self.open_rule_scope(owner, registry) {
+            return false;
+        }
+        if let Some(scope) = &mut self.rule_scope {
+            if scope.child.doc.node(region_node).is_some() {
+                scope.child.select_only(region_node);
+                scope.child.flash = Some((region_node, Instant::now()));
+            }
+        }
+        true
+    }
 }
 
 /// The add-node palette's session state.
@@ -1985,11 +2389,27 @@ impl GraphEditorState {
     ) -> Result<Self, String> {
         let mut doc = load_graph(abs_path).map_err(|e| e.to_string())?;
         migrate_doc(&mut doc, registry).map_err(|e| e.to_string())?;
+        Ok(Self::from_doc(
+            content_rel_key.to_string(),
+            doc,
+            GraphDomain::of_path(content_rel_key),
+            registry,
+        ))
+    }
+
+    /// The one constructor: a state over an already-loaded (and migrated)
+    /// document. [`open`](Self::open) wraps it with disk I/O; the rule scope
+    /// (ticket 05) wraps it around a projection; tests hand it a bare doc.
+    pub fn from_doc(
+        path: String,
+        doc: GraphDoc,
+        domain: GraphDomain,
+        registry: &NodeRegistry,
+    ) -> Self {
         let errors = validate_doc(&doc, registry);
-        let domain = GraphDomain::of_path(content_rel_key);
         let domain_errors = domain.compile_errors(&doc);
-        Ok(Self {
-            path: content_rel_key.to_string(),
+        Self {
+            path,
             doc,
             errors,
             domain,
@@ -2044,7 +2464,8 @@ impl GraphEditorState {
             watches: Vec::new(),
             debug_request: None,
             payload: PayloadPanel::default(),
-        })
+            rule_scope: None,
+        }
     }
 
     /// Serialize and write the doc back to disk, clearing the dirty flag.
@@ -2085,20 +2506,27 @@ impl GraphEditorState {
         // "take back what I am doing" before it means "take back what I did".
         let had_gesture = self.gesture_in_flight();
         self.cancel_interactions();
+        // One history (ticket 05): with a rule scope open, its recorded edits
+        // are already on this stack (drained), so popping here takes back the
+        // most recent thing done *anywhere* — then the projection re-derives.
+        self.drain_rule_scope(registry);
         if self.stack.undo(&mut self.doc).is_some() {
             self.prune_selection();
             self.after_edit(registry);
         } else if had_gesture {
             self.after_edit(registry);
         }
+        self.rebuild_rule_scope();
     }
 
     pub fn redo(&mut self, registry: &NodeRegistry) {
         self.cancel_interactions();
+        self.drain_rule_scope(registry);
         if self.stack.redo(&mut self.doc).is_some() {
             self.prune_selection();
             self.after_edit(registry);
         }
+        self.rebuild_rule_scope();
     }
 
     /// Is a gesture mid-flight — one whose edits are not on the stack yet?
@@ -2108,6 +2536,10 @@ impl GraphEditorState {
             || self.annotation_resize.is_some()
             || self.prop_edit.is_some()
             || self.cut_path.is_some()
+            || self
+                .rule_scope
+                .as_ref()
+                .is_some_and(|s| s.child.gesture_in_flight())
     }
 
     /// Drop selection entries whose node no longer exists, and clear
@@ -2136,6 +2568,12 @@ impl GraphEditorState {
 
     /// Add a comment box at `pos` (default size + placeholder text), select it.
     pub fn add_comment(&mut self, pos: [f32; 2], registry: &NodeRegistry) {
+        // A region holds nodes and edges only — an annotation would have
+        // nowhere to live (ticket 05).
+        if matches!(self.domain, GraphDomain::AnimationRule { .. }) {
+            self.toast("A rule keeps no annotations");
+            return;
+        }
         let comment = CommentBox {
             rect: [pos[0], pos[1], 220.0, 130.0],
             text: "Comment".to_string(),
@@ -2150,6 +2588,11 @@ impl GraphEditorState {
     /// Add a group frame bounding the selected nodes (approximate extent +
     /// padding), select it. No-op when nothing is selected.
     pub fn add_group_around_selection(&mut self, registry: &NodeRegistry) {
+        // Same region rule as `add_comment` (ticket 05).
+        if matches!(self.domain, GraphDomain::AnimationRule { .. }) {
+            self.toast("A rule keeps no annotations");
+            return;
+        }
         // Rough per-node extent (real geometry lives in the panel); over-cover
         // so the frame encloses the nodes.
         const NODE_EXT: [f32; 2] = [168.0, 100.0];
@@ -2233,6 +2676,16 @@ impl GraphEditorState {
     /// Commit the in-flight inline edit as one `SetProperty`. No-op when
     /// nothing is pending or the value ended where it started.
     pub fn flush_prop_edit(&mut self, registry: &NodeRegistry) {
+        // A scope's own coalesced edit settles with the parent's, and its
+        // settled entries move onto the parent history — so a caller about
+        // to save or undo sees one coherent stack (ticket 05).
+        if self.rule_scope.is_some() {
+            if let Some(scope) = &mut self.rule_scope {
+                scope.child.flush_prop_edit(rule_scope_registry());
+                scope.child.flush_var_default_edit(rule_scope_registry());
+            }
+            self.drain_rule_scope(registry);
+        }
         let Some(p) = self.prop_edit.take() else {
             return;
         };
@@ -2889,6 +3342,15 @@ impl GraphEditorState {
     /// Delete the current selection: a selected comment or group frame (frame
     /// only — member nodes stay), else the selected nodes and their edges.
     pub fn delete_selection(&mut self, registry: &NodeRegistry) {
+        // With a rule peek open the machine is inert, so Delete means the
+        // peek's selection (ticket 05).
+        if self.rule_scope.is_some() {
+            if let Some(scope) = &mut self.rule_scope {
+                scope.child.delete_selection(rule_scope_registry());
+            }
+            self.drain_rule_scope(registry);
+            return;
+        }
         // Any in-flight drag / inline edit targets an index this delete may
         // shift or remove — cancel them so nothing commits against it.
         self.cancel_interactions();
@@ -4194,6 +4656,11 @@ impl GraphEditorState {
     /// after this the document reads exactly as it did before the press, and
     /// undo history is untouched.
     pub fn cancel_interactions(&mut self) {
+        // The peek's gestures are as abandonable as the machine's. Depth-one
+        // recursion: a projection never opens a scope of its own.
+        if let Some(scope) = &mut self.rule_scope {
+            scope.child.cancel_interactions();
+        }
         self.revert_pending_drag();
         if let Some(drag) = self.node_drag.take() {
             for (id, pos) in drag.originals {
@@ -4283,6 +4750,13 @@ impl GraphEditorState {
     /// survives a restart), keeping the in-memory copy as a fallback for when
     /// the platform clipboard is unavailable.
     pub fn copy_selection(&mut self, clipboard: &mut Option<GraphFragment>) {
+        // With a rule peek open, Copy means the peek's selection (ticket 05).
+        if self.rule_scope.is_some() {
+            if let Some(scope) = &mut self.rule_scope {
+                scope.child.copy_selection(clipboard);
+            }
+            return;
+        }
         let Some(frag) = self.selection_fragment() else {
             return;
         };
@@ -4365,6 +4839,18 @@ impl GraphEditorState {
         at: Option<[f32; 2]>,
         registry: &NodeRegistry,
     ) {
+        // With a rule peek open, Paste lands in the peek. `at` came from the
+        // machine's view, which is not the peek's — the fragment's own
+        // layout is the honest fallback. (Pastes *inside* the peek's canvas
+        // go straight to the child and keep their cursor position.)
+        if self.rule_scope.is_some() {
+            if let Some(mut scope) = self.rule_scope.take() {
+                scope.child.paste_clipboard(clipboard, None, rule_scope_registry());
+                self.rule_scope = Some(scope);
+            }
+            self.drain_rule_scope(registry);
+            return;
+        }
         let from_os = crusty_gui::clipboard::get_text()
             .as_deref()
             .and_then(GraphFragment::from_ron);
@@ -4383,6 +4869,14 @@ impl GraphEditorState {
     /// Duplicate the selection in place. Deliberately does **not** touch the
     /// clipboard: duplicating should not cost you what you copied earlier.
     pub fn duplicate_selection(&mut self, registry: &NodeRegistry) {
+        // With a rule peek open, Duplicate means the peek's selection.
+        if self.rule_scope.is_some() {
+            if let Some(scope) = &mut self.rule_scope {
+                scope.child.duplicate_selection(rule_scope_registry());
+            }
+            self.drain_rule_scope(registry);
+            return;
+        }
         if let Some(frag) = self.selection_fragment() {
             let min = frag.bbox_min();
             let at = [min[0] + Self::DUPLICATE_OFFSET, min[1] + Self::DUPLICATE_OFFSET];
@@ -4411,6 +4905,30 @@ impl GraphEditorState {
     ) {
         if frag.is_empty() {
             return;
+        }
+        // Placement gating holds through the clipboard back door (ticket 05):
+        // on an animation canvas, a fragment carrying node types the active
+        // registry does not offer is refused whole, with a note — pasting
+        // half a clipboard would be worse. Reserved doc-dependent types
+        // (`var_get`, `reroute`, …) have no descriptors anywhere and pass;
+        // the compiler's whitelist judges them where they land.
+        if self.domain.is_animation_family() {
+            let foreign = frag
+                .nodes
+                .iter()
+                .filter(|n| {
+                    registry.get(&n.type_id).is_none()
+                        && !crate::engine::node_graph::RESERVED_TYPE_IDS
+                            .contains(&n.type_id.as_str())
+                })
+                .count();
+            if foreign > 0 {
+                self.toast(format!(
+                    "{foreign} node{} don't belong on this canvas",
+                    if foreign == 1 { "" } else { "s" }
+                ));
+                return;
+            }
         }
         // Anchor the fragment's top-left at the target and keep every
         // internal offset, so a pasted cluster arrives shaped as it was.
@@ -4596,60 +5114,7 @@ pub mod tests_support {
 
     /// An empty editor state, for tests that only need somewhere to hang a doc.
     pub fn empty_state() -> GraphEditorState {
-        GraphEditorState {
-            path: "t.graph".into(),
-            doc: GraphDoc::default(),
-            domain: GraphDomain::default(),
-            domain_errors: vec![],
-            errors: vec![],
-            ref_errors: vec![],
-            dirty: false,
-            last_saved_at: None,
-            view: CanvasView::default(),
-            selection: BTreeSet::new(),
-            primary: None,
-            selected_edges: BTreeSet::new(),
-            stack: GraphEditStack::new(),
-            node_drag: None,
-            connect_drag: None,
-            marquee: None,
-            marquee_mode: MarqueeMode::default(),
-            prop_edit: None,
-            var_edit: None,
-            create_menu_world: None,
-            create_menu_search: String::new(),
-            sel_comment: None,
-            sel_group: None,
-            annotation_drag: None,
-            editing: None,
-            annotation_resize: None,
-            annotation_menu: None,
-            error_cursor: 0,
-            error_popover: false,
-            wire_menu: None,
-            bookmarks: [None; BOOKMARK_SLOTS],
-            bookmark_next: 0,
-            purge_confirm: None,
-            toasts: Vec::new(),
-            cut_path: None,
-            node_menu: None,
-            palette: None,
-            find: None,
-            cheat_sheet: false,
-            canvas_menu: None,
-            breakpoints: Default::default(),
-            nav_back: Vec::new(),
-            nudge: None,
-            frame: 0,
-            frame_all_on_open: false,
-            vars: VarPanel::default(),
-            flash: None,
-            exec_bind: None,
-            exec_picker: false,
-            watches: Vec::new(),
-            debug_request: None,
-            payload: PayloadPanel::default(),
-        }
+        super::test_state("t.graph")
     }
 }
 
@@ -7649,63 +8114,328 @@ mod tests {
     }
 }
 
+/// Rule-scope tests (Task 41 ticket 05): the peek's state machinery —
+/// projection, drain-to-parent-history, rebuild-on-undo, gating.
+#[cfg(test)]
+mod rule_scope_tests {
+    use super::*;
+    use crate::engine::animation::graph::plan::{
+        ANIM_ENTRY_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, ANIM_STATE_TYPE_ID,
+        ANIM_TRANSITION_TYPE_ID, CLIP_PROP, RULE_RESULT_PIN, STATE_IN_PIN, STATE_OUT_PIN,
+        TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
+    };
+    use crate::engine::animation::graph::anim_node_registry;
+    use crate::engine::editor::graph_anim_chip::transition_chip;
+    use crate::engine::node_graph::{
+        GraphRealm, GraphRegion, VarDecl, VAR_GET_TYPE_ID, VAR_PROP, VAR_VALUE_PIN,
+    };
+    use node_graph_types::std_nodes::COMPARE_FLOAT;
+
+    fn node(id: u64, type_id: &str, title: Option<&str>) -> NodeInst {
+        NodeInst {
+            id,
+            type_id: type_id.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: title.map(str::to_string),
+        }
+    }
+
+    fn edge(from: u64, from_pin: &str, to: u64, to_pin: &str) -> Edge {
+        Edge {
+            from_node: from,
+            from_pin: from_pin.to_string(),
+            to_node: to,
+            to_pin: to_pin.to_string(),
+        }
+    }
+
+    /// ENTRY → Idle —(transition 3)→ Run, `region` as transition 3's rule,
+    /// one declared Float parameter `speed`.
+    fn machine(region: Option<GraphRegion>) -> GraphEditorState {
+        let mut st = super::test_state("graphs/t.animgraph");
+        st.doc.realm = GraphRealm::Client;
+        let mut idle = node(1, ANIM_STATE_TYPE_ID, Some("Idle"));
+        idle.properties
+            .insert(CLIP_PROP.to_string(), PropValue::Asset("anims/idle.anim".into()));
+        let mut run = node(2, ANIM_STATE_TYPE_ID, Some("Run"));
+        run.properties
+            .insert(CLIP_PROP.to_string(), PropValue::Asset("anims/run.anim".into()));
+        st.doc.nodes = vec![
+            node(0, ANIM_ENTRY_TYPE_ID, None),
+            idle,
+            run,
+            node(3, ANIM_TRANSITION_TYPE_ID, None),
+        ];
+        st.doc.edges = vec![
+            edge(0, STATE_OUT_PIN, 1, STATE_IN_PIN),
+            edge(1, STATE_OUT_PIN, 3, TRANSITION_FROM_PIN),
+            edge(3, TRANSITION_TO_PIN, 2, STATE_IN_PIN),
+        ];
+        st.doc.variables = vec![VarDecl {
+            slug: "speed".into(),
+            label: "Speed".into(),
+            ty: PinType::Float,
+            default: None,
+            group: None,
+        }];
+        if let Some(r) = region {
+            st.doc.regions.insert(3, r);
+        }
+        st.after_edit(&NodeRegistry::new());
+        st
+    }
+
+    /// A one-comparison rule: var_get(speed) → compare → RESULT.
+    fn speed_rule() -> GraphRegion {
+        let mut get = node(1, VAR_GET_TYPE_ID, None);
+        get.properties
+            .insert(VAR_PROP.to_string(), PropValue::Str("speed".into()));
+        let mut cmp = node(2, COMPARE_FLOAT, None);
+        cmp.properties
+            .insert("op".to_string(), PropValue::Enum("greater".into()));
+        cmp.properties.insert("b".to_string(), PropValue::Float(3.0));
+        GraphRegion {
+            nodes: vec![node(0, ANIM_RULE_RESULT_TYPE_ID, None), get, cmp],
+            edges: vec![
+                edge(1, VAR_VALUE_PIN, 2, "a"),
+                edge(2, "result", 0, RULE_RESULT_PIN),
+            ],
+        }
+    }
+
+    /// `InRegion` speaks region-local ids against the real region, creates
+    /// the map entry on demand, and prunes an entry left empty — absent and
+    /// empty both mean always-true, and only one spelling reaches a save.
+    #[test]
+    fn in_region_edits_round_trip_and_prune_empty_regions() {
+        let mut doc = machine(None).doc;
+        let before = doc.clone();
+        let add = GraphEdit::InRegion {
+            owner: 3,
+            edit: Box::new(GraphEdit::AddNode(node(0, ANIM_RULE_RESULT_TYPE_ID, None))),
+        };
+        add.apply(&mut doc);
+        assert_eq!(doc.regions.get(&3).unwrap().nodes.len(), 1);
+        add.revert(&mut doc);
+        assert!(!doc.regions.contains_key(&3), "an emptied region prunes");
+        assert_eq!(doc, before, "undo restores the exact document");
+    }
+
+    /// Opening a peek is look-only: the projection mirrors the region plus
+    /// the parent's variables, an empty rule gets an unrecorded RESULT seed,
+    /// and neither opening nor closing dirties the document.
+    #[test]
+    fn opening_a_peek_projects_without_dirtying() {
+        let reg = NodeRegistry::new();
+        let mut st = machine(Some(speed_rule()));
+        assert!(st.open_rule_scope(3, &reg));
+        {
+            let scope = st.rule_scope.as_ref().unwrap();
+            assert_eq!(scope.child.doc.nodes.len(), 3);
+            assert_eq!(scope.child.doc.variables.len(), 1, "parameters project");
+            assert!(scope.seed.is_none(), "a real rule needs no seed");
+            assert!(matches!(scope.child.domain, GraphDomain::AnimationRule { owner: 3 }));
+        }
+        // Only transitions descend.
+        assert!(!st.open_rule_scope(1, &reg), "a state is not a rule scope");
+        st.close_rule_scope(&reg);
+        assert!(!st.dirty && st.stack.undo_len() == 0);
+
+        // An always-true transition opens seeded, and looking costs nothing.
+        let mut st = machine(None);
+        let before = st.doc.clone();
+        assert!(st.open_rule_scope(3, &reg));
+        {
+            let scope = st.rule_scope.as_ref().unwrap();
+            assert_eq!(scope.child.doc.nodes[0].type_id, ANIM_RULE_RESULT_TYPE_ID);
+            assert!(scope.seed.is_some());
+        }
+        st.close_rule_scope(&reg);
+        assert_eq!(st.doc, before, "peeking into always-true changed nothing");
+        assert!(!st.dirty);
+    }
+
+    /// Edits made in the peek drain onto the **parent** stack (seed recorded
+    /// first), update the real region — the chip reads them live — and undo
+    /// at the machine takes them back entry by entry to the exact bytes.
+    #[test]
+    fn peek_edits_are_one_history_with_the_machine() {
+        let reg = NodeRegistry::new();
+        let mut st = machine(None);
+        let before = st.doc.clone();
+        st.open_rule_scope(3, &reg);
+        assert_eq!(transition_chip(&st.doc, 3).text(), "0.00s");
+
+        // The author wires a parameter read straight into the seeded RESULT.
+        {
+            let scope = st.rule_scope.as_mut().unwrap();
+            let mut get = node(1, VAR_GET_TYPE_ID, None);
+            get.properties
+                .insert(VAR_PROP.to_string(), PropValue::Str("speed".into()));
+            scope.child.doc.nodes.push(get.clone());
+            scope.child.stack.record(GraphEdit::AddNode(get));
+            let e = edge(1, VAR_VALUE_PIN, 0, RULE_RESULT_PIN);
+            scope.child.doc.edges.push(e.clone());
+            scope.child.stack.record(GraphEdit::Connect(e));
+        }
+        st.drain_rule_scope(&reg);
+
+        // Seed + two edits, all wrapped, all on the parent stack.
+        assert_eq!(st.stack.undo_len(), 3);
+        assert!(st.dirty);
+        assert_eq!(
+            st.rule_scope.as_ref().unwrap().child.stack.undo_len(),
+            0,
+            "the projection's stack hands everything to the parent"
+        );
+        let region = st.doc.regions.get(&3).expect("region materialized");
+        assert_eq!((region.nodes.len(), region.edges.len()), (2, 1));
+        // The chip reads the drained document — "Speed · 0.00s", wired.
+        assert_eq!(transition_chip(&st.doc, 3).text(), "Speed \u{b7} 0.00s");
+
+        // Undo at the machine unwinds the rule edit by edit; the projection
+        // rebuilds each time and the scope survives.
+        st.undo(&reg);
+        st.undo(&reg);
+        st.undo(&reg);
+        assert_eq!(st.doc, before, "three undos return the exact document");
+        assert!(st.rule_scope.is_some(), "the peek stays open, re-seeded");
+        assert!(st.rule_scope.as_ref().unwrap().seed.is_some());
+        assert!(!st.dirty);
+    }
+
+    /// Undoing past the transition's own creation closes the scope: a peek
+    /// into a node that no longer exists has nothing to show.
+    #[test]
+    fn undo_that_removes_the_owner_closes_the_scope() {
+        let reg = NodeRegistry::new();
+        let mut st = machine(Some(speed_rule()));
+        // The transition arrives as a recorded paste (as a duplicate would).
+        let t = node(9, ANIM_TRANSITION_TYPE_ID, None);
+        let paste = GraphEdit::Paste {
+            nodes: vec![t.clone()],
+            edges: vec![],
+            regions: vec![(9, speed_rule())],
+        };
+        paste.apply(&mut st.doc);
+        st.stack.record(paste);
+        assert!(st.open_rule_scope(9, &reg));
+        st.undo(&reg);
+        assert!(st.rule_scope.is_none(), "the owner is gone, so is the peek");
+        assert!(st.doc.node(9).is_none());
+    }
+
+    /// Variable edits made inside the peek pass through to the document
+    /// unwrapped — declarations live on the machine, not in a region.
+    #[test]
+    fn variable_edits_pass_through_to_the_document() {
+        let reg = NodeRegistry::new();
+        let mut st = machine(None);
+        st.open_rule_scope(3, &reg);
+        {
+            let scope = st.rule_scope.as_mut().unwrap();
+            let decl = VarDecl {
+                slug: "grounded".into(),
+                label: "Grounded".into(),
+                ty: PinType::Bool,
+                default: None,
+                group: None,
+            };
+            scope.child.doc.variables.push(decl.clone());
+            scope.child.stack.record(GraphEdit::AddVariable(decl));
+        }
+        st.drain_rule_scope(&reg);
+        assert_eq!(st.doc.variables.len(), 2, "the declaration is the machine's");
+        assert_eq!(st.stack.undo_len(), 1);
+        assert!(
+            st.doc.regions.get(&3).is_none(),
+            "a variable edit is not region content — no seed, no region"
+        );
+        st.undo(&reg);
+        assert_eq!(st.doc.variables.len(), 1);
+    }
+
+    /// Placement gating holds through the clipboard: machine nodes refuse to
+    /// paste into a rule canvas, rule nodes refuse to paste onto the machine,
+    /// and a legal rule fragment pastes into the projection.
+    #[test]
+    fn foreign_fragments_refuse_across_animation_canvases() {
+        let reg = NodeRegistry::new();
+        // Rule nodes onto the machine canvas: refused whole.
+        let mut st = machine(None);
+        let rule_frag = GraphFragment {
+            nodes: vec![node(0, COMPARE_FLOAT, None)],
+            ..Default::default()
+        };
+        st.paste_fragment(&rule_frag, None, &anim_node_registry());
+        assert!(st.doc.nodes.iter().all(|n| n.type_id != COMPARE_FLOAT));
+
+        // Machine nodes into the rule projection: refused whole.
+        st.open_rule_scope(3, &reg);
+        let machine_frag = GraphFragment {
+            nodes: vec![node(0, ANIM_STATE_TYPE_ID, Some("Rogue"))],
+            ..Default::default()
+        };
+        {
+            let scope = st.rule_scope.as_mut().unwrap();
+            let n = scope.child.doc.nodes.len();
+            scope.child.paste_fragment(&machine_frag, None, rule_scope_registry());
+            assert_eq!(scope.child.doc.nodes.len(), n, "a State cannot enter a rule");
+            // A rule fragment is welcome.
+            scope.child.paste_fragment(&rule_frag, None, rule_scope_registry());
+            assert_eq!(scope.child.doc.nodes.len(), n + 1);
+        }
+    }
+
+    /// Find reaches inside embedded rules (spec story 22): region hits name
+    /// the owning transition and the region-local node, and matching is over
+    /// the same title/type/parameter text a user would type.
+    #[test]
+    fn find_indexes_nodes_inside_rules() {
+        let st = machine(Some(speed_rule()));
+        let find = |q: &str| FindState { query: q.into(), ..Default::default() };
+        assert_eq!(region_find_matches(&st.doc, &find("speed")), vec![(3, 1)]);
+        assert_eq!(region_find_matches(&st.doc, &find("compare")), vec![(3, 2)]);
+        assert!(region_find_matches(&st.doc, &find("zzz")).is_empty());
+    }
+
+    /// A refusal naming a node inside a rule carries both anchors — the
+    /// transition for the badge, the region-local node for the descend — and
+    /// F8's landing selects that node inside the opened peek.
+    #[test]
+    fn rule_refusals_descend_into_the_peek() {
+        let reg = NodeRegistry::new();
+        // Poison the rule: a State node inside the region.
+        let mut region = speed_rule();
+        region.nodes.push(node(7, ANIM_STATE_TYPE_ID, None));
+        let mut st = machine(Some(region));
+        assert_eq!(st.domain_errors.len(), 1);
+        let e = &st.domain_errors[0];
+        assert_eq!((e.node, e.region_node), (Some(3), Some(7)), "{}", e.message);
+
+        assert!(st.open_rule_scope_at(3, 7, &reg));
+        let scope = st.rule_scope.as_ref().unwrap();
+        assert!(scope.child.selection.contains(&7));
+        assert!(scope.child.flash.is_some());
+        // The projection's own compiler anchors the same refusal directly.
+        assert_eq!(scope.child.domain_errors.len(), 1);
+        assert_eq!(scope.child.domain_errors[0].node, Some(7));
+    }
+}
+
 /// A blank editor state. Test-only, at module level so the sibling test
 /// modules (the variables model, P6b) share one definition rather than
-/// drifting copies of a 40-field literal.
+/// drifting copies of the constructor call.
 #[cfg(test)]
 pub(crate) fn test_state(path: &str) -> GraphEditorState {
-    GraphEditorState {
-        path: path.to_string(),
-        doc: GraphDoc::default(),
-        domain: GraphDomain::of_path(path),
-        domain_errors: vec![],
-        errors: vec![],
-        ref_errors: vec![],
-        dirty: false,
-        last_saved_at: None,
-        view: CanvasView::default(),
-        selection: BTreeSet::new(),
-        primary: None,
-        selected_edges: BTreeSet::new(),
-        stack: GraphEditStack::new(),
-        node_drag: None,
-        connect_drag: None,
-        marquee: None,
-        marquee_mode: MarqueeMode::default(),
-        prop_edit: None,
-        var_edit: None,
-        create_menu_world: None,
-        create_menu_search: String::new(),
-        sel_comment: None,
-        sel_group: None,
-        annotation_drag: None,
-        editing: None,
-        annotation_resize: None,
-        annotation_menu: None,
-        error_cursor: 0,
-        error_popover: false,
-        wire_menu: None,
-        bookmarks: [None; BOOKMARK_SLOTS],
-        bookmark_next: 0,
-        purge_confirm: None,
-        toasts: Vec::new(),
-        cut_path: None,
-        node_menu: None,
-        palette: None,
-        find: None,
-        cheat_sheet: false,
-        canvas_menu: None,
-        breakpoints: Default::default(),
-        nav_back: Vec::new(),
-        nudge: None,
-        frame: 0,
-        frame_all_on_open: false,
-        vars: VarPanel::default(),
-        payload: PayloadPanel::default(),
-        flash: None,
-        exec_bind: None,
-        exec_picker: false,
-        watches: Vec::new(),
-        debug_request: None,
-    }
+    GraphEditorState::from_doc(
+        path.to_string(),
+        GraphDoc::default(),
+        GraphDomain::of_path(path),
+        &NodeRegistry::new(),
+    )
 }

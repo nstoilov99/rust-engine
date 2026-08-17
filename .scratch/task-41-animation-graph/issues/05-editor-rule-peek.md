@@ -4,11 +4,11 @@
 
 **Blocked by:** 04 — Editor: author state machines in the graph editor.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Double-click on a transition opens the rule as a peek overlay: machine dimmed, source/target states lit, rule canvas fully editable in place
-- [ ] Esc closes the peek and returns to the machine; ⤢ promotes the rule to a full editor tab
-- [ ] Breadcrumb shows the non-file rule scope and navigates back out
-- [ ] F8, find, and the palette surface nodes inside embedded rules
-- [ ] Copy/paste and duplicate of a transition carry its rule in the editor; undo of either is one history
-- [ ] Visual pass per the repo's screenshot-review workflow (peek dim/lit treatment matches the mockup's option 3b)
+- [x] Double-click on a transition opens the rule as a peek overlay: machine dimmed, source/target states lit, rule canvas fully editable in place
+- [x] Esc closes the peek and returns to the machine; ⤢ promotes the rule to a full editor tab
+- [x] Breadcrumb shows the non-file rule scope and navigates back out
+- [x] F8, find, and the palette surface nodes inside embedded rules
+- [x] Copy/paste and duplicate of a transition carry its rule in the editor; undo of either is one history
+- [x] Visual pass per the repo's screenshot-review workflow (peek dim/lit treatment matches the mockup's option 3b)

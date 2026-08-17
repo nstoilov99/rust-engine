@@ -390,23 +390,11 @@ fn str_prop<'a>(
     }
 }
 
-/// Compile a `.animgraph` document into a plan.
-///
-/// Refusals are author errors, phrased against the node that caused them.
-pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
-    // Animation graphs are Client-realm by definition (spec realm note): the
-    // server never evaluates animation (ADR 0002), and saying so in the
-    // document is the authority statement the realm field exists for.
-    if doc.realm != GraphRealm::Client {
-        return Err(format!(
-            "an animation graph must declare `realm: Client` (found {:?}) — \
-             animation is client-derived (ADR 0002)",
-            doc.realm
-        ));
-    }
-
-    // Parameters first, from the document's variables — states need them to
-    // validate the parameters their blend trees read.
+/// Compile the document's `variables` into the typed parameter list — the
+/// contract between gameplay and the graph. Public seam: the editor's rule
+/// canvas (ticket 05) compiles a rule region against these without walking
+/// the whole machine.
+pub fn compile_parameters(doc: &GraphDoc) -> Result<Vec<ParamDecl>, String> {
     let mut parameters: Vec<ParamDecl> = Vec::new();
     for v in &doc.variables {
         if parameters.iter().any(|p| p.slug == v.slug) {
@@ -447,6 +435,27 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
             default,
         });
     }
+    Ok(parameters)
+}
+
+/// Compile a `.animgraph` document into a plan.
+///
+/// Refusals are author errors, phrased against the node that caused them.
+pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
+    // Animation graphs are Client-realm by definition (spec realm note): the
+    // server never evaluates animation (ADR 0002), and saying so in the
+    // document is the authority statement the realm field exists for.
+    if doc.realm != GraphRealm::Client {
+        return Err(format!(
+            "an animation graph must declare `realm: Client` (found {:?}) — \
+             animation is client-derived (ADR 0002)",
+            doc.realm
+        ));
+    }
+
+    // Parameters first, from the document's variables — states need them to
+    // validate the parameters their blend trees read.
+    let parameters = compile_parameters(doc)?;
 
     // States, in document order (index = plan identity). A state with a
     // non-empty region compiles it as a blend tree; a leaf state plays the
@@ -679,6 +688,19 @@ fn compile_rule(
     let Some(region) = doc.regions.get(&tid) else {
         return Ok(None);
     };
+    compile_rule_region(region, tid, parameters)
+}
+
+/// Compile one rule region against an already-compiled parameter list.
+/// Public seam: the editor's rule canvas (ticket 05) checks the region it is
+/// editing without recompiling the whole machine, and gets refusals phrased
+/// exactly as [`compile_anim_graph`] would phrase them ("transition {tid}:
+/// rule node {id} …"), so the two never disagree about what is wrong.
+pub fn compile_rule_region(
+    region: &GraphRegion,
+    tid: u64,
+    parameters: &[ParamDecl],
+) -> Result<Option<PlanRule>, String> {
     if region.nodes.is_empty() {
         return Ok(None);
     }

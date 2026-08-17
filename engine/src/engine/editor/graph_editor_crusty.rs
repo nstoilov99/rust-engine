@@ -41,6 +41,7 @@ use super::graph_editor::{
     DEFAULT_PAYLOAD_TYPE, watch_chip_text, Watch, WATCH_STALE_SECS,
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
+    region_find_matches, rule_scope_registry,
 };
 use super::graph_exec_viz::{DebugRequest, ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
@@ -1849,9 +1850,19 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // never act across a half-finished gesture, or they would either skip an
     // untracked mutation or mark a save cursor over content the file does not
     // have.
+    // Rule-scope upkeep (ticket 05): settle anything the peek recorded since
+    // last frame onto the parent history before shortcuts or drawing read
+    // either document.
+    state.drain_rule_scope(registry);
     if !ui.ctx().input.pointer_down {
         finish_node_drag(state, registry);
         finish_annotation_drag(state, registry);
+        // The peek's canvas gets the same orphaned-gesture finish.
+        if let Some(mut scope) = state.rule_scope.take() {
+            finish_node_drag(&mut scope.child, rule_scope_registry());
+            finish_annotation_drag(&mut scope.child, rule_scope_registry());
+            state.rule_scope = Some(scope);
+        }
         state.flush_prop_edit(registry);
         // The variables panel's defaults coalesce on the same rule as node
         // properties — one drag, one entry — so they close on the same beat.
@@ -1886,6 +1897,30 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // off the canvas rect follows without knowing it exists.
     paused_banner(ui, state, registry, resolver, keymap, exec);
 
+    // An open rule scope shows on the breadcrumb (ticket 05): the non-file
+    // scope target — "duck.animgraph ▸ rule: Idle → Locomotion" — with the
+    // file crumb as the way back out.
+    if state.rule_scope.is_some() && rule_breadcrumb_band(ui, state) {
+        state.close_rule_scope(registry);
+    }
+    // Promoted (⤢): the rule takes the full canvas; the machine's canvas and
+    // strips yield entirely until the breadcrumb (or Esc) climbs back out.
+    if state.rule_scope.as_ref().is_some_and(|s| s.full) {
+        rule_scope_full(
+            ui,
+            state,
+            registry,
+            clipboard,
+            resolver,
+            keymap,
+            selection_outline,
+            &wire_prefs,
+            zoom_min,
+            zoom_max,
+        );
+        return;
+    }
+
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
     // width before the canvas allocates, so the canvas shrinks by exactly that
@@ -1902,6 +1937,10 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         r
     };
 
+    // While a peek is open the machine is a backdrop: its view must not move
+    // under the overlay (pan/zoom gestures belong to the peek's canvas), so
+    // the pre-frame view is restored after the canvas ran (ticket 05).
+    let peek_view_lock = state.rule_scope.is_some().then_some(state.view);
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
@@ -1943,6 +1982,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut frame_request,
             keymap,
             exec,
+            None,
         )
     });
     // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
@@ -1951,17 +1991,31 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         view = v;
     }
     state.view = view;
+    if let Some(v) = peek_view_lock {
+        state.view = v;
+    }
+    // The machine dims under an open peek — its lit trio (transition, source
+    // and target states) excepted (mockup 3b).
+    rule_dim_scrim(ui, out.rect, state, &out.inner);
 
     // A row released over the canvas: remember where, and ask Get or Set.
     // Taken here rather than inside the canvas body because the body runs
     // before the strip is drawn, and the payload only has to be claimed once
     // per frame — the drag survives frames on the context, not on either side.
-    if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
+    // A drop headed for the open peek is the *peek's* — the claim is
+    // first-come, and the overlay's own drop target runs later this frame.
+    let drop_is_peeks = state.rule_scope.is_some()
+        && ui
+            .ctx()
+            .input
+            .pointer_pos
+            .is_some_and(|sp| rule_peek_rect(ui, out.rect, state, &out.inner).contains(sp));
+    if drop_is_peeks {
+    } else if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
         if state.domain.is_animation() {
             // Parameters are read *inside* a transition's rule, not on the
             // machine canvas — a top-level Get would compile to nothing.
-            // The rule canvas (peek overlay) is the later slice that makes
-            // this drop meaningful.
+            // The rule canvas (the peek overlay) is where this drop lands.
             state.toast("Parameters are read inside transition rules");
         } else if let Some(sp) = ui.ctx().input.pointer_pos {
             let v = state.view;
@@ -2006,7 +2060,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     payload_confirm_dialog(ui, out.rect, state, registry);
 
     palette_popover(ui, state, registry, subgraph_assets);
-    find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
+    find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max, registry);
     annotation_menu(ui, state, registry, keymap, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
     node_menu(ui, state, registry, keymap, &out.inner, node_menu_at);
@@ -2021,6 +2075,22 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     cheat_sheet(ui, out.rect, state, keymap);
+    // The rule peek (ticket 05) draws over everything the machine owns; its
+    // own transient surfaces stack above it.
+    rule_peek_overlay(
+        ui,
+        out.rect,
+        &out.inner,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        &wire_prefs,
+        zoom_min,
+        zoom_max,
+    );
     draw_toasts(ui, out.rect, state);
 
     // F8 / Shift+F8 walk the anchored errors. The chip's own cursor drives
@@ -2047,6 +2117,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             zoom_min,
             zoom_max,
             &mut req,
+            registry,
         );
         if let Some(v) = req {
             state.view = v;
@@ -2090,6 +2161,14 @@ fn palette_modal_id() -> crusty_gui::id::Id {
 }
 
 fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
+    overlay_has_focus_excl(ui, state, None)
+}
+
+/// [`overlay_has_focus`] for a canvas living *inside* a modal surface (the
+/// rule peek, ticket 05): the surface registers itself on the modal stack to
+/// shield the machine underneath, but must not count as "an open modal" for
+/// its own body — only things stacked above it do.
+fn overlay_has_focus_excl(ui: &Ui, state: &GraphEditorState, own_modal: Option<Id>) -> bool {
     state.palette.is_some()
         || state.find.is_some()
         || state.editing.is_some()
@@ -2105,7 +2184,10 @@ fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
         // shortcuts must never fire mid-typing.
         || ui.ctx().text_focused()
         // An open menu/dropdown owns the keyboard too.
-        || ui.ctx().modal_any_open()
+        || match own_modal {
+            Some(id) => ui.ctx().modal_any_open_above(id),
+            None => ui.ctx().modal_any_open(),
+        }
 }
 
 /// Tab-level shortcuts: clipboard, history, delete, save.
@@ -2122,7 +2204,17 @@ fn handle_panel_keys(
     keymap: &Keymap,
     exec: Option<&GraphExecViz>,
 ) {
-    if overlay_has_focus(ui, state) {
+    // With a rule scope open the gate consults the *peek's* surfaces — the
+    // scope's own modal must not swallow the keys it exists to serve
+    // (ticket 05). The actions below route into the scope at the state level.
+    let focus_taken = match &state.rule_scope {
+        Some(scope) if !scope.full => {
+            overlay_has_focus_excl(ui, &scope.child, Some(rule_peek_modal_id()))
+        }
+        Some(scope) => overlay_has_focus_excl(ui, &scope.child, None),
+        None => overlay_has_focus(ui, state),
+    };
+    if focus_taken {
         return;
     }
     for action in keymap.dispatch(&ui.ctx().input, Context::GraphTab) {
@@ -2195,6 +2287,10 @@ fn draw_and_interact(
     frame_request: &mut Option<CanvasView>,
     keymap: &Keymap,
     exec: Option<&GraphExecViz>,
+    // The modal surface this canvas lives inside, when it lives inside one
+    // (the rule peek, ticket 05): excluded from the modal gates so the
+    // surface does not shield its own body.
+    own_modal: Option<Id>,
 ) -> Vec<NodeGeom> {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -2385,8 +2481,12 @@ fn draw_and_interact(
     // stack before we got here (Rule 1). Asking the stack directly also keeps
     // *hover* interactions off the canvas underneath one, which consumption
     // alone would not.
-    let widget_claimed = pointer_screen
-        .is_some_and(|p| ui.ctx().modal_contains(p) || widget_owns(p, &widget_rects));
+    let widget_claimed = pointer_screen.is_some_and(|p| {
+        (match own_modal {
+            Some(id) => ui.ctx().modal_contains_above(id, p),
+            None => ui.ctx().modal_contains(p),
+        }) || widget_owns(p, &widget_rects)
+    });
 
     // Frame shortcuts. F frames the selection, Home fits the whole graph.
     // (Bare `A` used to mean fit-graph; the ratified table gives that job to
@@ -2394,7 +2494,7 @@ fn draw_and_interact(
     // matches modifiers exactly, which replaces the old blanket
     // `mods.is_empty()` guard — that existed only to stop Ctrl+A and Ctrl+F
     // over the canvas also framing the view.
-    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
+    if pointer_world.is_some() && !overlay_has_focus_excl(ui, state, own_modal) {
         let framing = keymap.dispatch(&ui.ctx().input, Context::Canvas);
         let frame_all = framing.contains(&Action::FIT_GRAPH);
         let frame_sel = framing.contains(&Action::FRAME_SELECTION);
@@ -2996,10 +3096,15 @@ fn draw_and_interact(
             state.toggle_selected(g.id);
         }
         // Double-click a subgraph node → open its referenced doc as a tab.
+        // Double-click a transition → descend into its embedded rule as a
+        // peek (ticket 05): same gesture, same meaning — "go inside" — the
+        // only difference is that nothing new exists on disk.
         if resp.double_clicked(ui) {
             if let Some(path) = state.doc.node(g.id).and_then(|n| n.subgraph.clone()) {
                 state.push_nav(state.path.clone());
                 *open_subgraph = Some(path);
+            } else {
+                state.open_rule_scope(g.id, registry);
             }
         }
     }
@@ -3384,6 +3489,7 @@ fn draw_and_interact(
         frame_request,
         open_subgraph,
         keymap,
+        registry,
     );
 
     // Right-click: an annotation gets its own menu (tint / collapse / anchor
@@ -3474,7 +3580,7 @@ fn draw_and_interact(
         }
     }
 
-    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
+    if pointer_world.is_some() && !overlay_has_focus_excl(ui, state, own_modal) {
         for action in keymap.dispatch(&ui.ctx().input, Context::Canvas) {
             match action {
                 Action::GROUP => state.add_group_around_selection(registry),
@@ -3557,13 +3663,20 @@ fn draw_and_interact(
                     state.begin_rename();
                 }
                 Action::CHILD_GRAPH => {
-                    if let Some(path) = state.descend_target() {
+                    // Rules first (ticket 05): descending a selected
+                    // transition opens its rule peek — no file involved.
+                    if let Some(t) = state.rule_descend_target() {
+                        state.open_rule_scope(t, registry);
+                    } else if let Some(path) = state.descend_target() {
                         state.push_nav(state.path.clone());
                         *open_subgraph = Some(path);
                     }
                 }
                 Action::PARENT_GRAPH => {
-                    if let Some(path) = state.ascend_target() {
+                    // Inside a rule, "up" means back to the machine.
+                    if state.rule_scope.is_some() {
+                        state.close_rule_scope(registry);
+                    } else if let Some(path) = state.ascend_target() {
                         *open_subgraph = Some(path);
                     }
                 }
@@ -3789,6 +3902,625 @@ fn all_rects(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Rule scope drawing (Task 41 ticket 05): peek overlay, promoted scope,
+// breadcrumb, and the dim-with-lit-holes scrim. Mockup 3b is the reference.
+// ---------------------------------------------------------------------------
+
+fn rule_peek_modal_id() -> Id {
+    Id::ROOT.with("graph_rule_peek")
+}
+
+/// Source and target of a transition, resolved through its pins.
+fn rule_endpoints(state: &GraphEditorState, owner: u64) -> (Option<u64>, Option<u64>) {
+    use crate::engine::animation::graph::plan::{TRANSITION_FROM_PIN, TRANSITION_TO_PIN};
+    let from = state
+        .doc
+        .edges
+        .iter()
+        .find(|e| e.to_node == owner && e.to_pin == TRANSITION_FROM_PIN)
+        .map(|e| e.from_node);
+    let to = state
+        .doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == owner && e.from_pin == TRANSITION_TO_PIN)
+        .map(|e| e.to_node);
+    (from, to)
+}
+
+/// A state's display name for the scope labels — the same fallbacks the
+/// compiler's messages use, plus "?" for an unwired endpoint.
+fn rule_state_name(state: &GraphEditorState, id: Option<u64>) -> String {
+    use crate::engine::animation::graph::plan::{ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID};
+    let Some(n) = id.and_then(|id| state.doc.node(id)) else {
+        return "?".to_string();
+    };
+    if let Some(t) = &n.title {
+        return t.clone();
+    }
+    match n.type_id.as_str() {
+        ANIM_ANY_STATE_TYPE_ID => "Any State".to_string(),
+        ANIM_STATE_TYPE_ID => format!("State {}", n.id),
+        _ => format!("Node {}", n.id),
+    }
+}
+
+/// "rule: Idle → Locomotion" — the breadcrumb's non-file scope target.
+fn rule_scope_label(state: &GraphEditorState, owner: u64) -> String {
+    let (from, to) = rule_endpoints(state, owner);
+    format!(
+        "rule: {} \u{2192} {}",
+        rule_state_name(state, from),
+        rule_state_name(state, to)
+    )
+}
+
+/// "0.20s" / "0.20s · P1" — sourced from the same chip resolver the edge
+/// draws with, so the header and the chip never disagree.
+fn rule_duration_tag(state: &GraphEditorState, owner: u64) -> String {
+    let chip = super::graph_anim_chip::transition_chip(&state.doc, owner);
+    let mut t = format!("{:.2}s", chip.duration.max(0.0));
+    if chip.priority != 0 {
+        t.push_str(&format!(" \u{b7} P{}", chip.priority));
+    }
+    t
+}
+
+/// Where the peek panel sits: anchored under the transition's chip when it is
+/// on screen (the rule opens where the eye already is), clamped into the
+/// canvas, sized to leave the machine visible around it.
+fn rule_peek_rect(
+    ui: &Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    geoms: &[NodeGeom],
+) -> Rect {
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let margin = 12.0 * s;
+    let w = (canvas.width() * 0.62)
+        .clamp(340.0 * s, 780.0 * s)
+        .min((canvas.width() - margin * 2.0).max(80.0));
+    let h = (canvas.height() * 0.58)
+        .clamp(260.0 * s, 500.0 * s)
+        .min((canvas.height() - margin * 2.0).max(60.0));
+    let v = state.view;
+    let anchor = state
+        .rule_scope
+        .as_ref()
+        .and_then(|sc| geoms.iter().find(|g| g.id == sc.owner))
+        .map(|g| {
+            Pos2::new(
+                canvas.min.x + (g.rect.center().x - v.pan.x) * v.zoom,
+                canvas.min.y + (g.rect.max.y - v.pan.y) * v.zoom,
+            )
+        })
+        .unwrap_or_else(|| canvas.center());
+    let mut min = Pos2::new(anchor.x - w * 0.5, anchor.y + 14.0 * s);
+    min.x = min
+        .x
+        .clamp(canvas.min.x + margin, (canvas.max.x - margin - w).max(canvas.min.x + margin));
+    if min.y + h > canvas.max.y - margin {
+        min.y = (anchor.y - 28.0 * s - h).max(canvas.min.y + margin);
+    }
+    min.y = min
+        .y
+        .clamp(canvas.min.y + margin, (canvas.max.y - margin - h).max(canvas.min.y + margin));
+    Rect::from_min_size(min, Vec2::new(w, h))
+}
+
+/// `outer` minus the union of `holes`, as horizontal bands: cut at every hole
+/// edge, then walk each band's uncovered x-intervals. Pure, and tested.
+fn subtract_rects(outer: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut ys: Vec<f32> = vec![outer.min.y, outer.max.y];
+    for h in holes {
+        ys.push(h.min.y.clamp(outer.min.y, outer.max.y));
+        ys.push(h.max.y.clamp(outer.min.y, outer.max.y));
+    }
+    ys.sort_by(f32::total_cmp);
+    ys.dedup();
+    let mut out = Vec::new();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        if y1 <= y0 {
+            continue;
+        }
+        let mid = (y0 + y1) * 0.5;
+        let mut spans: Vec<(f32, f32)> = holes
+            .iter()
+            .filter(|h| h.min.y <= mid && mid < h.max.y)
+            .map(|h| (h.min.x.max(outer.min.x), h.max.x.min(outer.max.x)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut x = outer.min.x;
+        for (hx0, hx1) in spans {
+            if hx0 > x {
+                out.push(Rect::from_min_max(Pos2::new(x, y0), Pos2::new(hx0, y1)));
+            }
+            x = x.max(hx1);
+        }
+        if outer.max.x > x {
+            out.push(Rect::from_min_max(Pos2::new(x, y0), Pos2::new(outer.max.x, y1)));
+        }
+    }
+    out
+}
+
+/// Dim the machine under an open peek, leaving the transition and its two
+/// states lit — holes in the scrim, not repaints, so the lit trio is exactly
+/// what the canvas already drew (mockup 3b: "source + target states stay
+/// lit; rest dims").
+fn rule_dim_scrim(ui: &mut Ui, canvas: Rect, state: &GraphEditorState, geoms: &[NodeGeom]) {
+    let Some(scope) = &state.rule_scope else { return };
+    let (from, to) = rule_endpoints(state, scope.owner);
+    let v = state.view;
+    let mut lit: Vec<Rect> = Vec::new();
+    for g in geoms {
+        if g.id == scope.owner || Some(g.id) == from || Some(g.id) == to {
+            let r = Rect::from_min_max(
+                Pos2::new(
+                    canvas.min.x + (g.rect.min.x - v.pan.x) * v.zoom,
+                    canvas.min.y + (g.rect.min.y - v.pan.y) * v.zoom,
+                ),
+                Pos2::new(
+                    canvas.min.x + (g.rect.max.x - v.pan.x) * v.zoom,
+                    canvas.min.y + (g.rect.max.y - v.pan.y) * v.zoom,
+                ),
+            )
+            .intersect(canvas);
+            if r.width() > 0.0 && r.height() > 0.0 {
+                lit.push(r);
+            }
+        }
+    }
+    let st = ui.style();
+    let color = Color::BLACK.with_alpha(st.palette.scrim_alpha);
+    let mut p = ui.painter();
+    for band in subtract_rects(canvas, &lit) {
+        p.rect_filled_translucent(band, Rounding::ZERO, color);
+    }
+}
+
+/// The tab's breadcrumb while a rule scope is open: `duck.animgraph ▸ rule:
+/// Idle → Locomotion · 0.20s`. The file crumb is the way back out; returns
+/// true when it was clicked.
+fn rule_breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> bool {
+    let Some(scope) = &state.rule_scope else { return false };
+    let owner = scope.owner;
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let h = st.metrics.control_height;
+    let rect = ui.allocate(Vec2::new(ui.available_size().x, h));
+    let file = state.path.rsplit('/').next().unwrap_or(&state.path).to_string();
+    let scope_text = rule_scope_label(state, owner);
+    let tag = rule_duration_tag(state, owner);
+
+    let font = st.fonts.body;
+    let (file_w, sep_w, scope_w) = {
+        let mut p = ui.painter();
+        (
+            p.measure_text(&file, font, None).x,
+            p.measure_text(" \u{25b8} ", font, None).x,
+            p.measure_text(&scope_text, font, None).x,
+        )
+    };
+    let crumb = Rect::from_min_size(
+        Pos2::new(rect.min.x + pad, rect.min.y),
+        Vec2::new(file_w, h),
+    );
+    let crumb_id = ui.alloc_id("rule_breadcrumb_file");
+    let resp = ui.interact(crumb_id, crumb);
+
+    let mut p = ui.painter();
+    p.rect_filled(rect, Rounding::ZERO, st.palette.header);
+    p.rect_filled(
+        Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - st.metrics.border), rect.max),
+        Rounding::ZERO,
+        st.palette.stroke_strong,
+    );
+    let ty = rect.center().y - font * 0.62;
+    // The file crumb reads as a link: accent on hover, text otherwise.
+    p.text(
+        Pos2::new(crumb.min.x, ty),
+        &file,
+        font,
+        if resp.hovered { st.palette.accent_active } else { st.palette.text },
+        None,
+    );
+    let mut x = crumb.max.x;
+    p.text(Pos2::new(x, ty), " \u{25b8} ", font, st.palette.text_disabled, None);
+    x += sep_w;
+    p.text(Pos2::new(x, ty), &scope_text, font, st.palette.text, None);
+    x += scope_w + pad;
+    p.text_family(
+        Pos2::new(x, rect.center().y - st.fonts.small * 0.62),
+        &format!("\u{b7} {tag}"),
+        st.fonts.small,
+        st.palette.text_disabled,
+        None,
+        FontFamily::Mono,
+    );
+    resp.clicked
+}
+
+/// What one child-canvas pass hands back to its host surface.
+struct RuleCanvasOut {
+    rect: Rect,
+    geoms: Vec<NodeGeom>,
+    /// `PageUp` fired over the child canvas — the caller climbs out.
+    ascend: bool,
+}
+
+/// One frame of the rule projection's canvas: the same `draw_and_interact`
+/// the machine runs, over the scope's child state and the rule registry —
+/// which *is* the placement gate — plus the child's own transient surfaces.
+/// Ends by draining the child's recorded edits onto the parent history.
+#[allow(clippy::too_many_arguments)]
+fn rule_canvas_pass(
+    ui: &mut Ui,
+    body: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+    own_modal: Option<Id>,
+) -> Option<RuleCanvasOut> {
+    let Some(mut scope) = state.rule_scope.take() else { return None };
+    let rreg = rule_scope_registry();
+    let owner = scope.owner;
+    let child = &mut *scope.child;
+
+    let mut view = child.view;
+    let mut annotation_menu_at: Option<Pos2> = None;
+    let mut wire_menu_at: Option<Pos2> = None;
+    let mut node_menu_at: Option<Pos2> = None;
+    let mut canvas_menu_at: Option<Pos2> = None;
+    let mut collapse_request = false;
+    let mut layout_request = false;
+    let mut cycle_error_request: Option<bool> = None;
+    let mut frame_request: Option<CanvasView> = None;
+    // Rules reference no files; nothing ever lands here.
+    let mut open_subgraph = None;
+    let (out, _) = ui.run_at(
+        body,
+        Direction::TopDown,
+        Id::ROOT.with(("rule_canvas", owner)),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            Canvas::new()
+                .size(body.size())
+                .zoom_range(zoom_min, zoom_max)
+                .drag_threshold(crusty_gui::input::drag_threshold(
+                    (ui.style().metrics.row_height / BASE_ROW_H).max(0.1),
+                ))
+                .show(ui, &mut view, |ui, cscope| {
+                    draw_and_interact(
+                        ui,
+                        cscope,
+                        child,
+                        rreg,
+                        resolver,
+                        &mut annotation_menu_at,
+                        &mut wire_menu_at,
+                        &mut node_menu_at,
+                        &mut canvas_menu_at,
+                        &mut collapse_request,
+                        &mut layout_request,
+                        &mut cycle_error_request,
+                        &mut open_subgraph,
+                        selection_outline,
+                        wire_prefs,
+                        zoom_min,
+                        zoom_max,
+                        &mut frame_request,
+                        keymap,
+                        None,
+                        own_modal,
+                    )
+                })
+        },
+    );
+    let _ = (annotation_menu_at, collapse_request, open_subgraph);
+    if let Some(v) = frame_request {
+        view = v;
+    }
+    child.view = view;
+
+    // A parameter dropped on the rule canvas places a Get outright — a rule
+    // only reads, so there is no Get/Set question to ask.
+    if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
+        if let Some(sp) = ui.ctx().input.pointer_pos {
+            let v = child.view;
+            let world = [
+                v.pan.x + (sp.x - out.rect.min.x) / v.zoom,
+                v.pan.y + (sp.y - out.rect.min.y) / v.zoom,
+            ];
+            let id = child.add_variable_node(&p.slug, false, world, rreg);
+            child.select_only(id);
+        }
+    }
+
+    palette_popover(ui, child, rreg, &[]);
+    find_overlay(ui, out.rect, child, &out.inner, zoom_min, zoom_max, rreg);
+    wire_menu(ui, child, rreg, wire_menu_at);
+    node_menu(ui, child, rreg, keymap, &out.inner, node_menu_at);
+    if let Some((world, screen)) =
+        canvas_menu(ui, child, rreg, keymap, &out.inner, clipboard, canvas_menu_at)
+    {
+        open_palette(child, world, screen, None);
+    }
+    purge_confirm(ui, out.rect, child, rreg);
+    var_confirm_dialog(ui, out.rect, child, rreg);
+
+    // F8 inside the scope cycles the rule's own anchored errors.
+    if let Some(forward) = cycle_error_request {
+        let errors = ErrorIndex::build(&child.errors, &child.ref_errors, &child.domain_errors);
+        if !forward {
+            let n = errors
+                .ordered
+                .iter()
+                .filter(|e| e.anchor() != ErrorAnchor::Document)
+                .count();
+            if n > 0 {
+                child.error_cursor = (child.error_cursor + n.saturating_sub(2)) % n;
+            }
+        }
+        let mut req = None;
+        cycle_error(
+            child,
+            &errors,
+            &out.inner,
+            out.rect.size(),
+            zoom_min,
+            zoom_max,
+            &mut req,
+            rreg,
+        );
+        if let Some(v) = req {
+            child.view = v;
+        }
+    }
+    if layout_request {
+        let rects = all_rects(&out.inner);
+        let sp = layout_spacing(&ui.style());
+        child.auto_layout(&rects, sp, rreg);
+    }
+    draw_toasts(ui, out.rect, child);
+
+    // PageUp over the child canvas climbs out — the child cannot reach the
+    // parent, so the ascend is answered here for the caller to take.
+    let ascend = out.hovered
+        && !overlay_has_focus_excl(ui, child, own_modal)
+        && keymap
+            .dispatch(&ui.ctx().input, Context::Canvas)
+            .contains(&Action::PARENT_GRAPH);
+
+    state.rule_scope = Some(scope);
+    state.drain_rule_scope(registry);
+    Some(RuleCanvasOut { rect: out.rect, geoms: out.inner, ascend })
+}
+
+/// The peek overlay (mockup 3b): a modal panel over the dimmed machine —
+/// header ("RULE · IDLE → LOCOMOTION", duration tag, ⤢ promote, ✕ close),
+/// body a fully editable rule canvas. Esc, an outside press or a wheel
+/// outside dismiss it, per the modal stack's standing rules.
+#[allow(clippy::too_many_arguments)]
+fn rule_peek_overlay(
+    ui: &mut Ui,
+    canvas: Rect,
+    geoms: &[NodeGeom],
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+) {
+    let Some(scope) = &state.rule_scope else { return };
+    if scope.full {
+        return;
+    }
+    let owner = scope.owner;
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let panel = rule_peek_rect(ui, canvas, state, geoms);
+    let header_h = st.metrics.control_height + pad * 0.5;
+    ui.ctx_mut().modal_push(rule_peek_modal_id(), panel);
+
+    // Header controls: measured right-to-left, interacted before painting so
+    // hover states land in the same frame.
+    let font = st.fonts.small;
+    let close_text = "\u{2715} esc";
+    let promote_text = "\u{2922} tab";
+    let (close_w, promote_w) = {
+        let mut p = ui.painter();
+        (
+            p.measure_text(close_text, font, None).x,
+            p.measure_text(promote_text, font, None).x,
+        )
+    };
+    let cy = panel.min.y + header_h * 0.5;
+    let close_r = Rect::from_center_size(
+        Pos2::new(panel.max.x - pad - close_w * 0.5, cy),
+        Vec2::new(close_w + pad * 0.5, header_h * 0.8),
+    );
+    let promote_r = Rect::from_center_size(
+        Pos2::new(close_r.min.x - pad - promote_w * 0.5, cy),
+        Vec2::new(promote_w + pad * 0.5, header_h * 0.8),
+    );
+    let close_id = ui.alloc_id("rule_peek_close");
+    let promote_id = ui.alloc_id("rule_peek_promote");
+    let close_resp = ui.interact(close_id, close_r);
+    let promote_resp = ui.interact(promote_id, promote_r);
+
+    {
+        let (from, to) = rule_endpoints(state, owner);
+        let title = format!(
+            "RULE \u{b7} {} \u{2192} {}",
+            rule_state_name(state, from).to_uppercase(),
+            rule_state_name(state, to).to_uppercase()
+        );
+        let tag = rule_duration_tag(state, owner);
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_filled(
+            Rect::from_min_max(panel.min, Pos2::new(panel.max.x, panel.min.y + header_h)),
+            st.rounding.panel,
+            st.palette.header,
+        );
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+        p.text_family(
+            Pos2::new(panel.min.x + pad, cy - font * 0.62),
+            &title,
+            font,
+            st.palette.text,
+            None,
+            FontFamily::Mono,
+        );
+        let title_w = p.measure_text(&title, font, None).x;
+        p.text_family(
+            Pos2::new(panel.min.x + pad * 2.0 + title_w, cy - font * 0.62),
+            &format!("\u{b7} {tag}"),
+            font,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+        for (r, text, resp) in [
+            (close_r, close_text, &close_resp),
+            (promote_r, promote_text, &promote_resp),
+        ] {
+            if resp.hovered {
+                p.rect_filled(r, st.rounding.small, st.palette.selection_fill);
+            }
+            p.text_family(
+                Pos2::new(r.min.x + pad * 0.25, cy - font * 0.62),
+                text,
+                font,
+                if resp.hovered { st.palette.text } else { st.palette.text_disabled },
+                None,
+                FontFamily::Mono,
+            );
+        }
+    }
+
+    let body = Rect::from_min_max(
+        Pos2::new(panel.min.x + 1.0, panel.min.y + header_h),
+        Pos2::new(panel.max.x - 1.0, panel.max.y - 1.0),
+    );
+    let pass = rule_canvas_pass(
+        ui,
+        body,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        wire_prefs,
+        zoom_min,
+        zoom_max,
+        Some(rule_peek_modal_id()),
+    );
+
+    // Dismissal: the modal stack's standing rules (Esc, press/wheel outside),
+    // the ✕, or PageUp over the canvas.
+    if ui.ctx().modal_dismissed(rule_peek_modal_id()).is_some()
+        || close_resp.clicked
+        || pass.as_ref().is_some_and(|p| p.ascend)
+    {
+        state.close_rule_scope(registry);
+        ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
+        return;
+    }
+    if promote_resp.clicked {
+        if let Some(s) = state.rule_scope.as_mut() {
+            s.full = true;
+        }
+        ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
+    }
+}
+
+/// The promoted scope (⤢): the rule takes the machine's whole canvas area,
+/// with the variables strip rebound to the projection — a Get dragged from it
+/// lands in the rule. Esc or the breadcrumb's file crumb climbs out.
+#[allow(clippy::too_many_arguments)]
+fn rule_scope_full(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+) {
+    let strip = {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        let open = state.rule_scope.as_ref().is_some_and(|sc| sc.child.vars.open);
+        let w = if open { VARS_W * s } else { VARS_RAIL_W * s };
+        let c = ui.cursor();
+        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y));
+        ui.set_cursor(Pos2::new(c.x + w, c.y));
+        r
+    };
+    let body = Rect::from_min_max(ui.cursor(), ui.available().max);
+    // Whether Escape already had a job this frame — a gesture to abort, a
+    // popup to pop — decided before the pass runs, because the pass consumes
+    // exactly those.
+    let esc_busy = state.rule_scope.as_ref().is_some_and(|sc| {
+        sc.child.interaction_in_flight() || overlay_has_focus_excl(ui, &sc.child, None)
+    });
+    let pass = rule_canvas_pass(
+        ui,
+        body,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        wire_prefs,
+        zoom_min,
+        zoom_max,
+        None,
+    );
+
+    if let Some(mut scope) = state.rule_scope.take() {
+        let mut locate = None;
+        variables_panel(ui, strip, &mut scope.child, rule_scope_registry(), &mut locate);
+        if let (Some(id), Some(pass)) = (locate, &pass) {
+            scope.child.select_only(id);
+            scope.child.flash = Some((id, std::time::Instant::now()));
+            if let Some((mn, mx)) = geoms_bbox(pass.geoms.iter().filter(|g| g.id == id)) {
+                let v = frame_view(mn, mx, pass.rect.size(), zoom_min, zoom_max);
+                scope.child.view = CanvasView { pan: v.pan, zoom: scope.child.view.zoom };
+            }
+        }
+        state.rule_scope = Some(scope);
+        state.drain_rule_scope(registry);
+    }
+
+    if pass.is_some_and(|p| p.ascend)
+        || (ui.ctx().input.key_pressed(Key::Escape) && !esc_busy)
+    {
+        state.close_rule_scope(registry);
+    }
+}
+
 /// World rects of the selected nodes, for align & distribute — node sizes are
 /// auto-fitted at draw time, so only the geometry pass knows them.
 fn selected_rects(state: &GraphEditorState, geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
@@ -3866,6 +4598,7 @@ fn find_overlay(
     geoms: &[NodeGeom],
     zoom_min: f32,
     zoom_max: f32,
+    registry: &NodeRegistry,
 ) {
     let Some(find) = state.find.clone() else {
         return;
@@ -3921,11 +4654,20 @@ fn find_overlay(
         .filter(|g| find.matches(&g.title, &g.title))
         .map(|g| g.id)
         .collect();
+    // Nodes inside embedded rules count too (ticket 05, spec story 22):
+    // a search must never silently skip a rule. They cycle after the
+    // canvas's own hits; landing on one opens the peek.
+    let rule_hits: Vec<(u64, u64)> = if state.domain.is_animation() {
+        region_find_matches(&state.doc, &find)
+    } else {
+        Vec::new()
+    };
+    let total = matches.len() + rule_hits.len();
     // Mono count, the same convention the palette footer uses.
     if find.active() {
         ui.painter().text_family(
             Pos2::new(panel.max.x - pad * 4.0, panel.center().y - st.fonts.small * 0.62),
-            &format!("{}", matches.len()),
+            &format!("{total}"),
             st.fonts.small,
             st.palette.text_disabled,
             None,
@@ -3934,15 +4676,24 @@ fn find_overlay(
     }
 
     let mut cursor = find.cursor;
-    if submitted && !matches.is_empty() {
-        let id = matches[cursor % matches.len()];
-        cursor = (cursor + 1) % matches.len();
-        state.select_only(id);
-        if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == id)) {
-            // Pan only, like error cycling — a find should not also rescale
-            // the canvas out from under the reader.
-            let v = frame_view(mn, mx, rect.size(), zoom_min, zoom_max);
-            state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+    if submitted && total > 0 {
+        let i = cursor % total;
+        cursor = (cursor + 1) % total;
+        let frame_on = |state: &mut GraphEditorState, id: u64| {
+            if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == id)) {
+                // Pan only, like error cycling — a find should not also
+                // rescale the canvas out from under the reader.
+                let v = frame_view(mn, mx, rect.size(), zoom_min, zoom_max);
+                state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+            }
+        };
+        if let Some(&id) = matches.get(i) {
+            state.select_only(id);
+            frame_on(state, id);
+        } else {
+            let (owner, inner) = rule_hits[i - matches.len()];
+            frame_on(state, owner);
+            state.open_rule_scope_at(owner, inner, registry);
         }
     }
     if let Some(fs) = state.find.as_mut() {
@@ -5416,7 +6167,9 @@ fn var_types(domain: GraphDomain) -> &'static [(&'static str, PinType)] {
                 ]
             })
         }
-        GraphDomain::Animation => {
+        // The rule canvas declares against the same parameter contract as
+        // the machine — a parameter added mid-rule is a machine parameter.
+        GraphDomain::Animation | GraphDomain::AnimationRule { .. } => {
             static TYPES: OnceLock<Vec<(&'static str, PinType)>> = OnceLock::new();
             TYPES.get_or_init(|| {
                 vec![
@@ -6581,7 +7334,7 @@ fn footer_inspector(
         );
     } else if PropValue::zero_of(&decl.ty).is_none() {
         // No literal form: the chip says why, instead of a broken "—".
-        let text = if state.domain.is_animation() {
+        let text = if state.domain.is_animation_family() {
             "fired by gameplay"
         } else {
             "bound at runtime"
@@ -10263,6 +11016,7 @@ fn error_chip(
     frame_request: &mut Option<CanvasView>,
     open_subgraph: &mut Option<String>,
     keymap: &Keymap,
+    registry: &NodeRegistry,
 ) {
     if errors.is_empty() {
         state.error_popover = false;
@@ -10312,7 +11066,7 @@ fn error_chip(
         ui.tooltip_for(chip, &tip);
     }
     if resp.clicked {
-        cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request);
+        cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request, registry);
     }
 
     // Doc-level errors have no canvas anchor, so they get compiler rows.
@@ -10414,6 +11168,7 @@ fn cycle_error(
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
+    registry: &NodeRegistry,
 ) {
     if errors.ordered.is_empty() {
         return;
@@ -10448,6 +11203,14 @@ fn cycle_error(
     if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == node)) {
         *frame_request = Some(frame_view(mn, mx, viewport, zoom_min, zoom_max));
     }
+    // A refusal naming a node *inside* the transition's rule descends
+    // (ticket 05): the peek opens on the transition with the culprit
+    // selected and flashing, so F8 never strands the eye at the chip.
+    if let IndexedError::Domain(e) = anchored[i] {
+        if let (Some(owner), Some(inner)) = (e.node, e.region_node) {
+            state.open_rule_scope_at(owner, inner, registry);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -10466,6 +11229,32 @@ mod tests {
             tint: None,
             title: None,
         }
+    }
+
+    /// Ticket 05: the peek's scrim is `canvas − lit nodes` as bands. The
+    /// bands must tile exactly — full coverage minus the holes, no overlap —
+    /// or the dim reads blotchy over the machine.
+    #[test]
+    fn scrim_bands_tile_the_complement_of_the_lit_rects() {
+        let outer = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 100.0));
+        let holes = [
+            Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(30.0, 30.0)),
+            Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(50.0, 40.0)), // overlaps
+            Rect::from_min_max(Pos2::new(90.0, 95.0), Pos2::new(120.0, 130.0)), // clipped
+        ];
+        let bands = subtract_rects(outer, &holes);
+        // Sampled coverage: a point is under exactly one band iff it is in
+        // the outer rect and in no hole.
+        for xi in 0..40 {
+            for yi in 0..40 {
+                let p = Pos2::new(xi as f32 * 2.5 + 1.2, yi as f32 * 2.5 + 1.2);
+                let in_hole = holes.iter().any(|h| h.contains(p));
+                let covered = bands.iter().filter(|b| b.contains(p)).count();
+                assert_eq!(covered, usize::from(!in_hole), "at {p:?}");
+            }
+        }
+        // No holes: one band, the whole canvas.
+        assert_eq!(subtract_rects(outer, &[]), vec![outer]);
     }
 
     /// 45-A P7. A reroute is transparent at run time, so the interpreter
