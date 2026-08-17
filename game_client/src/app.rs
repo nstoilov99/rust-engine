@@ -188,6 +188,9 @@ pub struct SceneEditorState {
     pub registry: SceneRegistry,
     /// Model import dialog state (shown when model files are dropped).
     pub import_dialog: Option<ImportDialogState>,
+    /// Anim event marker list for a `.anim` asset (Task 41; opened by
+    /// double-clicking the asset).
+    pub anim_events_dialog: Option<rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog>,
     /// Open mesh editors keyed by content-relative mesh path.
     pub mesh_editors:
         std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
@@ -803,6 +806,7 @@ impl App {
                 active_dirty: false,
                 registry: SceneRegistry::new(SceneId(0)),
                 import_dialog: None,
+                anim_events_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
                 graph_editors: std::collections::HashMap::new(),
                 curve_editors: std::collections::HashMap::new(),
@@ -2897,6 +2901,24 @@ impl App {
                             self.open_curve_document(relative);
                             #[cfg(not(feature = "editor"))]
                             let _ = relative;
+                        } else if asset_type == AssetType::Animation {
+                            // Anim event markers, as a minimal list (Task 41).
+                            use rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog;
+                            let abs = self
+                                .editor
+                                .scene
+                                .asset_browser
+                                .registry
+                                .root_path()
+                                .join(&meta_path);
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            match AnimEventsDialog::load(abs, relative) {
+                                Ok(dlg) => self.editor.scene.anim_events_dialog = Some(dlg),
+                                Err(e) => self.editor.console.messages.push(LogMessage::error(
+                                    format!("Cannot open anim events: {e}"),
+                                )),
+                            }
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
                             self.open_input_action_as_tab(full_path);
@@ -3478,6 +3500,8 @@ impl App {
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
         let mut crusty_dialog_actions = Vec::new();
         let mut crusty_import_action = ImportDialogAction::None;
+        let mut anim_events_action =
+            rust_engine::engine::editor::anim_events_dialog::AnimEventsAction::None;
         // Subgraph node double-clicked in a docked graph this frame (P6);
         // declared out here so it outlives the layout block and can be applied
         // once the panel borrows are released.
@@ -3837,6 +3861,7 @@ impl App {
             let command_palette = &mut self.editor.services.command_palette;
             let command_registry = &self.editor.services.command_registry;
             let import_dialog = &mut self.editor.scene.import_dialog;
+            let anim_events_dialog = &mut self.editor.scene.anim_events_dialog;
             let save_as_dialog = &mut self.editor.scene.save_as_dialog;
             let mut save_as_cancel = false;
             let mut crusty_menu_action = MenuAction::None;
@@ -4197,6 +4222,10 @@ impl App {
                 if let Some(state) = import_dialog.as_mut() {
                     crusty_import_action = dialogs_crusty::import_dialog_panel(ui, state);
                 }
+                if let Some(dlg) = anim_events_dialog.as_mut() {
+                    use rust_engine::engine::editor::anim_events_dialog;
+                    anim_events_action = anim_events_dialog::anim_events_dialog_panel(ui, dlg);
+                }
                 if let Some(dlg) = save_as_dialog.as_mut() {
                     save_as_cancel = dialogs_crusty::save_as_dialog_panel(ui, dlg);
                 }
@@ -4267,6 +4296,7 @@ impl App {
         }
 
         self.handle_import_dialog_action(crusty_import_action);
+        self.handle_anim_events_action(anim_events_action);
         for action in crusty_dialog_actions {
             self.handle_editor_action(action);
         }
@@ -6540,6 +6570,49 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply the anim events dialog's result: Save rewrites the `.anim` and
+    /// invalidates the clip + plan caches, so running graph machines re-arm
+    /// against the edited markers on their next tick.
+    fn handle_anim_events_action(
+        &mut self,
+        action: rust_engine::engine::editor::anim_events_dialog::AnimEventsAction,
+    ) {
+        use rust_engine::engine::animation::graph::{AnimClipCache, AnimGraphPlanCache};
+        use rust_engine::engine::editor::anim_events_dialog::AnimEventsAction;
+        match action {
+            AnimEventsAction::None => {}
+            AnimEventsAction::Cancel => {
+                self.editor.scene.anim_events_dialog = None;
+            }
+            AnimEventsAction::Save => {
+                let Some(mut dlg) = self.editor.scene.anim_events_dialog.take() else {
+                    return;
+                };
+                match dlg.save() {
+                    Ok(()) => {
+                        let resources = self.core.game_world.resources_mut();
+                        if let Some(clips) = resources.get_mut::<AnimClipCache>() {
+                            clips.invalidate(&dlg.relative);
+                        }
+                        if let Some(plans) = resources.get_mut::<AnimGraphPlanCache>() {
+                            plans.invalidate(&dlg.relative);
+                        }
+                        self.editor.console.messages.push(LogMessage::info(format!(
+                            "Anim events saved: {}",
+                            dlg.relative
+                        )));
+                    }
+                    Err(e) => {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::error(format!("Anim events save failed: {e}")));
                     }
                 }
             }

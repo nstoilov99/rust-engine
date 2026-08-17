@@ -33,10 +33,13 @@ pub mod runner;
 #[cfg(test)]
 mod acceptance;
 
-pub use machine::{evaluate_pose, AnimMachine, AnimParams, Crossfade, ParamValue, PoseScratch};
+pub use machine::{
+    collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, Crossfade,
+    ParamValue, PlayOnceSlot, PoseScratch,
+};
 pub use plan::{
     compile_anim_graph, trigger_pin_type, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl,
-    PlanClip, PlanRule, PlanState, PlanTransition, PlanTree, RuleExpr, TransitionFrom,
+    PlanClip, PlanRule, PlanSlot, PlanState, PlanTransition, PlanTree, RuleExpr, TransitionFrom,
     TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{

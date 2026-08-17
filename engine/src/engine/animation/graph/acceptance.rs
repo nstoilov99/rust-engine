@@ -21,12 +21,18 @@ use node_graph_types::{
 
 use crate::engine::animation::components::{LocalBoneTransform, SkeletonInstance};
 use crate::engine::animation::{AnimationPlayer, AnimationUpdateSystem};
-use crate::engine::assets::model_loader::{AnimationChannel, BoneData, RawAnimationClip};
+use crate::engine::assets::model_loader::{
+    AnimEventMarker, AnimationChannel, BoneData, RawAnimationClip,
+};
 use crate::engine::ecs::components::MeshRenderer;
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 
-use super::machine::{evaluate_pose, AnimMachine, AnimParams, PoseScratch};
+use super::machine::{
+    collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
+    PoseScratch,
+};
+use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
@@ -155,6 +161,7 @@ fn constant_clip(name: &str, x: f32) -> RawAnimationClip {
             rotation_keys: vec![],
             scale_keys: vec![],
         }],
+        events: vec![],
     }
 }
 
@@ -288,6 +295,7 @@ fn phase_clip(name: &str, duration: f32) -> RawAnimationClip {
             rotation_keys: vec![],
             scale_keys: vec![],
         }],
+        events: vec![],
     }
 }
 
@@ -1435,9 +1443,17 @@ impl AnimAssetLoader for MapAssets {
             "anims/run.anim" => ("Run", 20.0),
             _ => return None,
         };
+        let mut clip = constant_clip(name, x);
+        if name == "Idle" {
+            // One marker for the system-level event test.
+            clip.events.push(AnimEventMarker {
+                time_seconds: 0.05,
+                name: "step".into(),
+            });
+        }
         Some(ClipSet {
             bone_names: vec!["root".into(), "child".into()],
-            clips: vec![constant_clip(name, x)],
+            clips: vec![clip],
         })
     }
 
@@ -1660,5 +1676,585 @@ fn a_missing_clip_refuses_to_arm_with_a_reason() {
     let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
     let why = rt.disabled.as_deref().expect("refused");
     assert!(why.contains("Walk") && why.contains("missing.anim"), "{why}");
+}
+
+// ---------------------------------------------------------------------------
+// Play-once slot and anim events (ticket 07)
+// ---------------------------------------------------------------------------
+
+/// [`constant_clip`] with a chosen duration and anim event markers.
+fn marked_clip(name: &str, x: f32, duration: f32, marks: &[(f32, &str)]) -> RawAnimationClip {
+    let mut clip = constant_clip(name, x);
+    clip.duration_seconds = duration;
+    clip.events = marks
+        .iter()
+        .map(|(t, n)| AnimEventMarker {
+            time_seconds: *t,
+            name: n.to_string(),
+        })
+        .collect();
+    clip
+}
+
+/// `two_state_doc` plus the Trigger `attack` and a play-once slot node
+/// playing `anims/attack.anim` on it.
+fn slot_doc() -> GraphDoc {
+    let mut doc = two_state_doc();
+    doc.variables.push(trigger_decl("attack"));
+    doc.nodes.push(with(
+        9,
+        plan::ANIM_PLAY_ONCE_TYPE_ID,
+        Some("Attack"),
+        &[
+            (plan::CLIP_PROP, PropValue::Asset("anims/attack.anim".into())),
+            (plan::SLOT_TRIGGER_PROP, PropValue::Str("attack".into())),
+        ],
+    ));
+    doc
+}
+
+/// One frame at the evaluator seam, in the runner's exact order: machine tick
+/// → slot tick → event collection → pose evaluation → play-once overlay.
+#[allow(clippy::too_many_arguments)]
+fn tick_frame<'a, F>(
+    plan: &AnimGraphPlan,
+    m: &mut AnimMachine,
+    slot: &mut PlayOnceSlot,
+    params: &mut AnimParams,
+    clip_for: &F,
+    dt: f32,
+    pose: &mut [LocalBoneTransform],
+    scratch: &mut PoseScratch,
+    events: &mut Vec<AnimEventFire>,
+) where
+    F: Fn(&plan::PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    m.tick(plan, params, dt);
+    slot.tick(plan, params, dt, clip_for);
+    collect_anim_events(m, slot, plan, params, clip_for, events);
+    evaluate_pose(m, plan, params, clip_for, pose, scratch);
+    slot.apply(plan, clip_for, pose, scratch);
+}
+
+fn count(events: &[AnimEventFire], name: &str) -> usize {
+    events.iter().filter(|e| e.name == name).count()
+}
+
+#[test]
+fn a_play_once_slot_compiles_and_round_trips() {
+    let doc = slot_doc();
+    let compiled = compile_anim_graph(&doc).expect("compiles");
+    assert_eq!(compiled.slots.len(), 1);
+    let s = &compiled.slots[0];
+    assert_eq!(s.name, "Attack");
+    assert_eq!(s.clip.clip, "anims/attack.anim");
+    assert_eq!(s.trigger, "attack");
+    assert_eq!((s.speed, s.fade_in, s.fade_out), (1.0, 0.0, 0.0));
+    assert_eq!(
+        compiled.clip_refs(),
+        vec!["anims/attack.anim", "anims/idle.anim", "anims/walk.anim"],
+        "slot clips prefetch with the rest"
+    );
+    // The slot node round-trips through the shared container io.
+    let back = parse_graph(&serialize_graph(&doc).unwrap()).unwrap();
+    assert_eq!(compile_anim_graph(&back).expect("compiles"), compiled);
+}
+
+#[test]
+fn play_once_compile_refusals_are_author_errors() {
+    // No clip.
+    let mut doc = slot_doc();
+    doc.node_mut(9).unwrap().properties.remove(plan::CLIP_PROP);
+    let err = compile_anim_graph(&doc).unwrap_err();
+    assert!(err.contains("Attack") && err.contains("names no clip"), "{err}");
+
+    // No trigger.
+    let mut doc = slot_doc();
+    doc.node_mut(9).unwrap().properties.remove(plan::SLOT_TRIGGER_PROP);
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("names no trigger"));
+
+    // An undeclared trigger.
+    let mut doc = slot_doc();
+    doc.variables.retain(|v| v.slug != "attack");
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("not declared"));
+
+    // A declared parameter that is not a Trigger.
+    let mut doc = slot_doc();
+    doc.node_mut(9)
+        .unwrap()
+        .properties
+        .insert(plan::SLOT_TRIGGER_PROP.into(), PropValue::Str("walk".into()));
+    assert!(compile_anim_graph(&doc).unwrap_err().contains("not a Trigger"));
+}
+
+#[test]
+fn play_once_overlays_the_base_and_returns_when_the_clip_finishes() {
+    let plan = compile_anim_graph(&slot_doc()).expect("compiles");
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 5.0)),
+        ("anims/attack.anim", marked_clip("Attack", 10.0, 0.3, &[])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.1, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    // Base result before any request: Idle.
+    frame!();
+    assert_eq!(pose[0].translation.x, 0.0);
+    assert!(slot.playing().is_none());
+
+    // Gameplay fires the Trigger — parameters in, never the slot directly.
+    assert!(params.fire_trigger("attack"));
+    frame!();
+    assert_eq!(slot.playing(), Some(0));
+    assert_eq!(
+        params.trigger_set("attack"),
+        Some(false),
+        "consume-on-start, like consume-on-transition"
+    );
+    assert_eq!(slot.weight(&plan), 1.0, "no fades: full override");
+    assert_eq!(pose[0].translation.x, 10.0, "the overlay replaces the base");
+
+    // Mid-clip: still the overlay.
+    frame!();
+    frame!();
+    assert_eq!(pose[0].translation.x, 10.0);
+
+    // The clock passes the clip end (0.3s): the base result returns, and the
+    // machine underneath never noticed — same state, clock kept running.
+    frame!();
+    assert_eq!(slot.weight(&plan), 0.0, "finished: the overlay contributes nothing");
+    assert_eq!(pose[0].translation.x, 0.0, "back to the base result");
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+
+    // The playback retires shortly after (bookkeeping, not visible).
+    frame!();
+    frame!();
+    assert!(slot.playing().is_none(), "the channel is free again");
+
+    // And a fresh fire plays it again from the top.
+    params.fire_trigger("attack");
+    frame!();
+    assert_eq!(slot.playing(), Some(0));
+    assert_eq!(pose[0].translation.x, 10.0);
+}
+
+#[test]
+fn slot_fades_ramp_the_overlay_weight() {
+    let mut doc = slot_doc();
+    doc.node_mut(9).unwrap().properties.extend([
+        (plan::SLOT_FADE_IN_PROP.to_string(), PropValue::Float(0.2)),
+        (plan::SLOT_FADE_OUT_PROP.to_string(), PropValue::Float(0.2)),
+    ]);
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 5.0)),
+        ("anims/attack.anim", marked_clip("Attack", 10.0, 1.0, &[])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.1, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    params.fire_trigger("attack");
+    // Start tick: t = 0.0 → weight 0 (the overlay blends in from zero, the
+    // same posture a crossfade target has).
+    frame!();
+    assert_eq!(slot.weight(&plan), 0.0);
+    assert_eq!(pose[0].translation.x, 0.0);
+    // t = 0.1 → halfway up the 0.2s fade-in.
+    frame!();
+    assert!((slot.weight(&plan) - 0.5).abs() < 1e-4);
+    assert!((pose[0].translation.x - 5.0).abs() < 1e-4);
+    // t = 0.5 → plateau.
+    for _ in 0..4 {
+        frame!();
+    }
+    assert_eq!(slot.weight(&plan), 1.0);
+    // t = 0.9 → halfway down the 0.2s fade-out ((1.0 − 0.9) / 0.2).
+    for _ in 0..4 {
+        frame!();
+    }
+    assert!((slot.weight(&plan) - 0.5).abs() < 1e-4);
+    assert!((pose[0].translation.x - 5.0).abs() < 1e-4);
+}
+
+#[test]
+fn the_channel_is_single_a_later_start_replaces_and_buffered_triggers_wait() {
+    // A second slot on its own trigger. Node 10 sorts after node 9, so with
+    // both triggers set the same tick, slot 9 takes the channel first.
+    let mut doc = slot_doc();
+    doc.variables.push(trigger_decl("hurt"));
+    doc.nodes.push(with(
+        10,
+        plan::ANIM_PLAY_ONCE_TYPE_ID,
+        Some("Hurt"),
+        &[
+            (plan::CLIP_PROP, PropValue::Asset("anims/hurt.anim".into())),
+            (plan::SLOT_TRIGGER_PROP, PropValue::Str("hurt".into())),
+        ],
+    ));
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 5.0)),
+        ("anims/attack.anim", marked_clip("Attack", 10.0, 1.0, &[])),
+        ("anims/hurt.anim", marked_clip("Hurt", 20.0, 1.0, &[])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.1, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    params.fire_trigger("attack");
+    params.fire_trigger("hurt");
+    frame!();
+    assert_eq!(slot.playing(), Some(0), "plan order takes the channel");
+    assert_eq!(params.trigger_set("attack"), Some(false), "consumed by the start");
+    assert_eq!(
+        params.trigger_set("hurt"),
+        Some(true),
+        "one start per tick — the loser stays buffered, never lost"
+    );
+
+    // Next tick the buffered trigger takes the channel, replacing: one
+    // override channel is the v1 contract.
+    frame!();
+    assert_eq!(slot.playing(), Some(1));
+    assert_eq!(params.trigger_set("hurt"), Some(false));
+    assert_eq!(pose[0].translation.x, 20.0, "the replacement plays from its top");
+}
+
+// ---------------------------------------------------------------------------
+// Anim events: crossings, cycles, blend-weight suppression
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anim_events_fire_once_per_crossing_and_refire_each_cycle() {
+    // Idle loops a 1.0s clip with markers at 0.0 and 0.5. Ticking 0.2s at a
+    // time for 1.8s crosses each marker exactly twice (at 0.0/1.0 and
+    // 0.5/1.5) — and each individual tick fires a marker at most once.
+    let plan = compile_anim_graph(&two_state_doc()).expect("compiles");
+    let clips = [
+        (
+            "anims/idle.anim",
+            marked_clip("Idle", 0.0, 1.0, &[(0.0, "loop"), (0.5, "mid")]),
+        ),
+        ("anims/walk.anim", constant_clip("Walk", 5.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+
+    let (mut loops, mut mids) = (0, 0);
+    for _ in 0..9 {
+        tick_frame(
+            &plan, &mut m, &mut slot, &mut params, &clip_for, 0.2, &mut pose, &mut scratch,
+            &mut events,
+        );
+        assert!(count(&events, "loop") <= 1 && count(&events, "mid") <= 1);
+        loops += count(&events, "loop");
+        mids += count(&events, "mid");
+        assert!(events.iter().all(|e| e.weight == 1.0), "at rest, full weight");
+    }
+    assert_eq!((loops, mids), (2, 2), "one fire per crossing, refired per cycle");
+
+    // A held clock (speed 0 would do the same) crosses nothing.
+    tick_frame(
+        &plan, &mut m, &mut slot, &mut params, &clip_for, 0.0, &mut pose, &mut scratch,
+        &mut events,
+    );
+    assert!(events.is_empty(), "a zero-length span fires nothing");
+}
+
+#[test]
+fn no_events_fire_from_a_fully_blended_out_clip() {
+    // Walk and Run both carry a marker; the 1D blend's weight decides who may
+    // fire. Same 1.0s duration keeps the sync phase equal to either clock.
+    let plan = compile_anim_graph(&blend1d_doc()).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", marked_clip("Walk", 2.0, 1.0, &[(0.5, "wstep")])),
+        ("anims/run.anim", marked_clip("Run", 10.0, 1.0, &[(0.5, "rstep")])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut scratch = PoseScratch::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut events = Vec::new();
+
+    for (speed, wstep, rstep, w_expected) in [
+        (0.0, 1, 0, 1.0),  // pure Walk: Run is fully blended out — silent
+        (6.0, 0, 1, 1.0),  // pure Run: Walk is silent
+        (3.0, 1, 1, 0.5),  // 50/50: both fire, at their blend weight
+    ] {
+        let mut params = AnimParams::from_decls(&plan.parameters);
+        let mut m = AnimMachine::new(&plan);
+        let mut slot = PlayOnceSlot::new();
+        params.set_float("speed", speed);
+        let (mut ws, mut rs) = (0, 0);
+        for _ in 0..5 {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.2, &mut pose, &mut scratch,
+                &mut events,
+            );
+            ws += count(&events, "wstep");
+            rs += count(&events, "rstep");
+            for e in &events {
+                assert!(
+                    (e.weight - w_expected).abs() < 1e-4,
+                    "speed {speed}: weight {}",
+                    e.weight
+                );
+            }
+        }
+        assert_eq!((ws, rs), (wstep, rstep), "speed {speed}");
+    }
+}
+
+#[test]
+fn blend_child_events_follow_the_sync_group_phase() {
+    // Run (0.4s) under the walk/run blend at pure Run: the sync group drives
+    // Run at Walk's (1.0s) phase, so Run's marker at 0.2 — phase 0.5 — fires
+    // when the *state clock* crosses 0.5, not when it crosses 0.2.
+    let plan = compile_anim_graph(&blend1d_doc()).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", marked_clip("Walk", 2.0, 1.0, &[])),
+        ("anims/run.anim", marked_clip("Run", 10.0, 0.4, &[(0.2, "rstep")])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+
+    params.set_float("speed", 6.0);
+    let mut fired_at = Vec::new();
+    for _ in 0..5 {
+        tick_frame(
+            &plan, &mut m, &mut slot, &mut params, &clip_for, 0.2, &mut pose, &mut scratch,
+            &mut events,
+        );
+        if count(&events, "rstep") > 0 {
+            fired_at.push(m.time());
+        }
+    }
+    // Crossings of phase 0.5 within 1.0s of clock: the tick reaching 0.6
+    // (span [0.4, 0.6)) — not the raw-clock tick reaching 0.2.
+    assert_eq!(fired_at, vec![0.6], "phase space, not raw clip time");
+}
+
+#[test]
+fn a_crossfade_keeps_the_outgoing_state_audible_and_an_instant_switch_does_not() {
+    // Idle marker at 0.45, Walk marker at 0.25 (both 1.0s clips).
+    let make_clips = || {
+        [
+            ("anims/idle.anim", marked_clip("Idle", 0.0, 1.0, &[(0.45, "istep")])),
+            ("anims/walk.anim", marked_clip("Walk", 5.0, 1.0, &[(0.25, "wstep")])),
+        ]
+    };
+
+    // With the 0.5s crossfade: the outgoing state's clock keeps firing at its
+    // fading weight, and the target fires once its own clock reaches markers.
+    let plan = compile_anim_graph(&two_state_doc()).expect("compiles");
+    let clips = make_clips();
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.2, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    frame!(); // Idle [0.0, 0.2)
+    params.set_bool("walk", true);
+    frame!(); // the transition fires; Idle advanced [0.2, 0.4)
+    assert_eq!(plan.states[m.current_state()].name, "Walk");
+    assert!(events.is_empty());
+    frame!(); // Walk [0, 0.2), Idle [0.4, 0.6)
+    assert_eq!(count(&events, "istep"), 1, "the outgoing state still fires mid-fade");
+    let istep = events.iter().find(|e| e.name == "istep").unwrap();
+    assert!((istep.weight - 0.6).abs() < 1e-4, "at its fading weight, got {}", istep.weight);
+    frame!(); // Walk [0.2, 0.4), Idle [0.6, 0.8)
+    assert_eq!(count(&events, "wstep"), 1, "the target fires on its own clock");
+    let wstep = events.iter().find(|e| e.name == "wstep").unwrap();
+    assert!((wstep.weight - 0.8).abs() < 1e-4, "at the fade-in weight, got {}", wstep.weight);
+
+    // With an instant transition: the outgoing state's final sliver was never
+    // rendered, so it fires nothing.
+    let mut doc = two_state_doc();
+    doc.node_mut(4)
+        .unwrap()
+        .properties
+        .insert(plan::DURATION_PROP.into(), PropValue::Float(0.0));
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let clips = make_clips();
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.4, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    frame!(); // Idle [0.0, 0.4)
+    assert!(events.is_empty());
+    params.set_bool("walk", true);
+    // This tick advances Idle across its 0.45 marker *and* switches — the
+    // sliver is invisible, so nothing fires.
+    frame!();
+    assert_eq!(plan.states[m.current_state()].name, "Walk");
+    assert!(events.is_empty(), "no events from a state an instant switch discarded");
+    // Walk's own clock starts at zero and fires its marker as it reaches it.
+    frame!();
+    assert_eq!(count(&events, "wstep"), 1);
+}
+
+#[test]
+fn a_full_weight_overlay_silences_the_base_and_fires_its_own_markers_once() {
+    // Idle loops 0.2s with a step marker each cycle; the attack overlay
+    // (0.5s, no fades) carries a hit frame at 0.45.
+    let mut doc = slot_doc();
+    doc.node_mut(2)
+        .unwrap()
+        .properties
+        .insert(plan::CLIP_PROP.into(), PropValue::Asset("anims/tap.anim".into()));
+    let plan = compile_anim_graph(&doc).expect("compiles");
+    let clips = [
+        ("anims/tap.anim", marked_clip("Tap", 0.0, 0.2, &[(0.05, "istep")])),
+        ("anims/walk.anim", constant_clip("Walk", 5.0)),
+        ("anims/attack.anim", marked_clip("Attack", 10.0, 0.5, &[(0.45, "hit")])),
+    ];
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(&plan);
+    let mut slot = PlayOnceSlot::new();
+    let mut pose = vec![LocalBoneTransform::default(); 1];
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    macro_rules! frame {
+        () => {
+            tick_frame(
+                &plan, &mut m, &mut slot, &mut params, &clip_for, 0.2, &mut pose, &mut scratch,
+                &mut events,
+            )
+        };
+    }
+
+    // Base steps while nothing overlays.
+    frame!();
+    assert_eq!(count(&events, "istep"), 1);
+
+    // Full-weight overlay: the base is invisible — and silent.
+    params.fire_trigger("attack");
+    let mut hits = 0;
+    let mut base_while_overlaid = 0;
+    for _ in 0..3 {
+        frame!();
+        hits += count(&events, "hit");
+        base_while_overlaid += count(&events, "istep");
+    }
+    assert_eq!(base_while_overlaid, 0, "no footsteps from an invisible walk");
+    assert_eq!(hits, 0, "the hit frame is later in the clip");
+
+    // The tick that crosses the hit frame also passes the clip end: the hit
+    // fires (at the envelope of its own moment), and the base is back.
+    frame!();
+    assert_eq!(count(&events, "hit"), 1, "the overlay's marker fires exactly once");
+    assert_eq!(count(&events, "istep"), 1, "the base is audible again");
+    assert_eq!(pose[0].translation.x, 0.0, "and visible again");
+
+    // No refires from a finished one-shot.
+    for _ in 0..3 {
+        frame!();
+        assert_eq!(count(&events, "hit"), 0);
+    }
+}
+
+#[test]
+fn the_system_surfaces_events_on_the_runtime() {
+    // The idle clip carries a marker at 0.05; the harness ticks 0.1s frames.
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), two_state_doc());
+    let mut h = Harness::new(assets);
+
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arms and runs the first frame: span [0.0, 0.1) crosses 0.05
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert_eq!(
+            rt.events,
+            vec![AnimEventFire {
+                name: "step".into(),
+                weight: 1.0
+            }],
+            "the fire is readable by gameplay systems after this one"
+        );
+    }
+    h.tick(); // span [0.1, 0.2): no crossing
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+        assert!(rt.events.is_empty(), "one frame's worth, never accumulated");
+    }
 }
 

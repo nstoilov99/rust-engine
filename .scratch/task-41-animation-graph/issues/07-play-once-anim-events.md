@@ -4,9 +4,9 @@
 
 **Blocked by:** 01 — Tracer: a two-state machine animates an entity.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A play-once request overlays the base Pose and returns to the base result when the clip finishes, verified at the evaluator seam
-- [ ] Anim events fire exactly once per crossing; a looping clip refires on each cycle's crossing
-- [ ] No events fire from a clip whose blend weight is fully blended out
-- [ ] Markers are viewable and editable as a minimal list on the clip asset
+- [x] A play-once request overlays the base Pose and returns to the base result when the clip finishes, verified at the evaluator seam
+- [x] Anim events fire exactly once per crossing; a looping clip refires on each cycle's crossing
+- [x] No events fire from a clip whose blend weight is fully blended out
+- [x] Markers are viewable and editable as a minimal list on the clip asset

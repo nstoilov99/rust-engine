@@ -119,6 +119,21 @@ pub const SPEED_PROP: &str = "speed";
 pub const DURATION_PROP: &str = "duration";
 pub const PRIORITY_PROP: &str = "priority";
 
+/// A play-once slot: v1's only override channel (CONTEXT.md). A standalone
+/// node on the machine canvas — no wires — that plays the clip its
+/// [`CLIP_PROP`] names over the base result when the Trigger parameter its
+/// [`SLOT_TRIGGER_PROP`] names fires, then returns to the base result when
+/// the clip finishes. Firing stays inside the parameter contract: gameplay
+/// writes the Trigger, never the slot. [`SPEED_PROP`] applies.
+pub const ANIM_PLAY_ONCE_TYPE_ID: &str = "anim_play_once";
+/// The declared Trigger parameter that starts the slot (consume-on-start,
+/// mirroring consume-on-transition).
+pub const SLOT_TRIGGER_PROP: &str = "trigger";
+/// Overlay envelope, seconds: the slot's weight ramps 0→1 over `fade_in`
+/// and 1→0 over the clip's last `fade_out` seconds. Defaults 0.0 (hard cut).
+pub const SLOT_FADE_IN_PROP: &str = "fade_in";
+pub const SLOT_FADE_OUT_PROP: &str = "fade_out";
+
 /// Trigger parameters are declared as `PinType::Domain("anim_trigger")` —
 /// the pin system's consumer-owned extension point, so the shared container
 /// needs no animation-specific variant. Inside a rule a trigger reads as a
@@ -277,6 +292,22 @@ pub struct PlanRule {
     pub triggers: Vec<String>,
 }
 
+/// A compiled play-once slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSlot {
+    pub node_id: u64,
+    /// Author-facing name (node title, falling back to `Slot <id>`).
+    pub name: String,
+    pub clip: PlanClip,
+    /// The declared Trigger parameter that starts this slot.
+    pub trigger: String,
+    /// Playback-rate multiplier on the slot's clock.
+    pub speed: f32,
+    /// Overlay-weight ramp durations in seconds (0.0 = hard cut).
+    pub fade_in: f32,
+    pub fade_out: f32,
+}
+
 /// Where a transition starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionFrom {
@@ -314,6 +345,9 @@ pub struct AnimGraphPlan {
     /// Index of the ENTRY-wired state.
     pub entry: usize,
     pub parameters: Vec<ParamDecl>,
+    /// Play-once slots, sorted by node id — when several triggers are set at
+    /// once, the first slot in this order takes the (single) channel.
+    pub slots: Vec<PlanSlot>,
 }
 
 impl AnimGraphPlan {
@@ -324,6 +358,7 @@ impl AnimGraphPlan {
             .iter()
             .flat_map(|s| s.tree.clips())
             .map(|c| c.clip.as_str())
+            .chain(self.slots.iter().map(|s| s.clip.clip.as_str()))
             .collect();
         refs.sort_unstable();
         refs.dedup();
@@ -522,11 +557,67 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
     // as the deterministic tiebreak.
     transitions.sort_by_key(|t| (t.priority, t.node_id));
 
+    // Play-once slots: a clip, a starting Trigger, an overlay envelope.
+    let mut slots: Vec<PlanSlot> = Vec::new();
+    for n in doc
+        .nodes
+        .iter()
+        .filter(|n| n.type_id == ANIM_PLAY_ONCE_TYPE_ID)
+    {
+        let name = n.title.clone().unwrap_or_else(|| format!("Slot {}", n.id));
+        let clip = str_prop(&n.properties, CLIP_PROP)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                format!("play-once slot '{name}' names no clip (property `{CLIP_PROP}`)")
+            })?;
+        let trigger = match n.properties.get(SLOT_TRIGGER_PROP) {
+            Some(PropValue::Str(s)) if !s.is_empty() => s.clone(),
+            _ => {
+                return Err(format!(
+                    "play-once slot '{name}' names no trigger (property `{SLOT_TRIGGER_PROP}`)"
+                ))
+            }
+        };
+        match parameters.iter().find(|p| p.slug == trigger) {
+            None => {
+                return Err(format!(
+                    "play-once slot '{name}': parameter '{trigger}' is not declared"
+                ))
+            }
+            Some(p) if p.ty != AnimParamType::Trigger => {
+                return Err(format!(
+                    "play-once slot '{name}': parameter '{trigger}' is not a Trigger"
+                ))
+            }
+            Some(_) => {}
+        }
+        slots.push(PlanSlot {
+            node_id: n.id,
+            name,
+            clip: PlanClip {
+                clip: crate::engine::scripting::normalize_graph_path(clip),
+                clip_name: str_prop(&n.properties, CLIP_NAME_PROP)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            },
+            trigger,
+            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
+            fade_in: float_prop(&n.properties, SLOT_FADE_IN_PROP)
+                .unwrap_or(0.0)
+                .max(0.0),
+            fade_out: float_prop(&n.properties, SLOT_FADE_OUT_PROP)
+                .unwrap_or(0.0)
+                .max(0.0),
+        });
+    }
+    slots.sort_by_key(|s| s.node_id);
+
     Ok(AnimGraphPlan {
         states,
         transitions,
         entry,
         parameters,
+        slots,
     })
 }
 

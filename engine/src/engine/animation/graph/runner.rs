@@ -21,7 +21,10 @@ use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 use crate::engine::scripting::normalize_graph_path;
 
-use super::machine::{evaluate_pose, AnimMachine, AnimParams, PoseScratch};
+use super::machine::{
+    collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
+    PoseScratch,
+};
 use super::plan::{compile_anim_graph, AnimGraphPlan, PlanClip};
 
 // ---------------------------------------------------------------------------
@@ -73,8 +76,14 @@ pub struct AnimGraphRuntime {
     pub graph: String,
     pub plan: Arc<AnimGraphPlan>,
     pub machine: AnimMachine,
+    /// The play-once override channel (started through Trigger parameters).
+    pub slot: PlayOnceSlot,
     /// Gameplay's write surface (ADR 0002): parameters in, never states.
     pub params: AnimParams,
+    /// The anim events this frame's playback crossed — refilled every tick
+    /// (one frame's worth, never accumulated). Gameplay's read surface:
+    /// systems after this one see the fires that match the pose on screen.
+    pub events: Vec<AnimEventFire>,
     /// The cache generation this was compiled at; a mismatch means the asset
     /// changed and the instance must restart.
     pub generation: u64,
@@ -277,7 +286,9 @@ impl AnimGraphSystem {
             graph: graph.to_string(),
             plan: Arc::new(AnimGraphPlan::default()),
             machine: AnimMachine::new(&AnimGraphPlan::default()),
+            slot: PlayOnceSlot::new(),
             params: AnimParams::default(),
+            events: Vec::new(),
             generation,
             disabled: Some(why),
         };
@@ -324,12 +335,22 @@ impl AnimGraphSystem {
                     }
                 }
             }
+            for slot in &plan.slots {
+                if clip_of(clips, &slot.clip).is_none() {
+                    return refused(format!(
+                        "{graph}: play-once slot '{}': clip '{}' could not be loaded",
+                        slot.name, slot.clip.clip
+                    ));
+                }
+            }
         }
 
         AnimGraphRuntime {
             graph: graph.to_string(),
             machine: AnimMachine::new(&plan),
+            slot: PlayOnceSlot::new(),
             params: AnimParams::from_decls(&plan.parameters),
+            events: Vec::new(),
             plan,
             generation,
             disabled: None,
@@ -426,15 +447,22 @@ impl System for AnimGraphSystem {
                 continue;
             }
             let plan = rt.plan.clone();
+            let clip_for = |c: &PlanClip| clip_of(clips, c);
             rt.machine.tick(&plan, &mut rt.params, dt);
+            rt.slot.tick(&plan, &mut rt.params, dt, &clip_for);
+            let mut events = std::mem::take(&mut rt.events);
+            collect_anim_events(&rt.machine, &rt.slot, &plan, &rt.params, clip_for, &mut events);
+            rt.events = events;
             evaluate_pose(
                 &rt.machine,
                 &plan,
                 &rt.params,
-                |c| clip_of(clips, c),
+                clip_for,
                 &mut skeleton.local_transforms,
                 &mut self.scratch,
             );
+            rt.slot
+                .apply(&plan, &clip_for, &mut skeleton.local_transforms, &mut self.scratch);
             skeleton.compute_palette();
         }
     }

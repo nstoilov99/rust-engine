@@ -17,6 +17,8 @@ pub mod theme;
 pub mod toasts;
 pub mod widgets;
 
+#[cfg(feature = "editor")]
+pub mod anim_events_dialog;
 pub mod asset_browser;
 #[cfg(feature = "editor")]
 pub mod asset_browser_crusty;

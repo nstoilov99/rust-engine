@@ -43,6 +43,18 @@ pub struct AnimationChannel {
     pub scale_keys: Vec<(f32, Vec3)>,
 }
 
+/// An anim event marker (notify) on a clip's timeline: a name at a time that
+/// fires an engine-level event when playback crosses it — footsteps and hit
+/// frames line up with the animation (Task 41; CONTEXT.md ▸ Anim event).
+/// Authored as a minimal list on the clip asset, not by import.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimEventMarker {
+    /// Time on the clip's local timeline, in `[0, duration_seconds]`.
+    pub time_seconds: f32,
+    /// The event's name — gameplay's key ("footstep", "hit").
+    pub name: String,
+}
+
 /// A raw animation clip extracted from a source file (one per anim stack).
 #[derive(Debug, Clone)]
 pub struct RawAnimationClip {
@@ -52,6 +64,8 @@ pub struct RawAnimationClip {
     pub duration_seconds: f32,
     /// Per-bone animation channels.
     pub channels: Vec<AnimationChannel>,
+    /// Anim event markers, hand-authored on the asset (import writes none).
+    pub events: Vec<AnimEventMarker>,
 }
 
 /// Format-agnostic imported material — source of truth for material data.
