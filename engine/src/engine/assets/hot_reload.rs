@@ -115,6 +115,7 @@ impl HotReloadWatcher {
                                 // from its own saves).
                                 if normalized_path.ends_with(".graph")
                                     || normalized_path.ends_with(".subgraph")
+                                    || normalized_path.ends_with(".animgraph")
                                 {
                                     let _ = reload_sender.send(ReloadEvent::GraphChanged {
                                         path: normalized_path.clone(),

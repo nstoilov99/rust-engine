@@ -12,7 +12,9 @@ use rust_engine::engine::plugins::{
     EnginePlugin, PluginContext, PluginError, PluginKind, PluginManifest, PluginOrigin, PluginSet,
 };
 
-use crate::systems::{CharacterMovementSystem, GameCommandExecutor, PlayerInputSystem};
+use crate::systems::{
+    AnimGraphDemoSystem, CharacterMovementSystem, GameCommandExecutor, PlayerInputSystem,
+};
 
 /// Client-side game plugin that registers player input, movement, and command systems.
 pub struct ClientGamePlugin;
@@ -56,6 +58,15 @@ impl EnginePlugin for ClientGamePlugin {
             GameCommandExecutor,
             Stage::PostUpdate,
             SystemDescriptor::new("GameCommandExecutor").writes_resource::<GameCommandBuffer>(),
+            RunIfPlaying,
+        );
+        // Task 41 tracer demo: gameplay flips the `walk` parameter (ADR 0002
+        // posture — parameters in, never states). `Stage::Update` writes land
+        // ahead of the next frame's PreUpdate machine tick.
+        ctx.add_system_with_criteria(
+            AnimGraphDemoSystem::default(),
+            Stage::Update,
+            AnimGraphDemoSystem::descriptor(),
             RunIfPlaying,
         );
 

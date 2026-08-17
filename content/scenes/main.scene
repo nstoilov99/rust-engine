@@ -210,6 +210,11 @@
                     roughness_factor: 0.5,
                     emissive_factor: (0.0, 0.0, 0.0),
                 ),
+                (
+                    type: "AnimGraphRunner",
+                    graph: "graphs/defeated.animgraph",
+                    enabled: true,
+                ),
             ],
         ),
         (

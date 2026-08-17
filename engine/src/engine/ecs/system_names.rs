@@ -9,6 +9,9 @@ pub const ENHANCED_INPUT: &str = "EnhancedInputSystem";
 /// Animation update system — advances skeletal animation playback.
 pub const ANIMATION_UPDATE: &str = "AnimationUpdateSystem";
 
+/// Animation graph system — ticks `.animgraph` state machines into skeletons.
+pub const ANIM_GRAPH: &str = "AnimGraphSystem";
+
 /// Physics step system — steps the Rapier physics simulation.
 pub const PHYSICS_STEP: &str = "PhysicsStepSystem";
 

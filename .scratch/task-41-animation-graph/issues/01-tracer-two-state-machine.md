@@ -4,11 +4,11 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `.animgraph` document round-trips through serialization: states, transition data (duration, priority), parameter declarations
-- [ ] Evaluator-seam test: document + parameter writes + frame ticks in → active state and blend weights out; entry state is active on the first tick
-- [ ] Crossfade weight curve follows the stated duration; pose values verified on a synthetic skeleton, CPU only (no GPU, no asset files)
-- [ ] An entity in a scene visibly switches Idle → Walk when a system writes the parameter
-- [ ] Saving an edited document invalidates its cached plan; a stale plan never runs
-- [ ] Entities without a graph still animate through the existing single-clip player with crossfade
+- [x] `.animgraph` document round-trips through serialization: states, transition data (duration, priority), parameter declarations
+- [x] Evaluator-seam test: document + parameter writes + frame ticks in → active state and blend weights out; entry state is active on the first tick
+- [x] Crossfade weight curve follows the stated duration; pose values verified on a synthetic skeleton, CPU only (no GPU, no asset files)
+- [x] An entity in a scene visibly switches Idle → Walk when a system writes the parameter
+- [x] Saving an edited document invalidates its cached plan; a stale plan never runs
+- [x] Entities without a graph still animate through the existing single-clip player with crossfade

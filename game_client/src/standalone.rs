@@ -219,6 +219,30 @@ impl StandaloneApp {
                 .writes::<AnimationPlayer>()
                 .writes::<SkeletonInstance>(),
         );
+        // Task 41: `.animgraph` state machines — same registration as the
+        // editor build (see `app.rs`).
+        {
+            use rust_engine::engine::animation::graph::{
+                AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
+                AnimGraphSystem, DiskAnimAssets,
+            };
+            game_world.resources_mut().insert(AnimGraphPlanCache::new());
+            game_world.resources_mut().insert(AnimClipCache::new());
+            schedule.add_system_described(
+                AnimGraphSystem::new(Box::new(DiskAnimAssets {
+                    content_root: rust_engine::engine::assets::content_root::content_root(),
+                })),
+                Stage::PreUpdate,
+                SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
+                    .reads_resource::<Time>()
+                    .writes_resource::<AnimGraphPlanCache>()
+                    .writes_resource::<AnimClipCache>()
+                    .reads::<AnimGraphRunner>()
+                    .writes::<AnimGraphRuntime>()
+                    .writes::<SkeletonInstance>()
+                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE),
+            );
+        }
         // `PhysicsStepSystem` is registered by `RapierPhysicsPlugin` below.
         // It carries `RunIfPlaying` there; `StandaloneApp` forces
         // `PlayMode::Playing` at construction precisely so that criteria is
