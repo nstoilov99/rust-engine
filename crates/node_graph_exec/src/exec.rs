@@ -192,6 +192,32 @@ pub fn tick_debug<T: TraceSink>(
                     }
                     report.resumed += 1;
                 }
+                // Per-node tickers (Task 41 ticket 10): every armed node gets
+                // one firing this tick, in a **fresh activation** entered
+                // through the synthetic ticker pin — driven by time, not by
+                // any exec flow, which is what lets a Timeline advance while
+                // a Delay holding some other activation waits. Spawned in the
+                // latent phase because a ticker is time-driven like a latent:
+                // it lands before event-driven activations, so a same-tick
+                // Stop event runs after the tick's drive, deterministically.
+                // Set order is plan order (D8).
+                let armed: Vec<usize> = instance.tickers.iter().copied().collect();
+                for node in armed {
+                    let id = instance.next_activation_id();
+                    instance.threads.push(Activation {
+                        id,
+                        entry: node,
+                        cursor: Some(node),
+                        entered: Some(crate::node::TICKER_ENTRANCE.to_string()),
+                        frames: Vec::new(),
+                        locals: BTreeMap::new(),
+                        payload: BTreeMap::new(),
+                        resume_edge: None,
+                        resume_skip: false,
+                        state: ThreadState::Running,
+                    });
+                    report.activations += 1;
+                }
             }
             _ => {
                 for ev in pending.iter().filter(|e| e.phase == phase) {
@@ -451,6 +477,8 @@ fn advance<T: TraceSink>(
         let (result, new_state) = {
             let mut ctx = FireCtx {
                 node: &node.name,
+                node_ix,
+                tickers: &mut instance.tickers,
                 inputs: &inputs,
                 outputs: &mut outputs,
                 vars: &mut instance.variables,

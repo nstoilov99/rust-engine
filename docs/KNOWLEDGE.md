@@ -323,12 +323,16 @@ pub struct EntityRef {
 
 ## Graph Execution Gotchas (Task 45-A)
 
-- **Timeline is frame-parity, not wall-clock**: `update` fires *once per
-  tick* while a run is under way, and the first tick samples `t = 0`. A run of
-  duration `d` therefore lands its last sample on the tick that crosses `d` —
-  do not assert "N ticks = N×dt seconds of curve" without accounting for that
-  first sample. `finished` fires exactly once, and never for a looping
-  Timeline.
+- **Timeline is a per-node ticker, not a wait**: `update` fires *once per
+  tick* while a run is under way — the Play tick samples `t = 0` in the
+  caller's activation, every later tick is an interpreter-spawned drive
+  activation independent of all exec flow (`GraphInstance::tickers`, Task 41
+  ticket 10). Play is therefore fire-and-forget, and a `Delay` — in the
+  Update chain or after Play — parks only its own activation, never the run.
+  A run of duration `d` lands its last sample on the tick that crosses `d` —
+  do not assert "N ticks = N×dt seconds of curve" without accounting for the
+  `t = 0` sample. `finished` fires exactly once, one tick after the clamped
+  end sample, and never for a looping Timeline.
 - **A pause holds the whole instance, and only the bound one** (GS-4). When
   any activation parks on a breakpoint, no other activation of that instance
   advances, no due latent wakes, no queued event drains and instance time does

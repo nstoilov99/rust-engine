@@ -485,9 +485,11 @@ runs each activation until it blocks or finishes.
   through pure chains, performs its effect, then names the exec output to
   continue on. Pure nodes are re-evaluated per firing (no cross-statement
   caching in v1).
-- **Latents** (`Delay`, `Timeline`) suspend an activation and resume it on a
-  later tick, loop stack and all — one data structure, so a `Delay` inside a
-  `ForLoop` serializes correctly by construction.
+- **Latents** (`Delay`) suspend an activation and resume it on a later tick,
+  loop stack and all — one data structure, so a `Delay` inside a `ForLoop`
+  serializes correctly by construction. A `Timeline` is not a latent: it is a
+  per-node ticker driven once per tick in a fresh activation, independent of
+  exec flow (Blueprint-style), so a waiting `Delay` never stalls it.
 - **Budget**: every activation runs under a step budget; exceeding it halts
   the instance with an error naming the node, which is how an infinite
   `WhileLoop` is a reported bug rather than a hang.

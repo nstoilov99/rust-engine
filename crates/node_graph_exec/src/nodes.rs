@@ -305,59 +305,36 @@ impl ImpureNode for Delay {
     }
 }
 
-/// **Timeline** (45-A D7) — the per-tick node.
+/// **Timeline** (45-A D7, decoupled by Task 41 ticket 10) — the per-tick
+/// node, Blueprint-style.
 ///
 /// # Why this is not a suspension user
 ///
 /// A `Delay` is a *wait*: one suspension, one resume, done. A Timeline is the
 /// opposite shape — it has to do something on **every** tick between Play and
-/// Finished. P4's latent machinery resumes an activation at a parked
-/// continuation and deliberately never re-fires the latent node, so a
-/// Timeline built on `Suspend` alone could never advance twice.
+/// Finished, and it must keep doing it while other activations wait. So it is
+/// a **per-node ticker** (`ctx.set_ticking`): while armed, the interpreter
+/// fires the node once per tick in a fresh activation entered through the
+/// ticker, independent of every exec flow.
 ///
-/// So it is built out of the two primitives that already exist, and it needs
-/// no new interpreter feature:
-///
-/// - [`FireResult::Loop`] gives it a frame the interpreter re-enters after the
-///   Update chain finishes — that is the "fire again" half;
-/// - a zero-length [`FireResult::Suspend`] (`until = now`, no resume pin) is a
-///   yield: the latent phase runs *before* the advance loop, so a suspension
-///   created this tick can only come due on the next one. That is the "not
-///   twice in one tick" half, and it is the same rule that makes `Delay(0)`
-///   mean "resume next tick".
-///
-/// The two alternate, so the firing sequence per run is:
-///
-/// ```text
-///   tick N   : Play      -> advance to t=0, write tracks, Loop(Update)
-///              (update chain runs)
-///              re-entry  -> yield                        [frame iteration 1]
-///   tick N+1 : resume    -> advance, write tracks, Loop(Update)      [it. 2]
-///              (update chain runs)
-///              re-entry  -> yield                                    [it. 3]
-///   …
-///   tick N+k : resume    -> t reaches the end -> Continue(Finished)
-/// ```
-///
-/// **Advance and yield are told apart by the frame's parity, not by stored
-/// state**: `None` is the initial Play firing, an odd iteration is a
-/// re-entry-after-body (yield), an even one is a resume-after-yield (advance).
-/// Parity lives on the *activation's* frame rather than in the node's shared
-/// state slot, which is what keeps a `Stop` arriving on another thread from
-/// corrupting the running one's phase.
+/// - **Play / Reverse** validate the curve, arm the ticker, write the tracks
+///   at the starting `t` and continue straight into the Update chain — the
+///   first sample lands on the Play tick, in the caller's own activation,
+///   after which the caller unwinds and is free (fire-and-forget).
+/// - **Each later tick** the ticker drive advances `t` by `dt`, writes the
+///   tracks and continues on Update; the drive activation ends when the chain
+///   does. A `Delay` in the chain parks only that tick's activation — the
+///   next drive arrives regardless, which is the decoupling.
+/// - **The end**: one drive samples the clamped end value through the Update
+///   chain like every other, and the *next* drive fires Finished — the end
+///   value must reach whatever the Timeline drives before "done" is claimed.
 ///
 /// # State
 ///
-/// One `Vec4` in the per-node slot: `[t, direction, playing, reserved]`.
+/// One `Vec4` in the per-node slot: `[t, direction, playing, finishing]`.
 /// Shared across activations on purpose — that is how a `Stop` firing on one
-/// thread tells the playing thread to end.
-///
-/// # Known v1 limit
-///
-/// A `Delay` inside the Update chain pauses the Timeline with it: the loop
-/// frame cannot be re-entered until the body finishes. Blueprint decouples the
-/// two; doing that here needs a second activation per Timeline, which is the
-/// animation task's problem, not this one's.
+/// thread tells the run to end (Stop also disarms the ticker, so stopping is
+/// visible on the next tick, never mid-tick).
 struct Timeline;
 
 /// `[t, direction, playing, finishing]`.
@@ -422,95 +399,94 @@ impl ImpureNode for Timeline {
         };
         let (mut t, mut dir, playing, finishing) = timeline_state(ctx.state());
 
-        // --- a fresh entrance through one of the exec inputs ---------------
-        if ctx.loop_frame().is_none() {
-            match ctx.entered() {
-                Some(TIMELINE_STOP_PIN) => {
-                    ctx.set_state(timeline_value(t, dir, false, false));
-                    return FireResult::Done;
-                }
-                // Already running: Reverse is a direction change and Play is a
-                // rewind, not a second run. The thread that owns the loop
-                // keeps it — starting another would double every Update.
-                Some(TIMELINE_REVERSE_PIN) if playing => {
-                    ctx.set_state(timeline_value(t, -1.0, true, false));
-                    return FireResult::Done;
-                }
-                Some(TIMELINE_PLAY_PIN) if playing => {
-                    ctx.set_state(timeline_value(0.0, 1.0, true, false));
-                    return FireResult::Done;
-                }
-                _ => {}
-            }
-            // A curve that cannot be reached is reported once, loudly, on the
-            // activation that tried to play it — rather than silently playing
-            // nothing for as long as the game runs. Validation says the same
-            // thing at edit time; this is the runtime's half.
-            if ctx.curve_path().and_then(|p| ctx.world().curve(p)).is_none() {
-                return FireResult::Stop(ExecError::Stopped {
-                    node: ctx.node_name().to_string(),
-                    reason: match ctx.curve_path() {
-                        Some(p) => format!("curve '{p}' is not loaded"),
-                        None => "no curve asset set".to_string(),
-                    },
-                });
-            }
-            // Reverse begins at the end, which is what makes
-            // Reverse-from-stopped mean "play it backwards".
-            let reverse = ctx.entered() == Some(TIMELINE_REVERSE_PIN);
-            dir = if reverse { -1.0 } else { 1.0 };
-            t = if reverse { Timeline::duration(ctx) } else { 0.0 };
-            ctx.set_state(timeline_value(t, dir, true, false));
-            Timeline::write_tracks(ctx, t);
-            return FireResult::Loop(TIMELINE_UPDATE_PIN);
-        }
-
-        // --- inside the run: yield / advance, by frame parity --------------
-        if !playing {
+        // --- the interpreter's once-per-tick drive -------------------------
+        if ctx.ticker_fired() {
             if finishing {
                 // The end value has been through the Update chain; now say so.
                 ctx.set_state(timeline_value(t, dir, false, false));
+                ctx.set_ticking(false);
                 return FireResult::Continue(TIMELINE_FINISHED_PIN);
             }
-            // Someone fired Stop. Leave without claiming the run finished:
-            // Finished means "reached the end", and stopping is not that.
-            return FireResult::Done;
-        }
-        let iteration = ctx.loop_frame().map(|f| f.iteration).unwrap_or(0);
-        if iteration % 2 == 1 {
-            // Re-entered right after the Update chain: hand the tick back.
-            return FireResult::Suspend(Suspension { until: ctx.now(), resume: None, since: ctx.now() });
-        }
-
-        let total = Timeline::duration(ctx);
-        let looping = ctx.bool("looping").unwrap_or(false);
-        t += dir * ctx.tick().dt;
-
-        // A zero-length curve ends on its first advance rather than looping
-        // forever on a duration of nothing.
-        let past_end = (dir > 0.0 && t >= total) || (dir < 0.0 && t <= 0.0);
-        if past_end {
-            if looping && total > 0.0 {
-                // Carry the overshoot rather than snapping, so a looping
-                // Timeline does not drift by up to a frame every cycle.
-                t = if dir > 0.0 { t - total } else { t + total };
-                t = t.clamp(0.0, total);
-                ctx.set_state(timeline_value(t, dir, true, false));
-                Timeline::write_tracks(ctx, t);
-                return FireResult::Loop(TIMELINE_UPDATE_PIN);
+            if !playing {
+                // Stopped between arming and driving (Stop also disarms, so
+                // this is defensive). Not Finished: the run did not end.
+                ctx.set_ticking(false);
+                return FireResult::Done;
             }
-            // One more Update, at the clamped end value — the last sample is
-            // the one that matters most (it is where whatever the Timeline
-            // drives comes to rest), so it goes through the Update chain like
-            // every other. `finishing` makes the next re-entry fire Finished.
-            let end = if dir > 0.0 { total } else { 0.0 };
-            ctx.set_state(timeline_value(end, dir, false, true));
-            Timeline::write_tracks(ctx, end);
-            return FireResult::Loop(TIMELINE_UPDATE_PIN);
+
+            let total = Timeline::duration(ctx);
+            let looping = ctx.bool("looping").unwrap_or(false);
+            t += dir * ctx.tick().dt;
+
+            // A zero-length curve ends on its first advance rather than
+            // looping forever on a duration of nothing.
+            let past_end = (dir > 0.0 && t >= total) || (dir < 0.0 && t <= 0.0);
+            if past_end {
+                if looping && total > 0.0 {
+                    // Carry the overshoot rather than snapping, so a looping
+                    // Timeline does not drift by up to a frame every cycle.
+                    t = if dir > 0.0 { t - total } else { t + total };
+                    t = t.clamp(0.0, total);
+                } else {
+                    // One more Update, at the clamped end value — the last
+                    // sample is the one that matters most (it is where
+                    // whatever the Timeline drives comes to rest), so it goes
+                    // through the Update chain like every other. `finishing`
+                    // makes the next drive fire Finished.
+                    let end = if dir > 0.0 { total } else { 0.0 };
+                    ctx.set_state(timeline_value(end, dir, false, true));
+                    Timeline::write_tracks(ctx, end);
+                    return FireResult::Continue(TIMELINE_UPDATE_PIN);
+                }
+            }
+            ctx.set_state(timeline_value(t, dir, true, false));
+            Timeline::write_tracks(ctx, t);
+            return FireResult::Continue(TIMELINE_UPDATE_PIN);
         }
+
+        // --- an entrance through one of the exec inputs --------------------
+        match ctx.entered() {
+            Some(TIMELINE_STOP_PIN) => {
+                ctx.set_state(timeline_value(t, dir, false, false));
+                ctx.set_ticking(false);
+                return FireResult::Done;
+            }
+            // Already running: Reverse is a direction change and Play is a
+            // rewind, not a second run — the armed ticker keeps driving,
+            // arming it again would change nothing.
+            Some(TIMELINE_REVERSE_PIN) if playing => {
+                ctx.set_state(timeline_value(t, -1.0, true, false));
+                return FireResult::Done;
+            }
+            Some(TIMELINE_PLAY_PIN) if playing => {
+                ctx.set_state(timeline_value(0.0, 1.0, true, false));
+                return FireResult::Done;
+            }
+            _ => {}
+        }
+        // A curve that cannot be reached is reported once, loudly, on the
+        // activation that tried to play it — rather than silently playing
+        // nothing for as long as the game runs. Validation says the same
+        // thing at edit time; this is the runtime's half.
+        if ctx.curve_path().and_then(|p| ctx.world().curve(p)).is_none() {
+            return FireResult::Stop(ExecError::Stopped {
+                node: ctx.node_name().to_string(),
+                reason: match ctx.curve_path() {
+                    Some(p) => format!("curve '{p}' is not loaded"),
+                    None => "no curve asset set".to_string(),
+                },
+            });
+        }
+        // Reverse begins at the end, which is what makes Reverse-from-stopped
+        // mean "play it backwards". The first sample lands now, through the
+        // caller's own activation; every later one is the ticker's.
+        let reverse = ctx.entered() == Some(TIMELINE_REVERSE_PIN);
+        dir = if reverse { -1.0 } else { 1.0 };
+        t = if reverse { Timeline::duration(ctx) } else { 0.0 };
         ctx.set_state(timeline_value(t, dir, true, false));
+        ctx.set_ticking(true);
         Timeline::write_tracks(ctx, t);
-        FireResult::Loop(TIMELINE_UPDATE_PIN)
+        FireResult::Continue(TIMELINE_UPDATE_PIN)
     }
 }
 

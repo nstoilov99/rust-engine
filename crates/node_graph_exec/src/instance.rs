@@ -2,7 +2,7 @@
 //! FIFO and the RNG — **all plain serializable data**, so an instance can be
 //! written to disk mid-wait (the P4 case) and resumed.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use node_graph_types::EventPhase;
 use serde::{Deserialize, Serialize};
@@ -179,6 +179,16 @@ pub struct GraphInstance {
     /// component is rebuilt on the next play, so it re-arms by itself.
     #[serde(default)]
     pub stopped: bool,
+    /// Plan-node indices with an armed **per-node ticker** (Task 41 ticket
+    /// 10): each gets one interpreter-spawned firing per tick, in a fresh
+    /// activation entered through the ticker, independent of any exec flow.
+    /// This is what decouples a Timeline from the activation that played it —
+    /// a Delay parks only its own activation, never the drive. An ordered set
+    /// so the spawn order is the plan order (D8), and `serde(default)` so an
+    /// instance serialized before this existed still loads (its timelines
+    /// simply stay stopped).
+    #[serde(default)]
+    pub tickers: BTreeSet<usize>,
 }
 
 impl GraphInstance {
@@ -203,6 +213,7 @@ impl GraphInstance {
             next_alias: 0,
             halted: None,
             stopped: false,
+            tickers: BTreeSet::new(),
         }
     }
 
