@@ -223,6 +223,10 @@ pub struct AnimMachine {
     /// tick (instant switch, dropped fade) records nothing, so nothing
     /// invisible ever fires. Reused across ticks — no steady-state allocation.
     spans: Vec<(usize, f32, f32)>,
+    /// The last transition that fired — `(plan transition index, seconds
+    /// since)`. A read surface for the editor's live preview (ticket 06);
+    /// nothing in evaluation consults it.
+    fired: Option<(usize, f32)>,
 }
 
 impl AnimMachine {
@@ -234,6 +238,7 @@ impl AnimMachine {
             time: 0.0,
             fade: None,
             spans: Vec::new(),
+            fired: None,
         }
     }
 
@@ -251,6 +256,14 @@ impl AnimMachine {
         self.fade.as_ref()
     }
 
+    /// The last transition that fired: `(plan transition index, seconds
+    /// since)`. `None` until the first fire. The editor's live highlight
+    /// reads this to light the firing transition; age lets an instant
+    /// (zero-duration) fire still flash for a moment.
+    pub fn last_fired(&self) -> Option<(usize, f32)> {
+        self.fired
+    }
+
     /// The active state's blend weight: 1.0 at rest, the fade's target
     /// weight while crossfading.
     pub fn blend_weight(&self) -> f32 {
@@ -265,6 +278,9 @@ impl AnimMachine {
     /// firing rule reads (consume-on-transition); rules themselves stay pure.
     pub fn tick(&mut self, plan: &AnimGraphPlan, params: &mut AnimParams, dt: f32) {
         self.spans.clear();
+        if let Some((_, age)) = &mut self.fired {
+            *age += dt;
+        }
         // A machine armed against an empty/refused plan has nothing to do —
         // never index into a plan that has no states.
         let Some(state) = plan.states.get(self.current) else {
@@ -297,15 +313,17 @@ impl AnimMachine {
         let fired = plan
             .transitions
             .iter()
-            .filter(|t| match t.from {
+            .enumerate()
+            .filter(|(_, t)| match t.from {
                 TransitionFrom::State(s) => !fading && s == current,
                 // Skipping self-targets is what keeps a held Any State rule
                 // (Died = true) from restarting its state every frame — and,
                 // mid-fade, from re-interrupting into the fade's own target.
                 TransitionFrom::AnyState => t.to != current,
             })
-            .find(|t| t.rule.as_ref().is_none_or(|r| r.expr.eval_bool(params)));
-        if let Some(t) = fired {
+            .find(|(_, t)| t.rule.as_ref().is_none_or(|r| r.expr.eval_bool(params)));
+        if let Some((ti, t)) = fired {
+            self.fired = Some((ti, 0.0));
             // Consume-on-transition: the fire spends every trigger the rule
             // reads, exactly once — they were consulted, they are consumed.
             if let Some(rule) = &t.rule {

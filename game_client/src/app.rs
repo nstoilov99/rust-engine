@@ -3769,6 +3769,19 @@ impl App {
                 graph_camera_pos,
                 graph_editors.keys(),
             );
+            // Task 41 ticket 06: animation preview — candidates and the bound
+            // preview per open `.animgraph` tab, the LIVE chip's binding rule.
+            let anim_tabs: Vec<(String, Option<u64>)> = graph_editors
+                .iter()
+                .filter(|(k, _)| k.ends_with(".animgraph"))
+                .map(|(k, st)| (k.clone(), st.anim_bind))
+                .collect();
+            let anim_instances =
+                anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
+            let anim_previews = {
+                let picked: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+                anim_preview_bindings(&*world, &picked, &anim_tabs, &anim_instances)
+            };
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
@@ -4155,6 +4168,14 @@ impl App {
                                                     .map(Vec::as_slice)
                                                     .unwrap_or(&[]),
                                                 exec_clear: &mut graph_clear_trace,
+                                                anim: anim_previews
+                                                    .iter()
+                                                    .find(|(k, _)| *k == key)
+                                                    .map(|(_, v)| v),
+                                                anim_instances: anim_instances
+                                                    .get(&key)
+                                                    .map(Vec::as_slice)
+                                                    .unwrap_or(&[]),
                                             },
                                         ),
                                         None => dock_crusty::missing_document_panel(
@@ -4312,6 +4333,10 @@ impl App {
             if save_as_cancel {
                 *save_as_dialog = None;
             }
+            // Ticket 06: land the preview strips' parameter edits on their
+            // bound runtimes — after the UI, when the world is reachable
+            // again. Runtime-only writes; next frame's tick reads them.
+            apply_anim_param_edits(&mut *world, graph_editors, &anim_previews);
             self.crusty_menu_action = crusty_menu_action;
             crusty_result
         };
@@ -5630,6 +5655,18 @@ impl App {
             graph_camera_pos,
             graph_editors.keys(),
         );
+        // Ticket 06 preview bindings, same rule as the docked path.
+        let anim_tabs: Vec<(String, Option<u64>)> = graph_editors
+            .iter()
+            .filter(|(k, _)| k.ends_with(".animgraph"))
+            .map(|(k, st)| (k.clone(), st.anim_bind))
+            .collect();
+        let anim_instances =
+            anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
+        let anim_previews = {
+            let picked: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+            anim_preview_bindings(&*world, &picked, &anim_tabs, &anim_instances)
+        };
         let mut graph_clear_trace: Option<String> = None;
         let mut graph_open_requests: Vec<String> = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
@@ -5824,6 +5861,14 @@ impl App {
                                         .map(Vec::as_slice)
                                         .unwrap_or(&[]),
                                     exec_clear: &mut graph_clear_trace,
+                                    anim: anim_previews
+                                        .iter()
+                                        .find(|(k, _)| *k == key)
+                                        .map(|(_, v)| v),
+                                    anim_instances: anim_instances
+                                        .get(&key)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
@@ -5917,6 +5962,10 @@ impl App {
         for key in std::mem::take(&mut float_curve_saves) {
             save_curve_state(curve_editors, &mut editor.console, &mut core.game_world, &key);
         }
+
+        // Ticket 06, float-window path: same edit delivery as the docked one
+        // — done here because the world is mutably reachable again.
+        apply_anim_param_edits(core.game_world.hecs_mut(), graph_editors, &anim_previews);
 
         // GS-4, float-window path: same delivery as the docked one — the bound
         // instance gets this tab's breakpoints, everyone else gets an empty
@@ -7722,6 +7771,96 @@ fn graph_instance_lists<'a>(
             })
             .filter(|(_, v)| !v.is_empty())
             .collect()
+    }
+}
+
+/// Every entity an open `.animgraph` could preview on (Task 41 ticket 06):
+/// armed runtimes of that graph, nearest the editor camera first — minus the
+/// net rigs whose parameters `anim_bridge` derives every frame. A preview
+/// strip driving those would fight gameplay on every write, so bridge-owned
+/// rigs are not preview targets at all; scene-authored graph entities are.
+#[cfg(feature = "editor")]
+fn anim_instance_lists<'a>(
+    world: &hecs::World,
+    camera: [f32; 3],
+    keys: impl IntoIterator<Item = &'a String>,
+) -> std::collections::HashMap<
+    String,
+    Vec<rust_engine::engine::editor::graph_exec_viz::ExecInstance>,
+> {
+    let excluded: Vec<u64> = world
+        .query::<&crate::anim_bridge::CharacterRig>()
+        .iter()
+        .map(|(e, _)| e.to_bits().get())
+        .collect();
+    keys.into_iter()
+        .map(|k| {
+            (
+                k.clone(),
+                rust_engine::engine::editor::anim_preview::anim_instances_for(
+                    world,
+                    k,
+                    Some(camera),
+                    &excluded,
+                ),
+            )
+        })
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
+/// The bound preview per `.animgraph` tab (ticket 06): the explicit pick
+/// while it is still a candidate, else the first selected entity running
+/// this graph — the LIVE chip's binding ladder, resolved in the engine.
+#[cfg(feature = "editor")]
+fn anim_preview_bindings(
+    world: &hecs::World,
+    selected: &[u64],
+    tabs: &[(String, Option<u64>)],
+    instances: &std::collections::HashMap<
+        String,
+        Vec<rust_engine::engine::editor::graph_exec_viz::ExecInstance>,
+    >,
+) -> Vec<(String, rust_engine::engine::editor::anim_preview::AnimPreview)> {
+    use rust_engine::engine::editor::anim_preview::{anim_preview_for, resolve_anim_bind};
+    tabs.iter()
+        .filter_map(|(k, bind)| {
+            let cands = instances.get(k).map(Vec::as_slice).unwrap_or(&[]);
+            let bound = resolve_anim_bind(*bind, selected, cands)?;
+            Some((k.clone(), anim_preview_for(world, bound)?))
+        })
+        .collect()
+}
+
+/// Land the preview strips' parameter edits on their bound runtimes (ticket
+/// 06). Edits drain whether or not the binding still exists — a write with
+/// nowhere to go is dropped, never queued against a future binding.
+#[cfg(feature = "editor")]
+fn apply_anim_param_edits(
+    world: &mut hecs::World,
+    graph_editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    previews: &[(String, rust_engine::engine::editor::anim_preview::AnimPreview)],
+) {
+    use rust_engine::engine::animation::graph::AnimGraphRuntime;
+    for (key, st) in graph_editors.iter_mut() {
+        if st.anim_edits.is_empty() {
+            continue;
+        }
+        let edits = std::mem::take(&mut st.anim_edits);
+        let Some((_, p)) = previews.iter().find(|(k, _)| k == key) else {
+            continue;
+        };
+        let Some(entity) = hecs::Entity::from_bits(p.instance_id) else {
+            continue;
+        };
+        if let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(entity) {
+            for e in &edits {
+                e.apply(&mut rt.params);
+            }
+        }
     }
 }
 

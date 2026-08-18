@@ -82,6 +82,10 @@ pub mod graph_wire_router;
 /// and a shipped game must not carry the recorder that fills this in.
 #[cfg(feature = "editor")]
 pub mod graph_exec_viz;
+/// Task 41 ticket 06: animation-graph preview data (parameter strip, live
+/// state highlight), the animation counterpart of `graph_exec_viz`.
+#[cfg(feature = "editor")]
+pub mod anim_preview;
 #[cfg(feature = "editor")]
 pub mod graph_editor_crusty;
 pub mod editor_prefs;

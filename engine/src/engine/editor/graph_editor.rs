@@ -1438,6 +1438,17 @@ pub struct GraphEditorState {
     /// edited (Task 41 ticket 05). Session-only — which rule you are inside
     /// is a property of this browsing session, like `nav_back`.
     pub rule_scope: Option<RuleScope>,
+    /// The entity this tab previews on, picked explicitly from the strip's
+    /// PREVIEW chip (`Entity::to_bits`). `None` = follow the selection —
+    /// the LIVE chip's binding ladder, reused (Task 41 ticket 06).
+    /// Session-only: entity handles do not survive a reload.
+    pub anim_bind: Option<u64>,
+    /// The PREVIEW chip's entity picker is open.
+    pub anim_picker: bool,
+    /// Parameter edits the preview strip recorded this frame, drained by the
+    /// host onto the bound runtime's blackboard after the UI. Runtime-only
+    /// writes: never document state, never undo entries.
+    pub anim_edits: Vec<crate::engine::editor::anim_preview::AnimParamEdit>,
 }
 
 /// The graph editor is one product over several node libraries; the domain
@@ -2465,6 +2476,9 @@ impl GraphEditorState {
             debug_request: None,
             payload: PayloadPanel::default(),
             rule_scope: None,
+            anim_bind: None,
+            anim_picker: false,
+            anim_edits: Vec::new(),
         }
     }
 

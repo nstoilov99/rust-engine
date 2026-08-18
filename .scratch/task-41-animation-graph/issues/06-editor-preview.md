@@ -4,10 +4,24 @@
 
 **Blocked by:** 04 — Editor: author state machines in the graph editor.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The footer strip lists all declared Parameters with the right control per type; edits drive the machine immediately
-- [ ] Trigger FIRE respects buffering semantics — the trigger stays lit until a transition consumes it
-- [ ] Active state and firing transitions highlight live during preview
-- [ ] Selecting an entity previews the graph's Pose on it in the viewport
-- [ ] Visual pass per the repo's screenshot-review workflow
+- [x] The footer strip lists all declared Parameters with the right control per type; edits drive the machine immediately
+- [x] Trigger FIRE respects buffering semantics — the trigger stays lit until a transition consumes it
+- [x] Active state and firing transitions highlight live during preview
+- [x] Selecting an entity previews the graph's Pose on it in the viewport
+- [x] Visual pass per the repo's screenshot-review workflow
+
+Notes (implementation): the strip is the footer band (mockup 2g) — anatomy
+`PREVIEW · entity` chip + Float slider / Bool checkbox / Trigger FIRE per
+declared Parameter; binding follows the LIVE chip's ladder (explicit pick
+from the chip's upward picker, else the selected entity running this graph).
+Preview targets are entities already running the graph via `AnimGraphRunner`
+— which `AnimGraphSystem` already poses in the editor viewport — and
+net-play rigs whose parameters `anim_bridge` owns are excluded outright
+(driving them would fight gameplay every frame). Float slider ranges derive
+from what the graph reads (1D blend thresholds + rule compare constants, 25%
+headroom, `(0,1)` fallback). Strip edits are runtime-only writes the host
+applies after the UI — never document state, never undo entries. The band
+did not end up fighting the variables footer (the vars column simply stops
+above it), so the spec's open design item stays closed.

@@ -26,7 +26,7 @@ use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{
     Button, Canvas, CanvasScope, CanvasView, Checkbox, ComboBox, DragValue, ScrollArea,
-    SelectableValue, TextEdit,
+    SelectableValue, Slider, TextEdit,
 };
 
 use super::keymap::{Action, ActionStatus, Context, Keymap};
@@ -43,6 +43,7 @@ use super::graph_editor::{
     BOOKMARK_SLOTS, TOAST_MS,
     region_find_matches, rule_scope_registry,
 };
+use super::anim_preview::{AnimParamEdit, AnimPreview};
 use super::graph_exec_viz::{DebugRequest, ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
@@ -624,6 +625,15 @@ pub struct GraphEditorPanelCtx<'a> {
     /// pressed; the host clears the recorders of the instances running it,
     /// which are the only things that own one.
     pub exec_clear: &'a mut Option<String>,
+    /// The bound preview instance for an `.animgraph` tab (Task 41 ticket
+    /// 06): current parameter values, active state, in-flight fade. `None`
+    /// — a script tab, or nothing bound — draws no strip controls and no
+    /// live highlight.
+    pub anim: Option<&'a AnimPreview>,
+    /// Every entity this `.animgraph` could preview on, for the PREVIEW
+    /// chip's picker. Net rigs whose parameters gameplay owns are already
+    /// excluded by the host.
+    pub anim_instances: &'a [ExecInstance],
 }
 
 // ---------------------------------------------------------------------------
@@ -1829,6 +1839,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         exec,
         exec_instances,
         exec_clear,
+        anim,
+        anim_instances,
     } = ctx;
     let resolver = &DocResolvers { graphs: resolver, curves };
     // Subgraph instances are a script-library concept; the animation
@@ -1921,6 +1933,17 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         return;
     }
 
+    // Ticket 06: an animation document's preview strip reserves its band off
+    // the bottom before anything else measures — the vars strip and the
+    // canvas both stop above it (the curve editor's footer idiom, per the
+    // spec's placement ruling).
+    let preview_h = if state.domain.is_animation() {
+        let st = ui.style();
+        PREVIEW_H * (st.metrics.row_height / BASE_ROW_H).max(0.1)
+    } else {
+        0.0
+    };
+
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
     // width before the canvas allocates, so the canvas shrinks by exactly that
@@ -1932,7 +1955,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
         let w = if state.vars.open { VARS_W * s } else { VARS_RAIL_W * s };
         let c = ui.cursor();
-        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y));
+        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y - preview_h));
         ui.set_cursor(Pos2::new(c.x + w, c.y));
         r
     };
@@ -1955,12 +1978,17 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // Rule 2's threshold is a crusty constant, scaled by the editor's UI scale
     // so it stays 4 logical points at any scale factor. One source, so the
     // canvas's right-drag decision and the graph's own hit tests agree.
-    let out = Canvas::new()
+    let mut canvas = Canvas::new()
         .zoom_range(zoom_min, zoom_max)
         .drag_threshold(crusty_gui::input::drag_threshold(
             (ui.style().metrics.row_height / BASE_ROW_H).max(0.1),
-        ))
-        .show(ui, &mut view, |ui, scope| {
+        ));
+    if preview_h > 0.0 {
+        // The canvas fills what remains *above* the preview band.
+        let a = ui.available_size();
+        canvas = canvas.size(Vec2::new(a.x.max(1.0), (a.y - preview_h).max(1.0)));
+    }
+    let out = canvas.show(ui, &mut view, |ui, scope| {
         draw_and_interact(
             ui,
             scope,
@@ -1997,6 +2025,10 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // The machine dims under an open peek — its lit trio (transition, source
     // and target states) excepted (mockup 3b).
     rule_dim_scrim(ui, out.rect, state, &out.inner);
+    // Live preview highlight (ticket 06): the active state, the outgoing
+    // side of an in-flight fade, and the transition that fired. Above the
+    // scrim, so it stays readable while a rule peek is open.
+    anim_live_highlight(ui, out.rect, state, &out.inner, anim);
 
     // A row released over the canvas: remember where, and ask Get or Set.
     // Taken here rather than inside the canvas body because the body runs
@@ -2041,6 +2073,26 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         if let Some((mn, mx)) = geoms_bbox(out.inner.iter().filter(|g| g.id == id)) {
             let v = frame_view(mn, mx, out.rect.size(), zoom_min, zoom_max);
             state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+        }
+    }
+    // The preview strip (ticket 06) paints its band under the canvas, then
+    // its entity picker floats with the other transient surfaces.
+    let mut anim_chip_rect: Option<(Rect, bool)> = None;
+    if preview_h > 0.0 {
+        let band = Rect::from_min_max(
+            Pos2::new(strip.min.x, strip.max.y),
+            Pos2::new(ui.available().max.x, strip.max.y + preview_h),
+        );
+        anim_chip_rect = Some(anim_preview_strip(ui, band, state, registry, anim, anim_instances));
+    }
+    if let Some((chip, just_opened)) = anim_chip_rect.filter(|_| state.anim_picker) {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        if let Some(pick) =
+            anim_preview_picker(ui, chip, anim_instances, anim, &st, s, just_opened)
+        {
+            state.anim_bind = pick;
+            state.anim_picker = false;
         }
     }
     var_drop_popup(ui, state, registry);
@@ -6118,6 +6170,615 @@ fn instance_picker(
 
 fn instance_picker_modal_id() -> crusty_gui::id::Id {
     crusty_gui::id::Id::ROOT.with("graph_instance_picker")
+}
+
+// ---------------------------------------------------------------------------
+// Preview strip (Task 41 ticket 06)
+// ---------------------------------------------------------------------------
+
+/// Footer band height at ui_scale 1.0 — one control row, the curve editor's
+/// footer weight.
+const PREVIEW_H: f32 = 34.0;
+/// A Float parameter's slider width at ui_scale 1.0.
+const PREVIEW_SLIDER_W: f32 = 110.0;
+
+/// What the PREVIEW chip says. The LIVE chip's ladder in preview vocabulary,
+/// pure so the states are checkable without a canvas: bound (driving),
+/// bound-but-refused (the runtime would not arm), candidates-but-unbound,
+/// nothing at all — which, unlike the LIVE chip, still draws: the strip is
+/// where an author learns preview exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewChipState {
+    Bound,
+    Refused,
+    Unbound(usize),
+    Empty,
+}
+
+fn preview_chip_state(bound: bool, refused: bool, instances: usize) -> PreviewChipState {
+    match (bound, refused) {
+        (true, true) => PreviewChipState::Refused,
+        (true, false) => PreviewChipState::Bound,
+        (false, _) if instances > 0 => PreviewChipState::Unbound(instances),
+        (false, _) => PreviewChipState::Empty,
+    }
+}
+
+/// The preview parameter strip (mockup 2g): `PREVIEW · entity` chip, then a
+/// control per declared parameter — Float slider, Bool checkbox, Trigger
+/// FIRE. Values are read off the bound runtime every frame, so whatever else
+/// writes a parameter shows here, and a buffered Trigger stays lit because
+/// the machine still holds it — not because the strip remembers the click.
+/// Edits land in `state.anim_edits`, applied by the host after the UI:
+/// runtime-only writes, never document state, never undo entries.
+///
+/// Returns the chip's rect + whether its picker just opened, so the panel
+/// can float the entity picker after the band drew.
+fn anim_preview_strip(
+    ui: &mut Ui,
+    band: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    anim: Option<&AnimPreview>,
+    instances: &[ExecInstance],
+) -> (Rect, bool) {
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let status = Palette::invariant_status();
+    {
+        let mut p = ui.painter();
+        p.rect_filled(band, Rounding::ZERO, st.palette.window);
+        p.line_segment(
+            Pos2::new(band.min.x, band.min.y),
+            Pos2::new(band.max.x, band.min.y),
+            st.metrics.border,
+            st.palette.stroke_strong,
+        );
+    }
+    let seg_h = st.metrics.control_height.min(band.height() - 6.0 * s);
+    let cy = band.center().y;
+
+    let refused = anim.is_some_and(|a| a.disabled.is_some());
+    let chip_state = preview_chip_state(anim.is_some(), refused, instances.len());
+    let (word, word_col, chip_fill, chip_stroke) = match chip_state {
+        PreviewChipState::Refused => (
+            "\u{2715} REFUSED".to_string(),
+            status.error,
+            status.error.with_alpha(0.10),
+            status.error,
+        ),
+        PreviewChipState::Bound => (
+            "PREVIEW".to_string(),
+            st.palette.accent_active,
+            st.palette.accent_soft,
+            st.palette.accent_active,
+        ),
+        PreviewChipState::Unbound(n) => (
+            format!("{n} RUNNING"),
+            st.palette.text_secondary,
+            st.palette.panel,
+            st.palette.stroke,
+        ),
+        PreviewChipState::Empty => (
+            "PREVIEW".to_string(),
+            st.palette.text_disabled,
+            st.palette.panel,
+            st.palette.stroke,
+        ),
+    };
+    let who = match (anim, chip_state) {
+        (Some(a), _) if a.instance.is_empty() => "(unnamed)".to_string(),
+        (Some(a), _) => a.instance.clone(),
+        (None, PreviewChipState::Unbound(_)) => "select entity".to_string(),
+        _ => "nothing runs this graph".to_string(),
+    };
+    // Two runs, like the LIVE chip: the state is the accent word, the entity
+    // a plainly-colored noun after a thin separator.
+    let sep = " \u{00B7} ";
+    let (state_w, who_w) = {
+        let mut p = ui.painter();
+        (
+            p.measure_text_family(&word, px, None, FontFamily::Mono).x,
+            p.measure_text_family(&format!("{sep}{who}"), px, None, FontFamily::Mono).x,
+        )
+    };
+    let dot_r = px * 0.28;
+    let inner = pad + dot_r * 2.0 + pad * 0.5 + state_w + who_w + pad;
+    let chip = Rect::from_min_size(
+        Pos2::new(band.min.x + pad, cy - seg_h * 0.5),
+        Vec2::new(inner, seg_h),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled(chip, st.rounding.small, chip_fill);
+        p.rect_stroke(chip, st.rounding.small, st.metrics.border, chip_stroke);
+        p.circle_filled(
+            Pos2::new(chip.min.x + pad + dot_r, chip.center().y),
+            dot_r,
+            match chip_state {
+                PreviewChipState::Unbound(_) => status.success,
+                PreviewChipState::Empty => st.palette.text_disabled,
+                _ => word_col,
+            },
+        );
+        let text_x = chip.min.x + pad + dot_r * 2.0 + pad * 0.5;
+        let text_y = chip.center().y - px * 0.62;
+        p.text_family(Pos2::new(text_x, text_y), &word, px, word_col, None, FontFamily::Mono);
+        p.text_family(
+            Pos2::new(text_x + state_w, text_y),
+            &format!("{sep}{who}"),
+            px,
+            if chip_state == PreviewChipState::Empty {
+                st.palette.text_disabled
+            } else {
+                st.palette.text
+            },
+            None,
+            FontFamily::Mono,
+        );
+    }
+    let mut just_opened = false;
+    if chip_state == PreviewChipState::Empty {
+        // Nothing to pick; a dead chip must not hold a picker open either.
+        state.anim_picker = false;
+    } else {
+        let chip_id = ui.alloc_id("anim_preview_chip");
+        let resp = ui.interact(chip_id, chip);
+        just_opened = resp.clicked && !state.anim_picker;
+        if resp.clicked {
+            state.anim_picker = !state.anim_picker;
+        }
+        if resp.hovered && !state.anim_picker {
+            let tip = match (chip_state, anim.and_then(|a| a.disabled.as_deref())) {
+                (PreviewChipState::Refused, Some(why)) => {
+                    format!("This instance refused to run:\n{why}")
+                }
+                _ => "Which entity this graph previews on.\n\
+                      Click to pick another; the controls drive its parameters live."
+                    .to_string(),
+            };
+            ui.tooltip_for(chip, &tip);
+        }
+    }
+
+    // Controls, only for a live binding: sliders against a refused runtime
+    // (or nothing) would be dead weight pretending to work.
+    if let Some(a) = anim.filter(|a| a.disabled.is_none()) {
+        anim_param_controls(ui, band, chip.max.x + pad * 2.0, state, registry, a);
+    }
+    (chip, just_opened)
+}
+
+/// One control per declared parameter, flowing left to right from `x0`;
+/// parameters past the band's width elide to a mono `+n` — the chip
+/// summarizer's discipline, not a scroll surface in a footer.
+fn anim_param_controls(
+    ui: &mut Ui,
+    band: Rect,
+    x0: f32,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    a: &AnimPreview,
+) {
+    use crate::engine::animation::graph::{trigger_pin_type, ParamValue};
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let cy = band.center().y;
+    let seg_h = st.metrics.control_height.min(band.height() - 6.0 * s);
+    let slider_w = PREVIEW_SLIDER_W * s;
+    let fire_label = "FIRE";
+    let trigger_col = pin_color(Some(registry), &trigger_pin_type());
+    let mut x = x0;
+
+    for (i, p) in a.params.iter().enumerate() {
+        // The declaration's label, by slug — the strip lists the *runtime's*
+        // parameters (what edits can actually drive), the document supplies
+        // the author-facing name while the two agree.
+        let label = state
+            .doc
+            .variables
+            .iter()
+            .find(|v| v.slug == p.slug)
+            .map(|v| v.label.clone())
+            .unwrap_or_else(|| p.slug.clone());
+        let (label_w, value_w, fire_w) = {
+            let mut painter = ui.painter();
+            (
+                painter.measure_text(&label, px, None).x,
+                painter.measure_text_family("00.00", px, None, FontFamily::Mono).x,
+                painter
+                    .measure_text_family(fire_label, px, None, FontFamily::Mono)
+                    .x,
+            )
+        };
+        let w = match p.value {
+            ParamValue::Float(_) => label_w + pad + slider_w + pad * 0.5 + value_w,
+            ParamValue::Bool(_) => label_w + pad * 0.75 + st.sizes.checkbox,
+            ParamValue::Trigger(_) => label_w + pad * 0.75 + fire_w + pad * 1.6,
+        };
+        // Out of room: say how many the band is not showing, and stop.
+        if x + w > band.max.x - pad {
+            let n = a.params.len() - i;
+            ui.painter().text_family(
+                Pos2::new(x, cy - px * 0.62),
+                &format!("+{n}"),
+                px,
+                st.palette.text_disabled,
+                None,
+                FontFamily::Mono,
+            );
+            break;
+        }
+
+        match p.value {
+            ParamValue::Float(v) => {
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad;
+                let mut val = v;
+                let slider = Rect::from_min_size(
+                    Pos2::new(x, cy - st.sizes.slider_height * 0.5),
+                    Vec2::new(slider_w, st.sizes.slider_height),
+                );
+                ui.run_at(
+                    slider,
+                    Direction::LeftToRight,
+                    Id::new(("anim_preview_float", p.slug.as_str())),
+                    UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+                    |ui| {
+                        Slider::new(&mut val, p.range.0..=p.range.1)
+                            .width(slider_w)
+                            .show(ui);
+                    },
+                );
+                if val != v {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::SetFloat(p.slug.clone(), val));
+                }
+                x += slider_w + pad * 0.5;
+                ui.painter().text_family(
+                    Pos2::new(x, cy - px * 0.62),
+                    &format!("{val:.2}"),
+                    px,
+                    st.palette.text_mono,
+                    None,
+                    FontFamily::Mono,
+                );
+                x += value_w;
+            }
+            ParamValue::Bool(v) => {
+                // The label is painted like every other param's, so the four
+                // control families share one typography; the box alone is the
+                // widget.
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad * 0.75;
+                let mut val = v;
+                let row = Rect::from_min_size(
+                    Pos2::new(x, cy - st.sizes.checkbox * 0.5),
+                    Vec2::new(st.sizes.checkbox, st.sizes.checkbox),
+                );
+                ui.run_at(
+                    row,
+                    Direction::LeftToRight,
+                    Id::new(("anim_preview_bool", p.slug.as_str())),
+                    UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+                    |ui| {
+                        Checkbox::new(&mut val, "").show(ui);
+                    },
+                );
+                if val != v {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::SetBool(p.slug.clone(), val));
+                }
+                x += st.sizes.checkbox;
+            }
+            ParamValue::Trigger(lit) => {
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad * 0.75;
+                // FIRE holds the trigger's ember while the shot is buffered
+                // — lit until a transition consumes it, read, not
+                // remembered.
+                let b = Rect::from_min_size(
+                    Pos2::new(x, cy - seg_h * 0.5),
+                    Vec2::new(fire_w + pad * 1.6, seg_h),
+                );
+                let id = ui.alloc_id(("anim_preview_fire", p.slug.as_str()));
+                let resp = ui.interact(id, b);
+                let (fill, stroke, text_col) = if lit {
+                    (trigger_col.with_alpha(0.18), trigger_col, trigger_col)
+                } else if resp.hovered {
+                    (st.palette.hover, st.palette.stroke_strong, st.palette.text)
+                } else {
+                    (Color::TRANSPARENT, st.palette.stroke, st.palette.text_secondary)
+                };
+                {
+                    let mut painter = ui.painter();
+                    painter.rect_filled(b, st.rounding.small, fill);
+                    painter.rect_stroke(b, st.rounding.small, st.metrics.border, stroke);
+                    painter.text_family(
+                        Pos2::new(b.min.x + pad * 0.8, b.center().y - px * 0.62),
+                        fire_label,
+                        px,
+                        text_col,
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
+                if resp.hovered {
+                    ui.tooltip_for(
+                        b,
+                        if lit {
+                            "Buffered — stays set until a transition consumes it"
+                        } else {
+                            "Fire the trigger (buffered until consumed)"
+                        },
+                    );
+                }
+                if resp.clicked {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::FireTrigger(p.slug.clone()));
+                }
+                x += b.width();
+            }
+        }
+        x += pad * 1.6;
+    }
+}
+
+fn anim_picker_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("anim_preview_picker")
+}
+
+/// The PREVIEW chip's dropdown: every entity this graph could preview on,
+/// nearest first, opening **upward** — the chip lives in the footer band.
+/// Returns `Some(binding)` when a row was chosen; `Some(None)` is "follow
+/// the selection", the baseline rule and the way back out of an explicit
+/// pick.
+fn anim_preview_picker(
+    ui: &mut Ui,
+    anchor: Rect,
+    instances: &[ExecInstance],
+    anim: Option<&AnimPreview>,
+    st: &Style,
+    s: f32,
+    // The press that opened the picker lands *outside* it — without this the
+    // opening click would read as a dismissal.
+    just_opened: bool,
+) -> Option<Option<u64>> {
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let row_h = st.metrics.control_height;
+    let w = (VARS_W * s).max(anchor.width());
+    let h = row_h * (instances.len() as f32 + 1.0) + row_h * 0.9;
+    let panel = Rect::from_min_size(
+        Pos2::new(anchor.min.x, anchor.min.y - pad * 0.25 - h),
+        Vec2::new(w, h),
+    );
+    ui.ctx_mut().modal_push(anim_picker_modal_id(), panel);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.widget, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut picked: Option<Option<u64>> = None;
+    let bound = anim.map(|a| a.instance_id);
+    let mut y = panel.min.y;
+    for inst in instances {
+        let row = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+        y += row_h;
+        let id = ui.alloc_id(("anim_preview_row", inst.id));
+        let resp = ui.interact(id, row);
+        let is_bound = bound == Some(inst.id);
+        let mut p = ui.painter();
+        if is_bound {
+            p.rect_filled(row, Rounding::ZERO, st.palette.selection_fill);
+        } else if resp.hovered {
+            p.rect_filled(row, Rounding::ZERO, st.palette.hover);
+        }
+        let dot_r = px * 0.28;
+        p.circle_filled(
+            Pos2::new(row.min.x + pad + dot_r, row.center().y),
+            dot_r,
+            if inst.killed {
+                Palette::invariant_status().error
+            } else if is_bound {
+                st.palette.accent_active
+            } else {
+                Palette::invariant_status().success
+            },
+        );
+        // Distance only — machines tick every frame, so recency says
+        // nothing here; "refused" is the one state worth words.
+        let meta = if is_bound {
+            "selected".to_string()
+        } else if inst.killed {
+            format!("{:.0} m \u{b7} refused", inst.distance)
+        } else {
+            format!("{:.0} m", inst.distance)
+        };
+        let mw = p.measure_text_family(&meta, px, None, FontFamily::Mono).x;
+        p.text_family(
+            Pos2::new(row.max.x - pad - mw, row.center().y - px * 0.62),
+            &meta,
+            px,
+            if is_bound { st.palette.text_mono } else { st.palette.text_disabled },
+            None,
+            FontFamily::Mono,
+        );
+        let name = if inst.name.is_empty() { "(unnamed)" } else { inst.name.as_str() };
+        let avail = row.max.x - pad * 2.0 - mw - (row.min.x + pad * 2.0 + dot_r * 2.0);
+        let name = clip_text(&mut p, name, st.fonts.body, avail);
+        p.text(
+            Pos2::new(
+                row.min.x + pad * 2.0 + dot_r * 2.0,
+                row.center().y - st.fonts.body * 0.62,
+            ),
+            &name,
+            st.fonts.body,
+            if is_bound { st.palette.selection_text } else { st.palette.text },
+            None,
+        );
+        if resp.clicked {
+            picked = Some(Some(inst.id));
+        }
+    }
+    let follow = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+    let fid = ui.alloc_id("anim_preview_follow");
+    let fresp = ui.interact(fid, follow);
+    {
+        let mut p = ui.painter();
+        if fresp.hovered {
+            p.rect_filled(follow, Rounding::ZERO, st.palette.hover);
+        }
+        p.text(
+            Pos2::new(follow.min.x + pad, follow.center().y - px * 0.62),
+            "Follow selection",
+            px,
+            st.palette.text_secondary,
+            None,
+        );
+    }
+    if fresp.clicked {
+        picked = Some(None);
+    }
+    let footer = Rect::from_min_size(Pos2::new(panel.min.x, follow.max.y), Vec2::new(w, row_h * 0.9));
+    {
+        let mut p = ui.painter();
+        p.line_segment(
+            Pos2::new(footer.min.x, footer.min.y),
+            Pos2::new(footer.max.x, footer.min.y),
+            st.metrics.border,
+            st.palette.stroke,
+        );
+        p.text(
+            Pos2::new(footer.min.x + pad, footer.center().y - px * 0.62),
+            &format!(
+                "{} entit{} running this graph",
+                instances.len(),
+                if instances.len() == 1 { "y" } else { "ies" }
+            ),
+            px,
+            st.palette.text_disabled,
+            None,
+        );
+    }
+    let pressed_outside = ui.ctx().input.pointer_pressed
+        && ui
+            .ctx()
+            .input
+            .pointer_pos
+            .is_some_and(|p| !panel.contains(p) && !anchor.contains(p));
+    if !just_opened && (ui.ctx().input.key_pressed(Key::Escape) || pressed_outside) {
+        ui.ctx_mut().modal_dismiss(anim_picker_modal_id());
+        // Keep the binding, close the surface: "put it away" is not "unbind".
+        return Some(anim.map(|a| a.instance_id));
+    }
+    if picked.is_some() {
+        ui.ctx_mut().modal_dismiss(anim_picker_modal_id());
+    }
+    picked
+}
+
+/// The live preview highlight (ticket 06): while a preview is bound, the
+/// active state carries an accent outline, the outgoing side of an in-flight
+/// crossfade fades out with the fade itself, and the transition that fired
+/// flashes and decays. Painted over the canvas (and over the rule peek's
+/// scrim) from the node geoms — the canvas itself never learns about it.
+fn anim_live_highlight(
+    ui: &mut Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    geoms: &[NodeGeom],
+    anim: Option<&AnimPreview>,
+) {
+    let Some(a) = anim.filter(|a| a.disabled.is_none()) else {
+        return;
+    };
+    let v = state.view;
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let accent = st.palette.accent_active;
+    let screen = |r: Rect| {
+        Rect::from_min_max(
+            Pos2::new(
+                canvas.min.x + (r.min.x - v.pan.x) * v.zoom,
+                canvas.min.y + (r.min.y - v.pan.y) * v.zoom,
+            ),
+            Pos2::new(
+                canvas.min.x + (r.max.x - v.pan.x) * v.zoom,
+                canvas.min.y + (r.max.y - v.pan.y) * v.zoom,
+            ),
+        )
+    };
+    // Seconds an instant (zero-duration) fire stays lit — long enough to
+    // see, short enough to read as an event rather than a state.
+    const FLASH_SECS: f32 = 0.6;
+    let mut lit: Vec<(u64, f32)> = Vec::new();
+    if let Some(id) = a.active_state {
+        lit.push((id, 1.0));
+    }
+    if let Some((from, w)) = a.fade {
+        lit.push((from, (1.0 - w).clamp(0.0, 1.0)));
+    }
+    if let Some((t, age)) = a.fired {
+        // The firing transition holds while its fade runs, else decays.
+        let alpha = match a.fade {
+            Some(_) => 1.0,
+            None => 1.0 - (age / FLASH_SECS).clamp(0.0, 1.0),
+        };
+        if alpha > 0.0 {
+            lit.push((t, alpha));
+        }
+    }
+    for (id, alpha) in lit {
+        let Some(g) = geoms.iter().find(|g| g.id == id) else {
+            continue;
+        };
+        let r = screen(g.rect).expand(3.0 * s);
+        let visible = r.intersect(canvas);
+        if visible.width() <= 0.0 || visible.height() <= 0.0 || alpha <= 0.01 {
+            continue;
+        }
+        let mut p = ui.painter();
+        p.rect_stroke(
+            r,
+            st.rounding.widget,
+            (st.metrics.border * 2.0).max(2.0),
+            accent.with_alpha(alpha),
+        );
+        // A soft outer breath, so "live" reads at a glance without a second
+        // color: the same accent, wider and quieter.
+        p.rect_stroke(
+            r.expand(3.0 * s),
+            st.rounding.widget,
+            st.metrics.border,
+            accent.with_alpha(alpha * 0.35),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
