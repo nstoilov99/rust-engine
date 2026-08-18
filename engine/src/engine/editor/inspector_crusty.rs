@@ -87,6 +87,7 @@ enum ComponentAction {
     RemoveRigidBody,
     RemoveCollider,
     RemoveGraphRunner,
+    RemoveAnimGraphRunner,
     RemoveAudioEmitter,
     RemoveAudioListener,
     RemoveParticleEffect,
@@ -1307,6 +1308,14 @@ fn render_components(
     {
         edit_animation_player(ui, world, entity);
     }
+    if (panel.matches_filter("animation")
+        || panel.matches_filter("graph")
+        || panel.matches_filter("runner"))
+        && p.has(ComponentPresence::ANIM_GRAPH_RUNNER)
+        && edit_anim_graph_runner(ui, world, entity, asset_browser, icons)
+    {
+        action = Some(ComponentAction::RemoveAnimGraphRunner);
+    }
     if (panel.matches_filter("audio")
         || panel.matches_filter("emitter")
         || panel.matches_filter("sound")
@@ -1367,6 +1376,13 @@ fn render_components(
             }
             ComponentAction::RemoveGraphRunner => {
                 let _ = world.remove_one::<crate::engine::scripting::GraphRunner>(entity);
+            }
+            ComponentAction::RemoveAnimGraphRunner => {
+                // The paired `AnimGraphRuntime` is the system's to drop: it
+                // notices the missing runner on its next tick (see
+                // `runner_edits_re_arm_and_removal_drops_the_runtime`).
+                let _ = world
+                    .remove_one::<crate::engine::animation::graph::AnimGraphRunner>(entity);
             }
             ComponentAction::RemoveParticleEffect => {
                 let _ = world.remove_one::<ParticleEffect>(entity);
@@ -2007,6 +2023,44 @@ fn edit_animation_player(ui: &mut Ui, world: &mut World, entity: Entity) {
     }
 }
 
+/// The `AnimGraphRunner` row: which `.animgraph`, and whether it runs —
+/// the animation twin of [`edit_graph_runner`], with the asset picker the
+/// script side still defers. Edits land directly on the component; the
+/// system notices a re-pointed path or a cleared `enabled` on its next tick
+/// and drops/re-arms the runtime (the same lifecycle hot-reload rides).
+fn edit_anim_graph_runner(
+    ui: &mut Ui,
+    world: &mut World,
+    entity: Entity,
+    asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
+) -> bool {
+    let Ok(mut runner) =
+        world.get::<&mut crate::engine::animation::graph::AnimGraphRunner>(entity)
+    else {
+        return false;
+    };
+    component_section(ui, "Anim Graph Runner", cat("animation"), true, |ui| {
+        asset_ref_field(
+            ui,
+            "anim_graph_slot",
+            "Graph",
+            &mut runner.graph,
+            &[AssetType::AnimGraph],
+            asset_browser,
+            icons,
+        );
+        // The component's contract is forward slashes (registry paths can
+        // carry `\` on Windows); normalize so the runtime's stale check and
+        // the saved scene both see the canonical form.
+        let normalized = crate::engine::scripting::normalize_graph_path(&runner.graph);
+        if runner.graph != normalized {
+            runner.graph = normalized;
+        }
+        checkbox_row(ui, "Enabled", &mut runner.enabled);
+    })
+}
+
 fn edit_audio_emitter(
     ui: &mut Ui,
     world: &mut World,
@@ -2527,6 +2581,15 @@ fn render_add_component(
                 let _ = world.insert_one(
                     entity,
                     crate::engine::scripting::GraphRunner::default(),
+                );
+                added = true;
+            }
+            if !p.has(ComponentPresence::ANIM_GRAPH_RUNNER)
+                && entry(ui, "Anim Graph Runner", false)
+            {
+                let _ = world.insert_one(
+                    entity,
+                    crate::engine::animation::graph::AnimGraphRunner::default(),
                 );
                 added = true;
             }

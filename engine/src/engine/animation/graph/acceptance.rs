@@ -1619,6 +1619,56 @@ fn arming_attaches_a_skeleton_from_the_entitys_mesh() {
     assert!(h.world.get::<&AnimGraphRuntime>(e).unwrap().disabled.is_none());
 }
 
+/// The inspector's three edit surfaces — re-pointing the graph path,
+/// toggling `enabled`, and removing the component — are plain component
+/// writes; this pins that the system notices each one on its next tick
+/// (drop the stale runtime, re-arm where runnable), the same lifecycle
+/// scene-load and hot-reload ride.
+#[test]
+fn runner_edits_re_arm_and_removal_drops_the_runtime() {
+    const OTHER: &str = "graphs/other.animgraph";
+    let assets = MapAssets::default();
+    {
+        let mut graphs = assets.graphs.lock().unwrap();
+        graphs.insert(GRAPH.into(), two_state_doc());
+        graphs.insert(OTHER.into(), blend1d_doc());
+    }
+    let mut h = Harness::new(assets);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    assert_eq!(h.world.get::<&AnimGraphRuntime>(e).unwrap().graph, GRAPH);
+
+    // Re-point: the mismatched runtime drops and a fresh machine arms
+    // against the new asset, back at its ENTRY.
+    h.world.get::<&mut AnimGraphRunner>(e).unwrap().graph = OTHER.into();
+    h.tick();
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("re-armed");
+        assert_eq!(rt.graph, OTHER, "the runtime follows the edited path");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+    }
+
+    // Disable: the reference survives, the machine does not.
+    h.world.get::<&mut AnimGraphRunner>(e).unwrap().enabled = false;
+    h.tick();
+    assert!(h.world.get::<&AnimGraphRuntime>(e).is_err(), "disable drops the machine");
+
+    // Re-enable re-arms; removing the component drops the runtime for good.
+    h.world.get::<&mut AnimGraphRunner>(e).unwrap().enabled = true;
+    h.tick();
+    assert!(h.world.get::<&AnimGraphRuntime>(e).is_ok(), "re-enable re-arms");
+    h.world.remove_one::<AnimGraphRunner>(e).unwrap();
+    h.tick();
+    assert!(
+        h.world.get::<&AnimGraphRuntime>(e).is_err(),
+        "removing the runner removes the runtime"
+    );
+}
+
 #[test]
 fn entities_without_a_graph_keep_the_single_clip_player() {
     let assets = MapAssets::default();
