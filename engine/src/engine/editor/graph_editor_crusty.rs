@@ -33,7 +33,7 @@ use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, DomainError, GraphDomain,
-    GraphEdit, GraphEditorState,
+    GraphEdit, GraphEditorState, GraphOpenRequest,
     GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, PayloadConfirm, PayloadDraft,
     payload_reader_count, variable_matches, variable_mismatch, variable_node_ids, variable_slug,
     variables_view,
@@ -589,9 +589,11 @@ pub struct GraphEditorPanelCtx<'a> {
     pub curves: &'a dyn CurveResolver,
     /// Content-relative paths of known `.subgraph` assets (create menu).
     pub subgraph_assets: &'a [String],
-    /// Set to a content-relative path when a subgraph node is double-clicked;
-    /// the host opens it as a tab (P6 open-in-tab navigation).
-    pub open_subgraph: &'a mut Option<String>,
+    /// Set when a node that references another graph file is descended into
+    /// (a subgraph node, or an animation state nesting a `.animgraph` —
+    /// ticket 09); the host opens it as a tab (P6 open-in-tab navigation)
+    /// and seeds the opened tab's breadcrumb chain from the request.
+    pub open_subgraph: &'a mut Option<GraphOpenRequest>,
     /// `selection.outline` from the live theme. Passed in because crusty's
     /// `Style` has no counterpart and Graphite overrides the invariant.
     pub selection_outline: Color,
@@ -749,8 +751,8 @@ impl ConfigGeom {
 fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
     use crate::engine::animation::graph::plan::{
         ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP,
-        CLIP_PROP, DURATION_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
-        SLOT_TRIGGER_PROP, SPEED_PROP,
+        CLIP_PROP, DURATION_PROP, GRAPH_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP,
+        SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPEED_PROP,
     };
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
@@ -821,13 +823,22 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                 .get(&n.id)
                 .is_some_and(|r| !r.nodes.is_empty())
             {
-                // A state with a blend tree ignores its clip (the compiler's
-                // rule); the row says what the state *is* instead of showing
-                // a field that would do nothing.
+                // A state with a blend tree ignores its clip and graph (the
+                // compiler's rule); the row says what the state *is* instead
+                // of showing fields that would do nothing.
                 out.push((
                     CLIP_PROP.to_string(),
                     "Tree".to_string(),
                     InlineKind::Chip("blend tree".to_string()),
+                ));
+            } else if !text_of(GRAPH_PROP).trim().is_empty() {
+                // A nested sub-state-machine (ticket 09): the referenced
+                // `.animgraph` is the state's whole Pose source, so the clip
+                // rows yield the same way they do to a tree.
+                out.push((
+                    GRAPH_PROP.to_string(),
+                    "Graph".to_string(),
+                    InlineKind::Str(text_of(GRAPH_PROP)),
                 ));
             } else {
                 out.push((
@@ -845,6 +856,15 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                         InlineKind::Str(text_of(CLIP_NAME_PROP)),
                     ));
                 }
+                // The nested-graph reference's front door: an empty row on
+                // every leaf state (rows appear even when the property is
+                // missing — the module rule above — because a row is the only
+                // way to give it a value).
+                out.push((
+                    GRAPH_PROP.to_string(),
+                    "Graph".to_string(),
+                    InlineKind::Str(String::new()),
+                ));
             }
             out.push((
                 SPEED_PROP.to_string(),
@@ -1844,8 +1864,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     } = ctx;
     let resolver = &DocResolvers { graphs: resolver, curves };
     // Subgraph instances are a script-library concept; the animation
-    // palette's file-backed nesting is a state referencing another
-    // `.animgraph` (a later slice), not a subgraph row.
+    // library's file-backed nesting is a state referencing another
+    // `.animgraph` through its Graph row (ticket 09), not a subgraph row.
     let subgraph_assets: &[String] = if state.domain.is_animation() {
         &[]
     } else {
@@ -1909,11 +1929,22 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // off the canvas rect follows without knowing it exists.
     paused_banner(ui, state, registry, resolver, keymap, exec);
 
-    // An open rule scope shows on the breadcrumb (ticket 05): the non-file
-    // scope target — "duck.animgraph ▸ rule: Idle → Locomotion" — with the
-    // file crumb as the way back out.
-    if state.rule_scope.is_some() && rule_breadcrumb_band(ui, state) {
-        state.close_rule_scope(registry);
+    // The breadcrumb band (tickets 05/09): the file chain this tab was
+    // descended into — "character.animgraph ▸ locomotion.animgraph" — and,
+    // while a rule scope is open, the non-file scope target after it. A
+    // chain crumb navigates back to that ancestor; the file crumb closes an
+    // open rule scope.
+    match breadcrumb_band(ui, state) {
+        BreadcrumbClick::None => {}
+        BreadcrumbClick::CloseRule => state.close_rule_scope(registry),
+        BreadcrumbClick::Ancestor(i) => {
+            if let Some(path) = state.nav_back.get(i).cloned() {
+                *open_subgraph = Some(GraphOpenRequest {
+                    path,
+                    back: state.nav_back[..i].to_vec(),
+                });
+            }
+        }
     }
     // Promoted (⤢): the rule takes the full canvas; the machine's canvas and
     // strips yield entirely until the breadcrumb (or Esc) climbs back out.
@@ -2186,7 +2217,8 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     if collapse_request {
         if state.domain.is_animation() {
             // Subgraphs are the script library's factoring tool; a machine
-            // factors into a nested `.animgraph` (a later slice).
+            // factors by pointing a state's Graph row at another `.animgraph`
+            // (ticket 09), which is an authoring act, not a collapse gesture.
             state.toast("An animation graph has no subgraphs");
         } else {
             match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
@@ -2331,7 +2363,7 @@ fn draw_and_interact(
     collapse_request: &mut bool,
     layout_request: &mut bool,
     cycle_error_request: &mut Option<bool>,
-    open_subgraph: &mut Option<String>,
+    open_subgraph: &mut Option<GraphOpenRequest>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
     zoom_min: f32,
@@ -3147,14 +3179,14 @@ fn draw_and_interact(
         if resp.clicked && shift && !alt {
             state.toggle_selected(g.id);
         }
-        // Double-click a subgraph node → open its referenced doc as a tab.
-        // Double-click a transition → descend into its embedded rule as a
-        // peek (ticket 05): same gesture, same meaning — "go inside" — the
-        // only difference is that nothing new exists on disk.
+        // Double-click always means "descend" (spec): a subgraph node or a
+        // nested-`.animgraph` state opens its referenced file as a tab, a
+        // transition descends into its embedded rule as a peek (ticket 05) —
+        // same gesture, same meaning, the breadcrumb tells files and rules
+        // apart.
         if resp.double_clicked(ui) {
-            if let Some(path) = state.doc.node(g.id).and_then(|n| n.subgraph.clone()) {
-                state.push_nav(state.path.clone());
-                *open_subgraph = Some(path);
+            if let Some(path) = state.file_descend_target(g.id) {
+                *open_subgraph = Some(state.open_request(path));
             } else {
                 state.open_rule_scope(g.id, registry);
             }
@@ -3720,8 +3752,7 @@ fn draw_and_interact(
                     if let Some(t) = state.rule_descend_target() {
                         state.open_rule_scope(t, registry);
                     } else if let Some(path) = state.descend_target() {
-                        state.push_nav(state.path.clone());
-                        *open_subgraph = Some(path);
+                        *open_subgraph = Some(state.open_request(path));
                     }
                 }
                 Action::PARENT_GRAPH => {
@@ -3729,7 +3760,11 @@ fn draw_and_interact(
                     if state.rule_scope.is_some() {
                         state.close_rule_scope(registry);
                     } else if let Some(path) = state.ascend_target() {
-                        *open_subgraph = Some(path);
+                        // The popped remainder is the parent's own chain.
+                        *open_subgraph = Some(GraphOpenRequest {
+                            path,
+                            back: state.nav_back.clone(),
+                        });
                     }
                 }
                 // Arrow nudge. Each repeat extends the open transaction
@@ -4135,36 +4170,42 @@ fn rule_dim_scrim(ui: &mut Ui, canvas: Rect, state: &GraphEditorState, geoms: &[
     }
 }
 
-/// The tab's breadcrumb while a rule scope is open: `duck.animgraph ▸ rule:
-/// Idle → Locomotion · 0.20s`. The file crumb is the way back out; returns
-/// true when it was clicked.
-fn rule_breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> bool {
-    let Some(scope) = &state.rule_scope else { return false };
-    let owner = scope.owner;
+/// What the breadcrumb band's one click this frame asked for.
+enum BreadcrumbClick {
+    None,
+    /// The current file's crumb, while a rule scope is open — climb out.
+    CloseRule,
+    /// An ancestor crumb (index into `nav_back`) — navigate back to it.
+    Ancestor(usize),
+}
+
+/// The tab's breadcrumb: the file chain the tab was descended into (ticket
+/// 09 — every ancestor crumb is a link back), the current file, and — while
+/// a rule scope is open (ticket 05) — the non-file scope target:
+/// `character.animgraph ▸ locomotion.animgraph ▸ rule: Idle → Walk · 0.20s`.
+/// Drawn when either has something to say; the two scopes read as one chain,
+/// which is exactly the spec's "breadcrumb distinguishes the two".
+fn breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> BreadcrumbClick {
+    let chain: &[String] = if state.domain.is_animation() { &state.nav_back } else { &[] };
+    let rule = state.rule_scope.as_ref().map(|s| s.owner);
+    if chain.is_empty() && rule.is_none() {
+        return BreadcrumbClick::None;
+    }
     let st = ui.style();
     let pad = st.spacing.padding;
     let h = st.metrics.control_height;
-    let rect = ui.allocate(Vec2::new(ui.available_size().x, h));
-    let file = state.path.rsplit('/').next().unwrap_or(&state.path).to_string();
-    let scope_text = rule_scope_label(state, owner);
-    let tag = rule_duration_tag(state, owner);
-
     let font = st.fonts.body;
-    let (file_w, sep_w, scope_w) = {
-        let mut p = ui.painter();
-        (
-            p.measure_text(&file, font, None).x,
-            p.measure_text(" \u{25b8} ", font, None).x,
-            p.measure_text(&scope_text, font, None).x,
-        )
-    };
-    let crumb = Rect::from_min_size(
-        Pos2::new(rect.min.x + pad, rect.min.y),
-        Vec2::new(file_w, h),
-    );
-    let crumb_id = ui.alloc_id("rule_breadcrumb_file");
-    let resp = ui.interact(crumb_id, crumb);
+    let rect = ui.allocate(Vec2::new(ui.available_size().x, h));
+    let file_name =
+        |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let sep = " \u{25b8} ";
+    let sep_w = ui.painter().measure_text(sep, font, None).x;
+    let ty = rect.center().y - font * 0.62;
 
+    // Interact with every link crumb first (ancestors, plus the file crumb
+    // when a rule scope makes it a way back out), then paint — the band's
+    // layout is one left-to-right cursor either way.
+    let mut clicked = BreadcrumbClick::None;
     let mut p = ui.painter();
     p.rect_filled(rect, Rounding::ZERO, st.palette.header);
     p.rect_filled(
@@ -4172,29 +4213,71 @@ fn rule_breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> bool {
         Rounding::ZERO,
         st.palette.stroke_strong,
     );
-    let ty = rect.center().y - font * 0.62;
-    // The file crumb reads as a link: accent on hover, text otherwise.
+    drop(p);
+
+    let mut x = rect.min.x + pad;
+    for (i, ancestor) in chain.iter().enumerate() {
+        let text = file_name(ancestor);
+        let w = ui.painter().measure_text(&text, font, None).x;
+        let crumb = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(w, h));
+        let id = ui.alloc_id(("graph_breadcrumb", i));
+        let resp = ui.interact(id, crumb);
+        if resp.clicked {
+            clicked = BreadcrumbClick::Ancestor(i);
+        }
+        let mut p = ui.painter();
+        p.text(
+            Pos2::new(x, ty),
+            &text,
+            font,
+            if resp.hovered { st.palette.accent_active } else { st.palette.text_secondary },
+            None,
+        );
+        x += w;
+        p.text(Pos2::new(x, ty), sep, font, st.palette.text_disabled, None);
+        x += sep_w;
+    }
+
+    let file = file_name(&state.path);
+    let file_w = ui.painter().measure_text(&file, font, None).x;
+    let crumb = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(file_w, h));
+    let file_hovered = if rule.is_some() {
+        let id = ui.alloc_id("rule_breadcrumb_file");
+        let resp = ui.interact(id, crumb);
+        if resp.clicked {
+            clicked = BreadcrumbClick::CloseRule;
+        }
+        resp.hovered
+    } else {
+        false
+    };
+    let mut p = ui.painter();
     p.text(
-        Pos2::new(crumb.min.x, ty),
+        Pos2::new(x, ty),
         &file,
         font,
-        if resp.hovered { st.palette.accent_active } else { st.palette.text },
+        if file_hovered { st.palette.accent_active } else { st.palette.text },
         None,
     );
-    let mut x = crumb.max.x;
-    p.text(Pos2::new(x, ty), " \u{25b8} ", font, st.palette.text_disabled, None);
-    x += sep_w;
-    p.text(Pos2::new(x, ty), &scope_text, font, st.palette.text, None);
-    x += scope_w + pad;
-    p.text_family(
-        Pos2::new(x, rect.center().y - st.fonts.small * 0.62),
-        &format!("\u{b7} {tag}"),
-        st.fonts.small,
-        st.palette.text_disabled,
-        None,
-        FontFamily::Mono,
-    );
-    resp.clicked
+    x += file_w;
+
+    if let Some(owner) = rule {
+        let scope_text = rule_scope_label(state, owner);
+        let tag = rule_duration_tag(state, owner);
+        p.text(Pos2::new(x, ty), sep, font, st.palette.text_disabled, None);
+        x += sep_w;
+        p.text(Pos2::new(x, ty), &scope_text, font, st.palette.text, None);
+        x += p.measure_text(&scope_text, font, None).x + pad;
+        p.text_family(
+            Pos2::new(x, rect.center().y - st.fonts.small * 0.62),
+            &format!("\u{b7} {tag}"),
+            st.fonts.small,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    clicked
 }
 
 /// What one child-canvas pass hands back to its host surface.
@@ -11675,7 +11758,7 @@ fn error_chip(
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
-    open_subgraph: &mut Option<String>,
+    open_subgraph: &mut Option<GraphOpenRequest>,
     keymap: &Keymap,
     registry: &NodeRegistry,
 ) {
@@ -11799,7 +11882,8 @@ fn error_chip(
             }
             if r.clicked {
                 if let Some(first) = chain.first() {
-                    *open_subgraph = Some(first.clone());
+                    // A jump between peers, not a descent — no chain.
+                    *open_subgraph = Some(GraphOpenRequest::jump(first.clone()));
                 }
             }
         }
@@ -12632,6 +12716,63 @@ mod tests {
 
         // A plain registered node has no config band at all.
         assert!(config_rows(&test_node(9, "event_tick"), &docd).is_empty());
+    }
+
+    /// Ticket 09: a state's config band routes between its three sources.
+    /// A leaf shows Clip and an (empty) Graph row — the nesting feature's
+    /// front door; a set Graph row takes over and the clip rows yield; a
+    /// blend-tree region beats both.
+    #[test]
+    fn a_states_config_band_routes_clip_graph_and_tree() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPEED_PROP,
+        };
+        use crate::engine::node_graph::{GraphDoc, GraphRegion};
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        let mut leaf = test_node(0, ANIM_STATE_TYPE_ID);
+        leaf.properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        let mut nested = test_node(1, ANIM_STATE_TYPE_ID);
+        nested
+            .properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        nested
+            .properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
+        let mut tree = test_node(2, ANIM_STATE_TYPE_ID);
+        tree.properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
+        doc.nodes = vec![leaf, nested, tree];
+        doc.regions.insert(
+            2,
+            GraphRegion {
+                nodes: vec![test_node(0, "anim_pose_result")],
+                edges: vec![],
+            },
+        );
+        let docd = DocDescriptors::new(&doc, &reg);
+
+        let keys = |i: usize| -> Vec<String> {
+            config_rows(&doc.nodes[i], &docd).iter().map(|(k, _, _)| k.clone()).collect()
+        };
+        assert_eq!(keys(0), vec![CLIP_PROP, GRAPH_PROP, SPEED_PROP]);
+        let rows = config_rows(&doc.nodes[0], &docd);
+        assert!(
+            matches!(&rows[1].2, InlineKind::Str(s) if s.is_empty()),
+            "the Graph row exists empty — it is how the property comes to be"
+        );
+
+        assert_eq!(keys(1), vec![GRAPH_PROP, SPEED_PROP], "clip rows yield to the graph");
+        let rows = config_rows(&doc.nodes[1], &docd);
+        assert!(matches!(&rows[0].2, InlineKind::Str(s) if s == "graphs/loco.animgraph"));
+
+        assert_eq!(
+            keys(2),
+            vec![CLIP_PROP, SPEED_PROP],
+            "a tree region beats the graph reference — the chip row"
+        );
+        assert!(matches!(&config_rows(&doc.nodes[2], &docd)[0].2, InlineKind::Chip(_)));
     }
 
     /// **The five-site invariant.** Config rows shift the whole pin band down,

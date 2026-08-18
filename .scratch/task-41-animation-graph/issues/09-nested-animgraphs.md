@@ -4,9 +4,9 @@
 
 **Blocked by:** 01 — Tracer (runtime evaluation); 04 — Editor: author state machines (descend/breadcrumb).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A state referencing a nested `.animgraph` evaluates the sub-machine into its Pose, verified at the evaluator seam (entry, transitions, and crossfades inside the sub-machine work)
-- [ ] Validation rejects a missing reference and a circular reference (a graph reaching itself through nesting)
-- [ ] Editor double-click on the state opens the referenced file; breadcrumb shows the file chain and navigates back
-- [ ] Plan invalidation on save covers documents that nest the saved graph (or the wholesale invalidation documented for the plan cache is confirmed to cover it)
+- [x] A state referencing a nested `.animgraph` evaluates the sub-machine into its Pose, verified at the evaluator seam (entry, transitions, and crossfades inside the sub-machine work)
+- [x] Validation rejects a missing reference and a circular reference (a graph reaching itself through nesting)
+- [x] Editor double-click on the state opens the referenced file; breadcrumb shows the file chain and navigates back
+- [x] Plan invalidation on save covers documents that nest the saved graph (or the wholesale invalidation documented for the plan cache is confirmed to cover it)

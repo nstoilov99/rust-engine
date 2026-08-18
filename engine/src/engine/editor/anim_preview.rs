@@ -12,7 +12,7 @@
 //! the editor too).
 
 use crate::engine::animation::graph::machine::{AnimParams, ParamValue};
-use crate::engine::animation::graph::plan::{AnimGraphPlan, PlanTree, RuleExpr};
+use crate::engine::animation::graph::plan::{AnimGraphPlan, PlanTree, PoseSource, RuleExpr};
 use crate::engine::animation::graph::runner::{AnimGraphRunner, AnimGraphRuntime};
 use crate::engine::scripting::normalize_graph_path;
 
@@ -81,14 +81,7 @@ impl AnimParamEdit {
 /// or a parameter only read as-is) falls back to `(0, 1)`.
 pub fn float_param_range(plan: &AnimGraphPlan, slug: &str) -> (f32, f32) {
     let mut vals: Vec<f32> = Vec::new();
-    for st in &plan.states {
-        collect_tree(&st.tree, slug, &mut vals);
-    }
-    for t in &plan.transitions {
-        if let Some(rule) = &t.rule {
-            collect_expr(&rule.expr, slug, &mut vals);
-        }
-    }
+    collect_plan(plan, slug, &mut vals);
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for v in vals {
         lo = lo.min(v);
@@ -96,6 +89,22 @@ pub fn float_param_range(plan: &AnimGraphPlan, slug: &str) -> (f32, f32) {
     }
     let pad = (hi - lo) * 0.25;
     (if lo < 0.0 { lo - pad } else { lo }, hi + pad)
+}
+
+/// One plan's reads of `slug`, nested sub-machines included — a merged
+/// (nested) parameter's slider range comes from wherever the read lives.
+fn collect_plan(plan: &AnimGraphPlan, slug: &str, out: &mut Vec<f32>) {
+    for st in &plan.states {
+        match &st.source {
+            PoseSource::Tree(tree) => collect_tree(tree, slug, out),
+            PoseSource::Machine { plan: child, .. } => collect_plan(child, slug, out),
+        }
+    }
+    for t in &plan.transitions {
+        if let Some(rule) = &t.rule {
+            collect_expr(&rule.expr, slug, out);
+        }
+    }
 }
 
 fn collect_tree(tree: &PlanTree, slug: &str, out: &mut Vec<f32>) {
@@ -260,7 +269,7 @@ mod tests {
     use crate::engine::animation::graph::machine::AnimMachine;
     use crate::engine::animation::graph::plan::{
         AnimParamType, CmpOp, ParamDecl, PlanClip, PlanRule, PlanState, PlanTransition,
-        TransitionFrom,
+        PoseSource, TransitionFrom,
     };
     use crate::engine::animation::graph::{AnimGraphPlan, PlayOnceSlot};
     use std::sync::Arc;
@@ -280,16 +289,16 @@ mod tests {
                 PlanState {
                     node_id: 10,
                     name: "Idle".into(),
-                    tree: clip("a.anim"),
+                    source: PoseSource::Tree(clip("a.anim")),
                     speed: 1.0,
                 },
                 PlanState {
                     node_id: 11,
                     name: "Move".into(),
-                    tree: PlanTree::Blend1D {
+                    source: PoseSource::Tree(PlanTree::Blend1D {
                         param: "speed".into(),
                         children: vec![(0.0, clip("a.anim")), (6.0, clip("a.anim"))],
-                    },
+                    }),
                     speed: 1.0,
                 },
             ],

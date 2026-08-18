@@ -3563,10 +3563,13 @@ impl App {
         let mut crusty_import_action = ImportDialogAction::None;
         let mut anim_events_action =
             rust_engine::engine::editor::anim_events_dialog::AnimEventsAction::None;
-        // Subgraph node double-clicked in a docked graph this frame (P6);
-        // declared out here so it outlives the layout block and can be applied
-        // once the panel borrows are released.
-        let mut graph_open_request: Option<String> = None;
+        // Graph-file descend (subgraph node, nested `.animgraph` state) in a
+        // docked graph this frame (P6 / ticket 09); declared out here so it
+        // outlives the layout block and can be applied once the panel borrows
+        // are released.
+        let mut graph_open_request: Option<
+            rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+        > = None;
         // Set by a graph toolbar's "Clear trace"; applied after the UI, where
         // the world is reachable (GS-3).
         let mut graph_clear_trace: Option<String> = None;
@@ -4345,8 +4348,15 @@ impl App {
         if let Some(style) = graph_style_request {
             self.editor.ui.settings.prefs.graph.wires.style = style;
         }
-        if let Some(relative) = graph_open_request {
-            self.open_graph_document(relative);
+        if let Some(req) = graph_open_request {
+            self.open_graph_document(req.path.clone());
+            // A descent seeds the opened tab's breadcrumb chain; a plain
+            // jump (empty chain) leaves the target's session nav alone.
+            if !req.back.is_empty() {
+                if let Some(st) = self.editor.scene.graph_editors.get_mut(&req.path) {
+                    st.nav_back = req.back;
+                }
+            }
         }
         // "Clear trace" (GS-3): the taken-path tint and the pulse history are
         // one session's statement, and the recorder that owns them lives on
@@ -4871,6 +4881,11 @@ impl App {
             {
                 cache.invalidate(key);
             }
+            // Ticket 09: another open `.animgraph` may nest the one just
+            // saved — its anchored refusals compile against the file on
+            // disk, so they are recomputed now rather than on its next edit.
+            let key = key.to_string();
+            self.refresh_anim_graph_hosts(&key);
             return;
         }
         #[cfg(feature = "graph-scripting")]
@@ -4881,6 +4896,20 @@ impl App {
             .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
         {
             cache.invalidate(key);
+        }
+    }
+
+    /// Recompute the domain-compiler refusals of every open `.animgraph` tab
+    /// other than `changed_key` — a nested reference (ticket 09) makes a
+    /// host's compile depend on files it does not own, and those refusals
+    /// read from disk, so a save/reload of any `.animgraph` is the moment
+    /// they can change.
+    #[cfg(feature = "editor")]
+    fn refresh_anim_graph_hosts(&mut self, changed_key: &str) {
+        for st in self.editor.scene.graph_editors.values_mut() {
+            if st.domain.is_animation() && st.path != changed_key {
+                st.refresh_domain_errors();
+            }
         }
     }
 
@@ -5286,6 +5315,9 @@ impl App {
             {
                 cache.invalidate(&key);
             }
+            // Ticket 09: hosts nesting the changed graph recompile their
+            // anchored refusals against the new file.
+            self.refresh_anim_graph_hosts(&key);
         }
         #[cfg(feature = "graph-scripting")]
         if !is_anim {
@@ -5668,7 +5700,9 @@ impl App {
             anim_preview_bindings(&*world, &picked, &anim_tabs, &anim_instances)
         };
         let mut graph_clear_trace: Option<String> = None;
-        let mut graph_open_requests: Vec<String> = Vec::new();
+        let mut graph_open_requests: Vec<
+            rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+        > = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
         // Curve tabs in float windows that asked to save (their own Ctrl+S or
         // the toolbar). Applied after the window loop, like the graph opens.
@@ -5740,8 +5774,10 @@ impl App {
                     plugin_titles: &plugin_panel_titles,
                 },
             );
-            // Subgraph double-click in this float → queued for the host to open.
-            let mut float_open_request: Option<String> = None;
+            // Graph-file descend in this float → queued for the host to open.
+            let mut float_open_request: Option<
+                rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+            > = None;
             let res = fw.frame(
                 device.clone(),
                 queue.clone(),
@@ -5926,8 +5962,8 @@ impl App {
             if let Err(e) = res {
                 eprintln!("crusty float window frame failed: {e}");
             }
-            if let Some(path) = float_open_request {
-                graph_open_requests.push(path);
+            if let Some(req) = float_open_request {
+                graph_open_requests.push(req);
             }
         }
 
@@ -5937,26 +5973,41 @@ impl App {
         if let Some(style) = graph_style_request {
             editor.ui.settings.prefs.graph.wires.style = style;
         }
-        for relative in graph_open_requests {
-            if graph_editors.contains_key(&relative) {
-                editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
-            } else {
+        for req in graph_open_requests {
+            let relative = req.path;
+            if !graph_editors.contains_key(&relative) {
                 let abs = std::path::Path::new("content").join(&relative);
+                // The document's own library, exactly as the docked open
+                // path picks it — an `.animgraph` authors against the
+                // animation registry wherever it was opened from.
+                let reg = if relative.ends_with(".animgraph") {
+                    anim_graph_registry
+                } else {
+                    graph_registry
+                };
                 match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
                     &abs,
                     &relative,
-                    graph_registry,
+                    reg,
                 ) {
                     Ok(mut state) => {
                         restore_graph_ui_state(&mut state, &relative);
                         graph_editors.insert(relative.clone(), state);
-                        editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
                     }
-                    Err(e) => editor.console.messages.push(LogMessage::error(format!(
-                        "Failed to open graph '{relative}': {e}"
-                    ))),
+                    Err(e) => {
+                        editor.console.messages.push(LogMessage::error(format!(
+                            "Failed to open graph '{relative}': {e}"
+                        )));
+                        continue;
+                    }
                 }
             }
+            if let Some(st) = graph_editors.get_mut(&relative) {
+                if !req.back.is_empty() {
+                    st.nav_back = req.back;
+                }
+            }
+            editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
         }
 
         for key in std::mem::take(&mut float_curve_saves) {

@@ -27,10 +27,12 @@ use super::machine::ParamValue;
 /// The ENTRY node — a real node on the canvas, exactly one per machine. Its
 /// single outgoing edge names the starting state.
 pub const ANIM_ENTRY_TYPE_ID: &str = "anim_entry";
-/// A State: either a leaf that plays the `.anim` clip its [`CLIP_PROP`]
-/// names, or — when the document carries a region keyed by the state's id —
-/// a blend tree evaluated recursively into one Pose. (Nested machines widen
-/// this in a later slice.)
+/// A State: a leaf that plays the `.anim` clip its [`CLIP_PROP`] names, a
+/// blend tree (when the document carries a region keyed by the state's id),
+/// or a nested sub-state-machine (when [`GRAPH_PROP`] names another
+/// `.animgraph`) evaluated as this state's Pose source. Precedence mirrors
+/// the clip rule: a non-empty tree region wins over `graph`, which wins over
+/// `clip` — the ignored properties keep their data but do nothing.
 pub const ANIM_STATE_TYPE_ID: &str = "anim_state";
 /// A Transition between two states, carrying blend duration and priority as
 /// node data.
@@ -111,6 +113,13 @@ pub const TRANSITION_TO_PIN: &str = "to";
 pub const CLIP_PROP: &str = "clip";
 pub const CLIP_NAME_PROP: &str = "clip_name";
 pub const SPEED_PROP: &str = "speed";
+/// The content-relative `.animgraph` path a nested state references (spec
+/// story 3: factor Locomotion into its own file-backed sub-state-machine).
+/// The referenced document compiles into the plan as a child machine —
+/// see [`PoseSource::Machine`]; a [`SPEED_PROP`] on the state scales the
+/// sub-machine's clock. Editing tools treat it like `clip`: double-click
+/// descends into the file instead of playing anything here.
+pub const GRAPH_PROP: &str = "graph";
 
 /// Transition properties. `duration` is the crossfade length in seconds
 /// (default 0.0 = instant); `priority` orders evaluation when several rules
@@ -224,6 +233,43 @@ impl PlanTree {
     }
 }
 
+/// A state's compiled Pose source: a blend tree (a single clip is a
+/// one-node tree), or a nested sub-state-machine — the whole referenced
+/// `.animgraph`, compiled, evaluated by a child [`super::machine::AnimMachine`]
+/// the parent machine owns per nested state. Nesting is state-level only
+/// (spec: "states reference either a clip or a nested `.animgraph`"); a
+/// machine can never appear *inside* a blend tree, which is what keeps tree
+/// evaluation stateless.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PoseSource {
+    Tree(PlanTree),
+    Machine {
+        /// The normalized content-relative `.animgraph` path (diagnostics,
+        /// editor descend).
+        graph: String,
+        /// The child plan, compiled recursively — cycle-refused, so this is
+        /// always finite.
+        plan: std::sync::Arc<AnimGraphPlan>,
+    },
+}
+
+impl PoseSource {
+    /// Every clip reference this source samples — nested machines walk their
+    /// whole child plan (states and slots), so arm-time checks and
+    /// [`AnimGraphPlan::clip_refs`] see across files.
+    pub fn clips(&self) -> Vec<&PlanClip> {
+        match self {
+            PoseSource::Tree(t) => t.clips(),
+            PoseSource::Machine { plan, .. } => plan
+                .states
+                .iter()
+                .flat_map(|s| s.source.clips())
+                .chain(plan.slots.iter().map(|s| &s.clip))
+                .collect(),
+        }
+    }
+}
+
 /// A compiled State: what to play and how fast.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanState {
@@ -232,9 +278,11 @@ pub struct PlanState {
     /// Author-facing name (node title, falling back to `State <id>`).
     pub name: String,
     /// The pose producer: a single clip for a leaf state, a blend tree when
-    /// the document carries a region keyed by this state's node id.
-    pub tree: PlanTree,
-    /// Playback-rate multiplier on the state's clock.
+    /// the document carries a region keyed by this state's node id, or a
+    /// nested sub-state-machine when the state's [`GRAPH_PROP`] names one.
+    pub source: PoseSource,
+    /// Playback-rate multiplier on the state's clock. For a nested state it
+    /// scales the sub-machine's whole clock (its `dt`).
     pub speed: f32,
 }
 
@@ -344,19 +392,27 @@ pub struct AnimGraphPlan {
     pub transitions: Vec<PlanTransition>,
     /// Index of the ENTRY-wired state.
     pub entry: usize,
+    /// The parameter blackboard's declarations: this document's, plus every
+    /// nested graph's (merged by name — type conflicts refuse at compile, the
+    /// host's default wins a tie). One shared blackboard drives the whole
+    /// machine tree; rules still compile strictly against their *own*
+    /// document's declarations.
     pub parameters: Vec<ParamDecl>,
     /// Play-once slots, sorted by node id — when several triggers are set at
-    /// once, the first slot in this order takes the (single) channel.
+    /// once, the first slot in this order takes the (single) channel. Nested
+    /// graphs' slots merge in here (the overlay channel is machine-wide;
+    /// exact duplicates from nesting one graph twice are dropped).
     pub slots: Vec<PlanSlot>,
 }
 
 impl AnimGraphPlan {
-    /// Deduplicated content-relative `.anim` paths this plan samples.
+    /// Deduplicated content-relative `.anim` paths this plan samples —
+    /// nested graphs included.
     pub fn clip_refs(&self) -> Vec<&str> {
         let mut refs: Vec<&str> = self
             .states
             .iter()
-            .flat_map(|s| s.tree.clips())
+            .flat_map(|s| s.source.clips())
             .map(|c| c.clip.as_str())
             .chain(self.slots.iter().map(|s| s.clip.clip.as_str()))
             .collect();
@@ -438,10 +494,47 @@ pub fn compile_parameters(doc: &GraphDoc) -> Result<Vec<ParamDecl>, String> {
     Ok(parameters)
 }
 
-/// Compile a `.animgraph` document into a plan.
-///
-/// Refusals are author errors, phrased against the node that caused them.
+/// Compile a `.animgraph` document into a plan, with no way to resolve
+/// nested `.animgraph` references — a document that has any refuses with
+/// "could not be loaded". The seam for callers that know their document is
+/// self-contained (and for the editor's rule projection); everything else
+/// goes through [`compile_anim_graph_with`].
 pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
+    compile_anim_graph_with(doc, "", &|_| None)
+}
+
+/// Compile a `.animgraph` document into a plan, resolving nested
+/// sub-state-machine references through `load` (content-relative path →
+/// document — the runner hands its asset loader, the editor reads the
+/// content root). `path` is this document's own content-relative path; it
+/// seeds the cycle guard so `a.animgraph` nesting itself — directly or
+/// through any chain — refuses instead of recursing forever.
+///
+/// Refusals are author errors, phrased against the node that caused them;
+/// a nested graph's refusal is wrapped with the referencing state and file
+/// ("state 'Locomotion': in 'graphs/loco.animgraph': …"), so the anchored
+/// error lands on the state whose reference is broken.
+pub fn compile_anim_graph_with(
+    doc: &GraphDoc,
+    path: &str,
+    load: &dyn Fn(&str) -> Option<GraphDoc>,
+) -> Result<AnimGraphPlan, String> {
+    let mut stack = Vec::new();
+    let root = crate::engine::scripting::normalize_graph_path(path);
+    if !root.is_empty() {
+        stack.push(root);
+    }
+    compile_doc(doc, &mut stack, load)
+}
+
+/// One document of the nesting tree. `stack` holds the normalized paths
+/// currently being compiled, root-first — a nested reference back into it is
+/// a cycle, refused with the chain spelled out.
+fn compile_doc(
+    doc: &GraphDoc,
+    stack: &mut Vec<String>,
+    load: &dyn Fn(&str) -> Option<GraphDoc>,
+) -> Result<AnimGraphPlan, String> {
     // Animation graphs are Client-realm by definition (spec realm note): the
     // server never evaluates animation (ADR 0002), and saying so in the
     // document is the authority statement the realm field exists for.
@@ -458,37 +551,72 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
     let parameters = compile_parameters(doc)?;
 
     // States, in document order (index = plan identity). A state with a
-    // non-empty region compiles it as a blend tree; a leaf state plays the
-    // clip its `clip` property names.
+    // non-empty region compiles it as a blend tree; a `graph` property makes
+    // it a nested sub-state-machine; a leaf state plays the clip its `clip`
+    // property names.
     let mut states: Vec<PlanState> = Vec::new();
+    // Nested declarations to merge into the blackboard, with the state that
+    // brought them in (refusal anchoring).
+    let mut nested_params: Vec<(String, ParamDecl)> = Vec::new();
     for n in doc.nodes.iter().filter(|n| n.type_id == ANIM_STATE_TYPE_ID) {
         let name = n
             .title
             .clone()
             .unwrap_or_else(|| format!("State {}", n.id));
-        let tree = match doc.regions.get(&n.id).filter(|r| !r.nodes.is_empty()) {
-            Some(region) => compile_tree(region, &name, &parameters)?,
+        let nested = str_prop(&n.properties, GRAPH_PROP).filter(|s| !s.trim().is_empty());
+        let source = match doc.regions.get(&n.id).filter(|r| !r.nodes.is_empty()) {
+            Some(region) => PoseSource::Tree(compile_tree(region, &name, &parameters)?),
+            None if nested.is_some() => {
+                let child_rel = crate::engine::scripting::normalize_graph_path(
+                    nested.unwrap_or_default(),
+                );
+                if stack.contains(&child_rel) {
+                    let chain: Vec<&str> = stack
+                        .iter()
+                        .map(String::as_str)
+                        .chain([child_rel.as_str()])
+                        .collect();
+                    return Err(format!(
+                        "state '{name}': nesting cycle: {}",
+                        chain.join(" \u{2192} ")
+                    ));
+                }
+                let child_doc = load(&child_rel).ok_or_else(|| {
+                    format!("state '{name}': nested graph '{child_rel}' could not be loaded")
+                })?;
+                stack.push(child_rel.clone());
+                let child = compile_doc(&child_doc, stack, load)
+                    .map_err(|e| format!("state '{name}': in '{child_rel}': {e}"))?;
+                stack.pop();
+                for d in &child.parameters {
+                    nested_params.push((name.clone(), d.clone()));
+                }
+                PoseSource::Machine {
+                    graph: child_rel,
+                    plan: std::sync::Arc::new(child),
+                }
+            }
             None => {
                 let clip = str_prop(&n.properties, CLIP_PROP)
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| {
                         format!(
-                            "state '{name}' names no clip (property `{CLIP_PROP}`) and has \
-                             no blend tree"
+                            "state '{name}' names no clip (property `{CLIP_PROP}`) or nested \
+                             graph (property `{GRAPH_PROP}`), and has no blend tree"
                         )
                     })?;
-                PlanTree::Clip(PlanClip {
+                PoseSource::Tree(PlanTree::Clip(PlanClip {
                     clip: crate::engine::scripting::normalize_graph_path(clip),
                     clip_name: str_prop(&n.properties, CLIP_NAME_PROP)
                         .filter(|s| !s.is_empty())
                         .map(str::to_string),
-                })
+                }))
             }
         };
         states.push(PlanState {
             node_id: n.id,
             name,
-            tree,
+            source,
             speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
         });
     }
@@ -620,6 +748,45 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
         });
     }
     slots.sort_by_key(|s| s.node_id);
+
+    // Nested graphs' slots join the root's single override channel, after
+    // this document's own (deterministic: host slots by node id, then nested
+    // in state order). Nesting one graph twice would clone its slots — exact
+    // duplicates are dropped, the channel needs only one.
+    let nested_slots: Vec<PlanSlot> = states
+        .iter()
+        .filter_map(|s| match &s.source {
+            PoseSource::Machine { plan, .. } => Some(plan.slots.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for s in nested_slots {
+        if !slots.contains(&s) {
+            slots.push(s);
+        }
+    }
+
+    // Nested declarations join the blackboard: one shared surface drives the
+    // whole machine tree, so gameplay writes the union. Same name and type
+    // collapse to one entry (this document's declaration and default win); a
+    // type conflict refuses, or the nested rules would read a value of the
+    // wrong shape at runtime.
+    let mut parameters = parameters;
+    for (state, d) in nested_params {
+        match parameters.iter().find(|p| p.slug == d.slug) {
+            None => parameters.push(d),
+            Some(p) if p.ty == d.ty => {}
+            Some(p) => {
+                return Err(format!(
+                    "state '{state}': parameter '{}' is a {:?} in the nested graph but a \
+                     {:?} here — one blackboard drives the whole machine, so the types \
+                     must agree",
+                    d.slug, d.ty, p.ty
+                ))
+            }
+        }
+    }
 
     Ok(AnimGraphPlan {
         states,

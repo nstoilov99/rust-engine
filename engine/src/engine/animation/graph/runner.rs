@@ -25,7 +25,7 @@ use super::machine::{
     collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
     PoseScratch,
 };
-use super::plan::{compile_anim_graph, AnimGraphPlan, PlanClip};
+use super::plan::{compile_anim_graph_with, AnimGraphPlan, PlanClip};
 
 // ---------------------------------------------------------------------------
 // Components
@@ -160,9 +160,10 @@ impl AnimAssetLoader for DiskAnimAssets {
 ///
 /// Invalidation is wholesale with a generation bump, exactly like
 /// [`crate::engine::scripting::GraphPlanCache`]: nested `.animgraph` states
-/// will reference across documents the moment they exist, and the cache does
-/// not track that tree. Compilation is cheap and invalidation is an author
-/// action.
+/// (ticket 09) compile the referenced documents *into* the host's plan, and
+/// the cache does not track that reference tree — dropping everything on any
+/// `.animgraph` write is what keeps a host plan from outliving an edit to a
+/// graph it nests. Compilation is cheap and invalidation is an author action.
 #[derive(Default)]
 pub struct AnimGraphPlanCache {
     plans: BTreeMap<String, Result<Arc<AnimGraphPlan>, String>>,
@@ -301,11 +302,14 @@ impl AnimGraphSystem {
         let plan = match cached {
             Some(hit) => hit,
             None => {
+                // Nested `.animgraph` references resolve through the same
+                // loader; `graph` seeds the compiler's cycle guard.
+                let load = |rel: &str| self.loader.load_graph(rel);
                 let compiled = self
                     .loader
                     .load_graph(graph)
                     .ok_or_else(|| format!("'{graph}' could not be loaded"))
-                    .and_then(|doc| compile_anim_graph(&doc))
+                    .and_then(|doc| compile_anim_graph_with(&doc, graph, &load))
                     .map(Arc::new);
                 if let Some(cache) = resources.get_mut::<AnimGraphPlanCache>() {
                     cache.store(graph, compiled.clone());
@@ -326,7 +330,7 @@ impl AnimGraphSystem {
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
             for st in &plan.states {
-                for c in st.tree.clips() {
+                for c in st.source.clips() {
                     if clip_of(clips, c).is_none() {
                         return refused(format!(
                             "{graph}: state '{}': clip '{}' could not be loaded",

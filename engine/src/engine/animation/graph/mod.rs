@@ -43,9 +43,9 @@ pub use machine::{
     ParamValue, PlayOnceSlot, PoseScratch,
 };
 pub use plan::{
-    compile_anim_graph, trigger_pin_type, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl,
-    PlanClip, PlanRule, PlanSlot, PlanState, PlanTransition, PlanTree, RuleExpr, TransitionFrom,
-    TRIGGER_PARAM_DOMAIN,
+    compile_anim_graph, compile_anim_graph_with, trigger_pin_type, AnimGraphPlan, AnimParamType,
+    CmpOp, MathOp, ParamDecl, PlanClip, PlanRule, PlanSlot, PlanState, PlanTransition, PlanTree,
+    PoseSource, RuleExpr, TransitionFrom, TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{
     AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,

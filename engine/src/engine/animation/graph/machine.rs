@@ -14,7 +14,7 @@ use crate::engine::animation::sampling;
 use crate::engine::assets::model_loader::RawAnimationClip;
 
 use super::plan::{
-    AnimGraphPlan, CmpOp, MathOp, ParamDecl, PlanClip, PlanSlot, PlanTree, RuleExpr,
+    AnimGraphPlan, CmpOp, MathOp, ParamDecl, PlanClip, PlanSlot, PlanTree, PoseSource, RuleExpr,
     TransitionFrom,
 };
 
@@ -209,7 +209,10 @@ impl Crossfade {
 
 /// One running machine instance: active state, clip clock, optional
 /// crossfade. Owns nothing document-shaped — it walks the compiled plan it
-/// is ticked with.
+/// is ticked with. A nested state (ticket 09) owns a child machine in
+/// `subs`, recursively: the sub-machine is that state's Pose source, restarts
+/// at its own ENTRY whenever the host (re)enters the state, and keeps
+/// running while the state blends out.
 #[derive(Debug, Clone)]
 pub struct AnimMachine {
     current: usize,
@@ -227,19 +230,56 @@ pub struct AnimMachine {
     /// since)`. A read surface for the editor's live preview (ticket 06);
     /// nothing in evaluation consults it.
     fired: Option<(usize, f32)>,
+    /// Child machines, index-aligned with the plan's states — `Some` exactly
+    /// where the plan's source is [`PoseSource::Machine`]. The recursion
+    /// mirrors the plan's, which the compiler guaranteed finite (cycle
+    /// refusal), and reuses its allocations across restarts ([`Self::reset`]).
+    subs: Vec<Option<Box<AnimMachine>>>,
 }
 
 impl AnimMachine {
     /// A fresh machine sits in the plan's entry state — active from the very
     /// first tick, no transition needed to get there.
     pub fn new(plan: &AnimGraphPlan) -> Self {
-        Self {
+        let mut m = Self {
             current: plan.entry,
             time: 0.0,
             fade: None,
             spans: Vec::new(),
             fired: None,
+            subs: Vec::new(),
+        };
+        m.reset(plan);
+        m
+    }
+
+    /// Back to the plan's entry state, wholesale — what (re)entering a nested
+    /// state does to its sub-machine. Reuses every buffer already grown, so a
+    /// transition into a nested state allocates nothing once warm.
+    fn reset(&mut self, plan: &AnimGraphPlan) {
+        self.current = plan.entry;
+        self.time = 0.0;
+        self.fade = None;
+        self.spans.clear();
+        self.fired = None;
+        if self.subs.len() != plan.states.len() {
+            self.subs = plan.states.iter().map(|_| None).collect();
         }
+        for (i, s) in plan.states.iter().enumerate() {
+            if let PoseSource::Machine { plan: child, .. } = &s.source {
+                match &mut self.subs[i] {
+                    Some(sub) => sub.reset(child),
+                    slot => *slot = Some(Box::new(AnimMachine::new(child))),
+                }
+            }
+        }
+    }
+
+    /// The child machine of a nested state, by plan state index. The read
+    /// surface pose evaluation, event collection and the editor's preview
+    /// use; `None` for tree states.
+    pub fn sub(&self, state: usize) -> Option<&AnimMachine> {
+        self.subs.get(state).and_then(|s| s.as_deref())
     }
 
     /// Index of the active (target, if fading) state.
@@ -322,6 +362,7 @@ impl AnimMachine {
                 TransitionFrom::AnyState => t.to != current,
             })
             .find(|(_, t)| t.rule.as_ref().is_none_or(|r| r.expr.eval_bool(params)));
+        let entered = fired.is_some();
         if let Some((ti, t)) = fired {
             self.fired = Some((ti, 0.0));
             // Consume-on-transition: the fire spends every trigger the rule
@@ -350,11 +391,51 @@ impl AnimMachine {
             }
             self.current = t.to;
             self.time = 0.0;
+            // Entering a nested state restarts its sub-machine at the child's
+            // ENTRY — re-entry never resumes mid-flight, the same rule as the
+            // state clock resetting to 0.
+            if let Some(PoseSource::Machine { plan: child, .. }) =
+                plan.states.get(t.to).map(|s| &s.source)
+            {
+                if let Some(Some(sub)) = self.subs.get_mut(t.to) {
+                    sub.reset(child);
+                }
+            }
         } else {
             self.spans.push((self.current, time_before, self.time));
             if let Some(span) = from_span {
                 self.spans.push(span);
             }
+        }
+
+        // Nested states tick their sub-machines — only the ones this frame
+        // samples, so a sub frozen by an instant switch stays exactly where
+        // it stopped (and restarts at ENTRY on re-entry). The active state's
+        // sub skips the frame the host entered it (it was just reset: its
+        // entry pose this frame, exactly as a clip state samples t = 0). The
+        // outgoing state's sub keeps running while the fade keeps it visible.
+        // Order is the determinism statement for shared-blackboard triggers:
+        // host rules consumed theirs first, then the active sub, then the
+        // dying one. A self-transition's two sides share one sub instance —
+        // the fade blends the restarted machine with itself, the nested
+        // reading of the accepted restart semantics.
+        if !entered {
+            self.tick_sub(self.current, plan, params, dt);
+        }
+        if let Some(from) = self.fade.as_ref().map(|f| f.from) {
+            if from != self.current {
+                self.tick_sub(from, plan, params, dt);
+            }
+        }
+    }
+
+    /// Tick the child machine of `state`, if it has one, on the state's
+    /// speed-scaled clock.
+    fn tick_sub(&mut self, state: usize, plan: &AnimGraphPlan, params: &mut AnimParams, dt: f32) {
+        let Some(st) = plan.states.get(state) else { return };
+        let PoseSource::Machine { plan: child, .. } = &st.source else { return };
+        if let Some(Some(sub)) = self.subs.get_mut(state) {
+            sub.tick(child, params, dt * st.speed);
         }
     }
 
@@ -563,9 +644,106 @@ fn sample_tree<'a, F>(
     }
 }
 
+/// One state's Pose at `time`: its blend tree, or — nested — its whole
+/// sub-machine, evaluated recursively (the sub owns its clocks, so `time` is
+/// only for trees).
+#[allow(clippy::too_many_arguments)]
+fn sample_state<'a, F>(
+    machine: &AnimMachine,
+    plan: &AnimGraphPlan,
+    state: usize,
+    time: f32,
+    params: &AnimParams,
+    clip_for: &F,
+    pose: &mut [LocalBoneTransform],
+    scratch: &mut PoseScratch,
+    level: usize,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let Some(st) = plan.states.get(state) else { return };
+    match &st.source {
+        PoseSource::Tree(tree) => {
+            sample_tree(tree, time, params, clip_for, pose, scratch, level)
+        }
+        PoseSource::Machine { plan: child, .. } => {
+            if let Some(sub) = machine.sub(state) {
+                eval_machine(sub, child, params, clip_for, pose, scratch, level);
+            }
+        }
+    }
+}
+
+/// One machine level: the active state's Pose, mixed with the outgoing
+/// state's while a crossfade runs. `level` offsets the scratch pool so
+/// nested machines never alias a parent's buffers.
+fn eval_machine<'a, F>(
+    machine: &AnimMachine,
+    plan: &AnimGraphPlan,
+    params: &AnimParams,
+    clip_for: &F,
+    pose: &mut [LocalBoneTransform],
+    scratch: &mut PoseScratch,
+    level: usize,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let fading = machine
+        .crossfade()
+        .filter(|f| plan.states.get(f.from).is_some());
+
+    // The outgoing pose starts from the same pre-sample transforms as the
+    // target's — the same agreement `sample_tree` keeps inside a blend.
+    if let Some(fade) = fading {
+        let mut buf = scratch.take(level);
+        buf.clear();
+        buf.extend_from_slice(pose);
+        sample_state(
+            machine,
+            plan,
+            fade.from,
+            fade.from_time,
+            params,
+            clip_for,
+            &mut buf,
+            scratch,
+            level + 1,
+        );
+        sample_state(
+            machine,
+            plan,
+            machine.current_state(),
+            machine.time(),
+            params,
+            clip_for,
+            pose,
+            scratch,
+            level + 1,
+        );
+        let w = fade.weight();
+        for (out, from) in pose.iter_mut().zip(buf.iter()) {
+            *out = from.blend(out, w);
+        }
+        scratch.put(level, buf);
+    } else {
+        sample_state(
+            machine,
+            plan,
+            machine.current_state(),
+            machine.time(),
+            params,
+            clip_for,
+            pose,
+            scratch,
+            level,
+        );
+    }
+}
+
 /// Evaluate the machine's Pose into `pose` (the skeleton's local bone
 /// transforms): the active state's blend tree, mixed with the outgoing
-/// state's while a crossfade runs.
+/// state's while a crossfade runs; a nested state contributes its whole
+/// sub-machine's result the same way.
 ///
 /// `clip_for` resolves a plan clip reference to its loaded clip. `params`
 /// drives blend weights (crossfades already advanced in `tick`). `scratch`
@@ -580,52 +758,7 @@ pub fn evaluate_pose<'a, F>(
 ) where
     F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
 {
-    let fading = machine
-        .crossfade()
-        .and_then(|f| plan.states.get(f.from).map(|s| (f, s)));
-
-    // The outgoing pose starts from the same pre-sample transforms as the
-    // target's — the same agreement `sample_tree` keeps inside a blend.
-    if let Some((fade, from_state)) = fading {
-        let mut buf = scratch.take(0);
-        buf.clear();
-        buf.extend_from_slice(pose);
-        sample_tree(
-            &from_state.tree,
-            fade.from_time,
-            params,
-            &clip_for,
-            &mut buf,
-            scratch,
-            1,
-        );
-        if let Some(cur) = plan.states.get(machine.current_state()) {
-            sample_tree(
-                &cur.tree,
-                machine.time(),
-                params,
-                &clip_for,
-                pose,
-                scratch,
-                1,
-            );
-        }
-        let w = fade.weight();
-        for (out, from) in pose.iter_mut().zip(buf.iter()) {
-            *out = from.blend(out, w);
-        }
-        scratch.put(0, buf);
-    } else if let Some(cur) = plan.states.get(machine.current_state()) {
-        sample_tree(
-            &cur.tree,
-            machine.time(),
-            params,
-            &clip_for,
-            pose,
-            scratch,
-            0,
-        );
-    }
+    eval_machine(machine, plan, params, &clip_for, pose, scratch, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -893,10 +1026,50 @@ fn tree_events<'a, F>(
     }
 }
 
+/// One machine level's event crossings, scaled by `scale` (the weight the
+/// level itself is heard at). Tree states replay their recorded clock spans;
+/// nested states recurse into their sub-machine — whose spans are fresh
+/// exactly when the host sampled it this frame (the sub only ticks then),
+/// so a frozen sub can never re-fire stale crossings.
+fn machine_events<'a, F>(
+    machine: &AnimMachine,
+    plan: &AnimGraphPlan,
+    params: &AnimParams,
+    scale: f32,
+    clip_for: &F,
+    out: &mut Vec<AnimEventFire>,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let target_weight = machine.blend_weight();
+    for &(state, t0, t1) in machine.spans() {
+        let w = if state == machine.current_state() {
+            target_weight
+        } else {
+            1.0 - target_weight
+        } * scale;
+        if w <= 0.0 {
+            continue;
+        }
+        match plan.states.get(state).map(|s| &s.source) {
+            Some(PoseSource::Tree(tree)) => {
+                tree_events(tree, t0, t1, w, params, clip_for, out)
+            }
+            Some(PoseSource::Machine { plan: child, .. }) => {
+                if let Some(sub) = machine.sub(state) {
+                    machine_events(sub, child, params, w, clip_for, out);
+                }
+            }
+            None => {}
+        }
+    }
+}
+
 /// Collect every anim event this frame's playback crossed — the machine's
-/// states (per the clock spans its tick recorded) and the play-once slot —
-/// into `out`. Call after both ticks; `out` is caller-owned and cleared here,
-/// so steady state allocates nothing once grown.
+/// states (per the clock spans its tick recorded, nested sub-machines
+/// included) and the play-once slot — into `out`. Call after both ticks;
+/// `out` is caller-owned and cleared here, so steady state allocates nothing
+/// once grown.
 pub fn collect_anim_events<'a, F>(
     machine: &AnimMachine,
     slot: &PlayOnceSlot,
@@ -913,20 +1086,7 @@ pub fn collect_anim_events<'a, F>(
     // footsteps from an invisible walk must not fire.
     let base_scale = 1.0 - slot.weight(plan);
     if base_scale > 0.0 {
-        let target_weight = machine.blend_weight();
-        for &(state, t0, t1) in machine.spans() {
-            let w = if state == machine.current_state() {
-                target_weight
-            } else {
-                1.0 - target_weight
-            } * base_scale;
-            if w <= 0.0 {
-                continue;
-            }
-            if let Some(st) = plan.states.get(state) {
-                tree_events(&st.tree, t0, t1, w, params, &clip_for, out);
-            }
-        }
+        machine_events(machine, plan, params, base_scale, &clip_for, out);
     }
 
     // The slot's own clip: one shot, no cycles — each marker fires once as

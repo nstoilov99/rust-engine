@@ -1494,11 +1494,22 @@ impl GraphDomain {
 
     /// This domain's compile refusals for `doc`, anchored. Scripts answer
     /// none: their compile errors surface through the interpreter's own path.
-    pub fn compile_errors(self, doc: &GraphDoc) -> Vec<DomainError> {
+    /// `path` is the document's content-relative key — it seeds the nested
+    /// compiler's cycle guard, and nested `.animgraph` references resolve
+    /// from the content root on disk (the saved file is the unit of truth
+    /// here, exactly as it is for the runtime's plan cache — a dirty child
+    /// tab shows in the host once it saves).
+    pub fn compile_errors(self, doc: &GraphDoc, path: &str) -> Vec<DomainError> {
         match self {
             GraphDomain::Script => Vec::new(),
             GraphDomain::Animation => {
-                match crate::engine::animation::graph::compile_anim_graph(doc) {
+                let load = |rel: &str| {
+                    crate::engine::node_graph::load_graph(
+                        &std::path::Path::new("content").join(rel),
+                    )
+                    .ok()
+                };
+                match crate::engine::animation::graph::compile_anim_graph_with(doc, path, &load) {
                     Ok(_) => Vec::new(),
                     Err(message) => {
                         let node = anchor_anim_refusal(doc, &message);
@@ -1535,6 +1546,27 @@ impl GraphDomain {
                 }
             }
         }
+    }
+}
+
+/// A request to open another graph document as a tab, raised by descend
+/// gestures (double-click / PageDown on a node that references a file) and
+/// fulfilled by the host. `back` is the file chain that led there — the host
+/// seeds the opened tab's `nav_back` with it (when non-empty), which is what
+/// the breadcrumb band renders and PageUp walks. A plain jump (an exec-cycle
+/// crumb) carries an empty chain and leaves the target's session nav alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphOpenRequest {
+    /// Content-relative path of the document to open.
+    pub path: String,
+    /// Ancestor chain for the opened tab, outermost first.
+    pub back: Vec<String>,
+}
+
+impl GraphOpenRequest {
+    /// A jump with no descent chain.
+    pub fn jump(path: String) -> Self {
+        Self { path, back: Vec::new() }
     }
 }
 
@@ -2418,7 +2450,7 @@ impl GraphEditorState {
         registry: &NodeRegistry,
     ) -> Self {
         let errors = validate_doc(&doc, registry);
-        let domain_errors = domain.compile_errors(&doc);
+        let domain_errors = domain.compile_errors(&doc, &path);
         Self {
             path,
             doc,
@@ -2503,8 +2535,14 @@ impl GraphEditorState {
     /// Re-validate the doc and refresh the dirty flag. Call after every edit.
     pub fn after_edit(&mut self, registry: &NodeRegistry) {
         self.errors = validate_doc(&self.doc, registry);
-        self.domain_errors = self.domain.compile_errors(&self.doc);
+        self.refresh_domain_errors();
         self.dirty = self.stack.is_dirty();
+    }
+
+    /// Recompute the domain-compiler refusals alone — what a host tab needs
+    /// when a graph it *nests* changed on disk without any edit of its own.
+    pub fn refresh_domain_errors(&mut self) {
+        self.domain_errors = self.domain.compile_errors(&self.doc, &self.path);
     }
 
     /// Record an already-applied edit, then re-validate.
@@ -4642,11 +4680,45 @@ impl GraphEditorState {
         false
     }
 
-    /// `PageDown` — the subgraph asset under the last-clicked node, if any.
+    /// `PageDown` — the file the last-clicked node descends into, if any.
     /// The caller opens it as a tab; we only record where we came from.
     pub fn descend_target(&self) -> Option<String> {
         let id = self.primary.or_else(|| self.selection.iter().copied().next())?;
-        self.doc.node(id).and_then(|n| n.subgraph.clone())
+        self.file_descend_target(id)
+    }
+
+    /// The file `id` descends into — "double-click always means descend"
+    /// (spec): a script node's `.subgraph` asset, or the nested `.animgraph`
+    /// an animation state references (ticket 09). A state whose region holds
+    /// a blend tree answers nothing, exactly as the compiler ignores its
+    /// `graph` property then.
+    pub fn file_descend_target(&self, id: u64) -> Option<String> {
+        use crate::engine::animation::graph::plan::{ANIM_STATE_TYPE_ID, GRAPH_PROP};
+        let n = self.doc.node(id)?;
+        if let Some(path) = &n.subgraph {
+            return Some(path.clone());
+        }
+        if !self.domain.is_animation() || n.type_id != ANIM_STATE_TYPE_ID {
+            return None;
+        }
+        if self.doc.regions.get(&id).is_some_and(|r| !r.nodes.is_empty()) {
+            return None;
+        }
+        match n.properties.get(GRAPH_PROP) {
+            Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.trim().is_empty() => {
+                Some(crate::engine::scripting::normalize_graph_path(s))
+            }
+            _ => None,
+        }
+    }
+
+    /// The request descending from this tab raises: the target file plus the
+    /// breadcrumb chain the opened tab should carry (this tab's own chain,
+    /// then this tab) — the host seeds the target's `nav_back` with it.
+    pub fn open_request(&self, path: String) -> GraphOpenRequest {
+        let mut back = self.nav_back.clone();
+        back.push(self.path.clone());
+        GraphOpenRequest { path, back }
     }
 
     /// Remember the graph being left, so `PageUp` can come back to it.
@@ -8445,6 +8517,126 @@ mod rule_scope_tests {
 /// modules (the variables model, P6b) share one definition rather than
 /// drifting copies of the constructor call.
 #[cfg(test)]
+/// Nested sub-state-machine tests (Task 41 ticket 09): the editor half —
+/// descend targets, open-request chains, and anchored nested refusals.
+#[cfg(test)]
+mod nested_graph_tests {
+    use super::*;
+    use crate::engine::animation::graph::plan::{
+        ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, STATE_IN_PIN,
+        STATE_OUT_PIN,
+    };
+    use crate::engine::node_graph::{GraphRealm, GraphRegion};
+
+    fn state_node(id: u64, props: &[(&str, PropValue)]) -> NodeInst {
+        let mut n = NodeInst {
+            id,
+            type_id: ANIM_STATE_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: Some(format!("S{id}")),
+        };
+        for (k, v) in props {
+            n.properties.insert((*k).to_string(), v.clone());
+        }
+        n
+    }
+
+    /// Double-click / PageDown resolution: a nested state descends into its
+    /// file (path normalized), a blend-tree region wins over the reference,
+    /// and the script domain only ever answers through the `subgraph` field.
+    #[test]
+    fn animation_states_descend_into_their_nested_graph_file() {
+        let mut st = test_state("graphs/host.animgraph");
+        st.doc.nodes = vec![
+            state_node(1, &[(GRAPH_PROP, PropValue::Asset("graphs\\loco.animgraph".into()))]),
+            state_node(2, &[(CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))]),
+        ];
+        assert_eq!(
+            st.file_descend_target(1),
+            Some("graphs/loco.animgraph".to_string()),
+            "the reference descends, normalized"
+        );
+        assert_eq!(st.file_descend_target(2), None, "a clip leaf has no file to enter");
+
+        st.select_only(1);
+        assert_eq!(st.descend_target(), Some("graphs/loco.animgraph".to_string()));
+
+        // A non-empty tree region takes the state over; the ignored graph
+        // reference stops being a descend target too.
+        st.doc.regions.insert(
+            1,
+            GraphRegion {
+                nodes: vec![state_node(0, &[])],
+                edges: vec![],
+            },
+        );
+        assert_eq!(st.file_descend_target(1), None);
+
+        // Script documents: only the subgraph field answers.
+        let mut sc = test_state("graphs/t.graph");
+        let mut n = state_node(1, &[(GRAPH_PROP, PropValue::Asset("graphs/x.animgraph".into()))]);
+        n.subgraph = Some("lib/util.subgraph".into());
+        sc.doc.nodes = vec![n];
+        assert_eq!(sc.file_descend_target(1), Some("lib/util.subgraph".to_string()));
+    }
+
+    /// The request a descent raises carries the chain for the opened tab:
+    /// this tab's ancestors plus this tab — what the breadcrumb renders.
+    #[test]
+    fn open_requests_extend_the_breadcrumb_chain() {
+        let mut st = test_state("graphs/loco.animgraph");
+        st.nav_back = vec!["graphs/character.animgraph".into()];
+        let req = st.open_request("graphs/legs.animgraph".into());
+        assert_eq!(req.path, "graphs/legs.animgraph");
+        assert_eq!(
+            req.back,
+            vec!["graphs/character.animgraph".to_string(), "graphs/loco.animgraph".to_string()]
+        );
+        assert!(GraphOpenRequest::jump("a.graph".into()).back.is_empty());
+    }
+
+    /// A broken nested reference is a domain refusal anchored on the state
+    /// that carries it (the file does not exist, so the editor's disk load
+    /// fails exactly like the runtime's would).
+    #[test]
+    fn nested_reference_refusals_anchor_on_the_state() {
+        let mut st = test_state("graphs/host.animgraph");
+        st.doc.realm = GraphRealm::Client;
+        let entry = NodeInst {
+            id: 0,
+            type_id: ANIM_ENTRY_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        st.doc.nodes = vec![
+            entry,
+            state_node(
+                1,
+                &[(GRAPH_PROP, PropValue::Asset("graphs/does-not-exist.animgraph".into()))],
+            ),
+        ];
+        st.doc.edges = vec![Edge {
+            from_node: 0,
+            from_pin: STATE_OUT_PIN.to_string(),
+            to_node: 1,
+            to_pin: STATE_IN_PIN.to_string(),
+        }];
+        st.after_edit(&NodeRegistry::new());
+        assert_eq!(st.domain_errors.len(), 1);
+        let e = &st.domain_errors[0];
+        assert_eq!(e.node, Some(1), "anchored on the referencing state");
+        assert!(e.message.contains("could not be loaded"), "{}", e.message);
+    }
+}
+
 pub(crate) fn test_state(path: &str) -> GraphEditorState {
     GraphEditorState::from_doc(
         path.to_string(),

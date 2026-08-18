@@ -1038,8 +1038,10 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
 #[test]
 fn a_state_region_compiles_to_a_blend_tree() {
     let compiled = compile_anim_graph(&blend1d_doc()).expect("compiles");
-    let plan::PlanTree::Blend1D { param, children } = &compiled.states[0].tree else {
-        panic!("expected a 1D blend, got {:?}", compiled.states[0].tree);
+    let plan::PoseSource::Tree(plan::PlanTree::Blend1D { param, children }) =
+        &compiled.states[0].source
+    else {
+        panic!("expected a 1D blend, got {:?}", compiled.states[0].source);
     };
     assert_eq!(param, "speed");
     assert_eq!(
@@ -2255,6 +2257,356 @@ fn the_system_surfaces_events_on_the_runtime() {
     {
         let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
         assert!(rt.events.is_empty(), "one frame's worth, never accumulated");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nested sub-state-machines (ticket 09)
+// ---------------------------------------------------------------------------
+
+const CHILD: &str = "graphs/loco.animgraph";
+
+/// A Bool parameter declaration (default false).
+fn bool_decl(slug: &str) -> VarDecl {
+    VarDecl {
+        slug: slug.into(),
+        label: slug.into(),
+        ty: PinType::Bool,
+        default: Some(PropValue::Bool(false)),
+        group: None,
+    }
+}
+
+/// A host whose second state nests [`CHILD`]: ENTRY → Base (the run clip),
+/// Base → Loco on Bool `go` (crossfade `fade` seconds), Loco → Base on Bool
+/// `stop` (instant). The child is whatever the test's loader serves —
+/// usually [`two_state_doc`], whose own machine is Idle → Walk on `walk`
+/// with a 0.5s fade.
+fn nested_host_doc(fade: f32) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![bool_decl("go"), bool_decl("stop")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(
+            2,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Base"),
+            &[(plan::CLIP_PROP, PropValue::Asset("anims/run.anim".into()))],
+        ),
+        with(
+            3,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Loco"),
+            &[(plan::GRAPH_PROP, PropValue::Asset(CHILD.into()))],
+        ),
+        with(
+            4,
+            plan::ANIM_TRANSITION_TYPE_ID,
+            None,
+            &[(plan::DURATION_PROP, PropValue::Float(fade))],
+        ),
+        with(5, plan::ANIM_TRANSITION_TYPE_ID, None, &[]),
+    ];
+    doc.edges = vec![
+        edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN),
+        edge(2, plan::STATE_OUT_PIN, 4, plan::TRANSITION_FROM_PIN),
+        edge(4, plan::TRANSITION_TO_PIN, 3, plan::STATE_IN_PIN),
+        edge(3, plan::STATE_OUT_PIN, 5, plan::TRANSITION_FROM_PIN),
+        edge(5, plan::TRANSITION_TO_PIN, 2, plan::STATE_IN_PIN),
+    ];
+    doc.regions.insert(4, param_rule("go"));
+    doc.regions.insert(5, param_rule("stop"));
+    doc
+}
+
+/// The clips every nested evaluator test resolves: distinct constants so the
+/// pose says which machine level produced it (and how much of each side).
+fn nested_clips() -> [(&'static str, RawAnimationClip); 3] {
+    [
+        ("anims/idle.anim", constant_clip("Idle", 2.0)),
+        ("anims/walk.anim", constant_clip("Walk", 10.0)),
+        ("anims/run.anim", constant_clip("Run", 20.0)),
+    ]
+}
+
+#[test]
+fn a_nested_state_compiles_the_referenced_graph_into_the_plan() {
+    let load = |rel: &str| (rel == CHILD).then(two_state_doc);
+    let compiled =
+        plan::compile_anim_graph_with(&nested_host_doc(0.0), "graphs/host.animgraph", &load)
+            .expect("compiles");
+
+    let plan::PoseSource::Machine { graph, plan: child } = &compiled.states[1].source else {
+        panic!("expected a nested machine, got {:?}", compiled.states[1].source);
+    };
+    assert_eq!(graph, CHILD);
+    assert_eq!(child.states.len(), 2, "the whole child machine compiled in");
+
+    // One shared blackboard: the host's declarations, then the child's.
+    let slugs: Vec<&str> = compiled.parameters.iter().map(|p| p.slug.as_str()).collect();
+    assert_eq!(slugs, ["go", "stop", "walk"]);
+
+    // Clip references and arm-time checks see across files.
+    assert_eq!(
+        compiled.clip_refs(),
+        vec!["anims/idle.anim", "anims/run.anim", "anims/walk.anim"]
+    );
+
+    // The loaderless entry point cannot resolve the reference — and says so
+    // against the state that carries it.
+    let err = compile_anim_graph(&nested_host_doc(0.0)).unwrap_err();
+    assert!(err.contains("state 'Loco'"), "{err}");
+    assert!(err.contains("could not be loaded"), "{err}");
+}
+
+#[test]
+fn nested_refusals_cycles_and_parameter_conflicts() {
+    // A graph reaching itself directly.
+    let mut doc = nested_host_doc(0.0);
+    doc.node_mut(3).unwrap().properties.insert(
+        plan::GRAPH_PROP.into(),
+        PropValue::Asset("graphs/host.animgraph".into()),
+    );
+    let self_doc = doc.clone();
+    let load = move |rel: &str| (rel == "graphs/host.animgraph").then(|| self_doc.clone());
+    let err = plan::compile_anim_graph_with(&doc, "graphs/host.animgraph", &load).unwrap_err();
+    assert!(err.contains("nesting cycle"), "{err}");
+
+    // …and through a chain: a nests b nests a. Terminates with the chain
+    // spelled out instead of recursing forever.
+    let mut a = nested_host_doc(0.0);
+    a.node_mut(3).unwrap().properties.insert(
+        plan::GRAPH_PROP.into(),
+        PropValue::Asset("graphs/b.animgraph".into()),
+    );
+    let mut b = nested_host_doc(0.0);
+    b.node_mut(3).unwrap().properties.insert(
+        plan::GRAPH_PROP.into(),
+        PropValue::Asset("graphs/a.animgraph".into()),
+    );
+    let (a2, b2) = (a.clone(), b.clone());
+    let load = move |rel: &str| match rel {
+        "graphs/a.animgraph" => Some(a2.clone()),
+        "graphs/b.animgraph" => Some(b2.clone()),
+        _ => None,
+    };
+    let err = plan::compile_anim_graph_with(&a, "graphs/a.animgraph", &load).unwrap_err();
+    assert!(err.contains("nesting cycle"), "{err}");
+    assert!(
+        err.contains(
+            "graphs/a.animgraph \u{2192} graphs/b.animgraph \u{2192} graphs/a.animgraph"
+        ),
+        "the chain names every hop: {err}"
+    );
+
+    // A nested graph's own refusal wraps with the referencing state + file.
+    let mut broken = two_state_doc();
+    broken.node_mut(2).unwrap().properties.remove(plan::CLIP_PROP);
+    let load = move |rel: &str| (rel == CHILD).then(|| broken.clone());
+    let err =
+        plan::compile_anim_graph_with(&nested_host_doc(0.0), "graphs/host.animgraph", &load)
+            .unwrap_err();
+    assert!(err.starts_with("state 'Loco': in 'graphs/loco.animgraph':"), "{err}");
+
+    // A parameter declared with different types across the files refuses:
+    // one blackboard drives the whole machine.
+    let mut doc = nested_host_doc(0.0);
+    doc.variables.push(float_decl("walk"));
+    let load = |rel: &str| (rel == CHILD).then(two_state_doc);
+    let err = plan::compile_anim_graph_with(&doc, "graphs/host.animgraph", &load).unwrap_err();
+    assert!(err.contains("state 'Loco'"), "{err}");
+    assert!(err.contains("'walk'"), "{err}");
+    assert!(err.contains("must agree"), "{err}");
+}
+
+/// The evaluator seam: entry inside the child on host entry, host crossfade
+/// into the nested state, and transitions + crossfades *inside* the
+/// sub-machine — all observed as pose values.
+#[test]
+fn a_nested_machine_is_the_states_pose_source() {
+    let load = |rel: &str| (rel == CHILD).then(two_state_doc);
+    let compiled =
+        plan::compile_anim_graph_with(&nested_host_doc(0.4), "graphs/host.animgraph", &load)
+            .expect("compiles");
+    let clips = nested_clips();
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&compiled.parameters);
+    let mut m = AnimMachine::new(&compiled);
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    let mut sample = |m: &AnimMachine, params: &AnimParams| {
+        pose[0] = LocalBoneTransform::default();
+        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch);
+        pose[0].translation.x
+    };
+
+    // Host entry state plays pure.
+    m.tick(&compiled, &mut params, 0.1);
+    assert_eq!(sample(&m, &params), 20.0, "Base plays the run clip");
+
+    // Host crossfade into the nested state: the child sits at its own entry
+    // (Idle), and the fade mixes host-level Base against the child's result.
+    params.set_bool("go", true);
+    m.tick(&compiled, &mut params, 0.1); // fires; fade weight 0
+    assert_eq!(sample(&m, &params), 20.0);
+    m.tick(&compiled, &mut params, 0.2); // 0.2 of 0.4 → weight 0.5
+    let x = sample(&m, &params);
+    assert!((x - 11.0).abs() < 1e-3, "50/50 Base(20) vs child Idle(2): {x}");
+    m.tick(&compiled, &mut params, 0.2); // fade done
+    assert_eq!(sample(&m, &params), 2.0, "pure child Idle");
+
+    // A transition inside the sub-machine, with its own crossfade.
+    params.set_bool("walk", true);
+    m.tick(&compiled, &mut params, 0.1); // child fires Idle → Walk (0.5s)
+    assert_eq!(sample(&m, &params), 2.0, "child fade starts at weight 0");
+    m.tick(&compiled, &mut params, 0.25); // 0.25 of 0.5 → weight 0.5
+    let x = sample(&m, &params);
+    assert!((x - 6.0).abs() < 1e-3, "50/50 Idle(2) vs Walk(10) inside the child: {x}");
+    m.tick(&compiled, &mut params, 0.5); // child fade done
+    assert_eq!(sample(&m, &params), 10.0, "pure child Walk");
+}
+
+#[test]
+fn reentering_a_nested_state_restarts_it_at_the_childs_entry() {
+    let load = |rel: &str| (rel == CHILD).then(two_state_doc);
+    let compiled =
+        plan::compile_anim_graph_with(&nested_host_doc(0.0), "graphs/host.animgraph", &load)
+            .expect("compiles");
+    let clips = nested_clips();
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&compiled.parameters);
+    let mut m = AnimMachine::new(&compiled);
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    let mut sample = |m: &AnimMachine, params: &AnimParams| {
+        pose[0] = LocalBoneTransform::default();
+        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch);
+        pose[0].translation.x
+    };
+
+    // Into the nested state, then drive its machine fully into Walk.
+    params.set_bool("go", true);
+    m.tick(&compiled, &mut params, 0.1);
+    params.set_bool("walk", true);
+    m.tick(&compiled, &mut params, 0.1);
+    m.tick(&compiled, &mut params, 1.0);
+    assert_eq!(sample(&m, &params), 10.0, "the child reached Walk");
+
+    // Leave (instant), come back (instant): the child is at its ENTRY again
+    // — `walk` is still true, but re-entry never resumes mid-flight.
+    params.set_bool("go", false);
+    params.set_bool("stop", true);
+    m.tick(&compiled, &mut params, 0.1);
+    assert_eq!(sample(&m, &params), 20.0, "back in Base");
+    params.set_bool("stop", false);
+    params.set_bool("go", true);
+    m.tick(&compiled, &mut params, 0.1);
+    assert_eq!(sample(&m, &params), 2.0, "the child restarted at Idle");
+}
+
+#[test]
+fn a_nested_transition_consumes_triggers_from_the_shared_blackboard() {
+    // The child's Idle → Walk rule reads a Trigger instead of a Bool.
+    let mut child = two_state_doc();
+    child.variables = vec![trigger_decl("hop")];
+    child.regions.insert(4, param_rule("hop"));
+    let load = move |rel: &str| (rel == CHILD).then(|| child.clone());
+    let compiled =
+        plan::compile_anim_graph_with(&nested_host_doc(0.0), "graphs/host.animgraph", &load)
+            .expect("compiles");
+    assert!(
+        compiled
+            .parameters
+            .iter()
+            .any(|p| p.slug == "hop" && p.ty == plan::AnimParamType::Trigger),
+        "the child's Trigger joined the blackboard"
+    );
+
+    let clips = nested_clips();
+    let clip_for = resolver(&clips);
+    let mut params = AnimParams::from_decls(&compiled.parameters);
+    let mut m = AnimMachine::new(&compiled);
+    params.set_bool("go", true);
+    m.tick(&compiled, &mut params, 0.1); // host enters the nested state
+
+    params.fire_trigger("hop");
+    m.tick(&compiled, &mut params, 0.1); // the child's transition fires
+    assert_eq!(
+        params.trigger_set("hop"),
+        Some(false),
+        "consume-on-transition reaches through the nesting"
+    );
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    m.tick(&compiled, &mut params, 1.0); // the child's 0.5s fade finishes
+    evaluate_pose(&m, &compiled, &params, &clip_for, &mut pose, &mut scratch);
+    assert_eq!(pose[0].translation.x, 10.0, "the child is in Walk");
+}
+
+/// The system + cache seam the ticket's fourth box asks about: an edit to a
+/// *nested* file invalidates (wholesale) and the host re-arms against the
+/// re-compiled tree.
+#[test]
+fn editing_a_nested_graph_restarts_hosts_through_wholesale_invalidation() {
+    const HOST: &str = "graphs/host.animgraph";
+    let assets = MapAssets::default();
+    {
+        let mut graphs = assets.graphs.lock().unwrap();
+        graphs.insert(HOST.into(), nested_host_doc(0.0));
+        graphs.insert(CHILD.into(), two_state_doc());
+    }
+    let mut h = Harness::new(assets.clone());
+    let e = h.world.spawn((
+        AnimGraphRunner::new(HOST),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+    }
+
+    // Drive the host into the nested state — a live machine mid-tree.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_bool("go", true);
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+        assert_eq!(rt.plan.states[rt.machine.current_state()].name, "Loco");
+    }
+
+    // Edit the *child* file and invalidate by its path: wholesale drop, so
+    // the host's plan (which nests it) goes too, and the re-arm compiles the
+    // edited child into a fresh tree.
+    {
+        let mut graphs = assets.graphs.lock().unwrap();
+        graphs.get_mut(CHILD).unwrap().node_mut(2).unwrap().title = Some("IdleV2".into());
+    }
+    h.resources
+        .get_mut::<AnimGraphPlanCache>()
+        .unwrap()
+        .invalidate(CHILD);
+    h.tick(); // drops the stale runtime
+    h.tick(); // re-arms
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("re-armed");
+        assert_eq!(
+            rt.plan.states[rt.machine.current_state()].name, "Base",
+            "restart lands at the host's ENTRY"
+        );
+        let plan::PoseSource::Machine { plan: child, .. } = &rt.plan.states[1].source else {
+            panic!("nested state survived the recompile");
+        };
+        assert_eq!(
+            child.states[0].name, "IdleV2",
+            "the host plan carries the edited child"
+        );
     }
 }
 
