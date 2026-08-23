@@ -49,15 +49,17 @@ pub const ANIM_POSE_DOMAIN: &str = "anim_pose";
 pub const ANIM_CATEGORY: &str = "Animation";
 
 /// The 9px mono header tag for an animation node — the mockup's vocabulary
-/// (STATE / ENTRY / ANY / SLOT), overriding the derived PURE/EVENT tags,
-/// which describe exec flow and mean nothing in a domain that has none.
-/// Transitions return `None`: they render as chips, which have no header.
+/// (STATE / ENTRY / ANY / SLOT / TRANS), overriding the derived PURE/EVENT
+/// tags, which describe exec flow and mean nothing in a domain that has
+/// none. A transition's tag only shows on its unfolded (selected) card —
+/// the at-rest chip has no header.
 pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
     match type_id {
         ANIM_STATE_TYPE_ID => Some("STATE"),
         ANIM_ENTRY_TYPE_ID => Some("ENTRY"),
         ANIM_ANY_STATE_TYPE_ID => Some("ANY"),
         ANIM_PLAY_ONCE_TYPE_ID => Some("SLOT"),
+        ANIM_TRANSITION_TYPE_ID => Some("TRANS"),
         // The rule canvas's one sink (mockup: "RESULT ◉ Bool").
         ANIM_RULE_RESULT_TYPE_ID => Some("RESULT"),
         _ => None,

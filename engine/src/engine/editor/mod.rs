@@ -67,6 +67,7 @@ pub mod curve_editor;
 #[cfg(feature = "editor")]
 pub mod curve_editor_crusty;
 pub mod graph_anim_chip;
+pub mod graph_anim_edge;
 pub mod graph_editor;
 /// The 45-A P6b variables model: declarations, their edits and their undo
 /// behavior. Test-only — the panel that drives them is P6c.

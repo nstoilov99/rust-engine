@@ -958,6 +958,10 @@ struct PinGeom {
     /// Distinct from `PinType::Domain("")`, which merely *encodes* that state
     /// and compares equal only to itself, refusing every real type.
     untyped: bool,
+    /// Never drawn (Task 41 rework): machine nodes show no pin dots — their
+    /// flow wires land on the border. The pin still exists as a wire anchor
+    /// and (unless its `hit_w` is zero) a hit target.
+    hidden: bool,
 }
 
 /// The at-rest presentation of a transition node (Task 41): an edge chip —
@@ -970,6 +974,27 @@ struct ChipGeom {
     text: String,
     /// Filled dot = a wired rule; hollow = always-true.
     wired: bool,
+}
+
+/// Which compact machine card a node draws as (Task 41 canvas rework,
+/// mockup 2b/2d): states are name + tag + one mono subtitle, ENTRY and ANY
+/// STATE are small pills. None of them show pins or fields at rest —
+/// selecting a state swaps to the standard card (config rows) through
+/// geometry, exactly like a transition's chip does.
+#[derive(Clone, Copy, PartialEq)]
+enum AnimCardKind {
+    State,
+    Entry,
+    Any,
+}
+
+/// A compact machine card's extras beyond the shared title/tag.
+struct AnimCard {
+    kind: AnimCardKind,
+    /// The one mono line under the name: `▷ clip`, `❐ file.animgraph` or
+    /// `⧉ blend tree`. `None` — a state with nothing configured — draws
+    /// name-only.
+    subtitle: Option<String>,
 }
 
 struct NodeGeom {
@@ -990,6 +1015,13 @@ struct NodeGeom {
     reroute: bool,
     /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
     chip: Option<ChipGeom>,
+    /// A compact machine card (Task 41 rework): drawn instead of node
+    /// anatomy for states / ENTRY / ANY STATE on the machine canvas.
+    anim: Option<AnimCard>,
+    /// This node's displayed position is derived (a chip riding its edge):
+    /// its stored position is not what is on screen, so a direct grab must
+    /// not start a move that would land somewhere else entirely.
+    pinned_pos: bool,
     /// The breakpoint mark, if any: `Some(true)` armed, `Some(false)`
     /// disabled (GS-4). Whether it is *hit* or *invalid* is not geometry — it
     /// comes from the bound instance at draw time.
@@ -1005,6 +1037,29 @@ struct NodeGeom {
 }
 
 impl NodeGeom {
+    /// Move every piece of this geometry by `d` — the derived-position pass
+    /// (a transition riding its edge midpoint) after sizes are known.
+    fn translate(&mut self, d: Vec2) {
+        let mv = |r: &mut Rect| *r = Rect::from_min_max(r.min + d, r.max + d);
+        mv(&mut self.rect);
+        for pin in &mut self.pins {
+            pin.wire_anchor += d;
+            pin.dot_center += d;
+        }
+        for c in &mut self.config {
+            c.y += d.y;
+            mv(&mut c.cell);
+            mv(&mut c.label_box);
+            if let Some(r) = &mut c.remove {
+                mv(r);
+            }
+        }
+        if let Some(r) = &mut self.add_field {
+            mv(r);
+        }
+        self.pinned_pos = true;
+    }
+
     fn wire_anchor(&self, slug: &str, output: bool) -> Option<Pos2> {
         self.pins
             .iter()
@@ -1041,7 +1096,7 @@ impl NodeGeom {
         // at every zoom. Falling through to the header-height branch gave it a
         // hit box nearly twice as tall as the dot, hanging below it. A chip is
         // already smaller than a header, so it keeps its own box the same way.
-        if self.reroute || self.chip.is_some() || lod.rows() {
+        if self.reroute || self.chip.is_some() || self.anim.is_some() || lod.rows() {
             self.rect
         } else {
             Rect::from_min_size(self.rect.min, Vec2::new(self.rect.width(), m.header_h))
@@ -1220,6 +1275,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: Some(d * REROUTE_PIN_HIT),
                     untyped,
+                    hidden: false,
                 };
                 return NodeGeom {
                     id: n.id,
@@ -1232,6 +1288,8 @@ fn build_geoms(
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
                     chip: None,
+                    anim: None,
+                    pinned_pos: false,
                     breakpoint: state.breakpoints.get(&n.id).copied(),
                     preview: None,
                     config: Vec::new(),
@@ -1287,6 +1345,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: None,
                     untyped: false,
+                    hidden: true,
                 };
                 return NodeGeom {
                     id: n.id,
@@ -1301,6 +1360,8 @@ fn build_geoms(
                     errored: errors.nodes.contains(&n.id),
                     reroute: false,
                     chip: Some(ChipGeom { text, wired: resolved.wired }),
+                    anim: None,
+                    pinned_pos: false,
                     breakpoint: state.breakpoints.get(&n.id).copied(),
                     preview: None,
                     config: Vec::new(),
@@ -1310,6 +1371,29 @@ fn build_geoms(
                         pin(TRANSITION_TO_PIN, true, min.x + w, min.x + w - m.pin_inset),
                     ],
                 };
+            }
+
+            // Task 41 canvas rework: the other machine nodes render as
+            // compact cards — a state is its name, role tag and one mono
+            // subtitle; ENTRY and ANY STATE are small pills (mockup 2b).
+            // No pins, no fields. Selecting a *state* unfolds the standard
+            // card (its Clip/Graph/Speed config rows) through the generic
+            // path below — the transition-chip idiom exactly.
+            if state.domain.is_animation() {
+                use crate::engine::animation::graph::plan::{
+                    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID,
+                };
+                let kind = match n.type_id.as_str() {
+                    ANIM_STATE_TYPE_ID if !state.selection.contains(&n.id) => {
+                        Some(AnimCardKind::State)
+                    }
+                    ANIM_ENTRY_TYPE_ID => Some(AnimCardKind::Entry),
+                    ANIM_ANY_STATE_TYPE_ID => Some(AnimCardKind::Any),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    return anim_card_geom(n, kind, state, &docd, &incident, errors, m, st, p);
+                }
             }
             #[allow(clippy::type_complexity)]
             let (title, category, missing, inputs, outputs): (
@@ -1371,6 +1455,22 @@ fn build_geoms(
             let tag = crate::engine::animation::graph::anim_node_tag(&n.type_id)
                 .map(str::to_string)
                 .unwrap_or_else(|| derive_tag(is_sub, desc, category.as_deref()));
+
+            // Task 41 rework: machine nodes keep pins off the card even
+            // unfolded — flow wires land on the border. A selected state
+            // strips its pin rows before sizing (hidden border anchors are
+            // pushed after the pins are built); a selected transition keeps
+            // its two pins as hit targets (retargeting) but never draws them.
+            let anim_state_unfold = state.domain.is_animation()
+                && n.type_id == crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID;
+            let anim_transition = state.domain.is_animation()
+                && n.type_id
+                    == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+            let (inputs, outputs) = if anim_state_unfold {
+                (Vec::new(), Vec::new())
+            } else {
+                (inputs, outputs)
+            };
 
             // --- auto width: widest of the header row and every pin row ---
             let mut tag_w = p
@@ -1555,6 +1655,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: None,
                     untyped: false,
+                    hidden: anim_transition,
                 });
             }
             for (i, (slug, label, ty)) in outputs.into_iter().enumerate() {
@@ -1573,6 +1674,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: None,
                     untyped: false,
+                    hidden: anim_transition,
                 });
             }
             // Ghost rows last, one per side, continuing that side's rows.
@@ -1601,8 +1703,44 @@ fn build_geoms(
                     ghost: true,
                     hit_w: None,
                     untyped: false,
+                    hidden: false,
                 });
                 *row += 1;
+            }
+            // The unfolded state's hidden border anchors: mid-border, no
+            // dot, no hit — the same anchors its compact card carries, so
+            // its flow wires do not move when it folds or unfolds.
+            if anim_state_unfold {
+                use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
+                let flow = PinType::Domain(
+                    crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string(),
+                );
+                let cy = min.y + height * 0.5;
+                for (slug, output, x) in [
+                    (STATE_IN_PIN, false, min.x),
+                    (STATE_OUT_PIN, true, min.x + width),
+                ] {
+                    pins.push(PinGeom {
+                        slug: slug.to_string(),
+                        label: String::new(),
+                        ty: flow.clone(),
+                        output,
+                        row: 0,
+                        wire_anchor: Pos2::new(x, cy),
+                        dot_center: Pos2::new(x, cy),
+                        connected: if output {
+                            outgoing.contains(slug)
+                        } else {
+                            incoming.contains(slug)
+                        },
+                        inline: None,
+                        value_w: m.value_w,
+                        ghost: false,
+                        hit_w: Some(0.0),
+                        untyped: false,
+                        hidden: true,
+                    });
+                }
             }
             NodeGeom {
                 id: n.id,
@@ -1616,6 +1754,8 @@ fn build_geoms(
                 errored: errors.nodes.contains(&n.id),
                 reroute: is_reroute,
                 chip: None,
+                anim: None,
+                pinned_pos: false,
                 preview: desc.and_then(|d| d.preview),
                 config,
                 add_field,
@@ -1623,6 +1763,142 @@ fn build_geoms(
             }
         })
         .collect()
+}
+
+/// Geometry for a compact machine card (Task 41 canvas rework, mockup 2b):
+/// a state is name + STATE tag + one mono subtitle; ENTRY and ANY STATE are
+/// small pills. No pin rows exist — the flow anchors are hidden mid-border
+/// pins with a zero hit target, because a border press starts a wire and a
+/// flow wire lands on the border, not on a dot.
+#[allow(clippy::too_many_arguments)]
+fn anim_card_geom(
+    n: &NodeInst,
+    kind: AnimCardKind,
+    state: &GraphEditorState,
+    docd: &DocDescriptors,
+    incident: &IncidentEdges,
+    errors: &ErrorIndex,
+    m: &GraphMetrics,
+    st: &Style,
+    p: &mut Painter,
+) -> NodeGeom {
+    use crate::engine::animation::graph::plan::{
+        CLIP_PROP, GRAPH_PROP, STATE_IN_PIN, STATE_OUT_PIN,
+    };
+    let text_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) | Some(PropValue::Asset(s)) => {
+            s.clone()
+        }
+        _ => String::new(),
+    };
+    let min = Pos2::new(n.position[0], n.position[1]);
+    let errored = errors.nodes.contains(&n.id);
+    let (title, tag, subtitle) = match kind {
+        AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
+        AnimCardKind::Any => ("ANY STATE".to_string(), String::new(), None),
+        AnimCardKind::State => {
+            let has_tree = docd
+                .doc()
+                .regions
+                .get(&n.id)
+                .is_some_and(|r| !r.nodes.is_empty());
+            let graph = text_of(GRAPH_PROP);
+            let clip = text_of(CLIP_PROP);
+            // The compiler's precedence, spoken back: tree > graph > clip.
+            let subtitle = if has_tree {
+                Some("\u{29c9} blend tree".to_string())
+            } else if !graph.trim().is_empty() {
+                Some(format!("\u{2750} {}", graph.trim()))
+            } else if !clip.trim().is_empty() {
+                Some(format!("\u{25b7} {}", clip.trim()))
+            } else {
+                None
+            };
+            (
+                docd.display_name(n.id).unwrap_or_else(|| "State".to_string()),
+                "STATE".to_string(),
+                subtitle,
+            )
+        }
+    };
+    let title_px = st.fonts.body;
+    let sub_px = st.fonts.small;
+    let gutter_w = if errored {
+        m.pin_r * 1.6 + m.label_gap
+    } else {
+        0.0
+    };
+    let tag_w = if tag.is_empty() {
+        0.0
+    } else {
+        p.measure_text_family(&tag, m.tag_px, None, FontFamily::Mono).x + m.col_gap
+    };
+    let title_w = p.measure_text(&title, title_px, None).x;
+    let sub_w = subtitle
+        .as_deref()
+        .map_or(0.0, |s| p.measure_text_family(s, sub_px, None, FontFamily::Mono).x);
+    let content = (gutter_w + title_w + tag_w).max(sub_w);
+    // States take the mockup's min card width; pills size to their text.
+    let w = match kind {
+        AnimCardKind::State => (m.pad_x * 2.0 + content).clamp(m.min_w, m.max_w),
+        _ => (m.pad_x * 2.0 + content).min(m.max_w),
+    };
+    let h = match (kind, &subtitle) {
+        (AnimCardKind::State, Some(_)) => m.header_h + m.row_h * 0.7,
+        (AnimCardKind::State, None) => m.header_h + m.body_pad,
+        _ => m.header_h,
+    };
+    let rect = Rect::from_min_size(min, Vec2::new(w, h));
+    let title = middle_truncate(p, &title, title_px, w - m.pad_x * 2.0 - gutter_w - tag_w);
+
+    let cy = min.y + h * 0.5;
+    let empty: BTreeSet<&str> = BTreeSet::new();
+    let incoming = incident.incoming.get(&n.id).unwrap_or(&empty);
+    let outgoing = incident.outgoing.get(&n.id).unwrap_or(&empty);
+    let flow = PinType::Domain(crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string());
+    let anchor = |slug: &str, output: bool, x: f32| PinGeom {
+        slug: slug.to_string(),
+        label: String::new(),
+        ty: flow.clone(),
+        output,
+        row: 0,
+        wire_anchor: Pos2::new(x, cy),
+        dot_center: Pos2::new(x, cy),
+        connected: if output {
+            outgoing.contains(slug)
+        } else {
+            incoming.contains(slug)
+        },
+        inline: None,
+        value_w: m.value_w,
+        ghost: false,
+        hit_w: Some(0.0),
+        untyped: false,
+        hidden: true,
+    };
+    let mut pins = vec![anchor(STATE_OUT_PIN, true, min.x + w)];
+    if kind == AnimCardKind::State {
+        pins.push(anchor(STATE_IN_PIN, false, min.x));
+    }
+    NodeGeom {
+        id: n.id,
+        rect,
+        title,
+        tag,
+        category: Some(crate::engine::animation::graph::ANIM_CATEGORY.to_string()),
+        tint: n.tint,
+        missing: false,
+        errored,
+        reroute: false,
+        chip: None,
+        anim: Some(AnimCard { kind, subtitle }),
+        pinned_pos: false,
+        breakpoint: state.breakpoints.get(&n.id).copied(),
+        preview: None,
+        config: Vec::new(),
+        add_field: None,
+        pins,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2056,6 +2332,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // The machine dims under an open peek — its lit trio (transition, source
     // and target states) excepted (mockup 3b).
     rule_dim_scrim(ui, out.rect, state, &out.inner);
+    // …and dims the same way while a transition is merely *selected*
+    // (mockup 2d), its trio and its own edge staying lit.
+    anim_select_dim(ui, out.rect, state, registry, &out.inner);
     // Live preview highlight (ticket 06): the active state, the outgoing
     // side of an in-flight fade, and the transition that fired. Above the
     // scrim, so it stays readable while a rule peek is open.
@@ -2384,10 +2663,31 @@ fn draw_and_interact(
     // Errors are resolved to their anchors before geometry, because ghost
     // rows change a node's shape.
     let errors = ErrorIndex::build(&state.errors, &state.ref_errors, &state.domain_errors);
-    let geoms = {
+    let mut geoms = {
         let mut p = ui.painter();
         build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
     };
+    // Task 41 rework: the machine canvas derives its topology geometry —
+    // straight border-to-border edges with the transition chips riding their
+    // midpoints. Chips with both endpoints wired move to the derived spot
+    // (their stored position stays untouched in the document); every
+    // downstream consumer — hit tests, error badges, F8 framing, the live
+    // highlight — reads the translated geoms and follows for free.
+    let anim_flow = state.domain.is_animation().then(|| {
+        let rects: BTreeMap<u64, [f32; 4]> = geoms
+            .iter()
+            .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
+            .collect();
+        super::graph_anim_edge::anim_flow_layout(&state.doc, &rects)
+    });
+    if let Some(l) = &anim_flow {
+        for g in &mut geoms {
+            if let Some(mn) = l.chip_min.get(&g.id) {
+                g.translate(Vec2::new(mn[0] - g.rect.min.x, mn[1] - g.rect.min.y));
+            }
+        }
+    }
+    let geoms = geoms;
 
     state.frame = state.frame.wrapping_add(1);
     let frame = state.frame;
@@ -2400,7 +2700,17 @@ fn draw_and_interact(
         }
     }
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
-    let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis, exec);
+    let wires = build_wires(
+        state,
+        &geoms,
+        &node_rects,
+        &errors,
+        wire_prefs,
+        scope,
+        vis,
+        exec,
+        anim_flow.as_ref().map(|l| &l.segs),
+    );
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
     // Set when Alt+click removed a wire this frame, so nothing downstream
     // treats the same press as a reroute grab or a selection change.
@@ -2725,7 +3035,14 @@ fn draw_and_interact(
     // tooltip below does not talk over it.
     let mut midpoint_hovered = false;
     if let Some(i) = hovered_wire.filter(|_| !alt_broke_wire) {
-        if let Some(w) = wires.iter().find(|w| w.edge_index == i) {
+        // A derived machine edge (Task 41 rework) offers no reroute handle:
+        // its midpoint belongs to the transition chip, and a reroute spliced
+        // into a flow wire would knock the edge off its straight rendering.
+        if let Some(w) = wires
+            .iter()
+            .find(|w| w.edge_index == i)
+            .filter(|w| !w.direct)
+        {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
                 let r = MIDPOINT_R;
                 let handle = Rect::from_center_size(mid, Vec2::splat(r * 2.0));
@@ -2814,6 +3131,12 @@ fn draw_and_interact(
         // hit-test per pin, which is what keeps the stated budget reachable.
         for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
             for pin in &g.pins {
+                // A zero hit target (a machine card's hidden border anchor,
+                // Task 41 rework) takes no interaction at all — the border
+                // gesture below owns that surface.
+                if pin.hit_w == Some(0.0) {
+                    continue;
+                }
                 let wr = Rect::from_center_size(
                     pin.dot_center,
                     Vec2::splat(pin.hit_w.unwrap_or(hit_w)),
@@ -3158,6 +3481,43 @@ fn draw_and_interact(
                 break_node = Some(g.id);
             }
         }
+        // Task 41 rework: a press on a machine card's border rim starts a
+        // wire from its Out — the modern engines' "drag from the state
+        // edge", with no pin dot to aim at. Release over another state
+        // auto-inserts a Transition through the existing auto-connect path.
+        if resp.pressed
+            && !alt
+            && !shift
+            && !pin_claimed
+            && !badge_claimed
+            && !config_claimed
+            && !widget_claimed
+            && !wire_claimed
+            && state.node_drag.is_none()
+            && state.connect_drag.is_none()
+            // Compact cards, and the unfolded (selected) state — which lost
+            // its `anim` marker by taking the standard-card path.
+            && (g.anim.is_some()
+                || (state.domain.is_animation()
+                    && state.doc.node(g.id).is_some_and(|n| {
+                        n.type_id
+                            == crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID
+                    })))
+        {
+            if let Some(pw) = pointer_world {
+                let b = g.body_rect(lod, &m);
+                let grab = (BORDER_GRAB_PX / zoom).min(b.width().min(b.height()) * 0.33);
+                if b.contains(pw) && !b.shrink(grab).contains(pw) {
+                    use crate::engine::animation::graph::plan::STATE_OUT_PIN;
+                    state.connect_drag = Some(ConnectDrag {
+                        from_node: g.id,
+                        from_pin: STATE_OUT_PIN.to_string(),
+                        from_output: true,
+                    });
+                    pin_claimed = true;
+                }
+            }
+        }
         if resp.pressed && !alt
             && !pin_claimed
             && !badge_claimed
@@ -3174,7 +3534,11 @@ fn draw_and_interact(
             } else {
                 state.primary = Some(g.id);
             }
-            begin_drag = true;
+            // A chip riding its edge (Task 41 rework) has no position of its
+            // own to drag — a grab selects it and nothing more.
+            if !g.pinned_pos {
+                begin_drag = true;
+            }
         }
         if resp.clicked && shift && !alt {
             state.toggle_selected(g.id);
@@ -3391,6 +3755,8 @@ fn draw_and_interact(
                 pulse: 0.0,
                 taken: true,
                 rate: 0.0,
+                direct: false,
+                arrow: false,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
         }
@@ -4167,6 +4533,82 @@ fn rule_dim_scrim(ui: &mut Ui, canvas: Rect, state: &GraphEditorState, geoms: &[
     let mut p = ui.painter();
     for band in subtract_rects(canvas, &lit) {
         p.rect_filled_translucent(band, Rounding::ZERO, color);
+    }
+}
+
+/// Mockup 2d's dim-on-select (Task 41 rework): exactly one transition
+/// selected (no rule peek open) dims the rest of the machine behind the
+/// scrim while the transition's card, its source and target states and its
+/// own edge stay lit — the rule-peek scrim's idiom, applied at selection.
+fn anim_select_dim(
+    ui: &mut Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    registry: &NodeRegistry,
+    geoms: &[NodeGeom],
+) {
+    use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+    if !state.domain.is_animation() || state.rule_scope.is_some() {
+        return;
+    }
+    if state.selection.len() != 1 {
+        return;
+    }
+    let Some(&owner) = state.selection.iter().next() else {
+        return;
+    };
+    if !state
+        .doc
+        .node(owner)
+        .is_some_and(|n| n.type_id == ANIM_TRANSITION_TYPE_ID)
+    {
+        return;
+    }
+    let (from, to) = rule_endpoints(state, owner);
+    let v = state.view;
+    let screen = |q: Pos2| {
+        Pos2::new(
+            canvas.min.x + (q.x - v.pan.x) * v.zoom,
+            canvas.min.y + (q.y - v.pan.y) * v.zoom,
+        )
+    };
+    let mut lit: Vec<Rect> = Vec::new();
+    for g in geoms {
+        if g.id == owner || Some(g.id) == from || Some(g.id) == to {
+            let r = Rect::from_min_max(screen(g.rect.min), screen(g.rect.max))
+                .intersect(canvas);
+            if r.width() > 0.0 && r.height() > 0.0 {
+                lit.push(r);
+            }
+        }
+    }
+    let st = ui.style();
+    let scrim = Color::BLACK.with_alpha(st.palette.scrim_alpha);
+    let flow = PinType::Domain(crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string());
+    let bright = wire_color(Some(registry), &flow);
+    let mut p = ui.painter();
+    for band in subtract_rects(canvas, &lit) {
+        p.rect_filled_translucent(band, Rounding::ZERO, scrim);
+    }
+    // The selected transition's own edge stays lit: its segments re-draw
+    // above the scrim, arrowhead included.
+    let rects: BTreeMap<u64, [f32; 4]> = geoms
+        .iter()
+        .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
+        .collect();
+    let layout = super::graph_anim_edge::anim_flow_layout(&state.doc, &rects);
+    for (i, e) in state.doc.edges.iter().enumerate() {
+        if e.to_node != owner && e.from_node != owner {
+            continue;
+        }
+        if let Some(seg) = layout.segs.get(&i) {
+            let a = screen(Pos2::new(seg.a[0], seg.a[1]));
+            let b = screen(Pos2::new(seg.b[0], seg.b[1]));
+            p.line_segment(a, b, WIRE_DATA_SELECTED, bright);
+            if seg.arrow {
+                draw_arrow_head(&mut p, b, a, (ARROW_L * v.zoom).clamp(5.0, 16.0), bright);
+            }
+        }
     }
 }
 
@@ -9348,7 +9790,21 @@ struct WireGeom {
     /// never a re-route: the pulse travels the polyline the router already
     /// produced, so a wire does not move when it runs.
     pulse: f32,
+    /// A derived machine edge (Task 41 rework): drawn as its straight
+    /// segment regardless of the wire-style preference — a state machine's
+    /// arrows do not take the subway.
+    direct: bool,
+    /// Draw an arrowhead at `b` — the machine edge's direction marker.
+    arrow: bool,
 }
+
+/// Machine-edge arrowhead length, world units (Task 41 rework).
+const ARROW_L: f32 = 9.0;
+
+/// Screen-space width of the machine card's border rim that starts a wire
+/// drag (Task 41 rework), capped to a third of the card's smaller side so a
+/// small pill keeps a grabbable center.
+const BORDER_GRAB_PX: f32 = 10.0;
 
 impl WireGeom {
     fn is_exec(&self) -> bool {
@@ -9378,6 +9834,10 @@ fn build_wires(
     scope: &CanvasScope,
     vis: Rect,
     exec: Option<&GraphExecViz>,
+    // Task 41 rework: doc-edge indices the machine layout replaced with
+    // straight border-to-chip segments. Edges it could not place honestly
+    // (reroutes, overlapping states) fall through to the router.
+    anim_segs: Option<&BTreeMap<usize, super::graph_anim_edge::EdgeSeg>>,
 ) -> Vec<WireGeom> {
     let mut out = Vec::with_capacity(state.doc.edges.len());
     let ranks = converge_ranks(&state.doc.edges);
@@ -9387,6 +9847,40 @@ fn build_wires(
         let (Some(src), Some(dst)) = (src, dst) else {
             continue;
         };
+        if let Some(seg) = anim_segs.and_then(|s| s.get(&edge_index)) {
+            let a = Pos2::new(seg.a[0], seg.a[1]);
+            let b = Pos2::new(seg.b[0], seg.b[1]);
+            let bounds = Rect::from_min_max(
+                Pos2::new(a.x.min(b.x) - 20.0, a.y.min(b.y) - 20.0),
+                Pos2::new(a.x.max(b.x) + 20.0, a.y.max(b.y) + 20.0),
+            );
+            let clip = bounds.intersect(vis);
+            if clip.width() < 0.0 || clip.height() < 0.0 {
+                continue;
+            }
+            let ty = src
+                .pins
+                .iter()
+                .find(|p| p.output && p.slug == e.from_pin)
+                .map(|p| p.ty.clone())
+                .unwrap_or(PinType::Exec);
+            out.push(WireGeom {
+                edge_index,
+                a,
+                b,
+                ty,
+                screen: vec![scope.world_to_screen(a), scope.world_to_screen(b)],
+                selected: state.selected_edges.contains(e),
+                mismatched: errors.edges.contains(e),
+                // Machine flow never pulses: it is not exec.
+                pulse: 0.0,
+                taken: true,
+                rate: 0.0,
+                direct: true,
+                arrow: seg.arrow,
+            });
+            continue;
+        }
         let (Some(a), Some(b)) = (
             src.wire_anchor(&e.from_pin, true),
             dst.wire_anchor(&e.to_pin, false),
@@ -9435,6 +9929,8 @@ fn build_wires(
             pulse: exec.map_or(0.0, |v| wire_pulse(v, state, e)),
             taken: exec.is_none_or(|v| !v.has_session() || wire_taken(v, state, e)),
             rate: exec.map_or(0.0, |v| wire_rate(v, state, e)),
+            direct: false,
+            arrow: false,
         });
     }
     out
@@ -9656,6 +10152,18 @@ fn draw_wires(
             continue;
         }
         stroke_wire(&mut p, w, prefs, scope, width, color);
+        // The machine edge's direction marker (Task 41 rework): a filled
+        // arrowhead at the landing border — the Unreal reading of a state
+        // machine. World-sized, so it zooms with the graph.
+        if w.arrow && !lod.bar_only() && w.screen.len() >= 2 {
+            draw_arrow_head(
+                &mut p,
+                w.screen[w.screen.len() - 1],
+                w.screen[w.screen.len() - 2],
+                (ARROW_L * zoom).clamp(5.0, 16.0),
+                color,
+            );
+        }
         if w.mismatched && lod.rows() {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
                 let r = width * 2.2;
@@ -9674,6 +10182,24 @@ fn draw_wires(
             }
         }
     }
+}
+
+/// Filled arrowhead at `tip`, oriented away from `prev` (screen space) —
+/// the machine edge's direction marker (Task 41 rework).
+fn draw_arrow_head(p: &mut Painter, tip: Pos2, prev: Pos2, l: f32, color: Color) {
+    let v = tip - prev;
+    let len = v.length();
+    if len <= 1.0 {
+        return;
+    }
+    let d = Vec2::new(v.x / len * l, v.y / len * l);
+    let n = Vec2::new(-d.y * 0.45, d.x * 0.45);
+    p.triangle(
+        tip,
+        Pos2::new(tip.x - d.x + n.x, tip.y - d.y + n.y),
+        Pos2::new(tip.x - d.x - n.x, tip.y - d.y - n.y),
+        color,
+    );
 }
 
 /// Flow bubbles: dots riding an exec wire in the direction control took
@@ -9772,6 +10298,13 @@ fn stroke_wire(
     width: f32,
     color: Color,
 ) {
+    // A machine edge is a straight arrow whatever the wire-style pref says.
+    if w.direct {
+        if w.screen.len() >= 2 {
+            p.polyline(&w.screen, width, color);
+        }
+        return;
+    }
     if prefs.style.is_orthogonal() {
         if w.screen.len() >= 2 {
             p.polyline(&w.screen, width, color);
@@ -10073,6 +10606,121 @@ fn draw_nodes(
                     None,
                     FontFamily::Mono,
                 );
+            }
+            continue;
+        }
+
+        // Task 41 rework: compact machine cards (mockup 2b). A state is its
+        // name, role tag and one mono subtitle; ENTRY (Logic-green text) and
+        // ANY STATE (dashed border) are small pills of the same card family.
+        // No pins, no fields — selection swaps a state to the standard card
+        // via geometry, so this branch only ever draws the rest form.
+        if let Some(card) = &g.anim {
+            let bg = st.palette.input;
+            if lod.bar_only() {
+                let bar = Rect::from_min_size(
+                    srect.min,
+                    Vec2::new(srect.width(), (L4_BAR_H * m.scale * zoom).max(1.0)),
+                );
+                p.rect_filled(bar, Rounding::ZERO, edge_col);
+                continue;
+            }
+            p.rect_filled(srect, round, fade(st.palette.header, dim, bg));
+            if card.kind == AnimCardKind::State {
+                // The generic card's underlay-reveal: a rounded band in the
+                // category color, the fills inset below its top 2px.
+                let band_h = (round.nw * 2.0).min(srect.height());
+                p.rect_filled(
+                    Rect::from_min_size(srect.min, Vec2::new(srect.width(), band_h)),
+                    Rounding::same(round.nw.min(band_h * 0.5)),
+                    edge_col,
+                );
+                let edge_h = (m.edge * zoom).max(1.0).min(band_h);
+                let inner_r = (round.nw - edge_h).max(0.0);
+                p.rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(srect.min.x, srect.min.y + edge_h),
+                        srect.max,
+                    ),
+                    Rounding { nw: inner_r, ne: inner_r, sw: round.sw, se: round.se },
+                    fade(st.palette.elevated, dim, bg),
+                );
+            }
+            let border_col = if errored {
+                status.error
+            } else {
+                st.palette.stroke_strong
+            };
+            if card.kind == AnimCardKind::Any && !errored {
+                dashed_rect(&mut p, srect, m.border, border_col);
+            } else {
+                p.rect_stroke(srect, round, m.border, border_col);
+            }
+            if selected {
+                let off = m.edge;
+                let outer = Rect::from_min_max(
+                    Pos2::new(srect.min.x - off, srect.min.y - off),
+                    Pos2::new(srect.max.x + off, srect.max.y + off),
+                );
+                let alpha =
+                    if state.primary == Some(g.id) { 1.0 } else { SELECTION_REST_ALPHA };
+                p.rect_stroke(
+                    outer,
+                    Rounding::same(round.nw + off),
+                    m.edge,
+                    selection_outline.with_alpha(alpha),
+                );
+            }
+            if lod.glyphs() {
+                let header_c = srect.min.y + m.header_h * zoom * 0.5;
+                let mut x = srect.min.x + m.pad_x * zoom;
+                if errored {
+                    let r = m.pin_r * zoom * 0.8;
+                    p.circle_filled(Pos2::new(x + r, header_c), r, status.error);
+                    x += r * 2.0 + m.label_gap * zoom;
+                }
+                let (title_col, px) = match card.kind {
+                    AnimCardKind::Entry => {
+                        (fade(category_tag_color("Logic"), dim, bg), st.fonts.small * zoom)
+                    }
+                    AnimCardKind::Any => {
+                        (fade(st.palette.text_secondary, dim, bg), st.fonts.small * zoom)
+                    }
+                    AnimCardKind::State => {
+                        (fade(st.palette.text, dim, bg), st.fonts.body * zoom)
+                    }
+                };
+                p.text(Pos2::new(x, header_c - px * 0.62), &g.title, px, title_col, None);
+                if !g.tag.is_empty() {
+                    let tag_px = m.tag_px * zoom;
+                    let tw = p
+                        .measure_text_family(&g.tag, tag_px, None, FontFamily::Mono)
+                        .x;
+                    p.text_family(
+                        Pos2::new(
+                            srect.max.x - m.pad_x * zoom - tw,
+                            header_c - tag_px * 0.62,
+                        ),
+                        &g.tag,
+                        tag_px,
+                        fade(g.tag_color(), dim, bg),
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
+                if let Some(sub) = &card.subtitle {
+                    let spx = st.fonts.small * zoom;
+                    let sub_c = srect.min.y
+                        + (m.header_h + (g.rect.height() - m.header_h) * 0.5) * zoom;
+                    p.text_family(
+                        Pos2::new(srect.min.x + m.pad_x * zoom, sub_c - spx * 0.62),
+                        sub,
+                        spx,
+                        fade(st.palette.text_secondary, dim, bg),
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
             }
             continue;
         }
@@ -10560,6 +11208,11 @@ fn draw_nodes(
         }
 
         for pin in &g.pins {
+            // A hidden pin (Task 41 rework) is an anchor, not an affordance:
+            // no dot, no label — nothing to draw.
+            if pin.hidden {
+                continue;
+            }
             let c = scope.world_to_screen(pin.dot_center);
             draw_pin(&mut p, pin, c, zoom, m, st, registry);
             // Pin-level errors ring the pin itself.
@@ -12163,6 +12816,7 @@ mod tests {
             value_w: 0.0,
             hit_w: None,
             untyped: false,
+            hidden: false,
         };
         assert_eq!(pin_label(&pin(PinType::Vec2)), "Position \u{b7}2");
         assert_eq!(pin_label(&pin(PinType::Vec3)), "Position \u{b7}3");
@@ -12222,6 +12876,7 @@ mod tests {
             ghost: false,
             hit_w: Some(d * REROUTE_PIN_HIT),
             untyped,
+            hidden: false,
         };
         NodeGeom {
             id: 7,
@@ -12234,6 +12889,8 @@ mod tests {
             errored: false,
             reroute: true,
             chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -12437,6 +13094,8 @@ mod tests {
             errored: false,
             reroute: false,
             chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -12447,6 +13106,39 @@ mod tests {
         assert_eq!(g.body_rect(ZoomLod::L0, &m).height(), 120.0);
         assert!((g.body_rect(ZoomLod::L3, &m).height() - m.header_h).abs() < 1e-6);
         assert!((g.body_rect(ZoomLod::L4, &m).height() - m.header_h).abs() < 1e-6);
+    }
+
+    /// Task 41 rework: the derived-position pass moves a chip's whole
+    /// geometry — rect, pins, config cells — as one piece, and marks it so a
+    /// grab cannot start a move to nowhere.
+    #[test]
+    fn translate_moves_every_piece_of_a_geom() {
+        let m = GraphMetrics::new(&Style::steel());
+        let mut g = band_geom(&m, 1, false);
+        let pin = PinGeom {
+            slug: "from".into(),
+            label: String::new(),
+            ty: PinType::Float,
+            output: false,
+            row: 0,
+            wire_anchor: Pos2::new(0.0, 52.0),
+            dot_center: Pos2::new(4.0, 52.0),
+            connected: false,
+            inline: None,
+            value_w: 0.0,
+            ghost: false,
+            hit_w: None,
+            untyped: false,
+            hidden: false,
+        };
+        g.pins.push(pin);
+        let (r0, p0, c0) = (g.rect, g.pins[0].wire_anchor, g.config[0].cell);
+        g.translate(Vec2::new(30.0, -12.0));
+        assert_eq!(g.rect.min, r0.min + Vec2::new(30.0, -12.0));
+        assert_eq!(g.rect.size(), r0.size());
+        assert_eq!(g.pins[0].wire_anchor, p0 + Vec2::new(30.0, -12.0));
+        assert_eq!(g.config[0].cell.min, c0.min + Vec2::new(30.0, -12.0));
+        assert!(g.pinned_pos, "a translated geom knows its position is derived");
     }
 
     #[test]
@@ -12462,6 +13154,8 @@ mod tests {
             errored: false,
             reroute: false,
             chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -12867,6 +13561,8 @@ mod tests {
             errored: false,
             reroute: false,
             chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config,
