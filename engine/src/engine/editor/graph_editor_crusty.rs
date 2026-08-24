@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crusty_gui::context::{Direction, Ui, UiOptions};
+use crusty_gui::context::{CursorIcon, Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::input::{Key, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
@@ -35,6 +35,7 @@ use super::graph_editor::{
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, DomainError, GraphDomain,
     GraphEdit, GraphEditorState, GraphOpenRequest,
     GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, PayloadConfirm, PayloadDraft,
+    PeekDrag, PeekDragKind,
     payload_reader_count, variable_matches, variable_mismatch, variable_node_ids, variable_slug,
     variables_view,
     retype_default_outcome, pin_type_label, ResizeHandle, VarConfirm, VarDrop, VarListRow,
@@ -1545,7 +1546,7 @@ fn build_geoms(
                 .max(outputs.len() + ghost_out)
                 .max(usize::from(config_n == 0));
             let mut content_w: f32 = header_w;
-            for (key, label, _) in &config {
+            for (key, label, kind) in &config {
                 let remove_w = if key.starts_with(EVENT_PAYLOAD_PREFIX) {
                     m.config_remove_w() + m.label_gap
                 } else {
@@ -1561,7 +1562,10 @@ fn build_geoms(
                         )
                         .x
                         + m.label_gap
-                        + m.config_value_w()
+                        // Same content-aware floor the cell itself uses: a
+                        // config dropdown or long value widens its node
+                        // rather than eliding (readable-at-rest bar).
+                        + m.config_value_w().max(inline_cell_w(p, kind, m, st))
                         + remove_w
                         + m.pad_x,
                 );
@@ -1617,8 +1621,8 @@ fn build_geoms(
                         Some(r) => r.min.x - m.label_gap,
                         None => right,
                     };
-                    let cell =
-                        m.config_box(cell_right - m.config_value_w(), cell_right, y);
+                    let cell_w = m.config_value_w().max(inline_cell_w(p, &kind, m, st));
+                    let cell = m.config_box(cell_right - cell_w, cell_right, y);
                     let label_box =
                         m.config_box(min.x + m.pad_x, cell.min.x - m.label_gap, y);
                     ConfigGeom { key, label, kind, y, cell, label_box, remove }
@@ -2686,6 +2690,12 @@ fn draw_and_interact(
                 g.translate(Vec2::new(mn[0] - g.rect.min.x, mn[1] - g.rect.min.y));
             }
         }
+        // An unfolded (selected) card is the thing being edited: nothing may
+        // cross it. Selected nodes move to the end of the paint order — which
+        // is also the hit order, `node_under` taking the last hit — so open
+        // cards sit above every other chip and state. Stable, so unselected
+        // nodes keep their relative document order.
+        geoms.sort_by_key(|g| state.selection.contains(&g.id));
     }
     let geoms = geoms;
 
@@ -4420,9 +4430,28 @@ fn rule_duration_tag(state: &GraphEditorState, owner: u64) -> String {
     t
 }
 
-/// Where the peek panel sits: anchored under the transition's chip when it is
-/// on screen (the rule opens where the eye already is), clamped into the
-/// canvas, sized to leave the machine visible around it.
+/// The smallest the peek can be resized to — the header plus a usable slice
+/// of rule canvas.
+fn peek_min_size(s: f32) -> Vec2 {
+    Vec2::new(280.0 * s, 170.0 * s)
+}
+
+/// A user-placed peek rect: canvas-relative min offset + size, clamped so
+/// the panel stays fully on the canvas at a workable size. Pure, tested.
+fn peek_user_rect(canvas: Rect, off: [f32; 2], size: [f32; 2], s: f32) -> Rect {
+    let min_sz = peek_min_size(s);
+    let w = size[0].max(min_sz.x).min(canvas.width().max(min_sz.x));
+    let h = size[1].max(min_sz.y).min(canvas.height().max(min_sz.y));
+    let x = (canvas.min.x + off[0]).clamp(canvas.min.x, (canvas.max.x - w).max(canvas.min.x));
+    let y = (canvas.min.y + off[1]).clamp(canvas.min.y, (canvas.max.y - h).max(canvas.min.y));
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+}
+
+/// Where the peek panel sits: where the user last put it (header drag /
+/// border resize — session-remembered per tab), else anchored under the
+/// transition's chip when it is on screen (the rule opens where the eye
+/// already is), clamped into the canvas, sized to leave the machine visible
+/// around it.
 fn rule_peek_rect(
     ui: &Ui,
     canvas: Rect,
@@ -4431,6 +4460,9 @@ fn rule_peek_rect(
 ) -> Rect {
     let st = ui.style();
     let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    if let Some((off, size)) = state.peek_panel {
+        return peek_user_rect(canvas, off, size, s);
+    }
     let margin = 12.0 * s;
     let w = (canvas.width() * 0.62)
         .clamp(340.0 * s, 780.0 * s)
@@ -4591,22 +4623,31 @@ fn anim_select_dim(
         p.rect_filled_translucent(band, Rounding::ZERO, scrim);
     }
     // The selected transition's own edge stays lit: its segments re-draw
-    // above the scrim, arrowhead included.
+    // above the scrim, arrowhead included — but they stop at the border of
+    // the unfolded card itself (its halves meet at the card's center), so
+    // nothing ever crosses the card being edited.
     let rects: BTreeMap<u64, [f32; 4]> = geoms
         .iter()
         .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
         .collect();
     let layout = super::graph_anim_edge::anim_flow_layout(&state.doc, &rects);
+    let card = rects.get(&owner).copied();
     for (i, e) in state.doc.edges.iter().enumerate() {
         if e.to_node != owner && e.from_node != owner {
             continue;
         }
         if let Some(seg) = layout.segs.get(&i) {
-            let a = screen(Pos2::new(seg.a[0], seg.a[1]));
-            let b = screen(Pos2::new(seg.b[0], seg.b[1]));
-            p.line_segment(a, b, WIRE_DATA_SELECTED, bright);
-            if seg.arrow {
-                draw_arrow_head(&mut p, b, a, (ARROW_L * v.zoom).clamp(5.0, 16.0), bright);
+            let pieces = match card {
+                Some(r) => super::graph_anim_edge::seg_outside(seg.a, seg.b, r),
+                None => vec![(seg.a, seg.b)],
+            };
+            for (pa, pb) in pieces {
+                let a = screen(Pos2::new(pa[0], pa[1]));
+                let b = screen(Pos2::new(pb[0], pb[1]));
+                p.line_segment(a, b, WIRE_DATA_SELECTED, bright);
+                if seg.arrow && pb == seg.b {
+                    draw_arrow_head(&mut p, b, a, (ARROW_L * v.zoom).clamp(5.0, 16.0), bright);
+                }
             }
         }
     }
@@ -4884,10 +4925,46 @@ fn rule_canvas_pass(
     Some(RuleCanvasOut { rect: out.rect, geoms: out.inner, ascend })
 }
 
+/// Which panel borders a point inside the grip zones would resize — corners
+/// widen the diagonal grab. The float window's border language (6px edges,
+/// 14px corners), kept *inside* the panel because a press outside the modal
+/// rect dismisses the peek. Pure, tested.
+fn peek_resize_zone(panel: Rect, pt: Pos2, s: f32) -> Option<(bool, bool, bool, bool)> {
+    if !panel.contains(pt) {
+        return None;
+    }
+    let grip = 6.0 * s;
+    let corner = 14.0 * s;
+    let l = pt.x < panel.min.x + grip;
+    let r = pt.x > panel.max.x - grip;
+    let t = pt.y < panel.min.y + grip;
+    let b = pt.y > panel.max.y - grip;
+    if !(l || r || t || b) {
+        return None;
+    }
+    let cl = pt.x < panel.min.x + corner;
+    let cr = pt.x > panel.max.x - corner;
+    let ct = pt.y < panel.min.y + corner;
+    let cb = pt.y > panel.max.y - corner;
+    Some((
+        l || ((t || b) && cl),
+        r || ((t || b) && cr),
+        t || ((l || r) && ct),
+        b || ((l || r) && cb),
+    ))
+}
+
 /// The peek overlay (mockup 3b): a modal panel over the dimmed machine —
 /// header ("RULE · IDLE → LOCOMOTION", duration tag, ⤢ promote, ✕ close),
 /// body a fully editable rule canvas. Esc, an outside press or a wheel
 /// outside dismiss it, per the modal stack's standing rules.
+///
+/// The panel is the user's window onto the rule: its header drags it, its
+/// borders resize it (both session-remembered per tab via `peek_panel`), and
+/// releasing a header drag on the band at the canvas top lands on the
+/// existing ⤢ promote path — deliberately *not* a second document tab
+/// (ticket 05's ruling: two copies of one document break the one-history
+/// invariant).
 #[allow(clippy::too_many_arguments)]
 fn rule_peek_overlay(
     ui: &mut Ui,
@@ -4909,9 +4986,75 @@ fn rule_peek_overlay(
     }
     let owner = scope.owner;
     let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
     let pad = st.spacing.padding;
-    let panel = rule_peek_rect(ui, canvas, state, geoms);
     let header_h = st.metrics.control_height + pad * 0.5;
+    let mut panel = rule_peek_rect(ui, canvas, state, geoms);
+
+    // ── Move / resize / dock ─────────────────────────────────────────────
+    // Continue an in-flight header drag or border resize before anything
+    // draws, so the frame shows the placement the pointer is at.
+    let pointer = ui.ctx().input.pointer_pos;
+    let pressed = ui.ctx().input.pointer_pressed;
+    let down = ui.ctx().input.pointer_down;
+    let released = ui.ctx().input.pointer_released;
+    let dock_band =
+        Rect::from_min_max(canvas.min, Pos2::new(canvas.max.x, canvas.min.y + 34.0 * s));
+    let mut dock_hot = false;
+    let mut promote_drop = false;
+    let mut drag_aborted = false;
+    if let Some(drag) = state.peek_drag {
+        if ui.ctx().input.key_pressed(Key::Escape) || ui.ctx().focus_lost() || pointer.is_none()
+        {
+            // Rule 3: the drag reverts and records nothing — and the Esc
+            // that aborted it must not also dismiss the peek.
+            state.peek_panel = drag.prev;
+            state.peek_drag = None;
+            drag_aborted = true;
+        } else if let Some(pt) = pointer {
+            let store = |r: Rect| {
+                (
+                    [r.min.x - canvas.min.x, r.min.y - canvas.min.y],
+                    [r.width(), r.height()],
+                )
+            };
+            match drag.kind {
+                PeekDragKind::Move { grab } => {
+                    dock_hot = pt.y < dock_band.max.y;
+                    let min = Pos2::new(pt.x - grab[0], pt.y - grab[1]);
+                    state.peek_panel = Some(store(Rect::from_min_size(min, panel.size())));
+                }
+                PeekDragKind::Resize { left, right, top, bottom } => {
+                    let min_sz = peek_min_size(s);
+                    let mut r = panel;
+                    if left {
+                        r.min.x = pt.x.clamp(canvas.min.x, r.max.x - min_sz.x);
+                    }
+                    if right {
+                        r.max.x = pt.x.clamp(r.min.x + min_sz.x, canvas.max.x);
+                    }
+                    if top {
+                        r.min.y = pt.y.clamp(canvas.min.y, r.max.y - min_sz.y);
+                    }
+                    if bottom {
+                        r.max.y = pt.y.clamp(r.min.y + min_sz.y, canvas.max.y);
+                    }
+                    state.peek_panel = Some(store(r));
+                }
+            }
+            if released || !down {
+                if matches!(drag.kind, PeekDragKind::Move { .. }) && dock_hot {
+                    // Dropped on the dock band: this was a promote, not a
+                    // move — the placement reverts and ⤢ takes it from here.
+                    state.peek_panel = drag.prev;
+                    promote_drop = true;
+                    dock_hot = false;
+                }
+                state.peek_drag = None;
+            }
+            panel = rule_peek_rect(ui, canvas, state, geoms);
+        }
+    }
     ui.ctx_mut().modal_push(rule_peek_modal_id(), panel);
 
     // Header controls: measured right-to-left, interacted before painting so
@@ -4939,6 +5082,57 @@ fn rule_peek_overlay(
     let promote_id = ui.alloc_id("rule_peek_promote");
     let close_resp = ui.interact(close_id, close_r);
     let promote_resp = ui.interact(promote_id, promote_r);
+
+    // Starting a grab: border zones first, then the header as the move
+    // handle (its buttons excepted). The zones sit inside the panel, so the
+    // press can never read as an outside-press dismissing the modal.
+    if state.peek_drag.is_none() && pressed {
+        if let Some(pt) = pointer
+            .filter(|pt| panel.contains(*pt) && !close_r.contains(*pt) && !promote_r.contains(*pt))
+        {
+            let kind = match peek_resize_zone(panel, pt, s) {
+                Some((left, right, top, bottom)) => {
+                    Some(PeekDragKind::Resize { left, right, top, bottom })
+                }
+                None if pt.y < panel.min.y + header_h => Some(PeekDragKind::Move {
+                    grab: [pt.x - panel.min.x, pt.y - panel.min.y],
+                }),
+                None => None,
+            };
+            if let Some(kind) = kind {
+                state.peek_drag = Some(PeekDrag { kind, prev: state.peek_panel });
+                // The grab pins today's concrete placement, so a Move keeps
+                // this size and a Resize moves only the grabbed edges even
+                // when the panel was still on its anchored default.
+                state.peek_panel = Some((
+                    [panel.min.x - canvas.min.x, panel.min.y - canvas.min.y],
+                    [panel.width(), panel.height()],
+                ));
+            }
+        }
+    }
+
+    // Cursor language: borders advertise the resize, an active move grabs.
+    let zone = match state.peek_drag {
+        Some(PeekDrag { kind: PeekDragKind::Resize { left, right, top, bottom }, .. }) => {
+            Some((left, right, top, bottom))
+        }
+        Some(PeekDrag { kind: PeekDragKind::Move { .. }, .. }) => None,
+        None => pointer.and_then(|pt| peek_resize_zone(panel, pt, s)),
+    };
+    if let Some((l, r, t, b)) = zone {
+        ui.ctx_mut().set_cursor_icon(match (l, r, t, b) {
+            (true, _, true, _) | (_, true, _, true) => CursorIcon::ResizeNwSe,
+            (true, _, _, true) | (_, true, true, _) => CursorIcon::ResizeNeSw,
+            (true, _, _, _) | (_, true, _, _) => CursorIcon::ResizeEw,
+            _ => CursorIcon::ResizeNs,
+        });
+    } else if matches!(
+        state.peek_drag,
+        Some(PeekDrag { kind: PeekDragKind::Move { .. }, .. })
+    ) {
+        ui.ctx_mut().set_cursor_icon(CursorIcon::Grabbing);
+    }
 
     {
         let (from, to) = rule_endpoints(state, owner);
@@ -4991,9 +5185,12 @@ fn rule_peek_overlay(
         }
     }
 
+    // The body insets by the grip width, so the resize borders own their
+    // strip outright — a border press can never double as a canvas gesture.
+    let grip = 6.0 * s;
     let body = Rect::from_min_max(
-        Pos2::new(panel.min.x + 1.0, panel.min.y + header_h),
-        Pos2::new(panel.max.x - 1.0, panel.max.y - 1.0),
+        Pos2::new(panel.min.x + grip, panel.min.y + header_h),
+        Pos2::new(panel.max.x - grip, panel.max.y - grip),
     );
     let pass = rule_canvas_pass(
         ui,
@@ -5010,9 +5207,35 @@ fn rule_peek_overlay(
         Some(rule_peek_modal_id()),
     );
 
+    // The dock band lights while a header drag hovers it — releasing there
+    // promotes. Drawn last, above the panel it may overlap.
+    if dock_hot {
+        let mut p = ui.painter();
+        p.rect_filled_translucent(
+            dock_band,
+            st.rounding.panel,
+            st.palette.selection_fill,
+        );
+        p.rect_stroke(dock_band, st.rounding.panel, st.metrics.border, st.palette.accent_active);
+        let label = "\u{2922} drop to open as full canvas";
+        let w = p.measure_text(label, st.fonts.small, None).x;
+        p.text_family(
+            Pos2::new(
+                dock_band.center().x - w * 0.5,
+                dock_band.center().y - st.fonts.small * 0.62,
+            ),
+            label,
+            st.fonts.small,
+            st.palette.text,
+            None,
+            FontFamily::Mono,
+        );
+    }
+
     // Dismissal: the modal stack's standing rules (Esc, press/wheel outside),
-    // the ✕, or PageUp over the canvas.
-    if ui.ctx().modal_dismissed(rule_peek_modal_id()).is_some()
+    // the ✕, or PageUp over the canvas. An Esc that aborted a peek drag this
+    // frame is spent — it must not also close the peek.
+    if (ui.ctx().modal_dismissed(rule_peek_modal_id()).is_some() && !drag_aborted)
         || close_resp.clicked
         || pass.as_ref().is_some_and(|p| p.ascend)
     {
@@ -5020,9 +5243,9 @@ fn rule_peek_overlay(
         ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
         return;
     }
-    if promote_resp.clicked {
-        if let Some(s) = state.rule_scope.as_mut() {
-            s.full = true;
+    if promote_resp.clicked || promote_drop {
+        if let Some(sc) = state.rule_scope.as_mut() {
+            sc.full = true;
         }
         ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
     }
@@ -11647,19 +11870,43 @@ fn inline_cell_rect(
 
 /// Width the inline cell of `kind` needs, world units.
 ///
-/// Only text-shaped constants grow past the reserved [`GraphMetrics::value_w`]:
-/// a number, a checkbox and a dropdown all fit 56 units, a string does not.
-/// Measured at **both** fonts the cell can be painted in — the live `TextEdit`
-/// at L0 draws body-size, the L1 fallback draws small mono — because the sizer
-/// has to hold whichever the zoom picks.
+/// Content-shaped: text, numbers and dropdowns all size to what they hold
+/// (with the reserved [`GraphMetrics::value_w`] as the floor), because the
+/// bar is *every field readable at 100% zoom without interaction* — "le…"
+/// for `less_equal` teaches nothing. Measured at **both** fonts the cell can
+/// be painted in — the live widget at L0 draws body-size, the L1 fallback
+/// draws small mono — because the sizer has to hold whichever the zoom picks.
 fn inline_cell_w(p: &mut Painter, kind: &InlineKind, m: &GraphMetrics, st: &Style) -> f32 {
+    fn both(p: &mut Painter, st: &Style, s: &str) -> f32 {
+        let body = p.measure_text(s, st.fonts.body, None).x;
+        let mono = p
+            .measure_text_family(s, st.fonts.small, None, FontFamily::Mono)
+            .x;
+        body.max(mono)
+    }
     match kind {
-        InlineKind::Str(s) => {
-            let body = p.measure_text(s, st.fonts.body, None).x;
-            let mono = p
-                .measure_text_family(s, st.fonts.small, None, FontFamily::Mono)
-                .x;
-            m.text_value_w(body.max(mono))
+        InlineKind::Str(s) => m.text_value_w(both(p, st, s)),
+        // Numbers get air around the digits, not a tight sleeve.
+        InlineKind::Float(x) => {
+            let t = format!("{x}");
+            m.text_value_w(both(p, st, &t) + m.label_gap * 2.0)
+        }
+        InlineKind::Int(i) => {
+            let t = i.to_string();
+            m.text_value_w(both(p, st, &t) + m.label_gap * 2.0)
+        }
+        // A dropdown sizes its closed box to the longest option. The chrome
+        // mirrors the `ComboBox` trigger: 16 of text insets, 4 text→arrow
+        // gap, the arrow itself, a little slack. The usual cap applies, but
+        // yields whenever even the *current* value would not fit whole —
+        // the selected value never truncates.
+        InlineKind::Enum { value, variants, ok }
+        | InlineKind::Choice { value, variants, ok } => {
+            let arrow = p.measure_text("\u{25BC}", st.fonts.body, None).x;
+            let chrome = 20.0 + arrow + 2.0;
+            let cur = both(p, st, &flagged_value(value, *ok));
+            let longest = variants.iter().fold(cur, |w, v| w.max(both(p, st, v)));
+            (longest + chrome).clamp(m.value_w, (BASE_VALUE_W_MAX * m.scale).max(cur + chrome))
         }
         _ => m.value_w,
     }
@@ -11773,9 +12020,23 @@ fn inline_widget(
                 let now = variants.iter().position(|v| v == value);
                 let mut picked = now.unwrap_or(usize::MAX);
                 let shown = flagged_value(value, now.is_some());
+                // The open list renders every item fully: each row paints 8px
+                // insets plus the right-aligned ✓, so the popup grows to its
+                // widest row instead of clipping it (fonts here are already
+                // zoom-scaled, so the measure matches what the rows draw).
+                let popup_w = {
+                    let font = ui.style().fonts.body;
+                    let mut p = ui.painter();
+                    let check = p.measure_text("\u{2713}", font, None).x;
+                    let longest = variants
+                        .iter()
+                        .fold(0.0f32, |w, v| w.max(p.measure_text(v, font, None).x));
+                    (longest + check + 28.0).max(cell.width())
+                };
                 ComboBox::new("graph_enum")
                     .selected_text(shown.as_str())
                     .width(cell.width())
+                    .popup_width(popup_w)
                     .show_ui(ui, |ui| {
                         for (i, v) in variants.iter().enumerate() {
                             SelectableValue::new(&mut picked, i, v.as_str()).show(ui);
@@ -12653,6 +12914,61 @@ mod tests {
         }
         // No holes: one band, the whole canvas.
         assert_eq!(subtract_rects(outer, &[]), vec![outer]);
+    }
+
+    /// Task 41 polish: a user-placed peek stays fully on the canvas at a
+    /// workable size — the offset is canvas-relative, the min size is the
+    /// floor, and an off-canvas placement clamps back in.
+    #[test]
+    fn a_user_placed_peek_clamps_onto_the_canvas() {
+        let canvas = Rect::from_min_max(Pos2::new(100.0, 50.0), Pos2::new(1100.0, 750.0));
+        // A placement well inside passes through untouched.
+        let r = peek_user_rect(canvas, [40.0, 60.0], [400.0, 300.0], 1.0);
+        assert_eq!(r, Rect::from_min_size(Pos2::new(140.0, 110.0), Vec2::new(400.0, 300.0)));
+        // Sizes below the minimum grow to it.
+        let min = peek_min_size(1.0);
+        let r = peek_user_rect(canvas, [40.0, 60.0], [10.0, 10.0], 1.0);
+        assert_eq!(r.size(), min);
+        // Dragged past the bottom-right corner: pulled back inside.
+        let r = peek_user_rect(canvas, [5000.0, 5000.0], [400.0, 300.0], 1.0);
+        assert!(r.max.x <= canvas.max.x && r.max.y <= canvas.max.y);
+        // …and past the top-left.
+        let r = peek_user_rect(canvas, [-5000.0, -5000.0], [400.0, 300.0], 1.0);
+        assert!(r.min.x >= canvas.min.x && r.min.y >= canvas.min.y);
+        // A size larger than the canvas caps at the canvas.
+        let r = peek_user_rect(canvas, [0.0, 0.0], [9000.0, 9000.0], 1.0);
+        assert_eq!(r.size(), canvas.size());
+    }
+
+    /// The peek's border zones: edges resize one side, corners two, the
+    /// interior none — and a point outside the panel is nobody's grip.
+    #[test]
+    fn peek_resize_zones_read_edges_and_corners() {
+        let panel = Rect::from_min_max(Pos2::new(100.0, 100.0), Pos2::new(500.0, 400.0));
+        // Left edge, clear of the corners.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(103.0, 250.0), 1.0),
+            Some((true, false, false, false))
+        );
+        // Bottom edge.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(300.0, 398.0), 1.0),
+            Some((false, false, false, true))
+        );
+        // Bottom-right corner: the 14px corner widens the diagonal grab.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(497.0, 390.0), 1.0),
+            Some((false, true, false, true))
+        );
+        // Top-left corner via the top strip.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(105.0, 103.0), 1.0),
+            Some((true, false, true, false))
+        );
+        // Interior: no grip (the header's move handle takes it instead).
+        assert_eq!(peek_resize_zone(panel, Pos2::new(300.0, 250.0), 1.0), None);
+        // Outside the panel entirely.
+        assert_eq!(peek_resize_zone(panel, Pos2::new(50.0, 250.0), 1.0), None);
     }
 
     /// 45-A P7. A reroute is transparent at run time, so the interpreter

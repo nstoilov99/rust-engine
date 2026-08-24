@@ -1449,6 +1449,33 @@ pub struct GraphEditorState {
     /// host onto the bound runtime's blackboard after the UI. Runtime-only
     /// writes: never document state, never undo entries.
     pub anim_edits: Vec<crate::engine::editor::anim_preview::AnimParamEdit>,
+    /// Where the user last put the rule peek panel: min offset from the
+    /// canvas min plus size, screen units. Session-only, per tab — like
+    /// `rule_scope` itself. `None` keeps the anchored default under the
+    /// transition's chip; set by the header drag / border resize and reused
+    /// by every peek this tab opens until the tab closes.
+    pub peek_panel: Option<([f32; 2], [f32; 2])>,
+    /// The in-flight peek move/resize gesture, if any.
+    pub peek_drag: Option<PeekDrag>,
+}
+
+/// A live drag on the rule peek panel (Task 41 polish): moving it by its
+/// header or resizing it from an edge/corner. Carries the placement at the
+/// grab so an abort (Esc, focus loss) reverts — Rule 3, every drag is
+/// abortable.
+#[derive(Debug, Clone, Copy)]
+pub struct PeekDrag {
+    pub kind: PeekDragKind,
+    /// `peek_panel` at the grab, restored on abort.
+    pub prev: Option<([f32; 2], [f32; 2])>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PeekDragKind {
+    /// Grabbed by the header: pointer offset from the panel's min corner.
+    Move { grab: [f32; 2] },
+    /// Grabbed on a border: which sides follow the pointer.
+    Resize { left: bool, right: bool, top: bool, bottom: bool },
 }
 
 /// The graph editor is one product over several node libraries; the domain
@@ -2511,6 +2538,8 @@ impl GraphEditorState {
             anim_bind: None,
             anim_picker: false,
             anim_edits: Vec::new(),
+            peek_panel: None,
+            peek_drag: None,
         }
     }
 

@@ -147,6 +147,26 @@ fn border_segment(ra: [f32; 4], rb: [f32; 4]) -> Option<([f32; 2], [f32; 2])> {
     (t_in > t_out).then_some((a, b))
 }
 
+/// The sub-segments of `a→b` that lie *outside* `r` — at most two. Used by
+/// the dim-on-select edge redraw: the lit edge repaints above the scrim, but
+/// must stop at the border of the open (unfolded) card it belongs to instead
+/// of crossing it. Pure.
+pub fn seg_outside(a: [f32; 2], b: [f32; 2], r: [f32; 4]) -> Vec<([f32; 2], [f32; 2])> {
+    match seg_rect_interval(a, b, r) {
+        None => vec![(a, b)],
+        Some((t0, t1)) => {
+            let mut out = Vec::new();
+            if t0 > 0.0 {
+                out.push((a, lerp(a, b, t0)));
+            }
+            if t1 < 1.0 {
+                out.push((lerp(a, b, t1), b));
+            }
+            out
+        }
+    }
+}
+
 /// One resolved machine connection: a fully wired transition, or a direct
 /// flow edge (ENTRY → state; legacy state → state).
 struct Link {
@@ -500,6 +520,31 @@ mod tests {
         assert!(!l.segs.contains_key(&3));
         // The real transition is unaffected.
         assert!(l.segs.contains_key(&1) && l.segs.contains_key(&2));
+    }
+
+    /// `seg_outside`: a segment ending inside the rect trims to the border;
+    /// one crossing straight through splits into two outside pieces; one
+    /// that misses the rect passes through untouched.
+    #[test]
+    fn seg_outside_trims_at_the_card_border() {
+        let r = [100.0, 100.0, 200.0, 200.0];
+        // Ends at the rect center: one piece, stopping on the left border.
+        let cut = seg_outside([0.0, 150.0], [150.0, 150.0], r);
+        assert_eq!(cut, vec![([0.0, 150.0], [100.0, 150.0])]);
+        // Crosses through: two pieces, the gap exactly the rect's span.
+        let through = seg_outside([0.0, 150.0], [300.0, 150.0], r);
+        assert_eq!(
+            through,
+            vec![
+                ([0.0, 150.0], [100.0, 150.0]),
+                ([200.0, 150.0], [300.0, 150.0]),
+            ]
+        );
+        // Misses entirely: untouched.
+        let miss = seg_outside([0.0, 0.0], [300.0, 0.0], r);
+        assert_eq!(miss, vec![([0.0, 0.0], [300.0, 0.0])]);
+        // Fully inside: nothing to draw.
+        assert!(seg_outside([110.0, 150.0], [190.0, 150.0], r).is_empty());
     }
 
     /// A self-loop keeps the stored chip and draws both halves against it.
