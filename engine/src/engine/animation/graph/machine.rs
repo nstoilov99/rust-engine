@@ -14,8 +14,8 @@ use crate::engine::animation::sampling;
 use crate::engine::assets::model_loader::RawAnimationClip;
 
 use super::plan::{
-    AnimGraphPlan, CmpOp, MathOp, ParamDecl, PlanClip, PlanSlot, PlanTree, PoseSource, RuleExpr,
-    TransitionFrom,
+    AnimGraphPlan, CmpOp, MathOp, ParamDecl, PlanClip, PlanSlot, PlanSpace, PlanTree,
+    PoseSource, RuleExpr, TransitionFrom,
 };
 
 // ---------------------------------------------------------------------------
@@ -235,6 +235,12 @@ pub struct AnimMachine {
     /// mirrors the plan's, which the compiler guaranteed finite (cycle
     /// refusal), and reuses its allocations across restarts ([`Self::reset`]).
     subs: Vec<Option<Box<AnimMachine>>>,
+    /// Per-state smoothed blend-space input, index-aligned with the plan's
+    /// states (only meaningful where the source is a [`PlanTree::Space`]).
+    /// `None` = no memory yet: the next advance snaps to the raw target,
+    /// which is what (re)entering a state does so it never blends from stale
+    /// input.
+    inputs: Vec<Option<[f32; 2]>>,
 }
 
 impl AnimMachine {
@@ -248,6 +254,7 @@ impl AnimMachine {
             spans: Vec::new(),
             fired: None,
             subs: Vec::new(),
+            inputs: Vec::new(),
         };
         m.reset(plan);
         m
@@ -262,6 +269,8 @@ impl AnimMachine {
         self.fade = None;
         self.spans.clear();
         self.fired = None;
+        self.inputs.clear();
+        self.inputs.resize(plan.states.len(), None);
         if self.subs.len() != plan.states.len() {
             self.subs = plan.states.iter().map(|_| None).collect();
         }
@@ -308,6 +317,44 @@ impl AnimMachine {
     /// weight while crossfading.
     pub fn blend_weight(&self) -> f32 {
         self.fade.as_ref().map(Crossfade::weight).unwrap_or(1.0)
+    }
+
+    /// The (smoothed) blend-space input a state samples at, as of the last
+    /// tick; the raw parameter target before the state's first advance. The
+    /// editor's preview reads this to place the live point.
+    pub fn space_input(&self, state: usize, plan: &AnimGraphPlan, params: &AnimParams) -> [f32; 2] {
+        match plan.states.get(state).map(|s| &s.source) {
+            Some(PoseSource::Tree(PlanTree::Space(sp))) => self
+                .inputs
+                .get(state)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| sp.target(params)),
+            _ => [0.0; 2],
+        }
+    }
+
+    /// Advance a blend-space state's input memory toward the raw target:
+    /// exponential approach over the space's smoothing time, a snap when
+    /// smoothing is off or the state has no memory yet (just entered).
+    fn advance_input(&mut self, state: usize, plan: &AnimGraphPlan, params: &AnimParams, dt: f32) {
+        let Some(PoseSource::Tree(PlanTree::Space(sp))) =
+            plan.states.get(state).map(|s| &s.source)
+        else {
+            return;
+        };
+        let Some(slot) = self.inputs.get_mut(state) else { return };
+        let target = sp.target(params);
+        *slot = Some(match *slot {
+            Some(mut x) if sp.smoothing > 0.0 => {
+                let k = 1.0 - (-dt / sp.smoothing).exp();
+                for (v, t) in x.iter_mut().zip(target) {
+                    *v += (t - *v) * k;
+                }
+                x
+            }
+            _ => target,
+        });
     }
 
     /// Advance one frame: clip clocks first, then transition rules.
@@ -391,6 +438,11 @@ impl AnimMachine {
             }
             self.current = t.to;
             self.time = 0.0;
+            // Entering a blend-space state forgets its smoothed input: the
+            // first advance below snaps to the raw target.
+            if let Some(slot) = self.inputs.get_mut(t.to) {
+                *slot = None;
+            }
             // Entering a nested state restarts its sub-machine at the child's
             // ENTRY — re-entry never resumes mid-flight, the same rule as the
             // state clock resetting to 0.
@@ -425,6 +477,16 @@ impl AnimMachine {
         if let Some(from) = self.fade.as_ref().map(|f| f.from) {
             if from != self.current {
                 self.tick_sub(from, plan, params, dt);
+            }
+        }
+
+        // Blend-space inputs follow their parameters for every state sampled
+        // this frame — the active one and, while a fade keeps it visible, the
+        // outgoing one (which keeps smoothing on its own memory).
+        self.advance_input(self.current, plan, params, dt);
+        if let Some(from) = self.fade.as_ref().map(|f| f.from) {
+            if from != self.current {
+                self.advance_input(from, plan, params, dt);
             }
         }
     }
@@ -599,6 +661,11 @@ fn sample_tree<'a, F>(
             }
             return;
         }
+        // Reached only for a hand-built plan: a state's space goes through
+        // `sample_state`, which supplies the machine's smoothed input.
+        PlanTree::Space(sp) => {
+            return sample_space(sp, sp.target(params), time, clip_for, pose, scratch, level);
+        }
         PlanTree::Blend1D { param, children } => {
             (children, pick_1d(children, params.get_float(param).unwrap_or(0.0)))
         }
@@ -644,6 +711,74 @@ fn sample_tree<'a, F>(
     }
 }
 
+/// A blend space's sync group reference: the duration of the first sample in
+/// the space's order that resolves to a cyclic clip (the blend node's rule).
+/// Every cyclic sample then runs on the reference's cycle — sample `i` at
+/// clock `time · rate_i · d_i / d_ref` — so equal rates are phase-matched
+/// (walk/run feet agree) and a sample's `rate_scale` is its speed relative
+/// to a rate-1 sample. `None` = nothing cyclic: each sample runs its own
+/// rate on the raw clock.
+fn space_sync<'a, F>(sp: &PlanSpace, clip_for: &F) -> Option<f32>
+where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    sp.samples
+        .iter()
+        .find_map(|(c, _)| Some(clip_for(c)?.duration_seconds).filter(|d| *d > 0.0))
+}
+
+/// The clock sample `i` reads at state clock `time` (see [`space_sync`]).
+/// Unwrapped on purpose: the caller wraps by the clip, which keeps a
+/// non-integer rate ratio continuous across the reference's cycle boundary.
+fn space_sample_time(sp: &PlanSpace, i: usize, time: f32, d_ref: Option<f32>, d_i: f32) -> f32 {
+    let rate_i = sp.samples[i].1;
+    match d_ref {
+        Some(d_ref) if d_i > 0.0 => time * rate_i * d_i / d_ref,
+        _ => time * rate_i,
+    }
+}
+
+/// Evaluate a blend space at `input` into `pose`: the (at most three)
+/// contributing samples, mixed bone-wise in one accumulating pass — the same
+/// pre-sample agreement and scratch discipline `sample_tree` keeps.
+fn sample_space<'a, F>(
+    sp: &PlanSpace,
+    input: [f32; 2],
+    time: f32,
+    clip_for: &F,
+    pose: &mut [LocalBoneTransform],
+    scratch: &mut PoseScratch,
+    level: usize,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let weights = sp.space.weights(input);
+    let sync = space_sync(sp, clip_for);
+    let mut buf = scratch.take(level);
+    // Accumulated weight so far: mixing sample k in at `w_k / (acc + w_k)`
+    // yields the exact normalized blend after the last one.
+    let mut acc = 0.0f32;
+    for &(i, w) in weights.as_slice() {
+        let Some(clip) = sp.samples.get(i).and_then(|(c, _)| clip_for(c)) else {
+            continue;
+        };
+        let t = space_sample_time(sp, i, time, sync, clip.duration_seconds);
+        if acc <= 0.0 {
+            sampling::sample_channels(&clip.channels, wrapped(t, clip), pose);
+        } else {
+            buf.clear();
+            buf.extend_from_slice(pose);
+            sampling::sample_channels(&clip.channels, wrapped(t, clip), &mut buf);
+            let k = w / (acc + w);
+            for (out, other) in pose.iter_mut().zip(buf.iter()) {
+                *out = out.blend(other, k);
+            }
+        }
+        acc += w;
+    }
+    scratch.put(level, buf);
+}
+
 /// One state's Pose at `time`: its blend tree, or — nested — its whole
 /// sub-machine, evaluated recursively (the sub owns its clocks, so `time` is
 /// only for trees).
@@ -663,6 +798,10 @@ fn sample_state<'a, F>(
 {
     let Some(st) = plan.states.get(state) else { return };
     match &st.source {
+        PoseSource::Tree(PlanTree::Space(sp)) => {
+            let input = machine.space_input(state, plan, params);
+            sample_space(sp, input, time, clip_for, pose, scratch, level)
+        }
         PoseSource::Tree(tree) => {
             sample_tree(tree, time, params, clip_for, pose, scratch, level)
         }
@@ -970,6 +1109,9 @@ fn tree_events<'a, F>(
             }
             return;
         }
+        PlanTree::Space(sp) => {
+            return space_events(sp, sp.target(params), t0, t1, weight, clip_for, out);
+        }
         PlanTree::Blend1D { param, children } => {
             (children, pick_1d(children, params.get_float(param).unwrap_or(0.0)))
         }
@@ -1026,6 +1168,52 @@ fn tree_events<'a, F>(
     }
 }
 
+/// The markers a blend space's contributing samples crossed while the state
+/// clock ran `[t0, t1)` — the mirror of [`space_sample_time`]'s clocks, in
+/// each sample's own cycle units.
+fn space_events<'a, F>(
+    sp: &PlanSpace,
+    input: [f32; 2],
+    t0: f32,
+    t1: f32,
+    weight: f32,
+    clip_for: &F,
+    out: &mut Vec<AnimEventFire>,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let sync = space_sync(sp, clip_for);
+    for &(i, w) in sp.space.weights(input).as_slice() {
+        let w = w * weight;
+        let Some((clip, rate_i)) = sp
+            .samples
+            .get(i)
+            .and_then(|(c, rate)| clip_for(c).map(|cl| (cl, *rate)))
+        else {
+            continue;
+        };
+        if w <= 0.0 || clip.duration_seconds <= 0.0 {
+            continue;
+        }
+        let d = clip.duration_seconds;
+        // Sample-i clock as a function of the state clock, unwrapped: either
+        // the synced cycle (`T · rate_i / d_ref` cycles) or the raw rate.
+        let (period, s0, s1) = match sync {
+            Some(d_ref) => (1.0, t0 * rate_i / d_ref, t1 * rate_i / d_ref),
+            None => (d, t0 * rate_i, t1 * rate_i),
+        };
+        for m in &clip.events {
+            let at = if sync.is_some() { m.time_seconds / d } else { m.time_seconds };
+            crossings(at, period, s0, s1, || {
+                out.push(AnimEventFire {
+                    name: m.name.clone(),
+                    weight: w,
+                })
+            });
+        }
+    }
+}
+
 /// One machine level's event crossings, scaled by `scale` (the weight the
 /// level itself is heard at). Tree states replay their recorded clock spans;
 /// nested states recurse into their sub-machine — whose spans are fresh
@@ -1052,6 +1240,10 @@ fn machine_events<'a, F>(
             continue;
         }
         match plan.states.get(state).map(|s| &s.source) {
+            Some(PoseSource::Tree(PlanTree::Space(sp))) => {
+                let input = machine.space_input(state, plan, params);
+                space_events(sp, input, t0, t1, w, clip_for, out)
+            }
             Some(PoseSource::Tree(tree)) => {
                 tree_events(tree, t0, t1, w, params, clip_for, out)
             }

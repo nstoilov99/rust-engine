@@ -1530,11 +1530,9 @@ impl GraphDomain {
         match self {
             GraphDomain::Script => Vec::new(),
             GraphDomain::Animation => {
-                let load = |rel: &str| {
-                    crate::engine::node_graph::load_graph(
-                        &std::path::Path::new("content").join(rel),
-                    )
-                    .ok()
+                // Nested graphs and blend spaces both resolve from disk.
+                let load = crate::engine::animation::graph::DiskAnimAssets {
+                    content_root: std::path::PathBuf::from("content"),
                 };
                 match crate::engine::animation::graph::compile_anim_graph_with(doc, path, &load) {
                     Ok(_) => Vec::new(),

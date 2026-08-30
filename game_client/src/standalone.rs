@@ -224,10 +224,11 @@ impl StandaloneApp {
         {
             use rust_engine::engine::animation::graph::{
                 AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
-                AnimGraphSystem, DiskAnimAssets,
+                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets,
             };
             game_world.resources_mut().insert(AnimGraphPlanCache::new());
             game_world.resources_mut().insert(AnimClipCache::new());
+            game_world.resources_mut().insert(BlendSpaceCache::new());
             schedule.add_system_described(
                 AnimGraphSystem::new(Box::new(DiskAnimAssets {
                     content_root: rust_engine::engine::assets::content_root::content_root(),
@@ -237,6 +238,7 @@ impl StandaloneApp {
                     .reads_resource::<Time>()
                     .writes_resource::<AnimGraphPlanCache>()
                     .writes_resource::<AnimClipCache>()
+                    .writes_resource::<BlendSpaceCache>()
                     .reads::<AnimGraphRunner>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()

@@ -124,6 +124,14 @@ fn collect_tree(tree: &PlanTree, slug: &str, out: &mut Vec<f32>) {
                 collect_tree(c, slug, out);
             }
         }
+        // A blend space's samples sit at parameter values on each axis.
+        PlanTree::Space(s) => {
+            for (axis, p) in s.params.iter().enumerate() {
+                if p == slug {
+                    out.extend(s.space.points().iter().map(|pt| pt[axis]));
+                }
+            }
+        }
     }
 }
 

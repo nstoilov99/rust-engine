@@ -512,10 +512,11 @@ impl App {
         {
             use rust_engine::engine::animation::graph::{
                 AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
-                AnimGraphSystem, DiskAnimAssets,
+                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets,
             };
             game_world.resources_mut().insert(AnimGraphPlanCache::new());
             game_world.resources_mut().insert(AnimClipCache::new());
+            game_world.resources_mut().insert(BlendSpaceCache::new());
             schedule.add_system_described(
                 AnimGraphSystem::new(Box::new(DiskAnimAssets {
                     content_root: rust_engine::engine::assets::content_root::content_root(),
@@ -525,6 +526,7 @@ impl App {
                     .reads_resource::<Time>()
                     .writes_resource::<AnimGraphPlanCache>()
                     .writes_resource::<AnimClipCache>()
+                    .writes_resource::<BlendSpaceCache>()
                     .reads::<AnimGraphRunner>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()
@@ -2024,6 +2026,21 @@ impl App {
                     self.on_curve_changed(&path);
                     #[cfg(not(feature = "editor"))]
                     let _ = path;
+                }
+                ReloadEvent::BlendSpaceChanged { path } => {
+                    // Task 41.5: a state compiles the space into its plan, so
+                    // the space *and* every plan drop (wholesale, like a
+                    // nested `.animgraph`); live machines re-arm on the bump.
+                    // The editor tab's save path (later ticket) calls the
+                    // same helper. Hosts' anchored refusals read from disk
+                    // too, so they recompute now.
+                    let key = asset_source::to_content_relative(&path);
+                    rust_engine::engine::animation::graph::invalidate_blend_space(
+                        self.core.game_world.resources_mut(),
+                        &key,
+                    );
+                    #[cfg(feature = "editor")]
+                    self.refresh_anim_graph_hosts(&key);
                 }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;

@@ -221,6 +221,7 @@ pub struct BlendSpace {
     samples: Vec<BlendSample>,
     points: Vec<[f32; 2]>,
     shape: Shape,
+    input_smoothing: f32,
 }
 
 impl BlendSpace {
@@ -262,7 +263,13 @@ impl BlendSpace {
             samples: doc.samples.clone(),
             points,
             shape,
+            input_smoothing: doc.input_smoothing.max(0.0),
         })
+    }
+
+    /// The document's exponential input smoothing time (seconds; 0 = off).
+    pub fn input_smoothing(&self) -> f32 {
+        self.input_smoothing
     }
 
     fn shape_2d(points: &[[f32; 2]], sorted: &[usize]) -> Shape {

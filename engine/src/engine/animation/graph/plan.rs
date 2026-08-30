@@ -18,7 +18,8 @@ use node_graph_types::std_nodes::{
 };
 use node_graph_types::{GraphDoc, GraphRealm, GraphRegion, NodeInst, PinType, PropValue};
 
-use super::machine::ParamValue;
+use super::machine::{AnimParams, ParamValue};
+use crate::engine::animation::blend_space::BlendSpace;
 
 // ---------------------------------------------------------------------------
 // Node library slugs (stable identity, per the Task 40 identity rules)
@@ -120,6 +121,10 @@ pub const SPEED_PROP: &str = "speed";
 /// sub-machine's clock. Editing tools treat it like `clip`: double-click
 /// descends into the file instead of playing anything here.
 pub const GRAPH_PROP: &str = "graph";
+/// The content-relative `.blendspace` path a state plays as its Pose source
+/// (Task 41.5). Compiles to [`PlanTree::Space`]; precedence sits between
+/// `graph` and `clip`: tree region > `graph` > `space` > `clip`.
+pub const SPACE_PROP: &str = "space";
 
 /// Transition properties. `duration` is the crossfade length in seconds
 /// (default 0.0 = instant); `priority` orders evaluation when several rules
@@ -212,6 +217,36 @@ pub enum PlanTree {
         param_y: String,
         children: Vec<(f32, PlanTree)>,
     },
+    /// A blend space (`.blendspace`): the compiled space picks up to three
+    /// samples for the axis inputs. State-level only — the tree compiler
+    /// never produces one inside a region.
+    Space(PlanSpace),
+}
+
+/// A state's compiled blend-space source: the axis parameters it reads, the
+/// compiled space (shared through the host's cache), and one clip + rate
+/// scale per sample, in the space's sample order (what its weights index).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanSpace {
+    /// One declared Float parameter per live axis.
+    pub params: Vec<String>,
+    pub space: std::sync::Arc<BlendSpace>,
+    pub samples: Vec<(PlanClip, f32)>,
+    /// Exponential input smoothing time in seconds; 0 = off.
+    pub smoothing: f32,
+}
+
+impl PlanSpace {
+    /// The raw axis input the parameters give right now, clamped to each
+    /// axis's range (`[1]` is 0 for one axis).
+    pub fn target(&self, params: &AnimParams) -> [f32; 2] {
+        let mut v = [0.0; 2];
+        for (i, (slug, axis)) in self.params.iter().zip(self.space.axes()).enumerate() {
+            let (lo, hi) = (axis.min.min(axis.max), axis.max.max(axis.min));
+            v[i] = params.get_float(slug).unwrap_or(0.0).clamp(lo, hi);
+        }
+        v
+    }
 }
 
 impl PlanTree {
@@ -225,6 +260,7 @@ impl PlanTree {
                         walk(c, out);
                     }
                 }
+                PlanTree::Space(s) => out.extend(s.samples.iter().map(|(c, _)| c)),
             }
         }
         let mut out = Vec::new();
@@ -494,21 +530,45 @@ pub fn compile_parameters(doc: &GraphDoc) -> Result<Vec<ParamDecl>, String> {
     Ok(parameters)
 }
 
+/// How the compiler resolves the files a document references: nested
+/// `.animgraph` documents and `.blendspace` assets. The runner hands its
+/// asset loader (through its caches), the editor reads the content root, and
+/// tests hand over maps. A plain `Fn(&str) -> Option<GraphDoc>` closure is a
+/// loader that knows graphs only (every blend space reads as "not found").
+pub trait AnimGraphLoader {
+    /// A nested `.animgraph`, by normalized content-relative path.
+    fn graph(&self, content_rel: &str) -> Option<GraphDoc>;
+    /// A compiled `.blendspace`: `None` when the file does not exist,
+    /// `Some(Err)` when it exists but fails to parse or compile.
+    fn blend_space(
+        &self,
+        content_rel: &str,
+    ) -> Option<Result<std::sync::Arc<BlendSpace>, String>> {
+        let _ = content_rel;
+        None
+    }
+}
+
+impl<F: Fn(&str) -> Option<GraphDoc>> AnimGraphLoader for F {
+    fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
+        self(content_rel)
+    }
+}
+
 /// Compile a `.animgraph` document into a plan, with no way to resolve
-/// nested `.animgraph` references — a document that has any refuses with
-/// "could not be loaded". The seam for callers that know their document is
-/// self-contained (and for the editor's rule projection); everything else
-/// goes through [`compile_anim_graph_with`].
+/// nested `.animgraph` or `.blendspace` references — a document that has any
+/// refuses with "could not be loaded" / "not found". The seam for callers
+/// that know their document is self-contained (and for the editor's rule
+/// projection); everything else goes through [`compile_anim_graph_with`].
 pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
-    compile_anim_graph_with(doc, "", &|_| None)
+    compile_anim_graph_with(doc, "", &|_: &str| None)
 }
 
 /// Compile a `.animgraph` document into a plan, resolving nested
-/// sub-state-machine references through `load` (content-relative path →
-/// document — the runner hands its asset loader, the editor reads the
-/// content root). `path` is this document's own content-relative path; it
-/// seeds the cycle guard so `a.animgraph` nesting itself — directly or
-/// through any chain — refuses instead of recursing forever.
+/// sub-state-machine and blend-space references through `load` (see
+/// [`AnimGraphLoader`]). `path` is this document's own content-relative
+/// path; it seeds the cycle guard so `a.animgraph` nesting itself — directly
+/// or through any chain — refuses instead of recursing forever.
 ///
 /// Refusals are author errors, phrased against the node that caused them;
 /// a nested graph's refusal is wrapped with the referencing state and file
@@ -517,7 +577,7 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
 pub fn compile_anim_graph_with(
     doc: &GraphDoc,
     path: &str,
-    load: &dyn Fn(&str) -> Option<GraphDoc>,
+    load: &dyn AnimGraphLoader,
 ) -> Result<AnimGraphPlan, String> {
     let mut stack = Vec::new();
     let root = crate::engine::scripting::normalize_graph_path(path);
@@ -533,7 +593,7 @@ pub fn compile_anim_graph_with(
 fn compile_doc(
     doc: &GraphDoc,
     stack: &mut Vec<String>,
-    load: &dyn Fn(&str) -> Option<GraphDoc>,
+    load: &dyn AnimGraphLoader,
 ) -> Result<AnimGraphPlan, String> {
     // Animation graphs are Client-realm by definition (spec realm note): the
     // server never evaluates animation (ADR 0002), and saying so in the
@@ -552,8 +612,8 @@ fn compile_doc(
 
     // States, in document order (index = plan identity). A state with a
     // non-empty region compiles it as a blend tree; a `graph` property makes
-    // it a nested sub-state-machine; a leaf state plays the clip its `clip`
-    // property names.
+    // it a nested sub-state-machine; a `space` property plays a blend space;
+    // a leaf state plays the clip its `clip` property names.
     let mut states: Vec<PlanState> = Vec::new();
     // Nested declarations to merge into the blackboard, with the state that
     // brought them in (refusal anchoring).
@@ -564,6 +624,7 @@ fn compile_doc(
             .clone()
             .unwrap_or_else(|| format!("State {}", n.id));
         let nested = str_prop(&n.properties, GRAPH_PROP).filter(|s| !s.trim().is_empty());
+        let space = str_prop(&n.properties, SPACE_PROP).filter(|s| !s.trim().is_empty());
         let source = match doc.regions.get(&n.id).filter(|r| !r.nodes.is_empty()) {
             Some(region) => PoseSource::Tree(compile_tree(region, &name, &parameters)?),
             None if nested.is_some() => {
@@ -581,7 +642,7 @@ fn compile_doc(
                         chain.join(" \u{2192} ")
                     ));
                 }
-                let child_doc = load(&child_rel).ok_or_else(|| {
+                let child_doc = load.graph(&child_rel).ok_or_else(|| {
                     format!("state '{name}': nested graph '{child_rel}' could not be loaded")
                 })?;
                 stack.push(child_rel.clone());
@@ -596,13 +657,20 @@ fn compile_doc(
                     plan: std::sync::Arc::new(child),
                 }
             }
+            None if space.is_some() => PoseSource::Tree(PlanTree::Space(compile_space(
+                &name,
+                space.unwrap_or_default(),
+                &parameters,
+                load,
+            )?)),
             None => {
                 let clip = str_prop(&n.properties, CLIP_PROP)
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| {
                         format!(
-                            "state '{name}' names no clip (property `{CLIP_PROP}`) or nested \
-                             graph (property `{GRAPH_PROP}`), and has no blend tree"
+                            "state '{name}' names no clip (property `{CLIP_PROP}`), nested \
+                             graph (property `{GRAPH_PROP}`) or blend space (property \
+                             `{SPACE_PROP}`), and has no blend tree"
                         )
                     })?;
                 PoseSource::Tree(PlanTree::Clip(PlanClip {
@@ -794,6 +862,60 @@ fn compile_doc(
         entry,
         parameters,
         slots,
+    })
+}
+
+/// Compile a state's `space` reference: the file must resolve and compile,
+/// every live axis must read a declared Float, every sample must name a clip.
+/// Clip *existence* is an arm-time check (the runner's clip cache), exactly
+/// as it is for `clip` states and tree leaves — the compiler never touches
+/// `.anim` files.
+fn compile_space(
+    state: &str,
+    rel: &str,
+    parameters: &[ParamDecl],
+    load: &dyn AnimGraphLoader,
+) -> Result<PlanSpace, String> {
+    let rel = crate::engine::scripting::normalize_graph_path(rel);
+    let space = match load.blend_space(&rel) {
+        None => return Err(format!("state '{state}': blend space '{rel}' not found")),
+        Some(Err(e)) => return Err(format!("state '{state}': blend space '{rel}': {e}")),
+        Some(Ok(space)) => space,
+    };
+    let mut params = Vec::with_capacity(space.axes().len());
+    for axis in space.axes() {
+        let slug = axis.param_name();
+        match parameters.iter().find(|p| p.slug == slug) {
+            Some(p) if p.ty == AnimParamType::Float => params.push(slug.to_string()),
+            _ => {
+                return Err(format!(
+                    "state '{state}': blend space '{rel}' axis '{}' parameter '{slug}' is not \
+                     a declared Float parameter",
+                    axis.name
+                ))
+            }
+        }
+    }
+    let mut samples = Vec::with_capacity(space.samples().len());
+    for (i, s) in space.samples().iter().enumerate() {
+        if s.clip.trim().is_empty() {
+            return Err(format!(
+                "state '{state}': blend space '{rel}' sample {i} names no clip"
+            ));
+        }
+        samples.push((
+            PlanClip {
+                clip: crate::engine::scripting::normalize_graph_path(&s.clip),
+                clip_name: s.clip_name.clone().filter(|n| !n.is_empty()),
+            },
+            s.rate_scale,
+        ));
+    }
+    Ok(PlanSpace {
+        params,
+        samples,
+        smoothing: space.input_smoothing().max(0.0),
+        space,
     })
 }
 

@@ -21,11 +21,15 @@ use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 use crate::engine::scripting::normalize_graph_path;
 
+use crate::engine::animation::blend_space::{parse_blend_space, BlendSpace};
+
 use super::machine::{
     collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
     PoseScratch,
 };
-use super::plan::{compile_anim_graph_with, AnimGraphPlan, PlanClip};
+use super::plan::{
+    compile_anim_graph_with, AnimGraphLoader, AnimGraphPlan, PlanClip, PlanTree, PoseSource,
+};
 
 // ---------------------------------------------------------------------------
 // Components
@@ -125,6 +129,23 @@ pub trait AnimAssetLoader {
     /// The bone hierarchy of a `.mesh`, for arming an entity that has a
     /// skinned mesh but no `SkeletonInstance` yet.
     fn load_skeleton(&self, mesh_content_rel: &str) -> Option<Vec<BoneData>>;
+    /// The RON text of a `.blendspace`; `None` when the file does not exist.
+    /// Parsing and compiling happen in [`compile_blend_space`], so a broken
+    /// file refuses with its reason rather than reading as missing.
+    fn load_blend_space(&self, content_rel: &str) -> Option<String> {
+        let _ = content_rel;
+        None
+    }
+}
+
+/// Parse + compile a `.blendspace` through `loader` — the one path both the
+/// runner's cache and the editor's disk loader take. `None` = no such file.
+pub fn compile_blend_space(
+    loader: &dyn AnimAssetLoader,
+    content_rel: &str,
+) -> Option<Result<Arc<BlendSpace>, String>> {
+    let text = loader.load_blend_space(content_rel)?;
+    Some(parse_blend_space(&text).and_then(|doc| BlendSpace::compile(&doc)).map(Arc::new))
 }
 
 /// Loads from the content root on disk.
@@ -135,6 +156,10 @@ pub struct DiskAnimAssets {
 impl AnimAssetLoader for DiskAnimAssets {
     fn load_graph(&self, content_rel: &str) -> Option<GraphDoc> {
         node_graph_types::load_graph(&self.content_root.join(content_rel)).ok()
+    }
+
+    fn load_blend_space(&self, content_rel: &str) -> Option<String> {
+        std::fs::read_to_string(self.content_root.join(content_rel)).ok()
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
@@ -152,6 +177,104 @@ impl AnimAssetLoader for DiskAnimAssets {
         )
         .ok()
         .map(|m| m.bones)
+    }
+}
+
+/// The disk loader doubles as the compiler's resolver (the editor's anchored
+/// refusals compile against the files on disk, uncached — an author action).
+impl AnimGraphLoader for DiskAnimAssets {
+    fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
+        self.load_graph(content_rel)
+    }
+
+    fn blend_space(&self, content_rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {
+        compile_blend_space(self, content_rel)
+    }
+}
+
+/// Compiled `.blendspace` assets, keyed by content-relative path — so the
+/// triangulation is built once however many plans (or entities) reference
+/// the file. Failures are cached like plans: a broken space refuses the same
+/// way every compile until its file changes. A `Resource`.
+#[derive(Default)]
+pub struct BlendSpaceCache {
+    spaces: BTreeMap<String, Result<Arc<BlendSpace>, String>>,
+}
+
+impl BlendSpaceCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.spaces.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spaces.is_empty()
+    }
+
+    pub fn peek(&self, content_rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {
+        self.spaces.get(&normalize_graph_path(content_rel)).cloned()
+    }
+
+    /// The compiled space, loading through `loader` on a miss. `None` = the
+    /// file does not exist (not cached: it may appear).
+    pub fn get_or_load(
+        &mut self,
+        content_rel: &str,
+        loader: &dyn AnimAssetLoader,
+    ) -> Option<Result<Arc<BlendSpace>, String>> {
+        let key = normalize_graph_path(content_rel);
+        if let Some(hit) = self.spaces.get(&key) {
+            return Some(hit.clone());
+        }
+        let compiled = compile_blend_space(loader, &key)?;
+        self.spaces.insert(key, compiled.clone());
+        Some(compiled)
+    }
+
+    /// Forget one file (its next use reloads from the loader).
+    pub fn invalidate(&mut self, content_rel: &str) {
+        self.spaces.remove(&normalize_graph_path(content_rel));
+    }
+
+    pub fn invalidate_all(&mut self) {
+        self.spaces.clear();
+    }
+}
+
+/// A `.blendspace` changed (editor save or external write): drop its compiled
+/// form and every animation plan — a state compiles the space *into* its
+/// plan, and the plan cache does not track that reference (the same
+/// wholesale rule `.animgraph` nesting follows). The host calls this from
+/// both the save path and the file watcher.
+pub fn invalidate_blend_space(resources: &mut Resources, content_rel: &str) {
+    if let Some(spaces) = resources.get_mut::<BlendSpaceCache>() {
+        spaces.invalidate(content_rel);
+    }
+    if let Some(plans) = resources.get_mut::<AnimGraphPlanCache>() {
+        plans.invalidate_all();
+    }
+}
+
+/// The compiler's resolver at arm time: graphs straight from the assets,
+/// blend spaces through the cache (when the host registered one).
+struct ArmLoader<'a> {
+    assets: &'a dyn AnimAssetLoader,
+    spaces: std::cell::RefCell<Option<&'a mut BlendSpaceCache>>,
+}
+
+impl AnimGraphLoader for ArmLoader<'_> {
+    fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
+        self.assets.load_graph(content_rel)
+    }
+
+    fn blend_space(&self, content_rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {
+        match self.spaces.borrow_mut().as_deref_mut() {
+            Some(cache) => cache.get_or_load(content_rel, self.assets),
+            None => compile_blend_space(self.assets, content_rel),
+        }
     }
 }
 
@@ -302,15 +425,20 @@ impl AnimGraphSystem {
         let plan = match cached {
             Some(hit) => hit,
             None => {
-                // Nested `.animgraph` references resolve through the same
-                // loader; `graph` seeds the compiler's cycle guard.
-                let load = |rel: &str| self.loader.load_graph(rel);
+                // Nested `.animgraph` and `.blendspace` references resolve
+                // through the same loader (spaces via their cache); `graph`
+                // seeds the compiler's cycle guard.
+                let load = ArmLoader {
+                    assets: &*self.loader,
+                    spaces: std::cell::RefCell::new(resources.get_mut::<BlendSpaceCache>()),
+                };
                 let compiled = self
                     .loader
                     .load_graph(graph)
                     .ok_or_else(|| format!("'{graph}' could not be loaded"))
                     .and_then(|doc| compile_anim_graph_with(&doc, graph, &load))
                     .map(Arc::new);
+                drop(load);
                 if let Some(cache) = resources.get_mut::<AnimGraphPlanCache>() {
                     cache.store(graph, compiled.clone());
                 }
@@ -330,6 +458,22 @@ impl AnimGraphSystem {
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
             for st in &plan.states {
+                // A blend space names its samples by index, so its refusal
+                // says which sample to fix.
+                if let PoseSource::Tree(PlanTree::Space(sp)) = &st.source {
+                    if let Some((i, (c, _))) = sp
+                        .samples
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (c, _))| clip_of(clips, c).is_none())
+                    {
+                        return refused(format!(
+                            "{graph}: state '{}': blend space sample {i} clip '{}' could not \
+                             be loaded",
+                            st.name, c.clip
+                        ));
+                    }
+                }
                 for c in st.source.clips() {
                     if clip_of(clips, c).is_none() {
                         return refused(format!(
@@ -491,6 +635,46 @@ mod tests {
         r.enabled = false;
         assert!(!r.is_runnable(), "disabled keeps the reference, not the machine");
         assert!(!AnimGraphRunner::default().is_runnable());
+    }
+
+    /// A `.blendspace` write drops the compiled space and every plan (the
+    /// generation bump restarts live machines) — the host's save path and
+    /// watcher both go through `invalidate_blend_space`.
+    #[test]
+    fn a_blend_space_write_invalidates_its_space_and_every_plan() {
+        struct OneSpace;
+        impl AnimAssetLoader for OneSpace {
+            fn load_graph(&self, _: &str) -> Option<GraphDoc> {
+                None
+            }
+            fn load_clips(&self, _: &str) -> Option<ClipSet> {
+                None
+            }
+            fn load_skeleton(&self, _: &str) -> Option<Vec<BoneData>> {
+                None
+            }
+            fn load_blend_space(&self, rel: &str) -> Option<String> {
+                (rel == "blendspaces/loco.blendspace").then(|| {
+                    "(samples: [(x: 0.0, clip: \"a.anim\")])".to_string()
+                })
+            }
+        }
+        let mut resources = Resources::new();
+        resources.insert(BlendSpaceCache::new());
+        resources.insert(AnimGraphPlanCache::new());
+        let spaces = resources.get_mut::<BlendSpaceCache>().unwrap();
+        assert!(spaces.get_or_load("blendspaces\\loco.blendspace", &OneSpace).unwrap().is_ok());
+        assert!(spaces.get_or_load("blendspaces/none.blendspace", &OneSpace).is_none());
+        assert_eq!(spaces.len(), 1);
+        let plans = resources.get_mut::<AnimGraphPlanCache>().unwrap();
+        plans.store("graphs/a.animgraph", Ok(Arc::new(AnimGraphPlan::default())));
+        let g = plans.generation();
+
+        invalidate_blend_space(&mut resources, "blendspaces/loco.blendspace");
+        assert!(resources.get::<BlendSpaceCache>().unwrap().is_empty());
+        let plans = resources.get::<AnimGraphPlanCache>().unwrap();
+        assert!(plans.is_empty(), "plans go wholesale: they compiled the space in");
+        assert_ne!(plans.generation(), g, "live machines restart on the bump");
     }
 
     #[test]

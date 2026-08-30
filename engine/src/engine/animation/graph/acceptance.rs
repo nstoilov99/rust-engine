@@ -35,8 +35,11 @@ use super::machine::{
 use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
-    AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
-    AnimGraphSystem, ClipSet,
+    invalidate_blend_space, AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner,
+    AnimGraphRuntime, AnimGraphSystem, BlendSpaceCache, ClipSet,
+};
+use crate::engine::animation::blend_space::{
+    parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
 };
 
 // ---------------------------------------------------------------------------
@@ -1431,11 +1434,17 @@ fn a_blend_tree_round_trips_and_dies_with_its_state() {
 #[derive(Default, Clone)]
 struct MapAssets {
     graphs: Arc<Mutex<BTreeMap<String, GraphDoc>>>,
+    /// `.blendspace` files as their RON text (what the disk loader serves).
+    spaces: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl AnimAssetLoader for MapAssets {
     fn load_graph(&self, content_rel: &str) -> Option<GraphDoc> {
         self.graphs.lock().ok()?.get(content_rel).cloned()
+    }
+
+    fn load_blend_space(&self, content_rel: &str) -> Option<String> {
+        self.spaces.lock().ok()?.get(content_rel).cloned()
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
@@ -1478,6 +1487,7 @@ impl Harness {
         resources.insert(time);
         resources.insert(AnimGraphPlanCache::new());
         resources.insert(AnimClipCache::new());
+        resources.insert(BlendSpaceCache::new());
         Self {
             world: hecs::World::new(),
             resources,
@@ -2660,3 +2670,429 @@ fn editing_a_nested_graph_restarts_hosts_through_wholesale_invalidation() {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Blend spaces as a state's pose source (Task 41.5 ticket 02)
+// ---------------------------------------------------------------------------
+
+const SPACE: &str = "blendspaces/loco.blendspace";
+const SPACE_GRAPH: &str = "graphs/space.animgraph";
+
+/// The walk→run tree as a file: one "speed" axis over 0..6, Walk at 0 and
+/// Run at 6.
+fn walk_run_space() -> BlendSpaceDoc {
+    let mut doc = BlendSpaceDoc::default();
+    doc.axes[0] = BlendAxis::new("speed", 0.0, 6.0);
+    doc.samples = vec![
+        BlendSample::new(0.0, 0.0, "anims/walk.anim"),
+        BlendSample::new(6.0, 0.0, "anims/run.anim"),
+    ];
+    doc
+}
+
+/// ENTRY → "Move", whose `space` names [`SPACE`] (plus `extra` properties,
+/// for the precedence checks).
+fn space_doc(extra: &[(&str, PropValue)]) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("speed")];
+    let mut props = vec![(plan::SPACE_PROP, PropValue::Asset(SPACE.into()))];
+    props.extend_from_slice(extra);
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(2, plan::ANIM_STATE_TYPE_ID, Some("Move"), &props),
+    ];
+    doc.edges = vec![edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN)];
+    doc
+}
+
+/// In-memory resolver over blend-space documents and nested graphs — the
+/// test side of the compiler's loader seam.
+#[derive(Default)]
+struct SpaceLoader {
+    spaces: BTreeMap<String, BlendSpaceDoc>,
+    graphs: BTreeMap<String, GraphDoc>,
+}
+
+impl plan::AnimGraphLoader for SpaceLoader {
+    fn graph(&self, rel: &str) -> Option<GraphDoc> {
+        self.graphs.get(rel).cloned()
+    }
+
+    fn blend_space(&self, rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {
+        self.spaces.get(rel).map(|d| BlendSpace::compile(d).map(Arc::new))
+    }
+}
+
+fn one_space(doc: BlendSpaceDoc) -> SpaceLoader {
+    SpaceLoader {
+        spaces: [(SPACE.to_string(), doc)].into(),
+        graphs: BTreeMap::new(),
+    }
+}
+
+fn compile_with_space(doc: &GraphDoc, space: BlendSpaceDoc) -> Result<AnimGraphPlan, String> {
+    plan::compile_anim_graph_with(doc, SPACE_GRAPH, &one_space(space))
+}
+
+/// A machine in its entry state after one tick, with its blackboard.
+fn armed(plan: &AnimGraphPlan) -> (AnimMachine, AnimParams) {
+    let mut params = AnimParams::from_decls(&plan.parameters);
+    let mut m = AnimMachine::new(plan);
+    m.tick(plan, &mut params, 0.0);
+    (m, params)
+}
+
+/// Bone 0's x after evaluating the machine's pose.
+fn bone_x<'a, F>(m: &AnimMachine, plan: &AnimGraphPlan, params: &AnimParams, clip_for: &F) -> f32
+where
+    F: Fn(&plan::PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let mut pose = vec![LocalBoneTransform::default(); 2];
+    let mut scratch = PoseScratch::new();
+    evaluate_pose(m, plan, params, clip_for, &mut pose, &mut scratch);
+    assert_eq!(pose[1].translation, Vec3::ZERO, "unanimated bones stay put");
+    pose[0].translation.x
+}
+
+#[test]
+fn a_state_plays_a_blend_space_following_its_parameter() {
+    let plan = compile_with_space(&space_doc(&[]), walk_run_space()).expect("compiles");
+    let plan::PoseSource::Tree(plan::PlanTree::Space(sp)) = &plan.states[0].source else {
+        panic!("expected a blend space, got {:?}", plan.states[0].source);
+    };
+    assert_eq!(sp.params, ["speed"]);
+    assert_eq!(sp.samples.len(), 2);
+    assert_eq!(sp.samples[1].0.clip, "anims/run.anim");
+    assert_eq!(
+        plan.clip_refs(),
+        ["anims/run.anim", "anims/walk.anim"],
+        "the samples are the plan's clip references (prefetch + arm check)"
+    );
+
+    let clips = [
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/run.anim", constant_clip("Run", 10.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let (mut m, mut params) = armed(&plan);
+    for (speed, expected) in [
+        (0.0, 2.0),   // exactly on the Walk sample: pure Walk
+        (-5.0, 2.0),  // below the axis clamps
+        (6.0, 10.0),  // exactly on Run
+        (50.0, 10.0), // above the axis clamps
+        (3.0, 6.0),   // midpoint: 50/50
+        (1.5, 4.0),   // quarter: 0.75·Walk + 0.25·Run
+    ] {
+        params.set_float("speed", speed);
+        m.tick(&plan, &mut params, 0.1); // smoothing off: the input snaps
+        let x = bone_x(&m, &plan, &params, &clip_for);
+        assert!((x - expected).abs() < 1e-4, "speed {speed}: pose {x} expected {expected}");
+    }
+}
+
+#[test]
+fn a_two_axis_space_blends_three_samples_and_clamps_to_its_hull() {
+    let mut space = BlendSpaceDoc::default();
+    space.axis_count = 2;
+    space.axes = [BlendAxis::new("speed", 0.0, 4.0), BlendAxis::new("turn", 0.0, 4.0)];
+    space.samples = vec![
+        BlendSample::new(0.0, 0.0, "anims/walk.anim"),
+        BlendSample::new(4.0, 0.0, "anims/run.anim"),
+        BlendSample::new(0.0, 4.0, "anims/idle.anim"),
+    ];
+    let mut doc = space_doc(&[]);
+    doc.variables.push(float_decl("turn"));
+    let plan = compile_with_space(&doc, space).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/run.anim", constant_clip("Run", 10.0)),
+        ("anims/idle.anim", constant_clip("Idle", 20.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let (mut m, mut params) = armed(&plan);
+    for (x, y, expected, why) in [
+        (4.0, 0.0, 10.0, "exact on the Run sample"),
+        (1.0, 1.0, 8.5, "barycentric: ½ Walk + ¼ Run + ¼ Idle"),
+        (2.0, 0.0, 6.0, "on an edge: the far vertex drops out"),
+        (9.0, 9.0, 15.0, "outside: axis clamp then nearest hull point (2, 2)"),
+    ] {
+        params.set_float("speed", x);
+        params.set_float("turn", y);
+        m.tick(&plan, &mut params, 0.1);
+        let got = bone_x(&m, &plan, &params, &clip_for);
+        assert!((got - expected).abs() < 1e-3, "({x}, {y}): pose {got} expected {expected} — {why}");
+    }
+}
+
+#[test]
+fn blend_space_samples_stay_phase_matched_while_the_input_moves() {
+    // Walk (1.0s) and Run (0.4s) each report their own phase; one sync group
+    // means both read the same number however the weights shift. The
+    // reference is the first sample (Walk): expected phase = t mod 1.
+    let plan = compile_with_space(&space_doc(&[]), walk_run_space()).expect("compiles");
+    let clips = [
+        ("anims/walk.anim", phase_clip("Walk", 1.0)),
+        ("anims/run.anim", phase_clip("Run", 0.4)),
+    ];
+    let clip_for = resolver(&clips);
+    let (mut m, mut params) = armed(&plan);
+    for step in 0..30 {
+        params.set_float("speed", 6.0 * step as f32 / 29.0);
+        m.tick(&plan, &mut params, 0.05);
+        let x = bone_x(&m, &plan, &params, &clip_for);
+        let expected = m.time().rem_euclid(1.0);
+        assert!((x - expected).abs() < 1e-3, "step {step}: pose {x} expected phase {expected}");
+    }
+    let unsynced = m.time().rem_euclid(0.4) / 0.4;
+    assert!((unsynced - m.time().rem_euclid(1.0)).abs() > 0.1, "the check has teeth");
+
+    // A sample's rate scale is its speed relative to the reference: Run at
+    // 2× cycles twice per Walk cycle, still locked to it.
+    let mut space = walk_run_space();
+    space.samples[1].rate_scale = 2.0;
+    let plan = compile_with_space(&space_doc(&[]), space).expect("compiles");
+    let (mut m, mut params) = armed(&plan);
+    params.set_float("speed", 6.0);
+    for _ in 0..7 {
+        m.tick(&plan, &mut params, 0.05);
+    }
+    let x = bone_x(&m, &plan, &params, &clip_for);
+    let expected = (2.0 * m.time()).rem_euclid(1.0);
+    assert!((x - expected).abs() < 1e-3, "{x} expected {expected}");
+}
+
+#[test]
+fn input_smoothing_converges_over_ticks_and_resets_on_entry() {
+    // Idle (plain clip) → Move (space, 0.5s smoothing) on Bool `walk`.
+    let mut doc = space_doc(&[]);
+    doc.variables.push(bool_decl("walk"));
+    doc.nodes.push(with(
+        3,
+        plan::ANIM_STATE_TYPE_ID,
+        Some("Idle"),
+        &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
+    ));
+    doc.nodes.push(node(4, plan::ANIM_TRANSITION_TYPE_ID, None));
+    doc.edges = vec![
+        edge(1, plan::STATE_OUT_PIN, 3, plan::STATE_IN_PIN),
+        edge(3, plan::STATE_OUT_PIN, 4, plan::TRANSITION_FROM_PIN),
+        edge(4, plan::TRANSITION_TO_PIN, 2, plan::STATE_IN_PIN),
+    ];
+    doc.regions.insert(4, param_rule("walk"));
+    let mut space = walk_run_space();
+    space.input_smoothing = 0.5;
+    let plan = compile_with_space(&doc, space).expect("compiles");
+    let clips = [
+        ("anims/idle.anim", constant_clip("Idle", 0.0)),
+        ("anims/walk.anim", constant_clip("Walk", 2.0)),
+        ("anims/run.anim", constant_clip("Run", 10.0)),
+    ];
+    let clip_for = resolver(&clips);
+    let (mut m, mut params) = armed(&plan);
+    assert_eq!(plan.states[m.current_state()].name, "Idle");
+
+    // Entry never blends from stale input: speed was 6 all along in Idle,
+    // so the first Move frame is pure Run, not a ramp from 0.
+    params.set_float("speed", 6.0);
+    params.set_bool("walk", true);
+    m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Move");
+    let x = bone_x(&m, &plan, &params, &clip_for);
+    assert!((x - 10.0).abs() < 1e-4, "snapped on entry: {x}");
+
+    // Now the target moves: the pose approaches it monotonically over ticks
+    // and lands within a hair after many time constants.
+    params.set_float("speed", 0.0);
+    let mut last = 10.0f32;
+    for step in 0..40 {
+        m.tick(&plan, &mut params, 0.1);
+        let v = bone_x(&m, &plan, &params, &clip_for);
+        assert!(v < last, "step {step}: {v} did not move toward Walk from {last}");
+        if step == 0 {
+            // 1 − e^(−0.1/0.5) ≈ 0.18 of the way: 10 → ~8.55.
+            assert!((v - 8.55).abs() < 0.05, "first step {v}");
+        }
+        last = v;
+    }
+    assert!((last - 2.0).abs() < 0.01, "converged: {last}");
+}
+
+#[test]
+fn space_precedence_beats_clip_and_yields_to_graph() {
+    // `space` + `clip`: the space plays.
+    let doc = space_doc(&[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))]);
+    let plan = compile_with_space(&doc, walk_run_space()).expect("compiles");
+    assert!(matches!(
+        plan.states[0].source,
+        plan::PoseSource::Tree(plan::PlanTree::Space(_))
+    ));
+
+    // `graph` + `space`: the nested graph wins (and the space is never even
+    // loaded — no loader entry for it, no refusal).
+    let doc = space_doc(&[(plan::GRAPH_PROP, PropValue::Asset(CHILD.into()))]);
+    let loader = SpaceLoader {
+        spaces: BTreeMap::new(),
+        graphs: [(CHILD.to_string(), two_state_doc())].into(),
+    };
+    let plan = plan::compile_anim_graph_with(&doc, SPACE_GRAPH, &loader).expect("compiles");
+    assert!(matches!(plan.states[0].source, plan::PoseSource::Machine { .. }));
+}
+
+#[test]
+fn blend_space_refusals_are_anchored_to_the_state() {
+    let doc = space_doc(&[]);
+    let check = |err: String, needle: &str| {
+        assert!(err.starts_with("state 'Move': "), "{err}");
+        assert!(err.contains(needle), "{err}");
+        #[cfg(feature = "editor")]
+        assert_eq!(
+            crate::engine::editor::graph_editor::anchor_anim_refusal(&doc, &err),
+            Some(2),
+            "anchors on the state's node: {err}"
+        );
+    };
+
+    // Missing file.
+    let err = plan::compile_anim_graph_with(&doc, SPACE_GRAPH, &SpaceLoader::default())
+        .unwrap_err();
+    check(err, "blend space 'blendspaces/loco.blendspace' not found");
+
+    // Empty samples (the space's own compile refusal, wrapped).
+    let err = compile_with_space(&doc, BlendSpaceDoc::default()).unwrap_err();
+    check(err, "blend space 'blendspaces/loco.blendspace': no samples");
+
+    // A sample naming no clip.
+    let mut space = walk_run_space();
+    space.samples[1].clip.clear();
+    let err = compile_with_space(&doc, space).unwrap_err();
+    check(err, "sample 1 names no clip");
+
+    // Axis parameter undeclared, or declared with the wrong type.
+    let mut space = walk_run_space();
+    space.axes[0].param = "velocity".into();
+    let err = compile_with_space(&doc, space).unwrap_err();
+    check(
+        err,
+        "axis 'speed' parameter 'velocity' is not a declared Float parameter",
+    );
+    let mut bool_doc = space_doc(&[]);
+    bool_doc.variables = vec![bool_decl("speed")];
+    let err = compile_with_space(&bool_doc, walk_run_space()).unwrap_err();
+    assert!(err.contains("parameter 'speed' is not a declared Float"), "{err}");
+
+    // A missing sample clip is an arm-time refusal (clips load with the
+    // plan, never at compile), named by sample index.
+    let mut space = walk_run_space();
+    space.samples[1].clip = "anims/nope.anim".into();
+    let assets = MapAssets::default();
+    assets.graphs.lock().unwrap().insert(SPACE_GRAPH.into(), doc.clone());
+    assets
+        .spaces
+        .lock()
+        .unwrap()
+        .insert(SPACE.into(), serialize_blend_space(&space).unwrap());
+    let mut h = Harness::new(assets);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(SPACE_GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("state 'Move': blend space sample 1 clip 'anims/nope.anim'"),
+        "{why}"
+    );
+}
+
+/// System level: the space loads through the host's cache, plays, and a
+/// `.blendspace` write (save or watcher, both through
+/// `invalidate_blend_space`) recompiles the plan against the new file.
+#[test]
+fn saving_a_blend_space_invalidates_the_plan_and_the_next_arm_recompiles() {
+    let assets = MapAssets::default();
+    assets.graphs.lock().unwrap().insert(SPACE_GRAPH.into(), space_doc(&[]));
+    assets
+        .spaces
+        .lock()
+        .unwrap()
+        .insert(SPACE.into(), serialize_blend_space(&walk_run_space()).unwrap());
+    let mut h = Harness::new(assets.clone());
+    let e = h.world.spawn((
+        AnimGraphRunner::new(SPACE_GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        assert_eq!(h.resources.get::<BlendSpaceCache>().unwrap().len(), 1);
+    }
+    // Walk 10 / Run 20 (MapAssets' clips): speed 3 of 0..6 is the midpoint.
+    let set_speed = |h: &mut Harness, v: f32| {
+        h.world
+            .get::<&mut AnimGraphRuntime>(e)
+            .unwrap()
+            .params
+            .set_float("speed", v);
+    };
+    let x = |h: &Harness| {
+        h.world.get::<&SkeletonInstance>(e).unwrap().local_transforms[0]
+            .translation
+            .x
+    };
+    set_speed(&mut h, 3.0);
+    h.tick();
+    assert!((x(&h) - 15.0).abs() < 1e-3, "{}", x(&h));
+
+    // Move the Run sample to 3 and "save": the space and every plan drop,
+    // the runtime re-arms on the generation bump, and speed 3 is now pure
+    // Run.
+    let mut edited = walk_run_space();
+    edited.samples[1].x = 3.0;
+    assets
+        .spaces
+        .lock()
+        .unwrap()
+        .insert(SPACE.into(), serialize_blend_space(&edited).unwrap());
+    invalidate_blend_space(&mut h.resources, SPACE);
+    assert!(h.resources.get::<AnimGraphPlanCache>().unwrap().is_empty());
+    assert!(h.resources.get::<BlendSpaceCache>().unwrap().is_empty());
+    h.tick(); // drops the stale runtime
+    h.tick(); // re-arms against the fresh compile (params back to defaults)
+    set_speed(&mut h, 3.0);
+    h.tick();
+    assert!((x(&h) - 20.0).abs() < 1e-3, "{}", x(&h));
+}
+
+/// The committed demo asset compiles when a state references it: three
+/// samples of the one clip at rates ½ / 1 / 2 on a `Speed` axis.
+#[test]
+fn the_demo_blend_space_compiles_from_a_state() {
+    let text = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../content/blendspaces/locomotion.blendspace"
+    ));
+    let space = parse_blend_space(text).expect("demo parses");
+    let mut doc = space_doc(&[]);
+    doc.variables = vec![float_decl("Speed")];
+    doc.node_mut(2).unwrap().properties.insert(
+        plan::SPACE_PROP.into(),
+        PropValue::Asset("blendspaces\\locomotion.blendspace".into()),
+    );
+    let loader = SpaceLoader {
+        spaces: [("blendspaces/locomotion.blendspace".to_string(), space)].into(),
+        graphs: BTreeMap::new(),
+    };
+    let plan = plan::compile_anim_graph_with(&doc, SPACE_GRAPH, &loader).expect("compiles");
+    let plan::PoseSource::Tree(plan::PlanTree::Space(sp)) = &plan.states[0].source else {
+        panic!("expected a blend space");
+    };
+    assert_eq!(sp.params, ["Speed"]);
+    let rates: Vec<f32> = sp.samples.iter().map(|(_, r)| *r).collect();
+    assert_eq!(rates, [0.5, 1.0, 2.0]);
+    assert_eq!(plan.clip_refs(), ["Defeated.anim"]);
+}
