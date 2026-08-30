@@ -2945,6 +2945,8 @@ impl App {
                             self.open_curve_document(relative);
                             #[cfg(not(feature = "editor"))]
                             let _ = relative;
+                        } else if asset_type == AssetType::BlendSpace {
+                            // ticket 04: open blend space tab
                         } else if asset_type == AssetType::Animation {
                             // Anim event markers, as a minimal list (Task 41).
                             use rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog;
@@ -3464,41 +3466,10 @@ impl App {
                         .root_path()
                         .join(&parent_path);
 
+                    // Create ▸ menu (blend space ticket 03): write the
+                    // template, then the rescan selects the new row and
+                    // enters inline rename — nothing auto-opens.
                     match asset_type {
-                        AssetType::AnimGraph => {
-                            // Task 41: a fresh state machine — ENTRY wired to
-                            // an Idle state, Client realm — written to disk,
-                            // then opened like any double-clicked graph.
-                            let base_name = "NewAnimGraph";
-                            let mut new_name = format!("{}.animgraph", base_name);
-                            let mut counter = 1;
-                            while full_parent.join(&new_name).exists() {
-                                new_name = format!("{}_{}.animgraph", base_name, counter);
-                                counter += 1;
-                            }
-                            let file_path = full_parent.join(&new_name);
-                            let doc = rust_engine::engine::animation::graph::new_animgraph_doc();
-                            match rust_engine::engine::node_graph::save_graph(&file_path, &doc) {
-                                Ok(()) => {
-                                    self.editor.console.messages.push(LogMessage::info(format!(
-                                        "Created animation graph: {new_name}"
-                                    )));
-                                    self.editor.scene.asset_browser.request_rescan();
-                                    #[cfg(feature = "editor")]
-                                    {
-                                        let relative = asset_source::to_content_relative(
-                                            &parent_path.join(&new_name).to_string_lossy(),
-                                        );
-                                        self.open_graph_document(relative);
-                                    }
-                                }
-                                Err(e) => {
-                                    self.editor.console.messages.push(LogMessage::error(format!(
-                                        "Failed to create animation graph: {e}"
-                                    )));
-                                }
-                            }
-                        }
                         AssetType::InputAction => {
                             let base_name = "NewInputAction";
                             let mut new_name = format!("{}.inputaction", base_name);
@@ -3519,7 +3490,10 @@ impl App {
                                         "Created input action: {}",
                                         action_name
                                     )));
-                                    self.editor.scene.asset_browser.request_rescan();
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(&new_name));
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
@@ -3552,7 +3526,10 @@ impl App {
                                         "Created mapping context: {}",
                                         ctx_name
                                     )));
-                                    self.editor.scene.asset_browser.request_rescan();
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(&new_name));
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
@@ -3562,7 +3539,29 @@ impl App {
                                 }
                             }
                         }
-                        _ => {}
+                        other => {
+                            use rust_engine::engine::editor::asset_browser::templates;
+                            match templates::create_asset_file(&full_parent, other) {
+                                Ok(Some(file_name)) => {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Created {}: {}",
+                                        other.display_name().to_lowercase(),
+                                        file_name.display()
+                                    )));
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(file_name));
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to create {}: {e}",
+                                        other.display_name().to_lowercase()
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
