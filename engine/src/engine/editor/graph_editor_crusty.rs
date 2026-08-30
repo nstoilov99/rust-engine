@@ -753,7 +753,7 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
     use crate::engine::animation::graph::plan::{
         ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP,
         CLIP_PROP, DURATION_PROP, GRAPH_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP,
-        SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPEED_PROP,
+        SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
     };
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
@@ -842,25 +842,37 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                     InlineKind::Str(text_of(GRAPH_PROP)),
                 ));
             } else {
-                out.push((
-                    CLIP_PROP.to_string(),
-                    "Clip".to_string(),
-                    InlineKind::Str(text_of(CLIP_PROP)),
-                ));
-                // The in-container clip name only rows when the document
-                // carries one — data is never hidden, and the common
-                // one-clip-per-file case does not pay a row for it.
-                if !text_of(CLIP_NAME_PROP).is_empty() {
+                // Runtime precedence, spoken back: a blend space (ticket 06)
+                // is the state's whole Pose source too, so the clip rows
+                // yield to it; the Graph row stays (empty) because a set
+                // Graph would win over the space.
+                let space = text_of(SPACE_PROP);
+                if space.trim().is_empty() {
                     out.push((
-                        CLIP_NAME_PROP.to_string(),
-                        "Clip Name".to_string(),
-                        InlineKind::Str(text_of(CLIP_NAME_PROP)),
+                        CLIP_PROP.to_string(),
+                        "Clip".to_string(),
+                        InlineKind::Str(text_of(CLIP_PROP)),
                     ));
+                    // The in-container clip name only rows when the document
+                    // carries one — data is never hidden, and the common
+                    // one-clip-per-file case does not pay a row for it.
+                    if !text_of(CLIP_NAME_PROP).is_empty() {
+                        out.push((
+                            CLIP_NAME_PROP.to_string(),
+                            "Clip Name".to_string(),
+                            InlineKind::Str(text_of(CLIP_NAME_PROP)),
+                        ));
+                    }
                 }
-                // The nested-graph reference's front door: an empty row on
-                // every leaf state (rows appear even when the property is
-                // missing — the module rule above — because a row is the only
-                // way to give it a value).
+                // The blend-space and nested-graph references' front doors:
+                // empty rows on every leaf state (rows appear even when the
+                // property is missing — the module rule above — because a
+                // row is the only way to give it a value).
+                out.push((
+                    SPACE_PROP.to_string(),
+                    "Blend Space".to_string(),
+                    InlineKind::Str(space),
+                ));
                 out.push((
                     GRAPH_PROP.to_string(),
                     "Graph".to_string(),
@@ -1775,6 +1787,36 @@ fn build_geoms(
 /// pins with a zero hit target, because a border press starts a wire and a
 /// flow wire lands on the border, not on a dot.
 #[allow(clippy::too_many_arguments)]
+/// A state card's one mono subtitle: the compiler's precedence spoken back
+/// — tree > graph > blend space > clip — each source with its own glyph,
+/// files shown as their content-relative path (the `.animgraph` idiom).
+fn anim_state_subtitle(n: &NodeInst, docd: &DocDescriptors) -> Option<String> {
+    use crate::engine::animation::graph::plan::{CLIP_PROP, GRAPH_PROP, SPACE_PROP};
+    let text_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) | Some(PropValue::Asset(s)) => {
+            s.trim().to_string()
+        }
+        _ => String::new(),
+    };
+    let has_tree = docd
+        .doc()
+        .regions
+        .get(&n.id)
+        .is_some_and(|r| !r.nodes.is_empty());
+    let (graph, space, clip) = (text_of(GRAPH_PROP), text_of(SPACE_PROP), text_of(CLIP_PROP));
+    if has_tree {
+        Some("\u{29c9} blend tree".to_string())
+    } else if !graph.is_empty() {
+        Some(format!("\u{2750} {graph}"))
+    } else if !space.is_empty() {
+        Some(format!("\u{25a6} {space}"))
+    } else if !clip.is_empty() {
+        Some(format!("\u{25b7} {clip}"))
+    } else {
+        None
+    }
+}
+
 fn anim_card_geom(
     n: &NodeInst,
     kind: AnimCardKind,
@@ -1786,44 +1828,17 @@ fn anim_card_geom(
     st: &Style,
     p: &mut Painter,
 ) -> NodeGeom {
-    use crate::engine::animation::graph::plan::{
-        CLIP_PROP, GRAPH_PROP, STATE_IN_PIN, STATE_OUT_PIN,
-    };
-    let text_of = |key: &str| match n.properties.get(key) {
-        Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) | Some(PropValue::Asset(s)) => {
-            s.clone()
-        }
-        _ => String::new(),
-    };
+    use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
     let min = Pos2::new(n.position[0], n.position[1]);
     let errored = errors.nodes.contains(&n.id);
     let (title, tag, subtitle) = match kind {
         AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
         AnimCardKind::Any => ("ANY STATE".to_string(), String::new(), None),
-        AnimCardKind::State => {
-            let has_tree = docd
-                .doc()
-                .regions
-                .get(&n.id)
-                .is_some_and(|r| !r.nodes.is_empty());
-            let graph = text_of(GRAPH_PROP);
-            let clip = text_of(CLIP_PROP);
-            // The compiler's precedence, spoken back: tree > graph > clip.
-            let subtitle = if has_tree {
-                Some("\u{29c9} blend tree".to_string())
-            } else if !graph.trim().is_empty() {
-                Some(format!("\u{2750} {}", graph.trim()))
-            } else if !clip.trim().is_empty() {
-                Some(format!("\u{25b7} {}", clip.trim()))
-            } else {
-                None
-            };
-            (
-                docd.display_name(n.id).unwrap_or_else(|| "State".to_string()),
-                "STATE".to_string(),
-                subtitle,
-            )
-        }
+        AnimCardKind::State => (
+            docd.display_name(n.id).unwrap_or_else(|| "State".to_string()),
+            "STATE".to_string(),
+            anim_state_subtitle(n, docd),
+        ),
     };
     let title_px = st.fonts.body;
     let sub_px = st.fonts.small;
@@ -13728,14 +13743,14 @@ mod tests {
         assert!(config_rows(&test_node(9, "event_tick"), &docd).is_empty());
     }
 
-    /// Ticket 09: a state's config band routes between its three sources.
-    /// A leaf shows Clip and an (empty) Graph row — the nesting feature's
-    /// front door; a set Graph row takes over and the clip rows yield; a
-    /// blend-tree region beats both.
+    /// Tickets 09 / 06: a state's config band routes between its sources.
+    /// A leaf shows Clip and (empty) Blend Space and Graph rows — the
+    /// references' front doors; a set Blend Space hides the clip rows; a set
+    /// Graph takes over and both yield; a blend-tree region beats all.
     #[test]
     fn a_states_config_band_routes_clip_graph_and_tree() {
         use crate::engine::animation::graph::plan::{
-            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPEED_PROP,
+            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPACE_PROP, SPEED_PROP,
         };
         use crate::engine::node_graph::{GraphDoc, GraphRegion};
         let reg = NodeRegistry::new();
@@ -13753,7 +13768,15 @@ mod tests {
         let mut tree = test_node(2, ANIM_STATE_TYPE_ID);
         tree.properties
             .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
-        doc.nodes = vec![leaf, nested, tree];
+        let mut spaced = test_node(3, ANIM_STATE_TYPE_ID);
+        spaced
+            .properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        spaced.properties.insert(
+            SPACE_PROP.into(),
+            PropValue::Asset("blendspaces/loco.blendspace".into()),
+        );
+        doc.nodes = vec![leaf, nested, tree, spaced];
         doc.regions.insert(
             2,
             GraphRegion {
@@ -13766,14 +13789,22 @@ mod tests {
         let keys = |i: usize| -> Vec<String> {
             config_rows(&doc.nodes[i], &docd).iter().map(|(k, _, _)| k.clone()).collect()
         };
-        assert_eq!(keys(0), vec![CLIP_PROP, GRAPH_PROP, SPEED_PROP]);
+        assert_eq!(keys(0), vec![CLIP_PROP, SPACE_PROP, GRAPH_PROP, SPEED_PROP]);
         let rows = config_rows(&doc.nodes[0], &docd);
         assert!(
-            matches!(&rows[1].2, InlineKind::Str(s) if s.is_empty()),
-            "the Graph row exists empty — it is how the property comes to be"
+            rows[1..3].iter().all(|r| matches!(&r.2, InlineKind::Str(s) if s.is_empty())),
+            "the Blend Space and Graph rows exist empty — it is how the properties come to be"
         );
 
-        assert_eq!(keys(1), vec![GRAPH_PROP, SPEED_PROP], "clip rows yield to the graph");
+        assert_eq!(keys(1), vec![GRAPH_PROP, SPEED_PROP], "clip and space rows yield to the graph");
+
+        assert_eq!(
+            keys(3),
+            vec![SPACE_PROP, GRAPH_PROP, SPEED_PROP],
+            "clip rows yield to the blend space; the Graph door stays"
+        );
+        let rows = config_rows(&doc.nodes[3], &docd);
+        assert!(matches!(&rows[0].2, InlineKind::Str(s) if s == "blendspaces/loco.blendspace"));
         let rows = config_rows(&doc.nodes[1], &docd);
         assert!(matches!(&rows[0].2, InlineKind::Str(s) if s == "graphs/loco.animgraph"));
 
@@ -13783,6 +13814,40 @@ mod tests {
             "a tree region beats the graph reference — the chip row"
         );
         assert!(matches!(&config_rows(&doc.nodes[2], &docd)[0].2, InlineKind::Chip(_)));
+    }
+
+    /// The card subtitle speaks the same precedence as the config band and
+    /// the compiler: tree > graph > blend space > clip, files by path.
+    #[test]
+    fn a_state_cards_subtitle_follows_source_precedence() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPACE_PROP,
+        };
+        use crate::engine::node_graph::{GraphDoc, GraphRegion};
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![test_node(0, ANIM_STATE_TYPE_ID)];
+        let sub = |doc: &GraphDoc| {
+            anim_state_subtitle(&doc.nodes[0], &DocDescriptors::new(doc, &reg))
+        };
+        assert_eq!(sub(&doc), None);
+        let set = |doc: &mut GraphDoc, k: &str, v: &str| {
+            doc.nodes[0].properties.insert(k.into(), PropValue::Asset(v.into()));
+        };
+        set(&mut doc, CLIP_PROP, " anims/idle.anim ");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{25b7} anims/idle.anim"));
+        set(&mut doc, SPACE_PROP, "blendspaces/loco.blendspace");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{25a6} blendspaces/loco.blendspace"));
+        set(&mut doc, GRAPH_PROP, "graphs/loco.animgraph");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{2750} graphs/loco.animgraph"));
+        doc.regions.insert(
+            0,
+            GraphRegion {
+                nodes: vec![test_node(0, "anim_pose_result")],
+                edges: vec![],
+            },
+        );
+        assert_eq!(sub(&doc).as_deref(), Some("\u{29c9} blend tree"));
     }
 
     /// **The five-site invariant.** Config rows shift the whole pin band down,

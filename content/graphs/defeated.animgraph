@@ -32,6 +32,7 @@
             position: (320.0, 0.0),
             properties: {
                 "clip": Asset("Defeated.anim"),
+                "space": Asset("blendspaces/locomotion.blendspace"),
             },
             subgraph: None,
             tint: None,
@@ -81,6 +82,12 @@
             label: "Walk",
             ty: Bool,
             default: Some(Bool(false)),
+        ),
+        (
+            slug: "Speed",
+            label: "Speed",
+            ty: Float,
+            default: Some(Float(0.0)),
         ),
     ],
     regions: {

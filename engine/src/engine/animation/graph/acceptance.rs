@@ -366,14 +366,27 @@ fn animgraph_doc_round_trips() {
 /// posture from the scripting acceptance tests).
 #[test]
 fn the_committed_demo_document_loads_and_compiles() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("content/graphs/defeated.animgraph");
-    let doc = node_graph_types::load_graph(&path).expect("the demo animgraph loads");
-    let plan = compile_anim_graph(&doc).expect("the demo animgraph compiles");
+        .join("content");
+    let doc = node_graph_types::load_graph(&content.join("graphs/defeated.animgraph"))
+        .expect("the demo animgraph loads");
+    // Through the disk loader: Walk plays the shipped blend space (ticket
+    // 06), so the file agrees with `content/blendspaces/` too.
+    let load = super::DiskAnimAssets { content_root: content };
+    let plan = plan::compile_anim_graph_with(&doc, "graphs/defeated.animgraph", &load)
+        .expect("the demo animgraph compiles");
     assert_eq!(plan.states[plan.entry].name, "Idle");
     assert_eq!(plan.states[plan.entry].speed, 0.0, "Idle holds a pose");
+    let walk = plan.states.iter().find(|s| s.name == "Walk").expect("Walk");
+    match &walk.source {
+        plan::PoseSource::Tree(plan::PlanTree::Space(space)) => {
+            assert_eq!(space.params, vec!["Speed".to_string()], "the axis binds Speed");
+            assert_eq!(space.samples.len(), 3);
+        }
+        other => panic!("Walk should play the blend space, got {other:?}"),
+    }
     assert_eq!(plan.transitions.len(), 1);
     assert_eq!(plan.transitions[0].duration, 0.4);
     let rule = plan.transitions[0].rule.as_ref().expect("the walk rule compiled");

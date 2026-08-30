@@ -4716,11 +4716,11 @@ impl GraphEditorState {
 
     /// The file `id` descends into — "double-click always means descend"
     /// (spec): a script node's `.subgraph` asset, or the nested `.animgraph`
-    /// an animation state references (ticket 09). A state whose region holds
-    /// a blend tree answers nothing, exactly as the compiler ignores its
-    /// `graph` property then.
+    /// / `.blendspace` an animation state references (tickets 09 / 06), in
+    /// the compiler's precedence. A state whose region holds a blend tree
+    /// answers nothing, exactly as the compiler ignores its references then.
     pub fn file_descend_target(&self, id: u64) -> Option<String> {
-        use crate::engine::animation::graph::plan::{ANIM_STATE_TYPE_ID, GRAPH_PROP};
+        use crate::engine::animation::graph::plan::{ANIM_STATE_TYPE_ID, GRAPH_PROP, SPACE_PROP};
         let n = self.doc.node(id)?;
         if let Some(path) = &n.subgraph {
             return Some(path.clone());
@@ -4731,12 +4731,12 @@ impl GraphEditorState {
         if self.doc.regions.get(&id).is_some_and(|r| !r.nodes.is_empty()) {
             return None;
         }
-        match n.properties.get(GRAPH_PROP) {
+        [GRAPH_PROP, SPACE_PROP].iter().find_map(|key| match n.properties.get(*key) {
             Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.trim().is_empty() => {
                 Some(crate::engine::scripting::normalize_graph_path(s))
             }
             _ => None,
-        }
+        })
     }
 
     /// The request descending from this tab raises: the target file plus the
@@ -8550,8 +8550,8 @@ mod rule_scope_tests {
 mod nested_graph_tests {
     use super::*;
     use crate::engine::animation::graph::plan::{
-        ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, STATE_IN_PIN,
-        STATE_OUT_PIN,
+        ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPACE_PROP,
+        STATE_IN_PIN, STATE_OUT_PIN,
     };
     use crate::engine::node_graph::{GraphRealm, GraphRegion};
 
@@ -8602,6 +8602,21 @@ mod nested_graph_tests {
             },
         );
         assert_eq!(st.file_descend_target(1), None);
+
+        // A blend space reference (ticket 06) descends into its file; a
+        // nested graph beside it wins, as it does in the compiler.
+        st.doc.nodes.push(state_node(
+            3,
+            &[(SPACE_PROP, PropValue::Asset("blendspaces\\loco.blendspace".into()))],
+        ));
+        assert_eq!(
+            st.file_descend_target(3),
+            Some("blendspaces/loco.blendspace".to_string())
+        );
+        st.doc.nodes[2]
+            .properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
+        assert_eq!(st.file_descend_target(3), Some("graphs/loco.animgraph".to_string()));
 
         // Script documents: only the subgraph field answers.
         let mut sc = test_state("graphs/t.graph");
@@ -8661,6 +8676,23 @@ mod nested_graph_tests {
         let e = &st.domain_errors[0];
         assert_eq!(e.node, Some(1), "anchored on the referencing state");
         assert!(e.message.contains("could not be loaded"), "{}", e.message);
+
+        // A missing blend space (ticket 06) is the same shape of refusal:
+        // anchored on the state, so the badge and F8 reach it.
+        st.doc.nodes[1].properties.remove(GRAPH_PROP);
+        st.doc.nodes[1].properties.insert(
+            SPACE_PROP.into(),
+            PropValue::Asset("blendspaces/does-not-exist.blendspace".into()),
+        );
+        st.after_edit(&NodeRegistry::new());
+        assert_eq!(st.domain_errors.len(), 1);
+        let e = &st.domain_errors[0];
+        assert_eq!(e.node, Some(1), "anchored on the referencing state");
+        assert!(
+            e.message.contains("blend space 'blendspaces/does-not-exist.blendspace' not found"),
+            "{}",
+            e.message
+        );
     }
 }
 

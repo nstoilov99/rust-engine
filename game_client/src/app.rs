@@ -4480,15 +4480,23 @@ impl App {
         if let Some(style) = graph_style_request {
             self.editor.ui.settings.prefs.graph.wires.style = style;
         }
-        if let Some(req) = graph_open_request {
-            self.open_graph_document(req.path.clone());
-            // A descent seeds the opened tab's breadcrumb chain; a plain
-            // jump (empty chain) leaves the target's session nav alone.
-            if !req.back.is_empty() {
-                if let Some(st) = self.editor.scene.graph_editors.get_mut(&req.path) {
-                    st.nav_back = req.back;
+        match graph_open_request {
+            // Ticket 06: a state's blend space descends into its own tab
+            // kind — no breadcrumb chain for it (spec: out of scope).
+            Some(req) if req.path.ends_with(".blendspace") => {
+                self.open_blend_space_document(req.path);
+            }
+            Some(req) => {
+                self.open_graph_document(req.path.clone());
+                // A descent seeds the opened tab's breadcrumb chain; a plain
+                // jump (empty chain) leaves the target's session nav alone.
+                if !req.back.is_empty() {
+                    if let Some(st) = self.editor.scene.graph_editors.get_mut(&req.path) {
+                        st.nav_back = req.back;
+                    }
                 }
             }
+            None => {}
         }
         // "Clear trace" (GS-3): the taken-path tint and the pulse history are
         // one session's statement, and the recorder that owns them lives on
@@ -6009,6 +6017,9 @@ impl App {
         // the toolbar). Applied after the window loop, like the graph opens.
         let mut float_curve_saves: Vec<String> = Vec::new();
         let mut float_blend_space_saves: Vec<String> = Vec::new();
+        // Blend spaces descended into from a float `.animgraph` (ticket 06):
+        // their own tab kind, opened after the borrows below end.
+        let mut float_blend_space_opens: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -6291,7 +6302,11 @@ impl App {
                 eprintln!("crusty float window frame failed: {e}");
             }
             if let Some(req) = float_open_request {
-                graph_open_requests.push(req);
+                if req.path.ends_with(".blendspace") {
+                    float_blend_space_opens.push(req.path);
+                } else {
+                    graph_open_requests.push(req);
+                }
             }
         }
 
@@ -6463,6 +6478,12 @@ impl App {
             }
             !tabs.is_empty()
         });
+
+        // The destructured borrows above are done; blend spaces descended
+        // into from a float `.animgraph` open as main-dock tabs now.
+        for relative in float_blend_space_opens {
+            self.open_blend_space_document(relative);
+        }
     }
 
     fn save_active_scene(&mut self) {
