@@ -117,6 +117,21 @@ pub enum Field {
     Smoothing,
 }
 
+/// A canvas right-click the panel turns into a context menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasMenu {
+    /// Screen anchor on the frame it opened (`None` afterwards — the menu
+    /// widget remembers its own placement).
+    pub open_at: Option<[f32; 2]>,
+    /// Where on the axes the click landed.
+    pub at: [f32; 2],
+    /// The sample under the click, if any.
+    pub sample: Option<usize>,
+    /// Grid snapping as the modifiers had it when the menu opened (Shift
+    /// bypasses), so the choice is not read off a later frame's keyboard.
+    pub snap: bool,
+}
+
 /// What a numeric field did this frame (see [`BlendSpaceEditorState::numeric_event`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FieldEvent {
@@ -144,6 +159,22 @@ pub struct BlendSpaceEditorState {
     pub selection: Option<usize>,
     /// Preview input point in axis units (session state; ticket 05).
     pub preview_point: Option<[f32; 2]>,
+    /// A canvas sample drag in flight: the index and its pre-drag value
+    /// (ticket 05). The doc updates live; one entry lands on release.
+    pub drag: Option<(usize, BlendSample)>,
+    /// A Ctrl-drag of the preview point in flight.
+    pub preview_drag: bool,
+    /// Sample under the pointer this frame (the hover label).
+    pub hovered: Option<usize>,
+    /// Right-click menu pending/open: screen anchor, doc coords, the sample
+    /// under the click if any.
+    pub menu: Option<CanvasMenu>,
+    /// The panel drew this tab this frame; the host takes it to decide which
+    /// tabs' preview points may drive an entity.
+    pub shown: bool,
+    /// Display name of the entity the host is driving from `preview_point`
+    /// (`None` = nothing bound). Written by the host after the UI.
+    pub preview_bound: Option<String>,
     /// The text field being typed into and its buffer — committed on
     /// Enter/click-away, never per keystroke.
     pub field_text: Option<(Field, String)>,
@@ -178,6 +209,12 @@ impl BlendSpaceEditorState {
             frame_pending: true,
             selection: None,
             preview_point: None,
+            drag: None,
+            preview_drag: false,
+            hovered: None,
+            menu: None,
+            shown: false,
+            preview_bound: None,
             field_text: None,
             field_drag: None,
             clip_names: HashMap::new(),
@@ -227,9 +264,111 @@ impl BlendSpaceEditorState {
     fn after_change(&mut self) {
         self.dirty = self.stack.is_dirty();
         self.compiled = BlendSpace::compile(&self.doc);
-        if self.selection.is_some_and(|i| i >= self.doc.samples.len()) {
+        let n = self.doc.samples.len();
+        if self.selection.is_some_and(|i| i >= n) {
             self.selection = None;
         }
+        if self.drag.as_ref().is_some_and(|(i, _)| *i >= n) {
+            self.drag = None;
+        }
+    }
+
+    // ── canvas gestures (ticket 05) ──────────────────────────────────────
+
+    /// Clamp `p` to the axis ranges and, when `snap`, round it to the grid
+    /// (step = axis range / `grid_divisions`). One-axis spaces leave `y`
+    /// alone.
+    pub fn snap_point(&self, p: [f32; 2], snap: bool) -> [f32; 2] {
+        let mut out = p;
+        for (k, a) in self.doc.active_axes().iter().enumerate() {
+            let (lo, hi) = (a.min.min(a.max), a.min.max(a.max));
+            let mut v = p[k].clamp(lo, hi);
+            if snap && a.grid_divisions > 0 && hi > lo {
+                let step = (hi - lo) / a.grid_divisions as f32;
+                v = (lo + ((v - lo) / step).round() * step).clamp(lo, hi);
+            }
+            out[k] = v;
+        }
+        out
+    }
+
+    /// Start moving sample `index` (selects it).
+    pub fn begin_drag(&mut self, index: usize) {
+        let Some(from) = self.doc.samples.get(index).cloned() else { return };
+        self.selection = Some(index);
+        self.drag = Some((index, from));
+    }
+
+    /// Move the dragged sample to `p` (snapped unless bypassed). Live: the
+    /// document changes and recompiles, nothing is recorded yet.
+    pub fn drag_to(&mut self, p: [f32; 2], snap: bool) {
+        let Some((index, _)) = self.drag else { return };
+        let p = self.snap_point(p, snap);
+        let two_d = self.doc.is_2d();
+        let Some(sm) = self.doc.samples.get_mut(index) else { return };
+        if sm.x == p[0] && (!two_d || sm.y == p[1]) {
+            return;
+        }
+        sm.x = p[0];
+        if two_d {
+            sm.y = p[1];
+        }
+        self.compiled = BlendSpace::compile(&self.doc);
+    }
+
+    /// Release: one "Move Sample" entry from the pre-drag value (nothing
+    /// when it never moved).
+    pub fn end_drag(&mut self) {
+        if let Some((index, from)) = self.drag.take() {
+            self.record_sample(index, from, "Move Sample");
+        }
+    }
+
+    /// Escape: put the sample back where the drag found it.
+    pub fn cancel_drag(&mut self) {
+        if let Some((index, from)) = self.drag.take() {
+            if let Some(sm) = self.doc.samples.get_mut(index) {
+                *sm = from;
+            }
+            self.compiled = BlendSpace::compile(&self.doc);
+        }
+    }
+
+    /// Append a sample at `p` (snapped unless bypassed) and select it; the
+    /// clip is picked afterwards in the details column.
+    pub fn add_sample_at(&mut self, p: [f32; 2], snap: bool) -> usize {
+        let p = self.snap_point(p, snap);
+        let y = if self.doc.is_2d() { p[1] } else { (self.doc.axes[1].min + self.doc.axes[1].max) * 0.5 };
+        let sample = BlendSample::new(p[0], y, "");
+        let index = self.doc.samples.len();
+        self.doc.samples.push(sample.clone());
+        self.commit(BlendSpaceEdit::AddSample { index, sample });
+        self.selection = Some(index);
+        index
+    }
+
+    /// Place the preview point, clamped to the axis ranges.
+    pub fn set_preview(&mut self, p: [f32; 2]) {
+        self.preview_point = Some(self.snap_point(p, false));
+    }
+
+    pub fn clear_preview(&mut self) {
+        self.preview_point = None;
+        self.preview_drag = false;
+    }
+
+    /// The samples the preview point blends and their weights (document
+    /// indices), empty without a point or a compiled space.
+    pub fn preview_weights(&self) -> Vec<(usize, f32)> {
+        match (&self.compiled, self.preview_point) {
+            (Ok(space), Some(p)) => space.weights(p).as_slice().to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `true` while a canvas gesture owns the pointer.
+    pub fn gesture_in_flight(&self) -> bool {
+        self.drag.is_some() || self.preview_drag
     }
 
     pub fn toast(&mut self, msg: impl Into<String>) {
@@ -545,5 +684,106 @@ mod tests {
         // Enter commits; unchanged text is not an edit.
         assert_eq!(s.text_event(f, "Spe", "Spe".into(), true, true, false), None);
         assert_eq!(s.text_event(f, "Spe", "Run".into(), true, true, false), Some("Run".into()));
+    }
+}
+
+/// Which entity a blend space tab previews on: the first selected entity
+/// that has an animation runtime, else the first runtime whose plan
+/// references this blend space. `runtimes` is `(entity bits, references
+/// this space)` in world order; `selected` is the scene selection.
+pub fn resolve_blend_space_bind(selected: &[u64], runtimes: &[(u64, bool)]) -> Option<u64> {
+    selected
+        .iter()
+        .copied()
+        .find(|s| runtimes.iter().any(|(id, _)| id == s))
+        .or_else(|| runtimes.iter().find(|(_, refs)| *refs).map(|(id, _)| *id))
+}
+
+#[cfg(test)]
+mod canvas_tests {
+    use super::*;
+
+    fn state() -> BlendSpaceEditorState {
+        let mut doc = BlendSpaceDoc::default();
+        doc.axis_count = 2;
+        doc.axes[0] = BlendAxis::new("Speed", 0.0, 6.0);
+        doc.axes[0].grid_divisions = 6;
+        doc.axes[1] = BlendAxis::new("Direction", -1.0, 1.0);
+        doc.axes[1].grid_divisions = 4;
+        doc.samples.push(BlendSample::new(0.0, 0.0, "a.anim"));
+        doc.samples.push(BlendSample::new(6.0, -1.0, "b.anim"));
+        doc.samples.push(BlendSample::new(6.0, 1.0, "c.anim"));
+        BlendSpaceEditorState::from_doc(doc, "blendspaces/t.blendspace")
+    }
+
+    #[test]
+    fn drag_commits_one_snapped_move_on_release() {
+        let mut s = state();
+        s.begin_drag(0);
+        assert_eq!(s.selection, Some(0));
+        s.drag_to([1.3, 0.2], true);
+        s.drag_to([2.6, 0.4], true);
+        assert_eq!((s.doc.samples[0].x, s.doc.samples[0].y), (3.0, 0.5), "snapped live");
+        assert!(!s.stack.can_undo(), "nothing recorded mid-drag");
+        s.end_drag();
+        assert_eq!(s.stack.undo_len(), 1);
+        assert_eq!(s.stack.undo_description().as_deref(), Some("Move Sample"));
+        s.undo();
+        assert_eq!((s.doc.samples[0].x, s.doc.samples[0].y), (0.0, 0.0));
+
+        // Shift bypasses the grid but still clamps to the axes; Escape restores.
+        s.begin_drag(1);
+        s.drag_to([7.0, -0.37], false);
+        assert_eq!((s.doc.samples[1].x, s.doc.samples[1].y), (6.0, -0.37));
+        s.cancel_drag();
+        assert_eq!((s.doc.samples[1].x, s.doc.samples[1].y), (6.0, -1.0));
+        assert_eq!(s.stack.undo_len(), 0);
+    }
+
+    #[test]
+    fn one_axis_drag_keeps_y() {
+        let mut s = state();
+        s.doc.axis_count = 1;
+        s.begin_drag(2);
+        s.drag_to([2.0, 0.0], true);
+        assert_eq!((s.doc.samples[2].x, s.doc.samples[2].y), (2.0, 1.0));
+    }
+
+    #[test]
+    fn add_sample_here_lands_on_the_click_selected() {
+        let mut s = state();
+        let i = s.add_sample_at([2.6, 0.3], true);
+        assert_eq!(i, 3);
+        assert_eq!(s.selection, Some(3));
+        assert_eq!((s.doc.samples[3].x, s.doc.samples[3].y), (3.0, 0.5));
+        assert_eq!(s.stack.undo_description().as_deref(), Some("Add Sample"));
+        let j = s.add_sample_at([2.6, 0.3], false);
+        assert_eq!((s.doc.samples[j].x, s.doc.samples[j].y), (2.6, 0.3));
+        s.undo();
+        s.undo();
+        assert_eq!(s.doc.samples.len(), 3);
+    }
+
+    #[test]
+    fn preview_point_clamps_and_reports_the_compiled_weights() {
+        let mut s = state();
+        s.set_preview([9.0, -3.0]);
+        assert_eq!(s.preview_point, Some([6.0, -1.0]));
+        s.set_preview([4.0, 0.0]);
+        let ws = s.preview_weights();
+        let expect = s.compiled.as_ref().expect("compiled").weights([4.0, 0.0]);
+        assert_eq!(ws, expect.as_slice().to_vec());
+        assert!((ws.iter().map(|w| w.1).sum::<f32>() - 1.0).abs() < 1e-5);
+        s.clear_preview();
+        assert!(s.preview_weights().is_empty());
+    }
+
+    #[test]
+    fn binding_prefers_a_selected_runtime_then_the_first_referencing_plan() {
+        let rts = [(1, false), (2, true), (3, true)];
+        assert_eq!(resolve_blend_space_bind(&[1], &rts), Some(1), "selected runtime wins even without a reference");
+        assert_eq!(resolve_blend_space_bind(&[9, 3], &rts), Some(3));
+        assert_eq!(resolve_blend_space_bind(&[9], &rts), Some(2), "first plan that references the space");
+        assert_eq!(resolve_blend_space_bind(&[], &[(1, false)]), None);
     }
 }

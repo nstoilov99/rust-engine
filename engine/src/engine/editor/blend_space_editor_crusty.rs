@@ -6,10 +6,12 @@
 //! the divisions, the compiled triangulation and the samples as dots. A
 //! footer line under the canvas carries the compile status.
 //!
-//! This ticket's canvas is static: hit-testing, dragging and the preview
-//! point are ticket 05, which adds them inside [`canvas`]'s scope body
-//! (interact first, draw second — the curve plot's order) using
-//! [`doc_to_world`] / [`world_to_doc`] for the mapping.
+//! The canvas (ticket 05) is the authoring surface: click selects a sample,
+//! drag moves it snapped to the grid (Shift bypasses; one undo entry on
+//! release), right-click adds or deletes, Ctrl+click/drag places the green
+//! preview point the host drives the bound entity from. Interact first, draw
+//! second — the curve plot's order — with [`doc_to_world`] /
+//! [`world_to_doc`] as the mapping.
 //!
 //! Policy lives in `blend_space_editor`: field gestures, edits and the
 //! compiled space are decided — and tested — there. This file draws.
@@ -25,7 +27,7 @@ use crusty_gui::widgets::{
     TextEdit,
 };
 
-use super::blend_space_editor::{BlendSpaceEditorState, Field, FieldEvent};
+use super::blend_space_editor::{BlendSpaceEditorState, CanvasMenu, Field, FieldEvent};
 use super::theme::tokens::{asset_color, grid_major, grid_minor};
 use super::theme::Palette;
 use super::widgets::segmented_control;
@@ -41,8 +43,15 @@ pub const WORLD_H: f32 = 500.0;
 /// World height of the one-axis strip.
 pub const WORLD_H_1D: f32 = 120.0;
 /// Screen margin the fit leaves for the border labels.
-const FIT_MARGIN: f32 = 56.0;
+const FIT_MARGIN: f32 = 72.0;
 const SAMPLE_R: f32 = 5.0;
+/// Half-size of a sample's hit box.
+const SAMPLE_HIT: f32 = 9.0;
+const ARROW_LEN: f32 = 22.0;
+const ARROW_HEAD: f32 = 6.0;
+const ARROW_GAP: f32 = 8.0;
+/// Footer "Clear preview" button width.
+const CLEAR_W: f32 = 96.0;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 8.0;
 const TOAST_MS: f32 = 1800.0;
@@ -77,6 +86,7 @@ pub fn blend_space_editor_panel(
         ctx;
     let mut out = BlendSpaceEditorOutput::default();
     let panel_id = Id::new("engine_blend_space_editor").with(state.path.as_str());
+    state.shown = true;
     let opts = UiOptions { padding: Vec2::ZERO, spacing: 0.0 };
     ui.run_at(tab_rect, Direction::TopDown, panel_id, opts, |ui| {
         let s = (ui.style().metrics.row_height / 22.0).max(0.1);
@@ -523,24 +533,230 @@ fn canvas(ui: &mut Ui, rect: Rect, s: f32, selection: Color, state: &mut BlendSp
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             Canvas::new().size(rect.size()).zoom_range(ZOOM_MIN, ZOOM_MAX).show(ui, &mut view, |ui, scope| {
-                // Ticket 05: interact here, before drawing.
+                // Interact first, draw second: a drag renders where it landed.
+                interact(ui, scope, s, state);
                 draw_frame_and_grid(ui, scope, s, state, &st);
-                draw_triangulation(ui, scope, state, &st);
+                draw_triangulation(ui, scope, s, state, &st);
                 draw_samples(ui, scope, s, selection, state, &st);
+                draw_hint(ui, scope, state, &st);
             });
         },
     );
     state.view = view;
+    canvas_menu(ui, state);
+}
+
+/// Everything the pointer does on the canvas. Primary only — the `Canvas`
+/// owns middle/right-drag pans and the wheel; a right release that was not
+/// a pan arrives as `scope.right_clicked()`.
+fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEditorState) {
+    let input = &ui.ctx().input;
+    let ctrl = input.modifiers.contains(Modifiers::CTRL);
+    let shift = input.modifiers.contains(Modifiers::SHIFT);
+    let pointer = input.pointer_pos;
+    let pointer_down = input.pointer_down;
+    let pressed = input.pointer_pressed;
+    let escape = input.key_pressed(UiKey::Escape);
+    // Space+primary is the canvas's own pan: no authoring gesture starts under it.
+    let panning = input.key_down(UiKey::Space);
+    let modal = ui.ctx().modal_any_open();
+    let text_focused = ui.ctx().text_focused();
+    state.hovered = None;
+
+    // Escape: abandon the gesture in flight, else drop the preview point.
+    // A canvas gesture, not a bound action, so it works docked and floated.
+    if escape && !modal && !text_focused {
+        if state.drag.is_some() {
+            state.cancel_drag();
+        } else if state.preview_drag {
+            state.preview_drag = false;
+        } else {
+            state.clear_preview();
+        }
+        return;
+    }
+    let to_doc = |doc: &BlendSpaceDoc, p: Pos2| world_to_doc(doc, scope.screen_to_world(p));
+
+    // A live gesture owns the pointer: no hit test can steal it mid-drag.
+    if state.drag.is_some() {
+        if let Some(p) = pointer {
+            let d = to_doc(&state.doc, p);
+            state.drag_to(d, !shift);
+        }
+        if !pointer_down {
+            state.end_drag();
+        }
+        return;
+    }
+    if state.preview_drag {
+        if let Some(p) = pointer {
+            let d = to_doc(&state.doc, p);
+            state.set_preview(d);
+        }
+        if !pointer_down {
+            state.preview_drag = false;
+        }
+        return;
+    }
+
+    let r = scope.rect();
+    let hit_r = SAMPLE_HIT * s;
+    let hits: Vec<(usize, Rect)> = state
+        .doc
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(i, sm)| {
+            let c = scope.world_to_screen(doc_to_world(&state.doc, [sm.x, sm.y]));
+            (i, Rect::from_center_size(c, Vec2::splat(hit_r * 2.0)))
+        })
+        .filter(|(_, b)| r.intersect(*b).width() > 0.0)
+        .collect();
+    // Overlapping dots: the last drawn (highest index) wins hover, press
+    // and right-click alike.
+    let mut press: Option<usize> = None;
+    for (i, b) in &hits {
+        let id = ui.alloc_id(("bs_sample", *i));
+        let resp = ui.interact(id, *b);
+        if resp.hovered {
+            state.hovered = Some(*i);
+        }
+        if resp.pressed && pressed && !panning {
+            press = Some(*i);
+        }
+    }
+    if let (Some(i), false) = (state.hovered, pointer_down) {
+        let sm = &state.doc.samples[i];
+        let name = if sm.clip.is_empty() { "(no clip)".to_string() } else { clip_stem(&sm.clip) };
+        let text = if state.doc.is_2d() {
+            format!("{name}  \u{00B7}  {} {:.2}  {} {:.2}", state.doc.axes[0].name, sm.x, state.doc.axes[1].name, sm.y)
+        } else {
+            format!("{name}  \u{00B7}  {} {:.2}", state.doc.axes[0].name, sm.x)
+        };
+        if let Some((_, b)) = hits.iter().find(|(k, _)| *k == i) {
+            crusty_gui::widgets::show_tooltip_for(ui, *b, &text);
+        }
+    }
+
+    // Right-click: the menu for what is under the pointer. `CanvasScope`
+    // has already decided this release was a click and not a pan.
+    if let Some(p) = scope.right_clicked() {
+        let sample = hits.iter().rev().find(|(_, b)| b.contains(p)).map(|(i, _)| *i);
+        if sample.is_some() {
+            state.selection = sample;
+        }
+        let at = to_doc(&state.doc, p);
+        state.menu = Some(CanvasMenu { open_at: Some([p.x, p.y]), at, sample, snap: !shift });
+        return;
+    }
+
+    if let Some(i) = press {
+        if ctrl {
+            let sm = &state.doc.samples[i];
+            let d = [sm.x, sm.y];
+            state.preview_drag = true;
+            state.set_preview(d);
+        } else {
+            state.begin_drag(i);
+        }
+        return;
+    }
+    // Background press: Ctrl places the preview point, plain deselects.
+    let Some(p) = pointer.filter(|p| r.contains(*p)) else { return };
+    if pressed && !modal && !panning {
+        if ctrl {
+            let d = to_doc(&state.doc, p);
+            state.preview_drag = true;
+            state.set_preview(d);
+        } else {
+            state.selection = None;
+        }
+    }
+}
+
+/// The right-click menu: "Add sample here" on the background, "Delete
+/// sample" on a sample, and the preview point (set here / clear) — the
+/// discoverable route to what Ctrl+click does.
+fn canvas_menu(ui: &mut Ui, state: &mut BlendSpaceEditorState) {
+    let Some(mut m) = state.menu else { return };
+    let open_at = m.open_at.take().map(|a| Pos2::new(a[0], a[1]));
+    state.menu = Some(m);
+    let has_preview = state.preview_point.is_some();
+    let (mut add, mut delete, mut preview, mut clear) = (false, false, false, false);
+    crusty_gui::widgets::context_menu_at(ui, ("bs_canvas_menu", state.path.as_str()), open_at, |ui| {
+        match m.sample {
+            Some(_) => delete = ui.menu_item("Delete sample"),
+            None => add = ui.menu_item("Add sample here"),
+        }
+        ui.separator();
+        preview = ui.menu_item("Set preview point here");
+        if has_preview {
+            clear = ui.menu_item("Clear preview point");
+        }
+    });
+    if add {
+        state.add_sample_at(m.at, m.snap);
+        state.menu = None;
+    }
+    if preview {
+        state.set_preview(m.at);
+        state.menu = None;
+    }
+    if delete {
+        if let Some(i) = m.sample {
+            state.remove_sample(i);
+        }
+        state.menu = None;
+    }
+    if clear {
+        state.clear_preview();
+        state.menu = None;
+    }
+}
+
+/// Text on the canvas' top-left: the Ctrl hint at rest, the live input
+/// readout while a preview point is set.
+fn draw_hint(ui: &mut Ui, scope: &CanvasScope, state: &BlendSpaceEditorState, st: &Style) {
+    let pad = st.spacing.padding;
+    let at = scope.rect().min + Vec2::splat(pad);
+    let mut p = ui.painter();
+    match state.preview_point {
+        None => {
+            p.text(at, "Hold Ctrl to set the preview point", st.fonts.small, st.palette.text_disabled, None);
+        }
+        Some(pt) => {
+            let text = state
+                .doc
+                .active_axes()
+                .iter()
+                .enumerate()
+                .map(|(k, a)| format!("{} {:.2}", a.name, pt[k]))
+                .collect::<Vec<_>>()
+                .join("  \u{00B7}  ");
+            let size = p.measure_text_family(&text, st.fonts.small, None, FontFamily::Mono) + Vec2::splat(pad * 1.2);
+            let r = Rect::from_min_size(at, size);
+            p.rect_filled(r, st.rounding.small, st.palette.elevated);
+            p.rect_stroke(r, st.rounding.small, st.metrics.border, Palette::invariant_status().success);
+            p.text_family(r.min + Vec2::splat(pad * 0.6), &text, st.fonts.small, st.palette.text, None, FontFamily::Mono);
+            p.text(
+                Pos2::new(r.max.x + pad, r.min.y + pad * 0.6),
+                "Esc clears",
+                st.fonts.small,
+                st.palette.text_disabled,
+                None,
+            );
+        }
+    }
 }
 
 fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSpaceEditorState, st: &Style) {
     let doc = &state.doc;
     let size = world_size(doc);
     let frame = scope.world_rect_to_screen(Rect::from_min_size(Pos2::new(0.0, 0.0), size));
-    let bg = st.palette.window;
+    let bg = st.palette.panel;
     let small = st.fonts.small;
     let mut p = ui.painter();
-    p.rect_filled(frame, 0.0, st.palette.panel);
+    p.rect_filled(frame, 0.0, bg);
 
     let ax = &doc.axes[0];
     for i in 1..ax.grid_divisions.max(1) {
@@ -560,8 +776,9 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
     }
     p.rect_stroke(frame, 0.0, st.metrics.border, grid_major(bg, true));
 
-    // Border labels: range ends in mono, axis name (and the parameter it
-    // reads, when that differs) centred on the edge.
+    // Border labels: range ends in mono at the corners, the axis name (and
+    // the parameter it reads, when that differs) centred on the edge between
+    // a pair of arrows — the mockup's "← Yaw →".
     let mono = FontFamily::Mono;
     let secondary = st.palette.text_secondary;
     let fmt = |v: f32| format!("{v:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
@@ -570,9 +787,19 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
     let max_label = fmt(ax.max);
     let mw = p.measure_text_family(&max_label, small, None, mono).x;
     p.text_family(Pos2::new(frame.max.x - mw, below), &max_label, small, secondary, None, mono);
-    let title = axis_title(ax);
-    let tw = p.measure_text(&title, st.fonts.body, None).x;
-    p.text(Pos2::new(frame.center().x - tw * 0.5, below + small * 1.4 * s), &title, st.fonts.body, st.palette.text, None);
+    let tw = p.measure_text(&ax.name, st.fonts.body, None).x;
+    let ty = below + small * 1.4 * s;
+    let tx = frame.center().x - tw * 0.5;
+    p.text(Pos2::new(tx, ty), &ax.name, st.fonts.body, st.palette.text, None);
+    let mid = ty + st.fonts.body * 0.62;
+    let gap = ARROW_GAP * s;
+    let len = ARROW_LEN * s;
+    arrow(&mut p, Pos2::new(tx - gap, mid), Pos2::new(tx - gap - len, mid), s, secondary);
+    arrow(&mut p, Pos2::new(tx + tw + gap, mid), Pos2::new(tx + tw + gap + len, mid), s, secondary);
+    if let Some(param) = param_note(ax) {
+        let pw = p.measure_text_family(&param, small, None, mono).x;
+        p.text_family(Pos2::new(frame.center().x - pw * 0.5, ty + st.fonts.body * 1.35), &param, small, secondary, None, mono);
+    }
 
     if doc.is_2d() {
         let ay = &doc.axes[1];
@@ -583,70 +810,121 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
         let hi = fmt(ay.max);
         let hw = p.measure_text_family(&hi, small, None, mono).x;
         p.text_family(Pos2::new(right - hw, frame.min.y), &hi, small, secondary, None, mono);
-        let title = axis_title(ay);
-        p.text(Pos2::new(frame.min.x, frame.min.y - st.fonts.body * 1.5 * s), &title, st.fonts.body, st.palette.text, None);
+        // Name stacked between an up and a down arrow, left of the frame;
+        // the arrows step aside when the frame is too short to hold the
+        // stack clear of the range labels.
+        let tw = p.measure_text(&ay.name, st.fonts.body, None).x;
+        let cx = right - hw.max(lw) - small - tw.max(len) * 0.5;
+        let cy = frame.center().y;
+        let half = st.fonts.body * 0.62;
+        p.text(Pos2::new(cx - tw * 0.5, cy - half), &ay.name, st.fonts.body, st.palette.text, None);
+        if frame.height() > 2.0 * (half + gap + len) + 3.0 * small {
+            arrow(&mut p, Pos2::new(cx, cy - half - gap), Pos2::new(cx, cy - half - gap - len), s, secondary);
+            arrow(&mut p, Pos2::new(cx, cy + half + gap), Pos2::new(cx, cy + half + gap + len), s, secondary);
+        }
+        if let Some(param) = param_note(ay) {
+            let pw = p.measure_text_family(&param, small, None, mono).x;
+            p.text_family(Pos2::new(cx - pw * 0.5, cy + half + st.fonts.body * 0.2), &param, small, secondary, None, mono);
+        }
     }
 }
 
-fn axis_title(a: &BlendAxis) -> String {
-    if a.param.is_empty() || a.param == a.name {
-        a.name.clone()
-    } else {
-        format!("{} \u{2190} {}", a.name, a.param)
+/// A thin line from `from` to `to` with a filled head at `to`.
+fn arrow(p: &mut crusty_gui::paint::Painter, from: Pos2, to: Pos2, s: f32, color: Color) {
+    let d = to - from;
+    let l = (d.x * d.x + d.y * d.y).sqrt();
+    if l < 1e-3 {
+        return;
     }
+    let (ux, uy) = (d.x / l, d.y / l);
+    let head = ARROW_HEAD * s;
+    let base = Pos2::new(to.x - ux * head, to.y - uy * head);
+    p.line_segment(from, base, 1.0 * s, color);
+    let (nx, ny) = (-uy * head * 0.5, ux * head * 0.5);
+    p.triangle(to, Pos2::new(base.x + nx, base.y + ny), Pos2::new(base.x - nx, base.y - ny), color);
 }
 
-fn draw_triangulation(ui: &mut Ui, scope: &CanvasScope, state: &BlendSpaceEditorState, st: &Style) {
+/// The parameter an axis reads, when it is not simply the axis name.
+fn param_note(a: &BlendAxis) -> Option<String> {
+    (!a.param.is_empty() && a.param != a.name).then(|| format!("\u{2190} {}", a.param))
+}
+
+/// Interior Delaunay edges in the quiet stroke, the hull loop stronger —
+/// the region the input clamps to reads as the boundary it is.
+fn draw_triangulation(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSpaceEditorState, st: &Style) {
     let Ok(space) = &state.compiled else { return };
     let doc = &state.doc;
     let at = |i: usize| scope.world_to_screen(doc_to_world(doc, space.points()[i]));
-    let color = st.palette.stroke_strong;
     let mut p = ui.painter();
-    if space.triangles().is_empty() {
-        // Line-shaped set: hull is its two extremes.
-        let hull = space.hull();
-        if hull.len() == 2 {
-            p.line_segment(at(hull[0]), at(hull[1]), st.metrics.border, color);
-        }
-        return;
-    }
+    let hull = space.hull();
     for t in space.triangles() {
-        p.polygon_stroke(&[at(t[0]), at(t[1]), at(t[2])], st.metrics.border, color);
+        p.polygon_stroke(&[at(t[0]), at(t[1]), at(t[2])], st.metrics.border, st.palette.stroke);
+    }
+    match hull.len() {
+        0 | 1 => {}
+        2 => p.line_segment(at(hull[0]), at(hull[1]), 1.5 * s, st.palette.stroke_strong),
+        _ => {
+            let pts: Vec<Pos2> = hull.iter().map(|i| at(*i)).collect();
+            p.polygon_stroke(&pts, 1.5 * s, st.palette.stroke_strong);
+        }
     }
 }
 
 fn draw_samples(ui: &mut Ui, scope: &CanvasScope, s: f32, selection: Color, state: &BlendSpaceEditorState, st: &Style) {
     let doc = &state.doc;
     let fill = asset_color("animation");
+    let success = Palette::invariant_status().success;
     let r = SAMPLE_R * s;
-    let label_px = scope.label_size(st.fonts.small);
+    let label_px = scope.label_size(st.fonts.small).unwrap_or(st.fonts.small);
+    let weights = state.preview_weights();
     let mut p = ui.painter();
     for (i, sm) in doc.samples.iter().enumerate() {
         let c = scope.world_to_screen(doc_to_world(doc, [sm.x, sm.y]));
-        p.circle_filled(c, r, fill);
-        if state.selection == Some(i) {
-            p.circle_stroke(c, r + 2.0 * s, 1.5 * s, selection);
+        let weight = weights.iter().find(|(k, _)| *k == i).map(|(_, w)| *w);
+        let selected = state.selection == Some(i);
+        let hovered = state.hovered == Some(i);
+        let radius = if hovered || state.drag.as_ref().is_some_and(|(k, _)| *k == i) { r * 1.25 } else { r };
+        // Contributing samples glow in the preview colour under the dot.
+        if let Some(w) = weight {
+            p.circle_filled(c, radius + (3.0 + 5.0 * w) * s, success.with_alpha(0.25 + 0.35 * w));
         }
-        if let Some(px) = label_px {
-            let mut label = if sm.clip.is_empty() { "\u{2014}".to_string() } else { clip_stem(&sm.clip) };
+        p.circle_filled(c, radius, if sm.clip.is_empty() { st.palette.text_disabled } else { fill });
+        if selected {
+            p.circle_stroke(c, radius + 2.0 * s, 1.5 * s, selection);
+        }
+        if selected || hovered || weight.is_some() {
+            let mut label = if sm.clip.is_empty() { "(no clip)".to_string() } else { clip_stem(&sm.clip) };
             if let Some(n) = &sm.clip_name {
                 label = format!("{label}:{n}");
             }
-            let w = p.measure_text(&label, px, None).x;
-            p.text(Pos2::new(c.x - w * 0.5, c.y + r + 2.0 * s), &label, px, st.palette.text_secondary, None);
+            let w = p.measure_text(&label, label_px, None).x;
+            p.text(Pos2::new(c.x - w * 0.5, c.y + radius + 3.0 * s), &label, label_px, st.palette.text, None);
+        }
+        if let Some(w) = weight {
+            let pct = format!("{:.0}%", w * 100.0);
+            let pw = p.measure_text_family(&pct, label_px, None, FontFamily::Mono).x;
+            p.text_family(Pos2::new(c.x - pw * 0.5, c.y - radius - label_px - 3.0 * s), &pct, label_px, success, None, FontFamily::Mono);
         }
     }
     if let Some(pt) = state.preview_point {
         let c = scope.world_to_screen(doc_to_world(doc, pt));
-        p.circle_filled(c, r * 0.9, Palette::invariant_status().success);
+        // Crosshair ticks tie the point to the axes it reads.
+        let t = SAMPLE_R * 2.2 * s;
+        p.line_segment(Pos2::new(c.x - t, c.y), Pos2::new(c.x + t, c.y), 1.0 * s, success.with_alpha(0.7));
+        p.line_segment(Pos2::new(c.x, c.y - t), Pos2::new(c.x, c.y + t), 1.0 * s, success.with_alpha(0.7));
+        p.circle_filled(c, r * 0.9, success);
+        p.circle_stroke(c, r * 0.9, 1.0 * s, st.palette.window);
     }
 }
 
-fn footer(ui: &mut Ui, rect: Rect, s: f32, state: &BlendSpaceEditorState) {
+fn footer(ui: &mut Ui, rect: Rect, s: f32, state: &mut BlendSpaceEditorState) {
     let st = ui.style();
-    let mut p = ui.painter();
-    p.rect_filled(rect, 0.0, st.palette.panel);
-    p.line_segment(rect.min, Pos2::new(rect.max.x, rect.min.y), st.metrics.border, st.palette.stroke);
+    let pad = st.spacing.padding;
+    {
+        let mut p = ui.painter();
+        p.rect_filled(rect, 0.0, st.palette.panel);
+        p.line_segment(rect.min, Pos2::new(rect.max.x, rect.min.y), st.metrics.border, st.palette.stroke);
+    }
     let (text, color) = match &state.compiled {
         Ok(space) => (
             format!(
@@ -660,12 +938,43 @@ fn footer(ui: &mut Ui, rect: Rect, s: f32, state: &BlendSpaceEditorState) {
         ),
         Err(e) => (format!("\u{26A0} {e}"), Palette::invariant_status().warning),
     };
-    p.text_family(
-        Pos2::new(rect.min.x + st.spacing.padding, rect.center().y - st.fonts.small * 0.62),
+    let mut right = rect.max.x - pad;
+    if state.preview_point.is_some() {
+        // The clear affordance and the binding hint, right-aligned.
+        let bw = CLEAR_W * s;
+        let bh = (rect.height() - 4.0 * s).min(st.metrics.control_height);
+        let brect = Rect::from_min_size(Pos2::new(right - bw, rect.center().y - bh * 0.5), Vec2::new(bw, bh));
+        let mut clear = false;
+        let id = ui.alloc_id(("bs_footer_clear", state.path.as_str()));
+        ui.run_at(brect, Direction::LeftToRight, id, UiOptions { padding: Vec2::ZERO, spacing: 0.0 }, |ui| {
+            clear = Button::new("Clear preview").exact_size(brect.size()).ghost().show(ui).clicked;
+        });
+        if clear {
+            state.clear_preview();
+        }
+        right = brect.min.x - pad;
+        let (hint, hint_color) = match &state.preview_bound {
+            Some(name) => (
+                format!("Previewing on {}", if name.is_empty() { "(unnamed)" } else { name }),
+                Palette::invariant_status().success,
+            ),
+            None => (
+                "Select an entity whose Animation Graph Runner uses this blend space to preview"
+                    .to_string(),
+                Palette::invariant_status().warning,
+            ),
+        };
+        let mut p = ui.painter();
+        let hw = p.measure_text(&hint, st.fonts.small, None).x;
+        p.text(Pos2::new(right - hw, rect.center().y - st.fonts.small * 0.62), &hint, st.fonts.small, hint_color, None);
+        right -= hw + pad;
+    }
+    ui.painter().text_family(
+        Pos2::new(rect.min.x + pad, rect.center().y - st.fonts.small * 0.62),
         &text,
         st.fonts.small,
         color,
-        Some(rect.width() - st.spacing.padding * 2.0 * s),
+        Some((right - rect.min.x - pad * 2.0).max(0.0)),
         FontFamily::Mono,
     );
 }

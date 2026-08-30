@@ -3856,10 +3856,9 @@ impl App {
                 .collect();
             let anim_instances =
                 anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
-            let anim_previews = {
-                let picked: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
-                anim_preview_bindings(&*world, &picked, &anim_tabs, &anim_instances)
-            };
+            let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+            let anim_previews =
+                anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
@@ -4472,6 +4471,7 @@ impl App {
             // bound runtimes — after the UI, when the world is reachable
             // again. Runtime-only writes; next frame's tick reads them.
             apply_anim_param_edits(&mut *world, graph_editors, &anim_previews);
+            drive_blend_space_previews(&mut *world, &*world_resources, &picked_bits, blend_space_editors);
             self.crusty_menu_action = crusty_menu_action;
             crusty_result
         };
@@ -6004,10 +6004,9 @@ impl App {
             .collect();
         let anim_instances =
             anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
-        let anim_previews = {
-            let picked: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
-            anim_preview_bindings(&*world, &picked, &anim_tabs, &anim_instances)
-        };
+        let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+        let anim_previews =
+            anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
         let mut graph_clear_trace: Option<String> = None;
         let mut graph_open_requests: Vec<
             rust_engine::engine::editor::graph_editor::GraphOpenRequest,
@@ -6369,6 +6368,10 @@ impl App {
         // Ticket 06, float-window path: same edit delivery as the docked one
         // — done here because the world is mutably reachable again.
         apply_anim_param_edits(core.game_world.hecs_mut(), graph_editors, &anim_previews);
+        {
+            let (world, resources) = core.game_world.world_and_resources_mut();
+            drive_blend_space_previews(world, &*resources, &picked_bits, blend_space_editors);
+        }
 
         // GS-4, float-window path: same delivery as the docked one — the bound
         // instance gets this tab's breakpoints, everyone else gets an empty
@@ -8292,6 +8295,67 @@ fn apply_anim_param_edits(
         if let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(entity) {
             for e in &edits {
                 e.apply(&mut rt.params);
+            }
+        }
+    }
+}
+
+/// Drive the viewport from every shown blend space tab's preview point
+/// (Task 41.5 ticket 05). Binding: the first selected entity with an
+/// animation runtime, else the first runtime whose plan blends through this
+/// `.blendspace`. Parameters only — `SetFloat` per live axis, every frame
+/// the point is set (ADR 0002: never states). The tab's `shown` flag is
+/// consumed here so a tab hidden behind another stops driving.
+#[cfg(feature = "editor")]
+fn drive_blend_space_previews(
+    world: &mut hecs::World,
+    resources: &rust_engine::engine::ecs::resources::Resources,
+    selected: &[u64],
+    editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
+) {
+    use rust_engine::engine::animation::graph::{AnimGraphRuntime, BlendSpaceCache};
+    use rust_engine::engine::ecs::components::Name;
+    use rust_engine::engine::editor::anim_preview::{plan_references_space, AnimParamEdit};
+    use rust_engine::engine::editor::blend_space_editor::resolve_blend_space_bind;
+    for st in editors.values_mut() {
+        // A tab this pass did not draw keeps whatever the pass that drew it
+        // decided (docked and float passes both land here every frame).
+        if !std::mem::take(&mut st.shown) {
+            continue;
+        }
+        let Some(point) = st.preview_point else {
+            st.preview_bound = None;
+            continue;
+        };
+        let space = resources
+            .get::<BlendSpaceCache>()
+            .and_then(|c| c.peek(&st.path))
+            .and_then(Result::ok);
+        let runtimes: Vec<(u64, bool)> = world
+            .query::<&AnimGraphRuntime>()
+            .iter()
+            .map(|(e, rt)| {
+                (
+                    e.to_bits().get(),
+                    space.as_ref().is_some_and(|sp| plan_references_space(&rt.plan, sp)),
+                )
+            })
+            .collect();
+        let bound = resolve_blend_space_bind(selected, &runtimes)
+            .and_then(hecs::Entity::from_bits);
+        st.preview_bound = bound.map(|e| {
+            world
+                .get::<&Name>(e)
+                .map(|n| n.0.clone())
+                .unwrap_or_default()
+        });
+        let Some(entity) = bound else { continue };
+        if let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(entity) {
+            for (k, axis) in st.doc.active_axes().iter().enumerate() {
+                AnimParamEdit::SetFloat(axis.param_name().to_string(), point[k]).apply(&mut rt.params);
             }
         }
     }

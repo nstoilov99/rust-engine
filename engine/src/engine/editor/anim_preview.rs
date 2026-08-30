@@ -159,6 +159,21 @@ fn collect_expr(e: &RuleExpr, slug: &str, out: &mut Vec<f32>) {
     }
 }
 
+/// Does any state of `plan` (nested machines included) blend through
+/// `space` — the compiled `.blendspace` the cache holds for a path? Identity
+/// by `Arc`: a plan compiles the cache's entry in, so pointer equality is
+/// the reference.
+pub fn plan_references_space(
+    plan: &AnimGraphPlan,
+    space: &std::sync::Arc<crate::engine::animation::blend_space::BlendSpace>,
+) -> bool {
+    plan.states.iter().any(|st| match &st.source {
+        PoseSource::Tree(PlanTree::Space(sp)) => std::sync::Arc::ptr_eq(&sp.space, space),
+        PoseSource::Tree(_) => false,
+        PoseSource::Machine { plan: child, .. } => plan_references_space(child, space),
+    })
+}
+
 /// Build the frame's preview from a runtime. Pure over the runtime — the
 /// world queries below are the only ECS-facing pieces.
 pub fn preview_from_runtime(rt: &AnimGraphRuntime, name: String, id: u64) -> AnimPreview {
