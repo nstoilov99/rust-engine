@@ -22,11 +22,14 @@ use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::input::{Key as UiKey, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
+use crusty_gui::paint::{PaintCmd, TextureId};
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{Button, ComboBox, DragValue, ScrollArea, SelectableValue, TextEdit};
 
 use super::blend_space_editor::{BlendSpaceEditorState, CanvasMenu, Field, FieldEvent};
+use super::blend_space_preview::{clamp_split, stem, MIN_PANE};
+use super::mesh_editor_crusty::orbit_controls;
 use super::theme::tokens::{asset_color, grid_major, grid_minor};
 use super::theme::Palette;
 use super::widgets::segmented_control;
@@ -36,6 +39,14 @@ use crate::engine::animation::blend_space::{BlendAxis, BlendSample, BlendSpaceDo
 const DETAILS_W: f32 = 300.0;
 const LABEL_W: f32 = 84.0;
 const FOOTER_H: f32 = 24.0;
+/// The preview/plot splitter's drawn height and its (taller) grab target.
+const SPLITTER_H: f32 = 6.0;
+const SPLITTER_HIT: f32 = 14.0;
+/// The preview pane's bottom control bar (play/pause, clock, hint).
+const PREVIEW_BAR_H: f32 = 30.0;
+/// The mesh editor's clear colour — the pane reads as the same viewport
+/// while nothing is rendered into it yet.
+const PREVIEW_BG: Color = Color::rgb(0.16, 0.16, 0.18);
 /// Margins the plot frame leaves in the canvas for the axis labels: the
 /// Y column (name, arrows, range) on the left, the X row underneath, the
 /// Ctrl hint / readout on top.
@@ -67,6 +78,12 @@ pub struct BlendSpaceEditorPanelCtx<'a> {
     /// Content-relative `.anim` paths from the asset registry — the Clip
     /// dropdown's rows.
     pub anim_assets: &'a [String],
+    /// Content-relative `.mesh` paths — the Preview Mesh dropdown's rows and
+    /// the auto-pick candidates.
+    pub mesh_assets: &'a [String],
+    /// The preview render target's id in *this window's* crusty registry
+    /// (`None` until the host registered it).
+    pub texture: Option<TextureId>,
     /// `selection.outline` from the live theme (crusty's `Style` has none).
     pub selection_outline: Color,
     /// This tab is the focused tab of its dock (gates keyboard editing).
@@ -81,23 +98,36 @@ pub fn blend_space_editor_panel(
     tab_rect: Rect,
     ctx: BlendSpaceEditorPanelCtx,
 ) -> BlendSpaceEditorOutput {
-    let BlendSpaceEditorPanelCtx { state, anim_assets, selection_outline, focused, handle_shortcuts } =
-        ctx;
+    let BlendSpaceEditorPanelCtx {
+        state,
+        anim_assets,
+        mesh_assets,
+        texture,
+        selection_outline,
+        focused,
+        handle_shortcuts,
+    } = ctx;
     let mut out = BlendSpaceEditorOutput::default();
     let panel_id = Id::new("engine_blend_space_editor").with(state.path.as_str());
     state.shown = true;
+    state.tick_preview(mesh_assets);
     let opts = UiOptions { padding: Vec2::ZERO, spacing: 0.0 };
     ui.run_at(tab_rect, Direction::TopDown, panel_id, opts, |ui| {
         let s = (ui.style().metrics.row_height / 22.0).max(0.1);
         let side_w = (DETAILS_W * s).min(tab_rect.width() * 0.5);
         let side = Rect::from_min_size(tab_rect.min, Vec2::new(side_w, tab_rect.height()));
-        details(ui, side, s, panel_id, state, anim_assets);
+        details(ui, side, s, panel_id, state, anim_assets, mesh_assets);
 
         let foot = Rect::from_min_max(
             Pos2::new(side.max.x, tab_rect.max.y - FOOTER_H * s),
             tab_rect.max,
         );
-        let plot = Rect::from_min_max(Pos2::new(side.max.x, tab_rect.min.y), Pos2::new(tab_rect.max.x, foot.min.y));
+        // The right-hand column: the 3D preview on top, the plot below,
+        // a draggable splitter between them (the Unreal layout).
+        let column = Rect::from_min_max(Pos2::new(side.max.x, tab_rect.min.y), Pos2::new(tab_rect.max.x, foot.min.y));
+        let (pane, bar, plot) = split_column(column, state.preview.split, s);
+        preview_pane(ui, pane, s, panel_id, state, texture);
+        splitter(ui, bar, column, s, state);
         canvas(ui, plot, s, selection_outline, state);
         footer(ui, foot, s, state);
         draw_toast(ui, plot, state);
@@ -118,6 +148,7 @@ fn details(
     panel_id: Id,
     state: &mut BlendSpaceEditorState,
     anim_assets: &[String],
+    mesh_assets: &[String],
 ) {
     let st = ui.style();
     let pad = st.spacing.padding;
@@ -156,9 +187,75 @@ fn details(
                         FieldEvent::None => {}
                     }
                 }
+                ui.add_space(pad);
+                section_header(ui, w, &st, "PREVIEW");
+                preview_mesh_row(ui, w, s, &st, state, mesh_assets);
             });
         },
     );
+}
+
+/// "Mesh" + a dropdown of the project's `.mesh` files, "(auto)" first.
+/// Picking one is a document edit ("Set Preview Mesh").
+fn preview_mesh_row(
+    ui: &mut Ui,
+    w: f32,
+    s: f32,
+    st: &Style,
+    state: &mut BlendSpaceEditorState,
+    mesh_assets: &[String],
+) {
+    let row = ui.allocate(Vec2::new(w, st.metrics.control_height));
+    row_label_at(ui, row, s, st, "Mesh");
+    let current = state.doc.preview_mesh.clone();
+    let shown = if current.is_empty() {
+        match &state.preview.mesh {
+            Some(m) => format!("(auto) {}", stem(m)),
+            None => "(auto)".to_string(),
+        }
+    } else {
+        stem(&current)
+    };
+    let mut pick: Option<String> = None;
+    let id = ui.alloc_id(("bs_preview_mesh_row", state.path.as_str()));
+    let combo_w = row.width() - LABEL_W * s;
+    ui.run_at(
+        Rect::from_min_max(Pos2::new(row.min.x + LABEL_W * s, row.min.y), row.max),
+        Direction::LeftToRight,
+        id,
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            ComboBox::new(format!("bs_preview_mesh_{}", state.path))
+                .selected_text(shown)
+                .width(combo_w)
+                .popup_width(combo_w.max(260.0 * s))
+                .show_ui(ui, |ui| {
+                    let mut auto = current.is_empty();
+                    if SelectableValue::new(&mut auto, true, "(auto)").show(ui).clicked {
+                        pick = Some(String::new());
+                    }
+                    for path in mesh_assets {
+                        let mut sel = *path == current;
+                        if SelectableValue::new(&mut sel, true, path.as_str()).show(ui).clicked {
+                            pick = Some(path.clone());
+                        }
+                    }
+                });
+        },
+    );
+    if let Some(mesh) = pick {
+        state.set_preview_mesh(mesh);
+    }
+    if !current.is_empty() && !mesh_assets.iter().any(|p| *p == current) {
+        let r = ui.allocate(Vec2::new(w, st.fonts.small * 1.6));
+        ui.painter().text(
+            r.min,
+            &format!("\u{26A0} {current} not found in project"),
+            st.fonts.small,
+            Palette::invariant_status().warning,
+            Some(w),
+        );
+    }
 }
 
 fn axes_section(ui: &mut Ui, w: f32, s: f32, st: &Style, state: &mut BlendSpaceEditorState) {
@@ -473,6 +570,153 @@ fn clip_stem(clip: &str) -> String {
         .unwrap_or_else(|| clip.to_string())
 }
 
+// ── preview pane + splitter (ticket 08) ─────────────────────────────────────
+
+/// Split the right-hand column into (preview pane, splitter bar, plot) at
+/// `split` (clamped so both panes keep [`MIN_PANE`]).
+pub fn split_column(column: Rect, split: f32, s: f32) -> (Rect, Rect, Rect) {
+    let frac = clamp_split(split, column.height(), (MIN_PANE + SPLITTER_H * 0.5) * s);
+    let y = column.min.y + column.height() * frac;
+    let half = SPLITTER_H * s * 0.5;
+    let pane = Rect::from_min_max(column.min, Pos2::new(column.max.x, y - half));
+    let bar = Rect::from_min_max(Pos2::new(column.min.x, y - half), Pos2::new(column.max.x, y + half));
+    let plot = Rect::from_min_max(Pos2::new(column.min.x, y + half), column.max);
+    (pane, bar, plot)
+}
+
+/// The draggable bar between the preview and the plot; the fraction is
+/// session state on the preview.
+fn splitter(ui: &mut Ui, bar: Rect, column: Rect, s: f32, state: &mut BlendSpaceEditorState) {
+    let st = ui.style();
+    let id = ui.alloc_id(("bs_splitter", state.path.as_str()));
+    // The grab target is taller than the drawn bar — a 6 px line is hard
+    // to catch; the panes underneath only see presses, so overlap is safe.
+    let hit = Rect::from_center_size(bar.center(), Vec2::new(bar.width(), SPLITTER_HIT * s));
+    let resp = ui.interact(id, hit);
+    if resp.pressed {
+        if let Some(p) = ui.ctx().input.pointer_pos {
+            let frac = (p.y - column.min.y) / column.height().max(1.0);
+            state.preview.split = clamp_split(frac, column.height(), (MIN_PANE + SPLITTER_H * 0.5) * s);
+        }
+    }
+    state.preview.split_drag = resp.pressed;
+    let mut p = ui.painter();
+    p.rect_filled(bar, 0.0, st.palette.panel);
+    let line = if resp.hovered || resp.pressed { st.palette.focus_ring } else { st.palette.stroke };
+    let y = bar.center().y;
+    p.line_segment(Pos2::new(bar.min.x, y), Pos2::new(bar.max.x, y), st.metrics.border, line);
+    // A short grip in the middle so the bar reads as draggable.
+    let gw = 24.0 * s;
+    let c = bar.center();
+    p.rect_filled(
+        Rect::from_center_size(c, Vec2::new(gw, 2.0 * s)),
+        1.0 * s,
+        if resp.hovered || resp.pressed { st.palette.focus_ring } else { st.palette.text_disabled },
+    );
+}
+
+/// The 3D preview: the host's render target painted edge to edge, an orbit
+/// camera over it, a name/input chip top-left and a control bar along the
+/// bottom (play/pause, clock). Without a drawable mesh the pane explains
+/// why in its centre instead of showing a broken pose.
+fn preview_pane(
+    ui: &mut Ui,
+    rect: Rect,
+    s: f32,
+    panel_id: Id,
+    state: &mut BlendSpaceEditorState,
+    texture: Option<TextureId>,
+) {
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    ui.painter().rect_filled(rect, 0.0, PREVIEW_BG);
+    let bar = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - PREVIEW_BAR_H * s), rect.max);
+    let view = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, bar.min.y));
+    let input = state.preview_input();
+    let readout = state
+        .doc
+        .active_axes()
+        .iter()
+        .enumerate()
+        .map(|(k, a)| format!("{} {:.2}", a.name, input[k]))
+        .collect::<Vec<_>>()
+        .join("  \u{00B7}  ");
+    let pv = &mut state.preview;
+    if let Some(gpu) = pv.gpu.as_mut() {
+        gpu.size = (rect.width().floor().max(1.0) as u32, rect.height().floor().max(1.0) as u32);
+    }
+    let ready = pv.status.is_none() && pv.gpu.as_ref().is_some_and(|g| !g.mesh_indices.is_empty());
+    let centre = rect.center();
+    let msg_w = (rect.width() - pad * 4.0).max(40.0);
+    // Not drawable: the message alone, like the mesh editor's pane — no
+    // chrome suggesting controls that have nothing to act on.
+    let Some(tex) = texture.filter(|_| ready) else {
+        let (msg, color) = match (&pv.status, ready) {
+            (Some(why), _) => (why.clone(), st.palette.text_secondary),
+            (None, true) => ("Rendering preview\u{2026}".to_string(), st.palette.text_disabled),
+            (None, false) => ("Loading preview\u{2026}".to_string(), st.palette.text_disabled),
+        };
+        centred_text(ui, centre, &msg, st.fonts.body, color, msg_w);
+        return;
+    };
+    ui.painter().paint_mut().push(PaintCmd::Image {
+        rect,
+        uv_min: Pos2::new(0.0, 0.0),
+        uv_max: Pos2::new(1.0, 1.0),
+        tint: Color::WHITE,
+        texture: tex,
+    });
+    if let Some(gpu) = pv.gpu.as_mut() {
+        orbit_controls(ui, view, panel_id.with("bs_orbit"), gpu);
+    }
+
+    // Name + input chip, top-left, bounded by the pane.
+    if let Some(mesh) = pv.mesh.clone() {
+        let text = format!("{}  \u{00B7}  {readout}", stem(&mesh));
+        let mut p = ui.painter();
+        let size = p.measure_text_family(&text, st.fonts.small, Some(msg_w), FontFamily::Mono) + Vec2::splat(pad * 1.2);
+        let r = Rect::from_min_size(rect.min + Vec2::splat(pad), size);
+        p.rect_filled(r, st.rounding.small, st.palette.elevated.with_alpha(0.85));
+        p.text_family(r.min + Vec2::splat(pad * 0.6), &text, st.fonts.small, st.palette.text, Some(msg_w), FontFamily::Mono);
+    }
+
+    // Control bar: play/pause, the clock, the camera hint.
+    ui.painter().rect_filled(bar, 0.0, st.palette.panel.with_alpha(0.85));
+    let bh = (bar.height() - 6.0 * s).min(st.metrics.control_height);
+    let brect = Rect::from_min_size(Pos2::new(bar.min.x + pad, bar.center().y - bh * 0.5), Vec2::new(bh * 1.4, bh));
+    let mut toggle = false;
+    let id = ui.alloc_id(("bs_play", state.path.as_str()));
+    let glyph = if pv.playing { "\u{23F8}" } else { "\u{25B6}" };
+    ui.run_at(brect, Direction::LeftToRight, id, UiOptions { padding: Vec2::ZERO, spacing: 0.0 }, |ui| {
+        toggle = Button::new(glyph).exact_size(brect.size()).ghost().show(ui).clicked;
+    });
+    if toggle {
+        pv.playing = !pv.playing;
+    }
+    let clock = format!("{:.2} s", pv.time());
+    let mut p = ui.painter();
+    p.text_family(
+        Pos2::new(brect.max.x + pad, bar.center().y - st.fonts.small * 0.62),
+        &clock,
+        st.fonts.small,
+        st.palette.text_secondary,
+        None,
+        FontFamily::Mono,
+    );
+    let hint = "Left-drag orbit \u{00B7} Middle-drag pan \u{00B7} Wheel zoom";
+    let hw = p.measure_text(hint, st.fonts.small, None).x;
+    if bar.width() > brect.width() + hw + pad * 6.0 + 80.0 * s {
+        p.text(Pos2::new(bar.max.x - pad - hw, bar.center().y - st.fonts.small * 0.62), hint, st.fonts.small, st.palette.text_disabled, None);
+    }
+}
+
+/// Text centred on `centre`, wrapped to `max_w`.
+fn centred_text(ui: &mut Ui, centre: Pos2, text: &str, font: f32, color: Color, max_w: f32) {
+    let mut p = ui.painter();
+    let size = p.measure_text(text, font, Some(max_w));
+    p.text(Pos2::new(centre.x - size.x * 0.5, centre.y - size.y * 0.5), text, font, color, Some(max_w));
+}
+
 // ── canvas ──────────────────────────────────────────────────────────────────
 
 /// The plot frame: the canvas rect minus the margins the axis labels live
@@ -520,9 +764,8 @@ pub fn screen_to_doc(doc: &BlendSpaceDoc, plot: Rect, p: Pos2) -> [f32; 2] {
     [x, y]
 }
 
-/// The canvas region right of the details column: a fixed plot frame that
-/// stretches with the panel. Ticket 08 splits `rect` here to stack the 3D
-/// preview pane above the plot.
+/// The plot region under the preview pane: a fixed plot frame that
+/// stretches with the panel.
 fn canvas(ui: &mut Ui, rect: Rect, s: f32, selection: Color, state: &mut BlendSpaceEditorState) {
     let st = ui.style();
     let name_w = if state.doc.is_2d() {
@@ -948,7 +1191,7 @@ fn footer(ui: &mut Ui, rect: Rect, s: f32, state: &mut BlendSpaceEditorState) {
     };
     let mut right = rect.max.x - pad;
     if state.preview_point.is_some() {
-        // The clear affordance and the binding hint, right-aligned.
+        // The clear affordance, right-aligned.
         let bw = CLEAR_W * s;
         let bh = (rect.height() - 4.0 * s).min(st.metrics.control_height);
         let brect = Rect::from_min_size(Pos2::new(right - bw, rect.center().y - bh * 0.5), Vec2::new(bw, bh));
@@ -961,17 +1204,15 @@ fn footer(ui: &mut Ui, rect: Rect, s: f32, state: &mut BlendSpaceEditorState) {
             state.clear_preview();
         }
         right = brect.min.x - pad;
-        let (hint, hint_color) = match &state.preview_bound {
-            Some(name) => (
-                format!("Previewing on {}", if name.is_empty() { "(unnamed)" } else { name }),
-                Palette::invariant_status().success,
-            ),
-            None => (
-                "Select an entity whose Animation Graph Runner uses this blend space to preview"
-                    .to_string(),
-                Palette::invariant_status().warning,
-            ),
-        };
+    }
+    // What the pane animates (the scene entity, when one is bound, follows
+    // the same point — it needs no mention here).
+    let (hint, hint_color) = match &state.preview.mesh {
+        Some(m) if state.preview.status.is_none() => (format!("Preview: {}", stem(m)), Palette::invariant_status().success),
+        Some(m) => (format!("Preview: {}", stem(m)), Palette::invariant_status().warning),
+        None => ("Preview: none".to_string(), Palette::invariant_status().warning),
+    };
+    {
         let mut p = ui.painter();
         let hw = p.measure_text(&hint, st.fonts.small, None).x;
         p.text(Pos2::new(right - hw, rect.center().y - st.fonts.small * 0.62), &hint, st.fonts.small, hint_color, None);

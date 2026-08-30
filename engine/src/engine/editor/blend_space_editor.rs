@@ -14,7 +14,9 @@ use std::path::Path;
 use std::time::Instant;
 
 
+use super::blend_space_preview::{preview_input, BlendSpacePreview};
 use super::edit_stack::{EditStack, ReversibleEdit};
+use crate::engine::animation::graph::{AnimAssetLoader, DiskAnimAssets};
 use crate::engine::animation::blend_space::{
     parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
 };
@@ -29,6 +31,7 @@ pub enum BlendSpaceEdit {
     AddSample { index: usize, sample: BlendSample },
     RemoveSample { index: usize, sample: BlendSample },
     SetSample { index: usize, from: BlendSample, to: BlendSample, label: String },
+    SetPreviewMesh { from: String, to: String },
 }
 
 impl ReversibleEdit for BlendSpaceEdit {
@@ -37,6 +40,7 @@ impl ReversibleEdit for BlendSpaceEdit {
     fn apply(&self, doc: &mut BlendSpaceDoc) {
         match self {
             Self::SetAxisCount { to, .. } => doc.axis_count = *to,
+            Self::SetPreviewMesh { to, .. } => doc.preview_mesh = to.clone(),
             Self::SetAxis { axis, to, .. } => {
                 if let Some(a) = doc.axes.get_mut(*axis) {
                     *a = to.clone();
@@ -72,6 +76,7 @@ impl ReversibleEdit for BlendSpaceEdit {
             }
             .apply(doc),
             Self::SetSmoothing { from, to } => Self::SetSmoothing { from: *to, to: *from }.apply(doc),
+            Self::SetPreviewMesh { from, .. } => doc.preview_mesh = from.clone(),
             Self::AddSample { index, sample } => {
                 Self::RemoveSample { index: *index, sample: sample.clone() }.apply(doc)
             }
@@ -93,6 +98,7 @@ impl ReversibleEdit for BlendSpaceEdit {
             Self::SetAxisCount { to, .. } => format!("Set Axes {}", if *to >= 2 { "2D" } else { "1D" }),
             Self::SetAxis { label, .. } | Self::SetSample { label, .. } => label.clone(),
             Self::SetSmoothing { .. } => "Set Smoothing".into(),
+            Self::SetPreviewMesh { .. } => "Set Preview Mesh".into(),
             Self::AddSample { .. } => "Add Sample".into(),
             Self::RemoveSample { .. } => "Delete Sample".into(),
         }
@@ -182,6 +188,13 @@ pub struct BlendSpaceEditorState {
     pub last_saved_at: Option<Instant>,
     /// Transient status line (save failures, undo/redo labels).
     pub toast: Option<(String, Instant)>,
+    /// The embedded 3D preview (ticket 08): skeleton, clock, pose, and the
+    /// host-filled render target.
+    pub preview: BlendSpacePreview,
+    /// The document changed since the preview last rebuilt its plan.
+    preview_stale: bool,
+    /// When the preview last advanced — the frame clock.
+    preview_last_frame: Option<Instant>,
 }
 
 impl BlendSpaceEditorState {
@@ -213,7 +226,54 @@ impl BlendSpaceEditorState {
             clip_names: HashMap::new(),
             last_saved_at: None,
             toast: None,
+            preview: BlendSpacePreview::default(),
+            preview_stale: true,
+            preview_last_frame: None,
         }
+    }
+
+    // ── embedded preview (ticket 08) ─────────────────────────────────────
+
+    /// One frame of the preview: rebuild its plan if the document changed,
+    /// then advance by the wall-clock frame time (capped so a stall does
+    /// not leap). `mesh_assets` feeds the auto-pick.
+    pub fn tick_preview(&mut self, mesh_assets: &[String]) {
+        let now = Instant::now();
+        let dt = self
+            .preview_last_frame
+            .map(|t| now.duration_since(t).as_secs_f32().min(0.1))
+            .unwrap_or(0.0);
+        self.preview_last_frame = Some(now);
+        let loader = DiskAnimAssets { content_root: "content".into() };
+        self.tick_preview_with(&loader, mesh_assets, dt);
+    }
+
+    /// [`Self::tick_preview`] with an explicit loader and step (tests).
+    pub fn tick_preview_with(&mut self, loader: &dyn AnimAssetLoader, mesh_assets: &[String], dt: f32) {
+        if self.preview_stale {
+            self.preview.rebuild(&self.doc, &self.compiled, mesh_assets, loader);
+            self.preview_stale = false;
+        }
+        let input = preview_input(&self.doc, self.preview_point);
+        self.preview.advance(dt, input);
+    }
+
+    /// The input the preview plays at: the preview point, else the axis minimums.
+    pub fn preview_input(&self) -> [f32; 2] {
+        preview_input(&self.doc, self.preview_point)
+    }
+
+    /// Choose the preview mesh (empty = auto); one "Set Preview Mesh" entry.
+    pub fn set_preview_mesh(&mut self, to: String) {
+        let from = std::mem::replace(&mut self.doc.preview_mesh, to.clone());
+        if from != to {
+            self.commit(BlendSpaceEdit::SetPreviewMesh { from, to });
+        }
+    }
+
+    fn recompile(&mut self) {
+        self.compiled = BlendSpace::compile(&self.doc);
+        self.preview_stale = true;
     }
 
     /// Write the doc back to disk, clearing dirty. Cache invalidation is the
@@ -256,7 +316,7 @@ impl BlendSpaceEditorState {
 
     fn after_change(&mut self) {
         self.dirty = self.stack.is_dirty();
-        self.compiled = BlendSpace::compile(&self.doc);
+        self.recompile();
         let n = self.doc.samples.len();
         if self.selection.is_some_and(|i| i >= n) {
             self.selection = None;
@@ -306,7 +366,7 @@ impl BlendSpaceEditorState {
         if two_d {
             sm.y = p[1];
         }
-        self.compiled = BlendSpace::compile(&self.doc);
+        self.recompile();
     }
 
     /// Release: one "Move Sample" entry from the pre-drag value (nothing
@@ -323,7 +383,7 @@ impl BlendSpaceEditorState {
             if let Some(sm) = self.doc.samples.get_mut(index) {
                 *sm = from;
             }
-            self.compiled = BlendSpace::compile(&self.doc);
+            self.recompile();
         }
     }
 
@@ -536,6 +596,8 @@ impl BlendSpaceEditorState {
     /// Forget cached clip names (an `.anim` changed on disk).
     pub fn forget_clip_names(&mut self) {
         self.clip_names.clear();
+        self.preview.forget_clips();
+        self.preview_stale = true;
     }
 }
 

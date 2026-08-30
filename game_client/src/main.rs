@@ -273,6 +273,14 @@ impl GameApp {
                 app.crusty_docked_preview_cbs.push((key, cb));
             }
         }
+        // Blend space tab previews (ticket 08): keyed by the tab id itself.
+        for (tab, cb) in app.build_blend_space_preview_cbs() {
+            if app.crusty_float_hosts_tab(&tab) {
+                app.crusty_float_preview_cbs.push((tab, cb));
+            } else {
+                app.crusty_docked_preview_cbs.push((tab, cb));
+            }
+        }
 
         // Render here directly — going via request_redraw → DWM gates to
         // vblank on Windows (cap ≈ refresh-1 with G-Sync). Bypasses that.

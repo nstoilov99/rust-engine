@@ -359,6 +359,10 @@ pub struct App {
     /// registration round-trips via `RenderEvent::CrustyNativeRegistered`.
     #[cfg(feature = "editor")]
     crusty_mesh_textures: std::collections::HashMap<String, CrustyMeshTexture>,
+    /// Blend space tab preview targets, keyed by the tab's content-relative
+    /// path (ticket 08) — the mesh-preview registration, one asset kind over.
+    #[cfg(feature = "editor")]
+    crusty_blend_textures: std::collections::HashMap<String, CrustyMeshTexture>,
     /// Preview CBs for mesh tabs docked in the main crusty dock — sent to
     /// the render thread in the frame packet (executed before the GUI pass).
     #[cfg(feature = "editor")]
@@ -920,6 +924,8 @@ impl App {
             crusty_floats: std::collections::HashMap::new(),
             #[cfg(feature = "editor")]
             crusty_mesh_textures: std::collections::HashMap::new(),
+            #[cfg(feature = "editor")]
+            crusty_blend_textures: std::collections::HashMap::new(),
             #[cfg(feature = "editor")]
             crusty_docked_preview_cbs: Vec::new(),
             #[cfg(feature = "editor")]
@@ -2403,8 +2409,14 @@ impl App {
                             if !gpu_meshes.is_empty() {
                                 let aspect = pw as f32 / ph.max(1) as f32;
                                 let vp = preview.compute_view_projection(aspect);
-                                match renderer.render(&preview.framebuffer, pw, ph, &gpu_meshes, vp)
-                                {
+                                match renderer.render(
+                                    &preview.framebuffer,
+                                    pw,
+                                    ph,
+                                    &gpu_meshes,
+                                    vp,
+                                    None,
+                                ) {
                                     Ok(cb) => {
                                         result.push((key.clone(), cb));
                                         data.preview_dirty = false;
@@ -2417,6 +2429,100 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+        result
+    }
+
+    /// Build the blend space tabs' preview command buffers (ticket 08):
+    /// `build_mesh_preview_cbs` for the other embedded viewport. Keys are
+    /// the tab ids (`blendspace:<path>`), so `main.rs` routes each CB to the
+    /// window hosting the tab. The pose was evaluated on the main thread by
+    /// the panel; here it becomes a fresh palette set and a recorded pass.
+    pub fn build_blend_space_preview_cbs(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )> {
+        use rust_engine::engine::editor::mesh_editor::MeshPreviewState;
+        let Some(renderer) = self.editor.mesh_preview_renderer.as_ref() else {
+            return Vec::new();
+        };
+        let editors = &mut self.editor.scene.blend_space_editors;
+        // Meshes the previews resolved to but the GPU has not seen yet.
+        let to_load: Vec<String> = {
+            let meshes = self.core.asset_manager.meshes.read();
+            editors
+                .values()
+                .filter_map(|s| s.preview.mesh.clone())
+                .filter(|p| meshes.indices_for_path(p).is_none())
+                .collect()
+        };
+        for path in to_load {
+            if let Err(e) = self.core.asset_manager.load_model_gpu(&path) {
+                eprintln!("Blend space preview: failed to load mesh '{path}': {e}");
+            }
+        }
+        let queue = self.core.renderer.gpu.queue.clone();
+        let cb_alloc = self.core.renderer.gpu.command_buffer_allocator.clone();
+        let meshes = self.core.asset_manager.meshes.read();
+        let mut result = Vec::new();
+        for (key, st) in editors.iter_mut() {
+            let pv = &mut st.preview;
+            // A new (or first) mesh gets a fresh target; the old one is
+            // dropped and its registration re-pointed below.
+            if pv.gpu_mesh != pv.mesh {
+                pv.gpu = None;
+                pv.gpu_mesh = pv.mesh.clone();
+                if let Some(mesh) = &pv.mesh {
+                    match MeshPreviewState::new(renderer, &meshes, mesh) {
+                        Ok(state) => {
+                            if let Err(e) = state.texture.clear(queue.clone(), cb_alloc.clone()) {
+                                eprintln!("Blend space preview clear failed: {e}");
+                            }
+                            pv.gpu = Some(state);
+                        }
+                        Err(e) => eprintln!("Failed to create blend space preview: {e}"),
+                    }
+                }
+            }
+            let Some(gpu) = pv.gpu.as_mut() else { continue };
+            let (pw, ph) = gpu.size;
+            if pw == 0 || ph == 0 || gpu.mesh_indices.is_empty() {
+                continue;
+            }
+            if pw != gpu.texture.width() || ph != gpu.texture.height() {
+                if let Ok(true) = gpu.resize(renderer, pw, ph) {
+                    if let Err(e) = gpu.texture.clear(queue.clone(), cb_alloc.clone()) {
+                        eprintln!("Blend space preview clear failed: {e}");
+                    }
+                }
+            }
+            let gpu_meshes: Vec<_> = gpu
+                .mesh_indices
+                .iter()
+                .filter_map(|&idx| meshes.get(idx))
+                .map(|gm| (gm.vertex_buffer.clone(), gm.index_buffer.clone(), gm.index_count))
+                .collect();
+            if gpu_meshes.is_empty() {
+                continue;
+            }
+            let palette = pv
+                .skeleton
+                .as_ref()
+                .filter(|s| !s.palette.is_empty())
+                .and_then(|s| match renderer.create_palette_set(&s.palette) {
+                    Ok(set) => Some(set),
+                    Err(e) => {
+                        eprintln!("Blend space preview palette upload failed: {e}");
+                        None
+                    }
+                });
+            let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
+            match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
+                Ok(cb) => result.push((format!("blendspace:{key}"), cb)),
+                Err(e) => eprintln!("Blend space preview render error: {e}"),
             }
         }
         result
@@ -2453,6 +2559,10 @@ impl App {
                         for (key, tid) in regs {
                             if let Some(k) = key.strip_prefix("mesh_preview:") {
                                 if let Some(entry) = self.crusty_mesh_textures.get_mut(k) {
+                                    entry.id = Some(tid);
+                                }
+                            } else if let Some(k) = key.strip_prefix("bs_preview:") {
+                                if let Some(entry) = self.crusty_blend_textures.get_mut(k) {
                                     entry.id = Some(tid);
                                 }
                             }
@@ -3779,6 +3889,7 @@ impl App {
             inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
             let anim_assets = anim_asset_paths(&asset_browser.registry);
+            let mesh_assets = mesh_asset_paths(&asset_browser.registry);
             let profiler = &mut self.editor.ui.profiler_panel;
             let input_settings = &mut self.editor.ui.input_settings_panel;
             let action_set = action_set_snapshot.as_ref();
@@ -3941,6 +4052,7 @@ impl App {
                     }
                 });
             let mesh_textures = &self.crusty_mesh_textures;
+            let blend_textures = &self.crusty_blend_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
             // Per-file editor dirty dots: build the set of dirty tab ids so
@@ -4328,6 +4440,10 @@ impl App {
                                                 BlendSpaceEditorPanelCtx {
                                                     state,
                                                     anim_assets: &anim_assets,
+                                                    mesh_assets: &mesh_assets,
+                                                    texture: blend_textures
+                                                        .get(&key)
+                                                        .and_then(|e| e.id),
                                                     selection_outline: graph_sel_outline,
                                                     focused: graph_focused_tab.as_deref()
                                                         == Some(tab),
@@ -4599,6 +4715,46 @@ impl App {
                         packet
                             .crusty_native_registrations
                             .push((format!("mesh_preview:{key}"), view.clone()));
+                        e.insert(CrustyMeshTexture { id: None, view });
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let entry = e.get_mut();
+                        if !std::sync::Arc::ptr_eq(&entry.view, &view) {
+                            if let Some(id) = entry.id {
+                                packet.crusty_native_updates.push((id, view.clone()));
+                                entry.view = view;
+                            }
+                        }
+                    }
+                }
+            }
+            // Blend space previews: the same registration dance, keyed by
+            // the tab's path and the `bs_preview:` name.
+            let bs_editors = &self.editor.scene.blend_space_editors;
+            self.crusty_blend_textures.retain(|k, entry| {
+                if bs_editors.contains_key(k) {
+                    return true;
+                }
+                if let Some(id) = entry.id {
+                    packet.crusty_native_removals.push(id);
+                }
+                false
+            });
+            for (key, st) in bs_editors.iter() {
+                let Some(ref gpu) = st.preview.gpu else { continue };
+                if gpu.mesh_indices.is_empty() {
+                    continue;
+                }
+                let tab = format!("blendspace:{key}");
+                if !self.crusty_docked_preview_cbs.iter().any(|(k, _)| *k == tab) {
+                    continue;
+                }
+                let view = gpu.texture.image_view();
+                match self.crusty_blend_textures.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        packet
+                            .crusty_native_registrations
+                            .push((format!("bs_preview:{key}"), view.clone()));
                         e.insert(CrustyMeshTexture { id: None, view });
                     }
                     std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -5939,6 +6095,7 @@ impl App {
         let curve_editors = &mut editor.scene.curve_editors;
         let blend_space_editors = &mut editor.scene.blend_space_editors;
         let anim_assets = anim_asset_paths(&asset_browser.registry);
+        let mesh_assets = mesh_asset_paths(&asset_browser.registry);
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
         let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
             graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
@@ -6022,13 +6179,17 @@ impl App {
             let mut tabs = Vec::new();
             fw.tree.collect_tabs(&mut tabs);
 
-            // Mesh previews hosted here: drop stale textures, register this
-            // window's registry-local ids, claim this window's preview CBs.
-            fw.prune_mesh_textures(|k| tabs.iter().any(|t| t == &format!("mesh:{k}")));
+            // Mesh + blend space previews hosted here: drop stale textures,
+            // register this window's registry-local ids, claim this window's
+            // preview CBs. Mesh previews key by mesh path, blend space
+            // previews by their full tab id (`blendspace:<path>`).
+            fw.prune_mesh_textures(|k| {
+                tabs.iter().any(|t| t == &format!("mesh:{k}") || t == k)
+            });
             let mut cbs = Vec::new();
             let mut cb_keys = Vec::new();
             float_cbs.retain(|(k, cb)| {
-                if tabs.iter().any(|t| t == &format!("mesh:{k}")) {
+                if tabs.iter().any(|t| t == &format!("mesh:{k}") || t == k) {
                     cbs.push(cb.clone());
                     cb_keys.push(k.clone());
                     false
@@ -6038,16 +6199,23 @@ impl App {
             });
             let mut mesh_tex = std::collections::HashMap::new();
             for tab in &tabs {
-                let Some(key) = tab.strip_prefix("mesh:") else {
-                    continue;
-                };
-                if let Some(preview) = mesh_editors.get(key).and_then(|d| d.preview.as_ref()) {
-                    if !preview.mesh_indices.is_empty() {
-                        let has_cb = cb_keys.iter().any(|k| k == key);
-                        if let Some(id) =
-                            fw.ensure_mesh_texture(key, preview.texture.image_view(), has_cb)
-                        {
-                            mesh_tex.insert(key.to_string(), id);
+                if let Some(key) = tab.strip_prefix("mesh:") {
+                    if let Some(preview) = mesh_editors.get(key).and_then(|d| d.preview.as_ref()) {
+                        if !preview.mesh_indices.is_empty() {
+                            let has_cb = cb_keys.iter().any(|k| k == key);
+                            if let Some(id) =
+                                fw.ensure_mesh_texture(key, preview.texture.image_view(), has_cb)
+                            {
+                                mesh_tex.insert(key.to_string(), id);
+                            }
+                        }
+                    }
+                } else if let Some(key) = tab.strip_prefix("blendspace:") {
+                    let gpu = blend_space_editors.get(key).and_then(|s| s.preview.gpu.as_ref());
+                    if let Some(gpu) = gpu.filter(|g| !g.mesh_indices.is_empty()) {
+                        let has_cb = cb_keys.iter().any(|k| k == tab);
+                        if let Some(id) = fw.ensure_mesh_texture(tab, gpu.texture.image_view(), has_cb) {
+                            mesh_tex.insert(tab.clone(), id);
                         }
                     }
                 }
@@ -6256,6 +6424,8 @@ impl App {
                                                 BlendSpaceEditorPanelCtx {
                                                     state,
                                                     anim_assets: &anim_assets,
+                                                    mesh_assets: &mesh_assets,
+                                                    texture: mesh_tex.get(tab).copied(),
                                                     selection_outline: graph_sel_outline,
                                                     focused: true,
                                                     handle_shortcuts: true,
@@ -8448,17 +8618,35 @@ fn save_blend_space_state(
 /// editor's Clip dropdown rows.
 #[cfg(feature = "editor")]
 fn anim_asset_paths(registry: &rust_engine::engine::editor::AssetRegistry) -> Vec<String> {
+    registry_paths(registry, AssetType::Animation, "anim")
+}
+
+/// Every `.mesh` in the registry: the Preview Mesh dropdown rows and the
+/// auto-pick candidates (ticket 08).
+#[cfg(feature = "editor")]
+fn mesh_asset_paths(registry: &rust_engine::engine::editor::AssetRegistry) -> Vec<String> {
+    registry_paths(registry, AssetType::Mesh, "mesh")
+}
+
+#[cfg(feature = "editor")]
+fn registry_paths(
+    registry: &rust_engine::engine::editor::AssetRegistry,
+    ty: AssetType,
+    ext: &str,
+) -> Vec<String> {
     let filter = rust_engine::engine::editor::AssetFilter {
-        asset_types: Some(vec![AssetType::Animation]),
+        asset_types: Some(vec![ty]),
         include_subfolders: true,
         ..Default::default()
     };
-    registry
+    let mut paths: Vec<String> = registry
         .query(&filter)
         .into_iter()
-        .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some("anim"))
+        .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some(ext))
         .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
-        .collect()
+        .collect();
+    paths.sort();
+    paths
 }
 
 /// Forget every recorded session for the instances running `graph_path`.

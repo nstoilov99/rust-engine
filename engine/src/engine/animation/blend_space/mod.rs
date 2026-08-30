@@ -105,6 +105,9 @@ pub struct BlendSpaceDoc {
     pub samples: Vec<BlendSample>,
     /// Exponential input smoothing time in seconds; 0 = off.
     pub input_smoothing: f32,
+    /// Content-relative `.mesh` the editor previews on; empty = auto-pick
+    /// the first mesh whose skeleton covers the samples' clips.
+    pub preview_mesh: String,
 }
 
 impl Default for BlendSpaceDoc {
@@ -115,6 +118,7 @@ impl Default for BlendSpaceDoc {
             axes: [BlendAxis::default(), BlendAxis::new("Direction", -1.0, 1.0)],
             samples: Vec::new(),
             input_smoothing: 0.0,
+            preview_mesh: String::new(),
         }
     }
 }

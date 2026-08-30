@@ -73,6 +73,8 @@ pub mod edit_stack;
 pub mod blend_space_editor;
 #[cfg(feature = "editor")]
 pub mod blend_space_editor_crusty;
+/// Ticket 08: the tab's embedded 3D preview — skeleton, clock and pose.
+pub mod blend_space_preview;
 pub mod graph_anim_chip;
 pub mod graph_anim_edge;
 pub mod graph_editor;
