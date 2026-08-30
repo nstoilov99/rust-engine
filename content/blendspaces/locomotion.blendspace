@@ -1,0 +1,41 @@
+(
+    version: 1,
+    axis_count: 1,
+    axes: ((
+        name: "Speed",
+        param: "Speed",
+        min: 0.0,
+        max: 6.0,
+        grid_divisions: 6,
+    ), (
+        name: "Direction",
+        param: "",
+        min: -1.0,
+        max: 1.0,
+        grid_divisions: 10,
+    )),
+    samples: [
+        (
+            x: 0.0,
+            y: 0.0,
+            clip: "Defeated.anim",
+            clip_name: None,
+            rate_scale: 0.5,
+        ),
+        (
+            x: 3.0,
+            y: 0.0,
+            clip: "Defeated.anim",
+            clip_name: None,
+            rate_scale: 1.0,
+        ),
+        (
+            x: 6.0,
+            y: 0.0,
+            clip: "Defeated.anim",
+            clip_name: None,
+            rate_scale: 2.0,
+        ),
+    ],
+    input_smoothing: 0.0,
+)

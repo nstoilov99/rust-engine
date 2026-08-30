@@ -40,6 +40,9 @@ pub enum AssetType {
     /// Float-track curves (*.curve) — Timeline tracks today, animation
     /// channels when Task 41 grows the same asset.
     Curve,
+    /// Blend spaces (*.blendspace) - Task 41.5: clips placed on one or two
+    /// parameter axes; the animation family, like `.animgraph` and `.curve`.
+    BlendSpace,
     /// Unknown or unsupported file type
     #[default]
     Unknown,
@@ -71,6 +74,7 @@ impl AssetType {
             "graph" | "subgraph" => AssetType::Graph,
             "animgraph" => AssetType::AnimGraph,
             "curve" => AssetType::Curve,
+            "blendspace" => AssetType::BlendSpace,
             // Legacy RON files - refined by filename pattern in from_path
             "ron" => AssetType::Unknown,
             _ => AssetType::Unknown,
@@ -127,6 +131,7 @@ impl AssetType {
             AssetType::Graph => "Node Graph",
             AssetType::AnimGraph => "Animation Graph",
             AssetType::Curve => "Curve",
+            AssetType::BlendSpace => "Blend Space",
             AssetType::Unknown => "Unknown",
         }
     }
@@ -148,6 +153,7 @@ impl AssetType {
             AssetType::Graph => &["graph", "subgraph"],
             AssetType::AnimGraph => &["animgraph"],
             AssetType::Curve => &["curve"],
+            AssetType::BlendSpace => &["blendspace"],
             AssetType::Unknown => &[],
         }
     }
@@ -169,6 +175,7 @@ impl AssetType {
             AssetType::Graph,
             AssetType::AnimGraph,
             AssetType::Curve,
+            AssetType::BlendSpace,
         ]
     }
 
@@ -209,6 +216,8 @@ mod tests {
         assert_eq!(AssetType::from_extension("mesh"), AssetType::Mesh);
         assert_eq!(AssetType::from_extension("wav"), AssetType::Audio);
         assert_eq!(AssetType::from_extension("xyz"), AssetType::Unknown);
+        assert_eq!(AssetType::from_extension("blendspace"), AssetType::BlendSpace);
+        assert_eq!(AssetType::BlendSpace.extensions(), &["blendspace"]);
     }
 
     #[test]

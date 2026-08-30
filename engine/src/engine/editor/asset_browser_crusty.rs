@@ -98,7 +98,7 @@ pub(super) fn type_color(t: AssetType) -> Color {
         // Task 41 grows this exact asset into animation channels, and the two
         // reading alike is the point rather than an accident. An `.animgraph`
         // is the same family: the machine that plays those clips.
-        AssetType::Curve | AssetType::AnimGraph => "animation",
+        AssetType::Curve | AssetType::AnimGraph | AssetType::BlendSpace => "animation",
         _ => "geometry",
     })
 }

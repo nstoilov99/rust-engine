@@ -4,6 +4,7 @@
 //! runtime skeletal animation, keyframe sampling with lerp/slerp, and
 //! forward kinematics to compute world-space bone palettes for GPU skinning.
 
+pub mod blend_space;
 pub mod components;
 #[cfg(debug_assertions)]
 pub mod debug_draw;
