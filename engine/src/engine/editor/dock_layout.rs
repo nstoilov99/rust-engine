@@ -34,6 +34,8 @@ pub enum EditorTab {
     GraphEditor(String),
     /// Per-file `.curve` editor (keyed by content-relative curve path).
     CurveEditor(String),
+    /// Per-file `.blendspace` editor (keyed by content-relative path).
+    BlendSpace(String),
     /// Per-file input action editor (keyed by file path)
     InputActionEditor(String),
     /// Per-file mapping context editor (keyed by file path)
@@ -79,6 +81,13 @@ impl EditorTab {
                     .unwrap_or_else(|| key.clone());
                 format!("Curve \u{2014} {}", name)
             }
+            EditorTab::BlendSpace(key) => {
+                let name = std::path::Path::new(key)
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| key.clone());
+                format!("Blend Space \u{2014} {}", name)
+            }
             EditorTab::InputActionEditor(key) => {
                 let name = std::path::Path::new(key)
                     .file_stem()
@@ -119,6 +128,7 @@ impl EditorTab {
             EditorTab::MeshEditor(key) => format!("tab_mesh_{}", key),
             EditorTab::GraphEditor(key) => format!("tab_graph_{}", key),
             EditorTab::CurveEditor(key) => format!("tab_curve_{}", key),
+            EditorTab::BlendSpace(key) => format!("tab_blendspace_{}", key),
             EditorTab::InputActionEditor(key) => format!("tab_ia_{}", key),
             EditorTab::InputContextEditor(key) => format!("tab_mc_{}", key),
             EditorTab::Plugin(id) => format!("tab_plugin_{}", id),
@@ -140,6 +150,7 @@ impl EditorTab {
             EditorTab::MeshEditor(key) => Some((K::Mesh, key.clone())),
             EditorTab::GraphEditor(key) => Some((K::Graph, key.clone())),
             EditorTab::CurveEditor(key) => Some((K::Curve, key.clone())),
+            EditorTab::BlendSpace(key) => Some((K::BlendSpace, key.clone())),
             EditorTab::InputActionEditor(key) => Some((K::InputAction, key.clone())),
             EditorTab::InputContextEditor(key) => Some((K::InputContext, key.clone())),
             EditorTab::Plugin(id) => Some((K::Plugin, id.clone())),

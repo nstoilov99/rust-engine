@@ -629,7 +629,9 @@ pub fn float_window_attrs(tab: &str) -> (String, u32, u32) {
         Some(EditorTab::Profiler) => ("Profiler".into(), 700, 500),
         // Node canvas and curve plot both want more room than the default
         // asset editor: one is a graph, the other is a chart.
-        Some(t @ (EditorTab::GraphEditor(_) | EditorTab::CurveEditor(_))) => {
+        Some(
+            t @ (EditorTab::GraphEditor(_) | EditorTab::CurveEditor(_) | EditorTab::BlendSpace(_)),
+        ) => {
             (t.title_string(), 900, 600)
         }
         Some(tab) => (tab.title_string(), 600, 500),

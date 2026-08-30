@@ -66,6 +66,13 @@ pub mod mesh_editor_crusty;
 pub mod curve_editor;
 #[cfg(feature = "editor")]
 pub mod curve_editor_crusty;
+/// Generic doc-local undo/redo stack shared by the curve and blend space editors.
+pub mod edit_stack;
+/// Task 41.5 ticket 04: the `.blendspace` document editor — state + undo
+/// stack here, drawing in `blend_space_editor_crusty`.
+pub mod blend_space_editor;
+#[cfg(feature = "editor")]
+pub mod blend_space_editor_crusty;
 pub mod graph_anim_chip;
 pub mod graph_anim_edge;
 pub mod graph_editor;

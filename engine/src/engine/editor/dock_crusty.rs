@@ -35,6 +35,7 @@ pub fn tab_id(tab: &EditorTab) -> String {
         EditorTab::MeshEditor(key) => format!("mesh:{key}"),
         EditorTab::GraphEditor(key) => format!("graph:{key}"),
         EditorTab::CurveEditor(key) => format!("curve:{key}"),
+        EditorTab::BlendSpace(key) => format!("blendspace:{key}"),
         EditorTab::InputActionEditor(key) => format!("ia:{key}"),
         EditorTab::InputContextEditor(key) => format!("mc:{key}"),
         EditorTab::Plugin(id) => format!("plugin:{id}"),
@@ -64,6 +65,7 @@ pub fn parse_tab(id: &str) -> Option<EditorTab> {
             "mesh" => Some(EditorTab::MeshEditor(key.to_string())),
             "graph" => Some(EditorTab::GraphEditor(key.to_string())),
             "curve" => Some(EditorTab::CurveEditor(key.to_string())),
+            "blendspace" => Some(EditorTab::BlendSpace(key.to_string())),
             "ia" => Some(EditorTab::InputActionEditor(key.to_string())),
             "mc" => Some(EditorTab::InputContextEditor(key.to_string())),
             // Always parses, even for a panel id nothing registers this
@@ -538,5 +540,25 @@ fn viewport_leaf_mut(node: &mut DockNode) -> Option<&mut Leaf> {
         DockNode::Split(s) => {
             viewport_leaf_mut(&mut s.first).or_else(|| viewport_leaf_mut(&mut s.second))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_file_tab_ids_round_trip() {
+        for tab in [
+            EditorTab::CurveEditor("curves/a.curve".into()),
+            EditorTab::BlendSpace("blendspaces/locomotion.blendspace".into()),
+            EditorTab::GraphEditor("graphs/x.animgraph".into()),
+        ] {
+            assert_eq!(parse_tab(&tab_id(&tab)), Some(tab));
+        }
+        assert_eq!(
+            tab_id(&EditorTab::BlendSpace("b/l.blendspace".into())),
+            "blendspace:b/l.blendspace"
+        );
     }
 }

@@ -204,6 +204,11 @@ pub struct SceneEditorState {
         String,
         rust_engine::engine::editor::curve_editor::CurveEditorState,
     >,
+    /// Open `.blendspace` editors keyed by content-relative path (Task 41.5).
+    pub blend_space_editors: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
@@ -832,6 +837,7 @@ impl App {
                 mesh_editors: std::collections::HashMap::new(),
                 graph_editors: std::collections::HashMap::new(),
                 curve_editors: std::collections::HashMap::new(),
+                blend_space_editors: std::collections::HashMap::new(),
                 node_registry,
                 anim_node_registry: std::sync::Arc::new(
                     rust_engine::engine::animation::graph::anim_node_registry(),
@@ -1214,6 +1220,11 @@ impl App {
         self.editor.ui.crusty_dock.open_tab(tab);
     }
 
+    /// Open a `.blendspace` file as a dock tab (Task 41.5).
+    pub fn open_blend_space_as_tab(&mut self, key: String) {
+        self.editor.ui.crusty_dock.open_tab(EditorTab::BlendSpace(key));
+    }
+
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
@@ -1304,6 +1315,10 @@ impl App {
                 #[cfg(feature = "editor")]
                 self.save_curve_editor(key);
             }
+            SecondaryWindowKind::BlendSpace => {
+                #[cfg(feature = "editor")]
+                self.save_blend_space_editor(key);
+            }
             SecondaryWindowKind::InputAction => {
                 if let Some(data) = self
                     .editor
@@ -1368,6 +1383,15 @@ impl App {
                     EditorAction::Undo | EditorAction::Redo | EditorAction::Delete
                 ) {
                     self.curve_edit(&key, action);
+                    return;
+                }
+            }
+            if let Some(key) = self.active_blend_space_key() {
+                if matches!(
+                    action,
+                    EditorAction::Undo | EditorAction::Redo | EditorAction::Delete
+                ) {
+                    self.blend_space_edit(&key, action);
                     return;
                 }
             }
@@ -1630,6 +1654,10 @@ impl App {
                         if kind == SecondaryWindowKind::Curve {
                             self.close_curve_tab(&key);
                         }
+                        #[cfg(feature = "editor")]
+                        if kind == SecondaryWindowKind::BlendSpace {
+                            self.close_blend_space_tab(&key);
+                        }
                     }
                     Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                         "Failed to save '{}': {}",
@@ -1651,6 +1679,11 @@ impl App {
                     }
                     SecondaryWindowKind::Curve => {
                         if let Some(state) = self.editor.scene.curve_editors.get_mut(&key) {
+                            state.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::BlendSpace => {
+                        if let Some(state) = self.editor.scene.blend_space_editors.get_mut(&key) {
                             state.dirty = false;
                         }
                     }
@@ -1687,6 +1720,10 @@ impl App {
                 #[cfg(feature = "editor")]
                 if kind == SecondaryWindowKind::Curve {
                     self.close_curve_tab(&key);
+                }
+                #[cfg(feature = "editor")]
+                if kind == SecondaryWindowKind::BlendSpace {
+                    self.close_blend_space_tab(&key);
                 }
             }
             EditorAction::GraphSaveGraph => {
@@ -2035,12 +2072,19 @@ impl App {
                     // same helper. Hosts' anchored refusals read from disk
                     // too, so they recompute now.
                     let key = asset_source::to_content_relative(&path);
+                    #[cfg(feature = "editor")]
+                    if self.blend_space_save_echo(&key) {
+                        continue;
+                    }
                     rust_engine::engine::animation::graph::invalidate_blend_space(
                         self.core.game_world.resources_mut(),
                         &key,
                     );
                     #[cfg(feature = "editor")]
-                    self.refresh_anim_graph_hosts(&key);
+                    {
+                        self.refresh_anim_graph_hosts(&key);
+                        self.reload_blend_space_editor(&key);
+                    }
                 }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
@@ -2177,6 +2221,9 @@ impl App {
                             true
                         } else if let Some(key) = self.active_curve_key() {
                             self.save_curve_editor(&key);
+                            true
+                        } else if let Some(key) = self.active_blend_space_key() {
+                            self.save_blend_space_editor(&key);
                             true
                         } else {
                             false
@@ -2946,7 +2993,13 @@ impl App {
                             #[cfg(not(feature = "editor"))]
                             let _ = relative;
                         } else if asset_type == AssetType::BlendSpace {
-                            // ticket 04: open blend space tab
+                            // Open the `.blendspace` editor tab (Task 41.5).
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            #[cfg(feature = "editor")]
+                            self.open_blend_space_document(relative);
+                            #[cfg(not(feature = "editor"))]
+                            let _ = relative;
                         } else if asset_type == AssetType::Animation {
                             // Anim event markers, as a minimal list (Task 41).
                             use rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog;
@@ -3601,6 +3654,7 @@ impl App {
         // float window's own Ctrl+S). Saving reaches the plan/curve caches, so
         // it has to happen outside the panel borrows.
         let mut curve_save_requests: Vec<String> = Vec::new();
+        let mut blend_space_save_requests: Vec<String> = Vec::new();
         let crusty_result = {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
@@ -3625,6 +3679,9 @@ impl App {
             };
             use rust_engine::engine::editor::curve_editor_crusty::{
                 curve_editor_panel, CurveEditorPanelCtx,
+            };
+            use rust_engine::engine::editor::blend_space_editor_crusty::{
+                blend_space_editor_panel, BlendSpaceEditorPanelCtx,
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
@@ -3721,6 +3778,7 @@ impl App {
             let inspector = &mut self.editor.scene.inspector_panel;
             inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
+            let anim_assets = anim_asset_paths(&asset_browser.registry);
             let profiler = &mut self.editor.ui.profiler_panel;
             let input_settings = &mut self.editor.ui.input_settings_panel;
             let action_set = action_set_snapshot.as_ref();
@@ -3732,6 +3790,7 @@ impl App {
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
             let curve_editors = &mut self.editor.scene.curve_editors;
+            let blend_space_editors = &mut self.editor.scene.blend_space_editors;
             let graph_registry = &self.editor.scene.node_registry;
             let anim_graph_registry = &self.editor.scene.anim_node_registry;
             // A frame-local snapshot: the preferences page edits the live
@@ -3829,6 +3888,31 @@ impl App {
                         has_clipboard: false,
                     }
                 });
+            let blend_space_edit_override = graph_focused_tab
+                .as_deref()
+                .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
+                .and_then(|ft| ft.strip_prefix("blendspace:"))
+                .and_then(|k| blend_space_editors.get(k))
+                .map(|st| {
+                    use rust_engine::engine::editor::menu_bar_crusty::EditMenuOverride;
+                    EditMenuOverride {
+                        undo_label: st
+                            .stack
+                            .undo_description()
+                            .map(|d| format!("Undo {d}"))
+                            .unwrap_or_else(|| "Undo".to_string()),
+                        can_undo: st.stack.can_undo(),
+                        redo_label: st
+                            .stack
+                            .redo_description()
+                            .map(|d| format!("Redo {d}"))
+                            .unwrap_or_else(|| "Redo".to_string()),
+                        can_redo: st.stack.can_redo(),
+                        has_selection: st.selection.is_some(),
+                        has_deletable: st.selection.is_some(),
+                        has_clipboard: false,
+                    }
+                });
             // Edit-menu override when a docked graph tab has focus (P5 routing).
             let graph_edit_override = graph_focused_tab
                 .as_deref()
@@ -3878,6 +3962,12 @@ impl App {
                         .iter()
                         .filter(|(_, s)| s.dirty)
                         .map(|(k, _)| format!("curve:{k}")),
+                )
+                .chain(
+                    blend_space_editors
+                        .iter()
+                        .filter(|(_, s)| s.dirty)
+                        .map(|(k, _)| format!("blendspace:{k}")),
                 )
                 .collect();
             // Both driven by the *active* runtime plugin set (39.8 §5.8/D7),
@@ -3978,7 +4068,8 @@ impl App {
                         command_history: &*vp_command_history,
                         edit_override: graph_edit_override
                             .clone()
-                            .or_else(|| curve_edit_override.clone()),
+                            .or_else(|| curve_edit_override.clone())
+                            .or_else(|| blend_space_edit_override.clone()),
                         play_mode: current_play_mode,
                         build_dialog,
                         console_messages: &mut console.messages,
@@ -4229,6 +4320,31 @@ impl App {
                                         ),
                                     }
                                 }
+                                Some(EditorTab::BlendSpace(key)) => {
+                                    match blend_space_editors.get_mut(&key) {
+                                        Some(state) => {
+                                            if blend_space_editor_panel(
+                                                ui,
+                                                rect,
+                                                BlendSpaceEditorPanelCtx {
+                                                    state,
+                                                    anim_assets: &anim_assets,
+                                                    selection_outline: graph_sel_outline,
+                                                    focused: graph_focused_tab.as_deref()
+                                                        == Some(tab),
+                                                    handle_shortcuts: false,
+                                                },
+                                            )
+                                            .save_requested
+                                            {
+                                                blend_space_save_requests.push(key.clone());
+                                            }
+                                        }
+                                        None => dock_crusty::missing_document_panel(
+                                            ui, "Blend Space", &key, None,
+                                        ),
+                                    }
+                                }
                                 Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
                                     Some(entry) => entry.panel.draw(
                                         ui,
@@ -4387,6 +4503,9 @@ impl App {
         }
         for key in std::mem::take(&mut curve_save_requests) {
             self.save_curve_editor(&key);
+        }
+        for key in std::mem::take(&mut blend_space_save_requests) {
+            self.save_blend_space_editor(&key);
         }
 
         // Commit (or veto) a crusty dock tab-close request.
@@ -4778,6 +4897,32 @@ impl App {
                 return;
             }
             self.close_curve_tab(key);
+        } else if let Some(key) = tab.strip_prefix("blendspace:") {
+            if self
+                .editor
+                .scene
+                .blend_space_editors
+                .get(key)
+                .is_some_and(|s| s.dirty)
+            {
+                let key = key.to_string();
+                let msg = format!("Save changes to '{key}' before closing?");
+                self.editor.services.dialogs.save_discard_cancel(
+                    format!("blendspace_close:{key}"),
+                    "Unsaved Blend Space",
+                    msg,
+                    EditorAction::SaveAndCloseEditor {
+                        kind: SecondaryWindowKind::BlendSpace,
+                        key: key.clone(),
+                    },
+                    EditorAction::DiscardAndCloseEditor {
+                        kind: SecondaryWindowKind::BlendSpace,
+                        key,
+                    },
+                );
+                return;
+            }
+            self.close_blend_space_tab(key);
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
             if let Some(key) = tab.strip_prefix("mesh:") {
@@ -5007,6 +5152,12 @@ impl App {
                     }
                     Some(("Curve", key.clone(), self.hydrate_curve(key)))
                 }
+                EditorTab::BlendSpace(key) => {
+                    if self.editor.scene.blend_space_editors.contains_key(key) {
+                        continue;
+                    }
+                    Some(("Blend Space", key.clone(), self.hydrate_blend_space(key)))
+                }
                 EditorTab::MeshEditor(key) => {
                     if self.editor.scene.mesh_editors.contains_key(key) {
                         continue;
@@ -5104,6 +5255,20 @@ impl App {
         Ok(())
     }
 
+    /// Load a `.blendspace` for a restored tab, without touching the dock:
+    /// `hydrate_curve`, one asset kind over.
+    #[cfg(feature = "editor")]
+    fn hydrate_blend_space(&mut self, key: &str) -> Result<(), String> {
+        let abs = std::path::Path::new("content").join(key);
+        if !abs.exists() {
+            return Err("file missing".to_string());
+        }
+        let state =
+            rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState::open(&abs, key)?;
+        self.editor.scene.blend_space_editors.insert(key.to_string(), state);
+        Ok(())
+    }
+
     /// Input-action and mapping-context keys are absolute-ish path strings,
     /// not content-relative — `InputActionEditor::open` keys on the path it
     /// was handed. Their loaders fall back to an empty definition rather than
@@ -5183,6 +5348,124 @@ impl App {
             }
         } else if !self.crusty_float_hosts_tab(&format!("curve:{relative}")) {
             self.open_curve_as_tab(relative);
+        }
+    }
+
+    /// Open a `.blendspace` by content-relative key: focus it if already
+    /// open (unless it lives in a float window), else load it and open a tab.
+    /// Ticket 06 routes the animation graph state descend here too.
+    #[cfg(feature = "editor")]
+    pub fn open_blend_space_document(&mut self, relative: String) {
+        self.hydration_failed.remove(&format!("blendspace:{relative}"));
+        if !self.editor.scene.blend_space_editors.contains_key(&relative) {
+            match self.hydrate_blend_space(&relative) {
+                Ok(()) => self.open_blend_space_as_tab(relative),
+                Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to open blend space '{relative}': {e}"
+                ))),
+            }
+        } else if !self.crusty_float_hosts_tab(&format!("blendspace:{relative}")) {
+            self.open_blend_space_as_tab(relative);
+        }
+    }
+
+    /// Content-relative key of the focused *main-dock* blend space tab, if
+    /// any (the `active_curve_key` rule).
+    #[cfg(feature = "editor")]
+    fn active_blend_space_key(&self) -> Option<String> {
+        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
+        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
+            return None;
+        }
+        let key = ft.strip_prefix("blendspace:")?.to_string();
+        self.editor
+            .scene
+            .blend_space_editors
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    #[cfg(feature = "editor")]
+    fn blend_space_edit(&mut self, key: &str, action: EditorAction) {
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return;
+        };
+        match action {
+            EditorAction::Undo => st.undo(),
+            EditorAction::Redo => st.redo(),
+            EditorAction::Delete => st.delete_selection(),
+            _ => {}
+        }
+    }
+
+    /// Save the blend space editor `key` (docked path). See [`save_blend_space_state`].
+    #[cfg(feature = "editor")]
+    fn save_blend_space_editor(&mut self, key: &str) {
+        save_blend_space_state(
+            &mut self.editor.scene.blend_space_editors,
+            &mut self.editor.scene.graph_editors,
+            &mut self.editor.console,
+            &mut self.core.game_world,
+            key,
+        );
+    }
+
+    /// Close a blend space tab everywhere (main dock + float windows) and
+    /// drop its document.
+    #[cfg(feature = "editor")]
+    fn close_blend_space_tab(&mut self, key: &str) {
+        let tab = format!("blendspace:{key}");
+        self.editor.ui.crusty_dock.tree.close_tab(&tab);
+        for fw in self.crusty_floats.values_mut() {
+            fw.tree.close_tab(&tab);
+        }
+        self.editor.scene.blend_space_editors.remove(key);
+    }
+
+    /// The watcher echo of this editor's own `.blendspace` save: one event
+    /// per save, consumed by clearing the stamp (the curve editor's guard).
+    #[cfg(feature = "editor")]
+    fn blend_space_save_echo(&mut self, key: &str) -> bool {
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return false;
+        };
+        let own = st
+            .last_saved_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+        if own {
+            st.last_saved_at = None;
+        }
+        own
+    }
+
+    /// An external `.blendspace` write: reload the open doc if clean (view
+    /// kept), warn if dirty.
+    #[cfg(feature = "editor")]
+    fn reload_blend_space_editor(&mut self, key: &str) {
+        use rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState;
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return;
+        };
+        if st.dirty {
+            self.editor.console.messages.push(LogMessage::warning(format!(
+                "Blend space '{key}' changed on disk; keeping your unsaved edits"
+            )));
+            return;
+        }
+        let abs = std::path::Path::new("content").join(key);
+        match BlendSpaceEditorState::open(&abs, key) {
+            Ok(mut fresh) => {
+                fresh.view = st.view;
+                fresh.frame_pending = false;
+                *st = fresh;
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("Blend space reloaded: {key}")));
+            }
+            Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                "Failed to reload blend space '{key}': {e}"
+            ))),
         }
     }
 
@@ -5648,6 +5931,8 @@ impl App {
         let graph_keymap = &editor.services.keymap;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
         let curve_editors = &mut editor.scene.curve_editors;
+        let blend_space_editors = &mut editor.scene.blend_space_editors;
+        let anim_assets = anim_asset_paths(&asset_browser.registry);
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
         let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
             graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
@@ -5723,6 +6008,7 @@ impl App {
         // Curve tabs in float windows that asked to save (their own Ctrl+S or
         // the toolbar). Applied after the window loop, like the graph opens.
         let mut float_curve_saves: Vec<String> = Vec::new();
+        let mut float_blend_space_saves: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
@@ -5951,6 +6237,32 @@ impl App {
                             }
                             None => dock_crusty::missing_document_panel(ui, "Curve", &key, None),
                         },
+                        Some(EditorTab::BlendSpace(key)) => {
+                            match blend_space_editors.get_mut(&key) {
+                                Some(state) => {
+                                    if rust_engine::engine::editor::blend_space_editor_crusty::
+                                        blend_space_editor_panel(
+                                            ui,
+                                            rect,
+                                            rust_engine::engine::editor::blend_space_editor_crusty::
+                                                BlendSpaceEditorPanelCtx {
+                                                    state,
+                                                    anim_assets: &anim_assets,
+                                                    selection_outline: graph_sel_outline,
+                                                    focused: true,
+                                                    handle_shortcuts: true,
+                                                },
+                                        )
+                                        .save_requested
+                                    {
+                                        float_blend_space_saves.push(key.clone());
+                                    }
+                                }
+                                None => dock_crusty::missing_document_panel(
+                                    ui, "Blend Space", &key, None,
+                                ),
+                            }
+                        }
                         Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
                             Some(entry) => entry.panel.draw(
                                 ui,
@@ -6029,6 +6341,15 @@ impl App {
         for key in std::mem::take(&mut float_curve_saves) {
             save_curve_state(curve_editors, &mut editor.console, &mut core.game_world, &key);
         }
+        for key in std::mem::take(&mut float_blend_space_saves) {
+            save_blend_space_state(
+                blend_space_editors,
+                graph_editors,
+                &mut editor.console,
+                &mut core.game_world,
+                &key,
+            );
+        }
 
         // Ticket 06, float-window path: same edit delivery as the docked one
         // — done here because the world is mutably reachable again.
@@ -6062,6 +6383,28 @@ impl App {
                     let key = t.strip_prefix("curve:")?;
                     curve_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
                 });
+                let dirty_blend_space = tabs.iter().find_map(|t| {
+                    let key = t.strip_prefix("blendspace:")?;
+                    blend_space_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
+                });
+                if let Some(key) = dirty_blend_space {
+                    let msg = format!("Save changes to '{key}' before closing?");
+                    editor.services.dialogs.save_discard_cancel(
+                        format!("blendspace_close:{key}"),
+                        "Unsaved Blend Space",
+                        msg,
+                        EditorAction::SaveAndCloseEditor {
+                            kind: SecondaryWindowKind::BlendSpace,
+                            key: key.clone(),
+                        },
+                        EditorAction::DiscardAndCloseEditor {
+                            kind: SecondaryWindowKind::BlendSpace,
+                            key,
+                        },
+                    );
+                    fw.close_requested = false;
+                    return true;
+                }
                 if let Some(key) = dirty_curve {
                     let msg = format!("Save changes to '{key}' before closing?");
                     editor.services.dialogs.save_discard_cancel(
@@ -6110,6 +6453,8 @@ impl App {
                         graph_editors.remove(key);
                     } else if let Some(key) = tab.strip_prefix("curve:") {
                         curve_editors.remove(key);
+                    } else if let Some(key) = tab.strip_prefix("blendspace:") {
+                        blend_space_editors.remove(key);
                     } else {
                         dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
                     }
@@ -7978,6 +8323,59 @@ fn save_curve_state(
     }
     #[cfg(not(feature = "graph-scripting"))]
     let _ = world;
+}
+
+/// Save a blend space editor: write, then the ticket 02 invalidation pair:
+/// drop the cached space + every animation plan (a state compiles the space
+/// into its plan) and recompute the open `.animgraph` hosts' anchored
+/// refusals, exactly what the `BlendSpaceChanged` reload arm does.
+#[cfg(feature = "editor")]
+fn save_blend_space_state(
+    editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
+    graph_editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    console: &mut ConsoleState,
+    world: &mut GameWorld,
+    key: &str,
+) {
+    let Some(st) = editors.get_mut(key) else {
+        return;
+    };
+    let abs = std::path::Path::new("content").join(&st.path);
+    if let Err(e) = st.save(&abs) {
+        console
+            .messages
+            .push(LogMessage::error(format!("Failed to save blend space '{key}': {e}")));
+        return;
+    }
+    rust_engine::engine::animation::graph::invalidate_blend_space(world.resources_mut(), key);
+    for g in graph_editors.values_mut() {
+        if g.domain.is_animation() {
+            g.refresh_domain_errors();
+        }
+    }
+}
+
+/// Content-relative paths of every `.anim` in the registry: the blend space
+/// editor's Clip dropdown rows.
+#[cfg(feature = "editor")]
+fn anim_asset_paths(registry: &rust_engine::engine::editor::AssetRegistry) -> Vec<String> {
+    let filter = rust_engine::engine::editor::AssetFilter {
+        asset_types: Some(vec![AssetType::Animation]),
+        include_subfolders: true,
+        ..Default::default()
+    };
+    registry
+        .query(&filter)
+        .into_iter()
+        .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some("anim"))
+        .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
+        .collect()
 }
 
 /// Forget every recorded session for the instances running `graph_path`.
