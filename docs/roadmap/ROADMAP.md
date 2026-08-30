@@ -2188,6 +2188,14 @@ pub struct SpeedBlend {
 
 ---
 
+### Task 41.5: Animation at Scale + IK
+**Status:** 📋 Planned — see [`VULKANO-41.5-ANIMATION-SCALE.md`](VULKANO-41.5-ANIMATION-SCALE.md) (drafted 2026-08-30, Claude + Codex audit)
+**Prerequisites:** Task 41
+
+Hundreds of animated characters at frame rate (palette SSBO ring buffer, zero-alloc two-phase FK, rayon pose evaluation, update-rate optimisation, instanced skinned draws) plus IK v1 (two-bone + look-at solvers, graph-declared chains, foot placement with foot lock and pelvis adjust). Root motion, LOD tiers, and GPU crowd paths stay in the deferred ledger.
+
+---
+
 ### Task 42: Save/Load & Runtime Persistence
 **Status:** 🔀 Absorbed into Task M5 for networked state (SpacetimeDB tables are the save system). A local single-player save format remains deferred here.
 **Duration:** ~1-1.5 weeks
