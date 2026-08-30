@@ -3,7 +3,7 @@
 //! Holds one open `.blendspace` document, its doc-local undo/redo stack
 //! (saved-cursor dirty rule, like the curve and graph editors), the compiled
 //! [`BlendSpace`] the canvas draws from, and the session state the panel
-//! needs (view, selection, in-flight field edits). The drawing layer is
+//! needs (selection, in-flight field edits). The drawing layer is
 //! `blend_space_editor_crusty`.
 //!
 //! Every edit is one undo entry with a verb-object label; a field that
@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-use crusty_gui::widgets::CanvasView;
 
 use super::edit_stack::{EditStack, ReversibleEdit};
 use crate::engine::animation::blend_space::{
@@ -151,10 +150,6 @@ pub struct BlendSpaceEditorState {
     /// The current document compiled, or why it cannot be. Refreshed after
     /// every doc change; the canvas draws triangles from `Ok`.
     pub compiled: Result<BlendSpace, String>,
-    /// Canvas pan/zoom (session state).
-    pub view: CanvasView,
-    /// Ask the panel to fit the view; set on open.
-    pub frame_pending: bool,
     /// Selected sample index (session state; ticket 05 drives it from the canvas).
     pub selection: Option<usize>,
     /// Preview input point in axis units (session state; ticket 05).
@@ -205,8 +200,6 @@ impl BlendSpaceEditorState {
             dirty: false,
             stack: BlendSpaceEditStack::new(),
             compiled,
-            view: CanvasView::default(),
-            frame_pending: true,
             selection: None,
             preview_point: None,
             drag: None,

@@ -5462,9 +5462,7 @@ impl App {
         }
         let abs = std::path::Path::new("content").join(key);
         match BlendSpaceEditorState::open(&abs, key) {
-            Ok(mut fresh) => {
-                fresh.view = st.view;
-                fresh.frame_pending = false;
+            Ok(fresh) => {
                 *st = fresh;
                 self.editor
                     .console

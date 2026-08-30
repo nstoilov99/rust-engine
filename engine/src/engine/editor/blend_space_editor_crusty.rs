@@ -2,16 +2,18 @@
 //!
 //! Two regions: a **details column** on the left (Axes, Samples, Smoothing —
 //! every field commits at end-edit as one undo entry) and the **canvas** on
-//! the right, a [`Canvas`] scope that draws the axis frame, grid lines at
-//! the divisions, the compiled triangulation and the samples as dots. A
-//! footer line under the canvas carries the compile status.
+//! the right: a fixed plot frame (ticket 07 — no pan or zoom, it stretches
+//! with the panel) that draws grid lines at the divisions, the compiled
+//! triangulation and the samples as dots, with the axis labels in the
+//! margins around it. A footer line under the canvas carries the compile
+//! status.
 //!
 //! The canvas (ticket 05) is the authoring surface: click selects a sample,
 //! drag moves it snapped to the grid (Shift bypasses; one undo entry on
 //! release), right-click adds or deletes, Ctrl+click/drag places the green
 //! preview point the host drives the bound entity from. Interact first, draw
-//! second — the curve plot's order — with [`doc_to_world`] /
-//! [`world_to_doc`] as the mapping.
+//! second — the curve plot's order — with [`doc_to_screen`] /
+//! [`screen_to_doc`] over [`plot_rect`] as the mapping.
 //!
 //! Policy lives in `blend_space_editor`: field gestures, edits and the
 //! compiled space are decided — and tested — there. This file draws.
@@ -22,10 +24,7 @@ use crusty_gui::input::{Key as UiKey, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
-use crusty_gui::widgets::{
-    Button, Canvas, CanvasScope, CanvasView, ComboBox, DragValue, ScrollArea, SelectableValue,
-    TextEdit,
-};
+use crusty_gui::widgets::{Button, ComboBox, DragValue, ScrollArea, SelectableValue, TextEdit};
 
 use super::blend_space_editor::{BlendSpaceEditorState, CanvasMenu, Field, FieldEvent};
 use super::theme::tokens::{asset_color, grid_major, grid_minor};
@@ -37,13 +36,15 @@ use crate::engine::animation::blend_space::{BlendAxis, BlendSample, BlendSpaceDo
 const DETAILS_W: f32 = 300.0;
 const LABEL_W: f32 = 84.0;
 const FOOTER_H: f32 = 24.0;
-/// Canvas world box the axis ranges map onto (pixels at zoom 1).
-pub const WORLD_W: f32 = 800.0;
-pub const WORLD_H: f32 = 500.0;
-/// World height of the one-axis strip.
-pub const WORLD_H_1D: f32 = 120.0;
-/// Screen margin the fit leaves for the border labels.
-const FIT_MARGIN: f32 = 72.0;
+/// Margins the plot frame leaves in the canvas for the axis labels: the
+/// Y column (name, arrows, range) on the left, the X row underneath, the
+/// Ctrl hint / readout on top.
+pub const MARGIN_L: f32 = 56.0;
+pub const MARGIN_B: f32 = 48.0;
+pub const MARGIN_R: f32 = 16.0;
+pub const MARGIN_T: f32 = 36.0;
+/// Height of the one-axis strip.
+pub const STRIP_H: f32 = 120.0;
 const SAMPLE_R: f32 = 5.0;
 /// Half-size of a sample's hit box.
 const SAMPLE_HIT: f32 = 9.0;
@@ -52,8 +53,6 @@ const ARROW_HEAD: f32 = 6.0;
 const ARROW_GAP: f32 = 8.0;
 /// Footer "Clear preview" button width.
 const CLEAR_W: f32 = 96.0;
-const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 8.0;
 const TOAST_MS: f32 = 1800.0;
 
 /// What the panel wants the host to do after the frame. Save is the host's
@@ -476,9 +475,20 @@ fn clip_stem(clip: &str) -> String {
 
 // ── canvas ──────────────────────────────────────────────────────────────────
 
-/// World size of the axis box for this document.
-pub fn world_size(doc: &BlendSpaceDoc) -> Vec2 {
-    Vec2::new(WORLD_W, if doc.is_2d() { WORLD_H } else { WORLD_H_1D })
+/// The plot frame: the canvas rect minus the margins the axis labels live
+/// in. `left` is the Y-label column width (the caller measures it so a
+/// long axis name gets room). One axis: a strip of fixed height centred in
+/// the frame, keeping the same left/bottom margins.
+pub fn plot_rect(doc: &BlendSpaceDoc, canvas: Rect, left: f32, s: f32) -> Rect {
+    let min = canvas.min + Vec2::new(left, MARGIN_T * s);
+    let max = canvas.max - Vec2::new(MARGIN_R * s, MARGIN_B * s);
+    let frame = Rect::from_min_max(min, Pos2::new(max.x.max(min.x), max.y.max(min.y)));
+    if doc.is_2d() {
+        frame
+    } else {
+        let h = (STRIP_H * s).min(frame.height());
+        Rect::from_center_size(frame.center(), Vec2::new(frame.width(), h))
+    }
 }
 
 fn norm(a: &BlendAxis, v: f32) -> f32 {
@@ -486,79 +496,72 @@ fn norm(a: &BlendAxis, v: f32) -> f32 {
     if span.abs() < 1e-6 { 0.5 } else { (v - a.min) / span }
 }
 
-/// Axis units → canvas world. `y` is the strip's centreline for one axis.
-pub fn doc_to_world(doc: &BlendSpaceDoc, p: [f32; 2]) -> Pos2 {
-    let size = world_size(doc);
-    let y = if doc.is_2d() { (1.0 - norm(&doc.axes[1], p[1])) * size.y } else { size.y * 0.5 };
-    Pos2::new(norm(&doc.axes[0], p[0]) * size.x, y)
+/// Axis units → screen: min at the left/bottom edge of `plot`, max at the
+/// right/top. `y` is the strip's centreline for one axis.
+pub fn doc_to_screen(doc: &BlendSpaceDoc, plot: Rect, p: [f32; 2]) -> Pos2 {
+    let y = if doc.is_2d() {
+        plot.max.y - norm(&doc.axes[1], p[1]) * plot.height()
+    } else {
+        plot.center().y
+    };
+    Pos2::new(plot.min.x + norm(&doc.axes[0], p[0]) * plot.width(), y)
 }
 
-/// Canvas world → axis units (unclamped). One-axis spaces report `y = 0`.
-pub fn world_to_doc(doc: &BlendSpaceDoc, w: Pos2) -> [f32; 2] {
-    let size = world_size(doc);
+/// Screen → axis units (unclamped). One-axis spaces report `y = 0`.
+pub fn screen_to_doc(doc: &BlendSpaceDoc, plot: Rect, p: Pos2) -> [f32; 2] {
     let ax = &doc.axes[0];
-    let x = ax.min + (w.x / size.x) * (ax.max - ax.min);
+    let x = ax.min + ((p.x - plot.min.x) / plot.width().max(1e-3)) * (ax.max - ax.min);
     let y = if doc.is_2d() {
         let ay = &doc.axes[1];
-        ay.min + (1.0 - w.y / size.y) * (ay.max - ay.min)
+        ay.min + ((plot.max.y - p.y) / plot.height().max(1e-3)) * (ay.max - ay.min)
     } else {
         0.0
     };
     [x, y]
 }
 
-/// A view that fits the axis box with room for the border labels.
-pub fn fit_view(doc: &BlendSpaceDoc, size: Vec2, s: f32) -> CanvasView {
-    let world = world_size(doc);
-    let m = FIT_MARGIN * s;
-    let zoom = ((size.x - 2.0 * m) / world.x).min((size.y - 2.0 * m) / world.y).clamp(ZOOM_MIN, ZOOM_MAX);
-    CanvasView {
-        pan: Vec2::new(world.x * 0.5 - size.x * 0.5 / zoom, world.y * 0.5 - size.y * 0.5 / zoom),
-        zoom,
-    }
-}
-
+/// The canvas region right of the details column: a fixed plot frame that
+/// stretches with the panel. Ticket 08 splits `rect` here to stack the 3D
+/// preview pane above the plot.
 fn canvas(ui: &mut Ui, rect: Rect, s: f32, selection: Color, state: &mut BlendSpaceEditorState) {
     let st = ui.style();
-    ui.painter().rect_filled(rect, 0.0, st.palette.window);
-    if state.frame_pending {
-        state.frame_pending = false;
-        state.view = fit_view(&state.doc, rect.size(), s);
-    }
-    let mut view = state.view;
+    let name_w = if state.doc.is_2d() {
+        ui.painter().measure_text(&state.doc.axes[1].name, st.fonts.body, None).x
+    } else {
+        0.0
+    };
+    let left = (MARGIN_L * s).max(name_w + st.spacing.padding * 2.0);
+    let plot = plot_rect(&state.doc, rect, left, s);
     ui.run_at(
         rect,
         Direction::TopDown,
         Id::new("blend_space_canvas").with(state.path.as_str()),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
-            Canvas::new().size(rect.size()).zoom_range(ZOOM_MIN, ZOOM_MAX).show(ui, &mut view, |ui, scope| {
-                // Interact first, draw second: a drag renders where it landed.
-                interact(ui, scope, s, state);
-                draw_frame_and_grid(ui, scope, s, state, &st);
-                draw_triangulation(ui, scope, s, state, &st);
-                draw_samples(ui, scope, s, selection, state, &st);
-                draw_hint(ui, scope, state, &st);
-            });
+            ui.set_clip(rect.intersect(ui.clip_rect()));
+            ui.painter().rect_filled(rect, 0.0, st.palette.window);
+            // Interact first, draw second: a drag renders where it landed.
+            interact(ui, rect, plot, s, state);
+            draw_frame_and_grid(ui, plot, left, s, state, &st);
+            draw_triangulation(ui, plot, s, state, &st);
+            draw_samples(ui, plot, s, selection, state, &st);
+            draw_hint(ui, rect, state, &st);
         },
     );
-    state.view = view;
     canvas_menu(ui, state);
 }
 
-/// Everything the pointer does on the canvas. Primary only — the `Canvas`
-/// owns middle/right-drag pans and the wheel; a right release that was not
-/// a pan arrives as `scope.right_clicked()`.
-fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEditorState) {
+/// Everything the pointer does on the canvas: primary presses on samples
+/// and the background, a right press for the menu.
+fn interact(ui: &mut Ui, canvas: Rect, plot: Rect, s: f32, state: &mut BlendSpaceEditorState) {
     let input = &ui.ctx().input;
     let ctrl = input.modifiers.contains(Modifiers::CTRL);
     let shift = input.modifiers.contains(Modifiers::SHIFT);
     let pointer = input.pointer_pos;
     let pointer_down = input.pointer_down;
     let pressed = input.pointer_pressed;
+    let right_pressed = input.right_pressed;
     let escape = input.key_pressed(UiKey::Escape);
-    // Space+primary is the canvas's own pan: no authoring gesture starts under it.
-    let panning = input.key_down(UiKey::Space);
     let modal = ui.ctx().modal_any_open();
     let text_focused = ui.ctx().text_focused();
     state.hovered = None;
@@ -575,7 +578,7 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         }
         return;
     }
-    let to_doc = |doc: &BlendSpaceDoc, p: Pos2| world_to_doc(doc, scope.screen_to_world(p));
+    let to_doc = |doc: &BlendSpaceDoc, p: Pos2| screen_to_doc(doc, plot, p);
 
     // A live gesture owns the pointer: no hit test can steal it mid-drag.
     if state.drag.is_some() {
@@ -599,7 +602,6 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         return;
     }
 
-    let r = scope.rect();
     let hit_r = SAMPLE_HIT * s;
     let hits: Vec<(usize, Rect)> = state
         .doc
@@ -607,10 +609,9 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         .iter()
         .enumerate()
         .map(|(i, sm)| {
-            let c = scope.world_to_screen(doc_to_world(&state.doc, [sm.x, sm.y]));
+            let c = doc_to_screen(&state.doc, plot, [sm.x, sm.y]);
             (i, Rect::from_center_size(c, Vec2::splat(hit_r * 2.0)))
         })
-        .filter(|(_, b)| r.intersect(*b).width() > 0.0)
         .collect();
     // Overlapping dots: the last drawn (highest index) wins hover, press
     // and right-click alike.
@@ -621,7 +622,7 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         if resp.hovered {
             state.hovered = Some(*i);
         }
-        if resp.pressed && pressed && !panning {
+        if resp.pressed && pressed {
             press = Some(*i);
         }
     }
@@ -638,9 +639,16 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         }
     }
 
-    // Right-click: the menu for what is under the pointer. `CanvasScope`
-    // has already decided this release was a click and not a pan.
-    if let Some(p) = scope.right_clicked() {
+    // Right press: the menu for what is under the pointer. A right press
+    // that dismissed another transient surface hands its position on
+    // (`context_menu_for`'s rule) so dismiss-and-reopen is one gesture.
+    let right = if right_pressed && ui.contains_pointer(canvas) {
+        pointer
+    } else {
+        ui.ctx().modal_reopen_at().filter(|p| canvas.contains(*p))
+    };
+    if let Some(p) = right {
+        ui.ctx_mut().take_modal_reopen();
         let sample = hits.iter().rev().find(|(_, b)| b.contains(p)).map(|(i, _)| *i);
         if sample.is_some() {
             state.selection = sample;
@@ -662,8 +670,8 @@ fn interact(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &mut BlendSpaceEdit
         return;
     }
     // Background press: Ctrl places the preview point, plain deselects.
-    let Some(p) = pointer.filter(|p| r.contains(*p)) else { return };
-    if pressed && !modal && !panning {
+    let Some(p) = pointer.filter(|_| ui.contains_pointer(canvas)) else { return };
+    if pressed && !modal {
         if ctrl {
             let d = to_doc(&state.doc, p);
             state.preview_drag = true;
@@ -714,11 +722,11 @@ fn canvas_menu(ui: &mut Ui, state: &mut BlendSpaceEditorState) {
     }
 }
 
-/// Text on the canvas' top-left: the Ctrl hint at rest, the live input
-/// readout while a preview point is set.
-fn draw_hint(ui: &mut Ui, scope: &CanvasScope, state: &BlendSpaceEditorState, st: &Style) {
+/// Text in the canvas' top-left margin: the Ctrl hint at rest, the live
+/// input readout while a preview point is set.
+fn draw_hint(ui: &mut Ui, canvas: Rect, state: &BlendSpaceEditorState, st: &Style) {
     let pad = st.spacing.padding;
-    let at = scope.rect().min + Vec2::splat(pad);
+    let at = canvas.min + Vec2::splat(pad);
     let mut p = ui.painter();
     match state.preview_point {
         None => {
@@ -749,10 +757,10 @@ fn draw_hint(ui: &mut Ui, scope: &CanvasScope, state: &BlendSpaceEditorState, st
     }
 }
 
-fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSpaceEditorState, st: &Style) {
+/// The frame, its grid, and the axis labels in the margins around it.
+/// `left` is the Y column's width (the name is centred in it).
+fn draw_frame_and_grid(ui: &mut Ui, frame: Rect, left: f32, s: f32, state: &BlendSpaceEditorState, st: &Style) {
     let doc = &state.doc;
-    let size = world_size(doc);
-    let frame = scope.world_rect_to_screen(Rect::from_min_size(Pos2::new(0.0, 0.0), size));
     let bg = st.palette.panel;
     let small = st.fonts.small;
     let mut p = ui.painter();
@@ -760,13 +768,13 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
 
     let ax = &doc.axes[0];
     for i in 1..ax.grid_divisions.max(1) {
-        let x = scope.world_to_screen(Pos2::new(size.x * i as f32 / ax.grid_divisions as f32, 0.0)).x;
+        let x = frame.min.x + frame.width() * i as f32 / ax.grid_divisions as f32;
         p.line_segment(Pos2::new(x, frame.min.y), Pos2::new(x, frame.max.y), st.metrics.border, grid_minor(bg));
     }
     if doc.is_2d() {
         let ay = &doc.axes[1];
         for j in 1..ay.grid_divisions.max(1) {
-            let y = scope.world_to_screen(Pos2::new(0.0, size.y * j as f32 / ay.grid_divisions as f32)).y;
+            let y = frame.min.y + frame.height() * j as f32 / ay.grid_divisions as f32;
             p.line_segment(Pos2::new(frame.min.x, y), Pos2::new(frame.max.x, y), st.metrics.border, grid_minor(bg));
         }
     } else {
@@ -776,9 +784,9 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
     }
     p.rect_stroke(frame, 0.0, st.metrics.border, grid_major(bg, true));
 
-    // Border labels: range ends in mono at the corners, the axis name (and
-    // the parameter it reads, when that differs) centred on the edge between
-    // a pair of arrows — the mockup's "← Yaw →".
+    // Margin labels: range ends in mono at the plot's corners, the axis name
+    // (and the parameter it reads, when that differs) centred on the edge
+    // between a pair of arrows — the mockup's "← Yaw →".
     let mono = FontFamily::Mono;
     let secondary = st.palette.text_secondary;
     let fmt = |v: f32| format!("{v:.2}").trim_end_matches('0').trim_end_matches('.').to_string();
@@ -788,7 +796,7 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
     let mw = p.measure_text_family(&max_label, small, None, mono).x;
     p.text_family(Pos2::new(frame.max.x - mw, below), &max_label, small, secondary, None, mono);
     let tw = p.measure_text(&ax.name, st.fonts.body, None).x;
-    let ty = below + small * 1.4 * s;
+    let ty = below + small * 1.3;
     let tx = frame.center().x - tw * 0.5;
     p.text(Pos2::new(tx, ty), &ax.name, st.fonts.body, st.palette.text, None);
     let mid = ty + st.fonts.body * 0.62;
@@ -798,7 +806,7 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
     arrow(&mut p, Pos2::new(tx + tw + gap, mid), Pos2::new(tx + tw + gap + len, mid), s, secondary);
     if let Some(param) = param_note(ax) {
         let pw = p.measure_text_family(&param, small, None, mono).x;
-        p.text_family(Pos2::new(frame.center().x - pw * 0.5, ty + st.fonts.body * 1.35), &param, small, secondary, None, mono);
+        p.text_family(Pos2::new(frame.center().x - pw * 0.5, ty + st.fonts.body * 1.25), &param, small, secondary, None, mono);
     }
 
     if doc.is_2d() {
@@ -810,11 +818,11 @@ fn draw_frame_and_grid(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSp
         let hi = fmt(ay.max);
         let hw = p.measure_text_family(&hi, small, None, mono).x;
         p.text_family(Pos2::new(right - hw, frame.min.y), &hi, small, secondary, None, mono);
-        // Name stacked between an up and a down arrow, left of the frame;
-        // the arrows step aside when the frame is too short to hold the
-        // stack clear of the range labels.
+        // Name stacked between an up and a down arrow, centred in the left
+        // column; the arrows step aside when the frame is too short to hold
+        // the stack clear of the range labels.
         let tw = p.measure_text(&ay.name, st.fonts.body, None).x;
-        let cx = right - hw.max(lw) - small - tw.max(len) * 0.5;
+        let cx = frame.min.x - left * 0.5;
         let cy = frame.center().y;
         let half = st.fonts.body * 0.62;
         p.text(Pos2::new(cx - tw * 0.5, cy - half), &ay.name, st.fonts.body, st.palette.text, None);
@@ -851,10 +859,10 @@ fn param_note(a: &BlendAxis) -> Option<String> {
 
 /// Interior Delaunay edges in the quiet stroke, the hull loop stronger —
 /// the region the input clamps to reads as the boundary it is.
-fn draw_triangulation(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSpaceEditorState, st: &Style) {
+fn draw_triangulation(ui: &mut Ui, plot: Rect, s: f32, state: &BlendSpaceEditorState, st: &Style) {
     let Ok(space) = &state.compiled else { return };
     let doc = &state.doc;
-    let at = |i: usize| scope.world_to_screen(doc_to_world(doc, space.points()[i]));
+    let at = |i: usize| doc_to_screen(doc, plot, space.points()[i]);
     let mut p = ui.painter();
     let hull = space.hull();
     for t in space.triangles() {
@@ -870,16 +878,16 @@ fn draw_triangulation(ui: &mut Ui, scope: &CanvasScope, s: f32, state: &BlendSpa
     }
 }
 
-fn draw_samples(ui: &mut Ui, scope: &CanvasScope, s: f32, selection: Color, state: &BlendSpaceEditorState, st: &Style) {
+fn draw_samples(ui: &mut Ui, plot: Rect, s: f32, selection: Color, state: &BlendSpaceEditorState, st: &Style) {
     let doc = &state.doc;
     let fill = asset_color("animation");
     let success = Palette::invariant_status().success;
     let r = SAMPLE_R * s;
-    let label_px = scope.label_size(st.fonts.small).unwrap_or(st.fonts.small);
+    let label_px = st.fonts.small;
     let weights = state.preview_weights();
     let mut p = ui.painter();
     for (i, sm) in doc.samples.iter().enumerate() {
-        let c = scope.world_to_screen(doc_to_world(doc, [sm.x, sm.y]));
+        let c = doc_to_screen(doc, plot, [sm.x, sm.y]);
         let weight = weights.iter().find(|(k, _)| *k == i).map(|(_, w)| *w);
         let selected = state.selection == Some(i);
         let hovered = state.hovered == Some(i);
@@ -907,7 +915,7 @@ fn draw_samples(ui: &mut Ui, scope: &CanvasScope, s: f32, selection: Color, stat
         }
     }
     if let Some(pt) = state.preview_point {
-        let c = scope.world_to_screen(doc_to_world(doc, pt));
+        let c = doc_to_screen(doc, plot, pt);
         // Crosshair ticks tie the point to the axes it reads.
         let t = SAMPLE_R * 2.2 * s;
         p.line_segment(Pos2::new(c.x - t, c.y), Pos2::new(c.x + t, c.y), 1.0 * s, success.with_alpha(0.7));
@@ -1038,12 +1046,17 @@ mod tests {
         d
     }
 
+    fn plot() -> Rect {
+        Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(400.0, 300.0))
+    }
+
     #[test]
-    fn doc_and_world_are_inverses_and_y_grows_up() {
+    fn doc_and_screen_are_inverses_and_y_grows_up() {
         let d = doc_2d();
-        let w = doc_to_world(&d, [3.0, 1.0]);
-        assert_eq!(w, Pos2::new(WORLD_W * 0.5, 0.0), "max y is the top edge");
-        let back = world_to_doc(&d, w);
+        let p = plot();
+        let w = doc_to_screen(&d, p, [3.0, 1.0]);
+        assert_eq!(w, Pos2::new(300.0, 50.0), "max y is the top edge");
+        let back = screen_to_doc(&d, p, w);
         assert!((back[0] - 3.0).abs() < 1e-5 && (back[1] - 1.0).abs() < 1e-5);
     }
 
@@ -1051,20 +1064,36 @@ mod tests {
     fn one_axis_maps_onto_the_strip_centreline() {
         let mut d = doc_2d();
         d.axis_count = 1;
-        assert_eq!(doc_to_world(&d, [6.0, 0.7]).y, WORLD_H_1D * 0.5);
-        assert_eq!(world_to_doc(&d, Pos2::new(WORLD_W, 3.0))[1], 0.0);
+        let p = plot();
+        assert_eq!(doc_to_screen(&d, p, [6.0, 0.7]), Pos2::new(500.0, 200.0));
+        assert_eq!(screen_to_doc(&d, p, Pos2::new(500.0, 3.0))[1], 0.0);
     }
 
     #[test]
-    fn fit_view_centres_the_box_inside_the_margin() {
+    fn mapping_fills_the_plot_rect_at_any_size() {
         let d = doc_2d();
-        let size = Vec2::new(1000.0, 700.0);
-        let v = fit_view(&d, size, 1.0);
-        let scale = |w: Pos2| Pos2::new((w.x - v.pan.x) * v.zoom, (w.y - v.pan.y) * v.zoom);
-        let min = scale(Pos2::new(0.0, 0.0));
-        let max = scale(Pos2::new(WORLD_W, WORLD_H));
-        assert!(min.x >= FIT_MARGIN - 1e-3 && min.y >= FIT_MARGIN - 1e-3);
-        assert!(max.x <= size.x - FIT_MARGIN + 1e-3 && max.y <= size.y - FIT_MARGIN + 1e-3);
-        assert!(((min.x + max.x) * 0.5 - size.x * 0.5).abs() < 1e-3, "centred");
+        for size in [Vec2::new(400.0, 300.0), Vec2::new(1200.0, 90.0)] {
+            let p = Rect::from_min_size(Pos2::new(17.0, 23.0), size);
+            assert_eq!(doc_to_screen(&d, p, [0.0, -1.0]), Pos2::new(p.min.x, p.max.y), "min → left/bottom");
+            assert_eq!(doc_to_screen(&d, p, [6.0, 1.0]), Pos2::new(p.max.x, p.min.y), "max → right/top");
+        }
+    }
+
+    #[test]
+    fn plot_rect_insets_the_margins_and_centres_the_strip() {
+        let canvas = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(600.0, 400.0));
+        let d = doc_2d();
+        let r = plot_rect(&d, canvas, MARGIN_L, 1.0);
+        assert_eq!(r.min, Pos2::new(10.0 + MARGIN_L, 20.0 + MARGIN_T));
+        assert_eq!(r.max, Pos2::new(610.0 - MARGIN_R, 420.0 - MARGIN_B));
+        let mut one = d.clone();
+        one.axis_count = 1;
+        let strip = plot_rect(&one, canvas, MARGIN_L, 1.0);
+        assert_eq!(strip.height(), STRIP_H);
+        assert_eq!(strip.center().y, r.center().y);
+        assert_eq!((strip.min.x, strip.max.x), (r.min.x, r.max.x));
+        // Never inverted, however small the panel.
+        let tiny = plot_rect(&d, Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(30.0, 30.0)), MARGIN_L, 1.0);
+        assert!(tiny.width() >= 0.0 && tiny.height() >= 0.0);
     }
 }
