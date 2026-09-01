@@ -40,6 +40,12 @@ pub enum EditorTab {
     InputActionEditor(String),
     /// Per-file mapping context editor (keyed by file path)
     InputContextEditor(String),
+    /// Properties of the focused graph document's selection (doc-layouts 02).
+    GraphDetails,
+    /// The focused graph document's variables (doc-layouts 02).
+    GraphVariables,
+    /// 3D preview of the focused anim graph document (doc-layouts 03).
+    AnimPreview,
     /// A panel contributed by a plugin (Task 39.8 D6), keyed by panel id.
     ///
     /// The one open variant: a plugin panel that is not registered this
@@ -104,6 +110,9 @@ impl EditorTab {
                     .unwrap_or_else(|| key.clone());
                 format!("MC \u{2014} {}", name)
             }
+            EditorTab::GraphDetails => "Details".to_string(),
+            EditorTab::GraphVariables => "Variables".to_string(),
+            EditorTab::AnimPreview => "Preview".to_string(),
             // Fallback only: the registered title wins wherever the live
             // plugin set is reachable (`dock_crusty::tab_titles`).
             EditorTab::Plugin(id) => id.clone(),
@@ -131,6 +140,9 @@ impl EditorTab {
             EditorTab::BlendSpace(key) => format!("tab_blendspace_{}", key),
             EditorTab::InputActionEditor(key) => format!("tab_ia_{}", key),
             EditorTab::InputContextEditor(key) => format!("tab_mc_{}", key),
+            EditorTab::GraphDetails => "tab_graph_details".to_string(),
+            EditorTab::GraphVariables => "tab_graph_variables".to_string(),
+            EditorTab::AnimPreview => "tab_anim_preview".to_string(),
             EditorTab::Plugin(id) => format!("tab_plugin_{}", id),
         }
     }
@@ -153,6 +165,8 @@ impl EditorTab {
             EditorTab::BlendSpace(key) => Some((K::BlendSpace, key.clone())),
             EditorTab::InputActionEditor(key) => Some((K::InputAction, key.clone())),
             EditorTab::InputContextEditor(key) => Some((K::InputContext, key.clone())),
+            // Graph side panels have no secondary-window kind yet (tickets 02–03).
+            EditorTab::GraphDetails | EditorTab::GraphVariables | EditorTab::AnimPreview => None,
             EditorTab::Plugin(id) => Some((K::Plugin, id.clone())),
         }
     }

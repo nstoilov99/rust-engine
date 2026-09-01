@@ -336,6 +336,12 @@ pub struct App {
     /// Subject of the open tab context menu (right-clicked dock tab).
     #[cfg(feature = "editor")]
     crusty_tab_ctx: Option<String>,
+    /// Tab id of the focused *document* (viewport, graph, curve, …) in the
+    /// main dock. Unlike `DockState::focused_tab` it survives clicks on side
+    /// panels, so Details/Variables/Preview and edit routing keep their
+    /// document; the active layout profile follows it (doc-layouts spec).
+    #[cfg(feature = "editor")]
+    focused_document: Option<String>,
     /// Tabs dropped outside any dock target — main.rs turns these into OS
     /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
     #[cfg(feature = "editor")]
@@ -914,6 +920,8 @@ impl App {
             #[cfg(feature = "editor")]
             crusty_dock_drag: None,
             crusty_tab_ctx: None,
+            #[cfg(feature = "editor")]
+            focused_document: None,
             #[cfg(feature = "editor")]
             pending_crusty_floats: Vec::new(),
             // The layout was just restored from disk; its per-file tabs have
@@ -2929,6 +2937,11 @@ impl App {
                 let _ = self.editor.ui.crusty_dock.save_to_default();
                 println!("Layout reset to default");
             }
+            MenuAction::ResetAllLayouts => {
+                self.editor.ui.crusty_dock.reset_all();
+                let _ = self.editor.ui.crusty_dock.save_to_default();
+                println!("All layouts reset to default");
+            }
             MenuAction::LoadBenchmarkScene => self.load_benchmark_scene(),
             MenuAction::RunBenchmark => self.run_benchmark(),
             MenuAction::Play => self.enter_play_mode(),
@@ -3854,6 +3867,9 @@ impl App {
             // Graph selection outline: preset-invariant except for Graphite's
             // achromatic carve-out, so it must come from the live theme.
             let graph_sel_outline = self.editor.services.theme.palette.selection.outline;
+            // Edit-menu overrides follow the document that owns Edit actions
+            // (same source as `active_graph_key`), so menu and shortcuts agree.
+            let focused_document = self.edit_target_document();
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -3973,7 +3989,7 @@ impl App {
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
-            let curve_edit_override = graph_focused_tab
+            let curve_edit_override = focused_document
                 .as_deref()
                 .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
                 .and_then(|ft| ft.strip_prefix("curve:"))
@@ -3998,7 +4014,7 @@ impl App {
                         has_clipboard: false,
                     }
                 });
-            let blend_space_edit_override = graph_focused_tab
+            let blend_space_edit_override = focused_document
                 .as_deref()
                 .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
                 .and_then(|ft| ft.strip_prefix("blendspace:"))
@@ -4024,7 +4040,7 @@ impl App {
                     }
                 });
             // Edit-menu override when a docked graph tab has focus (P5 routing).
-            let graph_edit_override = graph_focused_tab
+            let graph_edit_override = focused_document
                 .as_deref()
                 .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
                 .and_then(|ft| ft.strip_prefix("graph:"))
@@ -4479,6 +4495,12 @@ impl App {
                                         Some("no enabled plugin registers this panel"),
                                     ),
                                 },
+                                // Bodies land in doc-layouts tickets 02–03.
+                                Some(
+                                    EditorTab::GraphDetails
+                                    | EditorTab::GraphVariables
+                                    | EditorTab::AnimPreview,
+                                ) => dock_crusty::placeholder_panel(ui, "No graph focused"),
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -4639,6 +4661,7 @@ impl App {
         for tab in std::mem::take(&mut crusty_ctx_close) {
             self.handle_crusty_tab_close(&tab);
         }
+        self.sync_layout_profile();
 
         // Resolve a cross-window drag from a float window: docked into the
         // main tree → drop the tab from the float (an emptied window closes
@@ -5099,16 +5122,84 @@ impl App {
         }
     }
 
-    /// Content-relative key of the graph tab that currently has focus in the
-    /// *main* dock, if any. Returns `None` when the focused tab isn't a graph,
-    /// or the graph is torn off into a float window (that window owns its
-    /// keyboard editing). Drives edit-action focus routing (Task 40 P5).
+    /// Keep `focused_document` and the active layout profile in step with
+    /// the dock, after the dock frame and its tab closes have landed.
+    ///
+    /// A click on a document tab makes it the focused document; a click on
+    /// a side panel changes nothing; a focused document that left the tree
+    /// (closed, torn off) yields to the strip's front tab. The profile then
+    /// follows the focused document's kind — swapping the surrounding
+    /// panels when the kind changes (doc-layouts spec).
+    #[cfg(feature = "editor")]
+    fn sync_layout_profile(&mut self) {
+        use rust_engine::engine::editor::dock_crusty::{self, is_document_id};
+        let dock = &self.editor.ui.crusty_dock;
+        // A tab closed this frame can still be the dock's focused tab (its
+        // cleanup ran before the close landed); membership is the test.
+        let focused = dock
+            .state
+            .focused_tab
+            .as_deref()
+            .filter(|t| is_document_id(t) && dock.tree.contains_tab(t));
+        let doc = match focused {
+            Some(t) => Some(t.to_string()),
+            None => self
+                .focused_document
+                .clone()
+                .filter(|d| dock.tree.contains_tab(d))
+                .or_else(|| dock.active_document()),
+        };
+        self.focused_document = doc.clone();
+        let Some(tab) = doc.as_deref().and_then(dock_crusty::parse_tab) else {
+            return;
+        };
+        let domain = match &tab {
+            EditorTab::GraphEditor(key) => {
+                self.editor.scene.graph_editors.get(key).map(|st| st.domain)
+            }
+            _ => None,
+        };
+        let Some(profile) = dock_crusty::profile_of(&tab, domain) else {
+            return;
+        };
+        if profile != dock.active {
+            if let Some(doc) = doc {
+                self.editor.ui.crusty_dock.swap_profile(profile, &doc);
+            }
+        }
+    }
+
+    /// The document that owns Edit actions and the Edit menu: the focused
+    /// document (`focused_document`, in the main dock) — except while a
+    /// scene-side panel (Hierarchy, Inspector, Assets, Console, …) holds the
+    /// dock focus, which keeps today's scene routing. The graph side panels
+    /// (Details, Variables, Preview) defer to the focused graph, so editing
+    /// in them undoes on the graph's stack.
+    #[cfg(feature = "editor")]
+    fn edit_target_document(&self) -> Option<String> {
+        use rust_engine::engine::editor::dock_crusty::{is_document, parse_tab};
+        let dock = &self.editor.ui.crusty_dock;
+        if let Some(ft) = dock.state.focused_tab.as_deref().and_then(parse_tab) {
+            let graph_panel = matches!(
+                ft,
+                EditorTab::GraphDetails | EditorTab::GraphVariables | EditorTab::AnimPreview
+            );
+            if !is_document(&ft) && !graph_panel {
+                return None;
+            }
+        }
+        self.focused_document
+            .clone()
+            .filter(|d| dock.tree.contains_tab(d))
+    }
+
+    /// Content-relative key of the graph that owns Edit actions
+    /// (`edit_target_document`), if any. `None` when that document isn't a
+    /// graph, or the graph is torn off into a float window (that window owns
+    /// its keyboard editing). Drives edit-action focus routing (Task 40 P5).
     #[cfg(feature = "editor")]
     fn active_graph_key(&self) -> Option<String> {
-        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
-        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
-            return None;
-        }
+        let ft = self.edit_target_document()?;
         let key = ft.strip_prefix("graph:")?.to_string();
         self.editor
             .scene
@@ -5537,10 +5628,7 @@ impl App {
     /// any (the `active_curve_key` rule).
     #[cfg(feature = "editor")]
     fn active_blend_space_key(&self) -> Option<String> {
-        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
-        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
-            return None;
-        }
+        let ft = self.edit_target_document()?;
         let key = ft.strip_prefix("blendspace:")?.to_string();
         self.editor
             .scene
@@ -5636,10 +5724,7 @@ impl App {
     /// owns its own keyboard, so it does not answer here.
     #[cfg(feature = "editor")]
     fn active_curve_key(&self) -> Option<String> {
-        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
-        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
-            return None;
-        }
+        let ft = self.edit_target_document()?;
         let key = ft.strip_prefix("curve:")?.to_string();
         self.editor
             .scene
@@ -6458,6 +6543,11 @@ impl App {
                                 Some("no enabled plugin registers this panel"),
                             ),
                         },
+                        Some(
+                            EditorTab::GraphDetails
+                            | EditorTab::GraphVariables
+                            | EditorTab::AnimPreview,
+                        ) => dock_crusty::placeholder_panel(ui, "No graph focused"),
                         _ => dock_crusty::placeholder_panel(
                             ui,
                             "This panel is not yet ported to crusty-gui.",
