@@ -3725,12 +3725,22 @@ fn draw_and_interact(
         .as_ref()
         .map(|d| (d.from_node, d.from_pin.clone(), d.from_output));
     if let Some((from_node, from_pin, from_output)) = connect_snapshot {
-        let src = geoms
-            .iter()
-            .find(|g| g.id == from_node)
-            .and_then(|g| g.wire_anchor(&from_pin, from_output));
+        // The machine level (Task 41 rework): the ghost is a straight arrow
+        // from the state's border facing the pointer — where the finished
+        // edge will start — and never takes the wire-style route.
+        let machine = state.domain.is_animation();
+        let src = geoms.iter().find(|g| g.id == from_node).and_then(|g| {
+            if machine {
+                let pw = pointer_world?;
+                let r = [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y];
+                super::graph_anim_edge::border_exit(r, [pw.x, pw.y]).map(|a| Pos2::new(a[0], a[1]))
+            } else {
+                g.wire_anchor(&from_pin, from_output)
+            }
+        });
         if let (Some(src), Some(pw)) = (src, pointer_world) {
             let src_ty = pin_ty(&geoms, from_node, &from_pin, from_output);
+            let ty = src_ty.clone().unwrap_or(PinType::Exec);
             let tint = match (pin_under(&geoms, pw, hit_w), src_ty.as_ref()) {
                 (Some(h), Some(sty)) => {
                     if validate_connection(
@@ -3754,6 +3764,7 @@ fn draw_and_interact(
                         status.error
                     }
                 }
+                _ if machine => wire_color(Some(registry), &ty),
                 _ => st.palette.accent_active,
             };
             // The ghost takes the same route as the finished wire will —
@@ -3766,24 +3777,38 @@ fn draw_and_interact(
                 converge_index: 0,
                 node_rects: &node_rects,
             };
+            let screen = if machine {
+                vec![scope.world_to_screen(src), scope.world_to_screen(pw)]
+            } else {
+                wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope)
+            };
             let width = if lod.bar_only() { 1.0 } else { WIRE_DATA };
             let mut p = ui.painter();
             let ghost = WireGeom {
                 edge_index: usize::MAX,
                 a: src,
                 b: pw,
-                ty: src_ty.clone().unwrap_or(PinType::Exec),
-                screen: wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope),
+                ty,
+                screen,
                 selected: false,
                 mismatched: false,
                 // A wire being dragged is not running: it does not exist yet.
                 pulse: 0.0,
                 taken: true,
                 rate: 0.0,
-                direct: false,
-                arrow: false,
+                direct: machine,
+                arrow: machine,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
+            if ghost.arrow && !lod.bar_only() {
+                draw_arrow_head(
+                    &mut p,
+                    ghost.screen[1],
+                    ghost.screen[0],
+                    (ARROW_L * zoom).clamp(5.0, 16.0),
+                    tint,
+                );
+            }
         }
         if released {
             let landed = resolve_connection(state, &geoms, pointer_world, hit_w, registry);
@@ -6418,16 +6443,20 @@ fn graph_toolbar(
         .iter()
         .position(|x| *x == style_now)
         .unwrap_or(0);
-    if let Some(i) = segmented_control(
-        ui,
-        "graph_toolbar_style",
-        seg,
-        &["Spline", "Manhattan", "Subway"],
-        active,
-        true,
-    ) {
-        if WireStyle::ALL[i] != style_now {
-            *request = Some(WireStyle::ALL[i]);
+    // The machine level draws straight arrows whatever the style says, so the
+    // switch is a dead control there; it returns inside a rule region.
+    if !state.at_machine_level() {
+        if let Some(i) = segmented_control(
+            ui,
+            "graph_toolbar_style",
+            seg,
+            &["Spline", "Manhattan", "Subway"],
+            active,
+            true,
+        ) {
+            if WireStyle::ALL[i] != style_now {
+                *request = Some(WireStyle::ALL[i]);
+            }
         }
     }
 

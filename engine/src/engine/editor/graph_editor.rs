@@ -1801,6 +1801,13 @@ impl GraphEditorState {
         (self.doc.node(id)?.type_id == ANIM_TRANSITION_TYPE_ID).then_some(id)
     }
 
+    /// The machine canvas is what this tab shows: an animation document with
+    /// no rule region open. Flow there is straight arrows whatever the wire
+    /// style says, so the style switch has nothing to do and hides.
+    pub fn at_machine_level(&self) -> bool {
+        self.domain.is_animation() && self.rule_scope.is_none()
+    }
+
     /// Open (or refocus) the rule peek on `owner`. Answers `false` when
     /// `owner` is not a transition of an animation document. `registry` is
     /// the parent's — needed to settle a previously open scope first.
@@ -8336,6 +8343,22 @@ mod rule_scope_tests {
         add.revert(&mut doc);
         assert!(!doc.regions.contains_key(&3), "an emptied region prunes");
         assert_eq!(doc, before, "undo restores the exact document");
+    }
+
+    /// The wire-style switch hides exactly while the machine canvas shows:
+    /// an animation document with no rule open. A script graph and an open
+    /// rule (the parent tab and the child projection alike) show it.
+    #[test]
+    fn machine_level_is_an_animation_document_with_no_rule_open() {
+        let reg = NodeRegistry::new();
+        assert!(!test_state("a.graph").at_machine_level());
+        let mut st = machine(Some(speed_rule()));
+        assert!(st.at_machine_level());
+        assert!(st.open_rule_scope(3, &reg));
+        assert!(!st.at_machine_level(), "an open rule is a region");
+        assert!(!st.rule_scope.as_ref().unwrap().child.at_machine_level());
+        st.close_rule_scope(&reg);
+        assert!(st.at_machine_level());
     }
 
     /// Opening a peek is look-only: the projection mirrors the region plus

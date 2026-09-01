@@ -125,6 +125,15 @@ fn exit_anchor(a: [f32; 2], b: [f32; 2], r: [f32; 4]) -> ([f32; 2], f32) {
     }
 }
 
+/// Where the ray from `r`'s center toward `to` leaves `r` — the start of a
+/// transition being dragged out of a state. `None` while `to` is still
+/// inside the rect: there is no border-to-pointer line to draw yet.
+pub fn border_exit(r: [f32; 4], to: [f32; 2]) -> Option<[f32; 2]> {
+    let c = center(r);
+    let (a, t_out) = exit_anchor(c, to, r);
+    (t_out < 1.0).then_some(a)
+}
+
 /// Where the line `a→b` enters `r` (which nominally contains `b`).
 fn entry_anchor(a: [f32; 2], b: [f32; 2], r: [f32; 4]) -> ([f32; 2], f32) {
     match seg_rect_interval(a, b, r) {
@@ -525,6 +534,17 @@ mod tests {
     /// `seg_outside`: a segment ending inside the rect trims to the border;
     /// one crossing straight through splits into two outside pieces; one
     /// that misses the rect passes through untouched.
+    /// The drag ghost starts where the center→pointer ray leaves the state
+    /// card, and does not exist while the pointer is still inside it.
+    #[test]
+    fn border_exit_leaves_the_card_toward_the_pointer() {
+        let r = [0.0, 0.0, 100.0, 40.0];
+        assert_eq!(border_exit(r, [300.0, 20.0]), Some([100.0, 20.0]));
+        assert_eq!(border_exit(r, [50.0, -60.0]), Some([50.0, 0.0]));
+        assert_eq!(border_exit(r, [80.0, 30.0]), None, "pointer inside");
+        assert_eq!(border_exit(r, [50.0, 20.0]), None, "pointer at center");
+    }
+
     #[test]
     fn seg_outside_trims_at_the_card_border() {
         let r = [100.0, 100.0, 200.0, 200.0];
