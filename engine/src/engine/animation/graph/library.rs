@@ -28,8 +28,7 @@ use node_graph_types::std_nodes::{
 use node_graph_types::{Edge, GraphDoc, GraphRealm, NodeInst, NodeRealm, PinType};
 
 use super::plan::{
-    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID,
-    ANIM_STATE_ALIAS_TYPE_ID,
+    ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
     ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, RULE_RESULT_PIN, STATE_IN_PIN, STATE_OUT_PIN,
     TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
 };
@@ -50,7 +49,7 @@ pub const ANIM_POSE_DOMAIN: &str = "anim_pose";
 pub const ANIM_CATEGORY: &str = "Animation";
 
 /// The 9px mono header tag for an animation node — the mockup's vocabulary
-/// (STATE / ENTRY / ANY / SLOT / TRANS), overriding the derived PURE/EVENT
+/// (STATE / ENTRY / ALIAS / SLOT / TRANS), overriding the derived PURE/EVENT
 /// tags, which describe exec flow and mean nothing in a domain that has
 /// none. A transition's tag only shows on its unfolded (selected) card —
 /// the at-rest chip has no header.
@@ -59,8 +58,6 @@ pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
         ANIM_STATE_TYPE_ID => Some("STATE"),
         ANIM_ENTRY_TYPE_ID => Some("ENTRY"),
         ANIM_STATE_ALIAS_TYPE_ID => Some("ALIAS"),
-        // Legacy Any State — only seen before the open-time upgrade runs.
-        ANIM_ANY_STATE_TYPE_ID => Some("ANY"),
         ANIM_PLAY_ONCE_TYPE_ID => Some("SLOT"),
         ANIM_TRANSITION_TYPE_ID => Some("TRANS"),
         // The rule canvas's one sink (mockup: "RESULT ◉ Bool").
@@ -244,6 +241,9 @@ mod tests {
             assert!(reg.get(id).is_some(), "{id}");
             assert_eq!(reg.get(id).unwrap().category, ANIM_CATEGORY);
         }
+        // The palette is registry-driven: the legacy Any State is not in it.
+        assert!(reg.get(super::super::plan::ANIM_ANY_STATE_TYPE_ID).is_none());
+        assert_eq!(reg.get(ANIM_STATE_ALIAS_TYPE_ID).unwrap().name, "State Alias");
         assert_eq!(reg.domain_registration(ANIM_FLOW_DOMAIN), Some(Some(2)));
         assert_eq!(reg.domain_registration(ANIM_POSE_DOMAIN), Some(Some(11)));
         assert_eq!(reg.domain_registration(TRIGGER_PARAM_DOMAIN), Some(Some(0)));

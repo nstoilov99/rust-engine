@@ -31,6 +31,7 @@ use crusty_gui::widgets::{
 
 use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
+    alias_is_global, alias_name, alias_states, alias_states_value,
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
     AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, DomainError, GraphDomain,
     GraphEdit, GraphEditorState, GraphOpenRequest,
@@ -748,6 +749,30 @@ impl ConfigGeom {
     }
 }
 
+/// Config-row key prefix of an alias's per-state rows: `states.<node id>`.
+/// Not a property — the row writes to `states` (see `config_write_back`);
+/// the prefix keeps each row's widget id and edit target distinct.
+const ALIAS_STATE_ROW_PREFIX: &str = "states.";
+
+/// What an inline change on config row `slug` of `n` writes back, as
+/// `(property key, value)`. Every row is its own property except an alias's
+/// state rows, which toggle one id in the `states` array.
+fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropValue) {
+    use crate::engine::animation::graph::ALIAS_STATES_PROP;
+    let toggled = slug
+        .strip_prefix(ALIAS_STATE_ROW_PREFIX)
+        .and_then(|id| id.parse::<i32>().ok());
+    let Some(id) = toggled else {
+        return (slug.to_string(), v);
+    };
+    let mut ids = alias_states(n);
+    ids.retain(|x| *x != id);
+    if matches!(v, PropValue::Bool(true)) {
+        ids.push(id);
+    }
+    (ALIAS_STATES_PROP.to_string(), alias_states_value(&ids))
+}
+
 /// The reserved config rows a node instance shows, in render order.
 ///
 /// Sourced from the type's `NodeKind` plus the reserved-key constants, so
@@ -757,10 +782,12 @@ impl ConfigGeom {
 /// only way to give it one.
 fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
     use crate::engine::animation::graph::plan::{
-        ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP,
-        CLIP_PROP, DURATION_PROP, GRAPH_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP,
-        SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
+        ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP, GRAPH_PROP,
+        PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPACE_PROP,
+        SPEED_PROP,
     };
+    use crate::engine::animation::graph::ALIAS_GLOBAL_PROP;
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
         Some(PropValue::Enum(s)) => s.clone(),
@@ -891,6 +918,34 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                 InlineKind::Float(float_of(SPEED_PROP, 1.0)),
             ));
         }
+        // A State Alias (state-aliases ticket 02): the Global switch, and
+        // while it is off one Bool row per state in document order — checked
+        // = listed. Each state row is a view over the one `states` array;
+        // `config_write_back` folds a tick into that property, so the edit
+        // and its undo are a single `SetProperty` on `states`.
+        _ if n.type_id == ANIM_STATE_ALIAS_TYPE_ID => {
+            let global = alias_is_global(n);
+            out.push((
+                ALIAS_GLOBAL_PROP.to_string(),
+                "Global".to_string(),
+                InlineKind::Bool(global),
+            ));
+            if !global {
+                let listed = alias_states(n);
+                for s in docd
+                    .doc()
+                    .nodes
+                    .iter()
+                    .filter(|s| s.type_id == ANIM_STATE_TYPE_ID)
+                {
+                    out.push((
+                        format!("{ALIAS_STATE_ROW_PREFIX}{}", s.id),
+                        anim_state_name(s),
+                        InlineKind::Bool(listed.contains(&(s.id as i32))),
+                    ));
+                }
+            }
+        }
         _ if n.type_id == ANIM_TRANSITION_TYPE_ID => {
             out.push((
                 DURATION_PROP.to_string(),
@@ -999,15 +1054,16 @@ struct ChipGeom {
 }
 
 /// Which compact machine card a node draws as (Task 41 canvas rework,
-/// mockup 2b/2d): states are name + tag + one mono subtitle, ENTRY and ANY
-/// STATE are small pills. None of them show pins or fields at rest —
-/// selecting a state swaps to the standard card (config rows) through
-/// geometry, exactly like a transition's chip does.
+/// mockup 2b/2d): states are name + tag + one mono subtitle, ENTRY is a
+/// small pill, an alias a pill with its title, ALIAS tag and the states it
+/// stands for. None of them show pins or fields at rest — selecting a state
+/// or alias swaps to the standard card (config rows) through geometry,
+/// exactly like a transition's chip does.
 #[derive(Clone, Copy, PartialEq)]
 enum AnimCardKind {
     State,
     Entry,
-    Any,
+    Alias,
 }
 
 /// A compact machine card's extras beyond the shared title/tag.
@@ -1038,7 +1094,7 @@ struct NodeGeom {
     /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
     chip: Option<ChipGeom>,
     /// A compact machine card (Task 41 rework): drawn instead of node
-    /// anatomy for states / ENTRY / ANY STATE on the machine canvas.
+    /// anatomy for states / ENTRY / aliases on the machine canvas.
     anim: Option<AnimCard>,
     /// This node's displayed position is derived (a chip riding its edge):
     /// its stored position is not what is on screen, so a direct grab must
@@ -1393,20 +1449,19 @@ fn build_geoms(
 
             // Task 41 canvas rework: the other machine nodes render as
             // compact cards — a state is its name, role tag and one mono
-            // subtitle; ENTRY and ANY STATE are small pills (mockup 2b).
-            // No pins, no fields. Selecting a *state* unfolds the standard
-            // card (its Clip/Graph/Speed config rows) through the generic
-            // path below — the transition-chip idiom exactly.
+            // subtitle; ENTRY and an alias are small pills (mockup 2b).
+            // No pins, no fields. Selecting a *state* or *alias* unfolds the
+            // standard card (its config rows) through the generic path
+            // below — the transition-chip idiom exactly.
             if state.domain.is_animation() {
                 use crate::engine::animation::graph::plan::{
-                    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID,
+                    ANIM_ENTRY_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
                 };
+                let selected = state.selection.contains(&n.id);
                 let kind = match n.type_id.as_str() {
-                    ANIM_STATE_TYPE_ID if !state.selection.contains(&n.id) => {
-                        Some(AnimCardKind::State)
-                    }
+                    ANIM_STATE_TYPE_ID if !selected => Some(AnimCardKind::State),
+                    ANIM_STATE_ALIAS_TYPE_ID if !selected => Some(AnimCardKind::Alias),
                     ANIM_ENTRY_TYPE_ID => Some(AnimCardKind::Entry),
-                    ANIM_ANY_STATE_TYPE_ID => Some(AnimCardKind::Any),
                     _ => None,
                 };
                 if let Some(kind) = kind {
@@ -1480,7 +1535,11 @@ fn build_geoms(
             // pushed after the pins are built); a selected transition keeps
             // its two pins as hit targets (retargeting) but never draws them.
             let anim_state_unfold = state.domain.is_animation()
-                && n.type_id == crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID;
+                && matches!(
+                    n.type_id.as_str(),
+                    crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID
+                        | crate::engine::animation::graph::plan::ANIM_STATE_ALIAS_TYPE_ID
+                );
             let anim_transition = state.domain.is_animation()
                 && n.type_id
                     == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
@@ -1730,17 +1789,24 @@ fn build_geoms(
             }
             // The unfolded state's hidden border anchors: mid-border, no
             // dot, no hit — the same anchors its compact card carries, so
-            // its flow wires do not move when it folds or unfolds.
+            // its flow wires do not move when it folds or unfolds. An alias
+            // has no `in`.
             if anim_state_unfold {
-                use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
+                use crate::engine::animation::graph::plan::{
+                    ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+                };
                 let flow = PinType::Domain(
                     crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string(),
                 );
                 let cy = min.y + height * 0.5;
+                let has_in = n.type_id == ANIM_STATE_TYPE_ID;
                 for (slug, output, x) in [
                     (STATE_IN_PIN, false, min.x),
                     (STATE_OUT_PIN, true, min.x + width),
-                ] {
+                ]
+                .into_iter()
+                .filter(|(_, output, _)| *output || has_in)
+                {
                     pins.push(PinGeom {
                         slug: slug.to_string(),
                         label: String::new(),
@@ -1787,11 +1853,46 @@ fn build_geoms(
 }
 
 /// Geometry for a compact machine card (Task 41 canvas rework, mockup 2b):
-/// a state is name + STATE tag + one mono subtitle; ENTRY and ANY STATE are
-/// small pills. No pin rows exist — the flow anchors are hidden mid-border
-/// pins with a zero hit target, because a border press starts a wire and a
-/// flow wire lands on the border, not on a dot.
+/// a state is name + STATE tag + one mono subtitle; ENTRY is a small pill;
+/// an alias is a pill with its title, ALIAS tag and the states it stands
+/// for. No pin rows exist — the flow anchors are hidden mid-border pins
+/// with a zero hit target, because a border press starts a wire and a flow
+/// wire lands on the border, not on a dot.
 #[allow(clippy::too_many_arguments)]
+/// An alias pill's mono subtitle: "Global", else the listed states' names in
+/// document order — the first two, then "+N" ("Idle, Jump +2"); a listed
+/// alias with nothing on its list says so (the compiler refuses it too).
+fn alias_subtitle(n: &NodeInst, doc: &GraphDoc) -> String {
+    if alias_is_global(n) {
+        return "Global".to_string();
+    }
+    let names = alias_state_names(n, doc);
+    match names.len() {
+        0 => "No states".to_string(),
+        1 | 2 => names.join(", "),
+        k => format!("{} +{}", names[..2].join(", "), k - 2),
+    }
+}
+
+/// The display names of the states an alias lists, in document order (a
+/// listed id that is no longer a state is not a name and does not show).
+fn alias_state_names(n: &NodeInst, doc: &GraphDoc) -> Vec<String> {
+    use crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID;
+    let listed = alias_states(n);
+    doc.nodes
+        .iter()
+        .filter(|s| s.type_id == ANIM_STATE_TYPE_ID && listed.contains(&(s.id as i32)))
+        .map(anim_state_name)
+        .collect()
+}
+
+/// A state's name as the compiler spells it: its title, else "State <id>".
+fn anim_state_name(s: &NodeInst) -> String {
+    s.title
+        .clone()
+        .unwrap_or_else(|| format!("State {}", s.id))
+}
+
 /// A state card's one mono subtitle: the compiler's precedence spoken back
 /// — tree > graph > blend space > clip — each source with its own glyph,
 /// files shown as their content-relative path (the `.animgraph` idiom).
@@ -1838,7 +1939,11 @@ fn anim_card_geom(
     let errored = errors.nodes.contains(&n.id);
     let (title, tag, subtitle) = match kind {
         AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
-        AnimCardKind::Any => ("ANY STATE".to_string(), String::new(), None),
+        AnimCardKind::Alias => (
+            alias_name(n),
+            "ALIAS".to_string(),
+            Some(alias_subtitle(n, docd.doc())),
+        ),
         AnimCardKind::State => (
             docd.display_name(n.id).unwrap_or_else(|| "State".to_string()),
             "STATE".to_string(),
@@ -1868,7 +1973,7 @@ fn anim_card_geom(
         _ => (m.pad_x * 2.0 + content).min(m.max_w),
     };
     let h = match (kind, &subtitle) {
-        (AnimCardKind::State, Some(_)) => m.header_h + m.row_h * 0.7,
+        (AnimCardKind::State | AnimCardKind::Alias, Some(_)) => m.header_h + m.row_h * 0.7,
         (AnimCardKind::State, None) => m.header_h + m.body_pad,
         _ => m.header_h,
     };
@@ -3535,13 +3640,18 @@ fn draw_and_interact(
             && !wire_claimed
             && state.node_drag.is_none()
             && state.connect_drag.is_none()
-            // Compact cards, and the unfolded (selected) state — which lost
-            // its `anim` marker by taking the standard-card path.
+            // Compact cards, and the unfolded (selected) state or alias —
+            // which lost its `anim` marker by taking the standard-card path.
             && (g.anim.is_some()
                 || (state.domain.is_animation()
                     && state.doc.node(g.id).is_some_and(|n| {
-                        n.type_id
-                            == crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID
+                        use crate::engine::animation::graph::plan::{
+                            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+                        };
+                        matches!(
+                            n.type_id.as_str(),
+                            ANIM_STATE_TYPE_ID | ANIM_STATE_ALIAS_TYPE_ID
+                        )
                     })))
         {
             if let Some(pw) = pointer_world {
@@ -4450,7 +4560,7 @@ fn rule_endpoints(state: &GraphEditorState, owner: u64) -> (Option<u64>, Option<
 /// A state's display name for the scope labels — the same fallbacks the
 /// compiler's messages use, plus "?" for an unwired endpoint.
 fn rule_state_name(state: &GraphEditorState, id: Option<u64>) -> String {
-    use crate::engine::animation::graph::plan::{ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID};
+    use crate::engine::animation::graph::plan::{ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID};
     let Some(n) = id.and_then(|id| state.doc.node(id)) else {
         return "?".to_string();
     };
@@ -4458,7 +4568,7 @@ fn rule_state_name(state: &GraphEditorState, id: Option<u64>) -> String {
         return t.clone();
     }
     match n.type_id.as_str() {
-        ANIM_ANY_STATE_TYPE_ID => "Any State".to_string(),
+        ANIM_STATE_ALIAS_TYPE_ID => "Alias".to_string(),
         ANIM_STATE_TYPE_ID => format!("State {}", n.id),
         _ => format!("Node {}", n.id),
     }
@@ -10902,9 +11012,10 @@ fn draw_nodes(
 
         // Task 41 rework: compact machine cards (mockup 2b). A state is its
         // name, role tag and one mono subtitle; ENTRY (Logic-green text) and
-        // ANY STATE (dashed border) are small pills of the same card family.
-        // No pins, no fields — selection swaps a state to the standard card
-        // via geometry, so this branch only ever draws the rest form.
+        // an alias (title, ALIAS tag, its states as subtitle) are pills of
+        // the same card family — plain header fill, no category band. No
+        // pins, no fields — selection swaps a state or alias to the standard
+        // card via geometry, so this branch only ever draws the rest form.
         if let Some(card) = &g.anim {
             let bg = st.palette.input;
             if lod.bar_only() {
@@ -10941,11 +11052,7 @@ fn draw_nodes(
             } else {
                 st.palette.stroke_strong
             };
-            if card.kind == AnimCardKind::Any && !errored {
-                dashed_rect(&mut p, srect, m.border, border_col);
-            } else {
-                p.rect_stroke(srect, round, m.border, border_col);
-            }
+            p.rect_stroke(srect, round, m.border, border_col);
             if selected {
                 let off = m.edge;
                 let outer = Rect::from_min_max(
@@ -10973,10 +11080,9 @@ fn draw_nodes(
                     AnimCardKind::Entry => {
                         (fade(category_tag_color("Logic"), dim, bg), st.fonts.small * zoom)
                     }
-                    AnimCardKind::Any => {
-                        (fade(st.palette.text_secondary, dim, bg), st.fonts.small * zoom)
-                    }
-                    AnimCardKind::State => {
+                    // An alias is a named node like a state — same face; the
+                    // missing category band and the tag tell them apart.
+                    AnimCardKind::State | AnimCardKind::Alias => {
                         (fade(st.palette.text, dim, bg), st.fonts.body * zoom)
                     }
                 };
@@ -12127,9 +12233,12 @@ fn inline_widget(
     ui.ctx_mut().style = saved;
 
     if let Some(v) = changed {
-        state.begin_prop_edit(node, slug, registry);
+        let Some((key, v)) = state.doc.node(node).map(|n| config_write_back(n, slug, v)) else {
+            return;
+        };
+        state.begin_prop_edit(node, &key, registry);
         if let Some(n) = state.doc.node_mut(node) {
-            n.properties.insert(slug.to_string(), v);
+            n.properties.insert(key, v);
         }
     }
 }
@@ -13793,6 +13902,84 @@ mod tests {
 
         // A plain registered node has no config band at all.
         assert!(config_rows(&test_node(9, "event_tick"), &docd).is_empty());
+    }
+
+    /// State aliases (ticket 02): the pill's subtitle and the selected card's
+    /// config band — Global alone while global, else one Bool row per state
+    /// in document order whose tick folds into the one `states` property.
+    #[test]
+    fn an_alias_has_a_global_row_and_one_row_per_state() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        };
+        use crate::engine::animation::graph::{ALIAS_GLOBAL_PROP, ALIAS_STATES_PROP};
+        use crate::engine::node_graph::GraphDoc;
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        let mut idle = test_node(1, ANIM_STATE_TYPE_ID);
+        idle.title = Some("Idle".into());
+        let mut jump = test_node(2, ANIM_STATE_TYPE_ID);
+        jump.title = Some("Jump".into());
+        let alias = test_node(4, ANIM_STATE_ALIAS_TYPE_ID);
+        doc.nodes = vec![idle, jump, test_node(3, ANIM_STATE_TYPE_ID), alias];
+
+        // Global (the default, property absent): one row, subtitle "Global".
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, ALIAS_GLOBAL_PROP);
+            assert!(matches!(rows[0].2, InlineKind::Bool(true)));
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Global");
+        }
+
+        // Not global, nothing listed: the state rows appear, all unticked.
+        doc.nodes[3]
+            .properties
+            .insert(ALIAS_GLOBAL_PROP.into(), PropValue::Bool(false));
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert_eq!(
+                rows.iter().map(|(k, l, _)| (k.as_str(), l.as_str())).collect::<Vec<_>>(),
+                vec![
+                    (ALIAS_GLOBAL_PROP, "Global"),
+                    ("states.1", "Idle"),
+                    ("states.2", "Jump"),
+                    ("states.3", "State 3"),
+                ]
+            );
+            assert!(rows[1..].iter().all(|r| matches!(r.2, InlineKind::Bool(false))));
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "No states");
+        }
+
+        // Ticking a state row writes the `states` array, not the row key.
+        let (key, v) = config_write_back(&doc.nodes[3], "states.2", PropValue::Bool(true));
+        assert_eq!(key, ALIAS_STATES_PROP);
+        assert_eq!(v, alias_states_value(&[2]));
+        doc.nodes[3].properties.insert(key, v);
+        let (key, v) = config_write_back(&doc.nodes[3], "states.1", PropValue::Bool(true));
+        doc.nodes[3].properties.insert(key, v);
+        assert_eq!(alias_states(&doc.nodes[3]), vec![2, 1], "list order is tick order");
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert!(matches!(rows[1].2, InlineKind::Bool(true)));
+            assert!(matches!(rows[2].2, InlineKind::Bool(true)));
+            assert!(matches!(rows[3].2, InlineKind::Bool(false)));
+            // The subtitle names them in document order.
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Idle, Jump");
+        }
+        let (key, v) = config_write_back(&doc.nodes[3], "states.3", PropValue::Bool(true));
+        doc.nodes[3].properties.insert(key, v);
+        assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Idle, Jump +1");
+        // Unticking removes the id; a plain row writes its own key.
+        let (_, v) = config_write_back(&doc.nodes[3], "states.2", PropValue::Bool(false));
+        assert_eq!(v, alias_states_value(&[1, 3]));
+        assert_eq!(
+            config_write_back(&doc.nodes[3], ALIAS_GLOBAL_PROP, PropValue::Bool(true)),
+            (ALIAS_GLOBAL_PROP.to_string(), PropValue::Bool(true))
+        );
     }
 
     /// Tickets 09 / 06: a state's config band routes between its sources.

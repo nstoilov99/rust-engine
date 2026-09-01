@@ -13,7 +13,7 @@
 //! worse than one that says "three conditions, descend to see them".
 
 use crate::engine::animation::graph::plan::{
-    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, DURATION_PROP,
+    ANIM_ENTRY_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, DURATION_PROP,
     PRIORITY_PROP, RULE_RESULT_PIN, TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
 };
 use crate::engine::node_graph::std_nodes::{AND, COMPARE_FLOAT, NOT, OR};
@@ -114,7 +114,7 @@ fn state_title(doc: &GraphDoc, id: Option<u64>) -> String {
     };
     match (&n.title, n.type_id.as_str()) {
         (Some(t), _) if !t.trim().is_empty() => t.clone(),
-        (_, ANIM_ANY_STATE_TYPE_ID) => "Any State".to_string(),
+        (_, ANIM_STATE_ALIAS_TYPE_ID) => "Alias".to_string(),
         (_, ANIM_ENTRY_TYPE_ID) => "Entry".to_string(),
         _ => "State".to_string(),
     }
@@ -634,21 +634,21 @@ mod tests {
     #[test]
     fn tooltip_names_both_states() {
         use crate::engine::animation::graph::plan::{
-            ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
         };
         let mut doc = doc_with(None, 0.2, 0);
         let mut idle = node(2, ANIM_STATE_TYPE_ID);
         idle.title = Some("Idle".to_string());
         doc.nodes.push(idle);
         doc.nodes.push(node(3, ANIM_STATE_TYPE_ID));
-        doc.nodes.push(node(4, ANIM_ANY_STATE_TYPE_ID));
+        doc.nodes.push(node(4, ANIM_STATE_ALIAS_TYPE_ID));
         doc.edges.push(edge(2, STATE_OUT_PIN, 1, TRANSITION_FROM_PIN));
         doc.edges.push(edge(1, TRANSITION_TO_PIN, 3, STATE_IN_PIN));
         assert_eq!(transition_chip(&doc, 1).tooltip(), "Idle \u{2192} State\n0.20s");
 
         doc.edges[0] = edge(4, STATE_OUT_PIN, 1, TRANSITION_FROM_PIN);
         doc.edges.pop();
-        assert_eq!(transition_chip(&doc, 1).tooltip(), "Any State \u{2192} ?\n0.20s");
+        assert_eq!(transition_chip(&doc, 1).tooltip(), "Alias \u{2192} ?\n0.20s");
     }
 
     /// Float formatting: whole values take the mockup's ".0" spelling.

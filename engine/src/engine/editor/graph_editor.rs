@@ -947,17 +947,40 @@ pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
 /// one thing an editor must never let a gesture mean.
 pub fn transition_shortcut(doc: &GraphDoc, edge: &Edge) -> Option<(u64, u64)> {
     use crate::engine::animation::graph::plan::{
-        ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN,
-        STATE_OUT_PIN,
+        ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
     };
     let from = doc.node(edge.from_node)?;
     let to = doc.node(edge.to_node)?;
     let from_is_source = (from.type_id == ANIM_STATE_TYPE_ID
-        || from.type_id == ANIM_STATE_ALIAS_TYPE_ID
-        || from.type_id == ANIM_ANY_STATE_TYPE_ID)
+        || from.type_id == ANIM_STATE_ALIAS_TYPE_ID)
         && edge.from_pin == STATE_OUT_PIN;
     let to_is_state = to.type_id == ANIM_STATE_TYPE_ID && edge.to_pin == STATE_IN_PIN;
     (from_is_source && to_is_state).then_some((from.id, to.id))
+}
+
+/// The `states` rewrites deleting `ids` owes the surviving aliases: one
+/// `SetProperty` per alias that listed a deleted node, its list with those
+/// ids gone. Empty when no alias is touched.
+pub fn alias_strips(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<GraphEdit> {
+    use crate::engine::animation::graph::{ALIAS_STATES_PROP, ANIM_STATE_ALIAS_TYPE_ID};
+    doc.nodes
+        .iter()
+        .filter(|n| n.type_id == ANIM_STATE_ALIAS_TYPE_ID && !ids.contains(&n.id))
+        .filter_map(|n| {
+            let old = alias_states(n);
+            let kept: Vec<i32> = old
+                .iter()
+                .copied()
+                .filter(|id| !ids.contains(&(*id as u64)))
+                .collect();
+            (kept.len() != old.len()).then(|| GraphEdit::SetProperty {
+                node: n.id,
+                key: ALIAS_STATES_PROP.to_string(),
+                old: n.properties.get(ALIAS_STATES_PROP).cloned(),
+                new: Some(alias_states_value(&kept)),
+            })
+        })
+        .collect()
 }
 
 /// The embedded regions keyed by any of `ids` — the other collateral a node
@@ -1298,8 +1321,13 @@ pub struct GraphEditorState {
     /// Cross-asset (subgraph) validation errors, refreshed by the editor's
     /// per-frame `validate_refs` pass (P6). Shown alongside `errors`.
     pub ref_errors: Vec<GraphError>,
-    /// Unsaved changes flag, kept in sync with the edit stack's saved cursor.
+    /// Unsaved changes flag: the edit stack's saved cursor, or `migrated`.
     pub dirty: bool,
+    /// The open-time upgrade rewrote the document (legacy Any State nodes →
+    /// aliases): the file on disk holds the old shape, so the tab is dirty
+    /// even at the stack's origin — undoing to it must not hide that. A save
+    /// clears it.
+    pub migrated: bool,
     /// Time of the last save through this editor — used by hot-reload to
     /// suppress the watcher echo of our own write (P6).
     pub last_saved_at: Option<Instant>,
@@ -1616,7 +1644,8 @@ pub struct DomainError {
 /// half of that contract.
 pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
     use crate::engine::animation::graph::plan::{
-        ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
+        ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        ANIM_TRANSITION_TYPE_ID,
     };
     // The display name the compiler used: node title, or its typed fallback.
     let named = |type_id: &str, fallback: &str, name: &str| -> Option<u64> {
@@ -1648,6 +1677,26 @@ pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
     if let Some(name) = quoted("play-once slot ") {
         return named(ANIM_PLAY_ONCE_TYPE_ID, "Slot", name);
     }
+    // An alias's compiler name is its title, else the bare "Alias" (no id) —
+    // not unique, so among the aliases so named prefer the one the message
+    // is actually about (the first empty list / the first that lists the
+    // missing node), then the first by name.
+    if let Some(name) = quoted("alias ") {
+        let missing: Option<i32> = msg
+            .split("(node ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next()?.parse().ok());
+        let offends = |n: &NodeInst| match missing {
+            Some(id) => alias_states(n).contains(&id),
+            None => !alias_is_global(n) && alias_states(n).iter().all(|id| *id < 0),
+        };
+        let mut named = doc
+            .nodes
+            .iter()
+            .filter(|n| n.type_id == ANIM_STATE_ALIAS_TYPE_ID && alias_name(n) == name);
+        let first = named.clone().next()?;
+        return Some(named.find(|n| offends(n)).unwrap_or(first).id);
+    }
     // The ENTRY-wiring family ("the ENTRY node is not wired to a state", …)
     // anchors on the ENTRY node itself when there is exactly one.
     if msg.contains("ENTRY node") {
@@ -1657,6 +1706,43 @@ pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// A State Alias's name — its title, else "Alias" — the same reading the
+/// compiler's refusals use, so its messages anchor back to the node.
+pub fn alias_name(n: &NodeInst) -> String {
+    n.title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "Alias".to_string())
+}
+
+/// Does this alias stand for every state? Missing = the default, true.
+pub fn alias_is_global(n: &NodeInst) -> bool {
+    !matches!(
+        n.properties.get(crate::engine::animation::graph::ALIAS_GLOBAL_PROP),
+        Some(PropValue::Bool(false))
+    )
+}
+
+/// The state ids an alias lists, as stored (`Array(Int)`), non-`Int` entries
+/// dropped. Order is the list's own; the editor appends on tick.
+pub fn alias_states(n: &NodeInst) -> Vec<i32> {
+    match n.properties.get(crate::engine::animation::graph::ALIAS_STATES_PROP) {
+        Some(PropValue::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                PropValue::Int(id) => Some(*id),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The `states` property holding exactly `ids`.
+pub fn alias_states_value(ids: &[i32]) -> PropValue {
+    PropValue::Array(ids.iter().map(|id| PropValue::Int(*id)).collect())
 }
 
 /// The region-local node a refusal names, when it names one — the compiler's
@@ -2458,7 +2544,9 @@ pub struct AnnotationEdit {
 impl GraphEditorState {
     /// Load a graph asset: `load_graph` → `migrate_doc` → `validate_doc`.
     /// Fails only on I/O, parse, or migration errors; validation errors are
-    /// stored in `errors`, never fatal.
+    /// stored in `errors`, never fatal. An `.animgraph` also runs the Any
+    /// State → alias upgrade here (the editor's loading seam): a rewritten
+    /// document opens dirty (`migrated`) and says so in a toast.
     pub fn open(
         abs_path: &std::path::Path,
         content_rel_key: &str,
@@ -2466,12 +2554,22 @@ impl GraphEditorState {
     ) -> Result<Self, String> {
         let mut doc = load_graph(abs_path).map_err(|e| e.to_string())?;
         migrate_doc(&mut doc, registry).map_err(|e| e.to_string())?;
-        Ok(Self::from_doc(
-            content_rel_key.to_string(),
-            doc,
-            GraphDomain::of_path(content_rel_key),
-            registry,
-        ))
+        let domain = GraphDomain::of_path(content_rel_key);
+        let upgraded = if domain.is_animation() {
+            crate::engine::animation::graph::upgrade_any_state(&mut doc)
+        } else {
+            0
+        };
+        let mut state = Self::from_doc(content_rel_key.to_string(), doc, domain, registry);
+        if upgraded > 0 {
+            state.migrated = true;
+            state.dirty = true;
+            state.toast(format!(
+                "Upgraded {upgraded} Any State node{} to aliases",
+                if upgraded == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(state)
     }
 
     /// The one constructor: a state over an already-loaded (and migrated)
@@ -2493,6 +2591,7 @@ impl GraphEditorState {
             domain_errors,
             ref_errors: Vec::new(),
             dirty: false,
+            migrated: false,
             last_saved_at: None,
             view: CanvasView::default(),
             selection: BTreeSet::new(),
@@ -2563,6 +2662,7 @@ impl GraphEditorState {
         snap_positions(&mut self.doc);
         save_graph(abs_path, &self.doc).map_err(|e| e.to_string())?;
         self.stack.mark_saved();
+        self.migrated = false;
         self.dirty = false;
         self.last_saved_at = Some(Instant::now());
         Ok(())
@@ -2572,7 +2672,7 @@ impl GraphEditorState {
     pub fn after_edit(&mut self, registry: &NodeRegistry) {
         self.errors = validate_doc(&self.doc, registry);
         self.refresh_domain_errors();
-        self.dirty = self.stack.is_dirty();
+        self.dirty = self.stack.is_dirty() || self.migrated;
     }
 
     /// Recompute the domain-compiler refusals alone — what a host tab needs
@@ -3308,7 +3408,7 @@ impl GraphEditorState {
         self.commit(GraphEdit::AddNode(node), registry);
     }
 
-    /// Insert a Transition joining `from` (a state or Any State) to `to` (a
+    /// Insert a Transition joining `from` (a state or alias) to `to` (a
     /// state), placed midway between them — the state-machine drag gesture's
     /// other half. One composite, one undo ("Add Transition"). Returns the
     /// new node's id. The transition is deliberately **not** selected: at
@@ -3497,12 +3597,21 @@ impl GraphEditorState {
             .into_iter()
             .map(|i| (i, self.doc.comments[i].clone()))
             .collect();
-        let edit = GraphEdit::RemoveNodes {
+        let strips = alias_strips(&self.doc, &ids);
+        let mut edit = GraphEdit::RemoveNodes {
             nodes,
             edges,
             comments,
             regions: region_collateral(&self.doc, ids.iter().copied()),
         };
+        // A deleted state leaves every alias that listed it (same undo step:
+        // the alias's list and the node come back together).
+        if !strips.is_empty() {
+            let label = edit.description();
+            let mut edits = vec![edit];
+            edits.extend(strips);
+            edit = GraphEdit::Composite { label, edits };
+        }
         edit.apply(&mut self.doc);
         self.selection.clear();
         self.commit(edit, registry);
@@ -8123,13 +8232,13 @@ mod tests {
         assert_eq!(GraphFragment::from_ron(&old_text), Some(old));
     }
 
-    /// The state-machine drag: a flow wire dropped state → state (or Any
-    /// State → state) reads as "make a transition here"; one undo takes the
-    /// whole gesture back.
+    /// The state-machine drag: a flow wire dropped state → state (or alias
+    /// → state) reads as "make a transition here"; one undo takes the whole
+    /// gesture back.
     #[test]
     fn a_state_to_state_wire_becomes_a_transition() {
         use crate::engine::animation::graph::plan::{
-            ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, STATE_IN_PIN,
+            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, STATE_IN_PIN,
             STATE_OUT_PIN,
         };
         let reg = NodeRegistry::new();
@@ -8147,7 +8256,7 @@ mod tests {
         st.doc.nodes = vec![
             n(0, ANIM_STATE_TYPE_ID, [0.0, 0.0]),
             n(1, ANIM_STATE_TYPE_ID, [400.0, 80.0]),
-            n(2, ANIM_ANY_STATE_TYPE_ID, [0.0, 200.0]),
+            n(2, ANIM_STATE_ALIAS_TYPE_ID, [0.0, 200.0]),
         ];
         let flow = |a: u64, b: u64| Edge {
             from_node: a,
@@ -8159,7 +8268,7 @@ mod tests {
         assert_eq!(transition_shortcut(&st.doc, &flow(0, 1)), Some((0, 1)));
         assert_eq!(transition_shortcut(&st.doc, &flow(2, 1)), Some((2, 1)));
         // …and nothing else.
-        assert_eq!(transition_shortcut(&st.doc, &flow(0, 2)), None, "Any State has no `in`");
+        assert_eq!(transition_shortcut(&st.doc, &flow(0, 2)), None, "an alias has no `in`");
 
         let before = st.doc.clone();
         let t = st.insert_transition_between(0, 1, &reg);
@@ -8176,8 +8285,8 @@ mod tests {
     #[test]
     fn anim_refusals_anchor_to_the_node_they_name() {
         use crate::engine::animation::graph::plan::{
-            ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_TYPE_ID,
-            ANIM_TRANSITION_TYPE_ID,
+            ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
+            ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
         };
         let mut doc = GraphDoc::default();
         let mut n = |id: u64, ty: &str, title: Option<&str>| {
@@ -8197,8 +8306,26 @@ mod tests {
         n(2, ANIM_STATE_TYPE_ID, None); // display name "State 2"
         n(3, ANIM_TRANSITION_TYPE_ID, None);
         n(4, ANIM_PLAY_ONCE_TYPE_ID, Some("Attack"));
+        n(5, ANIM_STATE_ALIAS_TYPE_ID, Some("Grounded"));
+        n(6, ANIM_STATE_ALIAS_TYPE_ID, None); // compiler name "Alias"
+        n(7, ANIM_STATE_ALIAS_TYPE_ID, None); // …and so is this one
+        // 6 is a valid Global alias; 7 is the empty / dangling one.
+        doc.node_mut(7).unwrap().properties.insert(
+            crate::engine::animation::graph::ALIAS_GLOBAL_PROP.to_string(),
+            PropValue::Bool(false),
+        );
 
         let a = |msg: &str| anchor_anim_refusal(&doc, msg);
+        assert_eq!(a("alias 'Grounded' has no states"), Some(5));
+        assert_eq!(a("alias 'Alias' has no states"), Some(7), "the empty namesake, not the first");
+        doc.node_mut(7)
+            .unwrap()
+            .properties
+            .insert("states".to_string(), alias_states_value(&[42]));
+        let a = |msg: &str| anchor_anim_refusal(&doc, msg);
+        assert_eq!(a("alias 'Alias' references a missing state (node 42)"), Some(7));
+        assert_eq!(a("alias 'Alias' references a missing state (node 43)"), Some(6), "no match: first by name");
+        assert_eq!(a("alias 'Nobody' has no states"), None);
         assert_eq!(a("state 'Idle' names no clip (property `clip`) and has no blend tree"), Some(1));
         assert_eq!(a("state 'State 2': blend tree has no RESULT node"), Some(2));
         assert_eq!(a("transition 3 has no source state"), Some(3));
@@ -8207,6 +8334,114 @@ mod tests {
         assert_eq!(a("the ENTRY node is not wired to a state"), Some(0));
         assert_eq!(a("parameter 'speed' is declared twice"), None);
         assert_eq!(a("transition 99 has no source state"), None, "unknown ids stay unanchored");
+    }
+
+    /// Both alias refusals arrive anchored through the real error path — an
+    /// alias with no states and one listing a node that is not a state.
+    #[test]
+    fn alias_refusals_anchor_through_the_error_index() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_ALIAS_TYPE_ID, CLIP_PROP,
+        };
+        use crate::engine::animation::graph::{new_animgraph_doc, ALIAS_GLOBAL_PROP};
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/duck.animgraph");
+        st.doc = new_animgraph_doc();
+        st.doc.node_mut(1).unwrap().properties.insert(
+            CLIP_PROP.to_string(),
+            PropValue::Asset("anims/idle.anim".to_string()),
+        );
+        let mut alias = NodeInst {
+            id: 7,
+            type_id: ANIM_STATE_ALIAS_TYPE_ID.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: Some("Grounded".to_string()),
+        };
+        alias
+            .properties
+            .insert(ALIAS_GLOBAL_PROP.to_string(), PropValue::Bool(false));
+        st.doc.nodes.push(alias);
+        st.after_edit(&reg);
+        assert_eq!(st.domain_errors.len(), 1);
+        assert_eq!(st.domain_errors[0].node, Some(7), "{:?}", st.domain_errors);
+        assert!(st.domain_errors[0].message.contains("has no states"));
+
+        st.doc
+            .node_mut(7)
+            .unwrap()
+            .properties
+            .insert("states".to_string(), alias_states_value(&[42]));
+        st.after_edit(&reg);
+        assert_eq!(st.domain_errors.len(), 1);
+        assert_eq!(st.domain_errors[0].node, Some(7));
+        assert!(st.domain_errors[0].message.contains("missing state"));
+    }
+
+    /// Deleting a state strips its id from every alias, in the same undo
+    /// step as the delete — one Ctrl+Z brings the state and its listing back.
+    #[test]
+    fn deleting_a_state_strips_it_from_aliases_in_one_step() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        };
+        use crate::engine::animation::graph::{ALIAS_GLOBAL_PROP, ALIAS_STATES_PROP};
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/duck.animgraph");
+        let n = |id: u64, ty: &str| NodeInst {
+            id,
+            type_id: ty.to_string(),
+            type_version: 1,
+            position: [0.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        };
+        let mut listed = n(3, ANIM_STATE_ALIAS_TYPE_ID);
+        listed
+            .properties
+            .insert(ALIAS_GLOBAL_PROP.to_string(), PropValue::Bool(false));
+        listed
+            .properties
+            .insert(ALIAS_STATES_PROP.to_string(), alias_states_value(&[1, 2]));
+        let global = n(4, ANIM_STATE_ALIAS_TYPE_ID);
+        st.doc.nodes = vec![n(1, ANIM_STATE_TYPE_ID), n(2, ANIM_STATE_TYPE_ID), listed, global];
+        let before = st.doc.clone();
+
+        st.select_only(2);
+        st.delete_selection(&reg);
+        assert!(st.doc.node(2).is_none());
+        assert_eq!(alias_states(st.doc.node(3).unwrap()), vec![1]);
+        assert!(
+            !st.doc.node(4).unwrap().properties.contains_key(ALIAS_STATES_PROP),
+            "an alias that never listed the state is untouched"
+        );
+        assert_eq!(st.stack.undo_len(), 1, "one entry for the whole gesture");
+        st.undo(&reg);
+        assert_eq!(st.doc, before);
+    }
+
+    /// The open-time upgrade flag keeps the tab dirty at the stack's origin:
+    /// the file on disk still holds the old node until a save clears it.
+    #[test]
+    fn migrated_keeps_the_tab_dirty_until_saved() {
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/duck.animgraph");
+        st.migrated = true;
+        st.after_edit(&reg);
+        assert!(st.dirty, "nothing on the stack, still dirty");
+        let dir = std::env::temp_dir().join(format!("alias_migrated_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("duck.animgraph");
+        st.save(&path).unwrap();
+        assert!(!st.migrated && !st.dirty);
+        st.after_edit(&reg);
+        assert!(!st.dirty);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An `.animgraph` state recomputes its domain errors on every edit; a
