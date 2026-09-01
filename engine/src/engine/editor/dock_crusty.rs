@@ -188,12 +188,14 @@ pub fn default_tree(profile: LayoutProfile) -> DockNode {
                 leaf(EditorTab::Inspector),
             ),
         ),
-        // Variables (18%) | documents over Assets/Console | Preview over Details.
+        // Variables (18%) | documents over Assets/Console (57%) | Preview over
+        // Details (25%, split evenly). Wider than the Scene Inspector (20%)
+        // so the preview keeps a usable aspect.
         LayoutProfile::AnimGraph => DockNode::split_h(
             0.18,
             leaf(EditorTab::GraphVariables),
             DockNode::split_h(
-                0.72,
+                0.70,
                 DockNode::split_v(0.75, docs, strip(EditorTab::AssetBrowser, EditorTab::Console)),
                 DockNode::split_v(
                     0.5,
@@ -202,7 +204,8 @@ pub fn default_tree(profile: LayoutProfile) -> DockNode {
                 ),
             ),
         ),
-        // Variables (18%) | documents over Assets/Console | Details.
+        // Variables (18%) | documents over Assets/Console (62%) | Details (20%,
+        // the Scene Inspector's width).
         LayoutProfile::ScriptGraph => DockNode::split_h(
             0.18,
             leaf(EditorTab::GraphVariables),
@@ -886,6 +889,66 @@ mod tests {
             let mut ids = Vec::new();
             default_tree(p).collect_tabs(&mut ids);
             assert_eq!(ids.iter().filter(|t| *t == DOCUMENTS_TAB).count(), 1, "{p:?}");
+        }
+    }
+
+    /// The spec's default trees (doc-layouts ticket 04): shape, order and
+    /// split ratios. Change deliberately — a stored profile never re-reads
+    /// these; a profile without a stored tree (fresh file, first activation
+    /// after a v1 migration, Reset) does.
+    #[test]
+    fn graph_defaults_pin_the_spec_trees() {
+        use crusty_gui::dock::SplitDirection::{self, Horizontal as H, Vertical as V};
+        fn split(n: &DockNode, dir: SplitDirection, ratio: f32) -> (&DockNode, &DockNode) {
+            let DockNode::Split(s) = n else { panic!("expected a split, got {n:?}") };
+            assert_eq!(s.direction, dir);
+            assert!((s.ratio - ratio).abs() < 1e-6, "ratio {} != {ratio}", s.ratio);
+            (&s.first, &s.second)
+        }
+        fn tabs(n: &DockNode) -> Vec<&str> {
+            let DockNode::Leaf(l) = n else { panic!("expected a leaf, got {n:?}") };
+            l.tabs.iter().map(String::as_str).collect()
+        }
+        let bottom = ["assets", "console"];
+
+        // AnimGraph: Variables (18%) | docs over Assets/Console | Preview over Details (25%).
+        let t = default_tree(LayoutProfile::AnimGraph);
+        let (vars, rest) = split(&t, H, 0.18);
+        assert_eq!(tabs(vars), ["graph_variables"]);
+        let (center, right) = split(rest, H, 0.70);
+        let (docs, below) = split(center, V, 0.75);
+        assert_eq!(tabs(docs), [DOCUMENTS_TAB]);
+        assert_eq!(tabs(below), bottom);
+        let (preview, details) = split(right, V, 0.5);
+        assert_eq!(tabs(preview), ["anim_preview"]);
+        assert_eq!(tabs(details), ["graph_details"]);
+
+        // ScriptGraph: Variables (18%) | docs over Assets/Console | Details (20%).
+        let t = default_tree(LayoutProfile::ScriptGraph);
+        let (vars, rest) = split(&t, H, 0.18);
+        assert_eq!(tabs(vars), ["graph_variables"]);
+        let (center, details) = split(rest, H, 0.75);
+        let (docs, below) = split(center, V, 0.75);
+        assert_eq!(tabs(docs), [DOCUMENTS_TAB]);
+        assert_eq!(tabs(below), bottom);
+        assert_eq!(tabs(details), ["graph_details"]);
+
+        // Scene: Hierarchy (20%) | docs over Console/Profiler | Inspector (20%).
+        let t = default_tree(LayoutProfile::Scene);
+        let (hier, rest) = split(&t, H, 0.20);
+        assert_eq!(tabs(hier), ["hierarchy"]);
+        let (center, inspector) = split(rest, H, 0.75);
+        let (docs, below) = split(center, V, 0.75);
+        assert_eq!(tabs(docs), [DOCUMENTS_TAB]);
+        assert_eq!(tabs(below), ["console", "profiler"]);
+        assert_eq!(tabs(inspector), ["inspector"]);
+
+        // Embedded-panel documents: docs over Assets/Console only.
+        for p in [LayoutProfile::BlendSpace, LayoutProfile::Curve, LayoutProfile::Mesh] {
+            let t = default_tree(p);
+            let (docs, below) = split(&t, V, 0.75);
+            assert_eq!(tabs(docs), [DOCUMENTS_TAB]);
+            assert_eq!(tabs(below), bottom);
         }
     }
 

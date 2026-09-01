@@ -290,31 +290,46 @@ pub fn world_matrix_to_render(world_matrix_zup: &glm::Mat4) -> glm::Mat4 {
 
 ### Panel System
 
+Panels are tabs in a crusty-gui dock tree (`DockNode` splits/leaves, persisted as
+`editor_layout_crusty.ron` by `dock_crusty::CrustyDockLayout`). Documents (scene viewports,
+graphs, curves, blend spaces, meshes, input assets) share one **document strip** leaf; everything
+else is a side panel. The dock keeps one tree per **layout profile** (`LayoutProfile`: `Scene`,
+`AnimGraph`, `ScriptGraph`, `BlendSpace`, `Curve`, `Mesh`) and swaps the surrounding panels when
+the focused document's kind changes — Unreal-style asset editors inside the main window. Each
+profile remembers its own splits and panels; gotchas in `docs/KNOWLEDGE.md` ▸ Layout profiles.
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Menu Bar                                 │
-├─────────────┬───────────────────────────────┬───────────────────┤
-│             │                               │                   │
-│  Hierarchy  │         Viewport              │    Inspector      │
-│    Panel    │                               │      Panel        │
-│             │   ┌───────────────────────┐   │                   │
-│  - Entity   │   │                       │   │  - Transform      │
-│    Tree     │   │     3D Scene View     │   │  - Components     │
-│             │   │                       │   │  - Materials      │
-│             │   │     + Gizmos          │   │                   │
-│             │   │     + Grid            │   │                   │
-│             │   └───────────────────────┘   │                   │
-│             │                               │                   │
-├─────────────┴───────────────────────────────┴───────────────────┤
-│                         Console                                  │
-│  - Log messages                                                  │
-│  - Commands                                                      │
-├─────────────────────────────────────────────────────────────────┤
-│                      Asset Browser                               │
-│  - File tree                                                     │
-│  - Asset preview                                                 │
-└─────────────────────────────────────────────────────────────────┘
+Scene (default)                          AnimGraph (default)
+┌──────────┬───────────────┬──────────┐  ┌─────────┬────────────────┬───────────┐
+│Hierarchy │  documents    │Inspector │  │Variables│   documents    │  Preview  │
+│   20%    │  (viewports…) │   20%    │  │   18%   │   (graphs…)    │           │
+│          ├───────────────┤          │  │         ├────────────────┼───────────┤
+│          │Console|Profil.│          │  │         │Assets | Console│  Details  │
+└──────────┴───────────────┴──────────┘  └─────────┴────────────────┴───────────┘
 ```
+
+`ScriptGraph` is Variables 18% | documents 62% | Details 20% (Details alone on the right, at the
+Inspector's width); `BlendSpace`, `Curve` and `Mesh` are documents over Assets | Console (those
+tabs embed their own details/preview).
+
+### Graph side panels
+
+Three dock panels are keyed to the **focused graph document** (`App::focused_document`, not the
+dock focus, so clicking another panel never loses the graph):
+
+- **Details** (`graph_dock_panels_crusty::graph_details_panel`) — the selection's properties,
+  drawn from the same `config_rows` / inline-widget helpers as the canvas bands, so edits go
+  through the same `GraphEdit::SetProperty` path and undo identically.
+- **Variables** (`graph_variables_panel`) — the in-tab variables strip drawn docked; strip and
+  panel share one state (widget ids are salted per surface).
+- **Anim Preview** (`anim_preview_crusty::anim_preview_panel` over
+  `anim_graph_preview::AnimGraphPreview`) — compiles the focused anim graph and runs the real
+  `AnimMachine` + `evaluate_pose` on its own skeleton instance, parameters driven by the graph's
+  preview strip; mirrors a bound ECS runtime read-only when one exists.
+
+The Anim Preview panel and the blend space tab share one **skinned preview pane**
+(`anim_preview_crusty::skinned_preview_pane`: `MeshPreviewRenderer` target, orbit, Play/Pause,
+state chip); the host records both through `record_skinned_preview` in `app.rs`.
 
 ### Viewport Interaction
 

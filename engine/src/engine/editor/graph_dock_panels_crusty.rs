@@ -2,7 +2,7 @@
 //! layouts ticket 02).
 //!
 //! Both are thin views over the *focused graph document*'s `GraphEditorState`.
-//! The host resolves which document that is (`active_graph_key`) and draws
+//! The host resolves which document that is (`focused_graph_key`) and draws
 //! the "No graph focused" line itself when there is none, so a panel here
 //! always has a state to show. Nothing in this file has edit logic of its
 //! own: Details renders the selection's config rows through the same
