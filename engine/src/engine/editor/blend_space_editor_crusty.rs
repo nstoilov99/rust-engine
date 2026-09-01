@@ -22,14 +22,14 @@ use crusty_gui::context::{Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::input::{Key as UiKey, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Vec2};
-use crusty_gui::paint::{PaintCmd, TextureId};
+use crusty_gui::paint::TextureId;
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{Button, ComboBox, DragValue, ScrollArea, SelectableValue, TextEdit};
 
 use super::blend_space_editor::{BlendSpaceEditorState, CanvasMenu, Field, FieldEvent};
+use super::anim_preview_crusty::{skinned_preview_pane, PreviewPaneCtx};
 use super::blend_space_preview::{clamp_split, stem, MIN_PANE};
-use super::mesh_editor_crusty::orbit_controls;
 use super::theme::tokens::{asset_color, grid_major, grid_minor};
 use super::theme::Palette;
 use super::widgets::segmented_control;
@@ -42,11 +42,6 @@ const FOOTER_H: f32 = 24.0;
 /// The preview/plot splitter's drawn height and its (taller) grab target.
 const SPLITTER_H: f32 = 6.0;
 const SPLITTER_HIT: f32 = 14.0;
-/// The preview pane's bottom control bar (play/pause, clock, hint).
-const PREVIEW_BAR_H: f32 = 30.0;
-/// The mesh editor's clear colour — the pane reads as the same viewport
-/// while nothing is rendered into it yet.
-const PREVIEW_BG: Color = Color::rgb(0.16, 0.16, 0.18);
 /// Margins the plot frame leaves in the canvas for the axis labels: the
 /// Y column (name, arrows, range) on the left, the X row underneath, the
 /// Ctrl hint / readout on top.
@@ -615,10 +610,8 @@ fn splitter(ui: &mut Ui, bar: Rect, column: Rect, s: f32, state: &mut BlendSpace
     );
 }
 
-/// The 3D preview: the host's render target painted edge to edge, an orbit
-/// camera over it, a name/input chip top-left and a control bar along the
-/// bottom (play/pause, clock). Without a drawable mesh the pane explains
-/// why in its centre instead of showing a broken pose.
+/// The 3D preview (ticket 08): the shared skinned pane over the tab's own
+/// machine — the chip names the mesh and the axis readout.
 fn preview_pane(
     ui: &mut Ui,
     rect: Rect,
@@ -627,11 +620,6 @@ fn preview_pane(
     state: &mut BlendSpaceEditorState,
     texture: Option<TextureId>,
 ) {
-    let st = ui.style();
-    let pad = st.spacing.padding;
-    ui.painter().rect_filled(rect, 0.0, PREVIEW_BG);
-    let bar = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - PREVIEW_BAR_H * s), rect.max);
-    let view = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, bar.min.y));
     let input = state.preview_input();
     let readout = state
         .doc
@@ -642,79 +630,23 @@ fn preview_pane(
         .collect::<Vec<_>>()
         .join("  \u{00B7}  ");
     let pv = &mut state.preview;
-    if let Some(gpu) = pv.gpu.as_mut() {
-        gpu.size = (rect.width().floor().max(1.0) as u32, rect.height().floor().max(1.0) as u32);
-    }
-    let ready = pv.status.is_none() && pv.gpu.as_ref().is_some_and(|g| !g.mesh_indices.is_empty());
-    let centre = rect.center();
-    let msg_w = (rect.width() - pad * 4.0).max(40.0);
-    // Not drawable: the message alone, like the mesh editor's pane — no
-    // chrome suggesting controls that have nothing to act on.
-    let Some(tex) = texture.filter(|_| ready) else {
-        let (msg, color) = match (&pv.status, ready) {
-            (Some(why), _) => (why.clone(), st.palette.text_secondary),
-            (None, true) => ("Rendering preview\u{2026}".to_string(), st.palette.text_disabled),
-            (None, false) => ("Loading preview\u{2026}".to_string(), st.palette.text_disabled),
-        };
-        centred_text(ui, centre, &msg, st.fonts.body, color, msg_w);
-        return;
-    };
-    ui.painter().paint_mut().push(PaintCmd::Image {
+    let chip = pv.mesh.as_deref().map(|m| format!("{}  \u{00B7}  {readout}", stem(m)));
+    let time = pv.time();
+    skinned_preview_pane(
+        ui,
         rect,
-        uv_min: Pos2::new(0.0, 0.0),
-        uv_max: Pos2::new(1.0, 1.0),
-        tint: Color::WHITE,
-        texture: tex,
-    });
-    if let Some(gpu) = pv.gpu.as_mut() {
-        orbit_controls(ui, view, panel_id.with("bs_orbit"), gpu);
-    }
-
-    // Name + input chip, top-left, bounded by the pane.
-    if let Some(mesh) = pv.mesh.clone() {
-        let text = format!("{}  \u{00B7}  {readout}", stem(&mesh));
-        let mut p = ui.painter();
-        let size = p.measure_text_family(&text, st.fonts.small, Some(msg_w), FontFamily::Mono) + Vec2::splat(pad * 1.2);
-        let r = Rect::from_min_size(rect.min + Vec2::splat(pad), size);
-        p.rect_filled(r, st.rounding.small, st.palette.elevated.with_alpha(0.85));
-        p.text_family(r.min + Vec2::splat(pad * 0.6), &text, st.fonts.small, st.palette.text, Some(msg_w), FontFamily::Mono);
-    }
-
-    // Control bar: play/pause, the clock, the camera hint.
-    ui.painter().rect_filled(bar, 0.0, st.palette.panel.with_alpha(0.85));
-    let bh = (bar.height() - 6.0 * s).min(st.metrics.control_height);
-    let brect = Rect::from_min_size(Pos2::new(bar.min.x + pad, bar.center().y - bh * 0.5), Vec2::new(bh * 1.4, bh));
-    let mut toggle = false;
-    let id = ui.alloc_id(("bs_play", state.path.as_str()));
-    let glyph = if pv.playing { "\u{23F8}" } else { "\u{25B6}" };
-    ui.run_at(brect, Direction::LeftToRight, id, UiOptions { padding: Vec2::ZERO, spacing: 0.0 }, |ui| {
-        toggle = Button::new(glyph).exact_size(brect.size()).ghost().show(ui).clicked;
-    });
-    if toggle {
-        pv.playing = !pv.playing;
-    }
-    let clock = format!("{:.2} s", pv.time());
-    let mut p = ui.painter();
-    p.text_family(
-        Pos2::new(brect.max.x + pad, bar.center().y - st.fonts.small * 0.62),
-        &clock,
-        st.fonts.small,
-        st.palette.text_secondary,
-        None,
-        FontFamily::Mono,
+        s,
+        panel_id.with("bs_preview"),
+        PreviewPaneCtx {
+            gpu: pv.gpu.as_mut(),
+            texture,
+            status: pv.status.as_deref(),
+            chip,
+            chip_sub: None,
+            playing: Some(&mut pv.playing),
+            time,
+        },
     );
-    let hint = "Left-drag orbit \u{00B7} Middle-drag pan \u{00B7} Wheel zoom";
-    let hw = p.measure_text(hint, st.fonts.small, None).x;
-    if bar.width() > brect.width() + hw + pad * 6.0 + 80.0 * s {
-        p.text(Pos2::new(bar.max.x - pad - hw, bar.center().y - st.fonts.small * 0.62), hint, st.fonts.small, st.palette.text_disabled, None);
-    }
-}
-
-/// Text centred on `centre`, wrapped to `max_w`.
-fn centred_text(ui: &mut Ui, centre: Pos2, text: &str, font: f32, color: Color, max_w: f32) {
-    let mut p = ui.painter();
-    let size = p.measure_text(text, font, Some(max_w));
-    p.text(Pos2::new(centre.x - size.x * 0.5, centre.y - size.y * 0.5), text, font, color, Some(max_w));
 }
 
 // ── canvas ──────────────────────────────────────────────────────────────────

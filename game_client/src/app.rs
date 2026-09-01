@@ -209,6 +209,13 @@ pub struct SceneEditorState {
         String,
         rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
     >,
+    /// The Anim Preview panel's machines, keyed by `.animgraph` path
+    /// (per-document layouts ticket 03). An entry lives while the panel
+    /// draws it — the focused graph's — and goes when it stops.
+    pub anim_previews: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
@@ -369,6 +376,11 @@ pub struct App {
     /// path (ticket 08) — the mesh-preview registration, one asset kind over.
     #[cfg(feature = "editor")]
     crusty_blend_textures: std::collections::HashMap<String, CrustyMeshTexture>,
+    /// The Anim Preview panel's target (ticket 03): one registration,
+    /// `anim_preview`, re-pointed whenever the focused graph's target
+    /// changes and dropped when no preview holds one.
+    #[cfg(feature = "editor")]
+    crusty_anim_texture: Option<CrustyMeshTexture>,
     /// Preview CBs for mesh tabs docked in the main crusty dock — sent to
     /// the render thread in the frame packet (executed before the GUI pass).
     #[cfg(feature = "editor")]
@@ -392,6 +404,95 @@ pub struct App {
 struct CrustyMeshTexture {
     id: Option<rust_engine::engine::gui::crusty::TextureId>,
     view: std::sync::Arc<vulkano::image::view::ImageView>,
+}
+
+/// The Anim Preview panel's tab id — also its CB key and native texture
+/// name (one panel, one target).
+#[cfg(feature = "editor")]
+const ANIM_PREVIEW_TAB: &str = "anim_preview";
+
+/// One skinned preview's GPU-facing pieces, borrowed field-wise from a
+/// blend space tab's or the Anim Preview panel's evaluator.
+#[cfg(feature = "editor")]
+struct SkinnedPreviewTarget<'a> {
+    /// The mesh the evaluator resolved to (`None` = nothing to draw).
+    mesh: &'a Option<String>,
+    /// The render target, recreated when `mesh` differs from `gpu_mesh`.
+    gpu: &'a mut Option<rust_engine::engine::editor::mesh_editor::MeshPreviewState>,
+    gpu_mesh: &'a mut Option<String>,
+    skeleton: Option<&'a rust_engine::engine::animation::components::SkeletonInstance>,
+    /// Log prefix.
+    what: &'a str,
+}
+
+/// Record one skinned preview pass: (re)create the target for a new mesh,
+/// follow the pane's size, upload this frame's palette, draw. `None` when
+/// there is nothing to draw yet (no mesh, empty pane, mesh not on the GPU).
+#[cfg(feature = "editor")]
+fn record_skinned_preview(
+    renderer: &rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer,
+    meshes: &rust_engine::engine::rendering::rendering_3d::MeshManager,
+    queue: &std::sync::Arc<vulkano::device::Queue>,
+    cb_alloc: &std::sync::Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+    target: SkinnedPreviewTarget,
+) -> Option<std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>> {
+    use rust_engine::engine::editor::mesh_editor::MeshPreviewState;
+    let SkinnedPreviewTarget { mesh, gpu, gpu_mesh, skeleton, what } = target;
+    // A new (or first) mesh gets a fresh target; the old one is dropped and
+    // its registration re-pointed by the packet build.
+    if *gpu_mesh != *mesh {
+        *gpu = None;
+        *gpu_mesh = mesh.clone();
+        if let Some(mesh) = mesh {
+            match MeshPreviewState::new(renderer, meshes, mesh) {
+                Ok(state) => {
+                    if let Err(e) = state.texture.clear(queue.clone(), cb_alloc.clone()) {
+                        eprintln!("{what} clear failed: {e}");
+                    }
+                    *gpu = Some(state);
+                }
+                Err(e) => eprintln!("Failed to create {what}: {e}"),
+            }
+        }
+    }
+    let gpu = gpu.as_mut()?;
+    let (pw, ph) = gpu.size;
+    if pw == 0 || ph == 0 || gpu.mesh_indices.is_empty() {
+        return None;
+    }
+    if pw != gpu.texture.width() || ph != gpu.texture.height() {
+        if let Ok(true) = gpu.resize(renderer, pw, ph) {
+            if let Err(e) = gpu.texture.clear(queue.clone(), cb_alloc.clone()) {
+                eprintln!("{what} clear failed: {e}");
+            }
+        }
+    }
+    let gpu_meshes: Vec<_> = gpu
+        .mesh_indices
+        .iter()
+        .filter_map(|&idx| meshes.get(idx))
+        .map(|gm| (gm.vertex_buffer.clone(), gm.index_buffer.clone(), gm.index_count))
+        .collect();
+    if gpu_meshes.is_empty() {
+        return None;
+    }
+    let palette = skeleton
+        .filter(|s| !s.palette.is_empty())
+        .and_then(|s| match renderer.create_palette_set(&s.palette) {
+            Ok(set) => Some(set),
+            Err(e) => {
+                eprintln!("{what} palette upload failed: {e}");
+                None
+            }
+        });
+    let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
+    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
+        Ok(cb) => Some(cb),
+        Err(e) => {
+            eprintln!("{what} render error: {e}");
+            None
+        }
+    }
 }
 
 impl App {
@@ -848,6 +949,7 @@ impl App {
                 graph_editors: std::collections::HashMap::new(),
                 curve_editors: std::collections::HashMap::new(),
                 blend_space_editors: std::collections::HashMap::new(),
+                anim_previews: std::collections::HashMap::new(),
                 node_registry,
                 anim_node_registry: std::sync::Arc::new(
                     rust_engine::engine::animation::graph::anim_node_registry(),
@@ -934,6 +1036,8 @@ impl App {
             crusty_mesh_textures: std::collections::HashMap::new(),
             #[cfg(feature = "editor")]
             crusty_blend_textures: std::collections::HashMap::new(),
+            #[cfg(feature = "editor")]
+            crusty_anim_texture: None,
             #[cfg(feature = "editor")]
             crusty_docked_preview_cbs: Vec::new(),
             #[cfg(feature = "editor")]
@@ -2453,87 +2557,90 @@ impl App {
         String,
         std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
     )> {
-        use rust_engine::engine::editor::mesh_editor::MeshPreviewState;
         let Some(renderer) = self.editor.mesh_preview_renderer.as_ref() else {
             return Vec::new();
         };
         let editors = &mut self.editor.scene.blend_space_editors;
-        // Meshes the previews resolved to but the GPU has not seen yet.
-        let to_load: Vec<String> = {
-            let meshes = self.core.asset_manager.meshes.read();
-            editors
-                .values()
-                .filter_map(|s| s.preview.mesh.clone())
-                .filter(|p| meshes.indices_for_path(p).is_none())
-                .collect()
-        };
-        for path in to_load {
-            if let Err(e) = self.core.asset_manager.load_model_gpu(&path) {
-                eprintln!("Blend space preview: failed to load mesh '{path}': {e}");
-            }
-        }
+        let meshes: Vec<String> = editors.values().filter_map(|s| s.preview.mesh.clone()).collect();
+        Self::load_preview_meshes(&self.core.asset_manager, &meshes, "Blend space preview");
         let queue = self.core.renderer.gpu.queue.clone();
         let cb_alloc = self.core.renderer.gpu.command_buffer_allocator.clone();
         let meshes = self.core.asset_manager.meshes.read();
         let mut result = Vec::new();
         for (key, st) in editors.iter_mut() {
             let pv = &mut st.preview;
-            // A new (or first) mesh gets a fresh target; the old one is
-            // dropped and its registration re-pointed below.
-            if pv.gpu_mesh != pv.mesh {
-                pv.gpu = None;
-                pv.gpu_mesh = pv.mesh.clone();
-                if let Some(mesh) = &pv.mesh {
-                    match MeshPreviewState::new(renderer, &meshes, mesh) {
-                        Ok(state) => {
-                            if let Err(e) = state.texture.clear(queue.clone(), cb_alloc.clone()) {
-                                eprintln!("Blend space preview clear failed: {e}");
-                            }
-                            pv.gpu = Some(state);
-                        }
-                        Err(e) => eprintln!("Failed to create blend space preview: {e}"),
-                    }
-                }
-            }
-            let Some(gpu) = pv.gpu.as_mut() else { continue };
-            let (pw, ph) = gpu.size;
-            if pw == 0 || ph == 0 || gpu.mesh_indices.is_empty() {
-                continue;
-            }
-            if pw != gpu.texture.width() || ph != gpu.texture.height() {
-                if let Ok(true) = gpu.resize(renderer, pw, ph) {
-                    if let Err(e) = gpu.texture.clear(queue.clone(), cb_alloc.clone()) {
-                        eprintln!("Blend space preview clear failed: {e}");
-                    }
-                }
-            }
-            let gpu_meshes: Vec<_> = gpu
-                .mesh_indices
-                .iter()
-                .filter_map(|&idx| meshes.get(idx))
-                .map(|gm| (gm.vertex_buffer.clone(), gm.index_buffer.clone(), gm.index_count))
-                .collect();
-            if gpu_meshes.is_empty() {
-                continue;
-            }
-            let palette = pv
-                .skeleton
-                .as_ref()
-                .filter(|s| !s.palette.is_empty())
-                .and_then(|s| match renderer.create_palette_set(&s.palette) {
-                    Ok(set) => Some(set),
-                    Err(e) => {
-                        eprintln!("Blend space preview palette upload failed: {e}");
-                        None
-                    }
-                });
-            let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
-            match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
-                Ok(cb) => result.push((format!("blendspace:{key}"), cb)),
-                Err(e) => eprintln!("Blend space preview render error: {e}"),
+            let target = SkinnedPreviewTarget {
+                mesh: &pv.mesh,
+                gpu: &mut pv.gpu,
+                gpu_mesh: &mut pv.gpu_mesh,
+                skeleton: pv.skeleton.as_ref(),
+                what: "Blend space preview",
+            };
+            if let Some(cb) = record_skinned_preview(renderer, &meshes, &queue, &cb_alloc, target) {
+                result.push((format!("blendspace:{key}"), cb));
             }
         }
         result
+    }
+
+    /// The Anim Preview panel's command buffer (doc-layouts ticket 03), keyed
+    /// by the panel's tab id so `main.rs` routes it like a blend space tab's.
+    /// Runs first in the frame: it prunes the previews the panel did not
+    /// draw last frame, so what remains is the one the panel shows — the
+    /// one CB under the one key, and the one target the packet build and
+    /// the float pass register. (A second entry only ever exists between
+    /// the panel's draw and this prune.)
+    pub fn build_anim_preview_cbs(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )> {
+        self.prune_anim_previews();
+        let Some(renderer) = self.editor.mesh_preview_renderer.as_ref() else {
+            return Vec::new();
+        };
+        let previews = &mut self.editor.scene.anim_previews;
+        let meshes: Vec<String> = previews.values().filter_map(|p| p.mesh.clone()).collect();
+        Self::load_preview_meshes(&self.core.asset_manager, &meshes, "Anim preview");
+        let queue = self.core.renderer.gpu.queue.clone();
+        let cb_alloc = self.core.renderer.gpu.command_buffer_allocator.clone();
+        let meshes = self.core.asset_manager.meshes.read();
+        let mut result = Vec::new();
+        for pv in previews.values_mut() {
+            let target = SkinnedPreviewTarget {
+                mesh: &pv.mesh,
+                gpu: &mut pv.gpu,
+                gpu_mesh: &mut pv.gpu_mesh,
+                skeleton: pv.skeleton.as_ref(),
+                what: "Anim preview",
+            };
+            if let Some(cb) = record_skinned_preview(renderer, &meshes, &queue, &cb_alloc, target) {
+                result.push((ANIM_PREVIEW_TAB.to_string(), cb));
+                break;
+            }
+        }
+        result
+    }
+
+    /// Upload the meshes the previews resolved to but the GPU has not seen.
+    fn load_preview_meshes(
+        assets: &rust_engine::engine::assets::AssetManager,
+        wanted: &[String],
+        what: &str,
+    ) {
+        let to_load: Vec<&String> = {
+            let meshes = assets.meshes.read();
+            wanted
+                .iter()
+                .filter(|p| meshes.indices_for_path(p).is_none())
+                .collect()
+        };
+        for path in to_load {
+            if let Err(e) = assets.load_model_gpu(path) {
+                eprintln!("{what}: failed to load mesh '{path}': {e}");
+            }
+        }
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
@@ -2571,6 +2678,10 @@ impl App {
                                 }
                             } else if let Some(k) = key.strip_prefix("bs_preview:") {
                                 if let Some(entry) = self.crusty_blend_textures.get_mut(k) {
+                                    entry.id = Some(tid);
+                                }
+                            } else if key == ANIM_PREVIEW_TAB {
+                                if let Some(entry) = self.crusty_anim_texture.as_mut() {
                                     entry.id = Some(tid);
                                 }
                             }
@@ -3921,6 +4032,7 @@ impl App {
             let graph_editors = &mut self.editor.scene.graph_editors;
             let curve_editors = &mut self.editor.scene.curve_editors;
             let blend_space_editors = &mut self.editor.scene.blend_space_editors;
+            let anim_panel = &mut self.editor.scene.anim_previews;
             let graph_registry = &self.editor.scene.node_registry;
             let anim_graph_registry = &self.editor.scene.anim_node_registry;
             // A frame-local snapshot: the preferences page edits the live
@@ -3987,8 +4099,10 @@ impl App {
             let anim_instances =
                 anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
             let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
-            let anim_previews =
+            let mut anim_previews =
                 anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
+            fold_anim_panel_previews(&*world, anim_panel, &mut anim_previews);
+            let anim_texture = self.crusty_anim_texture.as_ref().and_then(|e| e.id);
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
@@ -4519,6 +4633,10 @@ impl App {
                                                 },
                                                 resolver: &graph_resolver_docs,
                                                 curves: &graph_curve_docs,
+                                                mesh_assets: &mesh_assets,
+                                                auto_mesh: anim_panel
+                                                    .get(key)
+                                                    .and_then(|p| p.mesh.as_deref()),
                                             },
                                         ),
                                         None => dock_crusty::placeholder_panel(ui, "No graph focused"),
@@ -4547,9 +4665,15 @@ impl App {
                                         None => dock_crusty::placeholder_panel(ui, "No graph focused"),
                                     }
                                 }
-                                Some(EditorTab::AnimPreview) => {
-                                    dock_crusty::placeholder_panel(ui, "No graph focused")
-                                }
+                                Some(EditorTab::AnimPreview) => anim_preview_body(
+                                    ui,
+                                    rect,
+                                    focused_graph_key.as_deref(),
+                                    graph_editors,
+                                    anim_panel,
+                                    &mesh_assets,
+                                    anim_texture,
+                                ),
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -4657,7 +4781,7 @@ impl App {
             // Ticket 06: land the preview strips' parameter edits on their
             // bound runtimes — after the UI, when the world is reachable
             // again. Runtime-only writes; next frame's tick reads them.
-            apply_anim_param_edits(&mut *world, graph_editors, &anim_previews);
+            apply_anim_param_edits(&mut *world, graph_editors, &anim_previews, anim_panel);
             drive_blend_space_previews(&mut *world, &*world_resources, &picked_bits, blend_space_editors);
             self.crusty_menu_action = crusty_menu_action;
             crusty_result
@@ -4839,6 +4963,47 @@ impl App {
                         }
                     }
                 }
+            }
+            // The Anim Preview panel (ticket 03): one registration for the
+            // focused graph's target; re-pointed when that target changes
+            // (another graph took the focus, the mesh changed), dropped when
+            // no preview holds one or the panel left the main dock (a float
+            // window registers the target in its own registry).
+            let anim_docked = self.editor.ui.crusty_dock.tree.contains_tab(ANIM_PREVIEW_TAB);
+            let anim_view = self
+                .editor
+                .scene
+                .anim_previews
+                .values()
+                .find_map(|pv| pv.gpu.as_ref().filter(|g| !g.mesh_indices.is_empty()))
+                .filter(|_| anim_docked)
+                .map(|g| g.texture.image_view());
+            let anim_has_cb = self
+                .crusty_docked_preview_cbs
+                .iter()
+                .any(|(k, _)| k == ANIM_PREVIEW_TAB);
+            match (anim_view, self.crusty_anim_texture.as_mut()) {
+                (Some(view), None) if anim_has_cb => {
+                    packet
+                        .crusty_native_registrations
+                        .push((ANIM_PREVIEW_TAB.to_string(), view.clone()));
+                    self.crusty_anim_texture = Some(CrustyMeshTexture { id: None, view });
+                }
+                (Some(view), Some(entry)) if anim_has_cb => {
+                    if !std::sync::Arc::ptr_eq(&entry.view, &view) {
+                        if let Some(id) = entry.id {
+                            packet.crusty_native_updates.push((id, view.clone()));
+                            entry.view = view;
+                        }
+                    }
+                }
+                (None, Some(entry)) => {
+                    if let Some(id) = entry.id {
+                        packet.crusty_native_removals.push(id);
+                    }
+                    self.crusty_anim_texture = None;
+                }
+                _ => {}
             }
             packet.crusty_preview_cbs = std::mem::take(&mut self.crusty_docked_preview_cbs)
                 .into_iter()
@@ -5260,6 +5425,22 @@ impl App {
             .graph_editors
             .contains_key(key)
             .then(|| key.to_string())
+    }
+
+    /// Keep the Anim Preview panel's machines in step with the panel
+    /// (doc-layouts ticket 03): an entry lives while the panel draws it.
+    /// A preview nobody drew last frame — the panel closed, the focus moved
+    /// to another graph, or its graph tab closed — goes, render target and
+    /// all; the next draw starts it fresh at ENTRY. Runs once per frame,
+    /// first (`build_anim_preview_cbs`), after the last frame's `shown`
+    /// flags landed and before anything records or registers a target.
+    #[cfg(feature = "editor")]
+    fn prune_anim_previews(&mut self) {
+        let editors = &self.editor.scene.graph_editors;
+        self.editor
+            .scene
+            .anim_previews
+            .retain(|k, pv| std::mem::take(&mut pv.shown) && editors.contains_key(k));
     }
 
     /// Content-relative key of the graph that owns Edit actions
@@ -6251,6 +6432,7 @@ impl App {
         let graph_clipboard = &mut editor.scene.graph_clipboard;
         let curve_editors = &mut editor.scene.curve_editors;
         let blend_space_editors = &mut editor.scene.blend_space_editors;
+        let anim_panel = &mut editor.scene.anim_previews;
         let anim_assets = anim_asset_paths(&asset_browser.registry);
         let mesh_assets = mesh_asset_paths(&asset_browser.registry);
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
@@ -6317,8 +6499,9 @@ impl App {
         let anim_instances =
             anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
         let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
-        let anim_previews =
+        let mut anim_previews =
             anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
+        fold_anim_panel_previews(&*world, anim_panel, &mut anim_previews);
         let mut graph_clear_trace: Option<String> = None;
         let mut graph_open_requests: Vec<
             rust_engine::engine::editor::graph_editor::GraphOpenRequest,
@@ -6370,6 +6553,18 @@ impl App {
                 } else if let Some(key) = tab.strip_prefix("blendspace:") {
                     let gpu = blend_space_editors.get(key).and_then(|s| s.preview.gpu.as_ref());
                     if let Some(gpu) = gpu.filter(|g| !g.mesh_indices.is_empty()) {
+                        let has_cb = cb_keys.iter().any(|k| k == tab);
+                        if let Some(id) = fw.ensure_mesh_texture(tab, gpu.texture.image_view(), has_cb) {
+                            mesh_tex.insert(tab.clone(), id);
+                        }
+                    }
+                } else if tab == ANIM_PREVIEW_TAB {
+                    // The Anim Preview panel floated here (ticket 03): the
+                    // focused graph's target, under the panel's own tab id.
+                    let gpu = anim_panel
+                        .values()
+                        .find_map(|pv| pv.gpu.as_ref().filter(|g| !g.mesh_indices.is_empty()));
+                    if let Some(gpu) = gpu {
                         let has_cb = cb_keys.iter().any(|k| k == tab);
                         if let Some(id) = fw.ensure_mesh_texture(tab, gpu.texture.image_view(), has_cb) {
                             mesh_tex.insert(tab.clone(), id);
@@ -6635,6 +6830,10 @@ impl App {
                                         },
                                         resolver: &graph_resolver_docs,
                                         curves: &graph_curve_docs,
+                                        mesh_assets: &mesh_assets,
+                                        auto_mesh: anim_panel
+                                            .get(key)
+                                            .and_then(|p| p.mesh.as_deref()),
                                     },
                                 ),
                                 None => dock_crusty::placeholder_panel(ui, "No graph focused"),
@@ -6663,9 +6862,15 @@ impl App {
                                 None => dock_crusty::placeholder_panel(ui, "No graph focused"),
                             }
                         }
-                        Some(EditorTab::AnimPreview) => {
-                            dock_crusty::placeholder_panel(ui, "No graph focused")
-                        }
+                        Some(EditorTab::AnimPreview) => anim_preview_body(
+                            ui,
+                            rect,
+                            focused_graph_key.as_deref(),
+                            graph_editors,
+                            anim_panel,
+                            &mesh_assets,
+                            mesh_tex.get(tab).copied(),
+                        ),
                         _ => dock_crusty::placeholder_panel(
                             ui,
                             "This panel is not yet ported to crusty-gui.",
@@ -6743,7 +6948,7 @@ impl App {
 
         // Ticket 06, float-window path: same edit delivery as the docked one
         // — done here because the world is mutably reachable again.
-        apply_anim_param_edits(core.game_world.hecs_mut(), graph_editors, &anim_previews);
+        apply_anim_param_edits(core.game_world.hecs_mut(), graph_editors, &anim_previews, anim_panel);
         {
             let (world, resources) = core.game_world.world_and_resources_mut();
             drive_blend_space_previews(world, &*resources, &picked_bits, blend_space_editors);
@@ -8644,9 +8849,84 @@ fn anim_preview_bindings(
         .collect()
 }
 
+/// Fold the Anim Preview panel's machines into the strips' bindings
+/// (doc-layouts ticket 03, the parameter-ownership ruling). A graph whose
+/// strip is bound to a world entity keeps that binding — the strip drives
+/// the entity — and the panel *mirrors* the runtime read-only this frame.
+/// One with no entity bound previews on the panel's own machine: its
+/// snapshot joins the list under [`PANEL_INSTANCE_ID`], so the strip shows
+/// and drives it like any bound instance.
+#[cfg(feature = "editor")]
+fn fold_anim_panel_previews(
+    world: &hecs::World,
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
+    previews: &mut Vec<(String, rust_engine::engine::editor::anim_preview::AnimPreview)>,
+) {
+    use rust_engine::engine::animation::graph::AnimGraphRuntime;
+    use rust_engine::engine::editor::anim_graph_preview::Mirror;
+    for (key, pv) in panel.iter_mut() {
+        match previews.iter().find(|(k, _)| k == key) {
+            Some((_, bound)) => {
+                pv.mirror = hecs::Entity::from_bits(bound.instance_id)
+                    .and_then(|e| world.get::<&AnimGraphRuntime>(e).ok())
+                    .filter(|rt| rt.disabled.is_none())
+                    .map(|rt| Mirror {
+                        name: bound.instance.clone(),
+                        plan: rt.plan.clone(),
+                        machine: rt.machine.clone(),
+                        params: rt.params.clone(),
+                    });
+            }
+            None => {
+                pv.mirror = None;
+                previews.push((key.clone(), pv.snapshot()));
+            }
+        }
+    }
+}
+
+/// The Anim Preview panel body (ticket 03), shared by the docked and float
+/// paths: tick the focused animation graph's machine against its document
+/// revision, then draw the pane. Not an animation graph, or none focused:
+/// an empty-state line, like the other graph side panels.
+#[cfg(feature = "editor")]
+fn anim_preview_body(
+    ui: &mut rust_engine::engine::gui::crusty::Ui,
+    rect: rust_engine::engine::editor::dock_crusty::Rect,
+    focused_graph_key: Option<&str>,
+    graph_editors: &std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
+    mesh_assets: &[String],
+    texture: Option<rust_engine::engine::gui::crusty::TextureId>,
+) {
+    use rust_engine::engine::editor::anim_preview_crusty::{anim_preview_panel, AnimPreviewPanelCtx};
+    use rust_engine::engine::editor::dock_crusty;
+    let focused = focused_graph_key.and_then(|k| graph_editors.get(k).map(|s| (k, s)));
+    match focused {
+        Some((key, state)) if state.domain.is_animation() => {
+            let pv = panel.entry(key.to_string()).or_default();
+            pv.tick(&state.doc, &state.path, state.revision, mesh_assets);
+            anim_preview_panel(ui, rect, AnimPreviewPanelCtx { preview: pv, key, texture });
+        }
+        Some(_) => dock_crusty::placeholder_panel(ui, "Not an animation graph"),
+        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+    }
+}
+
 /// Land the preview strips' parameter edits on their bound runtimes (ticket
-/// 06). Edits drain whether or not the binding still exists — a write with
-/// nowhere to go is dropped, never queued against a future binding.
+/// 06) — or, for a graph previewing on the Anim Preview panel, on the
+/// panel's own blackboard (ticket 03). Edits drain whether or not the
+/// binding still exists — a write with nowhere to go is dropped, never
+/// queued against a future binding.
 #[cfg(feature = "editor")]
 fn apply_anim_param_edits(
     world: &mut hecs::World,
@@ -8655,8 +8935,13 @@ fn apply_anim_param_edits(
         rust_engine::engine::editor::graph_editor::GraphEditorState,
     >,
     previews: &[(String, rust_engine::engine::editor::anim_preview::AnimPreview)],
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
 ) {
     use rust_engine::engine::animation::graph::AnimGraphRuntime;
+    use rust_engine::engine::editor::anim_preview::PANEL_INSTANCE_ID;
     for (key, st) in graph_editors.iter_mut() {
         if st.anim_edits.is_empty() {
             continue;
@@ -8665,6 +8950,14 @@ fn apply_anim_param_edits(
         let Some((_, p)) = previews.iter().find(|(k, _)| k == key) else {
             continue;
         };
+        if p.instance_id == PANEL_INSTANCE_ID {
+            if let Some(pv) = panel.get_mut(key) {
+                for e in &edits {
+                    pv.apply(e);
+                }
+            }
+            continue;
+        }
         let Some(entity) = hecs::Entity::from_bits(p.instance_id) else {
             continue;
         };

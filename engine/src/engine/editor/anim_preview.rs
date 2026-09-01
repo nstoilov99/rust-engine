@@ -174,10 +174,30 @@ pub fn plan_references_space(
     })
 }
 
+/// The `instance_id` of a preview the editor's Preview panel serves rather
+/// than an entity (per-document layouts ticket 03): the strip's edits for
+/// it land on the panel's own blackboard, and the picker never lists it.
+/// Every consumer checks for it *before* `Entity::from_bits` (which would
+/// accept the bits); a stale explicit pick of it is not a candidate, so
+/// `resolve_anim_bind` falls back to the selection as for any dead handle.
+pub const PANEL_INSTANCE_ID: u64 = u64::MAX;
+
 /// Build the frame's preview from a runtime. Pure over the runtime — the
 /// world queries below are the only ECS-facing pieces.
 pub fn preview_from_runtime(rt: &AnimGraphRuntime, name: String, id: u64) -> AnimPreview {
-    let plan = &rt.plan;
+    preview_from_machine(&rt.plan, &rt.machine, &rt.params, rt.disabled.clone(), name, id)
+}
+
+/// The same read surface over a bare machine — what the Preview panel's own
+/// (entity-less) machine hands the strip when nothing in the world is bound.
+pub fn preview_from_machine(
+    plan: &AnimGraphPlan,
+    machine: &crate::engine::animation::graph::AnimMachine,
+    params: &AnimParams,
+    disabled: Option<String>,
+    name: String,
+    id: u64,
+) -> AnimPreview {
     let params = plan
         .parameters
         .iter()
@@ -185,13 +205,13 @@ pub fn preview_from_runtime(rt: &AnimGraphRuntime, name: String, id: u64) -> Ani
             slug: d.slug.clone(),
             value: match d.ty {
                 crate::engine::animation::graph::plan::AnimParamType::Float => {
-                    ParamValue::Float(rt.params.get_float(&d.slug).unwrap_or(0.0))
+                    ParamValue::Float(params.get_float(&d.slug).unwrap_or(0.0))
                 }
                 crate::engine::animation::graph::plan::AnimParamType::Bool => {
-                    ParamValue::Bool(rt.params.get_bool(&d.slug).unwrap_or(false))
+                    ParamValue::Bool(params.get_bool(&d.slug).unwrap_or(false))
                 }
                 crate::engine::animation::graph::plan::AnimParamType::Trigger => {
-                    ParamValue::Trigger(rt.params.trigger_set(&d.slug).unwrap_or(false))
+                    ParamValue::Trigger(params.trigger_set(&d.slug).unwrap_or(false))
                 }
             },
             range: float_param_range(plan, &d.slug),
@@ -200,13 +220,12 @@ pub fn preview_from_runtime(rt: &AnimGraphRuntime, name: String, id: u64) -> Ani
     AnimPreview {
         instance: name,
         instance_id: id,
-        disabled: rt.disabled.clone(),
-        active_state: plan.states.get(rt.machine.current_state()).map(|s| s.node_id),
-        fade: rt.machine.crossfade().and_then(|f| {
-            plan.states.get(f.from).map(|s| (s.node_id, f.weight()))
-        }),
-        fired: rt
-            .machine
+        disabled,
+        active_state: plan.states.get(machine.current_state()).map(|s| s.node_id),
+        fade: machine
+            .crossfade()
+            .and_then(|f| plan.states.get(f.from).map(|s| (s.node_id, f.weight()))),
+        fired: machine
             .last_fired()
             .and_then(|(i, age)| plan.transitions.get(i).map(|t| (t.node_id, age))),
         params,

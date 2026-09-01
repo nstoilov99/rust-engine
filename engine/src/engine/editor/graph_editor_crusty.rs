@@ -45,7 +45,7 @@ use super::graph_editor::{
     BOOKMARK_SLOTS, TOAST_MS,
     region_find_matches, rule_scope_registry,
 };
-use super::anim_preview::{AnimParamEdit, AnimPreview};
+use super::anim_preview::{AnimParamEdit, AnimPreview, PANEL_INSTANCE_ID};
 use super::graph_exec_viz::{DebugRequest, ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
@@ -7629,7 +7629,9 @@ fn anim_preview_picker(
     if !just_opened && (ui.ctx().input.key_pressed(Key::Escape) || pressed_outside) {
         ui.ctx_mut().modal_dismiss(anim_picker_modal_id());
         // Keep the binding, close the surface: "put it away" is not "unbind".
-        return Some(anim.map(|a| a.instance_id));
+        // The Preview panel's own machine is not a pick, though — it is the
+        // fallback — so dismissing over it keeps "follow the selection".
+        return Some(anim.map(|a| a.instance_id).filter(|id| *id != PANEL_INSTANCE_ID));
     }
     if picked.is_some() {
         ui.ctx_mut().modal_dismiss(anim_picker_modal_id());

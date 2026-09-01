@@ -96,6 +96,12 @@ pub mod graph_exec_viz;
 /// state highlight), the animation counterpart of `graph_exec_viz`.
 #[cfg(feature = "editor")]
 pub mod anim_preview;
+/// Per-document layouts ticket 03: the Anim Preview dock panel's CPU half —
+/// the focused graph's compiled plan on a skeleton of its own.
+#[cfg(feature = "editor")]
+pub mod anim_graph_preview;
+#[cfg(feature = "editor")]
+pub mod anim_preview_crusty;
 #[cfg(feature = "editor")]
 pub mod graph_editor_crusty;
 /// Per-document layouts ticket 02: the focused graph's Details and

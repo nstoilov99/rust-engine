@@ -17,8 +17,9 @@ use crusty_gui::id::Id;
 use crusty_gui::math::{Pos2, Rect, Vec2};
 use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
-use crusty_gui::widgets::{ScrollArea, TextEdit};
+use crusty_gui::widgets::{ComboBox, ScrollArea, SelectableValue, TextEdit};
 
+use super::blend_space_preview::stem;
 use super::graph_editor::{
     alias_name, pin_type_label, prop_display, DetailsRename, GraphDomain, GraphEditorState,
 };
@@ -27,7 +28,7 @@ use super::graph_editor_crusty::{
 };
 use super::theme::Palette;
 use crate::engine::animation::graph::plan::{
-    ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
+    ANIM_ENTRY_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
 };
 use crate::engine::node_graph::{CurveResolver, GraphResolver, NodeInst, NodeRegistry};
 
@@ -43,6 +44,12 @@ pub struct GraphDetailsPanelCtx<'a> {
     /// descriptors the canvas does.
     pub resolver: &'a dyn GraphResolver,
     pub curves: &'a dyn CurveResolver,
+    /// Every `.mesh` in the project: the ENTRY node's Preview Mesh dropdown
+    /// (per-document layouts ticket 03).
+    pub mesh_assets: &'a [String],
+    /// The mesh the Preview panel auto-picked for this graph, when the
+    /// document names none — spelled in the dropdown as "(auto) name".
+    pub auto_mesh: Option<&'a str>,
 }
 
 pub struct GraphVariablesPanelCtx<'a> {
@@ -68,7 +75,7 @@ pub fn graph_variables_panel(ui: &mut Ui, rect: Rect, ctx: GraphVariablesPanelCt
 
 /// The Details panel: the selection's properties, or the document's summary.
 pub fn graph_details_panel(ui: &mut Ui, rect: Rect, ctx: GraphDetailsPanelCtx) {
-    let GraphDetailsPanelCtx { state, registry, resolver, curves } = ctx;
+    let GraphDetailsPanelCtx { state, registry, resolver, curves, mesh_assets, auto_mesh } = ctx;
     if !ui.ctx().input.pointer_down {
         state.flush_prop_edit(registry);
     }
@@ -97,7 +104,14 @@ pub fn graph_details_panel(ui: &mut Ui, rect: Rect, ctx: GraphDetailsPanelCtx) {
                     },
                     [id] => match state.doc.node(*id).cloned() {
                         Some(n) => {
-                            node_body(ui, state, registry, resolver, curves, &n, root, &st)
+                            let ctx = NodeBodyCtx {
+                                registry,
+                                resolver,
+                                curves,
+                                mesh_assets,
+                                auto_mesh,
+                            };
+                            node_body(ui, state, &ctx, &n, root, &st)
                         }
                         // A selected id the document no longer has (an edge
                         // selection, a stale id): the document is still the
@@ -160,23 +174,41 @@ fn variable_body(ui: &mut Ui, state: &GraphEditorState, slug: &str, st: &Style) 
     caption(ui, "Edit the declaration in the Variables panel.", st);
 }
 
+/// The read-only inputs `node_body` draws against.
+struct NodeBodyCtx<'a> {
+    registry: &'a NodeRegistry,
+    resolver: &'a dyn GraphResolver,
+    curves: &'a dyn CurveResolver,
+    mesh_assets: &'a [String],
+    auto_mesh: Option<&'a str>,
+}
+
 /// One node: its identity, then its config rows — the same rows, in the
 /// same order, with the same widgets, as the band on the node itself.
-#[allow(clippy::too_many_arguments)]
 fn node_body(
     ui: &mut Ui,
     state: &mut GraphEditorState,
-    registry: &NodeRegistry,
-    resolver: &dyn GraphResolver,
-    curves: &dyn CurveResolver,
+    ctx: &NodeBodyCtx,
     n: &NodeInst,
     root: Id,
     st: &Style,
 ) {
+    let NodeBodyCtx { registry, resolver, curves, mesh_assets, auto_mesh } = *ctx;
     let (title, tag) = node_identity(state, registry, n);
     header(ui, &title, Some(&tag), st);
     let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
     let label_w = DETAILS_LABEL_W * s;
+    // The ENTRY node carries the document's preview mesh (ticket 03): the
+    // one row the Preview panel is configured from, so it lives where the
+    // rest of the document's identity does rather than on the canvas band.
+    if n.type_id == ANIM_ENTRY_TYPE_ID {
+        let row = ui.allocate(Vec2::new(ui.available().width(), st.metrics.control_height));
+        row_label(ui, row, "Preview Mesh", st);
+        let cell = Rect::from_min_max(Pos2::new(row.min.x + label_w, row.min.y), row.max);
+        preview_mesh_row(ui, state, registry, cell, root, s, mesh_assets, auto_mesh, st);
+        caption(ui, "Empty picks a mesh whose bones cover the graph's clips.", st);
+        return;
+    }
     // A state's or alias's Name: the only title the animation library
     // spells back to the user, so it gets a row (spec: Name / Clip / …).
     if matches!(
@@ -235,6 +267,72 @@ fn node_body(
                 mono_value(ui, cell, &hex, st, st.palette.text_mono);
             }
         }
+    }
+}
+
+/// "(auto)" + every `.mesh` in the project; a pick is one undoable
+/// `SetProperty` on the ENTRY node (`set_preview_mesh`) — the blend space
+/// tab's Mesh row, one document kind over.
+#[allow(clippy::too_many_arguments)]
+fn preview_mesh_row(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    cell: Rect,
+    root: Id,
+    s: f32,
+    mesh_assets: &[String],
+    auto_mesh: Option<&str>,
+    st: &Style,
+) {
+    let current = state.preview_mesh();
+    let shown = if current.is_empty() {
+        match auto_mesh {
+            Some(m) => format!("(auto) {}", stem(m)),
+            None => "(auto)".to_string(),
+        }
+    } else {
+        stem(&current)
+    };
+    let mut pick: Option<String> = None;
+    ui.run_at(
+        cell,
+        Direction::LeftToRight,
+        root.with("graph_details_preview_mesh"),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            ComboBox::new(format!("graph_preview_mesh_{}", state.path))
+                .selected_text(shown)
+                .width(cell.width())
+                .popup_width(cell.width().max(260.0 * s))
+                .show_ui(ui, |ui| {
+                    let mut auto = current.is_empty();
+                    if SelectableValue::new(&mut auto, true, "(auto)").show(ui).clicked {
+                        pick = Some(String::new());
+                    }
+                    for path in mesh_assets {
+                        let mut sel = *path == current;
+                        if SelectableValue::new(&mut sel, true, path.as_str()).show(ui).clicked {
+                            pick = Some(path.clone());
+                        }
+                    }
+                });
+        },
+    );
+    if let Some(mesh) = pick {
+        if mesh != current {
+            state.set_preview_mesh(mesh, registry);
+        }
+    }
+    if !current.is_empty() && !mesh_assets.iter().any(|p| *p == current) {
+        let row = ui.allocate(Vec2::new(ui.available().width(), st.metrics.row_height));
+        ui.painter().text(
+            Pos2::new(row.min.x, row.center().y - st.fonts.small * 0.62),
+            &format!("\u{26A0} {current} not found in project"),
+            st.fonts.small,
+            Palette::invariant_status().warning,
+            Some(row.width()),
+        );
     }
 }
 

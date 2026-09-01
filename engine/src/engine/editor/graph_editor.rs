@@ -1500,6 +1500,11 @@ pub struct GraphEditorState {
     /// host onto the bound runtime's blackboard after the UI. Runtime-only
     /// writes: never document state, never undo entries.
     pub anim_edits: Vec<crate::engine::editor::anim_preview::AnimParamEdit>,
+    /// Bumps whenever what the document compiles to may have changed: every
+    /// edit, undo and redo (`after_edit`), a save, and a host-side refresh
+    /// after a nested file changed on disk. Caches derived from the document
+    /// (the Preview panel's compiled plan) key on it rather than diffing.
+    pub revision: u64,
     /// Where the user last put the rule peek panel: min offset from the
     /// canvas min plus size, screen units. Session-only, per tab — like
     /// `rule_scope` itself. `None` keeps the anchored default under the
@@ -2683,6 +2688,7 @@ impl GraphEditorState {
             anim_bind: None,
             anim_picker: false,
             anim_edits: Vec::new(),
+            revision: 0,
             peek_panel: None,
             peek_drag: None,
         }
@@ -2704,6 +2710,9 @@ impl GraphEditorState {
         self.migrated = false;
         self.dirty = false;
         self.last_saved_at = Some(Instant::now());
+        // A save is a recompile point for the Preview panel: the files this
+        // document nests may have changed since its plan was built.
+        self.revision += 1;
         Ok(())
     }
 
@@ -2718,6 +2727,39 @@ impl GraphEditorState {
     /// when a graph it *nests* changed on disk without any edit of its own.
     pub fn refresh_domain_errors(&mut self) {
         self.domain_errors = self.domain.compile_errors(&self.doc, &self.path);
+        self.revision += 1;
+    }
+
+    /// The document's preview mesh (per-document layouts ticket 03): the
+    /// `preview_mesh` property of its ENTRY node, empty = auto-pick.
+    pub fn preview_mesh(&self) -> String {
+        crate::engine::animation::graph::plan::preview_mesh_of(&self.doc)
+    }
+
+    /// Choose the preview mesh (empty = auto) as one `SetProperty` on the
+    /// ENTRY node — undoable like any other property; a document without
+    /// an ENTRY has nowhere to keep it and is left alone.
+    pub fn set_preview_mesh(&mut self, mesh: String, registry: &NodeRegistry) {
+        use crate::engine::animation::graph::plan::{ANIM_ENTRY_TYPE_ID, PREVIEW_MESH_PROP};
+        let Some(entry) = self
+            .doc
+            .nodes
+            .iter()
+            .find(|n| n.type_id == ANIM_ENTRY_TYPE_ID)
+            .map(|n| n.id)
+        else {
+            return;
+        };
+        self.begin_prop_edit(entry, PREVIEW_MESH_PROP, registry);
+        if let Some(n) = self.doc.node_mut(entry) {
+            if mesh.is_empty() {
+                n.properties.remove(PREVIEW_MESH_PROP);
+            } else {
+                n.properties
+                    .insert(PREVIEW_MESH_PROP.to_string(), PropValue::Str(mesh));
+            }
+        }
+        self.flush_prop_edit(registry);
     }
 
     /// Record an already-applied edit, then re-validate.

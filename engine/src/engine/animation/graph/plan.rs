@@ -28,6 +28,25 @@ use crate::engine::animation::blend_space::BlendSpace;
 /// The ENTRY node — a real node on the canvas, exactly one per machine. Its
 /// single outgoing edge names the starting state.
 pub const ANIM_ENTRY_TYPE_ID: &str = "anim_entry";
+/// ENTRY property (`Str`/`Asset`, optional): the content-relative `.mesh`
+/// the editor's Preview panel poses this graph on. Editor-only data that
+/// rides on the document's one ENTRY node (per-document layouts ruling) so
+/// it is an ordinary undoable node-property edit; empty or absent means
+/// "auto-pick a mesh whose bones cover the plan's clips". The compiler
+/// ignores it.
+pub const PREVIEW_MESH_PROP: &str = "preview_mesh";
+
+/// The document's preview mesh — its ENTRY node's [`PREVIEW_MESH_PROP`];
+/// empty when unset or when there is no ENTRY (auto-pick).
+pub fn preview_mesh_of(doc: &GraphDoc) -> String {
+    doc.nodes
+        .iter()
+        .find(|n| n.type_id == ANIM_ENTRY_TYPE_ID)
+        .and_then(|n| str_prop(&n.properties, PREVIEW_MESH_PROP))
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// A State: a leaf that plays the `.anim` clip its [`CLIP_PROP`] names, a
 /// blend tree (when the document carries a region keyed by the state's id),
 /// or a nested sub-state-machine (when [`GRAPH_PROP`] names another
