@@ -652,7 +652,7 @@ pub struct GraphEditorPanelCtx<'a> {
 
 /// What an unconnected input renders in its value cell.
 #[derive(Clone, Debug, PartialEq)]
-enum InlineKind {
+pub(super) enum InlineKind {
     /// Editable at L0 (`DragValue`).
     Float(f32),
     /// Editable at L0 (`DragValue` stepping whole numbers). Separate from
@@ -780,7 +780,7 @@ fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropVal
 /// in the drawing code. Rows appear even when the property is missing — a
 /// freshly placed `event_custom` has no `event_name` yet, and a row is the
 /// only way to give it one.
-fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
+pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
     use crate::engine::animation::graph::plan::{
         ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
         ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP, GRAPH_PROP,
@@ -1887,7 +1887,7 @@ fn alias_state_names(n: &NodeInst, doc: &GraphDoc) -> Vec<String> {
 }
 
 /// A state's name as the compiler spells it: its title, else "State <id>".
-fn anim_state_name(s: &NodeInst) -> String {
+pub(super) fn anim_state_name(s: &NodeInst) -> String {
     s.title
         .clone()
         .unwrap_or_else(|| format!("State {}", s.id))
@@ -2505,7 +2505,11 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // has no viewport and no geometry, and this is the same pan-only move
     // find-in-graph and error cycling already make.
     let mut locate: Option<u64> = None;
-    variables_panel(ui, strip, state, registry, &mut locate);
+    let vars_root = Id::new(("graph_vars_strip", state.path.as_str()));
+    variables_panel(ui, strip, state, registry, vars_root, false, &mut locate);
+    // The Variables dock panel has no canvas; it leaves its locate here for
+    // the tab to frame on its next draw (per-document layouts ticket 02).
+    let locate = locate.or_else(|| state.locate_request.take());
     if let Some(id) = locate {
         state.select_only(id);
         state.flash = Some((id, std::time::Instant::now()));
@@ -5470,7 +5474,16 @@ fn rule_scope_full(
 
     if let Some(mut scope) = state.rule_scope.take() {
         let mut locate = None;
-        variables_panel(ui, strip, &mut scope.child, rule_scope_registry(), &mut locate);
+        let vars_root = Id::new(("graph_vars_rule_strip", scope.child.path.as_str()));
+        variables_panel(
+            ui,
+            strip,
+            &mut scope.child,
+            rule_scope_registry(),
+            vars_root,
+            false,
+            &mut locate,
+        );
         if let (Some(id), Some(pass)) = (locate, &pass) {
             scope.child.select_only(id);
             scope.child.flash = Some((id, std::time::Instant::now()));
@@ -7884,11 +7897,19 @@ const VARS_ARRAY_ROWS: usize = 6;
 /// from here, from a config row, or from a test. Layout is by hand because the
 /// strip is a fixed column with a pinned footer: the list gets whatever the
 /// header, the filter and the footer inspector leave it.
-fn variables_panel(
+///
+/// `root` salts every widget id, because the same document can be showing
+/// this list twice at once — the tab's strip and the Variables dock panel
+/// (per-document layouts ticket 02) — and two live widgets sharing an id
+/// would each apply the other's drag. `docked` is that panel: it fills its
+/// tab, so it has no collapse caret, no rail state and no strip edge.
+pub(super) fn variables_panel(
     ui: &mut Ui,
     rect: Rect,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    root: Id,
+    docked: bool,
     locate: &mut Option<u64>,
 ) {
     let st = ui.style();
@@ -7900,22 +7921,24 @@ fn variables_panel(
     {
         let mut p = ui.painter();
         p.rect_filled(rect, Rounding::ZERO, st.palette.panel);
-        p.line_segment(
-            Pos2::new(rect.max.x, rect.min.y),
-            Pos2::new(rect.max.x, rect.max.y),
-            st.metrics.border,
-            st.palette.stroke,
-        );
+        if !docked {
+            p.line_segment(
+                Pos2::new(rect.max.x, rect.min.y),
+                Pos2::new(rect.max.x, rect.max.y),
+                st.metrics.border,
+                st.palette.stroke,
+            );
+        }
     }
 
-    if !state.vars.open {
+    if !docked && !state.vars.open {
         // Collapsed: a rail carrying the caret back to the list and the count.
         // 22px that hides "this graph has 10 variables" is 22px wasted.
         let btn = Rect::from_min_size(
             Pos2::new(rect.min.x + st.metrics.border, rect.min.y + pad * 0.5),
             Vec2::new(rect.width() - st.metrics.border * 2.0, head_h),
         );
-        if strip_button(ui, Id::new("graph_vars_expand"), btn, "\u{203a}", 0) {
+        if strip_button(ui, root.with("graph_vars_expand"), btn, "\u{203a}", 0) {
             state.vars.open = true;
         }
         let n = state.doc.variables.len().to_string();
@@ -7995,7 +8018,7 @@ fn variables_panel(
         Pos2::new(header.min.x, header.min.y),
         Vec2::new(pad * 1.5, head_h),
     );
-    if strip_button(ui, Id::new("graph_vars_collapse"), caret, "\u{2039}", 0) {
+    if !docked && strip_button(ui, root.with("graph_vars_collapse"), caret, "\u{2039}", 0) {
         collapse_strip = true;
     }
     // The `+` is a menu: a variable is one thing to add, a group is the other,
@@ -8008,7 +8031,7 @@ fn variables_panel(
     ui.run_at(
         plus,
         Direction::TopDown,
-        Id::new("graph_vars_add_menu"),
+        root.with("graph_vars_add_menu"),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             // The width is the *dropdown's*, not the button's — a menu as
@@ -8054,7 +8077,7 @@ fn variables_panel(
     ui.run_at(
         field,
         Direction::TopDown,
-        Id::new("graph_vars_filter"),
+        root.with("graph_vars_filter"),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             let out = TextEdit::new(&mut filter)
@@ -8101,7 +8124,7 @@ fn variables_panel(
     ui.run_at(
         list,
         Direction::TopDown,
-        Id::new("graph_vars_list"),
+        root.with("graph_vars_list"),
         UiOptions { padding: Vec2::new(pad * 0.5, pad * 0.5), spacing: 0.0 },
         |ui| {
             if vars.is_empty() && new_var.is_none() {
@@ -8120,7 +8143,7 @@ fn variables_panel(
                 // The add draft sits at the top of the list, unchanged from
                 // the baseline: name, type, array, Cancel/Add.
                 if let Some(draft) = new_var.as_mut() {
-                    if let Some(req) = add_draft_block(ui, w, &st, pad, state.domain, draft) {
+                    if let Some(req) = add_draft_block(ui, w, &st, pad, state.domain, root, draft) {
                         request = Some(req);
                     }
                 }
@@ -8274,7 +8297,7 @@ fn variables_panel(
         }
         let buf = rename_buf.get_or_insert_with(|| v.label.clone());
         if let Some(req) = footer_inspector(
-            ui, footer, v, uses[i], buf, &st, pad, s, registry, locate, state,
+            ui, footer, v, uses[i], buf, &st, pad, s, registry, root, locate, state,
         ) {
             request = Some(req);
         }
@@ -8290,13 +8313,15 @@ fn variables_panel(
         ui.run_at(
             entry,
             Direction::TopDown,
-            Id::new("graph_vars_new_group"),
+            root.with("graph_vars_new_group"),
             UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
             |ui| {
+                // Focus once, on the surface whose + menu opened the entry;
+                // asking every frame would let a twin surface steal it back.
                 let out = TextEdit::new(name)
                     .hint("New group\u{2026}")
                     .width(entry.width())
-                    .request_focus(true)
+                    .request_focus(want_group)
                     .show_full(ui);
                 done = out.submitted;
                 cancelled = out.cancelled;
@@ -8650,6 +8675,7 @@ fn add_draft_block(
     st: &Style,
     pad: f32,
     domain: GraphDomain,
+    root: Id,
     draft: &mut NewVarDraft,
 ) -> Option<VarRequest> {
     let block = ui.allocate(Vec2::new(w, st.metrics.control_height * 3.0 + pad * 3.0));
@@ -8665,7 +8691,7 @@ fn add_draft_block(
             block.max - Vec2::splat(pad * 0.5),
         ),
         Direction::TopDown,
-        Id::new("graph_vars_new"),
+        root.with("graph_vars_new"),
         UiOptions { padding: Vec2::ZERO, spacing: pad * 0.75 },
         |ui| {
             let fw = w - pad;
@@ -8681,7 +8707,7 @@ fn add_draft_block(
             ui.run_at(
                 row,
                 Direction::LeftToRight,
-                Id::new("graph_vars_new_row"),
+                root.with("graph_vars_new_row"),
                 UiOptions { padding: Vec2::ZERO, spacing: pad },
                 |ui| {
                     let types = var_types(domain);
@@ -8706,7 +8732,7 @@ fn add_draft_block(
             ui.run_at(
                 actions,
                 Direction::LeftToRight,
-                Id::new("graph_vars_new_actions"),
+                root.with("graph_vars_new_actions"),
                 UiOptions { padding: Vec2::ZERO, spacing: pad },
                 |ui| {
                     cancel |= Button::new("Cancel")
@@ -8767,6 +8793,7 @@ fn footer_inspector(
     pad: f32,
     s: f32,
     _registry: &NodeRegistry,
+    root: Id,
     locate: &mut Option<u64>,
     state: &mut GraphEditorState,
 ) -> Option<VarRequest> {
@@ -8840,21 +8867,32 @@ fn footer_inspector(
     let mut y = head.max.y + pad * 0.5;
     let name_row = Rect::from_min_size(Pos2::new(inner.min.x, y), Vec2::new(inner.width(), ch));
     field_label(ui, name_row, "Name", label_w, st);
-    let mut rename_done = false;
+    let (mut submitted, mut focused) = (false, false);
     ui.run_at(
         Rect::from_min_max(Pos2::new(inner.min.x + label_w, y), name_row.max),
         Direction::TopDown,
-        Id::new(("graph_var_name", decl.slug.as_str())),
+        root.with(("graph_var_name", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             let out = TextEdit::new(rename_buf)
                 .width(name_row.width() - label_w)
                 .show_full(ui);
-            // Commit on Enter or when the field gives the keyboard back —
-            // never per keystroke, which would be one undo entry per letter.
-            rename_done = out.submitted || !out.focused;
+            submitted = out.submitted;
+            focused = out.focused;
         },
     );
+    // Commit on Enter or when the field gives the keyboard back — never per
+    // keystroke, which would be one undo entry per letter. "Gives back" is
+    // judged by the surface that held it: the strip and the dock panel draw
+    // this same field over one buffer, and the twin that never had focus
+    // must not commit the other's typing.
+    let owner = state.vars.rename_owner;
+    let rename_done = submitted || (owner == Some(root) && !focused);
+    if focused {
+        state.vars.rename_owner = Some(root);
+    } else if owner == Some(root) {
+        state.vars.rename_owner = None;
+    }
     if rename_done {
         let text = rename_buf.trim().to_string();
         if !text.is_empty() && text != decl.label {
@@ -8872,7 +8910,7 @@ fn footer_inspector(
     ui.run_at(
         Rect::from_min_max(Pos2::new(inner.min.x + label_w, y), ty_row.max),
         Direction::LeftToRight,
-        Id::new(("graph_var_ty", decl.slug.as_str())),
+        root.with(("graph_var_ty", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: pad * 0.5 },
         |ui| {
             let types = var_types(domain);
@@ -8929,7 +8967,7 @@ fn footer_inspector(
             "bound at runtime"
         };
         runtime_chip(ui, cell, st, text);
-    } else if let Some(v) = var_default_widget(ui, cell, decl) {
+    } else if let Some(v) = var_default_widget(ui, cell, decl, root) {
         if request.is_none() {
             request = Some(VarRequest::SetDefault(decl.slug.clone(), v));
         }
@@ -8940,7 +8978,7 @@ fn footer_inspector(
     if ui.ctx().input.pointer_pos.is_some_and(|p| del.contains(p)) {
         ui.tooltip_for(del, "Delete variable");
     }
-    if strip_button(ui, Id::new(("graph_var_del", decl.slug.as_str())), del, "\u{2715}", 2)
+    if strip_button(ui, root.with(("graph_var_del", decl.slug.as_str())), del, "\u{2715}", 2)
         && request.is_none()
     {
         request = Some(VarRequest::ConfirmDelete(decl.slug.clone(), uses));
@@ -8952,7 +8990,7 @@ fn footer_inspector(
             Pos2::new(inner.min.x, d_row.max.y + pad * 0.5),
             inner.max,
         );
-        if let Some(req) = array_editor(ui, editor, decl, st, pad, s) {
+        if let Some(req) = array_editor(ui, editor, decl, st, pad, s, root) {
             if request.is_none() {
                 request = Some(req);
             }
@@ -9003,6 +9041,7 @@ fn array_editor(
     st: &Style,
     pad: f32,
     s: f32,
+    root: Id,
 ) -> Option<VarRequest> {
     let PinType::Array(elem) = &decl.ty else {
         return None;
@@ -9039,7 +9078,7 @@ fn array_editor(
     ui.run_at(
         box_rect.shrink(st.metrics.border),
         Direction::TopDown,
-        Id::new(("graph_var_array", decl.slug.as_str())),
+        root.with(("graph_var_array", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             ScrollArea::new(visible * row_h)
@@ -9081,7 +9120,7 @@ fn array_editor(
                         Pos2::new(r.min.x + idx_w + pad * 0.25, r.min.y + 1.0),
                         Pos2::new(handle.min.x - pad * 0.25, r.max.y - 1.0),
                     );
-                    if let Some(v) = array_entry_widget(ui, cell, elem, entry, &decl.slug, i, st) {
+                    if let Some(v) = array_entry_widget(ui, cell, elem, entry, &decl.slug, i, st, root) {
                         request = Some(VarRequest::SetEntry(decl.slug.clone(), i, v));
                     }
                     // ⋮⋮ reorders by one step per click — a drag inside a
@@ -9127,7 +9166,7 @@ fn array_editor(
         Vec2::new(rect.width(), st.metrics.control_height),
     );
     let add = Rect::from_min_size(actions.min, Vec2::new(64.0 * s, actions.height()));
-    if strip_button(ui, Id::new(("graph_var_entry_add", decl.slug.as_str())), add, "+ Entry", 0) {
+    if strip_button(ui, root.with(("graph_var_entry_add", decl.slug.as_str())), add, "+ Entry", 0) {
         request = Some(VarRequest::AddEntry(decl.slug.clone()));
     }
     if entries.len() > VARS_ARRAY_ROWS {
@@ -9152,13 +9191,14 @@ fn array_entry_widget(
     slug: &str,
     index: usize,
     st: &Style,
+    root: Id,
 ) -> Option<PropValue> {
     let mut changed: Option<PropValue> = None;
     let v = value.clone();
     ui.run_at(
         cell,
         Direction::LeftToRight,
-        Id::new(("graph_var_entry", slug, index)),
+        root.with(("graph_var_entry", slug, index)),
         UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item * 0.25 },
         |ui| match (elem, v) {
             (PinType::Float, PropValue::Float(x)) => {
@@ -9230,6 +9270,7 @@ fn var_default_widget(
     ui: &mut Ui,
     cell: Rect,
     decl: &crate::engine::node_graph::VarDecl,
+    root: Id,
 ) -> Option<PropValue> {
     let st = ui.style();
     let mut changed: Option<PropValue> = None;
@@ -9237,7 +9278,7 @@ fn var_default_widget(
     ui.run_at(
         cell,
         Direction::LeftToRight,
-        Id::new(("graph_var_default", decl.slug.as_str())),
+        root.with(("graph_var_default", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item * 0.5 },
         |ui| match (&decl.ty, d) {
             (PinType::Float, Some(PropValue::Float(v))) => {
@@ -11837,7 +11878,8 @@ fn draw_nodes(
     // Editable widgets, after the painter borrow ends.
     for (node, slug, cell, kind) in pending_widgets {
         widget_rects.push(cell);
-        inline_widget(ui, state, registry, node, &slug, cell, &kind, zoom);
+        let id = Id::new(("graph_inline", node, slug.as_str()));
+        inline_widget(ui, state, registry, node, &slug, cell, &kind, zoom, id);
     }
     // The payload name entry is a widget like any other — it just lives in a
     // row that is not a property yet (add) or is about to change key (rename).
@@ -12107,7 +12149,12 @@ fn clip_text(p: &mut Painter, s: &str, px: f32, max_w: f32) -> String {
 /// node it sits in. Any change opens (or continues) one coalesced
 /// `SetProperty` gesture, flushed on pointer release.
 #[allow(clippy::too_many_arguments)]
-fn inline_widget(
+///
+/// `id` is the caller's: the canvas band and the Details dock panel can both
+/// show the same row of the same node in one frame, and each needs its own
+/// widget identity (per-document layouts ticket 02).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn inline_widget(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
@@ -12116,6 +12163,7 @@ fn inline_widget(
     cell: Rect,
     kind: &InlineKind,
     zoom: f32,
+    id: Id,
 ) {
     let saved = ui.ctx().style;
     {
@@ -12132,7 +12180,6 @@ fn inline_widget(
         s.metrics.row_height *= zoom;
     }
 
-    let id = Id::new(("graph_inline", node, slug));
     let mut changed: Option<PropValue> = None;
     ui.run_at(
         cell,

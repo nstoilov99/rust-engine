@@ -145,6 +145,10 @@ pub enum GraphEdit {
     MoveGroup { index: usize, node_ids: Vec<u64>, delta: [f32; 2] },
     /// A group's title changed.
     SetGroupTitle { index: usize, old: String, new: String },
+    /// A node's display title changed (the Details panel's Name row,
+    /// per-document layouts ticket 02). `None` is "no custom title" — an
+    /// animation state then reads as `State <id>`.
+    SetNodeTitle { node: u64, old: Option<String>, new: Option<String> },
     /// An annotation's tint slot changed (a ramp index, never a hex).
     SetAnnotationTint {
         target: Annotation,
@@ -282,6 +286,11 @@ impl GraphEdit {
             GraphEdit::SetGroupTitle { index, new, .. } => {
                 doc.groups[*index].title = new.clone()
             }
+            GraphEdit::SetNodeTitle { node, new, .. } => {
+                if let Some(n) = doc.node_mut(*node) {
+                    n.title = new.clone();
+                }
+            }
             GraphEdit::SetAnnotationTint { target, new, .. } => set_tint(doc, *target, *new),
             GraphEdit::SetAnnotationCollapsed { target, new } => {
                 set_collapsed(doc, *target, *new)
@@ -372,6 +381,11 @@ impl GraphEdit {
             GraphEdit::SetGroupTitle { index, old, .. } => {
                 doc.groups[*index].title = old.clone()
             }
+            GraphEdit::SetNodeTitle { node, old, .. } => {
+                if let Some(n) = doc.node_mut(*node) {
+                    n.title = old.clone();
+                }
+            }
             GraphEdit::SetAnnotationTint { target, old, .. } => set_tint(doc, *target, *old),
             GraphEdit::SetAnnotationCollapsed { target, new } => {
                 set_collapsed(doc, *target, !*new)
@@ -435,6 +449,7 @@ impl GraphEdit {
             GraphEdit::RemoveGroup { .. } => "Delete Group".to_string(),
             GraphEdit::MoveGroup { .. } => "Move Group".to_string(),
             GraphEdit::SetGroupTitle { .. } => "Edit Group".to_string(),
+            GraphEdit::SetNodeTitle { .. } => "Rename Node".to_string(),
             GraphEdit::SetAnnotationTint { target, new, .. } => format!(
                 "{} {}",
                 if new.is_some() { "Tint" } else { "Clear Tint on" },
@@ -1436,9 +1451,15 @@ pub struct GraphEditorState {
     pub frame_all_on_open: bool,
     /// The variables side strip (45-A P6c). Session-only.
     pub vars: VarPanel,
+    /// The Details panel's Name entry, while one is being typed.
+    pub details_rename: Option<DetailsRename>,
     /// A node the panel just framed, and when — it flashes for a moment so
     /// the eye lands on it after the view moves (GS-2 locate).
     pub flash: Option<(u64, Instant)>,
+    /// A locate raised by the Variables dock panel (per-document layouts
+    /// ticket 02), which has no canvas of its own: the tab takes it on its
+    /// next draw and frames the node. Session-only and one-shot.
+    pub locate_request: Option<u64>,
     /// The instance this tab is bound to, picked explicitly from the LIVE
     /// chip (`Entity::to_bits`). `None` = follow the selection, which is the
     /// baseline rule. Session-only: entity handles do not survive a reload.
@@ -2357,6 +2378,22 @@ pub struct VarPanel {
     pub locate: BTreeMap<String, usize>,
     /// In-flight "New group…" name entry from the `+` menu.
     pub new_group: Option<String>,
+    /// Which surface's rename field holds the keyboard — the tab strip's or
+    /// the Variables dock panel's (their `root` ids). Both draw the same
+    /// footer over the same buffer, and only the one that *had* focus may
+    /// commit on losing it; without this the unfocused twin would commit
+    /// the other's half-typed name every keystroke.
+    pub rename_owner: Option<crusty_gui::id::Id>,
+}
+
+/// The Details panel's in-flight Name entry (per-document layouts ticket
+/// 02): the node it renames, the text so far, and whether the field has held
+/// focus yet — commit-on-blur must not fire before it ever had focus.
+#[derive(Debug, Clone, Default)]
+pub struct DetailsRename {
+    pub node: u64,
+    pub buf: String,
+    pub seen_focus: bool,
 }
 
 /// The add-variable draft: what the row's fields hold before `Add` is pressed.
@@ -2634,7 +2671,9 @@ impl GraphEditorState {
             // list, and a strip nobody can see teaches nobody it exists. One
             // click (or Alt+V) collapses it back to the rail.
             vars: VarPanel { open: true, ..Default::default() },
+            details_rename: None,
             flash: None,
+            locate_request: None,
             exec_bind: None,
             exec_picker: false,
             watches: Vec::new(),
@@ -2935,6 +2974,26 @@ impl GraphEditorState {
 
     /// Change a variable's display label. The slug is untouched — that is the
     /// point of having one.
+    /// Set (or clear) a node's display title as one undo entry. No-op when
+    /// the node is gone or the title is unchanged.
+    pub fn set_node_title(
+        &mut self,
+        node: u64,
+        title: Option<String>,
+        registry: &NodeRegistry,
+    ) -> bool {
+        let Some(old) = self.doc.node(node).map(|n| n.title.clone()) else {
+            return false;
+        };
+        if old == title {
+            return false;
+        }
+        let edit = GraphEdit::SetNodeTitle { node, old, new: title };
+        edit.apply(&mut self.doc);
+        self.commit(edit, registry);
+        true
+    }
+
     pub fn rename_variable(&mut self, slug: &str, label: &str, registry: &NodeRegistry) -> bool {
         let Some(old) = self.doc.variable(slug).map(|v| v.label.clone()) else {
             return false;

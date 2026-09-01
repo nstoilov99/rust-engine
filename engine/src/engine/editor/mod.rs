@@ -98,6 +98,10 @@ pub mod graph_exec_viz;
 pub mod anim_preview;
 #[cfg(feature = "editor")]
 pub mod graph_editor_crusty;
+/// Per-document layouts ticket 02: the focused graph's Details and
+/// Variables dock panels, thin views over `graph_editor_crusty`'s helpers.
+#[cfg(feature = "editor")]
+pub mod graph_dock_panels_crusty;
 pub mod editor_prefs;
 pub mod keymap;
 pub mod play_mode;

@@ -3870,6 +3870,9 @@ impl App {
             // Edit-menu overrides follow the document that owns Edit actions
             // (same source as `active_graph_key`), so menu and shortcuts agree.
             let focused_document = self.edit_target_document();
+            // The graph side panels (Details, Variables) show the focused
+            // graph document (per-document layouts ticket 02).
+            let focused_graph_key = self.focused_graph_key();
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -4496,11 +4499,57 @@ impl App {
                                     ),
                                 },
                                 // Bodies land in doc-layouts tickets 02–03.
-                                Some(
-                                    EditorTab::GraphDetails
-                                    | EditorTab::GraphVariables
-                                    | EditorTab::AnimPreview,
-                                ) => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                                Some(EditorTab::GraphDetails) => {
+                                    use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                        graph_details_panel, GraphDetailsPanelCtx,
+                                    };
+                                    let focused = focused_graph_key
+                                        .as_deref()
+                                        .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                                    match focused {
+                                        Some((key, state)) => graph_details_panel(
+                                            ui,
+                                            rect,
+                                            GraphDetailsPanelCtx {
+                                                state,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
+                                                resolver: &graph_resolver_docs,
+                                                curves: &graph_curve_docs,
+                                            },
+                                        ),
+                                        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                                    }
+                                }
+                                Some(EditorTab::GraphVariables) => {
+                                    use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                        graph_variables_panel, GraphVariablesPanelCtx,
+                                    };
+                                    let focused = focused_graph_key
+                                        .as_deref()
+                                        .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                                    match focused {
+                                        Some((key, state)) => graph_variables_panel(
+                                            ui,
+                                            rect,
+                                            GraphVariablesPanelCtx {
+                                                state,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
+                                            },
+                                        ),
+                                        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                                    }
+                                }
+                                Some(EditorTab::AnimPreview) => {
+                                    dock_crusty::placeholder_panel(ui, "No graph focused")
+                                }
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -5191,6 +5240,26 @@ impl App {
         self.focused_document
             .clone()
             .filter(|d| dock.tree.contains_tab(d))
+    }
+
+    /// Content-relative key of the graph the Details / Variables panels show:
+    /// the focused graph document, whichever side panel holds dock focus
+    /// (spec ruling: clicking a panel never loses the document — dragging a
+    /// clip from Assets into a Details row depends on it). Edit routing asks
+    /// the stricter question, `active_graph_key`.
+    #[cfg(feature = "editor")]
+    fn focused_graph_key(&self) -> Option<String> {
+        let dock = &self.editor.ui.crusty_dock;
+        let key = self
+            .focused_document
+            .as_deref()
+            .filter(|d| dock.tree.contains_tab(d))?
+            .strip_prefix("graph:")?;
+        self.editor
+            .scene
+            .graph_editors
+            .contains_key(key)
+            .then(|| key.to_string())
     }
 
     /// Content-relative key of the graph that owns Edit actions
@@ -6131,6 +6200,9 @@ impl App {
         let play_mode = self.play_mode();
         let active_scene_id = self.editor.scene.registry.active_id;
         let scene_name = self.editor.scene.current_scene_name.clone();
+        // A floated Details/Variables panel follows the main dock's focused
+        // graph, same as a docked one (ticket 02).
+        let focused_graph_key = self.focused_graph_key();
 
         let Self {
             crusty_floats,
@@ -6543,11 +6615,57 @@ impl App {
                                 Some("no enabled plugin registers this panel"),
                             ),
                         },
-                        Some(
-                            EditorTab::GraphDetails
-                            | EditorTab::GraphVariables
-                            | EditorTab::AnimPreview,
-                        ) => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                        Some(EditorTab::GraphDetails) => {
+                            use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                graph_details_panel, GraphDetailsPanelCtx,
+                            };
+                            let focused = focused_graph_key
+                                .as_deref()
+                                .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                            match focused {
+                                Some((key, state)) => graph_details_panel(
+                                    ui,
+                                    rect,
+                                    GraphDetailsPanelCtx {
+                                        state,
+                                        registry: if key.ends_with(".animgraph") {
+                                            anim_graph_registry
+                                        } else {
+                                            graph_registry
+                                        },
+                                        resolver: &graph_resolver_docs,
+                                        curves: &graph_curve_docs,
+                                    },
+                                ),
+                                None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                            }
+                        }
+                        Some(EditorTab::GraphVariables) => {
+                            use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                graph_variables_panel, GraphVariablesPanelCtx,
+                            };
+                            let focused = focused_graph_key
+                                .as_deref()
+                                .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                            match focused {
+                                Some((key, state)) => graph_variables_panel(
+                                    ui,
+                                    rect,
+                                    GraphVariablesPanelCtx {
+                                        state,
+                                        registry: if key.ends_with(".animgraph") {
+                                            anim_graph_registry
+                                        } else {
+                                            graph_registry
+                                        },
+                                    },
+                                ),
+                                None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                            }
+                        }
+                        Some(EditorTab::AnimPreview) => {
+                            dock_crusty::placeholder_panel(ui, "No graph focused")
+                        }
                         _ => dock_crusty::placeholder_panel(
                             ui,
                             "This panel is not yet ported to crusty-gui.",
