@@ -74,6 +74,11 @@ pub struct CrustyFloatWindow {
     pub drag_out: Option<DragOut>,
     /// Last client-space cursor position.
     cursor: Pos2,
+    /// The same cursor in screen space, fixed at event time (window origin
+    /// + client position). A window that is *moved* under a stationary
+    /// cursor gets no new `CursorMoved`, so a client-space value goes stale
+    /// the moment the window follows it — see `frame`.
+    cursor_screen: Option<Pos2>,
     /// Left button released since the last frame.
     pub released: bool,
     /// Borderless-window edge under the cursor (OS resize hit test).
@@ -134,6 +139,7 @@ impl CrustyFloatWindow {
             close_requested: false,
             drag_out: None,
             cursor: Pos2::ZERO,
+            cursor_screen: None,
             released: false,
             resize_zone: None,
         })
@@ -151,6 +157,11 @@ impl CrustyFloatWindow {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Pos2::new(position.x as f32, position.y as f32);
+                self.cursor_screen = self
+                    .window
+                    .inner_position()
+                    .ok()
+                    .map(|o| Pos2::new(o.x as f32 + self.cursor.x, o.y as f32 + self.cursor.y));
                 self.update_resize_zone();
                 self.gui.handle_event(event);
             }
@@ -229,14 +240,11 @@ impl CrustyFloatWindow {
         }
     }
 
-    /// Current drag cursor in screen coordinates (client cursor + window
-    /// client origin).
+    /// Current drag cursor in screen coordinates, as of the last
+    /// `CursorMoved` (not re-derived from the window's current origin,
+    /// which moves during a drag-out).
     pub fn drag_screen_pos(&self) -> Option<Pos2> {
-        let origin = self.window.inner_position().ok()?;
-        Some(Pos2::new(
-            origin.x as f32 + self.cursor.x,
-            origin.y as f32 + self.cursor.y,
-        ))
+        self.cursor_screen
     }
 
     /// Register or re-point a mesh-preview render target with this window's
@@ -345,19 +353,20 @@ impl CrustyFloatWindow {
             .set_screen_size(size.width as f32, size.height as f32);
 
         // While a tab is being dragged out, the whole window follows the
-        // cursor (the OS window itself is the drag ghost).
-        if let Some(drag) = &self.drag_out {
-            if let Ok(outer) = self.window.outer_position() {
-                // Keep the grab point under the cursor: shift outer by the
-                // difference between the desired and current client origin.
-                let dx = self.cursor.x - drag.grab.x;
-                let dy = self.cursor.y - drag.grab.y;
-                if dx.abs() > 0.5 || dy.abs() > 0.5 {
-                    self.window.set_outer_position(PhysicalPosition::new(
-                        outer.x + dx as i32,
-                        outer.y + dy as i32,
-                    ));
-                }
+        // cursor (the OS window itself is the drag ghost). Position it
+        // *absolutely* from the screen-space cursor so repeating this on a
+        // frame without a new cursor event is a no-op — a relative
+        // `client_cursor - grab` nudge would re-apply the same delta every
+        // frame once the window had moved under the cursor and send the
+        // window flying off-screen.
+        if let (Some(drag), Some(cursor)) = (&self.drag_out, self.cursor_screen) {
+            // Borderless window: the client origin is the outer origin.
+            let target = PhysicalPosition::new(
+                (cursor.x - drag.grab.x).round() as i32,
+                (cursor.y - drag.grab.y).round() as i32,
+            );
+            if self.window.inner_position().ok() != Some(target) {
+                self.window.set_outer_position(target);
             }
         }
 
@@ -631,9 +640,7 @@ pub fn float_window_attrs(tab: &str) -> (String, u32, u32) {
         // asset editor: one is a graph, the other is a chart.
         Some(
             t @ (EditorTab::GraphEditor(_) | EditorTab::CurveEditor(_) | EditorTab::BlendSpace(_)),
-        ) => {
-            (t.title_string(), 900, 600)
-        }
+        ) => (t.title_string(), 900, 600),
         Some(tab) => (tab.title_string(), 600, 500),
         None => (tab.to_string(), 600, 500),
     }
