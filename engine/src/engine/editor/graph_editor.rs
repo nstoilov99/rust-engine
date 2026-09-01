@@ -947,11 +947,13 @@ pub fn anchored_comments(doc: &GraphDoc, ids: &BTreeSet<u64>) -> Vec<usize> {
 /// one thing an editor must never let a gesture mean.
 pub fn transition_shortcut(doc: &GraphDoc, edge: &Edge) -> Option<(u64, u64)> {
     use crate::engine::animation::graph::plan::{
-        ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+        ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN,
+        STATE_OUT_PIN,
     };
     let from = doc.node(edge.from_node)?;
     let to = doc.node(edge.to_node)?;
     let from_is_source = (from.type_id == ANIM_STATE_TYPE_ID
+        || from.type_id == ANIM_STATE_ALIAS_TYPE_ID
         || from.type_id == ANIM_ANY_STATE_TYPE_ID)
         && edge.from_pin == STATE_OUT_PIN;
     let to_is_state = to.type_id == ANIM_STATE_TYPE_ID && edge.to_pin == STATE_IN_PIN;

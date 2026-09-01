@@ -29,6 +29,7 @@ use node_graph_types::{Edge, GraphDoc, GraphRealm, NodeInst, NodeRealm, PinType}
 
 use super::plan::{
     ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID,
+    ANIM_STATE_ALIAS_TYPE_ID,
     ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, RULE_RESULT_PIN, STATE_IN_PIN, STATE_OUT_PIN,
     TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
 };
@@ -57,6 +58,8 @@ pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
     match type_id {
         ANIM_STATE_TYPE_ID => Some("STATE"),
         ANIM_ENTRY_TYPE_ID => Some("ENTRY"),
+        ANIM_STATE_ALIAS_TYPE_ID => Some("ALIAS"),
+        // Legacy Any State — only seen before the open-time upgrade runs.
         ANIM_ANY_STATE_TYPE_ID => Some("ANY"),
         ANIM_PLAY_ONCE_TYPE_ID => Some("SLOT"),
         ANIM_TRANSITION_TYPE_ID => Some("TRANS"),
@@ -121,9 +124,9 @@ pub fn anim_node_registry() -> NodeRegistry {
             vec![flow_pin(STATE_OUT_PIN, "Out")],
         ),
         desc(
-            ANIM_ANY_STATE_TYPE_ID,
-            "Any State",
-            "Its outgoing transitions apply from whatever state is active.",
+            ANIM_STATE_ALIAS_TYPE_ID,
+            "State Alias",
+            "Stands for the states it lists (or all of them); its transitions apply from each.",
             vec![],
             vec![flow_pin(STATE_OUT_PIN, "Out")],
         ),
@@ -234,7 +237,7 @@ mod tests {
         for id in [
             ANIM_ENTRY_TYPE_ID,
             ANIM_STATE_TYPE_ID,
-            ANIM_ANY_STATE_TYPE_ID,
+            ANIM_STATE_ALIAS_TYPE_ID,
             ANIM_TRANSITION_TYPE_ID,
             ANIM_PLAY_ONCE_TYPE_ID,
         ] {
@@ -261,7 +264,7 @@ mod tests {
         for id in [
             ANIM_ENTRY_TYPE_ID,
             ANIM_STATE_TYPE_ID,
-            ANIM_ANY_STATE_TYPE_ID,
+            ANIM_STATE_ALIAS_TYPE_ID,
             ANIM_TRANSITION_TYPE_ID,
             ANIM_PLAY_ONCE_TYPE_ID,
         ] {

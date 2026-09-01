@@ -28,7 +28,8 @@ use super::machine::{
     PoseScratch,
 };
 use super::plan::{
-    compile_anim_graph_with, AnimGraphLoader, AnimGraphPlan, PlanClip, PlanTree, PoseSource,
+    compile_anim_graph_with, upgrade_any_state, AnimGraphLoader, AnimGraphPlan, PlanClip, PlanTree,
+    PoseSource,
 };
 
 // ---------------------------------------------------------------------------
@@ -184,7 +185,9 @@ impl AnimAssetLoader for DiskAnimAssets {
 /// refusals compile against the files on disk, uncached — an author action).
 impl AnimGraphLoader for DiskAnimAssets {
     fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
-        self.load_graph(content_rel)
+        let mut doc = self.load_graph(content_rel)?;
+        upgrade_any_state(&mut doc);
+        Some(doc)
     }
 
     fn blend_space(&self, content_rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {
@@ -267,7 +270,9 @@ struct ArmLoader<'a> {
 
 impl AnimGraphLoader for ArmLoader<'_> {
     fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
-        self.assets.load_graph(content_rel)
+        let mut doc = self.assets.load_graph(content_rel)?;
+        upgrade_any_state(&mut doc);
+        Some(doc)
     }
 
     fn blend_space(&self, content_rel: &str) -> Option<Result<Arc<BlendSpace>, String>> {

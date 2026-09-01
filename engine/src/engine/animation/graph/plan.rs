@@ -38,10 +38,23 @@ pub const ANIM_STATE_TYPE_ID: &str = "anim_state";
 /// A Transition between two states, carrying blend duration and priority as
 /// node data.
 pub const ANIM_TRANSITION_TYPE_ID: &str = "anim_transition";
-/// The Any State node: a source whose outgoing transitions apply from
-/// whatever state is active — and the only transitions allowed to interrupt
-/// a running crossfade (interruption rule v1). Several Any State nodes are
-/// legal and equivalent; they exist for wire tidiness, not semantics.
+/// A State Alias: a named source standing for a chosen set of states (or,
+/// when [`ALIAS_GLOBAL_PROP`] is true, every state). A transition leaving it
+/// is an *ordinary* transition from each aliased state — same priority
+/// scale, no fade-interrupt right, the source must be the current state —
+/// exactly as if the author had drawn it from each of them. Its name is the
+/// node title (default "Alias"); no inputs, one flow [`STATE_OUT_PIN`].
+pub const ANIM_STATE_ALIAS_TYPE_ID: &str = "anim_state_alias";
+/// Alias property (`Bool`, default true): stand for every state. While set,
+/// [`ALIAS_STATES_PROP`] is ignored.
+pub const ALIAS_GLOBAL_PROP: &str = "global";
+/// Alias property (`Array` of `Int`): document node ids of the aliased
+/// states. Written by the editor; the compiler dedupes and ignores
+/// non-`Int`/negative entries, and refuses an id that is not a state.
+pub const ALIAS_STATES_PROP: &str = "states";
+/// **Legacy.** The Any State node of documents saved before state aliases:
+/// [`upgrade_any_state`] matches on this id and rewrites the node to a
+/// Global alias. It is not in the registry and never compiles as itself.
 pub const ANIM_ANY_STATE_TYPE_ID: &str = "anim_any_state";
 /// The single Bool sink inside a transition's rule region — exactly one per
 /// non-empty rule. Its [`RULE_RESULT_PIN`] input unwired means always-true.
@@ -392,13 +405,13 @@ pub struct PlanSlot {
     pub fade_out: f32,
 }
 
-/// Where a transition starts.
+/// Where a transition starts. Always a concrete state: a transition drawn
+/// from a State Alias compiles into one entry per aliased state (sharing the
+/// transition's `node_id`), so the machine never sees an alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionFrom {
     /// Index into [`AnimGraphPlan::states`].
     State(usize),
-    /// An Any State transition: applies from whatever state is active.
-    AnyState,
 }
 
 /// A compiled Transition.
@@ -587,6 +600,33 @@ pub fn compile_anim_graph_with(
     compile_doc(doc, &mut stack, load)
 }
 
+/// Rewrite every legacy Any State node ([`ANIM_ANY_STATE_TYPE_ID`]) in place
+/// into a Global State Alias titled "Any State" — same id, same edges, so
+/// nothing else in the document moves. Returns how many nodes changed (0 =
+/// the document was already current; running it again is a no-op).
+///
+/// Runs at both loading seams — compile (on a private copy, root and nested
+/// documents alike) and the editor's open — so old files keep working
+/// unsaved and migrate when saved.
+pub fn upgrade_any_state(doc: &mut GraphDoc) -> usize {
+    let mut count = 0;
+    for n in doc
+        .nodes
+        .iter_mut()
+        .filter(|n| n.type_id == ANIM_ANY_STATE_TYPE_ID)
+    {
+        n.type_id = ANIM_STATE_ALIAS_TYPE_ID.to_string();
+        n.type_version = 1;
+        n.properties
+            .insert(ALIAS_GLOBAL_PROP.to_string(), PropValue::Bool(true));
+        if n.title.as_deref().is_none_or(|t| t.trim().is_empty()) {
+            n.title = Some("Any State".to_string());
+        }
+        count += 1;
+    }
+    count
+}
+
 /// One document of the nesting tree. `stack` holds the normalized paths
 /// currently being compiled, root-first — a nested reference back into it is
 /// a cycle, refused with the chain spelled out.
@@ -595,6 +635,14 @@ fn compile_doc(
     stack: &mut Vec<String>,
     load: &dyn AnimGraphLoader,
 ) -> Result<AnimGraphPlan, String> {
+    // A pre-alias document compiles as its upgraded self; the caller's copy
+    // stays untouched (the editor migrates its own on open).
+    let mut current = std::borrow::Cow::Borrowed(doc);
+    if doc.nodes.iter().any(|n| n.type_id == ANIM_ANY_STATE_TYPE_ID) {
+        upgrade_any_state(current.to_mut());
+    }
+    let doc = &*current;
+
     // Animation graphs are Client-realm by definition (spec realm note): the
     // server never evaluates animation (ADR 0002), and saying so in the
     // document is the authority statement the realm field exists for.
@@ -712,14 +760,56 @@ fn compile_doc(
     let entry = state_index(entry_edge.to_node)
         .ok_or_else(|| "the ENTRY node must be wired to a state".to_string())?;
 
-    // Transitions: resolve both endpoints through their pins. A source may
-    // be a state or an Any State node; a target is always a state.
-    let any_state_ids: Vec<u64> = doc
+    // Aliases: each resolves to the state indices it stands for, sorted —
+    // a Global alias to every state; a listed one to its normalised list
+    // (dupes dropped, non-Int/negative entries ignored, a non-state id
+    // refused). Refusals name the alias so they anchor on its node.
+    let mut aliases: Vec<(u64, Vec<usize>)> = Vec::new();
+    for n in doc
         .nodes
         .iter()
-        .filter(|n| n.type_id == ANIM_ANY_STATE_TYPE_ID)
-        .map(|n| n.id)
-        .collect();
+        .filter(|n| n.type_id == ANIM_STATE_ALIAS_TYPE_ID)
+    {
+        let name = n
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "Alias".to_string());
+        let global = !matches!(
+            n.properties.get(ALIAS_GLOBAL_PROP),
+            Some(PropValue::Bool(false))
+        );
+        let mut indices: Vec<usize> = if global {
+            (0..states.len()).collect()
+        } else {
+            let listed = match n.properties.get(ALIAS_STATES_PROP) {
+                Some(PropValue::Array(items)) => items.as_slice(),
+                _ => &[],
+            };
+            let mut indices = Vec::new();
+            for id in listed.iter().filter_map(|v| match v {
+                PropValue::Int(id) if *id >= 0 => Some(*id as u64),
+                _ => None,
+            }) {
+                indices.push(state_index(id).ok_or_else(|| {
+                    format!("alias '{name}' references a missing state (node {id})")
+                })?);
+            }
+            indices
+        };
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() && !global {
+            return Err(format!("alias '{name}' has no states"));
+        }
+        aliases.push((n.id, indices));
+    }
+
+    // Transitions: resolve both endpoints through their pins. A source is a
+    // state or an alias; a target is always a state. A transition leaving an
+    // alias expands into one ordinary transition per aliased state (sharing
+    // its node id), never into its own target — a Global alias in a
+    // one-state graph therefore compiles to nothing, which is not an error.
     let mut transitions: Vec<PlanTransition> = Vec::new();
     for n in doc
         .nodes
@@ -730,13 +820,18 @@ fn compile_doc(
             .edges
             .iter()
             .find(|e| e.to_node == n.id && e.to_pin == TRANSITION_FROM_PIN);
-        let from = match from_edge {
-            Some(e) if any_state_ids.contains(&e.from_node) => TransitionFrom::AnyState,
-            Some(e) => TransitionFrom::State(
-                state_index(e.from_node)
+        let from_edge = from_edge
+            .ok_or_else(|| format!("transition {} has no source state", n.id))?;
+        let alias = aliases
+            .iter()
+            .find(|(id, _)| *id == from_edge.from_node)
+            .map(|(_, indices)| indices);
+        let single = match alias {
+            Some(_) => None,
+            None => Some(
+                state_index(from_edge.from_node)
                     .ok_or_else(|| format!("transition {} has no source state", n.id))?,
             ),
-            None => return Err(format!("transition {} has no source state", n.id)),
         };
         let to = doc
             .edges
@@ -744,19 +839,28 @@ fn compile_doc(
             .find(|e| e.from_node == n.id && e.from_pin == TRANSITION_TO_PIN)
             .and_then(|e| state_index(e.to_node))
             .ok_or_else(|| format!("transition {} has no target state", n.id))?;
-        transitions.push(PlanTransition {
-            node_id: n.id,
-            from,
-            to,
-            rule: compile_rule(doc, n.id, &parameters)?,
-            duration: float_prop(&n.properties, DURATION_PROP)
-                .unwrap_or(0.0)
-                .max(0.0),
-            priority: match n.properties.get(PRIORITY_PROP) {
-                Some(PropValue::Int(i)) => *i,
-                _ => 0,
-            },
-        });
+        let sources: Vec<usize> = match alias {
+            Some(indices) => indices.iter().copied().filter(|&s| s != to).collect(),
+            None => single.into_iter().collect(),
+        };
+        let rule = compile_rule(doc, n.id, &parameters)?;
+        let duration = float_prop(&n.properties, DURATION_PROP)
+            .unwrap_or(0.0)
+            .max(0.0);
+        let priority = match n.properties.get(PRIORITY_PROP) {
+            Some(PropValue::Int(i)) => *i,
+            _ => 0,
+        };
+        for s in sources {
+            transitions.push(PlanTransition {
+                node_id: n.id,
+                from: TransitionFrom::State(s),
+                to,
+                rule: rule.clone(),
+                duration,
+                priority,
+            });
+        }
     }
     // Evaluation order is the sort order: lower priority value first, node id
     // as the deterministic tiebreak.

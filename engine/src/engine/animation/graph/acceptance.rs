@@ -1,11 +1,11 @@
 //! Acceptance evidence for the animation graph (Task 41: ticket 01 tracer,
-//! ticket 02 rule graphs / triggers / Any State).
+//! ticket 02 rule graphs / triggers, state aliases).
 //!
 //! Tests sit at the seams the spec pre-agreed: the document (round-trip
 //! through the shared container io, embedded rule regions as one unit with
 //! their transition), the machine (document + parameter writes + ticks in →
-//! active state and blend weights out — rules, trigger consumption and Any
-//! State interruption included), pose values on a synthetic skeleton (CPU
+//! active state and blend weights out — rules, trigger consumption and
+//! alias expansion included), pose values on a synthetic skeleton (CPU
 //! only, no GPU, no asset files), and the system (arming, invalidation,
 //! coexistence with the single-clip player).
 
@@ -890,12 +890,12 @@ fn only_the_firing_transition_consumes_a_trigger() {
 }
 
 // ---------------------------------------------------------------------------
-// Any State
+// State aliases
 // ---------------------------------------------------------------------------
 
-/// `two_state_doc` plus a Dead state and Any State → Dead on the Trigger
-/// `died`, priority −1, 0.2s fade.
-fn any_state_doc() -> GraphDoc {
+/// `two_state_doc` plus a Dead state and a Global alias (node 7) → Dead on
+/// the Trigger `died`, priority −1, 0.2s fade.
+fn alias_doc() -> GraphDoc {
     let mut doc = two_state_doc();
     doc.variables.push(trigger_decl("died"));
     doc.nodes.push(with(
@@ -904,7 +904,7 @@ fn any_state_doc() -> GraphDoc {
         Some("Dead"),
         &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
     ));
-    doc.nodes.push(node(7, plan::ANIM_ANY_STATE_TYPE_ID, None));
+    doc.nodes.push(node(7, plan::ANIM_STATE_ALIAS_TYPE_ID, Some("Global")));
     doc.nodes.push(with(
         8,
         plan::ANIM_TRANSITION_TYPE_ID,
@@ -920,11 +920,129 @@ fn any_state_doc() -> GraphDoc {
     doc
 }
 
+/// A non-global alias listing the given node ids.
+fn listed_alias(id: u64, title: &str, states: &[PropValue]) -> NodeInst {
+    with(
+        id,
+        plan::ANIM_STATE_ALIAS_TYPE_ID,
+        Some(title),
+        &[
+            (plan::ALIAS_GLOBAL_PROP, PropValue::Bool(false)),
+            (plan::ALIAS_STATES_PROP, PropValue::Array(states.to_vec())),
+        ],
+    )
+}
+
+/// `alias_doc` with node 7 swapped for `alias`.
+fn with_alias(alias: NodeInst) -> GraphDoc {
+    let mut doc = alias_doc();
+    let slot = doc.nodes.iter().position(|n| n.id == 7).expect("node 7");
+    doc.nodes[slot] = alias;
+    doc
+}
+
+/// The state names transition 8 was expanded from, in plan order.
+fn sources_of_8(plan: &AnimGraphPlan) -> Vec<&str> {
+    plan.transitions
+        .iter()
+        .filter(|t| t.node_id == 8)
+        .map(|t| match t.from {
+            TransitionFrom::State(s) => plan.states[s].name.as_str(),
+        })
+        .collect()
+}
+
 #[test]
-fn any_state_fires_from_whatever_state_is_active() {
-    let plan = compile_anim_graph(&any_state_doc()).expect("compiles");
-    let t8 = plan.transitions.iter().find(|t| t.node_id == 8).unwrap();
-    assert_eq!(t8.from, TransitionFrom::AnyState);
+fn a_global_alias_expands_to_every_state_but_its_target() {
+    let plan = compile_anim_graph(&alias_doc()).expect("compiles");
+    assert_eq!(
+        sources_of_8(&plan),
+        ["Idle", "Walk"],
+        "state order; Dead → Dead is skipped"
+    );
+    for t in plan.transitions.iter().filter(|t| t.node_id == 8) {
+        assert_eq!(plan.states[t.to].name, "Dead");
+        assert_eq!((t.duration, t.priority), (0.2, -1));
+        assert!(t.rule.is_some(), "each copy carries the rule");
+    }
+    assert_eq!(
+        plan.transitions[0].node_id, 8,
+        "expanded copies sort on the same priority scale"
+    );
+}
+
+#[test]
+fn a_listed_alias_expands_to_its_states_only() {
+    // Dupes and stale entries (negative, non-Int) are dropped, not refused.
+    let plan = compile_anim_graph(&with_alias(listed_alias(
+        7,
+        "Moving",
+        &[
+            PropValue::Int(3),
+            PropValue::Int(3),
+            PropValue::Int(-4),
+            PropValue::Str("x".into()),
+            PropValue::Int(2),
+        ],
+    )))
+    .expect("compiles");
+    assert_eq!(sources_of_8(&plan), ["Idle", "Walk"]);
+
+    let plan = compile_anim_graph(&with_alias(listed_alias(7, "Walking", &[PropValue::Int(3)])))
+        .expect("compiles");
+    assert_eq!(sources_of_8(&plan), ["Walk"]);
+
+    // `global` wins over the list.
+    let mut global = listed_alias(7, "All", &[PropValue::Int(3)]);
+    global
+        .properties
+        .insert(plan::ALIAS_GLOBAL_PROP.into(), PropValue::Bool(true));
+    let plan = compile_anim_graph(&with_alias(global)).expect("compiles");
+    assert_eq!(sources_of_8(&plan), ["Idle", "Walk"]);
+}
+
+#[test]
+fn an_alias_with_nothing_to_expand_to_compiles_to_nothing() {
+    // Only the transition's own target is aliased: no copies, no error.
+    let plan = compile_anim_graph(&with_alias(listed_alias(7, "Dead only", &[PropValue::Int(6)])))
+        .expect("compiles");
+    assert!(sources_of_8(&plan).is_empty());
+    assert_eq!(plan.transitions.len(), 1, "the ordinary Idle → Walk stays");
+}
+
+#[test]
+fn alias_refusals_name_the_alias() {
+    let err = |alias: NodeInst| compile_anim_graph(&with_alias(alias)).unwrap_err();
+    assert_eq!(err(listed_alias(7, "Empty", &[])), "alias 'Empty' has no states");
+    assert_eq!(
+        err(listed_alias(7, "Empty", &[PropValue::Int(-1)])),
+        "alias 'Empty' has no states",
+        "a list of only stale entries is an empty list"
+    );
+    let mut untitled = listed_alias(7, "", &[]);
+    untitled.title = None;
+    assert_eq!(err(untitled), "alias 'Alias' has no states", "default name");
+    assert!(
+        err(listed_alias(7, "Stale", &[PropValue::Int(99)]))
+            .starts_with("alias 'Stale' references a missing state"),
+    );
+    assert!(
+        err(listed_alias(7, "Stale", &[PropValue::Int(8)]))
+            .starts_with("alias 'Stale' references a missing state"),
+        "a transition id is not a state"
+    );
+    // An alias with no outgoing transition is still checked.
+    let mut doc = with_alias(listed_alias(7, "Idle", &[]));
+    doc.edges.retain(|e| e.from_node != 7);
+    assert_eq!(
+        compile_anim_graph(&doc).unwrap_err(),
+        "alias 'Idle' has no states"
+    );
+}
+
+#[test]
+fn an_alias_transition_fires_from_each_aliased_state() {
+    let plan = compile_anim_graph(&alias_doc()).expect("compiles");
 
     // From Idle — no Idle → Dead edge exists.
     let mut params = AnimParams::from_decls(&plan.parameters);
@@ -947,8 +1065,8 @@ fn any_state_fires_from_whatever_state_is_active() {
     m.tick(&plan, &mut params, 0.1);
     assert_eq!(plan.states[m.current_state()].name, "Dead");
 
-    // Priority is one scale: with both rules passing from Idle, the Any
-    // State transition's −1 beats the ordinary transition's 0.
+    // Priority is one scale: with both rules passing from Idle, the alias
+    // transition's −1 beats the ordinary transition's 0.
     let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
     params.set_bool("walk", true);
@@ -958,36 +1076,43 @@ fn any_state_fires_from_whatever_state_is_active() {
 }
 
 #[test]
-fn only_any_state_interrupts_a_running_crossfade() {
-    let plan = compile_anim_graph(&any_state_doc()).expect("compiles");
+fn an_alias_transition_does_not_interrupt_a_running_crossfade() {
+    let plan = compile_anim_graph(&alias_doc()).expect("compiles");
     let mut params = AnimParams::from_decls(&plan.parameters);
     let mut m = AnimMachine::new(&plan);
 
-    // Start Idle → Walk (0.5s) and kill mid-fade.
+    // Start Idle → Walk (0.5s) and kill mid-fade: an alias transition is an
+    // ordinary one, so it waits for the fade like any other.
     params.set_bool("walk", true);
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.1);
     assert!(m.crossfade().is_some());
     params.fire_trigger("died");
     m.tick(&plan, &mut params, 0.1);
+    assert_eq!(plan.states[m.current_state()].name, "Walk", "no interrupt");
+    assert!(m.crossfade().is_some(), "the fade runs on");
     assert_eq!(
-        plan.states[m.current_state()].name, "Dead",
-        "an Any State transition interrupts the fade"
+        params.trigger_set("died"),
+        Some(true),
+        "a rule that did not fire consumes nothing"
     );
+
+    // The moment the fade retires, the held trigger fires it.
+    for _ in 0..3 {
+        m.tick(&plan, &mut params, 0.1);
+    }
+    assert_eq!(plan.states[m.current_state()].name, "Dead");
     let fade = m.crossfade().expect("a fresh fade into Dead");
-    assert_eq!(
-        plan.states[fade.from].name, "Walk",
-        "the new outgoing side is the interrupted fade's target"
-    );
+    assert_eq!(plan.states[fade.from].name, "Walk");
     assert_eq!(fade.duration, 0.2);
-    assert_eq!(fade.elapsed, 0.0);
+    assert_eq!(params.trigger_set("died"), Some(false), "consumed by the fire");
 }
 
 #[test]
-fn a_held_any_state_rule_does_not_restart_its_target() {
-    // Strip the rule: an always-true Any State → Dead. Without the
-    // self-target skip this would restart Dead every single frame.
-    let mut doc = any_state_doc();
+fn a_held_alias_rule_does_not_restart_its_target() {
+    // Strip the rule: an always-true Global → Dead. The expansion never
+    // produces Dead → Dead, so nothing restarts Dead every frame.
+    let mut doc = alias_doc();
     doc.regions.remove(&8);
     let plan = compile_anim_graph(&doc).expect("compiles");
     let mut params = AnimParams::from_decls(&plan.parameters);
@@ -1003,6 +1128,43 @@ fn a_held_any_state_rule_does_not_restart_its_target() {
     assert_eq!(plan.states[m.current_state()].name, "Dead");
     assert!(m.time() > t, "Dead keeps playing — never re-entered");
     assert!(m.crossfade().is_none(), "and never re-fades");
+}
+
+#[test]
+fn a_legacy_any_state_node_upgrades_to_a_global_alias() {
+    let legacy = with_alias(node(7, plan::ANIM_ANY_STATE_TYPE_ID, None));
+
+    // Compile takes the old document as-is (the caller's copy is untouched)
+    // and treats the node as a Global alias.
+    let before = legacy.clone();
+    let compiled = compile_anim_graph(&legacy).expect("compiles unsaved");
+    assert_eq!(sources_of_8(&compiled), ["Idle", "Walk"]);
+    assert_eq!(legacy, before);
+
+    // The upgrade itself: same id, same edges, Global alias titled
+    // "Any State"; a second run finds nothing to do.
+    let mut doc = legacy.clone();
+    assert_eq!(plan::upgrade_any_state(&mut doc), 1);
+    let n = doc.node(7).expect("kept its id");
+    assert_eq!(n.type_id, plan::ANIM_STATE_ALIAS_TYPE_ID);
+    assert_eq!(n.title.as_deref(), Some("Any State"));
+    assert_eq!(
+        n.properties.get(plan::ALIAS_GLOBAL_PROP),
+        Some(&PropValue::Bool(true))
+    );
+    assert_eq!(doc.edges, legacy.edges);
+    let ids = |d: &GraphDoc| d.nodes.iter().map(|n| n.id).collect::<Vec<_>>();
+    assert_eq!(ids(&doc), ids(&legacy));
+    assert_eq!(compile_anim_graph(&doc).expect("compiles"), compiled);
+
+    let again = doc.clone();
+    assert_eq!(plan::upgrade_any_state(&mut doc), 0, "idempotent");
+    assert_eq!(doc, again);
+
+    // An author's title survives the upgrade.
+    let mut titled = with_alias(node(7, plan::ANIM_ANY_STATE_TYPE_ID, Some("Hurt")));
+    plan::upgrade_any_state(&mut titled);
+    assert_eq!(titled.node(7).unwrap().title.as_deref(), Some("Hurt"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2417,6 +2579,19 @@ fn a_nested_state_compiles_the_referenced_graph_into_the_plan() {
     };
     assert_eq!(graph, CHILD);
     assert_eq!(child.states.len(), 2, "the whole child machine compiled in");
+
+    // A nested document still holding a legacy Any State node compiles as
+    // its upgraded self too — whatever loader served it.
+    let stale = |rel: &str| {
+        (rel == CHILD).then(|| with_alias(node(7, plan::ANIM_ANY_STATE_TYPE_ID, None)))
+    };
+    let upgraded =
+        plan::compile_anim_graph_with(&nested_host_doc(0.0), "graphs/host.animgraph", &stale)
+            .expect("compiles");
+    let plan::PoseSource::Machine { plan: stale_child, .. } = &upgraded.states[1].source else {
+        panic!("expected a nested machine");
+    };
+    assert_eq!(sources_of_8(stale_child), ["Idle", "Walk"]);
 
     // One shared blackboard: the host's declarations, then the child's.
     let slugs: Vec<&str> = compiled.parameters.iter().map(|p| p.slug.as_str()).collect();

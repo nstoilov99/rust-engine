@@ -359,10 +359,11 @@ impl AnimMachine {
 
     /// Advance one frame: clip clocks first, then transition rules.
     ///
-    /// Interruption rule v1: while a crossfade runs, only an **Any State**
-    /// transition may start — ordinary transitions wait for the fade to
-    /// finish. `params` is mutable because firing consumes the triggers the
-    /// firing rule reads (consume-on-transition); rules themselves stay pure.
+    /// While a crossfade runs no transition may start — every transition
+    /// waits for the fade to finish (state aliases compile to ordinary
+    /// transitions, so nothing has an interrupt right). `params` is mutable
+    /// because firing consumes the triggers the firing rule reads
+    /// (consume-on-transition); rules themselves stay pure.
     pub fn tick(&mut self, plan: &AnimGraphPlan, params: &mut AnimParams, dt: f32) {
         self.spans.clear();
         if let Some((_, age)) = &mut self.fired {
@@ -393,8 +394,8 @@ impl AnimMachine {
         }
 
         // Transitions are pre-sorted (priority, then node id): the first
-        // candidate whose rule passes wins, deterministically — Any State
-        // competes with ordinary transitions on the same priority scale.
+        // candidate whose rule passes wins, deterministically. Alias-expanded
+        // transitions sit in the same list on the same priority scale.
         let fading = self.fade.is_some();
         let current = self.current;
         let fired = plan
@@ -403,10 +404,6 @@ impl AnimMachine {
             .enumerate()
             .filter(|(_, t)| match t.from {
                 TransitionFrom::State(s) => !fading && s == current,
-                // Skipping self-targets is what keeps a held Any State rule
-                // (Died = true) from restarting its state every frame — and,
-                // mid-fade, from re-interrupting into the fade's own target.
-                TransitionFrom::AnyState => t.to != current,
             })
             .find(|(_, t)| t.rule.as_ref().is_none_or(|r| r.expr.eval_bool(params)));
         let entered = fired.is_some();
@@ -419,10 +416,7 @@ impl AnimMachine {
                     params.consume_trigger(slug);
                 }
             }
-            // On an Any State interrupt this replaces the running fade: the
-            // new outgoing side is the interrupted fade's *target* (the
-            // dominant clip by then); the old outgoing state's residual
-            // contribution is dropped — the accepted v1 simplification.
+            // Nothing fires mid-fade, so this never replaces a running fade.
             self.fade = (t.duration > 0.0).then(|| Crossfade {
                 from: current,
                 from_time: self.time,

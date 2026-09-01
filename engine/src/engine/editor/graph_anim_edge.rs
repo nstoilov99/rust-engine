@@ -28,7 +28,8 @@
 use std::collections::BTreeMap;
 
 use crate::engine::animation::graph::plan::{
-    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID,
+    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+    ANIM_TRANSITION_TYPE_ID,
     STATE_IN_PIN, STATE_OUT_PIN, TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
 };
 use crate::engine::node_graph::GraphDoc;
@@ -82,7 +83,7 @@ fn half_extent(r: [f32; 4], d: [f32; 2]) -> f32 {
 fn is_flow_source(type_id: &str) -> bool {
     matches!(
         type_id,
-        ANIM_STATE_TYPE_ID | ANIM_ANY_STATE_TYPE_ID | ANIM_ENTRY_TYPE_ID
+        ANIM_STATE_TYPE_ID | ANIM_STATE_ALIAS_TYPE_ID | ANIM_ANY_STATE_TYPE_ID | ANIM_ENTRY_TYPE_ID
     )
 }
 
