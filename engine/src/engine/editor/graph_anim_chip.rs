@@ -13,7 +13,8 @@
 //! worse than one that says "three conditions, descend to see them".
 
 use crate::engine::animation::graph::plan::{
-    ANIM_RULE_RESULT_TYPE_ID, DURATION_PROP, PRIORITY_PROP, RULE_RESULT_PIN,
+    ANIM_ANY_STATE_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, DURATION_PROP,
+    PRIORITY_PROP, RULE_RESULT_PIN, TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
 };
 use crate::engine::node_graph::std_nodes::{AND, COMPARE_FLOAT, NOT, OR};
 use crate::engine::node_graph::{
@@ -32,9 +33,18 @@ pub struct TransitionChip {
     pub duration: f32,
     /// Priority (default 0). Non-zero shows as a `P{n}` tag.
     pub priority: i32,
+    /// Source state's title ("State" untitled, "?" unwired).
+    pub from: String,
+    /// Target state's title, same fallbacks.
+    pub to: String,
 }
 
 impl TransitionChip {
+    /// The badge's hover text: `Idle → Jump` over the chip line.
+    pub fn tooltip(&self) -> String {
+        format!("{} \u{2192} {}\n{}", self.from, self.to, self.text())
+    }
+
     /// The chip's one line: `[summary · ]duration[ · P{n}]`.
     ///
     /// Duration always prints — an instant transition saying "0.00s" is
@@ -76,7 +86,38 @@ pub fn transition_chip(doc: &GraphDoc, transition: u64) -> TransitionChip {
         // No region, or an empty one: always-true, the hollow-dot chip.
         _ => (None, false),
     };
-    TransitionChip { summary, wired, duration, priority }
+    let from = doc
+        .edges
+        .iter()
+        .find(|e| e.to_node == transition && e.to_pin == TRANSITION_FROM_PIN)
+        .map(|e| e.from_node);
+    let to = doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == transition && e.from_pin == TRANSITION_TO_PIN)
+        .map(|e| e.to_node);
+    TransitionChip {
+        summary,
+        wired,
+        duration,
+        priority,
+        from: state_title(doc, from),
+        to: state_title(doc, to),
+    }
+}
+
+/// A machine node's title for the badge tooltip: its own title, else what
+/// kind of node it is; "?" for an endpoint nothing is wired to.
+fn state_title(doc: &GraphDoc, id: Option<u64>) -> String {
+    let Some(n) = id.and_then(|id| doc.node(id)) else {
+        return "?".to_string();
+    };
+    match (&n.title, n.type_id.as_str()) {
+        (Some(t), _) if !t.trim().is_empty() => t.clone(),
+        (_, ANIM_ANY_STATE_TYPE_ID) => "Any State".to_string(),
+        (_, ANIM_ENTRY_TYPE_ID) => "Entry".to_string(),
+        _ => "State".to_string(),
+    }
 }
 
 /// Summarize a non-empty rule region: `(summary segment, wired)`.
@@ -391,7 +432,17 @@ mod tests {
     #[test]
     fn always_true_is_a_hollow_duration_chip() {
         let chip = transition_chip(&doc_with(None, 0.2, 0), 1);
-        assert_eq!(chip, TransitionChip { summary: None, wired: false, duration: 0.2, priority: 0 });
+        assert_eq!(
+            chip,
+            TransitionChip {
+                summary: None,
+                wired: false,
+                duration: 0.2,
+                priority: 0,
+                from: "?".to_string(),
+                to: "?".to_string(),
+            }
+        );
         assert_eq!(chip.text(), "0.20s");
 
         let empty = doc_with(Some(GraphRegion::default()), 0.2, 0);
@@ -576,6 +627,28 @@ mod tests {
             transition_chip(&doc_with(Some(region), 0.0, 0), 1).text(),
             "\u{ac}Died \u{b7} 0.00s"
         );
+    }
+
+    /// The badge tooltip names both endpoints — the state's title, its kind
+    /// when untitled, "?" when unwired — over the chip line.
+    #[test]
+    fn tooltip_names_both_states() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_ANY_STATE_TYPE_ID, ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+        };
+        let mut doc = doc_with(None, 0.2, 0);
+        let mut idle = node(2, ANIM_STATE_TYPE_ID);
+        idle.title = Some("Idle".to_string());
+        doc.nodes.push(idle);
+        doc.nodes.push(node(3, ANIM_STATE_TYPE_ID));
+        doc.nodes.push(node(4, ANIM_ANY_STATE_TYPE_ID));
+        doc.edges.push(edge(2, STATE_OUT_PIN, 1, TRANSITION_FROM_PIN));
+        doc.edges.push(edge(1, TRANSITION_TO_PIN, 3, STATE_IN_PIN));
+        assert_eq!(transition_chip(&doc, 1).tooltip(), "Idle \u{2192} State\n0.20s");
+
+        doc.edges[0] = edge(4, STATE_OUT_PIN, 1, TRANSITION_FROM_PIN);
+        doc.edges.pop();
+        assert_eq!(transition_chip(&doc, 1).tooltip(), "Any State \u{2192} ?\n0.20s");
     }
 
     /// Float formatting: whole values take the mockup's ".0" spelling.

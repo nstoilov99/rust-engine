@@ -16,11 +16,14 @@
 //! stacked on top of each other, a self-loop — is simply *absent* from the
 //! result, and the caller falls back to the stored-position rendering.
 //!
-//! Lane rules (the Unreal pairing): every connection between the same pair
-//! of states offsets to the **right of its travel direction**, so an A→B /
-//! B→A pair renders as two parallel arrows, one per side of the centerline.
-//! Additional same-direction transitions stack further right. Chips stagger
-//! along the edge so parallel lanes never pile their chips onto one point.
+//! Line rules (the Unreal pairing, 2026-09-01 ruling): **one straight line
+//! per (from, to) direction**. A→B and B→A part to the two sides of the
+//! centerline, each to the **right of its travel direction**; every further
+//! same-direction transition rides the *same* line. Each transition is a
+//! circular arrow badge in a row beside its line — centred on the midpoint,
+//! laid along the line in ascending node-id order, offset right-of-travel by
+//! radius + gap so the row never sits on the stroke. Rule text is not on the
+//! canvas at all (tooltip + unfolded card).
 
 use std::collections::BTreeMap;
 
@@ -30,18 +33,19 @@ use crate::engine::animation::graph::plan::{
 };
 use crate::engine::node_graph::GraphDoc;
 
-/// Distance between parallel lanes, world units. Chosen to clear a chip's
-/// height (one `row_h`, ~26) with air on both sides.
+/// Distance between the two opposite-direction lines of a state pair, world
+/// units. Wide enough that both arrowheads and a badge row on each outer
+/// side read as two separate arrows at a glance.
 pub const LANE_GAP: f32 = 36.0;
 
-/// How far apart chips stagger *along* a shared edge, as a fraction of the
-/// border-to-border length per lane index. Keeps two wide chips on a vertical
-/// pair from overlapping where the perpendicular gap alone could not.
-const STAGGER_T: f32 = 0.16;
-
-/// Chip stagger stays inside the middle of the edge — a chip pinned onto a
-/// state border would read as part of the state.
-const STAGGER_CLAMP: (f32, f32) = (0.3, 0.7);
+/// Badge sizing the layout needs from the canvas, world units: the badge
+/// diameter (the chip row height) and the gap between badges — also the
+/// air between the row and its line.
+#[derive(Debug, Clone, Copy)]
+pub struct BadgeMetrics {
+    pub d: f32,
+    pub gap: f32,
+}
 
 /// One straight display segment for a doc edge.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,13 +56,18 @@ pub struct EdgeSeg {
     pub arrow: bool,
 }
 
-/// The derived layout: chip positions and per-edge segments.
+/// The derived layout: badge positions and per-edge segments.
 #[derive(Debug, Default)]
 pub struct AnimFlowLayout {
     /// Transition node id → derived rect **min** (world). Only transitions
     /// with both endpoints resolved appear; everything else keeps its stored
-    /// position.
+    /// position. The rect is the transition's *displayed* rect (a badge, or
+    /// the unfolded card when selected) centred on its badge slot.
     pub chip_min: BTreeMap<u64, [f32; 2]>,
+    /// Transition node id → unit flow direction its badge arrow points
+    /// along. Present for every transition that has at least one placed
+    /// half, so a half-wired badge still points with its one wire.
+    pub chip_dir: BTreeMap<u64, [f32; 2]>,
     /// Doc edge index → straight segment replacing the routed wire.
     pub segs: BTreeMap<usize, EdgeSeg>,
 }
@@ -186,9 +195,20 @@ struct Link {
     e_to: Option<usize>,
 }
 
+/// Unit direction of `a→b`, or `None` for a degenerate segment.
+fn unit(a: [f32; 2], b: [f32; 2]) -> Option<[f32; 2]> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    (len >= 1.0).then(|| [d[0] / len, d[1] / len])
+}
+
 /// Compute the derived machine layout. `rects` are the *displayed* node
 /// rects of the current frame — transitions included, for their sizes.
-pub fn anim_flow_layout(doc: &GraphDoc, rects: &BTreeMap<u64, [f32; 4]>) -> AnimFlowLayout {
+pub fn anim_flow_layout(
+    doc: &GraphDoc,
+    rects: &BTreeMap<u64, [f32; 4]>,
+    badge: BadgeMetrics,
+) -> AnimFlowLayout {
     let mut out = AnimFlowLayout::default();
     let ty_of = |id: u64| doc.node(id).map(|n| n.type_id.as_str());
 
@@ -257,86 +277,96 @@ pub fn anim_flow_layout(doc: &GraphDoc, rects: &BTreeMap<u64, [f32; 4]>) -> Anim
         }
     }
 
-    // Lane assignment per unordered endpoint pair.
-    let mut groups: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
+    // One line per (from, to) direction; the two directions of an unordered
+    // pair part to opposite sides of the centerline.
+    let mut lines: BTreeMap<(u64, u64), Vec<usize>> = BTreeMap::new();
     for (i, l) in links.iter().enumerate() {
-        groups
-            .entry((l.from.min(l.to), l.from.max(l.to)))
-            .or_default()
-            .push(i);
+        lines.entry((l.from, l.to)).or_default().push(i);
     }
-    for group in groups.values() {
-        let n = group.len();
-        for (gi, &li) in group.iter().enumerate() {
-            let link = &links[li];
-            let has_opp = group.iter().any(|&j| links[j].from != link.from);
-            let lane = group[..gi]
-                .iter()
-                .filter(|&&j| links[j].from == link.from)
-                .count();
-            let perp_off = (if has_opp { 0.5 } else { 0.0 } + lane as f32) * LANE_GAP;
-            // Chip stagger in **canonical pair space** (min-id → max-id), so
-            // an A→B / B→A pair cannot cancel into the same world point.
-            let t_canon = (0.5 + (gi as f32 - (n as f32 - 1.0) * 0.5) * STAGGER_T)
-                .clamp(STAGGER_CLAMP.0, STAGGER_CLAMP.1);
-            let along_t = if link.from < link.to { t_canon } else { 1.0 - t_canon };
+    for (&(from, to), members) in &lines {
+        let has_opp = lines.contains_key(&(to, from));
+        let (ra, rb) = (rects[&from], rects[&to]);
+        let (ca, cb) = (center(ra), center(rb));
+        let Some(u) = unit(ca, cb) else { continue };
+        // Right of travel, screen coords (y down): east-bound offsets
+        // south, so A→B and B→A part to opposite sides of the line.
+        let right = [-u[1], u[0]];
+        // A line offset past a node's half-extent would detach from its
+        // border; the split compresses to what the smaller endpoint can carry.
+        let allowed = (half_extent(ra, right).min(half_extent(rb, right)) - 2.0).max(0.0);
+        let perp_off = (if has_opp { LANE_GAP * 0.5 } else { 0.0 }).min(allowed);
+        let oa = [ca[0] + right[0] * perp_off, ca[1] + right[1] * perp_off];
+        let ob = [cb[0] + right[0] * perp_off, cb[1] + right[1] * perp_off];
+        let (a, t_out) = exit_anchor(oa, ob, ra);
+        let (b, t_in) = entry_anchor(oa, ob, rb);
+        if t_in <= t_out {
+            continue; // rects overlap: no honest line, fall back
+        }
+        let mid = lerp(a, b, 0.5);
 
-            let (ra, rb) = (rects[&link.from], rects[&link.to]);
-            let (ca, cb) = (center(ra), center(rb));
-            let d = [cb[0] - ca[0], cb[1] - ca[1]];
-            let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
-            if len < 1.0 {
-                continue;
+        // The badge row: ascending node id (explicit — doc order is not a
+        // contract), centred on the midpoint, pushed right of travel so it
+        // clears the stroke. With an opposite line present that side is
+        // already the one facing away from it.
+        let mut badges: Vec<(u64, usize)> = members
+            .iter()
+            .filter_map(|&li| links[li].transition.map(|t| (t, li)))
+            .collect();
+        badges.sort_by_key(|&(t, _)| t);
+        let pitch = badge.d + badge.gap;
+        let start = -(badges.len() as f32 - 1.0) * 0.5 * pitch;
+        let side = badge.d * 0.5 + badge.gap;
+        for (i, &(t, li)) in badges.iter().enumerate() {
+            let s = start + i as f32 * pitch;
+            let c = [
+                mid[0] + u[0] * s + right[0] * side,
+                mid[1] + u[1] * s + right[1] * side,
+            ];
+            let sz = size(rects[&t]);
+            out.chip_min
+                .insert(t, [c[0] - sz[0] * 0.5, c[1] - sz[1] * 0.5]);
+            out.chip_dir.insert(t, u);
+            // Both halves stay collinear and meet at the midpoint, so every
+            // consumer of the halves (hit test, cut, dim redraw) still sees
+            // one straight line.
+            let link = &links[li];
+            out.segs
+                .insert(link.e_from, EdgeSeg { a, b: mid, arrow: false });
+            if let Some(eo) = link.e_to {
+                out.segs.insert(eo, EdgeSeg { a: mid, b, arrow: true });
             }
-            // Right of travel, screen coords (y down): east-bound offsets
-            // south, so A→B and B→A part to opposite sides of the line.
-            let right = [-d[1] / len, d[0] / len];
-            // A lane wider than a node's half-extent would detach from its
-            // border; lanes compress to what the smaller endpoint can carry.
-            let allowed = (half_extent(ra, right).min(half_extent(rb, right)) - 2.0).max(0.0);
-            let perp_off = perp_off.min(allowed);
-            let oa = [ca[0] + right[0] * perp_off, ca[1] + right[1] * perp_off];
-            let ob = [cb[0] + right[0] * perp_off, cb[1] + right[1] * perp_off];
-            let (a, t_out) = exit_anchor(oa, ob, ra);
-            let (b, t_in) = entry_anchor(oa, ob, rb);
-            if t_in <= t_out {
-                continue; // rects overlap: no honest line, fall back
-            }
-            match link.transition {
-                Some(t) => {
-                    let sz = size(rects[&t]);
-                    let c = lerp(a, b, along_t);
-                    out.chip_min
-                        .insert(t, [c[0] - sz[0] * 0.5, c[1] - sz[1] * 0.5]);
-                    out.segs
-                        .insert(link.e_from, EdgeSeg { a, b: c, arrow: false });
-                    if let Some(eo) = link.e_to {
-                        out.segs.insert(eo, EdgeSeg { a: c, b, arrow: true });
-                    }
-                }
-                None => {
-                    out.segs.insert(link.e_from, EdgeSeg { a, b, arrow: true });
-                }
+        }
+        for &li in members {
+            if links[li].transition.is_none() {
+                out.segs
+                    .insert(links[li].e_from, EdgeSeg { a, b, arrow: true });
             }
         }
     }
 
-    // Half-wired (or self-looping) transitions: the chip keeps its stored
+    // Half-wired (or self-looping) transitions: the badge keeps its stored
     // rect and each existing half draws straight between state border and
-    // chip border, arrow pointing with the flow.
+    // badge border, arrow pointing with the flow; the badge points with the
+    // wire it has (the incoming one when both exist).
     for (t, from_half, to_half) in partial {
         let Some(&rt) = rects.get(&t) else { continue };
-        if let Some((ei, from)) = from_half {
-            if let Some(&rs) = rects.get(&from) {
-                if let Some((a, b)) = border_segment(rs, rt) {
-                    out.segs.insert(ei, EdgeSeg { a, b, arrow: true });
-                }
-            }
-        }
         if let Some((eo, to)) = to_half {
             if let Some(&rs) = rects.get(&to) {
                 if let Some((a, b)) = border_segment(rt, rs) {
                     out.segs.insert(eo, EdgeSeg { a, b, arrow: true });
+                    if let Some(u) = unit(a, b) {
+                        out.chip_dir.insert(t, u);
+                    }
+                }
+            }
+        }
+        if let Some((ei, from)) = from_half {
+            if let Some(&rs) = rects.get(&from) {
+                if let Some((a, b)) = border_segment(rs, rt) {
+                    out.segs.insert(ei, EdgeSeg { a, b, arrow: true });
+                    if let Some(u) = unit(a, b) {
+                        out.chip_dir.insert(t, u);
+                    }
                 }
             }
         }
@@ -395,33 +425,50 @@ mod tests {
         (doc, rects)
     }
 
+    /// The badge metrics every test lays out with: D = 22, gap = 4, so a
+    /// badge centre sits 15 off its line and consecutive badges 26 apart.
+    const BADGE: BadgeMetrics = BadgeMetrics { d: 22.0, gap: 4.0 };
+
+    fn layout(doc: &GraphDoc, rects: &BTreeMap<u64, [f32; 4]>) -> AnimFlowLayout {
+        anim_flow_layout(doc, rects, BADGE)
+    }
+
+    /// Centre of transition `t`'s derived rect.
+    fn chip_center(l: &AnimFlowLayout, rects: &BTreeMap<u64, [f32; 4]>, t: u64) -> [f32; 2] {
+        let sz = size(rects[&t]);
+        let mn = l.chip_min[&t];
+        [mn[0] + sz[0] * 0.5, mn[1] + sz[1] * 0.5]
+    }
+
     /// A fully wired transition renders as two collinear halves — border to
-    /// chip center, chip center to border — with the arrow on the landing
-    /// half, and the chip's derived rect centered on the joint.
+    /// midpoint, midpoint to border — with the arrow on the landing half,
+    /// and its badge beside the midpoint, right of travel, pointing with
+    /// the flow.
     #[test]
     fn a_wired_transition_becomes_one_direct_edge_with_a_midpoint_chip() {
         let (doc, rects) = machine();
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
 
         let h1 = &l.segs[&1];
         let h2 = &l.segs[&2];
-        assert!(!h1.arrow, "the half landing on the chip has no arrowhead");
+        assert!(!h1.arrow, "the half landing on the midpoint has no arrowhead");
         assert!(h2.arrow, "the half landing on the state carries the arrow");
-        assert_eq!(h1.b, h2.a, "halves meet at the chip center");
+        assert_eq!(h1.b, h2.a, "halves meet at the midpoint");
         // Straight horizontal run at the centers' height, border to border.
         assert_eq!(h1.a, [120.0, 30.0]);
         assert_eq!(h2.b, [400.0, 30.0]);
-        assert_eq!(h1.b[1], 30.0, "single lane rides the centerline");
-        // Chip centered on the joint, using its own size.
-        let min = l.chip_min[&10];
-        assert_eq!([min[0] + 50.0, min[1] + 13.0], [h1.b[0], h1.b[1]]);
+        assert_eq!(h1.b, [260.0, 30.0], "a lone line rides the centerline");
+        // Badge beside the midpoint: east-bound, so right of travel is +y,
+        // by radius + gap; its own rect size centres it.
+        assert_eq!(chip_center(&l, &rects, 10), [260.0, 45.0]);
+        assert_eq!(l.chip_dir[&10], [1.0, 0.0]);
     }
 
     /// The entry wire is a plain direct arrow.
     #[test]
     fn the_entry_wire_is_a_direct_arrow() {
         let (doc, rects) = machine();
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
         let s = &l.segs[&0];
         assert!(s.arrow);
         // Lands on Idle's border, leaves Entry's border.
@@ -438,7 +485,7 @@ mod tests {
         doc.edges.push(edge(2, STATE_OUT_PIN, 11, TRANSITION_FROM_PIN));
         doc.edges.push(edge(11, TRANSITION_TO_PIN, 1, STATE_IN_PIN));
         rects.insert(11, [0.0, 400.0, 100.0, 426.0]);
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
 
         // Forward transition (1→2, east-bound): right of travel is +y.
         let f = &l.segs[&1];
@@ -449,48 +496,96 @@ mod tests {
         // Each line is level (parallel to the horizontal centerline).
         assert_eq!(f.a[1], l.segs[&2].b[1]);
         assert_eq!(r.a[1], l.segs[&4].b[1]);
-        // Chips stagger along the edge so they cannot overlap.
-        assert_ne!(l.chip_min[&10][0], l.chip_min[&11][0]);
+        // Each badge sits on the outer side of its own line — away from the
+        // other line — and points with its own flow.
+        assert_eq!(chip_center(&l, &rects, 10), [260.0, 48.0 + 15.0]);
+        assert_eq!(chip_center(&l, &rects, 11), [260.0, 12.0 - 15.0]);
+        assert_eq!(l.chip_dir[&10], [1.0, 0.0]);
+        assert_eq!(l.chip_dir[&11], [-1.0, 0.0]);
     }
 
-    /// Two same-direction transitions stack lanes on the same side.
+    /// Same-direction transitions share one line and stack their badges
+    /// side by side along it.
     #[test]
-    fn parallel_same_direction_transitions_stack_lanes() {
+    fn same_direction_transitions_share_one_line_and_stack_badges() {
         let (mut doc, mut rects) = machine();
         doc.nodes.push(node(11, ANIM_TRANSITION_TYPE_ID));
         doc.edges.push(edge(1, STATE_OUT_PIN, 11, TRANSITION_FROM_PIN));
         doc.edges.push(edge(11, TRANSITION_TO_PIN, 2, STATE_IN_PIN));
         rects.insert(11, [0.0, 400.0, 100.0, 426.0]);
-        // Tall states so the second lane fits uncompressed.
-        rects.insert(1, [0.0, 0.0, 120.0, 120.0]);
-        rects.insert(2, [400.0, 0.0, 520.0, 120.0]);
-        let l = anim_flow_layout(&doc, &rects);
-        assert_eq!(l.segs[&1].a[1], 60.0);
-        assert_eq!(l.segs[&3].a[1], 60.0 + LANE_GAP);
+        let l = layout(&doc, &rects);
+        // One line: both transitions' halves are the same two segments.
+        assert_eq!(l.segs[&1], l.segs[&3]);
+        assert_eq!(l.segs[&2], l.segs[&4]);
+        assert_eq!(l.segs[&1].a[1], 30.0, "no opposite line: the centerline");
+        // Two badges, one pitch (D + gap) apart, centred on the midpoint.
+        let c10 = chip_center(&l, &rects, 10);
+        let c11 = chip_center(&l, &rects, 11);
+        assert_eq!(c10, [260.0 - 13.0, 45.0]);
+        assert_eq!(c11, [260.0 + 13.0, 45.0]);
     }
 
-    /// A lane wider than the node allows compresses to the node's half-extent
-    /// instead of detaching from its border.
+    /// Badge order along the line is ascending node id whatever the
+    /// document's node order, and the row sits right of travel — so on a
+    /// west-bound line it is above the line and runs east-to-west by id.
+    #[test]
+    fn badges_order_by_node_id_on_the_right_of_travel() {
+        let (mut doc, mut rects) = machine();
+        // Reverse the existing transition (2 → 10 → 1) and add two more of
+        // the same direction with ids pushed out of order.
+        doc.edges[1] = edge(2, STATE_OUT_PIN, 10, TRANSITION_FROM_PIN);
+        doc.edges[2] = edge(10, TRANSITION_TO_PIN, 1, STATE_IN_PIN);
+        for id in [12u64, 11] {
+            doc.nodes.push(node(id, ANIM_TRANSITION_TYPE_ID));
+            doc.edges.push(edge(2, STATE_OUT_PIN, id, TRANSITION_FROM_PIN));
+            doc.edges.push(edge(id, TRANSITION_TO_PIN, 1, STATE_IN_PIN));
+            rects.insert(id, [0.0, 400.0, 22.0, 422.0]);
+        }
+        let l = layout(&doc, &rects);
+        let (c10, c11, c12) = (
+            chip_center(&l, &rects, 10),
+            chip_center(&l, &rects, 11),
+            chip_center(&l, &rects, 12),
+        );
+        // West-bound: travel is -x, right of travel is -y (above the line).
+        for c in [c10, c11, c12] {
+            assert_eq!(c[1], 30.0 - 15.0);
+        }
+        // Ascending id runs along the flow: 10 first (east), 12 last (west).
+        assert_eq!(c11[0], 260.0);
+        assert_eq!(c10[0], 260.0 + 26.0);
+        assert_eq!(c12[0], 260.0 - 26.0);
+        for id in [10u64, 11, 12] {
+            assert_eq!(l.chip_dir[&id], [-1.0, 0.0]);
+        }
+    }
+
+    /// A split wider than the node allows compresses to the node's
+    /// half-extent instead of detaching from its border.
     #[test]
     fn lanes_compress_to_what_a_small_node_can_carry() {
         let (mut doc, mut rects) = machine();
         doc.nodes.push(node(11, ANIM_TRANSITION_TYPE_ID));
-        doc.edges.push(edge(1, STATE_OUT_PIN, 11, TRANSITION_FROM_PIN));
-        doc.edges.push(edge(11, TRANSITION_TO_PIN, 2, STATE_IN_PIN));
+        doc.edges.push(edge(2, STATE_OUT_PIN, 11, TRANSITION_FROM_PIN));
+        doc.edges.push(edge(11, TRANSITION_TO_PIN, 1, STATE_IN_PIN));
         rects.insert(11, [0.0, 400.0, 100.0, 426.0]);
-        let l = anim_flow_layout(&doc, &rects);
-        // States are 60 tall (half-extent 30): lane 1 caps at 28, on-border.
-        assert_eq!(l.segs[&3].a[1], 30.0 + 28.0);
-        assert_eq!(l.segs[&3].a[0], 120.0, "anchor stays on the right border");
+        // Short states (half-extent 10): the ±18 split caps at ±8, on-border.
+        rects.insert(1, [0.0, 0.0, 120.0, 20.0]);
+        rects.insert(2, [400.0, 0.0, 520.0, 20.0]);
+        let l = layout(&doc, &rects);
+        assert_eq!(l.segs[&1].a[1], 10.0 + 8.0);
+        assert_eq!(l.segs[&3].a[1], 10.0 - 8.0);
+        assert_eq!(l.segs[&1].a[0], 120.0, "anchor stays on the right border");
     }
 
-    /// A transition with only its source wired keeps its stored chip and
-    /// draws one straight arrow from the state into the chip.
+    /// A transition with only its source wired keeps its stored badge and
+    /// draws one straight arrow from the state into the badge; the badge
+    /// points with that one wire.
     #[test]
     fn a_half_wired_transition_keeps_its_stored_position() {
         let (mut doc, rects) = machine();
         doc.edges.remove(2); // unwire transition → Loco
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
         assert!(
             !l.chip_min.contains_key(&10),
             "no derived position without both endpoints"
@@ -499,6 +594,8 @@ mod tests {
         assert!(s.arrow, "the dangling half still points with the flow");
         // From Idle's border toward the stored chip rect.
         assert!(s.b[1] >= 300.0 && s.b[1] <= 326.0, "lands on the chip border");
+        let d = l.chip_dir[&10];
+        assert!(d[1] > 0.0, "points down toward the stored badge");
     }
 
     /// Overlapping states produce no segment — the caller falls back to the
@@ -507,7 +604,7 @@ mod tests {
     fn overlapping_states_fall_back() {
         let (doc, mut rects) = machine();
         rects.insert(2, [10.0, 10.0, 130.0, 70.0]); // Loco on top of Idle
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
         assert!(!l.segs.contains_key(&1));
         assert!(!l.segs.contains_key(&2));
         assert!(!l.chip_min.contains_key(&10));
@@ -524,7 +621,7 @@ mod tests {
         // Replace the entry wire with entry → reroute → Idle.
         doc.edges[0] = edge(0, STATE_OUT_PIN, 20, REROUTE_IN);
         doc.edges.push(edge(20, REROUTE_OUT, 1, STATE_IN_PIN));
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
         assert!(!l.segs.contains_key(&0));
         assert!(!l.segs.contains_key(&3));
         // The real transition is unaffected.
@@ -572,7 +669,7 @@ mod tests {
     fn a_self_loop_uses_the_stored_chip_position() {
         let (mut doc, rects) = machine();
         doc.edges[2] = edge(10, TRANSITION_TO_PIN, 1, STATE_IN_PIN); // 1 → 10 → 1
-        let l = anim_flow_layout(&doc, &rects);
+        let l = layout(&doc, &rects);
         assert!(!l.chip_min.contains_key(&10));
         assert!(l.segs[&1].arrow && l.segs[&2].arrow);
     }

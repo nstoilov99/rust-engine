@@ -490,6 +490,12 @@ impl GraphMetrics {
         BASE_PREVIEW_SIDE * self.scale
     }
 
+    /// Transition badge sizing for the machine layout (transitions ticket
+    /// 02 ruling): diameter = the chip row height, gap = the label gap.
+    fn badge(&self) -> super::graph_anim_edge::BadgeMetrics {
+        super::graph_anim_edge::BadgeMetrics { d: self.row_h, gap: self.label_gap }
+    }
+
     /// Width of a config row's value cell, world units.
     fn config_value_w(&self) -> f32 {
         BASE_CONFIG_VALUE_W * self.scale
@@ -977,16 +983,19 @@ struct PinGeom {
     hidden: bool,
 }
 
-/// The at-rest presentation of a transition node (Task 41): an edge chip —
-/// "Speed > 3.0 · 0.20s" with a filled/hollow Bool socket dot — instead of
-/// the standard node anatomy. The node is storage; the chip is the
-/// presentation (mockup 2d). Selecting the transition unfolds it into a
-/// small standard card whose config rows edit duration and priority.
+/// The at-rest presentation of a transition node (Task 41, ticket 02 of the
+/// transitions rework): a circular arrow badge beside its line — Unreal's
+/// transition icon — instead of the standard node anatomy. The node is
+/// storage; the badge is the presentation. The rule summary is not on the
+/// canvas: it is the hover tooltip, and selecting the transition unfolds it
+/// into a small standard card whose config rows edit duration and priority.
 struct ChipGeom {
-    /// The summary line, from `graph_anim_chip`.
-    text: String,
-    /// Filled dot = a wired rule; hollow = always-true.
-    wired: bool,
+    /// Hover text: "Idle → Jump" over the summary line, from
+    /// `graph_anim_chip`.
+    tip: String,
+    /// Unit flow direction the arrow points along (world = screen axes).
+    /// Set by the derived-layout pass; a badge nothing placed points east.
+    dir: Vec2,
 }
 
 /// Which compact machine card a node draws as (Task 41 canvas rework,
@@ -1314,10 +1323,11 @@ fn build_geoms(
                 };
             }
 
-            // Task 41: an unselected transition renders as its at-rest chip —
-            // rule summary · duration · priority tag, sized around that one
-            // mono line. Selecting it unfolds the standard card (with its
-            // Duration/Priority config rows) through the normal path below.
+            // Task 41: an unselected transition renders as its at-rest badge
+            // — a D×D disc, D = the chip row height — with the rule summary
+            // in its tooltip. Selecting it unfolds the standard card (with
+            // its Duration/Priority config rows) through the normal path
+            // below.
             if n.type_id == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID
                 && !state.selection.contains(&n.id)
             {
@@ -1325,12 +1335,7 @@ fn build_geoms(
                     TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
                 };
                 let resolved = super::graph_anim_chip::transition_chip(&state.doc, n.id);
-                let text = resolved.text();
-                let tw = p
-                    .measure_text_family(&text, label_px, None, FontFamily::Mono)
-                    .x;
-                let dot_d = m.pin_r * 2.0;
-                let w = m.pad_x + dot_d + m.label_gap + tw + m.pad_x;
+                let w = m.row_h;
                 let h = m.row_h;
                 let rect = Rect::from_min_size(min, Vec2::new(w, h));
                 let cy = min.y + h * 0.5;
@@ -1372,7 +1377,7 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: false,
-                    chip: Some(ChipGeom { text, wired: resolved.wired }),
+                    chip: Some(ChipGeom { tip: resolved.tooltip(), dir: Vec2::new(1.0, 0.0) }),
                     anim: None,
                     pinned_pos: false,
                     breakpoint: state.breakpoints.get(&n.id).copied(),
@@ -2687,22 +2692,26 @@ fn draw_and_interact(
         build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
     };
     // Task 41 rework: the machine canvas derives its topology geometry —
-    // straight border-to-border edges with the transition chips riding their
-    // midpoints. Chips with both endpoints wired move to the derived spot
-    // (their stored position stays untouched in the document); every
-    // downstream consumer — hit tests, error badges, F8 framing, the live
-    // highlight — reads the translated geoms and follows for free.
+    // one straight border-to-border line per direction with the transition
+    // badges in a row beside its midpoint. Badges with both endpoints wired
+    // move to the derived spot (their stored position stays untouched in
+    // the document); every downstream consumer — hit tests, error badges,
+    // F8 framing, the live highlight — reads the translated geoms and
+    // follows for free.
     let anim_flow = state.domain.is_animation().then(|| {
         let rects: BTreeMap<u64, [f32; 4]> = geoms
             .iter()
             .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
             .collect();
-        super::graph_anim_edge::anim_flow_layout(&state.doc, &rects)
+        super::graph_anim_edge::anim_flow_layout(&state.doc, &rects, m.badge())
     });
     if let Some(l) = &anim_flow {
         for g in &mut geoms {
             if let Some(mn) = l.chip_min.get(&g.id) {
                 g.translate(Vec2::new(mn[0] - g.rect.min.x, mn[1] - g.rect.min.y));
+            }
+            if let (Some(d), Some(chip)) = (l.chip_dir.get(&g.id), &mut g.chip) {
+                chip.dir = Vec2::new(d[0], d[1]);
             }
         }
         // An unfolded (selected) card is the thing being edited: nothing may
@@ -3483,15 +3492,21 @@ fn draw_and_interact(
         if resp.pressed {
             node_pressed = true;
         }
-        // Node header hover: the node's own doc line.
+        // Node header hover: the node's own doc line. A transition badge
+        // hovers its rule instead — "Idle → Jump" over the summary line
+        // that used to be printed on the canvas.
         if resp.hovered && !g.reroute && state.node_drag.is_none() {
-            let header = Rect::from_min_size(
-                g.rect.min,
-                Vec2::new(g.rect.width(), m.header_h),
-            );
-            if pointer_world.is_some_and(|p| header.contains(p)) {
-                if let Some(doc) = node_doc(registry, resolver, state, g.id) {
-                    ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
+            if let Some(chip) = &g.chip {
+                ui.tooltip_for(scope.world_rect_to_screen(g.rect), &chip.tip);
+            } else {
+                let header = Rect::from_min_size(
+                    g.rect.min,
+                    Vec2::new(g.rect.width(), m.header_h),
+                );
+                if pointer_world.is_some_and(|p| header.contains(p)) {
+                    if let Some(doc) = node_doc(registry, resolver, state, g.id) {
+                        ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
+                    }
                 }
             }
         }
@@ -4664,13 +4679,17 @@ fn anim_select_dim(
     }
     // The selected transition's own edge stays lit: its segments re-draw
     // above the scrim, arrowhead included — but they stop at the border of
-    // the unfolded card itself (its halves meet at the card's center), so
-    // nothing ever crosses the card being edited.
+    // the unfolded card itself (its halves meet beside the card, at the
+    // line's midpoint), so nothing ever crosses the card being edited.
     let rects: BTreeMap<u64, [f32; 4]> = geoms
         .iter()
         .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
         .collect();
-    let layout = super::graph_anim_edge::anim_flow_layout(&state.doc, &rects);
+    let layout = super::graph_anim_edge::anim_flow_layout(
+        &state.doc,
+        &rects,
+        GraphMetrics::new(&st).badge(),
+    );
     let card = rects.get(&owner).copied();
     for (i, e) in state.doc.edges.iter().enumerate() {
         if e.to_node != owner && e.from_node != owner {
@@ -7556,6 +7575,13 @@ fn anim_live_highlight(
             continue;
         }
         let mut p = ui.painter();
+        // A transition is a round badge: its ring is round too.
+        if g.chip.is_some() {
+            let (c, rad) = (r.center(), r.width().min(r.height()) * 0.5);
+            p.circle_stroke(c, rad, (st.metrics.border * 2.0).max(2.0), accent.with_alpha(alpha));
+            p.circle_stroke(c, rad + 3.0 * s, st.metrics.border, accent.with_alpha(alpha * 0.35));
+            continue;
+        }
         p.rect_stroke(
             r,
             st.rounding.widget,
@@ -10451,6 +10477,32 @@ fn draw_wires(
     }
 }
 
+/// The transition badge's arrow: a vector reading of
+/// `engine/icons/left-arrow-circle.svg` (disc radius 10 — shaft from x=14 to
+/// the tip at x=6 on the centreline, head strokes from the tip to (9, 7) and
+/// (9, 13), stroke 2, round caps), scaled to badge radius `r` and rotated so
+/// it points along `dir`. Drawn in the canvas colour it reads as cut out of
+/// the disc, which is what keeps it crisp and rotatable where the raster
+/// icon could be neither.
+fn draw_badge_arrow(p: &mut Painter, c: Pos2, r: f32, dir: Vec2, w: f32, color: Color) {
+    let f = Vec2::new(dir.x * r, dir.y * r);
+    let n = Vec2::new(-f.y, f.x);
+    let at = |a: f32, s: f32| Pos2::new(c.x + f.x * a + n.x * s, c.y + f.y * a + n.y * s);
+    let (tail, tip) = (at(-0.4, 0.0), at(0.4, 0.0));
+    let wings = [at(0.1, -0.3), at(0.1, 0.3)];
+    // The shaft stops where its corners meet the head strokes' inner edges
+    // (the icon's x=8.4 at its own stroke), so the join is seamless at any
+    // stroke width instead of a bar running through the head's notch.
+    let shaft_end = at((0.4 - 1.2 * w / r).max(-0.4), 0.0);
+    p.line_segment(tail, shaft_end, w, color);
+    p.line_segment(tip, wings[0], w, color);
+    p.line_segment(tip, wings[1], w, color);
+    // Round caps and joins, as the icon has them.
+    for q in [tail, tip, wings[0], wings[1]] {
+        p.circle_filled(q, w * 0.5, color);
+    }
+}
+
 /// Filled arrowhead at `tip`, oriented away from `prev` (screen space) —
 /// the machine edge's direction marker (Task 41 rework).
 fn draw_arrow_head(p: &mut Painter, tip: Pos2, prev: Pos2, l: f32, color: Color) {
@@ -10825,54 +10877,25 @@ fn draw_nodes(
             continue;
         }
 
-        // Task 41: the at-rest transition chip. One mono line over a small
-        // rounded card, with the Bool socket dot at its left — filled when a
-        // rule is wired, hollow for always-true (mockup 2b's dot on 2d's
-        // collapse). Selection swaps to the standard card via geometry, so
-        // this branch only ever draws the rest state.
+        // Task 41 (transitions ticket 02): the at-rest transition badge — a
+        // disc with the arrow cut out of it, Unreal's transition icon,
+        // rotated to point along the flow. The rule text is not on the
+        // canvas (tooltip + unfolded card). Selection swaps to the standard
+        // card via geometry, so this branch only ever draws the rest state.
         if let Some(chip) = &g.chip {
             let bg = st.palette.input;
-            if lod.bar_only() {
-                let bar = Rect::from_min_size(
-                    srect.min,
-                    Vec2::new(srect.width(), (L4_BAR_H * m.scale * zoom).max(1.0)),
-                );
-                p.rect_filled(bar, Rounding::ZERO, edge_col);
-                continue;
-            }
-            let round = Rounding::same((m.radius * 0.7 * zoom).min(srect.height() * 0.5));
-            p.rect_filled(srect, round, fade(st.palette.elevated, dim, bg));
-            p.rect_stroke(
-                srect,
-                round,
+            let c = srect.center();
+            let r = srect.width().min(srect.height()) * 0.5;
+            p.circle_filled(c, r, fade(st.palette.stroke_strong, dim, bg));
+            p.circle_stroke(
+                c,
+                r,
                 m.border,
-                if errored { status.error } else { st.palette.stroke_strong },
+                if errored { status.error } else { fade(st.palette.stroke, dim, bg) },
             );
-            // The socket dot: ember — the Bool family — per the mockup.
-            let dot_c = Pos2::new(
-                srect.min.x + (m.pad_x + m.pin_r) * zoom,
-                srect.center().y,
-            );
-            let dot_r = m.pin_r * zoom;
-            let ember = fade(pin_color(Some(registry), &PinType::Bool), dim, bg);
-            if chip.wired {
-                p.circle_filled(dot_c, dot_r, ember);
-            } else {
-                p.circle_stroke(dot_c, dot_r, (m.ring_w * zoom).max(1.0), ember);
-            }
+            // Below the glyph threshold the badge is the plain disc.
             if lod.glyphs() {
-                let px = st.fonts.small * zoom;
-                p.text_family(
-                    Pos2::new(
-                        dot_c.x + dot_r + m.label_gap * zoom,
-                        srect.center().y - px * 0.62,
-                    ),
-                    &chip.text,
-                    px,
-                    fade(st.palette.text, dim, bg),
-                    None,
-                    FontFamily::Mono,
-                );
+                draw_badge_arrow(&mut p, c, r, chip.dir, (m.ring_w * zoom).max(1.0), bg);
             }
             continue;
         }
