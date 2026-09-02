@@ -44,13 +44,14 @@ pub use machine::{
 };
 pub use plan::{
     compile_anim_graph, compile_anim_graph_with, trigger_pin_type, upgrade_any_state,
-    AnimGraphLoader, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl, PlanClip, PlanRule,
-    PlanSlot, PlanSpace, PlanState, PlanTransition, PlanTree, PoseSource, RuleExpr,
-    TransitionFrom, ALIAS_GLOBAL_PROP, ALIAS_STATES_PROP, ANIM_STATE_ALIAS_TYPE_ID,
-    TRIGGER_PARAM_DOMAIN,
+    AnimGraphLoader, AnimGraphPlan, AnimParamType, CmpOp, MathOp, ParamDecl, PlanClip,
+    PlanIkChain, PlanIkSolver, PlanRule, PlanSlot, PlanSpace, PlanState, PlanTransition,
+    PlanTree, PoseSource, RuleExpr, TransitionFrom, ALIAS_GLOBAL_PROP, ALIAS_STATES_PROP,
+    ANIM_IK_CHAIN_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{
     compile_blend_space, invalidate_blend_space, AnimAssetLoader, AnimClipCache,
     AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime, AnimGraphSystem, AnimViewInfo,
-    BlendSpaceCache, ClipSet, DiskAnimAssets, ThrottleState,
+    ArmedIkChain, BlendSpaceCache, ClipSet, DiskAnimAssets, IkTarget, IkTargets,
+    ResolvedIkTarget, ThrottleState,
 };

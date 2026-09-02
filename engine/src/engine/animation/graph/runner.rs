@@ -29,9 +29,11 @@ use super::machine::{
     collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
     PoseScratch,
 };
+use crate::engine::animation::ik;
+
 use super::plan::{
-    compile_anim_graph_with, upgrade_any_state, AnimGraphLoader, AnimGraphPlan, PlanClip, PlanTree,
-    PoseSource,
+    compile_anim_graph_with, upgrade_any_state, AnimGraphLoader, AnimGraphPlan, PlanClip,
+    PlanIkSolver, PlanTree, PoseSource,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,66 @@ impl AnimGraphRunner {
     pub fn is_runnable(&self) -> bool {
         self.enabled && !self.graph.trim().is_empty()
     }
+}
+
+// ---------------------------------------------------------------------------
+// IK targets (Task 41.5 P5, I-D3)
+// ---------------------------------------------------------------------------
+
+/// One chain's IK goals, in **world Z-up** game space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IkTarget {
+    /// Where the effector should land (two-bone: the tip; look-at: the point
+    /// to aim at).
+    pub effector: glam::Vec3,
+    /// Bend-plane disambiguator for the two-bone solver; ignored by look-at.
+    pub pole: glam::Vec3,
+}
+
+/// Per-chain IK goals, written by gameplay (P6's foot placement, a look-at
+/// controller, tests) and read by the runner's serial target-resolution
+/// pass. Keyed by chain name — the IK Chain node's title. An entry for a
+/// name the graph does not declare is ignored; a declared chain with no
+/// entry simply does not solve this frame.
+///
+/// Positions are **world Z-up**; the runner converts them into the mesh's
+/// Y-up model space each frame through the entity's render matrix (I-D1,
+/// previous-frame `TransformCache` latency accepted).
+#[derive(Debug, Clone, Default)]
+pub struct IkTargets {
+    pub targets: BTreeMap<String, IkTarget>,
+}
+
+impl IkTargets {
+    /// Upsert one chain's goals (world Z-up).
+    pub fn set(&mut self, chain: &str, effector: glam::Vec3, pole: glam::Vec3) {
+        self.targets
+            .insert(chain.to_string(), IkTarget { effector, pole });
+    }
+}
+
+/// A frame's resolved targets for one chain, in the mesh's **Y-up model
+/// space** — what the solvers consume directly.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedIkTarget {
+    pub target: glam::Vec3,
+    pub pole: glam::Vec3,
+}
+
+/// A plan IK chain armed against one entity's skeleton: bone names resolved
+/// to indices (arm time refuses on a missing bone), plus the per-frame
+/// resolved targets the serial pre-pass writes.
+pub struct ArmedIkChain {
+    pub name: String,
+    /// Indices into `SkeletonInstance::bones`, root→tip.
+    pub bones: Vec<usize>,
+    pub solver: PlanIkSolver,
+    pub weight_param: String,
+    /// This frame's model-space targets — written by the serial resolution
+    /// pass (it needs `TransformCache` from `Resources`, which the parallel
+    /// section must not touch), read inside `tick_entity`. `None` = no
+    /// `IkTargets` entry for this chain, so it does not solve.
+    pub resolved: Option<ResolvedIkTarget>,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +250,12 @@ pub struct AnimGraphRuntime {
     pub disabled: Option<String>,
     /// Update-rate throttle state (Task 41.5 P4).
     pub throttle: ThrottleState,
+    /// Armed IK chains (Task 41.5 P5): the plan's chains with bone names
+    /// resolved to this skeleton's indices. Empty when the plan has none.
+    pub ik: Vec<ArmedIkChain>,
+    /// Scratch for the IK descendant re-walk (sized to the bone count on
+    /// first use, reused every frame — no steady-state allocation).
+    pub ik_touched: Vec<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +621,8 @@ impl AnimGraphSystem {
             generation,
             disabled: Some(why),
             throttle: ThrottleState::default(),
+            ik: Vec::new(),
+            ik_touched: Vec::new(),
         };
 
         // Peek, compile, store — short borrows, one at a time, the same dance
@@ -641,8 +711,59 @@ impl AnimGraphSystem {
             generation,
             disabled: None,
             throttle: ThrottleState::default(),
+            ik: Vec::new(),
+            ik_touched: Vec::new(),
         }
     }
+}
+
+/// Resolve a plan's IK chains against an entity's skeleton — the arm-time
+/// step of I-D3. Refuses, anchored on the chain, when a bone is missing or
+/// the chain does not run root→tip down one hierarchy path (the descendant
+/// re-walk relies on that; twist bones *between* the named ones are fine —
+/// they re-walk).
+fn arm_ik_chains(
+    plan: &AnimGraphPlan,
+    skeleton: &SkeletonInstance,
+) -> Result<Vec<ArmedIkChain>, String> {
+    let index_of = |name: &str| skeleton.bones.iter().position(|b| b.name == name);
+    let mut out = Vec::with_capacity(plan.ik_chains.len());
+    for chain in &plan.ik_chains {
+        let mut bones = Vec::with_capacity(chain.bones.len());
+        for b in &chain.bones {
+            bones.push(index_of(b).ok_or_else(|| {
+                format!(
+                    "IK chain '{}': bone '{b}' is not in the skeleton",
+                    chain.name
+                )
+            })?);
+        }
+        for w in bones.windows(2) {
+            let (anc, desc) = (w[0], w[1]);
+            let mut p = skeleton.bones[desc].parent_index;
+            while let Some(i) = p {
+                if i == anc {
+                    break;
+                }
+                p = skeleton.bones[i].parent_index;
+            }
+            if p.is_none() {
+                return Err(format!(
+                    "IK chain '{}': bone '{}' is not a descendant of '{}' — chain bones \
+                     go root\u{2192}tip down one hierarchy path",
+                    chain.name, skeleton.bones[desc].name, skeleton.bones[anc].name
+                ));
+            }
+        }
+        out.push(ArmedIkChain {
+            name: chain.name.clone(),
+            bones,
+            solver: chain.solver,
+            weight_param: chain.weight_param.clone(),
+            resolved: None,
+        });
+    }
+    Ok(out)
 }
 
 /// The clip a plan reference names, out of the cache.
@@ -700,8 +821,90 @@ fn tick_entity(
         scratch,
     );
     rt.slot.apply(&plan, &clip_for, &mut skeleton.local_transforms, scratch);
-    skeleton.compute_palette();
+    // FK phase 1, the IK stage (Task 41.5 P5) over the retained model space,
+    // then phase 2 — one palette refresh however many chains ran. Sitting
+    // inside the eval gate means IK follows the same rate as the pose it
+    // corrects (I-D5; P6's lock-edge `force_eval_external` hook covers the
+    // frames that must not be skipped).
+    skeleton.compute_model_space();
+    apply_ik(rt, skeleton);
+    skeleton.refresh_palette_from_model_space();
     true
+}
+
+/// The IK stage (I-D1/I-D5): for each armed chain with a resolved target
+/// and a positive weight, solve in the mesh's Y-up model space, blend
+/// solved vs animated by the weight parameter, write the chain bones'
+/// corrected matrices and re-walk their descendants (P2 caveat: FK phase 2
+/// never auto-updates them). Chains apply in plan order, each seeing the
+/// previous one's result. Runs on rayon workers — everything it touches is
+/// this entity's own state.
+///
+/// Weight-blend ruling: per edited bone on the model-space decomposition —
+/// slerp rotation, lerp translation, animated scale kept ([`ik::blend_model`]).
+/// Weight 0 (or a missing target) skips the chain entirely — no solve, no
+/// matrix writes.
+fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
+    if rt.ik.is_empty() {
+        return;
+    }
+    let mut touched = std::mem::take(&mut rt.ik_touched);
+    let SkeletonInstance {
+        bones,
+        local_transforms,
+        model_space,
+        ..
+    } = skeleton;
+    for chain in &rt.ik {
+        let Some(t) = chain.resolved else { continue };
+        let weight = rt
+            .params
+            .get_float(&chain.weight_param)
+            .unwrap_or(0.0)
+            .min(1.0);
+        if weight <= 0.0 {
+            continue;
+        }
+        // A skeleton swapped under a live runtime could shrink; never index
+        // out of bounds — the chain simply stops until re-arm.
+        if chain.bones.iter().any(|&i| i >= model_space.len()) {
+            continue;
+        }
+        match chain.solver {
+            PlanIkSolver::TwoBone => {
+                let (r, m, tip) = (chain.bones[0], chain.bones[1], chain.bones[2]);
+                let (root2, mid2) = ik::solve_two_bone(
+                    model_space[r],
+                    model_space[m],
+                    model_space[tip],
+                    t.target,
+                    t.pole,
+                );
+                model_space[r] = ik::blend_model(&model_space[r], &root2, weight);
+                model_space[m] = ik::blend_model(&model_space[m], &mid2, weight);
+                ik::rewalk_descendants(
+                    model_space,
+                    local_transforms,
+                    |i| bones[i].parent_index,
+                    &[r, m],
+                    &mut touched,
+                );
+            }
+            PlanIkSolver::LookAt { axis, max_angle } => {
+                let b = chain.bones[0];
+                let solved = ik::solve_look_at(model_space[b], t.target, axis, max_angle);
+                model_space[b] = ik::blend_model(&model_space[b], &solved, weight);
+                ik::rewalk_descendants(
+                    model_space,
+                    local_transforms,
+                    |i| bones[i].parent_index,
+                    &[b],
+                    &mut touched,
+                );
+            }
+        }
+    }
+    rt.ik_touched = touched;
 }
 
 impl System for AnimGraphSystem {
@@ -771,6 +974,18 @@ impl System for AnimGraphSystem {
                 }
             }
 
+            // Arm-time IK resolution (Task 41.5 P5): bone names → this
+            // skeleton's indices. A missing bone refuses the whole runtime,
+            // like a missing clip — anchored on the chain that named it.
+            if runtime.disabled.is_none() && !runtime.plan.ik_chains.is_empty() {
+                if let Ok(skel) = world.get::<&SkeletonInstance>(entity) {
+                    match arm_ik_chains(&runtime.plan, &skel) {
+                        Ok(chains) => runtime.ik = chains,
+                        Err(why) => runtime.disabled = Some(format!("{graph}: {why}")),
+                    }
+                }
+            }
+
             // Arm-time refusals print once — arming only happens when there
             // is no runtime, so this cannot repeat per frame.
             if let Some(why) = &runtime.disabled {
@@ -833,6 +1048,46 @@ impl System for AnimGraphSystem {
             let due = interval <= 1
                 || frame.wrapping_add(e.to_bits().get()) % u64::from(interval) == 0;
             rt.throttle.eval_this_frame = due || forced || first_visible;
+        }
+
+        // 2.6. IK target resolution (Task 41.5 P5, I-D1): gameplay's world
+        //    Z-up effector/pole become this frame's mesh-space targets —
+        //    `target_model = entity_render⁻¹ * zup_to_yup(target_world)`.
+        //    Serial by design, like the significance pass: `TransformCache`
+        //    lives in `Resources`, which the parallel section must not
+        //    touch; `tick_entity` reads only the `resolved` slots written
+        //    here. `entity_render` is the previous frame's render matrix
+        //    (the accepted render-path latency), with the entity's own
+        //    `Transform` as the cache-less fallback (tests).
+        for (e, (rt, targets, transform)) in world.query_mut::<(
+            &mut AnimGraphRuntime,
+            Option<&IkTargets>,
+            Option<&Transform>,
+        )>() {
+            if rt.disabled.is_some() || rt.ik.is_empty() {
+                continue;
+            }
+            let entity_render = match cache {
+                Some(c) => glam::Mat4::from_cols_slice(c.get_render(e).as_slice()),
+                None => transform
+                    .map(|t| glam::Mat4::from_cols_slice(t.model_matrix().as_slice()))
+                    .unwrap_or(glam::Mat4::IDENTITY),
+            };
+            let inv = entity_render.inverse();
+            for chain in &mut rt.ik {
+                chain.resolved = targets
+                    .and_then(|t| t.targets.get(&chain.name))
+                    .map(|t| ResolvedIkTarget {
+                        target: inv.transform_point3(
+                            crate::engine::utils::coords::convert_position_zup_to_yup(
+                                t.effector,
+                            ),
+                        ),
+                        pole: inv.transform_point3(
+                            crate::engine::utils::coords::convert_position_zup_to_yup(t.pole),
+                        ),
+                    });
+            }
         }
 
         // 3. Tick machines and write poses. Per-frame order per the spec:

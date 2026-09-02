@@ -5,6 +5,7 @@
 //! (not depth-tested): bones sit inside the skinned mesh and would
 //! otherwise be hidden by the character's own skin.
 
+use crate::engine::animation::graph::runner::{AnimGraphRuntime, IkTargets};
 use crate::engine::animation::SkeletonInstance;
 use crate::engine::debug_draw::DebugDrawBuffer;
 use crate::engine::ecs::components::Transform;
@@ -16,6 +17,13 @@ use hecs::World;
 const BONE_COLOR: [f32; 4] = [0.0, 0.9, 0.9, 1.0];
 /// Joint cross size in world units.
 const JOINT_CROSS_SIZE: f32 = 0.03;
+/// IK effector cross (orange) and pole cross (violet), Task 41.5 P5.
+const IK_EFFECTOR_COLOR: [f32; 4] = [1.0, 0.6, 0.1, 1.0];
+const IK_POLE_COLOR: [f32; 4] = [0.7, 0.4, 1.0, 1.0];
+/// The faint effector→pole tie line.
+const IK_TIE_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 0.35];
+const IK_EFFECTOR_CROSS_SIZE: f32 = 0.06;
+const IK_POLE_CROSS_SIZE: f32 = 0.035;
 
 /// Submit bone debug draw lines for all skeletons with `debug_draw_visible`.
 ///
@@ -34,6 +42,41 @@ pub fn submit_skeleton_debug_draws(
         let entity_mat = glam::Mat4::from_cols_slice(entity_render.as_slice());
         submit_one(skeleton, &joint_positions(skeleton, entity_mat), buffer);
     }
+}
+
+/// Submit IK effector/pole overlays (Task 41.5 P5) for every entity whose
+/// skeleton debug toggle is on and whose graph armed IK chains: a cross at
+/// each chain's effector, a smaller one at its pole, and a faint tie line.
+///
+/// `IkTargets` positions are already world Z-up game space — exactly what
+/// the debug draw API takes, so no conversion happens here.
+pub fn submit_ik_debug_draws(world: &World, buffer: &mut DebugDrawBuffer) {
+    for (_e, (skeleton, rt, targets)) in world
+        .query::<(&SkeletonInstance, &AnimGraphRuntime, &IkTargets)>()
+        .iter()
+    {
+        if !skeleton.debug_draw_visible || rt.ik.is_empty() {
+            continue;
+        }
+        for chain in &rt.ik {
+            let Some(t) = targets.targets.get(&chain.name) else {
+                continue;
+            };
+            let effector = t.effector.to_array();
+            let pole = t.pole.to_array();
+            cross_overlay(buffer, effector, IK_EFFECTOR_CROSS_SIZE, IK_EFFECTOR_COLOR);
+            cross_overlay(buffer, pole, IK_POLE_CROSS_SIZE, IK_POLE_COLOR);
+            buffer.line_overlay(effector, pole, IK_TIE_COLOR);
+        }
+    }
+}
+
+/// A single-color axis-aligned cross (game-space X/Y/Z), overlay.
+fn cross_overlay(buffer: &mut DebugDrawBuffer, p: [f32; 3], s: f32, color: [f32; 4]) {
+    let [x, y, z] = p;
+    buffer.line_overlay([x - s, y, z], [x + s, y, z], color);
+    buffer.line_overlay([x, y - s, z], [x, y + s, z], color);
+    buffer.line_overlay([x, y, z - s], [x, y, z + s], color);
 }
 
 /// World-space joint positions in Z-up game space, indexed like `bones`.

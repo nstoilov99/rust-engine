@@ -9,6 +9,7 @@ pub mod components;
 #[cfg(debug_assertions)]
 pub mod debug_draw;
 pub mod graph;
+pub mod ik;
 pub mod sampling;
 pub mod system;
 

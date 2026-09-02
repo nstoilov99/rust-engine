@@ -2803,6 +2803,11 @@ impl App {
                 &mut self.core.debug_draw_buffer,
                 tc,
             );
+            // IK effector/pole overlays (Task 41.5 P5) ride the same toggle.
+            rust_engine::engine::animation::debug_draw::submit_ik_debug_draws(
+                self.core.game_world.hecs(),
+                &mut self.core.debug_draw_buffer,
+            );
         }
 
         // Submit audio emitter debug wireframes (spatial emitters only)

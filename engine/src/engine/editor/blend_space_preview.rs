@@ -312,6 +312,7 @@ fn one_state_plan(doc: &BlendSpaceDoc, space: &BlendSpace) -> AnimGraphPlan {
         transitions: Vec::new(),
         entry: 0,
         slots: Vec::new(),
+        ik_chains: Vec::new(),
     }
 }
 

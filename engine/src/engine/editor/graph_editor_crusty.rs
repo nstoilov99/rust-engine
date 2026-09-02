@@ -782,10 +782,12 @@ fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropVal
 /// only way to give it one.
 pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
     use crate::engine::animation::graph::plan::{
-        ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
-        ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP, GRAPH_PROP,
-        PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPACE_PROP,
-        SPEED_PROP,
+        ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
+        ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP,
+        GRAPH_PROP, IK_AXIS_X_PROP, IK_AXIS_Y_PROP, IK_AXIS_Z_PROP, IK_BONES_PROP,
+        IK_MAX_ANGLE_PROP, IK_SOLVER_LOOK_AT, IK_SOLVER_PROP, IK_SOLVER_TWO_BONE,
+        IK_WEIGHT_PARAM_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
+        SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
     };
     use crate::engine::animation::graph::ALIAS_GLOBAL_PROP;
     let text_of = |key: &str| match n.properties.get(key) {
@@ -995,6 +997,64 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
                 "Fade Out".to_string(),
                 InlineKind::Float(float_of(SLOT_FADE_OUT_PROP, 0.0)),
             ));
+        }
+        // An IK Chain (Task 41.5 P5): bones as one comma-separated row
+        // (root→tip), the solver enum, the fading Float parameter as a
+        // dropdown (the trigger row's shape), and — look-at only — the aim
+        // axis and clamp. Minimal by design: the compiler's anchored
+        // refusals do the validating.
+        _ if n.type_id == ANIM_IK_CHAIN_TYPE_ID => {
+            out.push((
+                IK_BONES_PROP.to_string(),
+                "Bones".to_string(),
+                InlineKind::Str(text_of(IK_BONES_PROP)),
+            ));
+            let solver = {
+                let s = text_of(IK_SOLVER_PROP);
+                if s.is_empty() {
+                    IK_SOLVER_TWO_BONE.to_string()
+                } else {
+                    s
+                }
+            };
+            let variants = vec![
+                IK_SOLVER_TWO_BONE.to_string(),
+                IK_SOLVER_LOOK_AT.to_string(),
+            ];
+            let ok = variants.contains(&solver);
+            out.push((
+                IK_SOLVER_PROP.to_string(),
+                "Solver".to_string(),
+                InlineKind::Enum { value: solver.clone(), variants, ok },
+            ));
+            let value = text_of(IK_WEIGHT_PARAM_PROP);
+            let variants: Vec<String> = docd
+                .doc()
+                .variables
+                .iter()
+                .filter(|v| v.ty == PinType::Float)
+                .map(|v| v.slug.clone())
+                .collect();
+            let ok = variants.contains(&value);
+            out.push((
+                IK_WEIGHT_PARAM_PROP.to_string(),
+                "Weight".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+            if solver == IK_SOLVER_LOOK_AT {
+                for (key, label, default) in [
+                    (IK_AXIS_X_PROP, "Axis X", 0.0),
+                    (IK_AXIS_Y_PROP, "Axis Y", 0.0),
+                    (IK_AXIS_Z_PROP, "Axis Z", 1.0),
+                    (IK_MAX_ANGLE_PROP, "Max Angle", 90.0),
+                ] {
+                    out.push((
+                        key.to_string(),
+                        label.to_string(),
+                        InlineKind::Float(float_of(key, default)),
+                    ));
+                }
+            }
         }
         _ => {}
     }

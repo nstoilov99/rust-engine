@@ -36,7 +36,7 @@ use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     invalidate_blend_space, AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner,
-    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet,
+    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet, IkTargets,
 };
 use crate::engine::animation::blend_space::{
     parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
@@ -3513,4 +3513,323 @@ fn entering_the_frustum_forces_an_immediate_evaluation() {
     let r0 = revision_of(&h, e);
     h.tick();
     assert!(revision_of(&h, e) > r0, "first visible frame evaluated immediately");
+}
+
+// ---------------------------------------------------------------------------
+// IK (Task 41.5 P5, I-D1..3)
+// ---------------------------------------------------------------------------
+//
+// The compiler carries chains as bone *names*; arming resolves them against
+// the entity's skeleton and refuses on a missing bone; the serial pass
+// converts world Z-up `IkTargets` through the entity render matrix (the
+// harness has no `TransformCache`, so the documented `Transform` fallback is
+// what runs); the stage itself sits inside the eval gate, after FK phase 1.
+
+/// Three-bone Y-up arm: upper at the origin, lower one unit up, hand two
+/// units up (l1 = l2 = 1) — plus a "tool" hanging half a unit above the hand
+/// for the descendant re-walk test.
+fn ik_bones() -> Vec<BoneData> {
+    let bind = |y: f32| Mat4::from_translation(Vec3::new(0.0, y, 0.0)).inverse();
+    vec![
+        BoneData {
+            name: "upper".into(),
+            parent_index: None,
+            inverse_bind_matrix: Mat4::IDENTITY,
+        },
+        BoneData {
+            name: "lower".into(),
+            parent_index: Some(0),
+            inverse_bind_matrix: bind(1.0),
+        },
+        BoneData {
+            name: "hand".into(),
+            parent_index: Some(1),
+            inverse_bind_matrix: bind(2.0),
+        },
+        BoneData {
+            name: "tool".into(),
+            parent_index: Some(2),
+            inverse_bind_matrix: bind(2.5),
+        },
+    ]
+}
+
+/// ENTRY → Idle plus one IK Chain node with the given props.
+fn ik_doc(props: &[(&str, PropValue)]) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("ik")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(
+            2,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Idle"),
+            &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
+        ),
+        with(5, plan::ANIM_IK_CHAIN_TYPE_ID, Some("arm"), props),
+    ];
+    doc.edges = vec![edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN)];
+    doc
+}
+
+fn two_bone_props(bones: &str) -> Vec<(&'static str, PropValue)> {
+    vec![
+        (plan::IK_BONES_PROP, PropValue::Str(bones.to_string())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]
+}
+
+#[test]
+fn ik_chains_compile_into_the_plan() {
+    let p = compile_anim_graph(&ik_doc(&two_bone_props("upper, lower, hand"))).expect("compiles");
+    assert_eq!(p.ik_chains.len(), 1);
+    let c = &p.ik_chains[0];
+    assert_eq!(c.name, "arm");
+    assert_eq!(c.bones, vec!["upper", "lower", "hand"]);
+    assert_eq!(c.solver, plan::PlanIkSolver::TwoBone, "the default solver");
+    assert_eq!(c.weight_param, "ik");
+
+    // Look-at: one bone, default axis +Z, default clamp 90° carried as
+    // radians in the plan.
+    let p = compile_anim_graph(&ik_doc(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]))
+    .expect("compiles");
+    match p.ik_chains[0].solver {
+        plan::PlanIkSolver::LookAt { axis, max_angle } => {
+            assert!((axis - Vec3::Z).length() < 1e-6);
+            assert!((max_angle - 90f32.to_radians()).abs() < 1e-6);
+        }
+        ref other => panic!("expected LookAt, got {other:?}"),
+    }
+}
+
+#[test]
+fn ik_chains_refuse_bad_configs_with_anchored_messages() {
+    let err = |props: &[(&str, PropValue)]| compile_anim_graph(&ik_doc(props)).unwrap_err();
+
+    let e = err(&[(plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into()))]);
+    assert!(e.contains("IK chain 'arm' names no bones"), "{e}");
+
+    let e = err(&two_bone_props("upper, lower"));
+    assert!(e.contains("exactly 3 bones") && e.contains("got 2"), "{e}");
+
+    let e = err(&[
+        (plan::IK_BONES_PROP, PropValue::Str("upper".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum("fabrik".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]);
+    assert!(e.contains("unknown solver 'fabrik'"), "{e}");
+
+    let e = err(&[(plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into()))]);
+    assert!(e.contains("IK chain 'arm' names no weight parameter"), "{e}");
+
+    let e = err(&[
+        (plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("nope".into())),
+    ]);
+    assert!(
+        e.contains("IK chain 'arm': parameter 'nope' is not declared"),
+        "{e}"
+    );
+
+    // Duplicate names refuse — chain names key `IkTargets`.
+    let mut doc = ik_doc(&two_bone_props("upper, lower, hand"));
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_IK_CHAIN_TYPE_ID,
+        Some("arm"),
+        &two_bone_props("upper, lower, hand"),
+    ));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("two IK chains are named 'arm'"), "{e}");
+}
+
+fn ik_harness(props: &[(&str, PropValue)]) -> Harness {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), ik_doc(props));
+    Harness::new(assets)
+}
+
+#[test]
+fn arming_refuses_a_missing_ik_bone() {
+    let mut h = ik_harness(&two_bone_props("upper, shin, hand"));
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).expect("runtime exists");
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("IK chain 'arm': bone 'shin' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+#[test]
+fn arming_refuses_a_chain_off_the_hierarchy_path() {
+    // tool → hand is child → parent: not a root→tip descent.
+    let mut h = ik_harness(&two_bone_props("upper, tool, hand"));
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("'hand' is not a descendant of 'tool'"),
+        "{why}"
+    );
+}
+
+/// The model-space translation of bone `i`.
+fn bone_pos(h: &Harness, e: hecs::Entity, i: usize) -> Vec3 {
+    h.world.get::<&SkeletonInstance>(e).unwrap().model_space[i]
+        .to_scale_rotation_translation()
+        .2
+}
+
+/// End to end: the entity sits at Z-up (2, 0, 0); world-space targets
+/// convert through the entity render matrix (Transform fallback — no
+/// `TransformCache` in the harness) into the mesh's Y-up model space. The
+/// model-space goal is (1, 1, 0) with a +X pole:
+///   yup (1,1,0) at entity zup (2,0,0) → world zup (2, 1, 1);
+///   pole yup (1,0,0) → world zup (2, 1, 0).
+#[test]
+fn ik_reaches_the_target_and_weight_zero_skips_entirely() {
+    let mut h = ik_harness(&two_bone_props("upper, lower, hand"));
+    let mut targets = IkTargets::default();
+    targets.set("arm", Vec3::new(2.0, 1.0, 1.0), Vec3::new(2.0, 1.0, 0.0));
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(2.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+
+    // Weight defaults to 0 → the chain never touches the pose.
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        assert_eq!(rt.ik.len(), 1);
+        assert_eq!(rt.ik[0].bones, vec![0, 1, 2], "names resolved to indices");
+        assert!(rt.ik[0].resolved.is_some(), "targets resolved serially");
+    }
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        (hand - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4,
+        "weight 0 leaves the animated pose untouched: {hand}"
+    );
+
+    // Weight 1 → the hand lands on the model-space target exactly.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        (hand - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-3,
+        "tip on target: {hand}"
+    );
+    // +X pole → the elbow bent toward +X.
+    assert!(bone_pos(&h, e, 1).x > 0.1, "elbow follows the pole");
+
+    // Half weight blends between the animated and solved poses.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 0.5);
+    h.tick();
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        hand.x > 0.05 && hand.x < 0.95 && hand.y < 2.0,
+        "half weight is strictly between rest and solved: {hand}"
+    );
+}
+
+/// The P2 caveat, pinned: descendants of the solved bones are re-walked, so
+/// the tool attached to the hand follows exactly (hand * its unchanged local).
+#[test]
+fn ik_rewalks_descendants_below_the_chain() {
+    let mut h = ik_harness(&two_bone_props("upper, lower, hand"));
+    let mut targets = IkTargets::default();
+    // Entity at the origin: model yup (1,1,0) → world zup (0,1,1);
+    // pole yup (1,0,0) → world zup (0,1,0).
+    targets.set("arm", Vec3::new(0.0, 1.0, 1.0), Vec3::new(0.0, 1.0, 0.0));
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+    h.tick();
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+
+    let sk = h.world.get::<&SkeletonInstance>(e).unwrap();
+    let hand = sk.model_space[2];
+    let tool = sk.model_space[3].to_scale_rotation_translation().2;
+    // tool = hand * its rest local (half a unit up the hand's own Y).
+    let expected = (hand * Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0)))
+        .to_scale_rotation_translation()
+        .2;
+    assert!((tool - expected).length() < 1e-3, "tool {tool} vs {expected}");
+    assert!(
+        (tool - Vec3::new(0.0, 2.5, 0.0)).length() > 0.3,
+        "the tool really moved off its rest position"
+    );
+}
+
+/// Look-at end to end: the hand's local +Z aims at a target off to model +X,
+/// under the default 90° clamp.
+#[test]
+fn look_at_runs_end_to_end() {
+    let mut h = ik_harness(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]);
+    let mut targets = IkTargets::default();
+    // Model yup (5, 2, 0) at the origin entity → world zup (0, 5, 2).
+    targets.set("arm", Vec3::new(0.0, 5.0, 2.0), Vec3::ZERO);
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+    h.tick();
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+    let rot = h.world.get::<&SkeletonInstance>(e).unwrap().model_space[2]
+        .to_scale_rotation_translation()
+        .1;
+    let fwd = rot * Vec3::Z;
+    assert!(
+        (fwd - Vec3::X).length() < 1e-3,
+        "the hand's +Z aims at the target: {fwd}"
+    );
 }

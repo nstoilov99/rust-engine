@@ -381,6 +381,7 @@ mod tests {
                 },
             ],
             slots: Vec::new(),
+            ik_chains: Vec::new(),
         }
     }
 
@@ -396,6 +397,8 @@ mod tests {
             generation: 0,
             disabled: None,
             throttle: Default::default(),
+            ik: Vec::new(),
+            ik_touched: Vec::new(),
         }
     }
 
