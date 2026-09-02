@@ -86,6 +86,11 @@ pub fn prepare_mesh_data(
 ) {
     rust_engine::profile_scope!("prepare_mesh_data");
 
+    // Task 41.5 P0 bench hooks — inert (one atomic load) unless --bench-secs
+    // armed them in the standalone build.
+    let bench = crate::bench::render_hooks_enabled();
+    let mut skinned_draws = 0u32;
+
     mesh_data_buffer.clear();
     shadow_caster_buffer.clear();
 
@@ -128,12 +133,18 @@ pub fn prepare_mesh_data(
         });
         let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
+        let is_skinned = skeleton.is_some_and(|s| !s.palette.is_empty());
         let palette_set = if let Some(skel) = skeleton {
             if !skel.palette.is_empty() {
-                match skinning.create_palette_set(&skel.palette) {
+                let t0 = bench.then(std::time::Instant::now);
+                let set = match skinning.create_palette_set(&skel.palette) {
                     Ok(set) => set,
                     Err(_) => identity_set.clone(),
+                };
+                if let Some(t0) = t0 {
+                    crate::bench::palette_upload(t0.elapsed().as_nanos() as u64);
                 }
+                set
             } else {
                 identity_set.clone()
             }
@@ -178,12 +189,19 @@ pub fn prepare_mesh_data(
                 // Shadow casters are not camera-frustum culled — an off-screen
                 // object can still cast a shadow into the visible region.
                 shadow_caster_buffer.push(data.clone());
+                if is_skinned {
+                    skinned_draws += 1 + in_camera as u32;
+                }
 
                 if in_camera {
                     mesh_data_buffer.push(data);
                 }
             }
         }
+    }
+
+    if bench {
+        crate::bench::add_skinned_draws(skinned_draws);
     }
 
     mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));

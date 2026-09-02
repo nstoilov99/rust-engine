@@ -87,6 +87,10 @@ pub struct StandaloneApp {
     world_ready: bool,
     plane_mesh_index: usize,
     cube_mesh_index: usize,
+    /// Task 41.5 P0: `--stress-anim N` — characters spawned at world load.
+    stress_anim: usize,
+    /// Task 41.5 P0: `--bench-secs S` — per-frame metric collector.
+    bench: Option<crate::bench::BenchRun>,
 }
 
 /// Offline / fallback scene.
@@ -99,8 +103,17 @@ impl StandaloneApp {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         println!("Rust Game Engine - Starting up (standalone)...");
 
+        let args: Vec<String> = std::env::args().collect();
+        let bench_flags = crate::bench::parse_flags(&args);
+
         let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
-        let present_preference = window_config.vsync.as_present_preference();
+        // Bench runs measure frame time; an fps cap from the configured
+        // present mode would flatten the numbers, so force uncapped.
+        let present_preference = if bench_flags.bench_secs.is_some() {
+            rust_engine::engine::core::SwapchainPresentModePreference::Immediate
+        } else {
+            window_config.vsync.as_present_preference()
+        };
         println!(
             "VSync = {:?} (present mode = {:?})",
             window_config.vsync, present_preference
@@ -131,7 +144,7 @@ impl StandaloneApp {
         // so a net session starts sceneless and loads the world once the
         // handshake delivers it (`load_world` below). Offline runs load the
         // demo scene right after construction.
-        let net = crate::net::NetSession::from_args_or_config(&std::env::args().collect::<Vec<_>>());
+        let net = crate::net::NetSession::from_args_or_config(&args);
 
         game_world.resources_mut().insert(PhysicsWorld::new());
         game_world.resources_mut().insert(TransformCache::new());
@@ -229,11 +242,7 @@ impl StandaloneApp {
             game_world.resources_mut().insert(AnimGraphPlanCache::new());
             game_world.resources_mut().insert(AnimClipCache::new());
             game_world.resources_mut().insert(BlendSpaceCache::new());
-            schedule.add_system_described(
-                AnimGraphSystem::new(Box::new(DiskAnimAssets {
-                    content_root: rust_engine::engine::assets::content_root::content_root(),
-                })),
-                Stage::PreUpdate,
+            let descriptor = || {
                 SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
                     .reads_resource::<Time>()
                     .writes_resource::<AnimGraphPlanCache>()
@@ -242,8 +251,22 @@ impl StandaloneApp {
                     .reads::<AnimGraphRunner>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()
-                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE),
-            );
+                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
+            };
+            let system = AnimGraphSystem::new(Box::new(DiskAnimAssets {
+                content_root: rust_engine::engine::assets::content_root::content_root(),
+            }));
+            // Task 41.5 P0: with --bench-secs the system is wrapped to record
+            // its wall time; without the flag it registers plain (zero cost).
+            if bench_flags.bench_secs.is_some() {
+                schedule.add_system_described(
+                    crate::bench::TimedAnimGraph(system),
+                    Stage::PreUpdate,
+                    descriptor(),
+                );
+            } else {
+                schedule.add_system_described(system, Stage::PreUpdate, descriptor());
+            }
         }
         // `PhysicsStepSystem` is registered by `RapierPhysicsPlugin` below.
         // It carries `RunIfPlaying` there; `StandaloneApp` forces
@@ -382,6 +405,10 @@ impl StandaloneApp {
             world_ready: false,
             plane_mesh_index,
             cube_mesh_index,
+            stress_anim: bench_flags.stress_anim,
+            bench: bench_flags
+                .bench_secs
+                .map(|s| crate::bench::BenchRun::new(s, bench_flags.stress_anim)),
         };
         if app.net.is_none() {
             app.load_world(OFFLINE_SCENE);
@@ -422,6 +449,12 @@ impl StandaloneApp {
                 self.plane_mesh_index,
                 self.cube_mesh_index,
             );
+        }
+
+        // Task 41.5 P0: stress characters spawn before mesh/material
+        // resolution below so their paths resolve with the scene's.
+        if self.stress_anim > 0 {
+            crate::bench::spawn_stress_characters(self.game_world.hecs_mut(), self.stress_anim);
         }
 
         // Content moment (39.8 ruling §5.5): physics registration + plugin
@@ -756,6 +789,16 @@ impl StandaloneApp {
             }
         }
 
+        if let Some(bench) = &mut self.bench {
+            bench.end_frame(self.game_loop.delta_ms());
+        }
+
         Ok(())
+    }
+
+    /// True once `--bench-secs` wrote its baseline file — the event loop
+    /// exits cleanly (code 0).
+    pub fn bench_finished(&self) -> bool {
+        self.bench.as_ref().is_some_and(|b| b.finished())
     }
 }
