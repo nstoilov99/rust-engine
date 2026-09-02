@@ -396,21 +396,46 @@ impl AnimClipCache {
 /// `GraphScriptRunnerSystem` applies here.
 pub struct AnimGraphSystem {
     loader: Box<dyn AnimAssetLoader + Send + Sync>,
-    /// Reused blend scratch so steady-state frames allocate nothing.
-    scratch: PoseScratch,
+    /// True only while the parallel evaluation section (step 3) runs. `arm`
+    /// debug-asserts against it so structural mutation can never migrate into
+    /// the parallel region unnoticed (plan §7 risk 2).
+    evaluating: std::sync::atomic::AtomicBool,
+    /// Lifecycle scratch reused across frames: cleared each run, never
+    /// reallocated at steady state (both stay empty once the scene settles).
+    dead: Vec<hecs::Entity>,
+    needs_runtime: Vec<(hecs::Entity, String)>,
+}
+
+/// Entities per batch handed to a rayon worker in step 3. Small enough that
+/// a few hundred characters split across workers (300 → ~5 batches), large
+/// enough to amortize `par_bridge`'s per-item handoff.
+const EVAL_BATCH: u32 = 64;
+
+thread_local! {
+    /// Per-thread blend scratch for the parallel section. Rayon's workers
+    /// (and the calling thread) live across frames, so each thread's scratch
+    /// warms up once and steady-state evaluation allocates nothing.
+    static EVAL_SCRATCH: std::cell::RefCell<PoseScratch> =
+        std::cell::RefCell::new(PoseScratch::new());
 }
 
 impl AnimGraphSystem {
     pub fn new(loader: Box<dyn AnimAssetLoader + Send + Sync>) -> Self {
         Self {
             loader,
-            scratch: PoseScratch::new(),
+            evaluating: std::sync::atomic::AtomicBool::new(false),
+            dead: Vec::new(),
+            needs_runtime: Vec::new(),
         }
     }
 
     /// Compile (or reuse) the plan and build a fresh runtime sitting in the
     /// entry state. Every refusal lands in `disabled` rather than panicking.
     fn arm(&self, graph: &str, generation: u64, resources: &mut Resources) -> AnimGraphRuntime {
+        debug_assert!(
+            !self.evaluating.load(std::sync::atomic::Ordering::Relaxed),
+            "arm() must never run inside the parallel evaluation section"
+        );
         let refused = |why: String| AnimGraphRuntime {
             graph: graph.to_string(),
             plan: Arc::new(AnimGraphPlan::default()),
@@ -516,6 +541,36 @@ fn clip_of<'a>(cache: &'a AnimClipCache, c: &PlanClip) -> Option<&'a RawAnimatio
     cache.get(&c.clip)?.select(c.clip_name.as_deref())
 }
 
+/// One entity's step-3 work: machine + slot tick, event collection into the
+/// entity's own `events` Vec, pose evaluation, play-once overlay, palette.
+/// Runs on rayon workers — touches only this entity's components plus the
+/// immutable clip cache.
+fn tick_entity(
+    rt: &mut AnimGraphRuntime,
+    skeleton: &mut SkeletonInstance,
+    clips: &AnimClipCache,
+    dt: f32,
+    scratch: &mut PoseScratch,
+) {
+    let plan = rt.plan.clone();
+    let clip_for = |c: &PlanClip| clip_of(clips, c);
+    rt.machine.tick(&plan, &mut rt.params, dt);
+    rt.slot.tick(&plan, &mut rt.params, dt, &clip_for);
+    let mut events = std::mem::take(&mut rt.events);
+    collect_anim_events(&rt.machine, &rt.slot, &plan, &rt.params, clip_for, &mut events);
+    rt.events = events;
+    evaluate_pose(
+        &rt.machine,
+        &plan,
+        &rt.params,
+        clip_for,
+        &mut skeleton.local_transforms,
+        scratch,
+    );
+    rt.slot.apply(&plan, &clip_for, &mut skeleton.local_transforms, scratch);
+    skeleton.compute_palette();
+}
+
 impl System for AnimGraphSystem {
     fn run(&mut self, world: &mut hecs::World, resources: &mut Resources) {
         crate::profile_scope!("anim_graph");
@@ -532,30 +587,35 @@ impl System for AnimGraphSystem {
         // 1. Drop runtimes whose plan went stale (invalidation) or whose
         //    runner was disabled / re-pointed. Re-arming next tick restarts
         //    the machine at ENTRY — a stale plan never ticks again.
-        let dead: Vec<hecs::Entity> = world
-            .query::<&AnimGraphRuntime>()
-            .iter()
-            .filter(|(e, rt)| {
-                rt.generation != generation
-                    || world
-                        .get::<&AnimGraphRunner>(*e)
-                        .map(|r| !r.is_runnable() || r.graph != rt.graph)
-                        .unwrap_or(true)
-            })
-            .map(|(e, _)| e)
-            .collect();
-        for e in dead {
+        self.dead.clear();
+        self.dead.extend(
+            world
+                .query::<&AnimGraphRuntime>()
+                .iter()
+                .filter(|(e, rt)| {
+                    rt.generation != generation
+                        || world
+                            .get::<&AnimGraphRunner>(*e)
+                            .map(|r| !r.is_runnable() || r.graph != rt.graph)
+                            .unwrap_or(true)
+                })
+                .map(|(e, _)| e),
+        );
+        for &e in &self.dead {
             let _ = world.remove_one::<AnimGraphRuntime>(e);
         }
 
-        // 2. Arm anything runnable that has no runtime yet.
-        let needs_runtime: Vec<(hecs::Entity, String)> = world
-            .query::<&AnimGraphRunner>()
-            .iter()
-            .filter(|(e, r)| r.is_runnable() && world.get::<&AnimGraphRuntime>(*e).is_err())
-            .map(|(e, r)| (e, r.graph.clone()))
-            .collect();
-        for (entity, graph) in needs_runtime {
+        // 2. Arm anything runnable that has no runtime yet. (The Vec is taken
+        //    out of `self` so `arm(&self)` can borrow alongside the drain.)
+        let mut needs_runtime = std::mem::take(&mut self.needs_runtime);
+        needs_runtime.extend(
+            world
+                .query::<&AnimGraphRunner>()
+                .iter()
+                .filter(|(e, r)| r.is_runnable() && world.get::<&AnimGraphRuntime>(*e).is_err())
+                .map(|(e, r)| (e, r.graph.clone())),
+        );
+        for (entity, graph) in needs_runtime.drain(..) {
             let mut runtime = self.arm(&graph, generation, resources);
 
             // A machine needs a skeleton to pose. An entity that has a
@@ -585,39 +645,41 @@ impl System for AnimGraphSystem {
             }
             let _ = world.insert_one(entity, runtime);
         }
+        self.needs_runtime = needs_runtime;
 
         // 3. Tick machines and write poses. Per-frame order per the spec:
         //    parameters were written by gameplay before this system ran;
         //    machine update (rules, crossfades) precedes pose evaluation.
+        //
+        //    This step runs in parallel (S-D3): everything it touches is
+        //    per-entity state (hecs components are Send + Sync) except the
+        //    clip cache, borrowed immutably — every lazy load happened in the
+        //    serial arm phase above (`prefetch`). Events land on each
+        //    entity's own `events` Vec, so their order is deterministic
+        //    however rayon schedules the batches.
         let clips = match resources.get::<AnimClipCache>() {
             Some(c) => c,
             None => return,
         };
-        for (_entity, (rt, skeleton)) in world
+        use rayon::iter::{ParallelBridge, ParallelIterator};
+        use std::sync::atomic::Ordering;
+        self.evaluating.store(true, Ordering::Relaxed);
+        world
             .query_mut::<(&mut AnimGraphRuntime, &mut SkeletonInstance)>()
-        {
-            if rt.disabled.is_some() {
-                continue;
-            }
-            let plan = rt.plan.clone();
-            let clip_for = |c: &PlanClip| clip_of(clips, c);
-            rt.machine.tick(&plan, &mut rt.params, dt);
-            rt.slot.tick(&plan, &mut rt.params, dt, &clip_for);
-            let mut events = std::mem::take(&mut rt.events);
-            collect_anim_events(&rt.machine, &rt.slot, &plan, &rt.params, clip_for, &mut events);
-            rt.events = events;
-            evaluate_pose(
-                &rt.machine,
-                &plan,
-                &rt.params,
-                clip_for,
-                &mut skeleton.local_transforms,
-                &mut self.scratch,
-            );
-            rt.slot
-                .apply(&plan, &clip_for, &mut skeleton.local_transforms, &mut self.scratch);
-            skeleton.compute_palette();
-        }
+            .into_iter_batched(EVAL_BATCH)
+            .par_bridge()
+            .for_each(|batch| {
+                EVAL_SCRATCH.with(|cell| {
+                    let scratch = &mut *cell.borrow_mut();
+                    for (_entity, (rt, skeleton)) in batch {
+                        if rt.disabled.is_some() {
+                            continue;
+                        }
+                        tick_entity(rt, skeleton, clips, dt, scratch);
+                    }
+                });
+            });
+        self.evaluating.store(false, Ordering::Relaxed);
     }
 
     fn name(&self) -> &str {

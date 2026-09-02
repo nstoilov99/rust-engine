@@ -4101,6 +4101,7 @@ dependencies = [
  "parking_lot",
  "puffin",
  "rapier3d",
+ "rayon",
  "resvg",
  "ron",
  "serde",
