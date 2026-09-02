@@ -40,17 +40,14 @@ pub fn submit_skeleton_debug_draws(
 ///
 /// `entity_render` is the entity's Y-up render matrix — the same `model`
 /// the skinning shader multiplies by, so the joints land exactly where
-/// the skinned mesh is drawn:
-/// `palette[i] = world_bone[i] * inverse_bind[i]` ⇒
-/// `world_bone[i] = palette[i] * bind[i]`, whose translation is the joint.
+/// the skinned mesh is drawn. `model_space[i]` is the retained FK phase-1
+/// output (pre-inverse-bind), whose translation is the joint.
 fn joint_positions(skeleton: &SkeletonInstance, entity_render: glam::Mat4) -> Vec<[f32; 3]> {
     skeleton
-        .bones
+        .model_space
         .iter()
-        .zip(&skeleton.palette)
-        .map(|(bone, palette)| {
-            let world_bone = *palette * bone.inverse_bind_matrix.inverse();
-            let render_pos = entity_render * world_bone.w_axis;
+        .map(|model_bone| {
+            let render_pos = entity_render * model_bone.w_axis;
             convert_position_yup_to_zup(render_pos.truncate()).to_array()
         })
         .collect()
@@ -80,9 +77,9 @@ mod tests {
     use glam::{Mat4, Vec3};
 
     fn two_bone_skeleton() -> SkeletonInstance {
-        // Y-up mesh space (what the cooked mesh and its palette live in):
+        // Y-up mesh space (what the cooked mesh and its bones live in):
         // root at the origin, child one unit *up* the mesh.
-        SkeletonInstance::from_bones(vec![
+        let mut skeleton = SkeletonInstance::from_bones(vec![
             BoneData {
                 name: "root".into(),
                 parent_index: None,
@@ -93,7 +90,12 @@ mod tests {
                 parent_index: Some(0),
                 inverse_bind_matrix: Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)).inverse(),
             },
-        ])
+        ]);
+        // `from_bones` filled the retained `model_space` (the input joint
+        // positions read); poison the palette to pin that they no longer
+        // come from inverting it.
+        skeleton.palette.fill(Mat4::ZERO);
+        skeleton
     }
 
     #[test]
