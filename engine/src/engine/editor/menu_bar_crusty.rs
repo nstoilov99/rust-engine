@@ -265,6 +265,9 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                     (EditorTab::AssetBrowser, "Assets"),
                     (EditorTab::Console, "Console"),
                     (EditorTab::Profiler, "Profiler"),
+                    (EditorTab::GraphDetails, "Graph Details"),
+                    (EditorTab::GraphVariables, "Graph Variables"),
+                    (EditorTab::AnimPreview, "Anim Preview"),
                 ];
                 for (tab, name) in &panels {
                     let is_open = dock_state.is_tab_open(tab);
@@ -293,6 +296,9 @@ pub fn menu_bar_panel(ui: &mut Ui, bar_rect: Rect, ctx: MenuBarCtx) -> MenuActio
                 }
                 if ui.menu_item("Reset Layout") {
                     action = MenuAction::ResetLayout;
+                }
+                if ui.menu_item("Reset All Layouts") {
+                    action = MenuAction::ResetAllLayouts;
                 }
             });
 

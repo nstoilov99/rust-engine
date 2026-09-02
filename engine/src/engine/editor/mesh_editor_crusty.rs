@@ -979,8 +979,16 @@ fn preview(
         texture: tex,
     });
 
-    // ── orbit controls
-    let id = panel_id.with("preview");
+    if orbit_controls(ui, rect, panel_id.with("preview"), preview) {
+        data.preview_dirty = true;
+    }
+}
+
+/// The preview's orbit camera gestures over `rect`: left-drag rotates,
+/// middle-drag pans, wheel zooms. Returns `true` when the camera moved.
+/// Shared with the blend space tab's preview pane.
+pub fn orbit_controls(ui: &mut Ui, rect: Rect, id: Id, preview: &mut MeshPreviewState) -> bool {
+    let mut moved = false;
     let resp = ui.interact(id, rect);
     let input = &ui.ctx().input;
     let pointer = input.pointer_pos;
@@ -1026,7 +1034,7 @@ fn preview(
         preview.orbit_pitch = preview
             .orbit_pitch
             .clamp(-89.0_f32.to_radians(), 89.0_f32.to_radians());
-        data.preview_dirty = true;
+        moved = true;
     }
 
     // Middle-drag pans.
@@ -1037,7 +1045,7 @@ fn preview(
         let up = right.cross(forward).normalize();
         preview.orbit_target -= right * delta.x * pan_speed;
         preview.orbit_target += up * delta.y * pan_speed;
-        data.preview_dirty = true;
+        moved = true;
     }
 
     // Scroll zooms.
@@ -1047,8 +1055,9 @@ fn preview(
         let min_dist = preview.mesh_radius * 0.1;
         let max_dist = preview.mesh_radius * 50.0;
         preview.orbit_distance = preview.orbit_distance.clamp(min_dist, max_dist);
-        data.preview_dirty = true;
+        moved = true;
     }
+    moved
 }
 
 fn camera_position(preview: &MeshPreviewState) -> Vec3 {

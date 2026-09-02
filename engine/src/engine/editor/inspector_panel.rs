@@ -39,6 +39,7 @@ impl ComponentPresence {
     pub(crate) const PARTICLE_EFFECT: u16 = 1 << 12;
     pub(crate) const STATIC_COLLISION: u16 = 1 << 13;
     pub(crate) const GRAPH_RUNNER: u16 = 1 << 14;
+    pub(crate) const ANIM_GRAPH_RUNNER: u16 = 1 << 15;
 
     pub(crate) fn probe(world: &World, entity: Entity) -> Self {
         let mut bits = 0u16;
@@ -53,6 +54,12 @@ impl ComponentPresence {
             .is_ok()
         {
             bits |= Self::GRAPH_RUNNER;
+        }
+        if world
+            .get::<&crate::engine::animation::graph::AnimGraphRunner>(entity)
+            .is_ok()
+        {
+            bits |= Self::ANIM_GRAPH_RUNNER;
         }
         if world.get::<&Camera>(entity).is_ok() {
             bits |= Self::CAMERA;

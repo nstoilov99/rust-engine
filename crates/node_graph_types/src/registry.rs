@@ -292,6 +292,12 @@ pub struct NodeRegistry {
     /// (the theme hashes the slug); absent = not registered (theme renders
     /// `neutral`, the only unknown-color case).
     domain_pins: BTreeMap<String, Option<u8>>,
+    /// Domain pins declared **flow-like** (Task 41): their wires carry
+    /// topology, not pulled values, so — like Exec — their inputs may fan in
+    /// and their wires may form cycles. Unlike Exec, their *outputs* may fan
+    /// out (an animation state's `out` feeds several transitions). The
+    /// animation machine's `anim_flow` is the first member.
+    flow_domains: BTreeSet<String>,
     /// Which plugin registered a domain pin first, so a later conflicting
     /// registration can name both sides in its warning. Only populated via
     /// [`NodeRegistry::merge_staged`].
@@ -489,6 +495,21 @@ impl NodeRegistry {
     /// consumer can choose its own hue instead of taking the hash.
     pub fn register_domain_pin_keyed(&mut self, slug: &str, ramp_index: u8) {
         self.domain_pins.insert(slug.to_string(), Some(ramp_index));
+    }
+
+    /// Register a keyed domain pin whose wires are **flow, not values**: its
+    /// inputs may fan in and its wires may loop (the Exec exemptions), while
+    /// its outputs keep the data rule and may fan out. Direct-registration
+    /// only for now — no plugin has staged one, and `StagedRegistry` grows
+    /// the field when one does.
+    pub fn register_domain_pin_flow(&mut self, slug: &str, ramp_index: u8) {
+        self.domain_pins.insert(slug.to_string(), Some(ramp_index));
+        self.flow_domains.insert(slug.to_string());
+    }
+
+    /// Is `slug` a registered flow-like domain?
+    pub fn domain_is_flow(&self, slug: &str) -> bool {
+        self.flow_domains.contains(slug)
     }
 
     /// Theme-side lookup: outer `Option` = registered?, inner = explicit key.

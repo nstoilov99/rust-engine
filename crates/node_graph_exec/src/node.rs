@@ -13,13 +13,18 @@
 //! before `fire` is entered, so an implementation cannot re-enter the
 //! interpreter and cannot observe a half-evaluated statement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::effect::{Effect, EffectSink, WorldRead};
 use crate::instance::Rng;
 use crate::value::{EntityRef, Value};
+
+/// The synthetic `entered` pin of an interpreter-spawned **ticker** firing
+/// (Task 41 ticket 10). `~` keeps it out of the descriptor slug namespace, so
+/// it can never collide with a real exec input.
+pub(crate) const TICKER_ENTRANCE: &str = "~ticker";
 
 /// Time, injected. Nothing in this crate reads a clock (D8).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -263,6 +268,11 @@ pub struct EvalCtx<'a> {
 /// What an impure node may do.
 pub struct FireCtx<'a> {
     pub(crate) node: &'a str,
+    /// This node's plan index — what `set_ticking` keys the ticker set by.
+    pub(crate) node_ix: usize,
+    /// The instance's armed per-node tickers (see
+    /// [`GraphInstance::tickers`](crate::instance::GraphInstance::tickers)).
+    pub(crate) tickers: &'a mut BTreeSet<usize>,
     pub(crate) inputs: &'a BTreeMap<String, Value>,
     pub(crate) outputs: &'a mut BTreeMap<String, Value>,
     pub(crate) vars: &'a mut BTreeMap<String, Value>,
@@ -435,6 +445,25 @@ impl FireCtx<'_> {
     /// and for a loop node's re-entry from its own body.
     pub fn entered(&self) -> Option<&str> {
         self.entered
+    }
+
+    /// Whether this firing is the interpreter's once-per-tick **ticker
+    /// drive** rather than an arrival through a real exec input.
+    pub fn ticker_fired(&self) -> bool {
+        self.entered == Some(TICKER_ENTRANCE)
+    }
+
+    /// Arm (or disarm) this node's per-node ticker. While armed, the
+    /// interpreter fires the node once per tick in a **fresh activation**,
+    /// entered through the ticker ([`ticker_fired`](Self::ticker_fired) is
+    /// true) — independent of every exec flow, so no waiting Delay can stall
+    /// it. Idempotent, and serialized with the instance.
+    pub fn set_ticking(&mut self, on: bool) {
+        if on {
+            self.tickers.insert(self.node_ix);
+        } else {
+            self.tickers.remove(&self.node_ix);
+        }
     }
 
     /// This node's persistent state — the one thing a stateful node cannot

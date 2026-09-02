@@ -135,6 +135,25 @@ impl SkinningBackend {
         descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
         set_layout: Arc<DescriptorSetLayout>,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
+        Self::create_palette_set_for_layout(allocator, descriptor_set_allocator, set_layout, &[])
+    }
+
+    /// Create a bone-palette descriptor set for any pipeline whose set 0 /
+    /// binding 0 is `BonePaletteData` (the editor's preview pipeline). An
+    /// empty `palette` is the identity; anything past `MAX_PALETTE_BONES`
+    /// is dropped.
+    pub fn create_palette_set_for_layout(
+        allocator: &Arc<StandardMemoryAllocator>,
+        descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
+        set_layout: Arc<DescriptorSetLayout>,
+        palette: &[Mat4],
+    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
+        let mut data = BonePaletteData::identity();
+        let n = palette.len().min(MAX_PALETTE_BONES);
+        data.bone_count = n as u32;
+        for (slot, mat) in data.matrices.iter_mut().zip(palette) {
+            *slot = mat.to_cols_array();
+        }
         let buffer = Buffer::from_data(
             allocator.clone(),
             BufferCreateInfo {
@@ -146,7 +165,7 @@ impl SkinningBackend {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            BonePaletteData::identity(),
+            data,
         )?;
 
         let set = DescriptorSet::new(

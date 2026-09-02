@@ -10,6 +10,7 @@
 mod events;
 mod registry;
 mod selection;
+pub mod templates;
 mod thumbnail;
 pub mod thumbnail_renderer;
 
@@ -105,6 +106,9 @@ pub struct AssetBrowserPanel {
     needs_rescan: bool,
     /// Asset paths hidden from the browser.
     hidden_paths: HashSet<PathBuf>,
+    /// Registry-relative path of a just-created asset to select and put into
+    /// inline rename once the pending rescan has registered it.
+    pending_select_rename: Option<PathBuf>,
 }
 
 impl AssetBrowserPanel {
@@ -134,6 +138,7 @@ impl AssetBrowserPanel {
             folder_panel_width: 180.0,
             needs_rescan: false,
             hidden_paths: HashSet::new(),
+            pending_select_rename: None,
         }
     }
 
@@ -156,11 +161,27 @@ impl AssetBrowserPanel {
         self.needs_rescan = true;
     }
 
+    /// Select the asset at registry-relative `path` and enter inline rename
+    /// after the next rescan registers it (the Create menu's Unreal-style
+    /// "name it now" flow). Requests the rescan.
+    pub fn select_and_rename_after_rescan(&mut self, path: PathBuf) {
+        self.pending_select_rename = Some(path);
+        self.request_rescan();
+    }
+
     /// Run a pending rescan, if one was requested.
     pub(crate) fn process_rescan(&mut self) {
         if self.needs_rescan {
             self.needs_rescan = false;
             let _ = self.registry.scan_directory();
+        }
+        if let Some(path) = self.pending_select_rename.take() {
+            if let Some(meta) = self.registry.get_by_path(&path) {
+                let (id, name) = (meta.id, meta.display_name.clone());
+                self.selection.select(id);
+                self.events.push(AssetBrowserEvent::AssetSelected { id });
+                self.renaming = Some(RenameTarget::Asset { id, current_name: name });
+            }
         }
     }
 
@@ -246,4 +267,30 @@ pub struct AssetDragPayload {
     pub asset_id: AssetId,
     pub asset_type: AssetType,
     pub path: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A created file is selected and in rename mode once the rescan runs.
+    #[test]
+    fn pending_select_rename_resolves_after_rescan() {
+        let root = std::env::temp_dir().join(format!("ab_panel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("root");
+        let mut panel = AssetBrowserPanel::new(root.clone(), None);
+        let rel = PathBuf::from("sub").join("NewCurve.curve");
+        std::fs::write(root.join(&rel), "(version: 1, tracks: [])").expect("write");
+
+        panel.select_and_rename_after_rescan(rel.clone());
+        assert!(panel.renaming.is_none(), "nothing until the rescan runs");
+        panel.process_rescan();
+
+        let id = panel.registry.get_by_path(&rel).expect("registered").id;
+        assert_eq!(panel.selection.primary(), Some(id));
+        assert!(matches!(&panel.renaming, Some(RenameTarget::Asset { id: r, current_name }) if *r == id && current_name == "NewCurve"));
+        assert!(panel.events.drain().any(|e| matches!(e, AssetBrowserEvent::AssetSelected { id: e } if e == id)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -152,6 +152,13 @@ pub const PALETTES: Palettes = Palettes {
         ("Render", 9),
         ("Gameplay", 10),
         ("Interface", 11),
+        // Task 41: the animation node library (states, transitions, blend
+        // trees). Rose ON PURPOSE, pairing with the `animation` asset slot
+        // above — same concept, same hue; they move together or not at all
+        // (the mesh-pin/geometry-asset rule). Interface/rose is coincidental
+        // reuse: the two never co-occur on one canvas, since the animation
+        // library lives in its own registry.
+        ("Animation", 11),
         // "Dev" -> neutral(), special-cased in category_color(): fixture
         // nodes visually announce themselves as not-a-real-category.
     ],

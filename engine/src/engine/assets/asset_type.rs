@@ -33,9 +33,16 @@ pub enum AssetType {
     InputMappingContext,
     /// Node graph documents (*.graph) and reusable subgraphs (*.subgraph)
     Graph,
+    /// Animation state-machine graphs (*.animgraph) — Task 41. Its own type
+    /// (not `Graph`) so the browser colors it with the animation family and
+    /// the editor opens it with the animation node library.
+    AnimGraph,
     /// Float-track curves (*.curve) — Timeline tracks today, animation
     /// channels when Task 41 grows the same asset.
     Curve,
+    /// Blend spaces (*.blendspace) - Task 41.5: clips placed on one or two
+    /// parameter axes; the animation family, like `.animgraph` and `.curve`.
+    BlendSpace,
     /// Unknown or unsupported file type
     #[default]
     Unknown,
@@ -65,7 +72,9 @@ impl AssetType {
             "inputaction" => AssetType::InputAction,
             "mappingcontext" => AssetType::InputMappingContext,
             "graph" | "subgraph" => AssetType::Graph,
+            "animgraph" => AssetType::AnimGraph,
             "curve" => AssetType::Curve,
+            "blendspace" => AssetType::BlendSpace,
             // Legacy RON files - refined by filename pattern in from_path
             "ron" => AssetType::Unknown,
             _ => AssetType::Unknown,
@@ -120,7 +129,9 @@ impl AssetType {
             AssetType::InputAction => "Input Action",
             AssetType::InputMappingContext => "Input Mapping Context",
             AssetType::Graph => "Node Graph",
+            AssetType::AnimGraph => "Animation Graph",
             AssetType::Curve => "Curve",
+            AssetType::BlendSpace => "Blend Space",
             AssetType::Unknown => "Unknown",
         }
     }
@@ -140,7 +151,9 @@ impl AssetType {
             AssetType::InputAction => &["inputaction"],
             AssetType::InputMappingContext => &["mappingcontext"],
             AssetType::Graph => &["graph", "subgraph"],
+            AssetType::AnimGraph => &["animgraph"],
             AssetType::Curve => &["curve"],
+            AssetType::BlendSpace => &["blendspace"],
             AssetType::Unknown => &[],
         }
     }
@@ -160,7 +173,9 @@ impl AssetType {
             AssetType::InputAction,
             AssetType::InputMappingContext,
             AssetType::Graph,
+            AssetType::AnimGraph,
             AssetType::Curve,
+            AssetType::BlendSpace,
         ]
     }
 
@@ -201,6 +216,8 @@ mod tests {
         assert_eq!(AssetType::from_extension("mesh"), AssetType::Mesh);
         assert_eq!(AssetType::from_extension("wav"), AssetType::Audio);
         assert_eq!(AssetType::from_extension("xyz"), AssetType::Unknown);
+        assert_eq!(AssetType::from_extension("blendspace"), AssetType::BlendSpace);
+        assert_eq!(AssetType::BlendSpace.extensions(), &["blendspace"]);
     }
 
     #[test]
@@ -250,6 +267,10 @@ mod tests {
         assert_eq!(
             AssetType::from_path(Path::new("graphs/lib/calc.subgraph")),
             AssetType::Graph
+        );
+        assert_eq!(
+            AssetType::from_path(Path::new("graphs/duck.animgraph")),
+            AssetType::AnimGraph
         );
         // Mesh sidecars stay hidden; binary meshes classify as Mesh
         assert_eq!(

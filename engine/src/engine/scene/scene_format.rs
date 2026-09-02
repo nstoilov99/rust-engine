@@ -827,6 +827,14 @@ pub enum ComponentData {
         #[serde(default = "default_true")]
         enabled: bool,
     },
+    /// A `.animgraph` asset attached to this entity (Task 41). Same contract
+    /// as `GraphRunner`: config only, the running machine is never written.
+    AnimGraphRunner {
+        #[serde(default)]
+        graph: String,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     Player,
     StaticCollision,
     Parent {

@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crusty_gui::context::{Direction, Ui, UiOptions};
+use crusty_gui::context::{CursorIcon, Direction, Ui, UiOptions};
 use crusty_gui::id::Id;
 use crusty_gui::input::{Key, Modifiers};
 use crusty_gui::math::{Color, Pos2, Rect, Rounding, Vec2};
@@ -26,21 +26,26 @@ use crusty_gui::style::Style;
 use crusty_gui::text::FontFamily;
 use crusty_gui::widgets::{
     Button, Canvas, CanvasScope, CanvasView, Checkbox, ComboBox, DragValue, ScrollArea,
-    SelectableValue, TextEdit,
+    SelectableValue, Slider, TextEdit,
 };
 
 use super::keymap::{Action, ActionStatus, Context, Keymap};
 use super::graph_editor::{
+    alias_is_global, alias_name, alias_states, alias_states_value,
     anchored_comments, frame_view, nodes_captured_by_rect, prop_display, AlignMode, Annotation,
-    AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, GraphEdit, GraphEditorState,
+    AnnotationDrag, AnnotationEdit, AnnotationResize, ConnectDrag, DomainError, GraphDomain,
+    GraphEdit, GraphEditorState, GraphOpenRequest,
     GraphFragment, MarqueeMode, NewVarDraft, NodeDrag, PayloadConfirm, PayloadDraft,
+    PeekDrag, PeekDragKind,
     payload_reader_count, variable_matches, variable_mismatch, variable_node_ids, variable_slug,
     variables_view,
     retype_default_outcome, pin_type_label, ResizeHandle, VarConfirm, VarDrop, VarListRow,
     DEFAULT_PAYLOAD_TYPE, watch_chip_text, Watch, WATCH_STALE_SECS,
     ANNOTATION_MIN_H, ANNOTATION_MIN_W, FindState, PaletteDragSource, PaletteState,
     BOOKMARK_SLOTS, TOAST_MS,
+    region_find_matches, rule_scope_registry,
 };
+use super::anim_preview::{AnimParamEdit, AnimPreview, PANEL_INSTANCE_ID};
 use super::graph_exec_viz::{DebugRequest, ExecInstance, GraphExecViz, STEADY_HOT_HZ};
 use super::graph_palette::{self, PaletteEntry, PinFilter};
 use super::graph_prefs::{WirePrefs, WireStyle};
@@ -309,9 +314,46 @@ impl ZoomLod {
 // Error anchoring
 // ---------------------------------------------------------------------------
 
+/// One entry of the anchored-error UI. `GraphError` is a closed set by
+/// design ruling, so a *domain compiler's* refusal (Task 41: the animation
+/// compiler's `String`, already anchored editor-side) joins the index as its
+/// own arm rather than a new variant — same badge, same count chip, same F8.
+#[derive(Debug, Clone, PartialEq)]
+enum IndexedError {
+    Graph(GraphError),
+    Domain(DomainError),
+}
+
+impl IndexedError {
+    fn anchor(&self) -> ErrorAnchor {
+        match self {
+            IndexedError::Graph(e) => e.anchor(),
+            IndexedError::Domain(e) => match e.node {
+                Some(id) => ErrorAnchor::Node(id),
+                None => ErrorAnchor::Document,
+            },
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            IndexedError::Graph(e) => format!("{e}"),
+            IndexedError::Domain(e) => e.message.clone(),
+        }
+    }
+
+    fn cycle_chain(&self) -> Option<&[String]> {
+        match self {
+            IndexedError::Graph(e) => e.cycle_chain(),
+            IndexedError::Domain(_) => None,
+        }
+    }
+}
+
 /// This frame's errors, resolved to the thing each one is *about*. Built once
-/// from `state.errors` + `state.ref_errors` and read by both the geometry
-/// pass (ghost rows change a node's shape) and the paint pass.
+/// from `state.errors` + `state.ref_errors` + `state.domain_errors` and read
+/// by both the geometry pass (ghost rows change a node's shape) and the paint
+/// pass.
 #[derive(Default)]
 struct ErrorIndex {
     /// Nodes carrying a border + gutter badge.
@@ -323,15 +365,25 @@ struct ErrorIndex {
     /// Ghost rows to append, `node -> [(slug, is_output)]`.
     ghosts: BTreeMap<u64, Vec<(String, bool)>>,
     /// Errors with nowhere on the canvas to live — the compiler rows.
-    document: Vec<GraphError>,
+    document: Vec<IndexedError>,
     /// Every error, in a stable order, for the count chip's cycle.
-    ordered: Vec<GraphError>,
+    ordered: Vec<IndexedError>,
 }
 
 impl ErrorIndex {
-    fn build(doc_errors: &[GraphError], ref_errors: &[GraphError]) -> Self {
+    fn build(
+        doc_errors: &[GraphError],
+        ref_errors: &[GraphError],
+        domain_errors: &[DomainError],
+    ) -> Self {
         let mut ix = ErrorIndex::default();
-        for e in doc_errors.iter().chain(ref_errors.iter()) {
+        let all = doc_errors
+            .iter()
+            .chain(ref_errors.iter())
+            .cloned()
+            .map(IndexedError::Graph)
+            .chain(domain_errors.iter().cloned().map(IndexedError::Domain));
+        for e in all {
             match e.anchor() {
                 ErrorAnchor::Node(id) => {
                     ix.nodes.insert(id);
@@ -350,7 +402,7 @@ impl ErrorIndex {
                 }
                 ErrorAnchor::Document => ix.document.push(e.clone()),
             }
-            ix.ordered.push(e.clone());
+            ix.ordered.push(e);
         }
         ix
     }
@@ -437,6 +489,12 @@ impl GraphMetrics {
     /// Per-node preview slot side, world units.
     fn preview_side(&self) -> f32 {
         BASE_PREVIEW_SIDE * self.scale
+    }
+
+    /// Transition badge sizing for the machine layout (transitions ticket
+    /// 02 ruling): diameter = the chip row height, gap = the label gap.
+    fn badge(&self) -> super::graph_anim_edge::BadgeMetrics {
+        super::graph_anim_edge::BadgeMetrics { d: self.row_h, gap: self.label_gap }
     }
 
     /// Width of a config row's value cell, world units.
@@ -539,9 +597,11 @@ pub struct GraphEditorPanelCtx<'a> {
     pub curves: &'a dyn CurveResolver,
     /// Content-relative paths of known `.subgraph` assets (create menu).
     pub subgraph_assets: &'a [String],
-    /// Set to a content-relative path when a subgraph node is double-clicked;
-    /// the host opens it as a tab (P6 open-in-tab navigation).
-    pub open_subgraph: &'a mut Option<String>,
+    /// Set when a node that references another graph file is descended into
+    /// (a subgraph node, or an animation state nesting a `.animgraph` —
+    /// ticket 09); the host opens it as a tab (P6 open-in-tab navigation)
+    /// and seeds the opened tab's breadcrumb chain from the request.
+    pub open_subgraph: &'a mut Option<GraphOpenRequest>,
     /// `selection.outline` from the live theme. Passed in because crusty's
     /// `Style` has no counterpart and Graphite overrides the invariant.
     pub selection_outline: Color,
@@ -575,6 +635,15 @@ pub struct GraphEditorPanelCtx<'a> {
     /// pressed; the host clears the recorders of the instances running it,
     /// which are the only things that own one.
     pub exec_clear: &'a mut Option<String>,
+    /// The bound preview instance for an `.animgraph` tab (Task 41 ticket
+    /// 06): current parameter values, active state, in-flight fade. `None`
+    /// — a script tab, or nothing bound — draws no strip controls and no
+    /// live highlight.
+    pub anim: Option<&'a AnimPreview>,
+    /// Every entity this `.animgraph` could preview on, for the PREVIEW
+    /// chip's picker. Net rigs whose parameters gameplay owns are already
+    /// excluded by the host.
+    pub anim_instances: &'a [ExecInstance],
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +652,7 @@ pub struct GraphEditorPanelCtx<'a> {
 
 /// What an unconnected input renders in its value cell.
 #[derive(Clone, Debug, PartialEq)]
-enum InlineKind {
+pub(super) enum InlineKind {
     /// Editable at L0 (`DragValue`).
     Float(f32),
     /// Editable at L0 (`DragValue` stepping whole numbers). Separate from
@@ -680,6 +749,30 @@ impl ConfigGeom {
     }
 }
 
+/// Config-row key prefix of an alias's per-state rows: `states.<node id>`.
+/// Not a property — the row writes to `states` (see `config_write_back`);
+/// the prefix keeps each row's widget id and edit target distinct.
+const ALIAS_STATE_ROW_PREFIX: &str = "states.";
+
+/// What an inline change on config row `slug` of `n` writes back, as
+/// `(property key, value)`. Every row is its own property except an alias's
+/// state rows, which toggle one id in the `states` array.
+fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropValue) {
+    use crate::engine::animation::graph::ALIAS_STATES_PROP;
+    let toggled = slug
+        .strip_prefix(ALIAS_STATE_ROW_PREFIX)
+        .and_then(|id| id.parse::<i32>().ok());
+    let Some(id) = toggled else {
+        return (slug.to_string(), v);
+    };
+    let mut ids = alias_states(n);
+    ids.retain(|x| *x != id);
+    if matches!(v, PropValue::Bool(true)) {
+        ids.push(id);
+    }
+    (ALIAS_STATES_PROP.to_string(), alias_states_value(&ids))
+}
+
 /// The reserved config rows a node instance shows, in render order.
 ///
 /// Sourced from the type's `NodeKind` plus the reserved-key constants, so
@@ -687,11 +780,29 @@ impl ConfigGeom {
 /// in the drawing code. Rows appear even when the property is missing — a
 /// freshly placed `event_custom` has no `event_name` yet, and a row is the
 /// only way to give it one.
-fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
+pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, InlineKind)> {
+    use crate::engine::animation::graph::plan::{
+        ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP, GRAPH_PROP,
+        PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP, SPACE_PROP,
+        SPEED_PROP,
+    };
+    use crate::engine::animation::graph::ALIAS_GLOBAL_PROP;
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
         Some(PropValue::Enum(s)) => s.clone(),
+        // A clip reference is an `Asset` when the editor wrote it and a `Str`
+        // when a hand went in — the compiler reads both, so both display.
+        Some(PropValue::Asset(s)) => s.clone(),
         _ => String::new(),
+    };
+    let float_of = |key: &str, default: f32| match n.properties.get(key) {
+        Some(PropValue::Float(f)) => *f,
+        _ => default,
+    };
+    let int_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Int(i)) => *i,
+        _ => 0,
     };
     let mut out = Vec::new();
     match NodeKind::of_type(&n.type_id) {
@@ -736,6 +847,155 @@ fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, String, Inli
                 InlineKind::Str(text_of(EVENT_ACTION_PROP)),
             ));
         }
+        // Task 41 — the animation library's node data. Config rows, not pins:
+        // a clip path or a speed is node configuration, and a pin dot would
+        // promise a wire that no output type can ever legally feed.
+        _ if n.type_id == ANIM_STATE_TYPE_ID => {
+            if docd
+                .doc()
+                .regions
+                .get(&n.id)
+                .is_some_and(|r| !r.nodes.is_empty())
+            {
+                // A state with a blend tree ignores its clip and graph (the
+                // compiler's rule); the row says what the state *is* instead
+                // of showing fields that would do nothing.
+                out.push((
+                    CLIP_PROP.to_string(),
+                    "Tree".to_string(),
+                    InlineKind::Chip("blend tree".to_string()),
+                ));
+            } else if !text_of(GRAPH_PROP).trim().is_empty() {
+                // A nested sub-state-machine (ticket 09): the referenced
+                // `.animgraph` is the state's whole Pose source, so the clip
+                // rows yield the same way they do to a tree.
+                out.push((
+                    GRAPH_PROP.to_string(),
+                    "Graph".to_string(),
+                    InlineKind::Str(text_of(GRAPH_PROP)),
+                ));
+            } else {
+                // Runtime precedence, spoken back: a blend space (ticket 06)
+                // is the state's whole Pose source too, so the clip rows
+                // yield to it; the Graph row stays (empty) because a set
+                // Graph would win over the space.
+                let space = text_of(SPACE_PROP);
+                if space.trim().is_empty() {
+                    out.push((
+                        CLIP_PROP.to_string(),
+                        "Clip".to_string(),
+                        InlineKind::Str(text_of(CLIP_PROP)),
+                    ));
+                    // The in-container clip name only rows when the document
+                    // carries one — data is never hidden, and the common
+                    // one-clip-per-file case does not pay a row for it.
+                    if !text_of(CLIP_NAME_PROP).is_empty() {
+                        out.push((
+                            CLIP_NAME_PROP.to_string(),
+                            "Clip Name".to_string(),
+                            InlineKind::Str(text_of(CLIP_NAME_PROP)),
+                        ));
+                    }
+                }
+                // The blend-space and nested-graph references' front doors:
+                // empty rows on every leaf state (rows appear even when the
+                // property is missing — the module rule above — because a
+                // row is the only way to give it a value).
+                out.push((
+                    SPACE_PROP.to_string(),
+                    "Blend Space".to_string(),
+                    InlineKind::Str(space),
+                ));
+                out.push((
+                    GRAPH_PROP.to_string(),
+                    "Graph".to_string(),
+                    InlineKind::Str(String::new()),
+                ));
+            }
+            out.push((
+                SPEED_PROP.to_string(),
+                "Speed".to_string(),
+                InlineKind::Float(float_of(SPEED_PROP, 1.0)),
+            ));
+        }
+        // A State Alias (state-aliases ticket 02): the Global switch, and
+        // while it is off one Bool row per state in document order — checked
+        // = listed. Each state row is a view over the one `states` array;
+        // `config_write_back` folds a tick into that property, so the edit
+        // and its undo are a single `SetProperty` on `states`.
+        _ if n.type_id == ANIM_STATE_ALIAS_TYPE_ID => {
+            let global = alias_is_global(n);
+            out.push((
+                ALIAS_GLOBAL_PROP.to_string(),
+                "Global".to_string(),
+                InlineKind::Bool(global),
+            ));
+            if !global {
+                let listed = alias_states(n);
+                for s in docd
+                    .doc()
+                    .nodes
+                    .iter()
+                    .filter(|s| s.type_id == ANIM_STATE_TYPE_ID)
+                {
+                    out.push((
+                        format!("{ALIAS_STATE_ROW_PREFIX}{}", s.id),
+                        anim_state_name(s),
+                        InlineKind::Bool(listed.contains(&(s.id as i32))),
+                    ));
+                }
+            }
+        }
+        _ if n.type_id == ANIM_TRANSITION_TYPE_ID => {
+            out.push((
+                DURATION_PROP.to_string(),
+                "Duration".to_string(),
+                InlineKind::Float(float_of(DURATION_PROP, 0.0)),
+            ));
+            out.push((
+                PRIORITY_PROP.to_string(),
+                "Priority".to_string(),
+                InlineKind::Int(int_of(PRIORITY_PROP)),
+            ));
+        }
+        _ if n.type_id == ANIM_PLAY_ONCE_TYPE_ID => {
+            out.push((
+                CLIP_PROP.to_string(),
+                "Clip".to_string(),
+                InlineKind::Str(text_of(CLIP_PROP)),
+            ));
+            // The starting Trigger: a dropdown over the declared Trigger
+            // parameters, stored as `Str` — the `var` config row's shape.
+            let value = text_of(SLOT_TRIGGER_PROP);
+            let variants: Vec<String> = docd
+                .doc()
+                .variables
+                .iter()
+                .filter(|v| v.ty == crate::engine::animation::graph::trigger_pin_type())
+                .map(|v| v.slug.clone())
+                .collect();
+            let ok = variants.contains(&value);
+            out.push((
+                SLOT_TRIGGER_PROP.to_string(),
+                "Trigger".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+            out.push((
+                SPEED_PROP.to_string(),
+                "Speed".to_string(),
+                InlineKind::Float(float_of(SPEED_PROP, 1.0)),
+            ));
+            out.push((
+                SLOT_FADE_IN_PROP.to_string(),
+                "Fade In".to_string(),
+                InlineKind::Float(float_of(SLOT_FADE_IN_PROP, 0.0)),
+            ));
+            out.push((
+                SLOT_FADE_OUT_PROP.to_string(),
+                "Fade Out".to_string(),
+                InlineKind::Float(float_of(SLOT_FADE_OUT_PROP, 0.0)),
+            ));
+        }
         _ => {}
     }
     out
@@ -772,6 +1032,47 @@ struct PinGeom {
     /// Distinct from `PinType::Domain("")`, which merely *encodes* that state
     /// and compares equal only to itself, refusing every real type.
     untyped: bool,
+    /// Never drawn (Task 41 rework): machine nodes show no pin dots — their
+    /// flow wires land on the border. The pin still exists as a wire anchor
+    /// and (unless its `hit_w` is zero) a hit target.
+    hidden: bool,
+}
+
+/// The at-rest presentation of a transition node (Task 41, ticket 02 of the
+/// transitions rework): a circular arrow badge beside its line — Unreal's
+/// transition icon — instead of the standard node anatomy. The node is
+/// storage; the badge is the presentation. The rule summary is not on the
+/// canvas: it is the hover tooltip, and selecting the transition unfolds it
+/// into a small standard card whose config rows edit duration and priority.
+struct ChipGeom {
+    /// Hover text: "Idle → Jump" over the summary line, from
+    /// `graph_anim_chip`.
+    tip: String,
+    /// Unit flow direction the arrow points along (world = screen axes).
+    /// Set by the derived-layout pass; a badge nothing placed points east.
+    dir: Vec2,
+}
+
+/// Which compact machine card a node draws as (Task 41 canvas rework,
+/// mockup 2b/2d): states are name + tag + one mono subtitle, ENTRY is a
+/// small pill, an alias a pill with its title, ALIAS tag and the states it
+/// stands for. None of them show pins or fields at rest — selecting a state
+/// or alias swaps to the standard card (config rows) through geometry,
+/// exactly like a transition's chip does.
+#[derive(Clone, Copy, PartialEq)]
+enum AnimCardKind {
+    State,
+    Entry,
+    Alias,
+}
+
+/// A compact machine card's extras beyond the shared title/tag.
+struct AnimCard {
+    kind: AnimCardKind,
+    /// The one mono line under the name: `▷ clip`, `❐ file.animgraph` or
+    /// `⧉ blend tree`. `None` — a state with nothing configured — draws
+    /// name-only.
+    subtitle: Option<String>,
 }
 
 struct NodeGeom {
@@ -790,6 +1091,15 @@ struct NodeGeom {
     errored: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
+    /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
+    chip: Option<ChipGeom>,
+    /// A compact machine card (Task 41 rework): drawn instead of node
+    /// anatomy for states / ENTRY / aliases on the machine canvas.
+    anim: Option<AnimCard>,
+    /// This node's displayed position is derived (a chip riding its edge):
+    /// its stored position is not what is on screen, so a direct grab must
+    /// not start a move that would land somewhere else entirely.
+    pinned_pos: bool,
     /// The breakpoint mark, if any: `Some(true)` armed, `Some(false)`
     /// disabled (GS-4). Whether it is *hit* or *invalid* is not geometry — it
     /// comes from the bound instance at draw time.
@@ -805,6 +1115,29 @@ struct NodeGeom {
 }
 
 impl NodeGeom {
+    /// Move every piece of this geometry by `d` — the derived-position pass
+    /// (a transition riding its edge midpoint) after sizes are known.
+    fn translate(&mut self, d: Vec2) {
+        let mv = |r: &mut Rect| *r = Rect::from_min_max(r.min + d, r.max + d);
+        mv(&mut self.rect);
+        for pin in &mut self.pins {
+            pin.wire_anchor += d;
+            pin.dot_center += d;
+        }
+        for c in &mut self.config {
+            c.y += d.y;
+            mv(&mut c.cell);
+            mv(&mut c.label_box);
+            if let Some(r) = &mut c.remove {
+                mv(r);
+            }
+        }
+        if let Some(r) = &mut self.add_field {
+            mv(r);
+        }
+        self.pinned_pos = true;
+    }
+
     fn wire_anchor(&self, slug: &str, output: bool) -> Option<Pos2> {
         self.pins
             .iter()
@@ -839,8 +1172,9 @@ impl NodeGeom {
     fn body_rect(&self, lod: ZoomLod, m: &GraphMetrics) -> Rect {
         // A reroute has no header to collapse to; it is drawn as the same disc
         // at every zoom. Falling through to the header-height branch gave it a
-        // hit box nearly twice as tall as the dot, hanging below it.
-        if self.reroute || lod.rows() {
+        // hit box nearly twice as tall as the dot, hanging below it. A chip is
+        // already smaller than a header, so it keeps its own box the same way.
+        if self.reroute || self.chip.is_some() || self.anim.is_some() || lod.rows() {
             self.rect
         } else {
             Rect::from_min_size(self.rect.min, Vec2::new(self.rect.width(), m.header_h))
@@ -1019,6 +1353,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: Some(d * REROUTE_PIN_HIT),
                     untyped,
+                    hidden: false,
                 };
                 return NodeGeom {
                     id: n.id,
@@ -1030,6 +1365,9 @@ fn build_geoms(
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
                     reroute: true,
+                    chip: None,
+                    anim: None,
+                    pinned_pos: false,
                     breakpoint: state.breakpoints.get(&n.id).copied(),
                     preview: None,
                     config: Vec::new(),
@@ -1039,6 +1377,96 @@ fn build_geoms(
                         pin(REROUTE_OUT, true, min.x + d),
                     ],
                 };
+            }
+
+            // Task 41: an unselected transition renders as its at-rest badge
+            // — a D×D disc, D = the chip row height — with the rule summary
+            // in its tooltip. Selecting it unfolds the standard card (with
+            // its Duration/Priority config rows) through the normal path
+            // below.
+            if n.type_id == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID
+                && !state.selection.contains(&n.id)
+            {
+                use crate::engine::animation::graph::plan::{
+                    TRANSITION_FROM_PIN, TRANSITION_TO_PIN,
+                };
+                let resolved = super::graph_anim_chip::transition_chip(&state.doc, n.id);
+                let w = m.row_h;
+                let h = m.row_h;
+                let rect = Rect::from_min_size(min, Vec2::new(w, h));
+                let cy = min.y + h * 0.5;
+                let flow = PinType::Domain(
+                    crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string(),
+                );
+                let empty: BTreeSet<&str> = BTreeSet::new();
+                let incoming = incident.incoming.get(&n.id).unwrap_or(&empty);
+                let outgoing = incident.outgoing.get(&n.id).unwrap_or(&empty);
+                let pin = |slug: &str, output: bool, x: f32, dot: f32| PinGeom {
+                    slug: slug.to_string(),
+                    label: String::new(),
+                    ty: flow.clone(),
+                    output,
+                    row: 0,
+                    wire_anchor: Pos2::new(x, cy),
+                    dot_center: Pos2::new(dot, cy),
+                    connected: if output {
+                        outgoing.contains(slug)
+                    } else {
+                        incoming.contains(slug)
+                    },
+                    inline: None,
+                    value_w: m.value_w,
+                    ghost: false,
+                    hit_w: None,
+                    untyped: false,
+                    hidden: true,
+                };
+                return NodeGeom {
+                    id: n.id,
+                    rect,
+                    title: docd
+                        .display_name(n.id)
+                        .unwrap_or_else(|| "Transition".to_string()),
+                    tag: String::new(),
+                    category: Some(crate::engine::animation::graph::ANIM_CATEGORY.to_string()),
+                    tint: n.tint,
+                    missing: false,
+                    errored: errors.nodes.contains(&n.id),
+                    reroute: false,
+                    chip: Some(ChipGeom { tip: resolved.tooltip(), dir: Vec2::new(1.0, 0.0) }),
+                    anim: None,
+                    pinned_pos: false,
+                    breakpoint: state.breakpoints.get(&n.id).copied(),
+                    preview: None,
+                    config: Vec::new(),
+                    add_field: None,
+                    pins: vec![
+                        pin(TRANSITION_FROM_PIN, false, min.x, min.x + m.pin_inset),
+                        pin(TRANSITION_TO_PIN, true, min.x + w, min.x + w - m.pin_inset),
+                    ],
+                };
+            }
+
+            // Task 41 canvas rework: the other machine nodes render as
+            // compact cards — a state is its name, role tag and one mono
+            // subtitle; ENTRY and an alias are small pills (mockup 2b).
+            // No pins, no fields. Selecting a *state* or *alias* unfolds the
+            // standard card (its config rows) through the generic path
+            // below — the transition-chip idiom exactly.
+            if state.domain.is_animation() {
+                use crate::engine::animation::graph::plan::{
+                    ANIM_ENTRY_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+                };
+                let selected = state.selection.contains(&n.id);
+                let kind = match n.type_id.as_str() {
+                    ANIM_STATE_TYPE_ID if !selected => Some(AnimCardKind::State),
+                    ANIM_STATE_ALIAS_TYPE_ID if !selected => Some(AnimCardKind::Alias),
+                    ANIM_ENTRY_TYPE_ID => Some(AnimCardKind::Entry),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    return anim_card_geom(n, kind, state, &docd, &incident, errors, m, st, p);
+                }
             }
             #[allow(clippy::type_complexity)]
             let (title, category, missing, inputs, outputs): (
@@ -1094,7 +1522,32 @@ fn build_geoms(
                 )
             };
 
-            let tag = derive_tag(is_sub, desc, category.as_deref());
+            // Animation nodes wear the mockup's role words (STATE / ENTRY /
+            // ANY / SLOT) instead of the derived PURE/EVENT tags, which
+            // describe exec flow and mean nothing in a domain without any.
+            let tag = crate::engine::animation::graph::anim_node_tag(&n.type_id)
+                .map(str::to_string)
+                .unwrap_or_else(|| derive_tag(is_sub, desc, category.as_deref()));
+
+            // Task 41 rework: machine nodes keep pins off the card even
+            // unfolded — flow wires land on the border. A selected state
+            // strips its pin rows before sizing (hidden border anchors are
+            // pushed after the pins are built); a selected transition keeps
+            // its two pins as hit targets (retargeting) but never draws them.
+            let anim_state_unfold = state.domain.is_animation()
+                && matches!(
+                    n.type_id.as_str(),
+                    crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID
+                        | crate::engine::animation::graph::plan::ANIM_STATE_ALIAS_TYPE_ID
+                );
+            let anim_transition = state.domain.is_animation()
+                && n.type_id
+                    == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+            let (inputs, outputs) = if anim_state_unfold {
+                (Vec::new(), Vec::new())
+            } else {
+                (inputs, outputs)
+            };
 
             // --- auto width: widest of the header row and every pin row ---
             let mut tag_w = p
@@ -1162,11 +1615,14 @@ fn build_geoms(
             let has_add_field = n.type_id == EVENT_CUSTOM_TYPE_ID;
             let config_n = config.len() + usize::from(has_add_field);
 
+            // A pin-less node with a config band (the play-once slot) does
+            // not pay for an empty pin row; everything else keeps at least
+            // one row so a bare node still has a body.
             let rows = (inputs.len() + ghost_in)
                 .max(outputs.len() + ghost_out)
-                .max(1);
+                .max(usize::from(config_n == 0));
             let mut content_w: f32 = header_w;
-            for (key, label, _) in &config {
+            for (key, label, kind) in &config {
                 let remove_w = if key.starts_with(EVENT_PAYLOAD_PREFIX) {
                     m.config_remove_w() + m.label_gap
                 } else {
@@ -1182,7 +1638,10 @@ fn build_geoms(
                         )
                         .x
                         + m.label_gap
-                        + m.config_value_w()
+                        // Same content-aware floor the cell itself uses: a
+                        // config dropdown or long value widens its node
+                        // rather than eliding (readable-at-rest bar).
+                        + m.config_value_w().max(inline_cell_w(p, kind, m, st))
                         + remove_w
                         + m.pad_x,
                 );
@@ -1238,8 +1697,8 @@ fn build_geoms(
                         Some(r) => r.min.x - m.label_gap,
                         None => right,
                     };
-                    let cell =
-                        m.config_box(cell_right - m.config_value_w(), cell_right, y);
+                    let cell_w = m.config_value_w().max(inline_cell_w(p, &kind, m, st));
+                    let cell = m.config_box(cell_right - cell_w, cell_right, y);
                     let label_box =
                         m.config_box(min.x + m.pad_x, cell.min.x - m.label_gap, y);
                     ConfigGeom { key, label, kind, y, cell, label_box, remove }
@@ -1276,6 +1735,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: None,
                     untyped: false,
+                    hidden: anim_transition,
                 });
             }
             for (i, (slug, label, ty)) in outputs.into_iter().enumerate() {
@@ -1294,6 +1754,7 @@ fn build_geoms(
                     ghost: false,
                     hit_w: None,
                     untyped: false,
+                    hidden: anim_transition,
                 });
             }
             // Ghost rows last, one per side, continuing that side's rows.
@@ -1322,8 +1783,51 @@ fn build_geoms(
                     ghost: true,
                     hit_w: None,
                     untyped: false,
+                    hidden: false,
                 });
                 *row += 1;
+            }
+            // The unfolded state's hidden border anchors: mid-border, no
+            // dot, no hit — the same anchors its compact card carries, so
+            // its flow wires do not move when it folds or unfolds. An alias
+            // has no `in`.
+            if anim_state_unfold {
+                use crate::engine::animation::graph::plan::{
+                    ANIM_STATE_TYPE_ID, STATE_IN_PIN, STATE_OUT_PIN,
+                };
+                let flow = PinType::Domain(
+                    crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string(),
+                );
+                let cy = min.y + height * 0.5;
+                let has_in = n.type_id == ANIM_STATE_TYPE_ID;
+                for (slug, output, x) in [
+                    (STATE_IN_PIN, false, min.x),
+                    (STATE_OUT_PIN, true, min.x + width),
+                ]
+                .into_iter()
+                .filter(|(_, output, _)| *output || has_in)
+                {
+                    pins.push(PinGeom {
+                        slug: slug.to_string(),
+                        label: String::new(),
+                        ty: flow.clone(),
+                        output,
+                        row: 0,
+                        wire_anchor: Pos2::new(x, cy),
+                        dot_center: Pos2::new(x, cy),
+                        connected: if output {
+                            outgoing.contains(slug)
+                        } else {
+                            incoming.contains(slug)
+                        },
+                        inline: None,
+                        value_w: m.value_w,
+                        ghost: false,
+                        hit_w: Some(0.0),
+                        untyped: false,
+                        hidden: true,
+                    });
+                }
             }
             NodeGeom {
                 id: n.id,
@@ -1336,6 +1840,9 @@ fn build_geoms(
                 missing,
                 errored: errors.nodes.contains(&n.id),
                 reroute: is_reroute,
+                chip: None,
+                anim: None,
+                pinned_pos: false,
                 preview: desc.and_then(|d| d.preview),
                 config,
                 add_field,
@@ -1343,6 +1850,184 @@ fn build_geoms(
             }
         })
         .collect()
+}
+
+/// Geometry for a compact machine card (Task 41 canvas rework, mockup 2b):
+/// a state is name + STATE tag + one mono subtitle; ENTRY is a small pill;
+/// an alias is a pill with its title, ALIAS tag and the states it stands
+/// for. No pin rows exist — the flow anchors are hidden mid-border pins
+/// with a zero hit target, because a border press starts a wire and a flow
+/// wire lands on the border, not on a dot.
+#[allow(clippy::too_many_arguments)]
+/// An alias pill's mono subtitle: "Global", else the listed states' names in
+/// document order — the first two, then "+N" ("Idle, Jump +2"); a listed
+/// alias with nothing on its list says so (the compiler refuses it too).
+fn alias_subtitle(n: &NodeInst, doc: &GraphDoc) -> String {
+    if alias_is_global(n) {
+        return "Global".to_string();
+    }
+    let names = alias_state_names(n, doc);
+    match names.len() {
+        0 => "No states".to_string(),
+        1 | 2 => names.join(", "),
+        k => format!("{} +{}", names[..2].join(", "), k - 2),
+    }
+}
+
+/// The display names of the states an alias lists, in document order (a
+/// listed id that is no longer a state is not a name and does not show).
+fn alias_state_names(n: &NodeInst, doc: &GraphDoc) -> Vec<String> {
+    use crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID;
+    let listed = alias_states(n);
+    doc.nodes
+        .iter()
+        .filter(|s| s.type_id == ANIM_STATE_TYPE_ID && listed.contains(&(s.id as i32)))
+        .map(anim_state_name)
+        .collect()
+}
+
+/// A state's name as the compiler spells it: its title, else "State <id>".
+pub(super) fn anim_state_name(s: &NodeInst) -> String {
+    s.title
+        .clone()
+        .unwrap_or_else(|| format!("State {}", s.id))
+}
+
+/// A state card's one mono subtitle: the compiler's precedence spoken back
+/// — tree > graph > blend space > clip — each source with its own glyph,
+/// files shown as their content-relative path (the `.animgraph` idiom).
+fn anim_state_subtitle(n: &NodeInst, docd: &DocDescriptors) -> Option<String> {
+    use crate::engine::animation::graph::plan::{CLIP_PROP, GRAPH_PROP, SPACE_PROP};
+    let text_of = |key: &str| match n.properties.get(key) {
+        Some(PropValue::Str(s)) | Some(PropValue::Enum(s)) | Some(PropValue::Asset(s)) => {
+            s.trim().to_string()
+        }
+        _ => String::new(),
+    };
+    let has_tree = docd
+        .doc()
+        .regions
+        .get(&n.id)
+        .is_some_and(|r| !r.nodes.is_empty());
+    let (graph, space, clip) = (text_of(GRAPH_PROP), text_of(SPACE_PROP), text_of(CLIP_PROP));
+    if has_tree {
+        Some("\u{29c9} blend tree".to_string())
+    } else if !graph.is_empty() {
+        Some(format!("\u{2750} {graph}"))
+    } else if !space.is_empty() {
+        Some(format!("\u{25a6} {space}"))
+    } else if !clip.is_empty() {
+        Some(format!("\u{25b7} {clip}"))
+    } else {
+        None
+    }
+}
+
+fn anim_card_geom(
+    n: &NodeInst,
+    kind: AnimCardKind,
+    state: &GraphEditorState,
+    docd: &DocDescriptors,
+    incident: &IncidentEdges,
+    errors: &ErrorIndex,
+    m: &GraphMetrics,
+    st: &Style,
+    p: &mut Painter,
+) -> NodeGeom {
+    use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
+    let min = Pos2::new(n.position[0], n.position[1]);
+    let errored = errors.nodes.contains(&n.id);
+    let (title, tag, subtitle) = match kind {
+        AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
+        AnimCardKind::Alias => (
+            alias_name(n),
+            "ALIAS".to_string(),
+            Some(alias_subtitle(n, docd.doc())),
+        ),
+        AnimCardKind::State => (
+            docd.display_name(n.id).unwrap_or_else(|| "State".to_string()),
+            "STATE".to_string(),
+            anim_state_subtitle(n, docd),
+        ),
+    };
+    let title_px = st.fonts.body;
+    let sub_px = st.fonts.small;
+    let gutter_w = if errored {
+        m.pin_r * 1.6 + m.label_gap
+    } else {
+        0.0
+    };
+    let tag_w = if tag.is_empty() {
+        0.0
+    } else {
+        p.measure_text_family(&tag, m.tag_px, None, FontFamily::Mono).x + m.col_gap
+    };
+    let title_w = p.measure_text(&title, title_px, None).x;
+    let sub_w = subtitle
+        .as_deref()
+        .map_or(0.0, |s| p.measure_text_family(s, sub_px, None, FontFamily::Mono).x);
+    let content = (gutter_w + title_w + tag_w).max(sub_w);
+    // States take the mockup's min card width; pills size to their text.
+    let w = match kind {
+        AnimCardKind::State => (m.pad_x * 2.0 + content).clamp(m.min_w, m.max_w),
+        _ => (m.pad_x * 2.0 + content).min(m.max_w),
+    };
+    let h = match (kind, &subtitle) {
+        (AnimCardKind::State | AnimCardKind::Alias, Some(_)) => m.header_h + m.row_h * 0.7,
+        (AnimCardKind::State, None) => m.header_h + m.body_pad,
+        _ => m.header_h,
+    };
+    let rect = Rect::from_min_size(min, Vec2::new(w, h));
+    let title = middle_truncate(p, &title, title_px, w - m.pad_x * 2.0 - gutter_w - tag_w);
+
+    let cy = min.y + h * 0.5;
+    let empty: BTreeSet<&str> = BTreeSet::new();
+    let incoming = incident.incoming.get(&n.id).unwrap_or(&empty);
+    let outgoing = incident.outgoing.get(&n.id).unwrap_or(&empty);
+    let flow = PinType::Domain(crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string());
+    let anchor = |slug: &str, output: bool, x: f32| PinGeom {
+        slug: slug.to_string(),
+        label: String::new(),
+        ty: flow.clone(),
+        output,
+        row: 0,
+        wire_anchor: Pos2::new(x, cy),
+        dot_center: Pos2::new(x, cy),
+        connected: if output {
+            outgoing.contains(slug)
+        } else {
+            incoming.contains(slug)
+        },
+        inline: None,
+        value_w: m.value_w,
+        ghost: false,
+        hit_w: Some(0.0),
+        untyped: false,
+        hidden: true,
+    };
+    let mut pins = vec![anchor(STATE_OUT_PIN, true, min.x + w)];
+    if kind == AnimCardKind::State {
+        pins.push(anchor(STATE_IN_PIN, false, min.x));
+    }
+    NodeGeom {
+        id: n.id,
+        rect,
+        title,
+        tag,
+        category: Some(crate::engine::animation::graph::ANIM_CATEGORY.to_string()),
+        tint: n.tint,
+        missing: false,
+        errored,
+        reroute: false,
+        chip: None,
+        anim: Some(AnimCard { kind, subtitle }),
+        pinned_pos: false,
+        breakpoint: state.breakpoints.get(&n.id).copied(),
+        preview: None,
+        config: Vec::new(),
+        add_field: None,
+        pins,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1497,8 +2182,10 @@ fn pin_label(pin: &PinGeom) -> String {
 /// target, so a second wire into it is a second place execution can arrive
 /// from, not a second value. Data inputs keep the single-wire rule.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn validate_connection(
     state: &GraphEditorState,
+    registry: &NodeRegistry,
     a_node: u64,
     a_slug: &str,
     a_out: bool,
@@ -1531,7 +2218,11 @@ fn validate_connection(
         .edges
         .iter()
         .any(|e| e.to_node == to_node && e.to_pin == to_pin);
-    if occupied && *to_ty != PinType::Exec {
+    // Exec and flow-like domain inputs may fan in (Task 41: several
+    // transitions arriving at one state); a data input takes one wire.
+    let fan_in = *to_ty == PinType::Exec
+        || matches!(to_ty, PinType::Domain(k) if registry.domain_is_flow(k));
+    if occupied && !fan_in {
         return None;
     }
     // An identical wire is not a second arrival, it is the same one.
@@ -1573,8 +2264,18 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         exec,
         exec_instances,
         exec_clear,
+        anim,
+        anim_instances,
     } = ctx;
     let resolver = &DocResolvers { graphs: resolver, curves };
+    // Subgraph instances are a script-library concept; the animation
+    // library's file-backed nesting is a state referencing another
+    // `.animgraph` through its Graph row (ticket 09), not a subgraph row.
+    let subgraph_assets: &[String] = if state.domain.is_animation() {
+        &[]
+    } else {
+        subgraph_assets
+    };
 
     // Finalize a gesture orphaned by a release that landed while this tab was
     // not being drawn (e.g. the user switched tabs mid-drag): the pointer is
@@ -1586,9 +2287,19 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // never act across a half-finished gesture, or they would either skip an
     // untracked mutation or mark a save cursor over content the file does not
     // have.
+    // Rule-scope upkeep (ticket 05): settle anything the peek recorded since
+    // last frame onto the parent history before shortcuts or drawing read
+    // either document.
+    state.drain_rule_scope(registry);
     if !ui.ctx().input.pointer_down {
         finish_node_drag(state, registry);
         finish_annotation_drag(state, registry);
+        // The peek's canvas gets the same orphaned-gesture finish.
+        if let Some(mut scope) = state.rule_scope.take() {
+            finish_node_drag(&mut scope.child, rule_scope_registry());
+            finish_annotation_drag(&mut scope.child, rule_scope_registry());
+            state.rule_scope = Some(scope);
+        }
         state.flush_prop_edit(registry);
         // The variables panel's defaults coalesce on the same rule as node
         // properties — one drag, one entry — so they close on the same beat.
@@ -1623,6 +2334,52 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // off the canvas rect follows without knowing it exists.
     paused_banner(ui, state, registry, resolver, keymap, exec);
 
+    // The breadcrumb band (tickets 05/09): the file chain this tab was
+    // descended into — "character.animgraph ▸ locomotion.animgraph" — and,
+    // while a rule scope is open, the non-file scope target after it. A
+    // chain crumb navigates back to that ancestor; the file crumb closes an
+    // open rule scope.
+    match breadcrumb_band(ui, state) {
+        BreadcrumbClick::None => {}
+        BreadcrumbClick::CloseRule => state.close_rule_scope(registry),
+        BreadcrumbClick::Ancestor(i) => {
+            if let Some(path) = state.nav_back.get(i).cloned() {
+                *open_subgraph = Some(GraphOpenRequest {
+                    path,
+                    back: state.nav_back[..i].to_vec(),
+                });
+            }
+        }
+    }
+    // Promoted (⤢): the rule takes the full canvas; the machine's canvas and
+    // strips yield entirely until the breadcrumb (or Esc) climbs back out.
+    if state.rule_scope.as_ref().is_some_and(|s| s.full) {
+        rule_scope_full(
+            ui,
+            state,
+            registry,
+            clipboard,
+            resolver,
+            keymap,
+            selection_outline,
+            &wire_prefs,
+            zoom_min,
+            zoom_max,
+        );
+        return;
+    }
+
+    // Ticket 06: an animation document's preview strip reserves its band off
+    // the bottom before anything else measures — the vars strip and the
+    // canvas both stop above it (the curve editor's footer idiom, per the
+    // spec's placement ruling).
+    let preview_h = if state.domain.is_animation() {
+        let st = ui.style();
+        PREVIEW_H * (st.metrics.row_height / BASE_ROW_H).max(0.1)
+    } else {
+        0.0
+    };
+
     // The variables strip takes its column out of the available space the same
     // way the toolbar takes its row: the cursor moves right by the strip's
     // width before the canvas allocates, so the canvas shrinks by exactly that
@@ -1634,11 +2391,15 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
         let w = if state.vars.open { VARS_W * s } else { VARS_RAIL_W * s };
         let c = ui.cursor();
-        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y));
+        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y - preview_h));
         ui.set_cursor(Pos2::new(c.x + w, c.y));
         r
     };
 
+    // While a peek is open the machine is a backdrop: its view must not move
+    // under the overlay (pan/zoom gestures belong to the peek's canvas), so
+    // the pre-frame view is restored after the canvas ran (ticket 05).
+    let peek_view_lock = state.rule_scope.is_some().then_some(state.view);
     // Canvas needs `&mut CanvasView`; `CanvasView` is Copy, so pass a local
     // copy and write it back — keeps `state` fully borrowable in the body.
     let mut view = state.view;
@@ -1653,12 +2414,17 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // Rule 2's threshold is a crusty constant, scaled by the editor's UI scale
     // so it stays 4 logical points at any scale factor. One source, so the
     // canvas's right-drag decision and the graph's own hit tests agree.
-    let out = Canvas::new()
+    let mut canvas = Canvas::new()
         .zoom_range(zoom_min, zoom_max)
         .drag_threshold(crusty_gui::input::drag_threshold(
             (ui.style().metrics.row_height / BASE_ROW_H).max(0.1),
-        ))
-        .show(ui, &mut view, |ui, scope| {
+        ));
+    if preview_h > 0.0 {
+        // The canvas fills what remains *above* the preview band.
+        let a = ui.available_size();
+        canvas = canvas.size(Vec2::new(a.x.max(1.0), (a.y - preview_h).max(1.0)));
+    }
+    let out = canvas.show(ui, &mut view, |ui, scope| {
         draw_and_interact(
             ui,
             scope,
@@ -1680,6 +2446,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             &mut frame_request,
             keymap,
             exec,
+            None,
         )
     });
     // F/A frame shortcuts re-fit the view (applied after the canvas ran, so it
@@ -1688,13 +2455,40 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
         view = v;
     }
     state.view = view;
+    if let Some(v) = peek_view_lock {
+        state.view = v;
+    }
+    // The machine dims under an open peek — its lit trio (transition, source
+    // and target states) excepted (mockup 3b).
+    rule_dim_scrim(ui, out.rect, state, &out.inner);
+    // …and dims the same way while a transition is merely *selected*
+    // (mockup 2d), its trio and its own edge staying lit.
+    anim_select_dim(ui, out.rect, state, registry, &out.inner);
+    // Live preview highlight (ticket 06): the active state, the outgoing
+    // side of an in-flight fade, and the transition that fired. Above the
+    // scrim, so it stays readable while a rule peek is open.
+    anim_live_highlight(ui, out.rect, state, &out.inner, anim);
 
     // A row released over the canvas: remember where, and ask Get or Set.
     // Taken here rather than inside the canvas body because the body runs
     // before the strip is drawn, and the payload only has to be claimed once
     // per frame — the drag survives frames on the context, not on either side.
-    if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
-        if let Some(sp) = ui.ctx().input.pointer_pos {
+    // A drop headed for the open peek is the *peek's* — the claim is
+    // first-come, and the overlay's own drop target runs later this frame.
+    let drop_is_peeks = state.rule_scope.is_some()
+        && ui
+            .ctx()
+            .input
+            .pointer_pos
+            .is_some_and(|sp| rule_peek_rect(ui, out.rect, state, &out.inner).contains(sp));
+    if drop_is_peeks {
+    } else if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
+        if state.domain.is_animation() {
+            // Parameters are read *inside* a transition's rule, not on the
+            // machine canvas — a top-level Get would compile to nothing.
+            // The rule canvas (the peek overlay) is where this drop lands.
+            state.toast("Parameters are read inside transition rules");
+        } else if let Some(sp) = ui.ctx().input.pointer_pos {
             let v = state.view;
             state.vars.drop = Some(VarDrop {
                 slug: p.slug,
@@ -1711,13 +2505,37 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // has no viewport and no geometry, and this is the same pan-only move
     // find-in-graph and error cycling already make.
     let mut locate: Option<u64> = None;
-    variables_panel(ui, strip, state, registry, &mut locate);
+    let vars_root = Id::new(("graph_vars_strip", state.path.as_str()));
+    variables_panel(ui, strip, state, registry, vars_root, false, &mut locate);
+    // The Variables dock panel has no canvas; it leaves its locate here for
+    // the tab to frame on its next draw (per-document layouts ticket 02).
+    let locate = locate.or_else(|| state.locate_request.take());
     if let Some(id) = locate {
         state.select_only(id);
         state.flash = Some((id, std::time::Instant::now()));
         if let Some((mn, mx)) = geoms_bbox(out.inner.iter().filter(|g| g.id == id)) {
             let v = frame_view(mn, mx, out.rect.size(), zoom_min, zoom_max);
             state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+        }
+    }
+    // The preview strip (ticket 06) paints its band under the canvas, then
+    // its entity picker floats with the other transient surfaces.
+    let mut anim_chip_rect: Option<(Rect, bool)> = None;
+    if preview_h > 0.0 {
+        let band = Rect::from_min_max(
+            Pos2::new(strip.min.x, strip.max.y),
+            Pos2::new(ui.available().max.x, strip.max.y + preview_h),
+        );
+        anim_chip_rect = Some(anim_preview_strip(ui, band, state, registry, anim, anim_instances));
+    }
+    if let Some((chip, just_opened)) = anim_chip_rect.filter(|_| state.anim_picker) {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        if let Some(pick) =
+            anim_preview_picker(ui, chip, anim_instances, anim, &st, s, just_opened)
+        {
+            state.anim_bind = pick;
+            state.anim_picker = false;
         }
     }
     var_drop_popup(ui, state, registry);
@@ -1737,7 +2555,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     payload_confirm_dialog(ui, out.rect, state, registry);
 
     palette_popover(ui, state, registry, subgraph_assets);
-    find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max);
+    find_overlay(ui, out.rect, state, &out.inner, zoom_min, zoom_max, registry);
     annotation_menu(ui, state, registry, keymap, annotation_menu_at);
     wire_menu(ui, state, registry, wire_menu_at);
     node_menu(ui, state, registry, keymap, &out.inner, node_menu_at);
@@ -1752,12 +2570,28 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     edit_popup(ui, state, registry, out.rect);
     purge_confirm(ui, out.rect, state, registry);
     cheat_sheet(ui, out.rect, state, keymap);
+    // The rule peek (ticket 05) draws over everything the machine owns; its
+    // own transient surfaces stack above it.
+    rule_peek_overlay(
+        ui,
+        out.rect,
+        &out.inner,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        &wire_prefs,
+        zoom_min,
+        zoom_max,
+    );
     draw_toasts(ui, out.rect, state);
 
     // F8 / Shift+F8 walk the anchored errors. The chip's own cursor drives
     // it, so clicking and keying stay in step.
     if let Some(forward) = cycle_error_request {
-        let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
+        let errors = ErrorIndex::build(&state.errors, &state.ref_errors, &state.domain_errors);
         if !forward {
             // Backwards = step back two, then forward one.
             let n = errors
@@ -1778,6 +2612,7 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
             zoom_min,
             zoom_max,
             &mut req,
+            registry,
         );
         if let Some(v) = req {
             state.view = v;
@@ -1792,9 +2627,16 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
 
     // Ctrl+G writes a new asset, so it runs outside the draw pass.
     if collapse_request {
-        match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
-            Ok(rel) => println!("graph: collapsed selection into {rel}"),
-            Err(e) => println!("graph: collapse to subgraph failed: {e}"),
+        if state.domain.is_animation() {
+            // Subgraphs are the script library's factoring tool; a machine
+            // factors by pointing a state's Graph row at another `.animgraph`
+            // (ticket 09), which is an authoring act, not a collapse gesture.
+            state.toast("An animation graph has no subgraphs");
+        } else {
+            match state.collapse_to_subgraph(std::path::Path::new("content"), registry) {
+                Ok(rel) => println!("graph: collapsed selection into {rel}"),
+                Err(e) => println!("graph: collapse to subgraph failed: {e}"),
+            }
         }
     }
 }
@@ -1815,6 +2657,14 @@ fn palette_modal_id() -> crusty_gui::id::Id {
 }
 
 fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
+    overlay_has_focus_excl(ui, state, None)
+}
+
+/// [`overlay_has_focus`] for a canvas living *inside* a modal surface (the
+/// rule peek, ticket 05): the surface registers itself on the modal stack to
+/// shield the machine underneath, but must not count as "an open modal" for
+/// its own body — only things stacked above it do.
+fn overlay_has_focus_excl(ui: &Ui, state: &GraphEditorState, own_modal: Option<Id>) -> bool {
     state.palette.is_some()
         || state.find.is_some()
         || state.editing.is_some()
@@ -1830,7 +2680,10 @@ fn overlay_has_focus(ui: &Ui, state: &GraphEditorState) -> bool {
         // shortcuts must never fire mid-typing.
         || ui.ctx().text_focused()
         // An open menu/dropdown owns the keyboard too.
-        || ui.ctx().modal_any_open()
+        || match own_modal {
+            Some(id) => ui.ctx().modal_any_open_above(id),
+            None => ui.ctx().modal_any_open(),
+        }
 }
 
 /// Tab-level shortcuts: clipboard, history, delete, save.
@@ -1847,7 +2700,17 @@ fn handle_panel_keys(
     keymap: &Keymap,
     exec: Option<&GraphExecViz>,
 ) {
-    if overlay_has_focus(ui, state) {
+    // With a rule scope open the gate consults the *peek's* surfaces — the
+    // scope's own modal must not swallow the keys it exists to serve
+    // (ticket 05). The actions below route into the scope at the state level.
+    let focus_taken = match &state.rule_scope {
+        Some(scope) if !scope.full => {
+            overlay_has_focus_excl(ui, &scope.child, Some(rule_peek_modal_id()))
+        }
+        Some(scope) => overlay_has_focus_excl(ui, &scope.child, None),
+        None => overlay_has_focus(ui, state),
+    };
+    if focus_taken {
         return;
     }
     for action in keymap.dispatch(&ui.ctx().input, Context::GraphTab) {
@@ -1912,7 +2775,7 @@ fn draw_and_interact(
     collapse_request: &mut bool,
     layout_request: &mut bool,
     cycle_error_request: &mut Option<bool>,
-    open_subgraph: &mut Option<String>,
+    open_subgraph: &mut Option<GraphOpenRequest>,
     selection_outline: Color,
     wire_prefs: &WirePrefs,
     zoom_min: f32,
@@ -1920,6 +2783,10 @@ fn draw_and_interact(
     frame_request: &mut Option<CanvasView>,
     keymap: &Keymap,
     exec: Option<&GraphExecViz>,
+    // The modal surface this canvas lives inside, when it lives inside one
+    // (the rule peek, ticket 05): excluded from the modal gates so the
+    // surface does not shield its own body.
+    own_modal: Option<Id>,
 ) -> Vec<NodeGeom> {
     let st = ui.style();
     let zoom = scope.zoom();
@@ -1928,11 +2795,42 @@ fn draw_and_interact(
     let vis = scope.visible_world_rect();
     // Errors are resolved to their anchors before geometry, because ghost
     // rows change a node's shape.
-    let errors = ErrorIndex::build(&state.errors, &state.ref_errors);
-    let geoms = {
+    let errors = ErrorIndex::build(&state.errors, &state.ref_errors, &state.domain_errors);
+    let mut geoms = {
         let mut p = ui.painter();
         build_geoms(state, registry, resolver, &errors, &m, &st, &mut p)
     };
+    // Task 41 rework: the machine canvas derives its topology geometry —
+    // one straight border-to-border line per direction with the transition
+    // badges in a row beside its midpoint. Badges with both endpoints wired
+    // move to the derived spot (their stored position stays untouched in
+    // the document); every downstream consumer — hit tests, error badges,
+    // F8 framing, the live highlight — reads the translated geoms and
+    // follows for free.
+    let anim_flow = state.domain.is_animation().then(|| {
+        let rects: BTreeMap<u64, [f32; 4]> = geoms
+            .iter()
+            .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
+            .collect();
+        super::graph_anim_edge::anim_flow_layout(&state.doc, &rects, m.badge())
+    });
+    if let Some(l) = &anim_flow {
+        for g in &mut geoms {
+            if let Some(mn) = l.chip_min.get(&g.id) {
+                g.translate(Vec2::new(mn[0] - g.rect.min.x, mn[1] - g.rect.min.y));
+            }
+            if let (Some(d), Some(chip)) = (l.chip_dir.get(&g.id), &mut g.chip) {
+                chip.dir = Vec2::new(d[0], d[1]);
+            }
+        }
+        // An unfolded (selected) card is the thing being edited: nothing may
+        // cross it. Selected nodes move to the end of the paint order — which
+        // is also the hit order, `node_under` taking the last hit — so open
+        // cards sit above every other chip and state. Stable, so unselected
+        // nodes keep their relative document order.
+        geoms.sort_by_key(|g| state.selection.contains(&g.id));
+    }
+    let geoms = geoms;
 
     state.frame = state.frame.wrapping_add(1);
     let frame = state.frame;
@@ -1945,7 +2843,17 @@ fn draw_and_interact(
         }
     }
     let node_rects: Vec<Rect> = geoms.iter().map(|g| g.rect).collect();
-    let wires = build_wires(state, &geoms, &node_rects, &errors, wire_prefs, scope, vis, exec);
+    let wires = build_wires(
+        state,
+        &geoms,
+        &node_rects,
+        &errors,
+        wire_prefs,
+        scope,
+        vis,
+        exec,
+        anim_flow.as_ref().map(|l| &l.segs),
+    );
     let hovered_wire = wire_under(&wires, ui.ctx().input.pointer_pos);
     // Set when Alt+click removed a wire this frame, so nothing downstream
     // treats the same press as a reroute grab or a selection change.
@@ -2110,8 +3018,12 @@ fn draw_and_interact(
     // stack before we got here (Rule 1). Asking the stack directly also keeps
     // *hover* interactions off the canvas underneath one, which consumption
     // alone would not.
-    let widget_claimed = pointer_screen
-        .is_some_and(|p| ui.ctx().modal_contains(p) || widget_owns(p, &widget_rects));
+    let widget_claimed = pointer_screen.is_some_and(|p| {
+        (match own_modal {
+            Some(id) => ui.ctx().modal_contains_above(id, p),
+            None => ui.ctx().modal_contains(p),
+        }) || widget_owns(p, &widget_rects)
+    });
 
     // Frame shortcuts. F frames the selection, Home fits the whole graph.
     // (Bare `A` used to mean fit-graph; the ratified table gives that job to
@@ -2119,7 +3031,7 @@ fn draw_and_interact(
     // matches modifiers exactly, which replaces the old blanket
     // `mods.is_empty()` guard — that existed only to stop Ctrl+A and Ctrl+F
     // over the canvas also framing the view.
-    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
+    if pointer_world.is_some() && !overlay_has_focus_excl(ui, state, own_modal) {
         let framing = keymap.dispatch(&ui.ctx().input, Context::Canvas);
         let frame_all = framing.contains(&Action::FIT_GRAPH);
         let frame_sel = framing.contains(&Action::FRAME_SELECTION);
@@ -2266,7 +3178,14 @@ fn draw_and_interact(
     // tooltip below does not talk over it.
     let mut midpoint_hovered = false;
     if let Some(i) = hovered_wire.filter(|_| !alt_broke_wire) {
-        if let Some(w) = wires.iter().find(|w| w.edge_index == i) {
+        // A derived machine edge (Task 41 rework) offers no reroute handle:
+        // its midpoint belongs to the transition chip, and a reroute spliced
+        // into a flow wire would knock the edge off its straight rendering.
+        if let Some(w) = wires
+            .iter()
+            .find(|w| w.edge_index == i)
+            .filter(|w| !w.direct)
+        {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
                 let r = MIDPOINT_R;
                 let handle = Rect::from_center_size(mid, Vec2::splat(r * 2.0));
@@ -2355,6 +3274,12 @@ fn draw_and_interact(
         // hit-test per pin, which is what keeps the stated budget reachable.
         for g in geoms.iter().filter(|g| visible(g, lod, &m, vis)) {
             for pin in &g.pins {
+                // A zero hit target (a machine card's hidden border anchor,
+                // Task 41 rework) takes no interaction at all — the border
+                // gesture below owns that surface.
+                if pin.hit_w == Some(0.0) {
+                    continue;
+                }
                 let wr = Rect::from_center_size(
                     pin.dot_center,
                     Vec2::splat(pin.hit_w.unwrap_or(hit_w)),
@@ -2676,15 +3601,21 @@ fn draw_and_interact(
         if resp.pressed {
             node_pressed = true;
         }
-        // Node header hover: the node's own doc line.
+        // Node header hover: the node's own doc line. A transition badge
+        // hovers its rule instead — "Idle → Jump" over the summary line
+        // that used to be printed on the canvas.
         if resp.hovered && !g.reroute && state.node_drag.is_none() {
-            let header = Rect::from_min_size(
-                g.rect.min,
-                Vec2::new(g.rect.width(), m.header_h),
-            );
-            if pointer_world.is_some_and(|p| header.contains(p)) {
-                if let Some(doc) = node_doc(registry, resolver, state, g.id) {
-                    ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
+            if let Some(chip) = &g.chip {
+                ui.tooltip_for(scope.world_rect_to_screen(g.rect), &chip.tip);
+            } else {
+                let header = Rect::from_min_size(
+                    g.rect.min,
+                    Vec2::new(g.rect.width(), m.header_h),
+                );
+                if pointer_world.is_some_and(|p| header.contains(p)) {
+                    if let Some(doc) = node_doc(registry, resolver, state, g.id) {
+                        ui.tooltip_for(scope.world_rect_to_screen(header), &doc);
+                    }
                 }
             }
         }
@@ -2697,6 +3628,48 @@ fn draw_and_interact(
             );
             if pointer_world.is_some_and(|p| header.contains(p)) || g.reroute {
                 break_node = Some(g.id);
+            }
+        }
+        // Task 41 rework: a press on a machine card's border rim starts a
+        // wire from its Out — the modern engines' "drag from the state
+        // edge", with no pin dot to aim at. Release over another state
+        // auto-inserts a Transition through the existing auto-connect path.
+        if resp.pressed
+            && !alt
+            && !shift
+            && !pin_claimed
+            && !badge_claimed
+            && !config_claimed
+            && !widget_claimed
+            && !wire_claimed
+            && state.node_drag.is_none()
+            && state.connect_drag.is_none()
+            // Compact cards, and the unfolded (selected) state or alias —
+            // which lost its `anim` marker by taking the standard-card path.
+            && (g.anim.is_some()
+                || (state.domain.is_animation()
+                    && state.doc.node(g.id).is_some_and(|n| {
+                        use crate::engine::animation::graph::plan::{
+                            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+                        };
+                        matches!(
+                            n.type_id.as_str(),
+                            ANIM_STATE_TYPE_ID | ANIM_STATE_ALIAS_TYPE_ID
+                        )
+                    })))
+        {
+            if let Some(pw) = pointer_world {
+                let b = g.body_rect(lod, &m);
+                let grab = (BORDER_GRAB_PX / zoom).min(b.width().min(b.height()) * 0.33);
+                if b.contains(pw) && !b.shrink(grab).contains(pw) {
+                    use crate::engine::animation::graph::plan::STATE_OUT_PIN;
+                    state.connect_drag = Some(ConnectDrag {
+                        from_node: g.id,
+                        from_pin: STATE_OUT_PIN.to_string(),
+                        from_output: true,
+                    });
+                    pin_claimed = true;
+                }
             }
         }
         if resp.pressed && !alt
@@ -2715,16 +3688,25 @@ fn draw_and_interact(
             } else {
                 state.primary = Some(g.id);
             }
-            begin_drag = true;
+            // A chip riding its edge (Task 41 rework) has no position of its
+            // own to drag — a grab selects it and nothing more.
+            if !g.pinned_pos {
+                begin_drag = true;
+            }
         }
         if resp.clicked && shift && !alt {
             state.toggle_selected(g.id);
         }
-        // Double-click a subgraph node → open its referenced doc as a tab.
+        // Double-click always means "descend" (spec): a subgraph node or a
+        // nested-`.animgraph` state opens its referenced file as a tab, a
+        // transition descends into its embedded rule as a peek (ticket 05) —
+        // same gesture, same meaning, the breadcrumb tells files and rules
+        // apart.
         if resp.double_clicked(ui) {
-            if let Some(path) = state.doc.node(g.id).and_then(|n| n.subgraph.clone()) {
-                state.push_nav(state.path.clone());
-                *open_subgraph = Some(path);
+            if let Some(path) = state.file_descend_target(g.id) {
+                *open_subgraph = Some(state.open_request(path));
+            } else {
+                state.open_rule_scope(g.id, registry);
             }
         }
     }
@@ -2872,16 +3854,27 @@ fn draw_and_interact(
         .as_ref()
         .map(|d| (d.from_node, d.from_pin.clone(), d.from_output));
     if let Some((from_node, from_pin, from_output)) = connect_snapshot {
-        let src = geoms
-            .iter()
-            .find(|g| g.id == from_node)
-            .and_then(|g| g.wire_anchor(&from_pin, from_output));
+        // The machine level (Task 41 rework): the ghost is a straight arrow
+        // from the state's border facing the pointer — where the finished
+        // edge will start — and never takes the wire-style route.
+        let machine = state.domain.is_animation();
+        let src = geoms.iter().find(|g| g.id == from_node).and_then(|g| {
+            if machine {
+                let pw = pointer_world?;
+                let r = [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y];
+                super::graph_anim_edge::border_exit(r, [pw.x, pw.y]).map(|a| Pos2::new(a[0], a[1]))
+            } else {
+                g.wire_anchor(&from_pin, from_output)
+            }
+        });
         if let (Some(src), Some(pw)) = (src, pointer_world) {
             let src_ty = pin_ty(&geoms, from_node, &from_pin, from_output);
+            let ty = src_ty.clone().unwrap_or(PinType::Exec);
             let tint = match (pin_under(&geoms, pw, hit_w), src_ty.as_ref()) {
                 (Some(h), Some(sty)) => {
                     if validate_connection(
                         state,
+                        registry,
                         from_node,
                         &from_pin,
                         from_output,
@@ -2900,6 +3893,7 @@ fn draw_and_interact(
                         status.error
                     }
                 }
+                _ if machine => wire_color(Some(registry), &ty),
                 _ => st.palette.accent_active,
             };
             // The ghost takes the same route as the finished wire will —
@@ -2912,22 +3906,38 @@ fn draw_and_interact(
                 converge_index: 0,
                 node_rects: &node_rects,
             };
+            let screen = if machine {
+                vec![scope.world_to_screen(src), scope.world_to_screen(pw)]
+            } else {
+                wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope)
+            };
             let width = if lod.bar_only() { 1.0 } else { WIRE_DATA };
             let mut p = ui.painter();
             let ghost = WireGeom {
                 edge_index: usize::MAX,
                 a: src,
                 b: pw,
-                ty: src_ty.clone().unwrap_or(PinType::Exec),
-                screen: wire_screen_points(src, pw, wire_prefs, &ghost_meta, scope),
+                ty,
+                screen,
                 selected: false,
                 mismatched: false,
                 // A wire being dragged is not running: it does not exist yet.
                 pulse: 0.0,
                 taken: true,
                 rate: 0.0,
+                direct: machine,
+                arrow: machine,
             };
             stroke_wire(&mut p, &ghost, wire_prefs, scope, width, tint);
+            if ghost.arrow && !lod.bar_only() {
+                draw_arrow_head(
+                    &mut p,
+                    ghost.screen[1],
+                    ghost.screen[0],
+                    (ARROW_L * zoom).clamp(5.0, 16.0),
+                    tint,
+                );
+            }
         }
         if released {
             let landed = resolve_connection(state, &geoms, pointer_world, hit_w, registry);
@@ -3108,6 +4118,7 @@ fn draw_and_interact(
         frame_request,
         open_subgraph,
         keymap,
+        registry,
     );
 
     // Right-click: an annotation gets its own menu (tint / collapse / anchor
@@ -3198,7 +4209,7 @@ fn draw_and_interact(
         }
     }
 
-    if pointer_world.is_some() && !overlay_has_focus(ui, state) {
+    if pointer_world.is_some() && !overlay_has_focus_excl(ui, state, own_modal) {
         for action in keymap.dispatch(&ui.ctx().input, Context::Canvas) {
             match action {
                 Action::GROUP => state.add_group_around_selection(registry),
@@ -3281,14 +4292,24 @@ fn draw_and_interact(
                     state.begin_rename();
                 }
                 Action::CHILD_GRAPH => {
-                    if let Some(path) = state.descend_target() {
-                        state.push_nav(state.path.clone());
-                        *open_subgraph = Some(path);
+                    // Rules first (ticket 05): descending a selected
+                    // transition opens its rule peek — no file involved.
+                    if let Some(t) = state.rule_descend_target() {
+                        state.open_rule_scope(t, registry);
+                    } else if let Some(path) = state.descend_target() {
+                        *open_subgraph = Some(state.open_request(path));
                     }
                 }
                 Action::PARENT_GRAPH => {
-                    if let Some(path) = state.ascend_target() {
-                        *open_subgraph = Some(path);
+                    // Inside a rule, "up" means back to the machine.
+                    if state.rule_scope.is_some() {
+                        state.close_rule_scope(registry);
+                    } else if let Some(path) = state.ascend_target() {
+                        // The popped remainder is the parent's own chain.
+                        *open_subgraph = Some(GraphOpenRequest {
+                            path,
+                            back: state.nav_back.clone(),
+                        });
                     }
                 }
                 // Arrow nudge. Each repeat extends the open transaction
@@ -3513,6 +4534,975 @@ fn all_rects(geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Rule scope drawing (Task 41 ticket 05): peek overlay, promoted scope,
+// breadcrumb, and the dim-with-lit-holes scrim. Mockup 3b is the reference.
+// ---------------------------------------------------------------------------
+
+fn rule_peek_modal_id() -> Id {
+    Id::ROOT.with("graph_rule_peek")
+}
+
+/// Source and target of a transition, resolved through its pins.
+fn rule_endpoints(state: &GraphEditorState, owner: u64) -> (Option<u64>, Option<u64>) {
+    use crate::engine::animation::graph::plan::{TRANSITION_FROM_PIN, TRANSITION_TO_PIN};
+    let from = state
+        .doc
+        .edges
+        .iter()
+        .find(|e| e.to_node == owner && e.to_pin == TRANSITION_FROM_PIN)
+        .map(|e| e.from_node);
+    let to = state
+        .doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == owner && e.from_pin == TRANSITION_TO_PIN)
+        .map(|e| e.to_node);
+    (from, to)
+}
+
+/// A state's display name for the scope labels — the same fallbacks the
+/// compiler's messages use, plus "?" for an unwired endpoint.
+fn rule_state_name(state: &GraphEditorState, id: Option<u64>) -> String {
+    use crate::engine::animation::graph::plan::{ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID};
+    let Some(n) = id.and_then(|id| state.doc.node(id)) else {
+        return "?".to_string();
+    };
+    if let Some(t) = &n.title {
+        return t.clone();
+    }
+    match n.type_id.as_str() {
+        ANIM_STATE_ALIAS_TYPE_ID => "Alias".to_string(),
+        ANIM_STATE_TYPE_ID => format!("State {}", n.id),
+        _ => format!("Node {}", n.id),
+    }
+}
+
+/// "rule: Idle → Locomotion" — the breadcrumb's non-file scope target.
+fn rule_scope_label(state: &GraphEditorState, owner: u64) -> String {
+    let (from, to) = rule_endpoints(state, owner);
+    format!(
+        "rule: {} \u{2192} {}",
+        rule_state_name(state, from),
+        rule_state_name(state, to)
+    )
+}
+
+/// "0.20s" / "0.20s · P1" — sourced from the same chip resolver the edge
+/// draws with, so the header and the chip never disagree.
+fn rule_duration_tag(state: &GraphEditorState, owner: u64) -> String {
+    let chip = super::graph_anim_chip::transition_chip(&state.doc, owner);
+    let mut t = format!("{:.2}s", chip.duration.max(0.0));
+    if chip.priority != 0 {
+        t.push_str(&format!(" \u{b7} P{}", chip.priority));
+    }
+    t
+}
+
+/// The smallest the peek can be resized to — the header plus a usable slice
+/// of rule canvas.
+fn peek_min_size(s: f32) -> Vec2 {
+    Vec2::new(280.0 * s, 170.0 * s)
+}
+
+/// A user-placed peek rect: canvas-relative min offset + size, clamped so
+/// the panel stays fully on the canvas at a workable size. Pure, tested.
+fn peek_user_rect(canvas: Rect, off: [f32; 2], size: [f32; 2], s: f32) -> Rect {
+    let min_sz = peek_min_size(s);
+    let w = size[0].max(min_sz.x).min(canvas.width().max(min_sz.x));
+    let h = size[1].max(min_sz.y).min(canvas.height().max(min_sz.y));
+    let x = (canvas.min.x + off[0]).clamp(canvas.min.x, (canvas.max.x - w).max(canvas.min.x));
+    let y = (canvas.min.y + off[1]).clamp(canvas.min.y, (canvas.max.y - h).max(canvas.min.y));
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+}
+
+/// Where the peek panel sits: where the user last put it (header drag /
+/// border resize — session-remembered per tab), else anchored under the
+/// transition's chip when it is on screen (the rule opens where the eye
+/// already is), clamped into the canvas, sized to leave the machine visible
+/// around it.
+fn rule_peek_rect(
+    ui: &Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    geoms: &[NodeGeom],
+) -> Rect {
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    if let Some((off, size)) = state.peek_panel {
+        return peek_user_rect(canvas, off, size, s);
+    }
+    let margin = 12.0 * s;
+    let w = (canvas.width() * 0.62)
+        .clamp(340.0 * s, 780.0 * s)
+        .min((canvas.width() - margin * 2.0).max(80.0));
+    let h = (canvas.height() * 0.58)
+        .clamp(260.0 * s, 500.0 * s)
+        .min((canvas.height() - margin * 2.0).max(60.0));
+    let v = state.view;
+    let anchor = state
+        .rule_scope
+        .as_ref()
+        .and_then(|sc| geoms.iter().find(|g| g.id == sc.owner))
+        .map(|g| {
+            Pos2::new(
+                canvas.min.x + (g.rect.center().x - v.pan.x) * v.zoom,
+                canvas.min.y + (g.rect.max.y - v.pan.y) * v.zoom,
+            )
+        })
+        .unwrap_or_else(|| canvas.center());
+    let mut min = Pos2::new(anchor.x - w * 0.5, anchor.y + 14.0 * s);
+    min.x = min
+        .x
+        .clamp(canvas.min.x + margin, (canvas.max.x - margin - w).max(canvas.min.x + margin));
+    if min.y + h > canvas.max.y - margin {
+        min.y = (anchor.y - 28.0 * s - h).max(canvas.min.y + margin);
+    }
+    min.y = min
+        .y
+        .clamp(canvas.min.y + margin, (canvas.max.y - margin - h).max(canvas.min.y + margin));
+    Rect::from_min_size(min, Vec2::new(w, h))
+}
+
+/// `outer` minus the union of `holes`, as horizontal bands: cut at every hole
+/// edge, then walk each band's uncovered x-intervals. Pure, and tested.
+fn subtract_rects(outer: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut ys: Vec<f32> = vec![outer.min.y, outer.max.y];
+    for h in holes {
+        ys.push(h.min.y.clamp(outer.min.y, outer.max.y));
+        ys.push(h.max.y.clamp(outer.min.y, outer.max.y));
+    }
+    ys.sort_by(f32::total_cmp);
+    ys.dedup();
+    let mut out = Vec::new();
+    for w in ys.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        if y1 <= y0 {
+            continue;
+        }
+        let mid = (y0 + y1) * 0.5;
+        let mut spans: Vec<(f32, f32)> = holes
+            .iter()
+            .filter(|h| h.min.y <= mid && mid < h.max.y)
+            .map(|h| (h.min.x.max(outer.min.x), h.max.x.min(outer.max.x)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut x = outer.min.x;
+        for (hx0, hx1) in spans {
+            if hx0 > x {
+                out.push(Rect::from_min_max(Pos2::new(x, y0), Pos2::new(hx0, y1)));
+            }
+            x = x.max(hx1);
+        }
+        if outer.max.x > x {
+            out.push(Rect::from_min_max(Pos2::new(x, y0), Pos2::new(outer.max.x, y1)));
+        }
+    }
+    out
+}
+
+/// Dim the machine under an open peek, leaving the transition and its two
+/// states lit — holes in the scrim, not repaints, so the lit trio is exactly
+/// what the canvas already drew (mockup 3b: "source + target states stay
+/// lit; rest dims").
+fn rule_dim_scrim(ui: &mut Ui, canvas: Rect, state: &GraphEditorState, geoms: &[NodeGeom]) {
+    let Some(scope) = &state.rule_scope else { return };
+    let (from, to) = rule_endpoints(state, scope.owner);
+    let v = state.view;
+    let mut lit: Vec<Rect> = Vec::new();
+    for g in geoms {
+        if g.id == scope.owner || Some(g.id) == from || Some(g.id) == to {
+            let r = Rect::from_min_max(
+                Pos2::new(
+                    canvas.min.x + (g.rect.min.x - v.pan.x) * v.zoom,
+                    canvas.min.y + (g.rect.min.y - v.pan.y) * v.zoom,
+                ),
+                Pos2::new(
+                    canvas.min.x + (g.rect.max.x - v.pan.x) * v.zoom,
+                    canvas.min.y + (g.rect.max.y - v.pan.y) * v.zoom,
+                ),
+            )
+            .intersect(canvas);
+            if r.width() > 0.0 && r.height() > 0.0 {
+                lit.push(r);
+            }
+        }
+    }
+    let st = ui.style();
+    let color = Color::BLACK.with_alpha(st.palette.scrim_alpha);
+    let mut p = ui.painter();
+    for band in subtract_rects(canvas, &lit) {
+        p.rect_filled_translucent(band, Rounding::ZERO, color);
+    }
+}
+
+/// Mockup 2d's dim-on-select (Task 41 rework): exactly one transition
+/// selected (no rule peek open) dims the rest of the machine behind the
+/// scrim while the transition's card, its source and target states and its
+/// own edge stay lit — the rule-peek scrim's idiom, applied at selection.
+fn anim_select_dim(
+    ui: &mut Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    registry: &NodeRegistry,
+    geoms: &[NodeGeom],
+) {
+    use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
+    if !state.domain.is_animation() || state.rule_scope.is_some() {
+        return;
+    }
+    if state.selection.len() != 1 {
+        return;
+    }
+    let Some(&owner) = state.selection.iter().next() else {
+        return;
+    };
+    if !state
+        .doc
+        .node(owner)
+        .is_some_and(|n| n.type_id == ANIM_TRANSITION_TYPE_ID)
+    {
+        return;
+    }
+    let (from, to) = rule_endpoints(state, owner);
+    let v = state.view;
+    let screen = |q: Pos2| {
+        Pos2::new(
+            canvas.min.x + (q.x - v.pan.x) * v.zoom,
+            canvas.min.y + (q.y - v.pan.y) * v.zoom,
+        )
+    };
+    let mut lit: Vec<Rect> = Vec::new();
+    for g in geoms {
+        if g.id == owner || Some(g.id) == from || Some(g.id) == to {
+            let r = Rect::from_min_max(screen(g.rect.min), screen(g.rect.max))
+                .intersect(canvas);
+            if r.width() > 0.0 && r.height() > 0.0 {
+                lit.push(r);
+            }
+        }
+    }
+    let st = ui.style();
+    let scrim = Color::BLACK.with_alpha(st.palette.scrim_alpha);
+    let flow = PinType::Domain(crate::engine::animation::graph::ANIM_FLOW_DOMAIN.to_string());
+    let bright = wire_color(Some(registry), &flow);
+    let mut p = ui.painter();
+    for band in subtract_rects(canvas, &lit) {
+        p.rect_filled_translucent(band, Rounding::ZERO, scrim);
+    }
+    // The selected transition's own edge stays lit: its segments re-draw
+    // above the scrim, arrowhead included — but they stop at the border of
+    // the unfolded card itself (its halves meet beside the card, at the
+    // line's midpoint), so nothing ever crosses the card being edited.
+    let rects: BTreeMap<u64, [f32; 4]> = geoms
+        .iter()
+        .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
+        .collect();
+    let layout = super::graph_anim_edge::anim_flow_layout(
+        &state.doc,
+        &rects,
+        GraphMetrics::new(&st).badge(),
+    );
+    let card = rects.get(&owner).copied();
+    for (i, e) in state.doc.edges.iter().enumerate() {
+        if e.to_node != owner && e.from_node != owner {
+            continue;
+        }
+        if let Some(seg) = layout.segs.get(&i) {
+            let pieces = match card {
+                Some(r) => super::graph_anim_edge::seg_outside(seg.a, seg.b, r),
+                None => vec![(seg.a, seg.b)],
+            };
+            for (pa, pb) in pieces {
+                let a = screen(Pos2::new(pa[0], pa[1]));
+                let b = screen(Pos2::new(pb[0], pb[1]));
+                p.line_segment(a, b, WIRE_DATA_SELECTED, bright);
+                if seg.arrow && pb == seg.b {
+                    draw_arrow_head(&mut p, b, a, (ARROW_L * v.zoom).clamp(5.0, 16.0), bright);
+                }
+            }
+        }
+    }
+}
+
+/// What the breadcrumb band's one click this frame asked for.
+enum BreadcrumbClick {
+    None,
+    /// The current file's crumb, while a rule scope is open — climb out.
+    CloseRule,
+    /// An ancestor crumb (index into `nav_back`) — navigate back to it.
+    Ancestor(usize),
+}
+
+/// The tab's breadcrumb: the file chain the tab was descended into (ticket
+/// 09 — every ancestor crumb is a link back), the current file, and — while
+/// a rule scope is open (ticket 05) — the non-file scope target:
+/// `character.animgraph ▸ locomotion.animgraph ▸ rule: Idle → Walk · 0.20s`.
+/// Drawn when either has something to say; the two scopes read as one chain,
+/// which is exactly the spec's "breadcrumb distinguishes the two".
+fn breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> BreadcrumbClick {
+    let chain: &[String] = if state.domain.is_animation() { &state.nav_back } else { &[] };
+    let rule = state.rule_scope.as_ref().map(|s| s.owner);
+    if chain.is_empty() && rule.is_none() {
+        return BreadcrumbClick::None;
+    }
+    let st = ui.style();
+    let pad = st.spacing.padding;
+    let h = st.metrics.control_height;
+    let font = st.fonts.body;
+    let rect = ui.allocate(Vec2::new(ui.available_size().x, h));
+    let file_name =
+        |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let sep = " \u{25b8} ";
+    let sep_w = ui.painter().measure_text(sep, font, None).x;
+    let ty = rect.center().y - font * 0.62;
+
+    // Interact with every link crumb first (ancestors, plus the file crumb
+    // when a rule scope makes it a way back out), then paint — the band's
+    // layout is one left-to-right cursor either way.
+    let mut clicked = BreadcrumbClick::None;
+    let mut p = ui.painter();
+    p.rect_filled(rect, Rounding::ZERO, st.palette.header);
+    p.rect_filled(
+        Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - st.metrics.border), rect.max),
+        Rounding::ZERO,
+        st.palette.stroke_strong,
+    );
+    drop(p);
+
+    let mut x = rect.min.x + pad;
+    for (i, ancestor) in chain.iter().enumerate() {
+        let text = file_name(ancestor);
+        let w = ui.painter().measure_text(&text, font, None).x;
+        let crumb = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(w, h));
+        let id = ui.alloc_id(("graph_breadcrumb", i));
+        let resp = ui.interact(id, crumb);
+        if resp.clicked {
+            clicked = BreadcrumbClick::Ancestor(i);
+        }
+        let mut p = ui.painter();
+        p.text(
+            Pos2::new(x, ty),
+            &text,
+            font,
+            if resp.hovered { st.palette.accent_active } else { st.palette.text_secondary },
+            None,
+        );
+        x += w;
+        p.text(Pos2::new(x, ty), sep, font, st.palette.text_disabled, None);
+        x += sep_w;
+    }
+
+    let file = file_name(&state.path);
+    let file_w = ui.painter().measure_text(&file, font, None).x;
+    let crumb = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(file_w, h));
+    let file_hovered = if rule.is_some() {
+        let id = ui.alloc_id("rule_breadcrumb_file");
+        let resp = ui.interact(id, crumb);
+        if resp.clicked {
+            clicked = BreadcrumbClick::CloseRule;
+        }
+        resp.hovered
+    } else {
+        false
+    };
+    let mut p = ui.painter();
+    p.text(
+        Pos2::new(x, ty),
+        &file,
+        font,
+        if file_hovered { st.palette.accent_active } else { st.palette.text },
+        None,
+    );
+    x += file_w;
+
+    if let Some(owner) = rule {
+        let scope_text = rule_scope_label(state, owner);
+        let tag = rule_duration_tag(state, owner);
+        p.text(Pos2::new(x, ty), sep, font, st.palette.text_disabled, None);
+        x += sep_w;
+        p.text(Pos2::new(x, ty), &scope_text, font, st.palette.text, None);
+        x += p.measure_text(&scope_text, font, None).x + pad;
+        p.text_family(
+            Pos2::new(x, rect.center().y - st.fonts.small * 0.62),
+            &format!("\u{b7} {tag}"),
+            st.fonts.small,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+    }
+    clicked
+}
+
+/// What one child-canvas pass hands back to its host surface.
+struct RuleCanvasOut {
+    rect: Rect,
+    geoms: Vec<NodeGeom>,
+    /// `PageUp` fired over the child canvas — the caller climbs out.
+    ascend: bool,
+}
+
+/// One frame of the rule projection's canvas: the same `draw_and_interact`
+/// the machine runs, over the scope's child state and the rule registry —
+/// which *is* the placement gate — plus the child's own transient surfaces.
+/// Ends by draining the child's recorded edits onto the parent history.
+#[allow(clippy::too_many_arguments)]
+fn rule_canvas_pass(
+    ui: &mut Ui,
+    body: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+    own_modal: Option<Id>,
+) -> Option<RuleCanvasOut> {
+    let Some(mut scope) = state.rule_scope.take() else { return None };
+    let rreg = rule_scope_registry();
+    let owner = scope.owner;
+    let child = &mut *scope.child;
+
+    let mut view = child.view;
+    let mut annotation_menu_at: Option<Pos2> = None;
+    let mut wire_menu_at: Option<Pos2> = None;
+    let mut node_menu_at: Option<Pos2> = None;
+    let mut canvas_menu_at: Option<Pos2> = None;
+    let mut collapse_request = false;
+    let mut layout_request = false;
+    let mut cycle_error_request: Option<bool> = None;
+    let mut frame_request: Option<CanvasView> = None;
+    // Rules reference no files; nothing ever lands here.
+    let mut open_subgraph = None;
+    let (out, _) = ui.run_at(
+        body,
+        Direction::TopDown,
+        Id::ROOT.with(("rule_canvas", owner)),
+        UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+        |ui| {
+            Canvas::new()
+                .size(body.size())
+                .zoom_range(zoom_min, zoom_max)
+                .drag_threshold(crusty_gui::input::drag_threshold(
+                    (ui.style().metrics.row_height / BASE_ROW_H).max(0.1),
+                ))
+                .show(ui, &mut view, |ui, cscope| {
+                    draw_and_interact(
+                        ui,
+                        cscope,
+                        child,
+                        rreg,
+                        resolver,
+                        &mut annotation_menu_at,
+                        &mut wire_menu_at,
+                        &mut node_menu_at,
+                        &mut canvas_menu_at,
+                        &mut collapse_request,
+                        &mut layout_request,
+                        &mut cycle_error_request,
+                        &mut open_subgraph,
+                        selection_outline,
+                        wire_prefs,
+                        zoom_min,
+                        zoom_max,
+                        &mut frame_request,
+                        keymap,
+                        None,
+                        own_modal,
+                    )
+                })
+        },
+    );
+    let _ = (annotation_menu_at, collapse_request, open_subgraph);
+    if let Some(v) = frame_request {
+        view = v;
+    }
+    child.view = view;
+
+    // A parameter dropped on the rule canvas places a Get outright — a rule
+    // only reads, so there is no Get/Set question to ask.
+    if let Some(p) = ui.dnd_drop_target::<VarDragPayload>(out.rect) {
+        if let Some(sp) = ui.ctx().input.pointer_pos {
+            let v = child.view;
+            let world = [
+                v.pan.x + (sp.x - out.rect.min.x) / v.zoom,
+                v.pan.y + (sp.y - out.rect.min.y) / v.zoom,
+            ];
+            let id = child.add_variable_node(&p.slug, false, world, rreg);
+            child.select_only(id);
+        }
+    }
+
+    palette_popover(ui, child, rreg, &[]);
+    find_overlay(ui, out.rect, child, &out.inner, zoom_min, zoom_max, rreg);
+    wire_menu(ui, child, rreg, wire_menu_at);
+    node_menu(ui, child, rreg, keymap, &out.inner, node_menu_at);
+    if let Some((world, screen)) =
+        canvas_menu(ui, child, rreg, keymap, &out.inner, clipboard, canvas_menu_at)
+    {
+        open_palette(child, world, screen, None);
+    }
+    purge_confirm(ui, out.rect, child, rreg);
+    var_confirm_dialog(ui, out.rect, child, rreg);
+
+    // F8 inside the scope cycles the rule's own anchored errors.
+    if let Some(forward) = cycle_error_request {
+        let errors = ErrorIndex::build(&child.errors, &child.ref_errors, &child.domain_errors);
+        if !forward {
+            let n = errors
+                .ordered
+                .iter()
+                .filter(|e| e.anchor() != ErrorAnchor::Document)
+                .count();
+            if n > 0 {
+                child.error_cursor = (child.error_cursor + n.saturating_sub(2)) % n;
+            }
+        }
+        let mut req = None;
+        cycle_error(
+            child,
+            &errors,
+            &out.inner,
+            out.rect.size(),
+            zoom_min,
+            zoom_max,
+            &mut req,
+            rreg,
+        );
+        if let Some(v) = req {
+            child.view = v;
+        }
+    }
+    if layout_request {
+        let rects = all_rects(&out.inner);
+        let sp = layout_spacing(&ui.style());
+        child.auto_layout(&rects, sp, rreg);
+    }
+    draw_toasts(ui, out.rect, child);
+
+    // PageUp over the child canvas climbs out — the child cannot reach the
+    // parent, so the ascend is answered here for the caller to take.
+    let ascend = out.hovered
+        && !overlay_has_focus_excl(ui, child, own_modal)
+        && keymap
+            .dispatch(&ui.ctx().input, Context::Canvas)
+            .contains(&Action::PARENT_GRAPH);
+
+    state.rule_scope = Some(scope);
+    state.drain_rule_scope(registry);
+    Some(RuleCanvasOut { rect: out.rect, geoms: out.inner, ascend })
+}
+
+/// Which panel borders a point inside the grip zones would resize — corners
+/// widen the diagonal grab. The float window's border language (6px edges,
+/// 14px corners), kept *inside* the panel because a press outside the modal
+/// rect dismisses the peek. Pure, tested.
+fn peek_resize_zone(panel: Rect, pt: Pos2, s: f32) -> Option<(bool, bool, bool, bool)> {
+    if !panel.contains(pt) {
+        return None;
+    }
+    let grip = 6.0 * s;
+    let corner = 14.0 * s;
+    let l = pt.x < panel.min.x + grip;
+    let r = pt.x > panel.max.x - grip;
+    let t = pt.y < panel.min.y + grip;
+    let b = pt.y > panel.max.y - grip;
+    if !(l || r || t || b) {
+        return None;
+    }
+    let cl = pt.x < panel.min.x + corner;
+    let cr = pt.x > panel.max.x - corner;
+    let ct = pt.y < panel.min.y + corner;
+    let cb = pt.y > panel.max.y - corner;
+    Some((
+        l || ((t || b) && cl),
+        r || ((t || b) && cr),
+        t || ((l || r) && ct),
+        b || ((l || r) && cb),
+    ))
+}
+
+/// The peek overlay (mockup 3b): a modal panel over the dimmed machine —
+/// header ("RULE · IDLE → LOCOMOTION", duration tag, ⤢ promote, ✕ close),
+/// body a fully editable rule canvas. Esc, an outside press or a wheel
+/// outside dismiss it, per the modal stack's standing rules.
+///
+/// The panel is the user's window onto the rule: its header drags it, its
+/// borders resize it (both session-remembered per tab via `peek_panel`), and
+/// releasing a header drag on the band at the canvas top lands on the
+/// existing ⤢ promote path — deliberately *not* a second document tab
+/// (ticket 05's ruling: two copies of one document break the one-history
+/// invariant).
+#[allow(clippy::too_many_arguments)]
+fn rule_peek_overlay(
+    ui: &mut Ui,
+    canvas: Rect,
+    geoms: &[NodeGeom],
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+) {
+    let Some(scope) = &state.rule_scope else { return };
+    if scope.full {
+        return;
+    }
+    let owner = scope.owner;
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let pad = st.spacing.padding;
+    let header_h = st.metrics.control_height + pad * 0.5;
+    let mut panel = rule_peek_rect(ui, canvas, state, geoms);
+
+    // ── Move / resize / dock ─────────────────────────────────────────────
+    // Continue an in-flight header drag or border resize before anything
+    // draws, so the frame shows the placement the pointer is at.
+    let pointer = ui.ctx().input.pointer_pos;
+    let pressed = ui.ctx().input.pointer_pressed;
+    let down = ui.ctx().input.pointer_down;
+    let released = ui.ctx().input.pointer_released;
+    let dock_band =
+        Rect::from_min_max(canvas.min, Pos2::new(canvas.max.x, canvas.min.y + 34.0 * s));
+    let mut dock_hot = false;
+    let mut promote_drop = false;
+    let mut drag_aborted = false;
+    if let Some(drag) = state.peek_drag {
+        if ui.ctx().input.key_pressed(Key::Escape) || ui.ctx().focus_lost() || pointer.is_none()
+        {
+            // Rule 3: the drag reverts and records nothing — and the Esc
+            // that aborted it must not also dismiss the peek.
+            state.peek_panel = drag.prev;
+            state.peek_drag = None;
+            drag_aborted = true;
+        } else if let Some(pt) = pointer {
+            let store = |r: Rect| {
+                (
+                    [r.min.x - canvas.min.x, r.min.y - canvas.min.y],
+                    [r.width(), r.height()],
+                )
+            };
+            match drag.kind {
+                PeekDragKind::Move { grab } => {
+                    dock_hot = pt.y < dock_band.max.y;
+                    let min = Pos2::new(pt.x - grab[0], pt.y - grab[1]);
+                    state.peek_panel = Some(store(Rect::from_min_size(min, panel.size())));
+                }
+                PeekDragKind::Resize { left, right, top, bottom } => {
+                    let min_sz = peek_min_size(s);
+                    let mut r = panel;
+                    if left {
+                        r.min.x = pt.x.clamp(canvas.min.x, r.max.x - min_sz.x);
+                    }
+                    if right {
+                        r.max.x = pt.x.clamp(r.min.x + min_sz.x, canvas.max.x);
+                    }
+                    if top {
+                        r.min.y = pt.y.clamp(canvas.min.y, r.max.y - min_sz.y);
+                    }
+                    if bottom {
+                        r.max.y = pt.y.clamp(r.min.y + min_sz.y, canvas.max.y);
+                    }
+                    state.peek_panel = Some(store(r));
+                }
+            }
+            if released || !down {
+                if matches!(drag.kind, PeekDragKind::Move { .. }) && dock_hot {
+                    // Dropped on the dock band: this was a promote, not a
+                    // move — the placement reverts and ⤢ takes it from here.
+                    state.peek_panel = drag.prev;
+                    promote_drop = true;
+                    dock_hot = false;
+                }
+                state.peek_drag = None;
+            }
+            panel = rule_peek_rect(ui, canvas, state, geoms);
+        }
+    }
+    ui.ctx_mut().modal_push(rule_peek_modal_id(), panel);
+
+    // Header controls: measured right-to-left, interacted before painting so
+    // hover states land in the same frame.
+    let font = st.fonts.small;
+    let close_text = "\u{2715} esc";
+    let promote_text = "\u{2922} tab";
+    let (close_w, promote_w) = {
+        let mut p = ui.painter();
+        (
+            p.measure_text(close_text, font, None).x,
+            p.measure_text(promote_text, font, None).x,
+        )
+    };
+    let cy = panel.min.y + header_h * 0.5;
+    let close_r = Rect::from_center_size(
+        Pos2::new(panel.max.x - pad - close_w * 0.5, cy),
+        Vec2::new(close_w + pad * 0.5, header_h * 0.8),
+    );
+    let promote_r = Rect::from_center_size(
+        Pos2::new(close_r.min.x - pad - promote_w * 0.5, cy),
+        Vec2::new(promote_w + pad * 0.5, header_h * 0.8),
+    );
+    let close_id = ui.alloc_id("rule_peek_close");
+    let promote_id = ui.alloc_id("rule_peek_promote");
+    let close_resp = ui.interact(close_id, close_r);
+    let promote_resp = ui.interact(promote_id, promote_r);
+
+    // Starting a grab: border zones first, then the header as the move
+    // handle (its buttons excepted). The zones sit inside the panel, so the
+    // press can never read as an outside-press dismissing the modal.
+    if state.peek_drag.is_none() && pressed {
+        if let Some(pt) = pointer
+            .filter(|pt| panel.contains(*pt) && !close_r.contains(*pt) && !promote_r.contains(*pt))
+        {
+            let kind = match peek_resize_zone(panel, pt, s) {
+                Some((left, right, top, bottom)) => {
+                    Some(PeekDragKind::Resize { left, right, top, bottom })
+                }
+                None if pt.y < panel.min.y + header_h => Some(PeekDragKind::Move {
+                    grab: [pt.x - panel.min.x, pt.y - panel.min.y],
+                }),
+                None => None,
+            };
+            if let Some(kind) = kind {
+                state.peek_drag = Some(PeekDrag { kind, prev: state.peek_panel });
+                // The grab pins today's concrete placement, so a Move keeps
+                // this size and a Resize moves only the grabbed edges even
+                // when the panel was still on its anchored default.
+                state.peek_panel = Some((
+                    [panel.min.x - canvas.min.x, panel.min.y - canvas.min.y],
+                    [panel.width(), panel.height()],
+                ));
+            }
+        }
+    }
+
+    // Cursor language: borders advertise the resize, an active move grabs.
+    let zone = match state.peek_drag {
+        Some(PeekDrag { kind: PeekDragKind::Resize { left, right, top, bottom }, .. }) => {
+            Some((left, right, top, bottom))
+        }
+        Some(PeekDrag { kind: PeekDragKind::Move { .. }, .. }) => None,
+        None => pointer.and_then(|pt| peek_resize_zone(panel, pt, s)),
+    };
+    if let Some((l, r, t, b)) = zone {
+        ui.ctx_mut().set_cursor_icon(match (l, r, t, b) {
+            (true, _, true, _) | (_, true, _, true) => CursorIcon::ResizeNwSe,
+            (true, _, _, true) | (_, true, true, _) => CursorIcon::ResizeNeSw,
+            (true, _, _, _) | (_, true, _, _) => CursorIcon::ResizeEw,
+            _ => CursorIcon::ResizeNs,
+        });
+    } else if matches!(
+        state.peek_drag,
+        Some(PeekDrag { kind: PeekDragKind::Move { .. }, .. })
+    ) {
+        ui.ctx_mut().set_cursor_icon(CursorIcon::Grabbing);
+    }
+
+    {
+        let (from, to) = rule_endpoints(state, owner);
+        let title = format!(
+            "RULE \u{b7} {} \u{2192} {}",
+            rule_state_name(state, from).to_uppercase(),
+            rule_state_name(state, to).to_uppercase()
+        );
+        let tag = rule_duration_tag(state, owner);
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.panel, st.palette.elevated);
+        p.rect_filled(
+            Rect::from_min_max(panel.min, Pos2::new(panel.max.x, panel.min.y + header_h)),
+            st.rounding.panel,
+            st.palette.header,
+        );
+        p.rect_stroke(panel, st.rounding.panel, st.metrics.border, st.palette.stroke_strong);
+        p.text_family(
+            Pos2::new(panel.min.x + pad, cy - font * 0.62),
+            &title,
+            font,
+            st.palette.text,
+            None,
+            FontFamily::Mono,
+        );
+        let title_w = p.measure_text(&title, font, None).x;
+        p.text_family(
+            Pos2::new(panel.min.x + pad * 2.0 + title_w, cy - font * 0.62),
+            &format!("\u{b7} {tag}"),
+            font,
+            st.palette.text_disabled,
+            None,
+            FontFamily::Mono,
+        );
+        for (r, text, resp) in [
+            (close_r, close_text, &close_resp),
+            (promote_r, promote_text, &promote_resp),
+        ] {
+            if resp.hovered {
+                p.rect_filled(r, st.rounding.small, st.palette.selection_fill);
+            }
+            p.text_family(
+                Pos2::new(r.min.x + pad * 0.25, cy - font * 0.62),
+                text,
+                font,
+                if resp.hovered { st.palette.text } else { st.palette.text_disabled },
+                None,
+                FontFamily::Mono,
+            );
+        }
+    }
+
+    // The body insets by the grip width, so the resize borders own their
+    // strip outright — a border press can never double as a canvas gesture.
+    let grip = 6.0 * s;
+    let body = Rect::from_min_max(
+        Pos2::new(panel.min.x + grip, panel.min.y + header_h),
+        Pos2::new(panel.max.x - grip, panel.max.y - grip),
+    );
+    let pass = rule_canvas_pass(
+        ui,
+        body,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        wire_prefs,
+        zoom_min,
+        zoom_max,
+        Some(rule_peek_modal_id()),
+    );
+
+    // The dock band lights while a header drag hovers it — releasing there
+    // promotes. Drawn last, above the panel it may overlap.
+    if dock_hot {
+        let mut p = ui.painter();
+        p.rect_filled_translucent(
+            dock_band,
+            st.rounding.panel,
+            st.palette.selection_fill,
+        );
+        p.rect_stroke(dock_band, st.rounding.panel, st.metrics.border, st.palette.accent_active);
+        let label = "\u{2922} drop to open as full canvas";
+        let w = p.measure_text(label, st.fonts.small, None).x;
+        p.text_family(
+            Pos2::new(
+                dock_band.center().x - w * 0.5,
+                dock_band.center().y - st.fonts.small * 0.62,
+            ),
+            label,
+            st.fonts.small,
+            st.palette.text,
+            None,
+            FontFamily::Mono,
+        );
+    }
+
+    // Dismissal: the modal stack's standing rules (Esc, press/wheel outside),
+    // the ✕, or PageUp over the canvas. An Esc that aborted a peek drag this
+    // frame is spent — it must not also close the peek.
+    if (ui.ctx().modal_dismissed(rule_peek_modal_id()).is_some() && !drag_aborted)
+        || close_resp.clicked
+        || pass.as_ref().is_some_and(|p| p.ascend)
+    {
+        state.close_rule_scope(registry);
+        ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
+        return;
+    }
+    if promote_resp.clicked || promote_drop {
+        if let Some(sc) = state.rule_scope.as_mut() {
+            sc.full = true;
+        }
+        ui.ctx_mut().modal_dismiss(rule_peek_modal_id());
+    }
+}
+
+/// The promoted scope (⤢): the rule takes the machine's whole canvas area,
+/// with the variables strip rebound to the projection — a Get dragged from it
+/// lands in the rule. Esc or the breadcrumb's file crumb climbs out.
+#[allow(clippy::too_many_arguments)]
+fn rule_scope_full(
+    ui: &mut Ui,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    clipboard: &mut Option<GraphFragment>,
+    resolver: &DocResolvers<'_>,
+    keymap: &Keymap,
+    selection_outline: Color,
+    wire_prefs: &WirePrefs,
+    zoom_min: f32,
+    zoom_max: f32,
+) {
+    let strip = {
+        let st = ui.style();
+        let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+        let open = state.rule_scope.as_ref().is_some_and(|sc| sc.child.vars.open);
+        let w = if open { VARS_W * s } else { VARS_RAIL_W * s };
+        let c = ui.cursor();
+        let r = Rect::from_min_max(c, Pos2::new(c.x + w, ui.available().max.y));
+        ui.set_cursor(Pos2::new(c.x + w, c.y));
+        r
+    };
+    let body = Rect::from_min_max(ui.cursor(), ui.available().max);
+    // Whether Escape already had a job this frame — a gesture to abort, a
+    // popup to pop — decided before the pass runs, because the pass consumes
+    // exactly those.
+    let esc_busy = state.rule_scope.as_ref().is_some_and(|sc| {
+        sc.child.interaction_in_flight() || overlay_has_focus_excl(ui, &sc.child, None)
+    });
+    let pass = rule_canvas_pass(
+        ui,
+        body,
+        state,
+        registry,
+        clipboard,
+        resolver,
+        keymap,
+        selection_outline,
+        wire_prefs,
+        zoom_min,
+        zoom_max,
+        None,
+    );
+
+    if let Some(mut scope) = state.rule_scope.take() {
+        let mut locate = None;
+        let vars_root = Id::new(("graph_vars_rule_strip", scope.child.path.as_str()));
+        variables_panel(
+            ui,
+            strip,
+            &mut scope.child,
+            rule_scope_registry(),
+            vars_root,
+            false,
+            &mut locate,
+        );
+        if let (Some(id), Some(pass)) = (locate, &pass) {
+            scope.child.select_only(id);
+            scope.child.flash = Some((id, std::time::Instant::now()));
+            if let Some((mn, mx)) = geoms_bbox(pass.geoms.iter().filter(|g| g.id == id)) {
+                let v = frame_view(mn, mx, pass.rect.size(), zoom_min, zoom_max);
+                scope.child.view = CanvasView { pan: v.pan, zoom: scope.child.view.zoom };
+            }
+        }
+        state.rule_scope = Some(scope);
+        state.drain_rule_scope(registry);
+    }
+
+    if pass.is_some_and(|p| p.ascend)
+        || (ui.ctx().input.key_pressed(Key::Escape) && !esc_busy)
+    {
+        state.close_rule_scope(registry);
+    }
+}
+
 /// World rects of the selected nodes, for align & distribute — node sizes are
 /// auto-fitted at draw time, so only the geometry pass knows them.
 fn selected_rects(state: &GraphEditorState, geoms: &[NodeGeom]) -> Vec<(u64, [f32; 4])> {
@@ -3590,6 +5580,7 @@ fn find_overlay(
     geoms: &[NodeGeom],
     zoom_min: f32,
     zoom_max: f32,
+    registry: &NodeRegistry,
 ) {
     let Some(find) = state.find.clone() else {
         return;
@@ -3645,11 +5636,20 @@ fn find_overlay(
         .filter(|g| find.matches(&g.title, &g.title))
         .map(|g| g.id)
         .collect();
+    // Nodes inside embedded rules count too (ticket 05, spec story 22):
+    // a search must never silently skip a rule. They cycle after the
+    // canvas's own hits; landing on one opens the peek.
+    let rule_hits: Vec<(u64, u64)> = if state.domain.is_animation() {
+        region_find_matches(&state.doc, &find)
+    } else {
+        Vec::new()
+    };
+    let total = matches.len() + rule_hits.len();
     // Mono count, the same convention the palette footer uses.
     if find.active() {
         ui.painter().text_family(
             Pos2::new(panel.max.x - pad * 4.0, panel.center().y - st.fonts.small * 0.62),
-            &format!("{}", matches.len()),
+            &format!("{total}"),
             st.fonts.small,
             st.palette.text_disabled,
             None,
@@ -3658,15 +5658,24 @@ fn find_overlay(
     }
 
     let mut cursor = find.cursor;
-    if submitted && !matches.is_empty() {
-        let id = matches[cursor % matches.len()];
-        cursor = (cursor + 1) % matches.len();
-        state.select_only(id);
-        if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == id)) {
-            // Pan only, like error cycling — a find should not also rescale
-            // the canvas out from under the reader.
-            let v = frame_view(mn, mx, rect.size(), zoom_min, zoom_max);
-            state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+    if submitted && total > 0 {
+        let i = cursor % total;
+        cursor = (cursor + 1) % total;
+        let frame_on = |state: &mut GraphEditorState, id: u64| {
+            if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == id)) {
+                // Pan only, like error cycling — a find should not also
+                // rescale the canvas out from under the reader.
+                let v = frame_view(mn, mx, rect.size(), zoom_min, zoom_max);
+                state.view = CanvasView { pan: v.pan, zoom: state.view.zoom };
+            }
+        };
+        if let Some(&id) = matches.get(i) {
+            state.select_only(id);
+            frame_on(state, id);
+        } else {
+            let (owner, inner) = rule_hits[i - matches.len()];
+            frame_on(state, owner);
+            state.open_rule_scope_at(owner, inner, registry);
         }
     }
     if let Some(fs) = state.find.as_mut() {
@@ -4576,16 +6585,20 @@ fn graph_toolbar(
         .iter()
         .position(|x| *x == style_now)
         .unwrap_or(0);
-    if let Some(i) = segmented_control(
-        ui,
-        "graph_toolbar_style",
-        seg,
-        &["Spline", "Manhattan", "Subway"],
-        active,
-        true,
-    ) {
-        if WireStyle::ALL[i] != style_now {
-            *request = Some(WireStyle::ALL[i]);
+    // The machine level draws straight arrows whatever the style says, so the
+    // switch is a dead control there; it returns inside a rule region.
+    if !state.at_machine_level() {
+        if let Some(i) = segmented_control(
+            ui,
+            "graph_toolbar_style",
+            seg,
+            &["Spline", "Manhattan", "Subway"],
+            active,
+            true,
+        ) {
+            if WireStyle::ALL[i] != style_now {
+                *request = Some(WireStyle::ALL[i]);
+            }
         }
     }
 
@@ -5094,6 +7107,624 @@ fn instance_picker_modal_id() -> crusty_gui::id::Id {
 }
 
 // ---------------------------------------------------------------------------
+// Preview strip (Task 41 ticket 06)
+// ---------------------------------------------------------------------------
+
+/// Footer band height at ui_scale 1.0 — one control row, the curve editor's
+/// footer weight.
+const PREVIEW_H: f32 = 34.0;
+/// A Float parameter's slider width at ui_scale 1.0.
+const PREVIEW_SLIDER_W: f32 = 110.0;
+
+/// What the PREVIEW chip says. The LIVE chip's ladder in preview vocabulary,
+/// pure so the states are checkable without a canvas: bound (driving),
+/// bound-but-refused (the runtime would not arm), candidates-but-unbound,
+/// nothing at all — which, unlike the LIVE chip, still draws: the strip is
+/// where an author learns preview exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewChipState {
+    Bound,
+    Refused,
+    Unbound(usize),
+    Empty,
+}
+
+fn preview_chip_state(bound: bool, refused: bool, instances: usize) -> PreviewChipState {
+    match (bound, refused) {
+        (true, true) => PreviewChipState::Refused,
+        (true, false) => PreviewChipState::Bound,
+        (false, _) if instances > 0 => PreviewChipState::Unbound(instances),
+        (false, _) => PreviewChipState::Empty,
+    }
+}
+
+/// The preview parameter strip (mockup 2g): `PREVIEW · entity` chip, then a
+/// control per declared parameter — Float slider, Bool checkbox, Trigger
+/// FIRE. Values are read off the bound runtime every frame, so whatever else
+/// writes a parameter shows here, and a buffered Trigger stays lit because
+/// the machine still holds it — not because the strip remembers the click.
+/// Edits land in `state.anim_edits`, applied by the host after the UI:
+/// runtime-only writes, never document state, never undo entries.
+///
+/// Returns the chip's rect + whether its picker just opened, so the panel
+/// can float the entity picker after the band drew.
+fn anim_preview_strip(
+    ui: &mut Ui,
+    band: Rect,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    anim: Option<&AnimPreview>,
+    instances: &[ExecInstance],
+) -> (Rect, bool) {
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let status = Palette::invariant_status();
+    {
+        let mut p = ui.painter();
+        p.rect_filled(band, Rounding::ZERO, st.palette.window);
+        p.line_segment(
+            Pos2::new(band.min.x, band.min.y),
+            Pos2::new(band.max.x, band.min.y),
+            st.metrics.border,
+            st.palette.stroke_strong,
+        );
+    }
+    let seg_h = st.metrics.control_height.min(band.height() - 6.0 * s);
+    let cy = band.center().y;
+
+    let refused = anim.is_some_and(|a| a.disabled.is_some());
+    let chip_state = preview_chip_state(anim.is_some(), refused, instances.len());
+    let (word, word_col, chip_fill, chip_stroke) = match chip_state {
+        PreviewChipState::Refused => (
+            "\u{2715} REFUSED".to_string(),
+            status.error,
+            status.error.with_alpha(0.10),
+            status.error,
+        ),
+        PreviewChipState::Bound => (
+            "PREVIEW".to_string(),
+            st.palette.accent_active,
+            st.palette.accent_soft,
+            st.palette.accent_active,
+        ),
+        PreviewChipState::Unbound(n) => (
+            format!("{n} RUNNING"),
+            st.palette.text_secondary,
+            st.palette.panel,
+            st.palette.stroke,
+        ),
+        PreviewChipState::Empty => (
+            "PREVIEW".to_string(),
+            st.palette.text_disabled,
+            st.palette.panel,
+            st.palette.stroke,
+        ),
+    };
+    let who = match (anim, chip_state) {
+        (Some(a), _) if a.instance.is_empty() => "(unnamed)".to_string(),
+        (Some(a), _) => a.instance.clone(),
+        (None, PreviewChipState::Unbound(_)) => "select entity".to_string(),
+        _ => "nothing runs this graph".to_string(),
+    };
+    // Two runs, like the LIVE chip: the state is the accent word, the entity
+    // a plainly-colored noun after a thin separator.
+    let sep = " \u{00B7} ";
+    let (state_w, who_w) = {
+        let mut p = ui.painter();
+        (
+            p.measure_text_family(&word, px, None, FontFamily::Mono).x,
+            p.measure_text_family(&format!("{sep}{who}"), px, None, FontFamily::Mono).x,
+        )
+    };
+    let dot_r = px * 0.28;
+    let inner = pad + dot_r * 2.0 + pad * 0.5 + state_w + who_w + pad;
+    let chip = Rect::from_min_size(
+        Pos2::new(band.min.x + pad, cy - seg_h * 0.5),
+        Vec2::new(inner, seg_h),
+    );
+    {
+        let mut p = ui.painter();
+        p.rect_filled(chip, st.rounding.small, chip_fill);
+        p.rect_stroke(chip, st.rounding.small, st.metrics.border, chip_stroke);
+        p.circle_filled(
+            Pos2::new(chip.min.x + pad + dot_r, chip.center().y),
+            dot_r,
+            match chip_state {
+                PreviewChipState::Unbound(_) => status.success,
+                PreviewChipState::Empty => st.palette.text_disabled,
+                _ => word_col,
+            },
+        );
+        let text_x = chip.min.x + pad + dot_r * 2.0 + pad * 0.5;
+        let text_y = chip.center().y - px * 0.62;
+        p.text_family(Pos2::new(text_x, text_y), &word, px, word_col, None, FontFamily::Mono);
+        p.text_family(
+            Pos2::new(text_x + state_w, text_y),
+            &format!("{sep}{who}"),
+            px,
+            if chip_state == PreviewChipState::Empty {
+                st.palette.text_disabled
+            } else {
+                st.palette.text
+            },
+            None,
+            FontFamily::Mono,
+        );
+    }
+    let mut just_opened = false;
+    if chip_state == PreviewChipState::Empty {
+        // Nothing to pick; a dead chip must not hold a picker open either.
+        state.anim_picker = false;
+    } else {
+        let chip_id = ui.alloc_id("anim_preview_chip");
+        let resp = ui.interact(chip_id, chip);
+        just_opened = resp.clicked && !state.anim_picker;
+        if resp.clicked {
+            state.anim_picker = !state.anim_picker;
+        }
+        if resp.hovered && !state.anim_picker {
+            let tip = match (chip_state, anim.and_then(|a| a.disabled.as_deref())) {
+                (PreviewChipState::Refused, Some(why)) => {
+                    format!("This instance refused to run:\n{why}")
+                }
+                _ => "Which entity this graph previews on.\n\
+                      Click to pick another; the controls drive its parameters live."
+                    .to_string(),
+            };
+            ui.tooltip_for(chip, &tip);
+        }
+    }
+
+    // Controls, only for a live binding: sliders against a refused runtime
+    // (or nothing) would be dead weight pretending to work.
+    if let Some(a) = anim.filter(|a| a.disabled.is_none()) {
+        anim_param_controls(ui, band, chip.max.x + pad * 2.0, state, registry, a);
+    }
+    (chip, just_opened)
+}
+
+/// One control per declared parameter, flowing left to right from `x0`;
+/// parameters past the band's width elide to a mono `+n` — the chip
+/// summarizer's discipline, not a scroll surface in a footer.
+fn anim_param_controls(
+    ui: &mut Ui,
+    band: Rect,
+    x0: f32,
+    state: &mut GraphEditorState,
+    registry: &NodeRegistry,
+    a: &AnimPreview,
+) {
+    use crate::engine::animation::graph::{trigger_pin_type, ParamValue};
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let cy = band.center().y;
+    let seg_h = st.metrics.control_height.min(band.height() - 6.0 * s);
+    let slider_w = PREVIEW_SLIDER_W * s;
+    let fire_label = "FIRE";
+    let trigger_col = pin_color(Some(registry), &trigger_pin_type());
+    let mut x = x0;
+
+    for (i, p) in a.params.iter().enumerate() {
+        // The declaration's label, by slug — the strip lists the *runtime's*
+        // parameters (what edits can actually drive), the document supplies
+        // the author-facing name while the two agree.
+        let label = state
+            .doc
+            .variables
+            .iter()
+            .find(|v| v.slug == p.slug)
+            .map(|v| v.label.clone())
+            .unwrap_or_else(|| p.slug.clone());
+        let (label_w, value_w, fire_w) = {
+            let mut painter = ui.painter();
+            (
+                painter.measure_text(&label, px, None).x,
+                painter.measure_text_family("00.00", px, None, FontFamily::Mono).x,
+                painter
+                    .measure_text_family(fire_label, px, None, FontFamily::Mono)
+                    .x,
+            )
+        };
+        let w = match p.value {
+            ParamValue::Float(_) => label_w + pad + slider_w + pad * 0.5 + value_w,
+            ParamValue::Bool(_) => label_w + pad * 0.75 + st.sizes.checkbox,
+            ParamValue::Trigger(_) => label_w + pad * 0.75 + fire_w + pad * 1.6,
+        };
+        // Out of room: say how many the band is not showing, and stop.
+        if x + w > band.max.x - pad {
+            let n = a.params.len() - i;
+            ui.painter().text_family(
+                Pos2::new(x, cy - px * 0.62),
+                &format!("+{n}"),
+                px,
+                st.palette.text_disabled,
+                None,
+                FontFamily::Mono,
+            );
+            break;
+        }
+
+        match p.value {
+            ParamValue::Float(v) => {
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad;
+                let mut val = v;
+                let slider = Rect::from_min_size(
+                    Pos2::new(x, cy - st.sizes.slider_height * 0.5),
+                    Vec2::new(slider_w, st.sizes.slider_height),
+                );
+                ui.run_at(
+                    slider,
+                    Direction::LeftToRight,
+                    Id::new(("anim_preview_float", p.slug.as_str())),
+                    UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+                    |ui| {
+                        Slider::new(&mut val, p.range.0..=p.range.1)
+                            .width(slider_w)
+                            .show(ui);
+                    },
+                );
+                if val != v {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::SetFloat(p.slug.clone(), val));
+                }
+                x += slider_w + pad * 0.5;
+                ui.painter().text_family(
+                    Pos2::new(x, cy - px * 0.62),
+                    &format!("{val:.2}"),
+                    px,
+                    st.palette.text_mono,
+                    None,
+                    FontFamily::Mono,
+                );
+                x += value_w;
+            }
+            ParamValue::Bool(v) => {
+                // The label is painted like every other param's, so the four
+                // control families share one typography; the box alone is the
+                // widget.
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad * 0.75;
+                let mut val = v;
+                let row = Rect::from_min_size(
+                    Pos2::new(x, cy - st.sizes.checkbox * 0.5),
+                    Vec2::new(st.sizes.checkbox, st.sizes.checkbox),
+                );
+                ui.run_at(
+                    row,
+                    Direction::LeftToRight,
+                    Id::new(("anim_preview_bool", p.slug.as_str())),
+                    UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
+                    |ui| {
+                        Checkbox::new(&mut val, "").show(ui);
+                    },
+                );
+                if val != v {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::SetBool(p.slug.clone(), val));
+                }
+                x += st.sizes.checkbox;
+            }
+            ParamValue::Trigger(lit) => {
+                ui.painter().text(
+                    Pos2::new(x, cy - px * 0.62),
+                    &label,
+                    px,
+                    st.palette.text_secondary,
+                    None,
+                );
+                x += label_w + pad * 0.75;
+                // FIRE holds the trigger's ember while the shot is buffered
+                // — lit until a transition consumes it, read, not
+                // remembered.
+                let b = Rect::from_min_size(
+                    Pos2::new(x, cy - seg_h * 0.5),
+                    Vec2::new(fire_w + pad * 1.6, seg_h),
+                );
+                let id = ui.alloc_id(("anim_preview_fire", p.slug.as_str()));
+                let resp = ui.interact(id, b);
+                let (fill, stroke, text_col) = if lit {
+                    (trigger_col.with_alpha(0.18), trigger_col, trigger_col)
+                } else if resp.hovered {
+                    (st.palette.hover, st.palette.stroke_strong, st.palette.text)
+                } else {
+                    (Color::TRANSPARENT, st.palette.stroke, st.palette.text_secondary)
+                };
+                {
+                    let mut painter = ui.painter();
+                    painter.rect_filled(b, st.rounding.small, fill);
+                    painter.rect_stroke(b, st.rounding.small, st.metrics.border, stroke);
+                    painter.text_family(
+                        Pos2::new(b.min.x + pad * 0.8, b.center().y - px * 0.62),
+                        fire_label,
+                        px,
+                        text_col,
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
+                if resp.hovered {
+                    ui.tooltip_for(
+                        b,
+                        if lit {
+                            "Buffered — stays set until a transition consumes it"
+                        } else {
+                            "Fire the trigger (buffered until consumed)"
+                        },
+                    );
+                }
+                if resp.clicked {
+                    state
+                        .anim_edits
+                        .push(AnimParamEdit::FireTrigger(p.slug.clone()));
+                }
+                x += b.width();
+            }
+        }
+        x += pad * 1.6;
+    }
+}
+
+fn anim_picker_modal_id() -> crusty_gui::id::Id {
+    crusty_gui::id::Id::ROOT.with("anim_preview_picker")
+}
+
+/// The PREVIEW chip's dropdown: every entity this graph could preview on,
+/// nearest first, opening **upward** — the chip lives in the footer band.
+/// Returns `Some(binding)` when a row was chosen; `Some(None)` is "follow
+/// the selection", the baseline rule and the way back out of an explicit
+/// pick.
+fn anim_preview_picker(
+    ui: &mut Ui,
+    anchor: Rect,
+    instances: &[ExecInstance],
+    anim: Option<&AnimPreview>,
+    st: &Style,
+    s: f32,
+    // The press that opened the picker lands *outside* it — without this the
+    // opening click would read as a dismissal.
+    just_opened: bool,
+) -> Option<Option<u64>> {
+    let pad = BASE_PAD_X * s;
+    let px = st.fonts.small;
+    let row_h = st.metrics.control_height;
+    let w = (VARS_W * s).max(anchor.width());
+    let h = row_h * (instances.len() as f32 + 1.0) + row_h * 0.9;
+    let panel = Rect::from_min_size(
+        Pos2::new(anchor.min.x, anchor.min.y - pad * 0.25 - h),
+        Vec2::new(w, h),
+    );
+    ui.ctx_mut().modal_push(anim_picker_modal_id(), panel);
+    {
+        let mut p = ui.painter();
+        p.rect_filled(panel, st.rounding.widget, st.palette.elevated);
+        p.rect_stroke(panel, st.rounding.widget, st.metrics.border, st.palette.stroke_strong);
+    }
+    let mut picked: Option<Option<u64>> = None;
+    let bound = anim.map(|a| a.instance_id);
+    let mut y = panel.min.y;
+    for inst in instances {
+        let row = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+        y += row_h;
+        let id = ui.alloc_id(("anim_preview_row", inst.id));
+        let resp = ui.interact(id, row);
+        let is_bound = bound == Some(inst.id);
+        let mut p = ui.painter();
+        if is_bound {
+            p.rect_filled(row, Rounding::ZERO, st.palette.selection_fill);
+        } else if resp.hovered {
+            p.rect_filled(row, Rounding::ZERO, st.palette.hover);
+        }
+        let dot_r = px * 0.28;
+        p.circle_filled(
+            Pos2::new(row.min.x + pad + dot_r, row.center().y),
+            dot_r,
+            if inst.killed {
+                Palette::invariant_status().error
+            } else if is_bound {
+                st.palette.accent_active
+            } else {
+                Palette::invariant_status().success
+            },
+        );
+        // Distance only — machines tick every frame, so recency says
+        // nothing here; "refused" is the one state worth words.
+        let meta = if is_bound {
+            "selected".to_string()
+        } else if inst.killed {
+            format!("{:.0} m \u{b7} refused", inst.distance)
+        } else {
+            format!("{:.0} m", inst.distance)
+        };
+        let mw = p.measure_text_family(&meta, px, None, FontFamily::Mono).x;
+        p.text_family(
+            Pos2::new(row.max.x - pad - mw, row.center().y - px * 0.62),
+            &meta,
+            px,
+            if is_bound { st.palette.text_mono } else { st.palette.text_disabled },
+            None,
+            FontFamily::Mono,
+        );
+        let name = if inst.name.is_empty() { "(unnamed)" } else { inst.name.as_str() };
+        let avail = row.max.x - pad * 2.0 - mw - (row.min.x + pad * 2.0 + dot_r * 2.0);
+        let name = clip_text(&mut p, name, st.fonts.body, avail);
+        p.text(
+            Pos2::new(
+                row.min.x + pad * 2.0 + dot_r * 2.0,
+                row.center().y - st.fonts.body * 0.62,
+            ),
+            &name,
+            st.fonts.body,
+            if is_bound { st.palette.selection_text } else { st.palette.text },
+            None,
+        );
+        if resp.clicked {
+            picked = Some(Some(inst.id));
+        }
+    }
+    let follow = Rect::from_min_size(Pos2::new(panel.min.x, y), Vec2::new(w, row_h));
+    let fid = ui.alloc_id("anim_preview_follow");
+    let fresp = ui.interact(fid, follow);
+    {
+        let mut p = ui.painter();
+        if fresp.hovered {
+            p.rect_filled(follow, Rounding::ZERO, st.palette.hover);
+        }
+        p.text(
+            Pos2::new(follow.min.x + pad, follow.center().y - px * 0.62),
+            "Follow selection",
+            px,
+            st.palette.text_secondary,
+            None,
+        );
+    }
+    if fresp.clicked {
+        picked = Some(None);
+    }
+    let footer = Rect::from_min_size(Pos2::new(panel.min.x, follow.max.y), Vec2::new(w, row_h * 0.9));
+    {
+        let mut p = ui.painter();
+        p.line_segment(
+            Pos2::new(footer.min.x, footer.min.y),
+            Pos2::new(footer.max.x, footer.min.y),
+            st.metrics.border,
+            st.palette.stroke,
+        );
+        p.text(
+            Pos2::new(footer.min.x + pad, footer.center().y - px * 0.62),
+            &format!(
+                "{} entit{} running this graph",
+                instances.len(),
+                if instances.len() == 1 { "y" } else { "ies" }
+            ),
+            px,
+            st.palette.text_disabled,
+            None,
+        );
+    }
+    let pressed_outside = ui.ctx().input.pointer_pressed
+        && ui
+            .ctx()
+            .input
+            .pointer_pos
+            .is_some_and(|p| !panel.contains(p) && !anchor.contains(p));
+    if !just_opened && (ui.ctx().input.key_pressed(Key::Escape) || pressed_outside) {
+        ui.ctx_mut().modal_dismiss(anim_picker_modal_id());
+        // Keep the binding, close the surface: "put it away" is not "unbind".
+        // The Preview panel's own machine is not a pick, though — it is the
+        // fallback — so dismissing over it keeps "follow the selection".
+        return Some(anim.map(|a| a.instance_id).filter(|id| *id != PANEL_INSTANCE_ID));
+    }
+    if picked.is_some() {
+        ui.ctx_mut().modal_dismiss(anim_picker_modal_id());
+    }
+    picked
+}
+
+/// The live preview highlight (ticket 06): while a preview is bound, the
+/// active state carries an accent outline, the outgoing side of an in-flight
+/// crossfade fades out with the fade itself, and the transition that fired
+/// flashes and decays. Painted over the canvas (and over the rule peek's
+/// scrim) from the node geoms — the canvas itself never learns about it.
+fn anim_live_highlight(
+    ui: &mut Ui,
+    canvas: Rect,
+    state: &GraphEditorState,
+    geoms: &[NodeGeom],
+    anim: Option<&AnimPreview>,
+) {
+    let Some(a) = anim.filter(|a| a.disabled.is_none()) else {
+        return;
+    };
+    let v = state.view;
+    let st = ui.style();
+    let s = (st.metrics.row_height / BASE_ROW_H).max(0.1);
+    let accent = st.palette.accent_active;
+    let screen = |r: Rect| {
+        Rect::from_min_max(
+            Pos2::new(
+                canvas.min.x + (r.min.x - v.pan.x) * v.zoom,
+                canvas.min.y + (r.min.y - v.pan.y) * v.zoom,
+            ),
+            Pos2::new(
+                canvas.min.x + (r.max.x - v.pan.x) * v.zoom,
+                canvas.min.y + (r.max.y - v.pan.y) * v.zoom,
+            ),
+        )
+    };
+    // Seconds an instant (zero-duration) fire stays lit — long enough to
+    // see, short enough to read as an event rather than a state.
+    const FLASH_SECS: f32 = 0.6;
+    let mut lit: Vec<(u64, f32)> = Vec::new();
+    if let Some(id) = a.active_state {
+        lit.push((id, 1.0));
+    }
+    if let Some((from, w)) = a.fade {
+        lit.push((from, (1.0 - w).clamp(0.0, 1.0)));
+    }
+    if let Some((t, age)) = a.fired {
+        // The firing transition holds while its fade runs, else decays.
+        let alpha = match a.fade {
+            Some(_) => 1.0,
+            None => 1.0 - (age / FLASH_SECS).clamp(0.0, 1.0),
+        };
+        if alpha > 0.0 {
+            lit.push((t, alpha));
+        }
+    }
+    for (id, alpha) in lit {
+        let Some(g) = geoms.iter().find(|g| g.id == id) else {
+            continue;
+        };
+        let r = screen(g.rect).expand(3.0 * s);
+        let visible = r.intersect(canvas);
+        if visible.width() <= 0.0 || visible.height() <= 0.0 || alpha <= 0.01 {
+            continue;
+        }
+        let mut p = ui.painter();
+        // A transition is a round badge: its ring is round too.
+        if g.chip.is_some() {
+            let (c, rad) = (r.center(), r.width().min(r.height()) * 0.5);
+            p.circle_stroke(c, rad, (st.metrics.border * 2.0).max(2.0), accent.with_alpha(alpha));
+            p.circle_stroke(c, rad + 3.0 * s, st.metrics.border, accent.with_alpha(alpha * 0.35));
+            continue;
+        }
+        p.rect_stroke(
+            r,
+            st.rounding.widget,
+            (st.metrics.border * 2.0).max(2.0),
+            accent.with_alpha(alpha),
+        );
+        // A soft outer breath, so "live" reads at a glance without a second
+        // color: the same accent, wider and quieter.
+        p.rect_stroke(
+            r.expand(3.0 * s),
+            st.rounding.widget,
+            st.metrics.border,
+            accent.with_alpha(alpha * 0.35),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Variables strip (45-A P6c)
 // ---------------------------------------------------------------------------
 
@@ -5113,21 +7744,46 @@ struct VarDragPayload {
     label: String,
 }
 
-/// The element types the add / retype pickers offer, in order.
+/// The element types the add / retype pickers offer, in order — per domain.
 ///
-/// Deliberately the scalar set plus `Entity`: `Exec` is not data, `Enum` has
-/// no variant list to declare here, and textures/meshes/domain types belong to
-/// the editors that own them. The `Array` checkbox wraps whichever one is
-/// picked, which is how `Float[]` is authored without a second list.
-fn var_types() -> [(&'static str, PinType); 6] {
-    [
-        ("Float", PinType::Float),
-        ("Int", PinType::Int),
-        ("String", PinType::String),
-        ("Bool", PinType::Bool),
-        ("Vec3", PinType::Vec3),
-        ("Entity", PinType::Entity),
-    ]
+/// Script graphs: the scalar set plus `Entity` — `Exec` is not data, `Enum`
+/// has no variant list to declare here, and textures/meshes/domain types
+/// belong to the editors that own them. The `Array` checkbox wraps whichever
+/// one is picked, which is how `Float[]` is authored without a second list.
+///
+/// Animation graphs: exactly the parameter contract (Task 41) — Float, Bool
+/// and Trigger, nothing else. The compiler refuses every other type, so the
+/// picker offering one would be a lie; Trigger is the domain-typed one-shot
+/// (`plan::trigger_pin_type`).
+fn var_types(domain: GraphDomain) -> &'static [(&'static str, PinType)] {
+    use std::sync::OnceLock;
+    match domain {
+        GraphDomain::Script => {
+            static TYPES: OnceLock<Vec<(&'static str, PinType)>> = OnceLock::new();
+            TYPES.get_or_init(|| {
+                vec![
+                    ("Float", PinType::Float),
+                    ("Int", PinType::Int),
+                    ("String", PinType::String),
+                    ("Bool", PinType::Bool),
+                    ("Vec3", PinType::Vec3),
+                    ("Entity", PinType::Entity),
+                ]
+            })
+        }
+        // The rule canvas declares against the same parameter contract as
+        // the machine — a parameter added mid-rule is a machine parameter.
+        GraphDomain::Animation | GraphDomain::AnimationRule { .. } => {
+            static TYPES: OnceLock<Vec<(&'static str, PinType)>> = OnceLock::new();
+            TYPES.get_or_init(|| {
+                vec![
+                    ("Float", PinType::Float),
+                    ("Bool", PinType::Bool),
+                    ("Trigger", crate::engine::animation::graph::trigger_pin_type()),
+                ]
+            })
+        }
+    }
 }
 
 /// The tag a variable row shows: `Float`, `Float[]`, and for anything the
@@ -5141,18 +7797,21 @@ fn type_label(ty: &PinType) -> String {
 /// Split a declared type into what the two controls hold: (picker index,
 /// array). A type the picker cannot express answers index 0 — the row's tag
 /// still shows the truth, and touching the picker is then an explicit retype.
-fn type_pick(ty: &PinType) -> (usize, bool) {
+fn type_pick(domain: GraphDomain, ty: &PinType) -> (usize, bool) {
     let (elem, array) = match ty {
         PinType::Array(inner) => (inner.as_ref().clone(), true),
         other => (other.clone(), false),
     };
-    let i = var_types().iter().position(|(_, t)| *t == elem).unwrap_or(0);
+    let i = var_types(domain)
+        .iter()
+        .position(|(_, t)| *t == elem)
+        .unwrap_or(0);
     (i, array)
 }
 
 /// Rebuild a `PinType` from the two controls.
-fn type_from_pick(index: usize, array: bool) -> PinType {
-    let ty = var_types()
+fn type_from_pick(domain: GraphDomain, index: usize, array: bool) -> PinType {
+    let ty = var_types(domain)
         .get(index)
         .map(|(_, t)| t.clone())
         .unwrap_or(PinType::Float);
@@ -5240,11 +7899,19 @@ const VARS_ARRAY_ROWS: usize = 6;
 /// from here, from a config row, or from a test. Layout is by hand because the
 /// strip is a fixed column with a pinned footer: the list gets whatever the
 /// header, the filter and the footer inspector leave it.
-fn variables_panel(
+///
+/// `root` salts every widget id, because the same document can be showing
+/// this list twice at once — the tab's strip and the Variables dock panel
+/// (per-document layouts ticket 02) — and two live widgets sharing an id
+/// would each apply the other's drag. `docked` is that panel: it fills its
+/// tab, so it has no collapse caret, no rail state and no strip edge.
+pub(super) fn variables_panel(
     ui: &mut Ui,
     rect: Rect,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
+    root: Id,
+    docked: bool,
     locate: &mut Option<u64>,
 ) {
     let st = ui.style();
@@ -5256,22 +7923,24 @@ fn variables_panel(
     {
         let mut p = ui.painter();
         p.rect_filled(rect, Rounding::ZERO, st.palette.panel);
-        p.line_segment(
-            Pos2::new(rect.max.x, rect.min.y),
-            Pos2::new(rect.max.x, rect.max.y),
-            st.metrics.border,
-            st.palette.stroke,
-        );
+        if !docked {
+            p.line_segment(
+                Pos2::new(rect.max.x, rect.min.y),
+                Pos2::new(rect.max.x, rect.max.y),
+                st.metrics.border,
+                st.palette.stroke,
+            );
+        }
     }
 
-    if !state.vars.open {
+    if !docked && !state.vars.open {
         // Collapsed: a rail carrying the caret back to the list and the count.
         // 22px that hides "this graph has 10 variables" is 22px wasted.
         let btn = Rect::from_min_size(
             Pos2::new(rect.min.x + st.metrics.border, rect.min.y + pad * 0.5),
             Vec2::new(rect.width() - st.metrics.border * 2.0, head_h),
         );
-        if strip_button(ui, Id::new("graph_vars_expand"), btn, "\u{203a}", 0) {
+        if strip_button(ui, root.with("graph_vars_expand"), btn, "\u{203a}", 0) {
             state.vars.open = true;
         }
         let n = state.doc.variables.len().to_string();
@@ -5351,7 +8020,7 @@ fn variables_panel(
         Pos2::new(header.min.x, header.min.y),
         Vec2::new(pad * 1.5, head_h),
     );
-    if strip_button(ui, Id::new("graph_vars_collapse"), caret, "\u{2039}", 0) {
+    if !docked && strip_button(ui, root.with("graph_vars_collapse"), caret, "\u{2039}", 0) {
         collapse_strip = true;
     }
     // The `+` is a menu: a variable is one thing to add, a group is the other,
@@ -5364,7 +8033,7 @@ fn variables_panel(
     ui.run_at(
         plus,
         Direction::TopDown,
-        Id::new("graph_vars_add_menu"),
+        root.with("graph_vars_add_menu"),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             // The width is the *dropdown's*, not the button's — a menu as
@@ -5410,7 +8079,7 @@ fn variables_panel(
     ui.run_at(
         field,
         Direction::TopDown,
-        Id::new("graph_vars_filter"),
+        root.with("graph_vars_filter"),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             let out = TextEdit::new(&mut filter)
@@ -5457,7 +8126,7 @@ fn variables_panel(
     ui.run_at(
         list,
         Direction::TopDown,
-        Id::new("graph_vars_list"),
+        root.with("graph_vars_list"),
         UiOptions { padding: Vec2::new(pad * 0.5, pad * 0.5), spacing: 0.0 },
         |ui| {
             if vars.is_empty() && new_var.is_none() {
@@ -5476,7 +8145,7 @@ fn variables_panel(
                 // The add draft sits at the top of the list, unchanged from
                 // the baseline: name, type, array, Cancel/Add.
                 if let Some(draft) = new_var.as_mut() {
-                    if let Some(req) = add_draft_block(ui, w, &st, pad, draft) {
+                    if let Some(req) = add_draft_block(ui, w, &st, pad, state.domain, root, draft) {
                         request = Some(req);
                     }
                 }
@@ -5630,7 +8299,7 @@ fn variables_panel(
         }
         let buf = rename_buf.get_or_insert_with(|| v.label.clone());
         if let Some(req) = footer_inspector(
-            ui, footer, v, uses[i], buf, &st, pad, s, registry, locate, state,
+            ui, footer, v, uses[i], buf, &st, pad, s, registry, root, locate, state,
         ) {
             request = Some(req);
         }
@@ -5646,13 +8315,15 @@ fn variables_panel(
         ui.run_at(
             entry,
             Direction::TopDown,
-            Id::new("graph_vars_new_group"),
+            root.with("graph_vars_new_group"),
             UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
             |ui| {
+                // Focus once, on the surface whose + menu opened the entry;
+                // asking every frame would let a twin surface steal it back.
                 let out = TextEdit::new(name)
                     .hint("New group\u{2026}")
                     .width(entry.width())
-                    .request_focus(true)
+                    .request_focus(want_group)
                     .show_full(ui);
                 done = out.submitted;
                 cancelled = out.cancelled;
@@ -6005,6 +8676,8 @@ fn add_draft_block(
     w: f32,
     st: &Style,
     pad: f32,
+    domain: GraphDomain,
+    root: Id,
     draft: &mut NewVarDraft,
 ) -> Option<VarRequest> {
     let block = ui.allocate(Vec2::new(w, st.metrics.control_height * 3.0 + pad * 3.0));
@@ -6020,7 +8693,7 @@ fn add_draft_block(
             block.max - Vec2::splat(pad * 0.5),
         ),
         Direction::TopDown,
-        Id::new("graph_vars_new"),
+        root.with("graph_vars_new"),
         UiOptions { padding: Vec2::ZERO, spacing: pad * 0.75 },
         |ui| {
             let fw = w - pad;
@@ -6036,18 +8709,24 @@ fn add_draft_block(
             ui.run_at(
                 row,
                 Direction::LeftToRight,
-                Id::new("graph_vars_new_row"),
+                root.with("graph_vars_new_row"),
                 UiOptions { padding: Vec2::ZERO, spacing: pad },
                 |ui| {
+                    let types = var_types(domain);
+                    let picked = draft.ty.min(types.len() - 1);
                     ComboBox::new("graph_vars_new_ty")
-                        .selected_text(var_types()[draft.ty].0)
+                        .selected_text(types[picked].0)
                         .width(fw * 0.46)
                         .show_ui(ui, |ui| {
-                            for (i, (name, _)) in var_types().iter().enumerate() {
+                            for (i, (name, _)) in types.iter().enumerate() {
                                 SelectableValue::new(&mut draft.ty, i, *name).show(ui);
                             }
                         });
-                    Checkbox::new(&mut draft.array, "Array").show(ui);
+                    // Animation parameters have no array form — the compiler
+                    // refuses one, so the checkbox does not exist there.
+                    if domain == GraphDomain::Script {
+                        Checkbox::new(&mut draft.array, "Array").show(ui);
+                    }
                 },
             );
             let bw = (fw - pad) * 0.5;
@@ -6055,7 +8734,7 @@ fn add_draft_block(
             ui.run_at(
                 actions,
                 Direction::LeftToRight,
-                Id::new("graph_vars_new_actions"),
+                root.with("graph_vars_new_actions"),
                 UiOptions { padding: Vec2::ZERO, spacing: pad },
                 |ui| {
                     cancel |= Button::new("Cancel")
@@ -6075,7 +8754,7 @@ fn add_draft_block(
         draft.done = true;
         return Some(VarRequest::Add(
             draft.name.clone(),
-            type_from_pick(draft.ty, draft.array),
+            type_from_pick(domain, draft.ty, draft.array),
         ));
     }
     if cancel {
@@ -6116,6 +8795,7 @@ fn footer_inspector(
     pad: f32,
     s: f32,
     _registry: &NodeRegistry,
+    root: Id,
     locate: &mut Option<u64>,
     state: &mut GraphEditorState,
 ) -> Option<VarRequest> {
@@ -6189,21 +8869,32 @@ fn footer_inspector(
     let mut y = head.max.y + pad * 0.5;
     let name_row = Rect::from_min_size(Pos2::new(inner.min.x, y), Vec2::new(inner.width(), ch));
     field_label(ui, name_row, "Name", label_w, st);
-    let mut rename_done = false;
+    let (mut submitted, mut focused) = (false, false);
     ui.run_at(
         Rect::from_min_max(Pos2::new(inner.min.x + label_w, y), name_row.max),
         Direction::TopDown,
-        Id::new(("graph_var_name", decl.slug.as_str())),
+        root.with(("graph_var_name", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             let out = TextEdit::new(rename_buf)
                 .width(name_row.width() - label_w)
                 .show_full(ui);
-            // Commit on Enter or when the field gives the keyboard back —
-            // never per keystroke, which would be one undo entry per letter.
-            rename_done = out.submitted || !out.focused;
+            submitted = out.submitted;
+            focused = out.focused;
         },
     );
+    // Commit on Enter or when the field gives the keyboard back — never per
+    // keystroke, which would be one undo entry per letter. "Gives back" is
+    // judged by the surface that held it: the strip and the dock panel draw
+    // this same field over one buffer, and the twin that never had focus
+    // must not commit the other's typing.
+    let owner = state.vars.rename_owner;
+    let rename_done = submitted || (owner == Some(root) && !focused);
+    if focused {
+        state.vars.rename_owner = Some(root);
+    } else if owner == Some(root) {
+        state.vars.rename_owner = None;
+    }
     if rename_done {
         let text = rename_buf.trim().to_string();
         if !text.is_empty() && text != decl.label {
@@ -6215,26 +8906,30 @@ fn footer_inspector(
     y = name_row.max.y + pad * 0.5;
     let ty_row = Rect::from_min_size(Pos2::new(inner.min.x, y), Vec2::new(inner.width(), ch));
     field_label(ui, ty_row, "Type", label_w, st);
-    let (mut pick, mut array) = type_pick(&decl.ty);
+    let (mut pick, mut array) = type_pick(state.domain, &decl.ty);
     let (pick0, array0) = (pick, array);
+    let domain = state.domain;
     ui.run_at(
         Rect::from_min_max(Pos2::new(inner.min.x + label_w, y), ty_row.max),
         Direction::LeftToRight,
-        Id::new(("graph_var_ty", decl.slug.as_str())),
+        root.with(("graph_var_ty", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: pad * 0.5 },
         |ui| {
+            let types = var_types(domain);
             ComboBox::new(format!("graph_var_ty_{}", decl.slug))
-                .selected_text(var_types()[pick].0)
+                .selected_text(types[pick.min(types.len() - 1)].0)
                 .width((ty_row.width() - label_w) * 0.56)
                 .show_ui(ui, |ui| {
-                    for (i, (name, _)) in var_types().iter().enumerate() {
+                    for (i, (name, _)) in types.iter().enumerate() {
                         SelectableValue::new(&mut pick, i, *name).show(ui);
                     }
                 });
-            Checkbox::new(&mut array, "Array").show(ui);
+            if domain == GraphDomain::Script {
+                Checkbox::new(&mut array, "Array").show(ui);
+            }
         },
     );
-    let want = type_from_pick(pick, array);
+    let want = type_from_pick(domain, pick, array);
     if (pick, array) != (pick0, array0) && want != decl.ty && request.is_none() {
         request = Some(if uses > 0 {
             VarRequest::ConfirmRetype(decl.slug.clone(), want, uses)
@@ -6268,8 +8963,13 @@ fn footer_inspector(
         );
     } else if PropValue::zero_of(&decl.ty).is_none() {
         // No literal form: the chip says why, instead of a broken "—".
-        runtime_chip(ui, cell, st);
-    } else if let Some(v) = var_default_widget(ui, cell, decl) {
+        let text = if state.domain.is_animation_family() {
+            "fired by gameplay"
+        } else {
+            "bound at runtime"
+        };
+        runtime_chip(ui, cell, st, text);
+    } else if let Some(v) = var_default_widget(ui, cell, decl, root) {
         if request.is_none() {
             request = Some(VarRequest::SetDefault(decl.slug.clone(), v));
         }
@@ -6280,7 +8980,7 @@ fn footer_inspector(
     if ui.ctx().input.pointer_pos.is_some_and(|p| del.contains(p)) {
         ui.tooltip_for(del, "Delete variable");
     }
-    if strip_button(ui, Id::new(("graph_var_del", decl.slug.as_str())), del, "\u{2715}", 2)
+    if strip_button(ui, root.with(("graph_var_del", decl.slug.as_str())), del, "\u{2715}", 2)
         && request.is_none()
     {
         request = Some(VarRequest::ConfirmDelete(decl.slug.clone(), uses));
@@ -6292,7 +8992,7 @@ fn footer_inspector(
             Pos2::new(inner.min.x, d_row.max.y + pad * 0.5),
             inner.max,
         );
-        if let Some(req) = array_editor(ui, editor, decl, st, pad, s) {
+        if let Some(req) = array_editor(ui, editor, decl, st, pad, s, root) {
             if request.is_none() {
                 request = Some(req);
             }
@@ -6313,9 +9013,8 @@ fn field_label(ui: &mut Ui, row: Rect, text: &str, _label_w: f32, st: &Style) {
 
 /// The dashed "bound at runtime" chip an `Entity` default wears. An entity has
 /// no literal, and saying so teaches more than an em dash.
-fn runtime_chip(ui: &mut Ui, cell: Rect, st: &Style) {
+fn runtime_chip(ui: &mut Ui, cell: Rect, st: &Style, text: &str) {
     let small = st.fonts.small;
-    let text = "bound at runtime";
     let mut p = ui.painter();
     let w = p.measure_text(text, small, None).x + st.spacing.padding;
     let chip = Rect::from_min_size(
@@ -6344,6 +9043,7 @@ fn array_editor(
     st: &Style,
     pad: f32,
     s: f32,
+    root: Id,
 ) -> Option<VarRequest> {
     let PinType::Array(elem) = &decl.ty else {
         return None;
@@ -6380,7 +9080,7 @@ fn array_editor(
     ui.run_at(
         box_rect.shrink(st.metrics.border),
         Direction::TopDown,
-        Id::new(("graph_var_array", decl.slug.as_str())),
+        root.with(("graph_var_array", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: 0.0 },
         |ui| {
             ScrollArea::new(visible * row_h)
@@ -6422,7 +9122,7 @@ fn array_editor(
                         Pos2::new(r.min.x + idx_w + pad * 0.25, r.min.y + 1.0),
                         Pos2::new(handle.min.x - pad * 0.25, r.max.y - 1.0),
                     );
-                    if let Some(v) = array_entry_widget(ui, cell, elem, entry, &decl.slug, i, st) {
+                    if let Some(v) = array_entry_widget(ui, cell, elem, entry, &decl.slug, i, st, root) {
                         request = Some(VarRequest::SetEntry(decl.slug.clone(), i, v));
                     }
                     // ⋮⋮ reorders by one step per click — a drag inside a
@@ -6468,7 +9168,7 @@ fn array_editor(
         Vec2::new(rect.width(), st.metrics.control_height),
     );
     let add = Rect::from_min_size(actions.min, Vec2::new(64.0 * s, actions.height()));
-    if strip_button(ui, Id::new(("graph_var_entry_add", decl.slug.as_str())), add, "+ Entry", 0) {
+    if strip_button(ui, root.with(("graph_var_entry_add", decl.slug.as_str())), add, "+ Entry", 0) {
         request = Some(VarRequest::AddEntry(decl.slug.clone()));
     }
     if entries.len() > VARS_ARRAY_ROWS {
@@ -6493,13 +9193,14 @@ fn array_entry_widget(
     slug: &str,
     index: usize,
     st: &Style,
+    root: Id,
 ) -> Option<PropValue> {
     let mut changed: Option<PropValue> = None;
     let v = value.clone();
     ui.run_at(
         cell,
         Direction::LeftToRight,
-        Id::new(("graph_var_entry", slug, index)),
+        root.with(("graph_var_entry", slug, index)),
         UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item * 0.25 },
         |ui| match (elem, v) {
             (PinType::Float, PropValue::Float(x)) => {
@@ -6571,6 +9272,7 @@ fn var_default_widget(
     ui: &mut Ui,
     cell: Rect,
     decl: &crate::engine::node_graph::VarDecl,
+    root: Id,
 ) -> Option<PropValue> {
     let st = ui.style();
     let mut changed: Option<PropValue> = None;
@@ -6578,7 +9280,7 @@ fn var_default_widget(
     ui.run_at(
         cell,
         Direction::LeftToRight,
-        Id::new(("graph_var_default", decl.slug.as_str())),
+        root.with(("graph_var_default", decl.slug.as_str())),
         UiOptions { padding: Vec2::ZERO, spacing: st.spacing.item * 0.5 },
         |ui| match (&decl.ty, d) {
             (PinType::Float, Some(PropValue::Float(v))) => {
@@ -7534,7 +10236,21 @@ struct WireGeom {
     /// never a re-route: the pulse travels the polyline the router already
     /// produced, so a wire does not move when it runs.
     pulse: f32,
+    /// A derived machine edge (Task 41 rework): drawn as its straight
+    /// segment regardless of the wire-style preference — a state machine's
+    /// arrows do not take the subway.
+    direct: bool,
+    /// Draw an arrowhead at `b` — the machine edge's direction marker.
+    arrow: bool,
 }
+
+/// Machine-edge arrowhead length, world units (Task 41 rework).
+const ARROW_L: f32 = 9.0;
+
+/// Screen-space width of the machine card's border rim that starts a wire
+/// drag (Task 41 rework), capped to a third of the card's smaller side so a
+/// small pill keeps a grabbable center.
+const BORDER_GRAB_PX: f32 = 10.0;
 
 impl WireGeom {
     fn is_exec(&self) -> bool {
@@ -7564,6 +10280,10 @@ fn build_wires(
     scope: &CanvasScope,
     vis: Rect,
     exec: Option<&GraphExecViz>,
+    // Task 41 rework: doc-edge indices the machine layout replaced with
+    // straight border-to-chip segments. Edges it could not place honestly
+    // (reroutes, overlapping states) fall through to the router.
+    anim_segs: Option<&BTreeMap<usize, super::graph_anim_edge::EdgeSeg>>,
 ) -> Vec<WireGeom> {
     let mut out = Vec::with_capacity(state.doc.edges.len());
     let ranks = converge_ranks(&state.doc.edges);
@@ -7573,6 +10293,40 @@ fn build_wires(
         let (Some(src), Some(dst)) = (src, dst) else {
             continue;
         };
+        if let Some(seg) = anim_segs.and_then(|s| s.get(&edge_index)) {
+            let a = Pos2::new(seg.a[0], seg.a[1]);
+            let b = Pos2::new(seg.b[0], seg.b[1]);
+            let bounds = Rect::from_min_max(
+                Pos2::new(a.x.min(b.x) - 20.0, a.y.min(b.y) - 20.0),
+                Pos2::new(a.x.max(b.x) + 20.0, a.y.max(b.y) + 20.0),
+            );
+            let clip = bounds.intersect(vis);
+            if clip.width() < 0.0 || clip.height() < 0.0 {
+                continue;
+            }
+            let ty = src
+                .pins
+                .iter()
+                .find(|p| p.output && p.slug == e.from_pin)
+                .map(|p| p.ty.clone())
+                .unwrap_or(PinType::Exec);
+            out.push(WireGeom {
+                edge_index,
+                a,
+                b,
+                ty,
+                screen: vec![scope.world_to_screen(a), scope.world_to_screen(b)],
+                selected: state.selected_edges.contains(e),
+                mismatched: errors.edges.contains(e),
+                // Machine flow never pulses: it is not exec.
+                pulse: 0.0,
+                taken: true,
+                rate: 0.0,
+                direct: true,
+                arrow: seg.arrow,
+            });
+            continue;
+        }
         let (Some(a), Some(b)) = (
             src.wire_anchor(&e.from_pin, true),
             dst.wire_anchor(&e.to_pin, false),
@@ -7621,6 +10375,8 @@ fn build_wires(
             pulse: exec.map_or(0.0, |v| wire_pulse(v, state, e)),
             taken: exec.is_none_or(|v| !v.has_session() || wire_taken(v, state, e)),
             rate: exec.map_or(0.0, |v| wire_rate(v, state, e)),
+            direct: false,
+            arrow: false,
         });
     }
     out
@@ -7842,6 +10598,18 @@ fn draw_wires(
             continue;
         }
         stroke_wire(&mut p, w, prefs, scope, width, color);
+        // The machine edge's direction marker (Task 41 rework): a filled
+        // arrowhead at the landing border — the Unreal reading of a state
+        // machine. World-sized, so it zooms with the graph.
+        if w.arrow && !lod.bar_only() && w.screen.len() >= 2 {
+            draw_arrow_head(
+                &mut p,
+                w.screen[w.screen.len() - 1],
+                w.screen[w.screen.len() - 2],
+                (ARROW_L * zoom).clamp(5.0, 16.0),
+                color,
+            );
+        }
         if w.mismatched && lod.rows() {
             if let Some(mid) = arc_length_midpoint(&w.screen) {
                 let r = width * 2.2;
@@ -7860,6 +10628,50 @@ fn draw_wires(
             }
         }
     }
+}
+
+/// The transition badge's arrow: a vector reading of
+/// `engine/icons/left-arrow-circle.svg` (disc radius 10 — shaft from x=14 to
+/// the tip at x=6 on the centreline, head strokes from the tip to (9, 7) and
+/// (9, 13), stroke 2, round caps), scaled to badge radius `r` and rotated so
+/// it points along `dir`. Drawn in the canvas colour it reads as cut out of
+/// the disc, which is what keeps it crisp and rotatable where the raster
+/// icon could be neither.
+fn draw_badge_arrow(p: &mut Painter, c: Pos2, r: f32, dir: Vec2, w: f32, color: Color) {
+    let f = Vec2::new(dir.x * r, dir.y * r);
+    let n = Vec2::new(-f.y, f.x);
+    let at = |a: f32, s: f32| Pos2::new(c.x + f.x * a + n.x * s, c.y + f.y * a + n.y * s);
+    let (tail, tip) = (at(-0.4, 0.0), at(0.4, 0.0));
+    let wings = [at(0.1, -0.3), at(0.1, 0.3)];
+    // The shaft stops where its corners meet the head strokes' inner edges
+    // (the icon's x=8.4 at its own stroke), so the join is seamless at any
+    // stroke width instead of a bar running through the head's notch.
+    let shaft_end = at((0.4 - 1.2 * w / r).max(-0.4), 0.0);
+    p.line_segment(tail, shaft_end, w, color);
+    p.line_segment(tip, wings[0], w, color);
+    p.line_segment(tip, wings[1], w, color);
+    // Round caps and joins, as the icon has them.
+    for q in [tail, tip, wings[0], wings[1]] {
+        p.circle_filled(q, w * 0.5, color);
+    }
+}
+
+/// Filled arrowhead at `tip`, oriented away from `prev` (screen space) —
+/// the machine edge's direction marker (Task 41 rework).
+fn draw_arrow_head(p: &mut Painter, tip: Pos2, prev: Pos2, l: f32, color: Color) {
+    let v = tip - prev;
+    let len = v.length();
+    if len <= 1.0 {
+        return;
+    }
+    let d = Vec2::new(v.x / len * l, v.y / len * l);
+    let n = Vec2::new(-d.y * 0.45, d.x * 0.45);
+    p.triangle(
+        tip,
+        Pos2::new(tip.x - d.x + n.x, tip.y - d.y + n.y),
+        Pos2::new(tip.x - d.x - n.x, tip.y - d.y - n.y),
+        color,
+    );
 }
 
 /// Flow bubbles: dots riding an exec wire in the direction control took
@@ -7958,6 +10770,13 @@ fn stroke_wire(
     width: f32,
     color: Color,
 ) {
+    // A machine edge is a straight arrow whatever the wire-style pref says.
+    if w.direct {
+        if w.screen.len() >= 2 {
+            p.polyline(&w.screen, width, color);
+        }
+        return;
+    }
     if prefs.style.is_orthogonal() {
         if w.screen.len() >= 2 {
             p.polyline(&w.screen, width, color);
@@ -8207,6 +11026,140 @@ fn draw_nodes(
                         SELECTION_REST_ALPHA
                     }),
                 );
+            }
+            continue;
+        }
+
+        // Task 41 (transitions ticket 02): the at-rest transition badge — a
+        // disc with the arrow cut out of it, Unreal's transition icon,
+        // rotated to point along the flow. The rule text is not on the
+        // canvas (tooltip + unfolded card). Selection swaps to the standard
+        // card via geometry, so this branch only ever draws the rest state.
+        if let Some(chip) = &g.chip {
+            let bg = st.palette.input;
+            let c = srect.center();
+            let r = srect.width().min(srect.height()) * 0.5;
+            p.circle_filled(c, r, fade(st.palette.stroke_strong, dim, bg));
+            p.circle_stroke(
+                c,
+                r,
+                m.border,
+                if errored { status.error } else { fade(st.palette.stroke, dim, bg) },
+            );
+            // Below the glyph threshold the badge is the plain disc.
+            if lod.glyphs() {
+                draw_badge_arrow(&mut p, c, r, chip.dir, (m.ring_w * zoom).max(1.0), bg);
+            }
+            continue;
+        }
+
+        // Task 41 rework: compact machine cards (mockup 2b). A state is its
+        // name, role tag and one mono subtitle; ENTRY (Logic-green text) and
+        // an alias (title, ALIAS tag, its states as subtitle) are pills of
+        // the same card family — plain header fill, no category band. No
+        // pins, no fields — selection swaps a state or alias to the standard
+        // card via geometry, so this branch only ever draws the rest form.
+        if let Some(card) = &g.anim {
+            let bg = st.palette.input;
+            if lod.bar_only() {
+                let bar = Rect::from_min_size(
+                    srect.min,
+                    Vec2::new(srect.width(), (L4_BAR_H * m.scale * zoom).max(1.0)),
+                );
+                p.rect_filled(bar, Rounding::ZERO, edge_col);
+                continue;
+            }
+            p.rect_filled(srect, round, fade(st.palette.header, dim, bg));
+            if card.kind == AnimCardKind::State {
+                // The generic card's underlay-reveal: a rounded band in the
+                // category color, the fills inset below its top 2px.
+                let band_h = (round.nw * 2.0).min(srect.height());
+                p.rect_filled(
+                    Rect::from_min_size(srect.min, Vec2::new(srect.width(), band_h)),
+                    Rounding::same(round.nw.min(band_h * 0.5)),
+                    edge_col,
+                );
+                let edge_h = (m.edge * zoom).max(1.0).min(band_h);
+                let inner_r = (round.nw - edge_h).max(0.0);
+                p.rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(srect.min.x, srect.min.y + edge_h),
+                        srect.max,
+                    ),
+                    Rounding { nw: inner_r, ne: inner_r, sw: round.sw, se: round.se },
+                    fade(st.palette.elevated, dim, bg),
+                );
+            }
+            let border_col = if errored {
+                status.error
+            } else {
+                st.palette.stroke_strong
+            };
+            p.rect_stroke(srect, round, m.border, border_col);
+            if selected {
+                let off = m.edge;
+                let outer = Rect::from_min_max(
+                    Pos2::new(srect.min.x - off, srect.min.y - off),
+                    Pos2::new(srect.max.x + off, srect.max.y + off),
+                );
+                let alpha =
+                    if state.primary == Some(g.id) { 1.0 } else { SELECTION_REST_ALPHA };
+                p.rect_stroke(
+                    outer,
+                    Rounding::same(round.nw + off),
+                    m.edge,
+                    selection_outline.with_alpha(alpha),
+                );
+            }
+            if lod.glyphs() {
+                let header_c = srect.min.y + m.header_h * zoom * 0.5;
+                let mut x = srect.min.x + m.pad_x * zoom;
+                if errored {
+                    let r = m.pin_r * zoom * 0.8;
+                    p.circle_filled(Pos2::new(x + r, header_c), r, status.error);
+                    x += r * 2.0 + m.label_gap * zoom;
+                }
+                let (title_col, px) = match card.kind {
+                    AnimCardKind::Entry => {
+                        (fade(category_tag_color("Logic"), dim, bg), st.fonts.small * zoom)
+                    }
+                    // An alias is a named node like a state — same face; the
+                    // missing category band and the tag tell them apart.
+                    AnimCardKind::State | AnimCardKind::Alias => {
+                        (fade(st.palette.text, dim, bg), st.fonts.body * zoom)
+                    }
+                };
+                p.text(Pos2::new(x, header_c - px * 0.62), &g.title, px, title_col, None);
+                if !g.tag.is_empty() {
+                    let tag_px = m.tag_px * zoom;
+                    let tw = p
+                        .measure_text_family(&g.tag, tag_px, None, FontFamily::Mono)
+                        .x;
+                    p.text_family(
+                        Pos2::new(
+                            srect.max.x - m.pad_x * zoom - tw,
+                            header_c - tag_px * 0.62,
+                        ),
+                        &g.tag,
+                        tag_px,
+                        fade(g.tag_color(), dim, bg),
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
+                if let Some(sub) = &card.subtitle {
+                    let spx = st.fonts.small * zoom;
+                    let sub_c = srect.min.y
+                        + (m.header_h + (g.rect.height() - m.header_h) * 0.5) * zoom;
+                    p.text_family(
+                        Pos2::new(srect.min.x + m.pad_x * zoom, sub_c - spx * 0.62),
+                        sub,
+                        spx,
+                        fade(st.palette.text_secondary, dim, bg),
+                        None,
+                        FontFamily::Mono,
+                    );
+                }
             }
             continue;
         }
@@ -8694,6 +11647,11 @@ fn draw_nodes(
         }
 
         for pin in &g.pins {
+            // A hidden pin (Task 41 rework) is an anchor, not an affordance:
+            // no dot, no label — nothing to draw.
+            if pin.hidden {
+                continue;
+            }
             let c = scope.world_to_screen(pin.dot_center);
             draw_pin(&mut p, pin, c, zoom, m, st, registry);
             // Pin-level errors ring the pin itself.
@@ -8922,7 +11880,8 @@ fn draw_nodes(
     // Editable widgets, after the painter borrow ends.
     for (node, slug, cell, kind) in pending_widgets {
         widget_rects.push(cell);
-        inline_widget(ui, state, registry, node, &slug, cell, &kind, zoom);
+        let id = Id::new(("graph_inline", node, slug.as_str()));
+        inline_widget(ui, state, registry, node, &slug, cell, &kind, zoom, id);
     }
     // The payload name entry is a widget like any other — it just lives in a
     // row that is not a property yet (add) or is about to change key (rename).
@@ -9128,19 +12087,43 @@ fn inline_cell_rect(
 
 /// Width the inline cell of `kind` needs, world units.
 ///
-/// Only text-shaped constants grow past the reserved [`GraphMetrics::value_w`]:
-/// a number, a checkbox and a dropdown all fit 56 units, a string does not.
-/// Measured at **both** fonts the cell can be painted in — the live `TextEdit`
-/// at L0 draws body-size, the L1 fallback draws small mono — because the sizer
-/// has to hold whichever the zoom picks.
+/// Content-shaped: text, numbers and dropdowns all size to what they hold
+/// (with the reserved [`GraphMetrics::value_w`] as the floor), because the
+/// bar is *every field readable at 100% zoom without interaction* — "le…"
+/// for `less_equal` teaches nothing. Measured at **both** fonts the cell can
+/// be painted in — the live widget at L0 draws body-size, the L1 fallback
+/// draws small mono — because the sizer has to hold whichever the zoom picks.
 fn inline_cell_w(p: &mut Painter, kind: &InlineKind, m: &GraphMetrics, st: &Style) -> f32 {
+    fn both(p: &mut Painter, st: &Style, s: &str) -> f32 {
+        let body = p.measure_text(s, st.fonts.body, None).x;
+        let mono = p
+            .measure_text_family(s, st.fonts.small, None, FontFamily::Mono)
+            .x;
+        body.max(mono)
+    }
     match kind {
-        InlineKind::Str(s) => {
-            let body = p.measure_text(s, st.fonts.body, None).x;
-            let mono = p
-                .measure_text_family(s, st.fonts.small, None, FontFamily::Mono)
-                .x;
-            m.text_value_w(body.max(mono))
+        InlineKind::Str(s) => m.text_value_w(both(p, st, s)),
+        // Numbers get air around the digits, not a tight sleeve.
+        InlineKind::Float(x) => {
+            let t = format!("{x}");
+            m.text_value_w(both(p, st, &t) + m.label_gap * 2.0)
+        }
+        InlineKind::Int(i) => {
+            let t = i.to_string();
+            m.text_value_w(both(p, st, &t) + m.label_gap * 2.0)
+        }
+        // A dropdown sizes its closed box to the longest option. The chrome
+        // mirrors the `ComboBox` trigger: 16 of text insets, 4 text→arrow
+        // gap, the arrow itself, a little slack. The usual cap applies, but
+        // yields whenever even the *current* value would not fit whole —
+        // the selected value never truncates.
+        InlineKind::Enum { value, variants, ok }
+        | InlineKind::Choice { value, variants, ok } => {
+            let arrow = p.measure_text("\u{25BC}", st.fonts.body, None).x;
+            let chrome = 20.0 + arrow + 2.0;
+            let cur = both(p, st, &flagged_value(value, *ok));
+            let longest = variants.iter().fold(cur, |w, v| w.max(both(p, st, v)));
+            (longest + chrome).clamp(m.value_w, (BASE_VALUE_W_MAX * m.scale).max(cur + chrome))
         }
         _ => m.value_w,
     }
@@ -9168,7 +12151,12 @@ fn clip_text(p: &mut Painter, s: &str, px: f32, max_w: f32) -> String {
 /// node it sits in. Any change opens (or continues) one coalesced
 /// `SetProperty` gesture, flushed on pointer release.
 #[allow(clippy::too_many_arguments)]
-fn inline_widget(
+///
+/// `id` is the caller's: the canvas band and the Details dock panel can both
+/// show the same row of the same node in one frame, and each needs its own
+/// widget identity (per-document layouts ticket 02).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn inline_widget(
     ui: &mut Ui,
     state: &mut GraphEditorState,
     registry: &NodeRegistry,
@@ -9177,6 +12165,7 @@ fn inline_widget(
     cell: Rect,
     kind: &InlineKind,
     zoom: f32,
+    id: Id,
 ) {
     let saved = ui.ctx().style;
     {
@@ -9193,7 +12182,6 @@ fn inline_widget(
         s.metrics.row_height *= zoom;
     }
 
-    let id = Id::new(("graph_inline", node, slug));
     let mut changed: Option<PropValue> = None;
     ui.run_at(
         cell,
@@ -9254,9 +12242,23 @@ fn inline_widget(
                 let now = variants.iter().position(|v| v == value);
                 let mut picked = now.unwrap_or(usize::MAX);
                 let shown = flagged_value(value, now.is_some());
+                // The open list renders every item fully: each row paints 8px
+                // insets plus the right-aligned ✓, so the popup grows to its
+                // widest row instead of clipping it (fonts here are already
+                // zoom-scaled, so the measure matches what the rows draw).
+                let popup_w = {
+                    let font = ui.style().fonts.body;
+                    let mut p = ui.painter();
+                    let check = p.measure_text("\u{2713}", font, None).x;
+                    let longest = variants
+                        .iter()
+                        .fold(0.0f32, |w, v| w.max(p.measure_text(v, font, None).x));
+                    (longest + check + 28.0).max(cell.width())
+                };
                 ComboBox::new("graph_enum")
                     .selected_text(shown.as_str())
                     .width(cell.width())
+                    .popup_width(popup_w)
                     .show_ui(ui, |ui| {
                         for (i, v) in variants.iter().enumerate() {
                             SelectableValue::new(&mut picked, i, v.as_str()).show(ui);
@@ -9280,9 +12282,12 @@ fn inline_widget(
     ui.ctx_mut().style = saved;
 
     if let Some(v) = changed {
-        state.begin_prop_edit(node, slug, registry);
+        let Some((key, v)) = state.doc.node(node).map(|n| config_write_back(n, slug, v)) else {
+            return;
+        };
+        state.begin_prop_edit(node, &key, registry);
         if let Some(n) = state.doc.node_mut(node) {
-            n.properties.insert(slug.to_string(), v);
+            n.properties.insert(key, v);
         }
     }
 }
@@ -9403,6 +12408,7 @@ fn resolve_connection(
     };
     if let Some(edge) = validate_connection(
         state,
+        registry,
         from_node,
         &from_pin,
         from_output,
@@ -9414,6 +12420,15 @@ fn resolve_connection(
         &tty,
         pin_is_untyped(geoms, tn, &ts, to),
     ) {
+        // The state-machine drag (Task 41): a flow wire dropped state → state
+        // means "make a transition here", never a bare edge the compiler
+        // would silently ignore.
+        if state.domain.is_animation() {
+            if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
+                state.insert_transition_between(a, b, registry);
+                return true;
+            }
+        }
         state.doc.edges.push(edge.clone());
         state.commit(GraphEdit::Connect(edge), registry);
         return true;
@@ -9471,6 +12486,21 @@ fn auto_connect(
     //   dragging a second continuation off it replaces the first rather than
     //   authoring a document validation is about to refuse.
     let is_exec = pin.ty == PinType::Exec;
+    // A flow-like domain pin (Task 41) fans in and out freely, so a new wire
+    // never breaks an existing one — and a state-to-state drop means "make a
+    // transition here" (the state-machine drag), same as a pin-to-pin drop.
+    if matches!(&pin.ty, PinType::Domain(k) if registry.domain_is_flow(k)) {
+        if state.domain.is_animation() {
+            if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
+                state.insert_transition_between(a, b, registry);
+                return;
+            }
+        }
+        let edit = GraphEdit::Connect(edge);
+        edit.apply(&mut state.doc);
+        state.commit(edit, registry);
+        return;
+    }
     let existing: Vec<Edge> = if is_exec {
         state
             .doc
@@ -9867,8 +12897,9 @@ fn error_chip(
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
-    open_subgraph: &mut Option<String>,
+    open_subgraph: &mut Option<GraphOpenRequest>,
     keymap: &Keymap,
+    registry: &NodeRegistry,
 ) {
     if errors.is_empty() {
         state.error_popover = false;
@@ -9918,7 +12949,7 @@ fn error_chip(
         ui.tooltip_for(chip, &tip);
     }
     if resp.clicked {
-        cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request);
+        cycle_error(state, errors, geoms, viewport, zoom_min, zoom_max, frame_request, registry);
     }
 
     // Doc-level errors have no canvas anchor, so they get compiler rows.
@@ -9959,7 +12990,7 @@ fn error_chip(
     // the node that pulled them in, and the two stay visually separate.
     let mut rows: Vec<String> = Vec::new();
     for e in &errors.document {
-        rows.push(format!("{e}"));
+        rows.push(e.text());
     }
     let mut w: f32 = 0.0;
     for r in &rows {
@@ -9990,7 +13021,8 @@ fn error_chip(
             }
             if r.clicked {
                 if let Some(first) = chain.first() {
-                    *open_subgraph = Some(first.clone());
+                    // A jump between peers, not a descent — no chain.
+                    *open_subgraph = Some(GraphOpenRequest::jump(first.clone()));
                 }
             }
         }
@@ -10020,12 +13052,13 @@ fn cycle_error(
     zoom_min: f32,
     zoom_max: f32,
     frame_request: &mut Option<CanvasView>,
+    registry: &NodeRegistry,
 ) {
     if errors.ordered.is_empty() {
         return;
     }
     // Skip the doc-level ones: there is nothing on the canvas to frame.
-    let anchored: Vec<&GraphError> = errors
+    let anchored: Vec<&IndexedError> = errors
         .ordered
         .iter()
         .filter(|e| e.anchor() != ErrorAnchor::Document)
@@ -10054,6 +13087,14 @@ fn cycle_error(
     if let Some((mn, mx)) = geoms_bbox(geoms.iter().filter(|g| g.id == node)) {
         *frame_request = Some(frame_view(mn, mx, viewport, zoom_min, zoom_max));
     }
+    // A refusal naming a node *inside* the transition's rule descends
+    // (ticket 05): the peek opens on the transition with the culprit
+    // selected and flashing, so F8 never strands the eye at the chip.
+    if let IndexedError::Domain(e) = anchored[i] {
+        if let (Some(owner), Some(inner)) = (e.node, e.region_node) {
+            state.open_rule_scope_at(owner, inner, registry);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -10072,6 +13113,87 @@ mod tests {
             tint: None,
             title: None,
         }
+    }
+
+    /// Ticket 05: the peek's scrim is `canvas − lit nodes` as bands. The
+    /// bands must tile exactly — full coverage minus the holes, no overlap —
+    /// or the dim reads blotchy over the machine.
+    #[test]
+    fn scrim_bands_tile_the_complement_of_the_lit_rects() {
+        let outer = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 100.0));
+        let holes = [
+            Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(30.0, 30.0)),
+            Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(50.0, 40.0)), // overlaps
+            Rect::from_min_max(Pos2::new(90.0, 95.0), Pos2::new(120.0, 130.0)), // clipped
+        ];
+        let bands = subtract_rects(outer, &holes);
+        // Sampled coverage: a point is under exactly one band iff it is in
+        // the outer rect and in no hole.
+        for xi in 0..40 {
+            for yi in 0..40 {
+                let p = Pos2::new(xi as f32 * 2.5 + 1.2, yi as f32 * 2.5 + 1.2);
+                let in_hole = holes.iter().any(|h| h.contains(p));
+                let covered = bands.iter().filter(|b| b.contains(p)).count();
+                assert_eq!(covered, usize::from(!in_hole), "at {p:?}");
+            }
+        }
+        // No holes: one band, the whole canvas.
+        assert_eq!(subtract_rects(outer, &[]), vec![outer]);
+    }
+
+    /// Task 41 polish: a user-placed peek stays fully on the canvas at a
+    /// workable size — the offset is canvas-relative, the min size is the
+    /// floor, and an off-canvas placement clamps back in.
+    #[test]
+    fn a_user_placed_peek_clamps_onto_the_canvas() {
+        let canvas = Rect::from_min_max(Pos2::new(100.0, 50.0), Pos2::new(1100.0, 750.0));
+        // A placement well inside passes through untouched.
+        let r = peek_user_rect(canvas, [40.0, 60.0], [400.0, 300.0], 1.0);
+        assert_eq!(r, Rect::from_min_size(Pos2::new(140.0, 110.0), Vec2::new(400.0, 300.0)));
+        // Sizes below the minimum grow to it.
+        let min = peek_min_size(1.0);
+        let r = peek_user_rect(canvas, [40.0, 60.0], [10.0, 10.0], 1.0);
+        assert_eq!(r.size(), min);
+        // Dragged past the bottom-right corner: pulled back inside.
+        let r = peek_user_rect(canvas, [5000.0, 5000.0], [400.0, 300.0], 1.0);
+        assert!(r.max.x <= canvas.max.x && r.max.y <= canvas.max.y);
+        // …and past the top-left.
+        let r = peek_user_rect(canvas, [-5000.0, -5000.0], [400.0, 300.0], 1.0);
+        assert!(r.min.x >= canvas.min.x && r.min.y >= canvas.min.y);
+        // A size larger than the canvas caps at the canvas.
+        let r = peek_user_rect(canvas, [0.0, 0.0], [9000.0, 9000.0], 1.0);
+        assert_eq!(r.size(), canvas.size());
+    }
+
+    /// The peek's border zones: edges resize one side, corners two, the
+    /// interior none — and a point outside the panel is nobody's grip.
+    #[test]
+    fn peek_resize_zones_read_edges_and_corners() {
+        let panel = Rect::from_min_max(Pos2::new(100.0, 100.0), Pos2::new(500.0, 400.0));
+        // Left edge, clear of the corners.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(103.0, 250.0), 1.0),
+            Some((true, false, false, false))
+        );
+        // Bottom edge.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(300.0, 398.0), 1.0),
+            Some((false, false, false, true))
+        );
+        // Bottom-right corner: the 14px corner widens the diagonal grab.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(497.0, 390.0), 1.0),
+            Some((false, true, false, true))
+        );
+        // Top-left corner via the top strip.
+        assert_eq!(
+            peek_resize_zone(panel, Pos2::new(105.0, 103.0), 1.0),
+            Some((true, false, true, false))
+        );
+        // Interior: no grip (the header's move handle takes it instead).
+        assert_eq!(peek_resize_zone(panel, Pos2::new(300.0, 250.0), 1.0), None);
+        // Outside the panel entirely.
+        assert_eq!(peek_resize_zone(panel, Pos2::new(50.0, 250.0), 1.0), None);
     }
 
     /// 45-A P7. A reroute is transparent at run time, so the interpreter
@@ -10235,6 +13357,7 @@ mod tests {
             value_w: 0.0,
             hit_w: None,
             untyped: false,
+            hidden: false,
         };
         assert_eq!(pin_label(&pin(PinType::Vec2)), "Position \u{b7}2");
         assert_eq!(pin_label(&pin(PinType::Vec3)), "Position \u{b7}3");
@@ -10294,6 +13417,7 @@ mod tests {
             ghost: false,
             hit_w: Some(d * REROUTE_PIN_HIT),
             untyped,
+            hidden: false,
         };
         NodeGeom {
             id: 7,
@@ -10305,6 +13429,9 @@ mod tests {
             missing: false,
             errored: false,
             reroute: true,
+            chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10468,7 +13595,7 @@ mod tests {
         // Dragging a Float output onto the empty reroute's input...
         assert!(
             validate_connection(
-                &st, 1, "o", true, &PinType::Float, false,
+                &st, &NodeRegistry::new(), 1, "o", true, &PinType::Float, false,
                 7, REROUTE_IN, false, &PinType::Domain(String::new()), true,
             )
             .is_some(),
@@ -10477,7 +13604,7 @@ mod tests {
         // ...and dragging out of the empty reroute onto a Float input.
         assert!(
             validate_connection(
-                &st, 7, REROUTE_OUT, true, &PinType::Domain(String::new()), true,
+                &st, &NodeRegistry::new(), 7, REROUTE_OUT, true, &PinType::Domain(String::new()), true,
                 1, "i", false, &PinType::Float, false,
             )
             .is_some(),
@@ -10486,7 +13613,7 @@ mod tests {
         // Strictness is untouched where both sides really are typed.
         assert!(
             validate_connection(
-                &st, 1, "o", true, &PinType::Float, false,
+                &st, &NodeRegistry::new(), 1, "o", true, &PinType::Float, false,
                 2, "i", false, &PinType::Exec, false,
             )
             .is_none(),
@@ -10507,6 +13634,9 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10517,6 +13647,39 @@ mod tests {
         assert_eq!(g.body_rect(ZoomLod::L0, &m).height(), 120.0);
         assert!((g.body_rect(ZoomLod::L3, &m).height() - m.header_h).abs() < 1e-6);
         assert!((g.body_rect(ZoomLod::L4, &m).height() - m.header_h).abs() < 1e-6);
+    }
+
+    /// Task 41 rework: the derived-position pass moves a chip's whole
+    /// geometry — rect, pins, config cells — as one piece, and marks it so a
+    /// grab cannot start a move to nowhere.
+    #[test]
+    fn translate_moves_every_piece_of_a_geom() {
+        let m = GraphMetrics::new(&Style::steel());
+        let mut g = band_geom(&m, 1, false);
+        let pin = PinGeom {
+            slug: "from".into(),
+            label: String::new(),
+            ty: PinType::Float,
+            output: false,
+            row: 0,
+            wire_anchor: Pos2::new(0.0, 52.0),
+            dot_center: Pos2::new(4.0, 52.0),
+            connected: false,
+            inline: None,
+            value_w: 0.0,
+            ghost: false,
+            hit_w: None,
+            untyped: false,
+            hidden: false,
+        };
+        g.pins.push(pin);
+        let (r0, p0, c0) = (g.rect, g.pins[0].wire_anchor, g.config[0].cell);
+        g.translate(Vec2::new(30.0, -12.0));
+        assert_eq!(g.rect.min, r0.min + Vec2::new(30.0, -12.0));
+        assert_eq!(g.rect.size(), r0.size());
+        assert_eq!(g.pins[0].wire_anchor, p0 + Vec2::new(30.0, -12.0));
+        assert_eq!(g.config[0].cell.min, c0.min + Vec2::new(30.0, -12.0));
+        assert!(g.pinned_pos, "a translated geom knows its position is derived");
     }
 
     #[test]
@@ -10531,6 +13694,9 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config: Vec::new(),
@@ -10787,6 +13953,191 @@ mod tests {
         assert!(config_rows(&test_node(9, "event_tick"), &docd).is_empty());
     }
 
+    /// State aliases (ticket 02): the pill's subtitle and the selected card's
+    /// config band — Global alone while global, else one Bool row per state
+    /// in document order whose tick folds into the one `states` property.
+    #[test]
+    fn an_alias_has_a_global_row_and_one_row_per_state() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+        };
+        use crate::engine::animation::graph::{ALIAS_GLOBAL_PROP, ALIAS_STATES_PROP};
+        use crate::engine::node_graph::GraphDoc;
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        let mut idle = test_node(1, ANIM_STATE_TYPE_ID);
+        idle.title = Some("Idle".into());
+        let mut jump = test_node(2, ANIM_STATE_TYPE_ID);
+        jump.title = Some("Jump".into());
+        let alias = test_node(4, ANIM_STATE_ALIAS_TYPE_ID);
+        doc.nodes = vec![idle, jump, test_node(3, ANIM_STATE_TYPE_ID), alias];
+
+        // Global (the default, property absent): one row, subtitle "Global".
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, ALIAS_GLOBAL_PROP);
+            assert!(matches!(rows[0].2, InlineKind::Bool(true)));
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Global");
+        }
+
+        // Not global, nothing listed: the state rows appear, all unticked.
+        doc.nodes[3]
+            .properties
+            .insert(ALIAS_GLOBAL_PROP.into(), PropValue::Bool(false));
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert_eq!(
+                rows.iter().map(|(k, l, _)| (k.as_str(), l.as_str())).collect::<Vec<_>>(),
+                vec![
+                    (ALIAS_GLOBAL_PROP, "Global"),
+                    ("states.1", "Idle"),
+                    ("states.2", "Jump"),
+                    ("states.3", "State 3"),
+                ]
+            );
+            assert!(rows[1..].iter().all(|r| matches!(r.2, InlineKind::Bool(false))));
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "No states");
+        }
+
+        // Ticking a state row writes the `states` array, not the row key.
+        let (key, v) = config_write_back(&doc.nodes[3], "states.2", PropValue::Bool(true));
+        assert_eq!(key, ALIAS_STATES_PROP);
+        assert_eq!(v, alias_states_value(&[2]));
+        doc.nodes[3].properties.insert(key, v);
+        let (key, v) = config_write_back(&doc.nodes[3], "states.1", PropValue::Bool(true));
+        doc.nodes[3].properties.insert(key, v);
+        assert_eq!(alias_states(&doc.nodes[3]), vec![2, 1], "list order is tick order");
+        {
+            let docd = DocDescriptors::new(&doc, &reg);
+            let rows = config_rows(&doc.nodes[3], &docd);
+            assert!(matches!(rows[1].2, InlineKind::Bool(true)));
+            assert!(matches!(rows[2].2, InlineKind::Bool(true)));
+            assert!(matches!(rows[3].2, InlineKind::Bool(false)));
+            // The subtitle names them in document order.
+            assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Idle, Jump");
+        }
+        let (key, v) = config_write_back(&doc.nodes[3], "states.3", PropValue::Bool(true));
+        doc.nodes[3].properties.insert(key, v);
+        assert_eq!(alias_subtitle(&doc.nodes[3], &doc), "Idle, Jump +1");
+        // Unticking removes the id; a plain row writes its own key.
+        let (_, v) = config_write_back(&doc.nodes[3], "states.2", PropValue::Bool(false));
+        assert_eq!(v, alias_states_value(&[1, 3]));
+        assert_eq!(
+            config_write_back(&doc.nodes[3], ALIAS_GLOBAL_PROP, PropValue::Bool(true)),
+            (ALIAS_GLOBAL_PROP.to_string(), PropValue::Bool(true))
+        );
+    }
+
+    /// Tickets 09 / 06: a state's config band routes between its sources.
+    /// A leaf shows Clip and (empty) Blend Space and Graph rows — the
+    /// references' front doors; a set Blend Space hides the clip rows; a set
+    /// Graph takes over and both yield; a blend-tree region beats all.
+    #[test]
+    fn a_states_config_band_routes_clip_graph_and_tree() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPACE_PROP, SPEED_PROP,
+        };
+        use crate::engine::node_graph::{GraphDoc, GraphRegion};
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        let mut leaf = test_node(0, ANIM_STATE_TYPE_ID);
+        leaf.properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        let mut nested = test_node(1, ANIM_STATE_TYPE_ID);
+        nested
+            .properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        nested
+            .properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
+        let mut tree = test_node(2, ANIM_STATE_TYPE_ID);
+        tree.properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/loco.animgraph".into()));
+        let mut spaced = test_node(3, ANIM_STATE_TYPE_ID);
+        spaced
+            .properties
+            .insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        spaced.properties.insert(
+            SPACE_PROP.into(),
+            PropValue::Asset("blendspaces/loco.blendspace".into()),
+        );
+        doc.nodes = vec![leaf, nested, tree, spaced];
+        doc.regions.insert(
+            2,
+            GraphRegion {
+                nodes: vec![test_node(0, "anim_pose_result")],
+                edges: vec![],
+            },
+        );
+        let docd = DocDescriptors::new(&doc, &reg);
+
+        let keys = |i: usize| -> Vec<String> {
+            config_rows(&doc.nodes[i], &docd).iter().map(|(k, _, _)| k.clone()).collect()
+        };
+        assert_eq!(keys(0), vec![CLIP_PROP, SPACE_PROP, GRAPH_PROP, SPEED_PROP]);
+        let rows = config_rows(&doc.nodes[0], &docd);
+        assert!(
+            rows[1..3].iter().all(|r| matches!(&r.2, InlineKind::Str(s) if s.is_empty())),
+            "the Blend Space and Graph rows exist empty — it is how the properties come to be"
+        );
+
+        assert_eq!(keys(1), vec![GRAPH_PROP, SPEED_PROP], "clip and space rows yield to the graph");
+
+        assert_eq!(
+            keys(3),
+            vec![SPACE_PROP, GRAPH_PROP, SPEED_PROP],
+            "clip rows yield to the blend space; the Graph door stays"
+        );
+        let rows = config_rows(&doc.nodes[3], &docd);
+        assert!(matches!(&rows[0].2, InlineKind::Str(s) if s == "blendspaces/loco.blendspace"));
+        let rows = config_rows(&doc.nodes[1], &docd);
+        assert!(matches!(&rows[0].2, InlineKind::Str(s) if s == "graphs/loco.animgraph"));
+
+        assert_eq!(
+            keys(2),
+            vec![CLIP_PROP, SPEED_PROP],
+            "a tree region beats the graph reference — the chip row"
+        );
+        assert!(matches!(&config_rows(&doc.nodes[2], &docd)[0].2, InlineKind::Chip(_)));
+    }
+
+    /// The card subtitle speaks the same precedence as the config band and
+    /// the compiler: tree > graph > blend space > clip, files by path.
+    #[test]
+    fn a_state_cards_subtitle_follows_source_precedence() {
+        use crate::engine::animation::graph::plan::{
+            ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, SPACE_PROP,
+        };
+        use crate::engine::node_graph::{GraphDoc, GraphRegion};
+        let reg = NodeRegistry::new();
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![test_node(0, ANIM_STATE_TYPE_ID)];
+        let sub = |doc: &GraphDoc| {
+            anim_state_subtitle(&doc.nodes[0], &DocDescriptors::new(doc, &reg))
+        };
+        assert_eq!(sub(&doc), None);
+        let set = |doc: &mut GraphDoc, k: &str, v: &str| {
+            doc.nodes[0].properties.insert(k.into(), PropValue::Asset(v.into()));
+        };
+        set(&mut doc, CLIP_PROP, " anims/idle.anim ");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{25b7} anims/idle.anim"));
+        set(&mut doc, SPACE_PROP, "blendspaces/loco.blendspace");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{25a6} blendspaces/loco.blendspace"));
+        set(&mut doc, GRAPH_PROP, "graphs/loco.animgraph");
+        assert_eq!(sub(&doc).as_deref(), Some("\u{2750} graphs/loco.animgraph"));
+        doc.regions.insert(
+            0,
+            GraphRegion {
+                nodes: vec![test_node(0, "anim_pose_result")],
+                edges: vec![],
+            },
+        );
+        assert_eq!(sub(&doc).as_deref(), Some("\u{29c9} blend tree"));
+    }
+
     /// **The five-site invariant.** Config rows shift the whole pin band down,
     /// and every site that turns a row index into geometry has to agree or
     /// wires land beside their pins. All of them go through `band_y` /
@@ -10878,6 +14229,9 @@ mod tests {
             missing: false,
             errored: false,
             reroute: false,
+            chip: None,
+            anim: None,
+            pinned_pos: false,
             breakpoint: None,
             preview: None,
             config,
@@ -11086,14 +14440,14 @@ mod tests {
 
         // With the field declared, the pin exists and only the (already
         // unknown) target pin ghosts.
-        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[], &[]);
         assert!(!ix
             .ghosts_for(0)
             .iter()
             .any(|(s, o)| s == "damage" && *o));
 
         assert!(state.remove_payload_field(0, "damage", &reg));
-        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[]);
+        let ix = ErrorIndex::build(&validate_doc(&state.doc, &reg), &[], &[]);
         assert!(
             ix.ghosts_for(0).iter().any(|(s, o)| s == "damage" && *o),
             "the wire's source pin becomes a ghost row"
@@ -11116,15 +14470,15 @@ mod tests {
             PinType::Array(Box::new(PinType::Float)),
             PinType::Array(Box::new(PinType::Entity)),
         ] {
-            let (i, array) = type_pick(&ty);
-            assert_eq!(type_from_pick(i, array), ty, "{ty:?}");
+            let (i, array) = type_pick(GraphDomain::Script, &ty);
+            assert_eq!(type_from_pick(GraphDomain::Script, i, array), ty, "{ty:?}");
         }
         assert_eq!(type_label(&PinType::Array(Box::new(PinType::Float))), "Float[]");
         // A type the picker cannot express still reads honestly in the row and
         // does not silently become Float on the way past.
         let domain = PinType::Domain("shader".into());
         assert_eq!(type_label(&domain), "domain:shader");
-        assert_eq!(type_pick(&domain), (0, false));
+        assert_eq!(type_pick(GraphDomain::Script, &domain), (0, false));
     }
 
     /// An `Enum` pin becomes a dropdown only when its descriptor says what

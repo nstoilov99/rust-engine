@@ -519,7 +519,11 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
         // writes, interface binding, inlined subgraph pins) answer correctly.
         // An untyped reroute answers `None` and stays strict: refusing is the
         // honest answer when the type cannot be proven exec.
-        if d.pin_type(node, pin, false) == Some(PinType::Exec) {
+        //
+        // Flow-like domain pins (Task 41) share the exemption: several
+        // transitions targeting one state is the same convergence pattern,
+        // wires carrying arrival rather than a value.
+        if flow_like(d, d.pin_type(node, pin, false).as_ref()) {
             continue;
         }
         errors.push(GraphError::InputMultiplyConnected {
@@ -533,6 +537,16 @@ pub fn validate_doc_with(d: &DocDescriptors<'_>) -> Vec<GraphError> {
     errors.extend(data_cycles(d));
 
     errors
+}
+
+/// Does `ty` carry flow rather than a pulled value? Exec, or a domain the
+/// registry declared flow-like ([`NodeRegistry::register_domain_pin_flow`]).
+fn flow_like(d: &DocDescriptors<'_>, ty: Option<&PinType>) -> bool {
+    match ty {
+        Some(PinType::Exec) => true,
+        Some(PinType::Domain(k)) => d.registry().domain_is_flow(k),
+        _ => false,
+    }
 }
 
 /// Declared interface pins that no `graph_input`/`graph_output` node wires to
@@ -589,9 +603,13 @@ fn data_cycles(d: &DocDescriptors<'_>) -> Vec<GraphError> {
         if doc.node(e.from_node).is_none() || doc.node(e.to_node).is_none() {
             continue;
         }
-        // Exec wires may loop; unknown-typed wires are not claimed either way.
+        // Exec wires may loop; unknown-typed wires are not claimed either
+        // way. Flow-like domain wires (Task 41) may loop too: a state
+        // machine's Idle → Locomotion → Idle *is* a cycle, and nothing pulls
+        // a value around it.
         match d.pin_type(e.from_node, &e.from_pin, true) {
             Some(PinType::Exec) | None => continue,
+            Some(ref ty) if flow_like(d, Some(ty)) => continue,
             Some(_) => {}
         }
         if d.pulls_through(e.from_node) != Some(true) {
@@ -1537,6 +1555,70 @@ mod tests {
         assert!(validate_doc(&doc, &reg)
             .iter()
             .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, pin } if pin == "value")));
+    }
+
+    /// A **flow-like domain** (Task 41) takes the Exec exemptions — fan-in
+    /// and cycles are legal — while keeping data-output fan-out legal too.
+    /// Tested with a made-up domain: the rule is the framework's, not one
+    /// consumer's.
+    #[test]
+    fn flow_domains_may_fan_in_and_loop() {
+        let mut reg = NodeRegistry::new();
+        reg.register_domain_pin_flow("wire", 3);
+        reg.register(NodeDescriptor {
+            id: "hop".into(),
+            name: "Hop".into(),
+            category: "Dev".into(),
+            version: 1,
+            inputs: vec![PinDescriptor::new("in", "", PinType::Domain("wire".into()))],
+            outputs: vec![PinDescriptor::new("out", "", PinType::Domain("wire".into()))],
+            pure: true,
+            realm: NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+
+        // Fan-in: two hops into one, plus a two-node loop — both legal.
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "hop"), node(1, "hop"), node(2, "hop")];
+        doc.edges = vec![
+            edge(0, "out", 2, "in"),
+            edge(1, "out", 2, "in"),
+            edge(2, "out", 0, "in"),
+            edge(0, "out", 1, "in"), // fan-out from 0 as well
+        ];
+        assert_eq!(validate_doc(&doc, &reg), vec![]);
+
+        // The same shape over a *plain* domain keeps both refusals.
+        reg.register_domain_pin_keyed("plain", 4);
+        reg.register(NodeDescriptor {
+            id: "hop2".into(),
+            name: "Hop2".into(),
+            category: "Dev".into(),
+            version: 1,
+            inputs: vec![PinDescriptor::new("in", "", PinType::Domain("plain".into()))],
+            outputs: vec![PinDescriptor::new("out", "", PinType::Domain("plain".into()))],
+            pure: true,
+            realm: NodeRealm::Shared,
+            deterministic: true,
+            doc: None,
+            preview: None,
+        })
+        .unwrap();
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![node(0, "hop2"), node(1, "hop2"), node(2, "hop2")];
+        doc.edges = vec![
+            edge(0, "out", 2, "in"),
+            edge(1, "out", 2, "in"),
+            edge(2, "out", 0, "in"),
+        ];
+        let errs = validate_doc(&doc, &reg);
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, GraphError::InputMultiplyConnected { node: 2, .. })));
+        assert!(errs.iter().any(|e| matches!(e, GraphError::DataCycle { .. })));
     }
 
     #[test]

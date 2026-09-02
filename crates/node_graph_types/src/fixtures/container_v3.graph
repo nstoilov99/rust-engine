@@ -1,0 +1,85 @@
+(
+    version: 3,
+    realm: Shared,
+    nodes: [
+        (
+            id: 0,
+            type_id: "test_event",
+            type_version: 1,
+            position: (40.0, 80.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 1,
+            type_id: "test_damage",
+            type_version: 1,
+            position: (260.0, 80.0),
+            properties: {
+                "dps": Float(12.5),
+                "label": Enum("burn"),
+            },
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+    ],
+    edges: [
+        (
+            from_node: 0,
+            from_pin: "exec_out",
+            to_node: 1,
+            to_pin: "exec_in",
+        ),
+    ],
+    comments: [],
+    groups: [],
+    inputs: [],
+    outputs: [],
+    variables: [
+        (
+            slug: "jump",
+            label: "Jump",
+            ty: Domain("anim_trigger"),
+            default: None,
+        ),
+    ],
+    regions: {
+        1: (
+            nodes: [
+                (
+                    id: 0,
+                    type_id: "var_get",
+                    type_version: 1,
+                    position: (0.0, 0.0),
+                    properties: {
+                        "var": Str("jump"),
+                    },
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+                (
+                    id: 1,
+                    type_id: "anim_rule_result",
+                    type_version: 1,
+                    position: (200.0, 0.0),
+                    properties: {},
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+            ],
+            edges: [
+                (
+                    from_node: 0,
+                    from_pin: "value",
+                    to_node: 1,
+                    to_pin: "value",
+                ),
+            ],
+        ),
+    },
+)

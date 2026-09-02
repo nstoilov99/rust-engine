@@ -1,10 +1,11 @@
-//! Timeline semantics (Task 45-A P8, D7).
+//! Timeline semantics (Task 45-A P8, D7; decoupled by Task 41 ticket 10).
 //!
-//! The interesting claim is the **execution model**: a Timeline is a per-tick
-//! stateful node, not a suspension user, built out of the loop frame and a
-//! zero-length yield. So these tests count *ticks*, not firings — one Update
-//! per tick between Play and Finished, exactly one Finished, and never two
-//! advances in one tick.
+//! The interesting claim is the **execution model**: a Timeline is a per-node
+//! ticker, not a suspension user — the interpreter drives it once per tick in
+//! a fresh activation, independent of every exec flow. So these tests count
+//! *ticks*, not firings — one Update per tick between Play and Finished,
+//! exactly one Finished, never two advances in one tick, and no waiting Delay
+//! anywhere can stall the run.
 
 #![allow(clippy::field_reassign_with_default)]
 
@@ -316,6 +317,72 @@ fn a_missing_curve_stops_the_activation_and_says_so() {
     // The *instance* is not halted — one broken Timeline does not take the
     // whole graph down (only the budget does that).
     assert!(inst.halted.is_none());
+}
+
+/// The decoupling claim (Task 41 ticket 10): a Delay **inside the Update
+/// chain** parks only that tick's update activation — the timeline keeps
+/// advancing, one Update per tick, and every Delay still completes with its
+/// own timing. Under the old activation-hijack model the first Delay stalled
+/// the whole run.
+#[test]
+fn a_timeline_advances_while_a_delay_in_its_update_chain_waits() {
+    // Update -> Print(height) -> Delay(0.6) -> Print("late").
+    let mut d = doc(TIMELINE_PLAY_PIN, false, 0.0);
+    let mut delay = node(5, node_graph_exec::nodes::DELAY);
+    delay.properties.insert("duration".into(), PropValue::Float(0.6));
+    let mut late = node(6, PRINT);
+    late.properties.insert("text".into(), PropValue::Str("late".into()));
+    d.nodes.push(delay);
+    d.nodes.push(late);
+    d.edges.push(edge(2, EXEC_OUT_PIN, 5, EXEC_IN_PIN));
+    d.edges.push(edge(5, EXEC_OUT_PIN, 6, EXEC_IN_PIN));
+
+    let logs = run(&d, 8, 0.25, &CurveWorld::new());
+    // Heights land one per tick exactly as without the Delay, and each "late"
+    // lands 0.6s (three ticks) after its own update — waking latents run
+    // before the tick's drive, so a wake and an update share ticks in that
+    // order. Both streams complete with correct timing, interleaved.
+    assert_eq!(
+        logs,
+        vec!["0", "2.5", "5", "late", "7.5", "late", "10", "late", "done", "late", "late"],
+        "the timeline never stalls on the waiting Delays: {logs:?}"
+    );
+}
+
+/// …and the other half: firing Play is fire-and-forget. The caller's
+/// activation continues past it the same tick, so a Delay *after* Play on the
+/// same activation waits alongside the run instead of being hostage to it.
+#[test]
+fn play_frees_its_caller_and_a_delay_after_it_waits_alongside() {
+    // BeginPlay -> Sequence: then_0 -> Play, then_1 -> Delay(0.9) -> "waited".
+    let mut d = doc(TIMELINE_PLAY_PIN, false, 0.0);
+    d.nodes.push(node(5, node_graph_exec::nodes::SEQUENCE));
+    let mut delay = node(6, node_graph_exec::nodes::DELAY);
+    delay.properties.insert("duration".into(), PropValue::Float(0.9));
+    let mut waited = node(7, PRINT);
+    waited.properties.insert("text".into(), PropValue::Str("waited".into()));
+    d.nodes.push(delay);
+    d.nodes.push(waited);
+    d.edges.retain(|e| !(e.from_node == 0));
+    d.edges.push(edge(0, EXEC_OUT_PIN, 5, EXEC_IN_PIN));
+    d.edges.push(edge(5, "then_0", 1, TIMELINE_PLAY_PIN));
+    d.edges.push(edge(5, "then_1", 6, EXEC_IN_PIN));
+    d.edges.push(edge(6, EXEC_OUT_PIN, 7, EXEC_IN_PIN));
+
+    let (logs, inst) = run_with(&d, 8, 0.25, &CurveWorld::new(), |_, _| {});
+    // "waited" fires 0.9s after Play's tick — mid-run, before Finished.
+    assert_eq!(
+        logs,
+        vec!["0", "2.5", "5", "7.5", "waited", "10", "done"],
+        "the caller was not held hostage by the run: {logs:?}"
+    );
+    // The caller's activation is genuinely done once its Delay resumed; the
+    // run kept ticking without it.
+    assert!(
+        matches!(inst.threads[0].state, node_graph_exec::ThreadState::Finished),
+        "{:?}",
+        inst.threads[0].state
+    );
 }
 
 /// A run in progress is plain serializable data, like every other latent

@@ -467,6 +467,7 @@ fn extract_fbx_animations(
             name: clip_name,
             duration_seconds: duration,
             channels,
+            events: Vec::new(),
         });
     }
 }

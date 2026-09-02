@@ -58,6 +58,8 @@ impl EnginePlugin for ClientGamePlugin {
             SystemDescriptor::new("GameCommandExecutor").writes_resource::<GameCommandBuffer>(),
             RunIfPlaying,
         );
+        // The Task 41 tracer demo writer (ticket 01) is retired: the real
+        // parameter bridge lives in `anim_bridge` (net characters, ADR 0002).
 
         Ok(())
     }

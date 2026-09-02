@@ -86,6 +86,18 @@ impl Prediction {
         Some(((pos + self.error_offset).to_array(), yaw))
     }
 
+    /// Controller-state sample for animation derivation (ADR 0002): velocity
+    /// and grounded from the newest fixed step. `None` until the first ack
+    /// seeds state.
+    pub fn anim_motion(&self) -> Option<([f32; 3], bool)> {
+        self.state.as_ref().map(|s| (s.vel.to_array(), s.grounded))
+    }
+
+    /// Authoritative own-row alive flag (M7 D5); `true` before the first ack.
+    pub fn alive(&self) -> bool {
+        self.alive
+    }
+
     fn lerped_pose(&self, s: &MotionState) -> (Vec3, f32) {
         match &self.prev_state {
             Some(p) => {

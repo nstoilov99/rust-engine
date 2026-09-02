@@ -41,8 +41,10 @@ pub enum MenuAction {
     OpenPlugins,
     /// Save the current layout
     SaveLayout,
-    /// Reset dock layout to default
+    /// Reset the active layout profile to its default
     ResetLayout,
+    /// Reset every layout profile to its default
+    ResetAllLayouts,
     /// Replace the current world with the deterministic benchmark scene.
     LoadBenchmarkScene,
     /// Launch the standalone benchmark runner.
