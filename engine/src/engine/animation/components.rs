@@ -23,6 +23,12 @@ pub struct SkeletonInstance {
     pub palette: Vec<Mat4>,
     /// Whether the palette needs re-uploading this frame.
     pub dirty: bool,
+    /// Monotonic palette revision, bumped every time the palette is
+    /// recomputed (`refresh_palette_from_model_space`, and therefore
+    /// `compute_palette`). The SSBO ring upload compares it against what a
+    /// ring region already holds to skip re-copying an unchanged palette —
+    /// the Task 41.5 P4 upload gate for update-rate-throttled skeletons.
+    pub revision: u64,
     /// Whether to show debug bone visualization in the viewport.
     pub debug_draw_visible: bool,
 }
@@ -98,6 +104,7 @@ impl SkeletonInstance {
             model_space,
             palette,
             dirty: true,
+            revision: 0,
             debug_draw_visible: false,
         };
         instance.compute_palette();
@@ -148,6 +155,7 @@ impl SkeletonInstance {
             self.palette[i] = self.model_space[i] * self.bones[i].inverse_bind_matrix;
         }
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Model-space matrix of the named bone (a "socket" for attachments),

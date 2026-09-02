@@ -630,10 +630,13 @@ impl App {
                 Stage::PreUpdate,
                 SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
                     .reads_resource::<Time>()
+                    .reads_resource::<rust_engine::engine::animation::graph::AnimViewInfo>()
+                    .reads_resource::<TransformCache>()
                     .writes_resource::<AnimGraphPlanCache>()
                     .writes_resource::<AnimClipCache>()
                     .writes_resource::<BlendSpaceCache>()
                     .reads::<AnimGraphRunner>()
+                    .reads::<Transform>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE),
@@ -1962,6 +1965,19 @@ impl App {
 
         if let Some(time) = self.core.game_world.resource_mut::<Time>() {
             time.advance(delta_time);
+        }
+
+        // Task 41.5 P4: the previous frame's viewport camera feeds animation
+        // significance bucketing (Y-up render space — `camera_3d` mirrors the
+        // viewport camera during render; absent ⇒ machines run at full rate).
+        {
+            use rust_engine::engine::animation::graph::AnimViewInfo;
+            use rust_engine::engine::math::Frustum;
+            let cam = &self.core.renderer.camera_3d;
+            self.core.game_world.resources_mut().insert(AnimViewInfo {
+                camera_pos: cam.position,
+                frustum: Frustum::from_view_projection(cam.view_projection_matrix()),
+            });
         }
 
         self.core.game_world.run_schedule(&mut self.core.schedule);

@@ -133,6 +133,29 @@ pub struct SkinnedPaletteFrame {
     pub slot: usize,
 }
 
+/// What one ring region currently holds, in frame write order: one entry per
+/// `write_palette` call — `(entity key, matrix count, palette revision)`.
+///
+/// The Task 41.5 P4 upload gate: a write may skip its memcpy when this
+/// region already holds the same palette revision at the same base. Bases
+/// are made stable the cheap way — the cursor **always** advances (space is
+/// reserved whether or not the copy happens), so an entity's base repeats
+/// exactly when the frame's write sequence prefix repeats. Each visit
+/// compares its writes against `entries` in order; the first divergence
+/// (entity appeared/vanished/reordered, bone count changed) flips
+/// `prefix_ok` and every later write this visit copies and rewrites its
+/// entry. Data behind a still-matching prefix is untouched since this
+/// region's last visit (writes are the only mutation, spans are disjoint and
+/// sequential), so a revision match there means the bytes are already right.
+#[derive(Default)]
+struct RegionResidency {
+    entries: Vec<(u64, u32, u64)>,
+    /// Writes so far this visit (index into `entries`).
+    cursor: usize,
+    /// This visit's write sequence has matched `entries` so far.
+    prefix_ok: bool,
+}
+
 /// Main-thread palette writer over the SSBO ring.
 pub struct SkinningBackend {
     allocator: Arc<StandardMemoryAllocator>,
@@ -150,6 +173,9 @@ pub struct SkinningBackend {
     cur_slot: usize,
     /// Matrices written into the current region (element 0 is the identity).
     cursor: DeviceSize,
+    /// Per-region contents for the upload gate, index-aligned with the ring
+    /// regions (see [`RegionResidency`]).
+    residency: [RegionResidency; PALETTE_RING_REGIONS],
     warned_wait: bool,
 }
 
@@ -177,6 +203,7 @@ impl SkinningBackend {
             cur_seq: 0,
             cur_slot: 0,
             cursor: 1,
+            residency: Default::default(),
             warned_wait: false,
         })
     }
@@ -237,18 +264,55 @@ impl SkinningBackend {
         self.cur_seq = seq;
         self.cur_slot = slot;
         self.cursor = 1;
+        let res = &mut self.residency[slot];
+        res.cursor = 0;
+        res.prefix_ok = true;
     }
 
     /// Write one skeleton's palette into the current frame's region and
     /// return its flat `palette_base` index (region-relative). Call once per
     /// skeleton per frame, between `begin_frame` and `end_frame`.
-    pub fn write_palette(&mut self, palette: &[Mat4]) -> Result<u32, Box<dyn std::error::Error>> {
+    ///
+    /// `key` identifies the skeleton across frames (entity id bits) and
+    /// `revision` its palette revision ([`SkeletonInstance::revision`]): when
+    /// this region already holds exactly this revision at this base (see
+    /// [`RegionResidency`]) the memcpy is skipped — the P4 upload gate for
+    /// update-rate-throttled skeletons. The palette is still *present* in
+    /// the region either way (R2: the ring rotates, every visible skeleton
+    /// occupies its span in every frame's region).
+    pub fn write_palette(
+        &mut self,
+        key: u64,
+        revision: u64,
+        palette: &[Mat4],
+    ) -> Result<u32, Box<dyn std::error::Error>> {
         let n = palette.len() as DeviceSize;
         if n == 0 {
             return Ok(0);
         }
         if self.cursor + n > self.region_capacity {
             self.grow(self.cursor + n)?;
+        }
+        let base = self.cursor as u32;
+        let res = &mut self.residency[self.cur_slot];
+        let i = res.cursor;
+        if res.prefix_ok {
+            match res.entries.get(i) {
+                Some(&(k, len, rev)) if k == key && len == n as u32 => {
+                    if rev == revision {
+                        // Region already holds this palette at this base.
+                        res.cursor = i + 1;
+                        self.cursor += n;
+                        return Ok(base);
+                    }
+                    // Same span, stale contents: copy below, record the new
+                    // revision (prefix stays intact).
+                }
+                _ => res.prefix_ok = false,
+            }
+        }
+        if !res.prefix_ok {
+            res.entries.truncate(i);
         }
         let start = self.cur_slot as DeviceSize * self.region_capacity + self.cursor;
         let sub = self.buffer.clone().slice(start..start + n);
@@ -258,7 +322,13 @@ impl SkinningBackend {
                 *dst = mat.to_cols_array();
             }
         }
-        let base = self.cursor as u32;
+        let res = &mut self.residency[self.cur_slot];
+        if res.entries.len() == i {
+            res.entries.push((key, n as u32, revision));
+        } else {
+            res.entries[i] = (key, n as u32, revision);
+        }
+        res.cursor = i + 1;
         self.cursor += n;
         Ok(base)
     }
@@ -299,6 +369,19 @@ impl SkinningBackend {
         self.buffer = new_buffer;
         self.region_capacity = new_capacity;
         self.epoch_start_seq = self.cur_seq;
+        // Residency: the current region's already-written span was carried
+        // over (entries up to this visit's cursor stay valid); everything
+        // else refers to the old buffer and must be forgotten.
+        for (i, res) in self.residency.iter_mut().enumerate() {
+            if i == self.cur_slot {
+                let keep = res.cursor;
+                res.entries.truncate(keep);
+            } else {
+                res.entries.clear();
+                res.cursor = 0;
+                res.prefix_ok = true;
+            }
+        }
         Ok(())
     }
 

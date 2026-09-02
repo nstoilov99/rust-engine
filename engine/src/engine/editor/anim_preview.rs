@@ -395,6 +395,7 @@ mod tests {
             plan,
             generation: 0,
             disabled: None,
+            throttle: Default::default(),
         }
     }
 

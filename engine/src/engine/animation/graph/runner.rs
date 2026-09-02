@@ -16,9 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::assets::model_loader::{BoneData, RawAnimationClip};
-use crate::engine::ecs::components::MeshRenderer;
+use crate::engine::ecs::components::{MeshRenderer, Transform};
+use crate::engine::ecs::hierarchy::TransformCache;
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
+use crate::engine::math::Frustum;
 use crate::engine::scripting::normalize_graph_path;
 
 use crate::engine::animation::blend_space::{parse_blend_space, BlendSpace};
@@ -73,6 +75,95 @@ impl AnimGraphRunner {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Update-rate throttling (Task 41.5 P4, S-D4)
+// ---------------------------------------------------------------------------
+
+/// The camera's view of the world for significance bucketing, in **Y-up
+/// render space** (the same camera `prepare_mesh_data` culls with). Written
+/// by the host every frame before the schedule runs — it carries the
+/// *previous* frame's camera, the same one-frame latency the render
+/// transform path accepts. Absent ⇒ no throttling: every machine evaluates
+/// its pose every frame (tests, tools, hosts that never insert it).
+///
+/// Shadow-frustum note (v1): the directional light's VP is computed at
+/// packet-build time (`prepare_light_data`), *after* this system ran, and
+/// the shadow pass draws every caster unculled — there is no shadow frustum
+/// to test against here. So the significance inputs are camera distance +
+/// camera-frustum visibility, and an off-camera entity never freezes: it
+/// clamps to the slowest bucket so its shadow keeps moving.
+pub struct AnimViewInfo {
+    pub camera_pos: glam::Vec3,
+    pub frustum: Frustum,
+}
+
+/// Pose-eval interval (frames) per significance bucket, nearest first.
+/// Tuning constants for S-D4 live here, in one place.
+const BUCKET_INTERVALS: [u32; 4] = [1, 2, 4, 8];
+/// Camera-distance upper bound (render-space units ≈ meters) of buckets
+/// 0..N-1; beyond the last bound is the slowest bucket.
+const BUCKET_MAX_DISTANCE: [f32; 3] = [15.0, 35.0, 70.0];
+/// A bucket boundary must be overshot by this factor before an entity moves
+/// buckets — hysteresis, so oscillating on a boundary never flips.
+const BUCKET_HYSTERESIS: f32 = 1.15;
+/// Radius of the visibility test sphere: pads the frustum so characters
+/// half-off the screen edge still count as visible.
+const VIS_RADIUS: f32 = 2.0;
+/// Eval interval for entities outside the camera frustum (see
+/// [`AnimViewInfo`]'s shadow note — off-screen means slow, never frozen).
+const OFFSCREEN_INTERVAL: u32 = 8;
+
+/// The bucket for `distance`, given the entity currently sits in `current`.
+/// Movement in either direction requires crossing the boundary by
+/// [`BUCKET_HYSTERESIS`]: outward needs `> bound × H`, inward needs
+/// `< bound ÷ H` — inside the band, the entity stays where it is.
+fn significance_bucket(distance: f32, current: u8) -> u8 {
+    let mut b = (current as usize).min(BUCKET_INTERVALS.len() - 1);
+    while b < BUCKET_MAX_DISTANCE.len() && distance > BUCKET_MAX_DISTANCE[b] * BUCKET_HYSTERESIS {
+        b += 1;
+    }
+    while b > 0 && distance < BUCKET_MAX_DISTANCE[b - 1] / BUCKET_HYSTERESIS {
+        b -= 1;
+    }
+    b as u8
+}
+
+/// Per-entity throttle state, living on [`AnimGraphRuntime`]. The serial
+/// significance pre-pass writes it each frame (it needs the camera from
+/// `Resources`, which the parallel section must not touch); `tick_entity`
+/// only reads `eval_this_frame` — its own tick-local forces (event fired,
+/// crossfade, play-once) override a skip locally.
+#[derive(Debug, Clone)]
+pub struct ThrottleState {
+    /// Significance bucket, an index into [`BUCKET_INTERVALS`] (0 = nearest).
+    pub bucket: u8,
+    /// Pose evaluation is due this frame (bucket interval + entity stagger,
+    /// or a serial-side force).
+    pub eval_this_frame: bool,
+    /// Entity was inside the camera frustum last frame — the
+    /// first-visible-frame force fires on the `false → true` edge.
+    pub was_visible: bool,
+    /// Never evaluated under this runtime yet: the first frame after arming
+    /// always evaluates (consumed by the pre-pass).
+    pub pending_first_eval: bool,
+    /// P5/P6 IK hook: an external system (foot lock/unlock edge) sets this
+    /// to force one full evaluation; the pre-pass consumes it. Nothing in
+    /// the engine sets it yet.
+    pub force_eval_external: bool,
+}
+
+impl Default for ThrottleState {
+    fn default() -> Self {
+        Self {
+            bucket: 0,
+            eval_this_frame: true,
+            was_visible: false,
+            pending_first_eval: true,
+            force_eval_external: false,
+        }
+    }
+}
+
 /// The runtime half of a running graph: compiled plan, machine state and the
 /// parameter blackboard gameplay writes to. **Never serialized** — its
 /// absence is what tells the system to arm a fresh machine.
@@ -95,6 +186,8 @@ pub struct AnimGraphRuntime {
     /// Set when this instance refused to run (compile error, missing clip,
     /// no skeleton). Reported once at arm time, then remembered.
     pub disabled: Option<String>,
+    /// Update-rate throttle state (Task 41.5 P4).
+    pub throttle: ThrottleState,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +497,12 @@ pub struct AnimGraphSystem {
     /// reallocated at steady state (both stay empty once the scene settles).
     dead: Vec<hecs::Entity>,
     needs_runtime: Vec<(hecs::Entity, String)>,
+    /// Frames this system has run — the clock the per-bucket stagger phases
+    /// against (see the significance pre-pass in `run`).
+    frame: u64,
+    /// Pose evaluations skipped by throttling in the last run (bench read
+    /// surface; written from the parallel section).
+    skipped: std::sync::atomic::AtomicU32,
 }
 
 /// Entities per batch handed to a rayon worker in step 3. Small enough that
@@ -426,7 +525,15 @@ impl AnimGraphSystem {
             evaluating: std::sync::atomic::AtomicBool::new(false),
             dead: Vec::new(),
             needs_runtime: Vec::new(),
+            frame: 0,
+            skipped: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Pose evaluations the last `run` skipped under update-rate throttling
+    /// (0 whenever no [`AnimViewInfo`] resource is present). Bench surface.
+    pub fn evals_skipped_last_run(&self) -> u32 {
+        self.skipped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Compile (or reuse) the plan and build a fresh runtime sitting in the
@@ -445,6 +552,7 @@ impl AnimGraphSystem {
             events: Vec::new(),
             generation,
             disabled: Some(why),
+            throttle: ThrottleState::default(),
         };
 
         // Peek, compile, store — short borrows, one at a time, the same dance
@@ -532,6 +640,7 @@ impl AnimGraphSystem {
             plan,
             generation,
             disabled: None,
+            throttle: ThrottleState::default(),
         }
     }
 }
@@ -542,23 +651,46 @@ fn clip_of<'a>(cache: &'a AnimClipCache, c: &PlanClip) -> Option<&'a RawAnimatio
 }
 
 /// One entity's step-3 work: machine + slot tick, event collection into the
-/// entity's own `events` Vec, pose evaluation, play-once overlay, palette.
-/// Runs on rayon workers — touches only this entity's components plus the
-/// immutable clip cache.
+/// entity's own `events` Vec, then — throttling permitting — pose
+/// evaluation, play-once overlay, palette. Runs on rayon workers — touches
+/// only this entity's components plus the immutable clip cache.
+///
+/// The S-D4 split: machine tick, slot tick and event collection run **every
+/// frame** (rules, crossfade clocks, trigger consumption and event-crossing
+/// detection never miss a frame — the ruling that keeps event semantics
+/// exact under throttling). Only the pose work below the gate is
+/// rate-limited; a skipped frame holds the last evaluated pose (no
+/// interpolation in v1). Returns whether the pose was evaluated.
 fn tick_entity(
     rt: &mut AnimGraphRuntime,
     skeleton: &mut SkeletonInstance,
     clips: &AnimClipCache,
     dt: f32,
     scratch: &mut PoseScratch,
-) {
+) -> bool {
     let plan = rt.plan.clone();
     let clip_for = |c: &PlanClip| clip_of(clips, c);
+    // Checked before the tick too, so the frame a crossfade *completes* on
+    // still evaluates (the fade is dropped inside `tick`).
+    let fading_before = rt.machine.crossfade().is_some();
     rt.machine.tick(&plan, &mut rt.params, dt);
     rt.slot.tick(&plan, &mut rt.params, dt, &clip_for);
     let mut events = std::mem::take(&mut rt.events);
     collect_anim_events(&rt.machine, &rt.slot, &plan, &rt.params, clip_for, &mut events);
     rt.events = events;
+    // Tick-local forced-eval sources (S-D4): an active or just-completed
+    // crossfade, a transition fired this tick, an active play-once, or an
+    // event fired this tick. All visible on `rt` right here — they override
+    // a pre-pass "skip" without touching shared state. (The serial-side
+    // forces — first visible frame, first frame after arming, the external
+    // IK hook — already landed in `eval_this_frame`.)
+    let force = fading_before
+        || rt.machine.transition_activity()
+        || rt.slot.playing().is_some()
+        || !rt.events.is_empty();
+    if !rt.throttle.eval_this_frame && !force {
+        return false; // held pose: skeleton keeps its last palette + revision
+    }
     evaluate_pose(
         &rt.machine,
         &plan,
@@ -569,6 +701,7 @@ fn tick_entity(
     );
     rt.slot.apply(&plan, &clip_for, &mut skeleton.local_transforms, scratch);
     skeleton.compute_palette();
+    true
 }
 
 impl System for AnimGraphSystem {
@@ -647,6 +780,61 @@ impl System for AnimGraphSystem {
         }
         self.needs_runtime = needs_runtime;
 
+        // 2.5. Significance pre-pass (S-D4): decide, per entity, whether pose
+        //    evaluation is due this frame. Serial by design — it reads the
+        //    camera (and transforms) from `Resources`, which the parallel
+        //    section must not touch; step 3 only reads the flag this leaves
+        //    behind. Without an `AnimViewInfo` resource everything evaluates
+        //    every frame. Positions come from the `TransformCache` when the
+        //    host maintains one (hierarchy-correct, previous frame — the
+        //    accepted render-path latency), else from the entity's own
+        //    `Transform` (tests).
+        self.frame = self.frame.wrapping_add(1);
+        let frame = self.frame;
+        let view = resources.get::<AnimViewInfo>();
+        let cache = resources.get::<TransformCache>();
+        for (e, (rt, transform)) in world
+            .query_mut::<(&mut AnimGraphRuntime, Option<&Transform>)>()
+        {
+            if rt.disabled.is_some() {
+                continue;
+            }
+            let forced = std::mem::take(&mut rt.throttle.force_eval_external)
+                || std::mem::take(&mut rt.throttle.pending_first_eval);
+            let Some(view) = view else {
+                rt.throttle.eval_this_frame = true;
+                continue;
+            };
+            let pos = match cache {
+                Some(c) => {
+                    let m = c.get_render(e);
+                    glam::Vec3::new(m[(0, 3)], m[(1, 3)], m[(2, 3)])
+                }
+                None => transform
+                    .map(|t| {
+                        crate::engine::utils::coords::convert_position_zup_to_yup(
+                            glam::Vec3::new(t.position.x, t.position.y, t.position.z),
+                        )
+                    })
+                    .unwrap_or(glam::Vec3::ZERO),
+            };
+            let visible = view.frustum.contains_sphere(pos, VIS_RADIUS);
+            let first_visible = visible && !rt.throttle.was_visible;
+            rt.throttle.was_visible = visible;
+            let distance = pos.distance(view.camera_pos);
+            rt.throttle.bucket = significance_bucket(distance, rt.throttle.bucket);
+            let interval = if visible {
+                BUCKET_INTERVALS[rt.throttle.bucket as usize]
+            } else {
+                OFFSCREEN_INTERVAL
+            };
+            // Entity-id stagger: members of one bucket phase out across the
+            // interval instead of all evaluating on the same frame.
+            let due = interval <= 1
+                || frame.wrapping_add(e.to_bits().get()) % u64::from(interval) == 0;
+            rt.throttle.eval_this_frame = due || forced || first_visible;
+        }
+
         // 3. Tick machines and write poses. Per-frame order per the spec:
         //    parameters were written by gameplay before this system ran;
         //    machine update (rules, crossfades) precedes pose evaluation.
@@ -663,6 +851,8 @@ impl System for AnimGraphSystem {
         };
         use rayon::iter::{ParallelBridge, ParallelIterator};
         use std::sync::atomic::Ordering;
+        let skipped = &self.skipped;
+        skipped.store(0, Ordering::Relaxed);
         self.evaluating.store(true, Ordering::Relaxed);
         world
             .query_mut::<(&mut AnimGraphRuntime, &mut SkeletonInstance)>()
@@ -671,11 +861,17 @@ impl System for AnimGraphSystem {
             .for_each(|batch| {
                 EVAL_SCRATCH.with(|cell| {
                     let scratch = &mut *cell.borrow_mut();
+                    let mut held = 0u32;
                     for (_entity, (rt, skeleton)) in batch {
                         if rt.disabled.is_some() {
                             continue;
                         }
-                        tick_entity(rt, skeleton, clips, dt, scratch);
+                        if !tick_entity(rt, skeleton, clips, dt, scratch) {
+                            held += 1;
+                        }
+                    }
+                    if held > 0 {
+                        skipped.fetch_add(held, Ordering::Relaxed);
                     }
                 });
             });

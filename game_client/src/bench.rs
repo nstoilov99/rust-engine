@@ -42,6 +42,8 @@ pub fn add_skinned_draws(n: u32) {
 
 #[cfg(not(feature = "editor"))]
 static ANIM_NANOS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(feature = "editor"))]
+static EVAL_SKIPS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(not(feature = "editor"))]
 pub struct BenchFlags {
@@ -121,15 +123,14 @@ pub fn spawn_stress_characters(world: &mut hecs::World, n: usize) {
     println!("stress: spawned {n} characters on {STRESS_GRAPH} ({side}x{side} grid)");
 }
 
-/// Wraps `AnimGraphSystem` and records its wall time. Registered only when
+/// Wraps `AnimGraphSystem` and records its wall time (and, since P4, the
+/// pose evaluations update-rate throttling skipped). Registered only when
 /// `--bench-secs` is present; the plain system is registered otherwise.
 #[cfg(not(feature = "editor"))]
-pub struct TimedAnimGraph<S>(pub S);
+pub struct TimedAnimGraph(pub rust_engine::engine::animation::graph::AnimGraphSystem);
 
 #[cfg(not(feature = "editor"))]
-impl<S: rust_engine::engine::ecs::schedule::System> rust_engine::engine::ecs::schedule::System
-    for TimedAnimGraph<S>
-{
+impl rust_engine::engine::ecs::schedule::System for TimedAnimGraph {
     fn run(
         &mut self,
         world: &mut hecs::World,
@@ -138,6 +139,7 @@ impl<S: rust_engine::engine::ecs::schedule::System> rust_engine::engine::ecs::sc
         let t0 = std::time::Instant::now();
         self.0.run(world, resources);
         ANIM_NANOS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+        EVAL_SKIPS.fetch_add(self.0.evals_skipped_last_run(), Relaxed);
     }
 
     fn name(&self) -> &str {
@@ -158,6 +160,7 @@ pub struct BenchRun {
     palette_counts: Vec<f32>,
     palette_ms: Vec<f32>,
     skinned_draws: Vec<f32>,
+    evals_skipped: Vec<f32>,
     finished: bool,
 }
 
@@ -175,6 +178,7 @@ impl BenchRun {
             palette_counts: Vec::with_capacity(4096),
             palette_ms: Vec::with_capacity(4096),
             skinned_draws: Vec::with_capacity(4096),
+            evals_skipped: Vec::with_capacity(4096),
             finished: false,
         }
     }
@@ -191,6 +195,7 @@ impl BenchRun {
         let uploads = PALETTE_UPLOADS.swap(0, Relaxed);
         let palette_ns = PALETTE_NANOS.swap(0, Relaxed);
         let draws = SKINNED_DRAWS.swap(0, Relaxed);
+        let skips = EVAL_SKIPS.swap(0, Relaxed);
 
         // First frame carries plan compile + first uploads; the bench window
         // starts after it.
@@ -204,6 +209,7 @@ impl BenchRun {
         self.palette_counts.push(uploads as f32);
         self.palette_ms.push(palette_ns as f32 / 1.0e6);
         self.skinned_draws.push(draws as f32);
+        self.evals_skipped.push(skips as f32);
 
         if started.elapsed().as_secs_f32() >= self.secs {
             self.write_report(started.elapsed().as_secs_f32());
@@ -238,7 +244,12 @@ impl BenchRun {
         row("palette uploads", &self.palette_counts);
         row("palette upload ms", &self.palette_ms);
         row("skinned draws", &self.skinned_draws);
+        row("pose evals skipped", &self.evals_skipped);
         out.push_str("\nskinned draws = per-submesh draws submitted (camera list + shadow list).\n");
+        out.push_str(
+            "pose evals skipped = pose evaluations held by update-rate throttling per frame \
+             (P4; machine/slot/event ticks still ran).\n",
+        );
         out.push_str(
             "palette uploads = skeleton palettes written into the SSBO ring per frame \
              (P1; pre-P1 baselines measured per-entity UBO + descriptor-set allocations).\n",

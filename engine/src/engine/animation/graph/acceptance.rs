@@ -24,7 +24,7 @@ use crate::engine::animation::{AnimationPlayer, AnimationUpdateSystem};
 use crate::engine::assets::model_loader::{
     AnimEventMarker, AnimationChannel, BoneData, RawAnimationClip,
 };
-use crate::engine::ecs::components::MeshRenderer;
+use crate::engine::ecs::components::{MeshRenderer, Transform};
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 
@@ -36,7 +36,7 @@ use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     invalidate_blend_space, AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner,
-    AnimGraphRuntime, AnimGraphSystem, BlendSpaceCache, ClipSet,
+    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet,
 };
 use crate::engine::animation::blend_space::{
     parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
@@ -1623,6 +1623,14 @@ impl AnimAssetLoader for MapAssets {
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
+        if content_rel == "anims/attack.anim" {
+            // A short play-once clip with one marker — the throttling tests
+            // (Task 41.5 P4) fire it while the entity sits in a slow bucket.
+            return Some(ClipSet {
+                bone_names: vec!["root".into(), "child".into()],
+                clips: vec![marked_clip("Attack", 30.0, 0.35, &[(0.25, "swing")])],
+            });
+        }
         let (name, x) = match content_rel {
             "anims/idle.anim" => ("Idle", 0.0),
             "anims/walk.anim" => ("Walk", 10.0),
@@ -3283,4 +3291,226 @@ fn the_demo_blend_space_compiles_from_a_state() {
     let rates: Vec<f32> = sp.samples.iter().map(|(_, r)| *r).collect();
     assert_eq!(rates, [0.5, 1.0, 2.0]);
     assert_eq!(plan.clip_refs(), ["Defeated.anim"]);
+}
+
+// ---------------------------------------------------------------------------
+// Update-rate throttling (Task 41.5 P4, S-D4)
+// ---------------------------------------------------------------------------
+//
+// The ruling these tests pin: machine tick, slot tick and event collection
+// run every frame; only pose evaluation (and the palette it produces) is
+// rate-limited by significance bucket. `SkeletonInstance::revision` bumps
+// exactly once per pose evaluation, so it is the observable for "did this
+// frame evaluate". The harness has no `TransformCache`, so positions come
+// from the entities' `Transform` (Z-up; +X converts to straight ahead of the
+// test camera below at that distance).
+
+/// A camera at the render-space origin looking down -Z (the Y-up forward).
+fn view_looking_forward() -> AnimViewInfo {
+    let vp = Mat4::perspective_rh(60f32.to_radians(), 1.6, 0.1, 1000.0)
+        * Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+    AnimViewInfo {
+        camera_pos: Vec3::ZERO,
+        frustum: crate::engine::math::Frustum::from_view_projection(vp),
+    }
+}
+
+/// A Z-up transform `x` meters straight ahead of the test camera.
+fn ahead(x: f32) -> Transform {
+    Transform::new(nalgebra_glm::vec3(x, 0.0, 0.0))
+}
+
+fn revision_of(h: &Harness, e: hecs::Entity) -> u64 {
+    h.world.get::<&SkeletonInstance>(e).unwrap().revision
+}
+
+fn bucket_of(h: &Harness, e: hecs::Entity) -> u8 {
+    h.world.get::<&AnimGraphRuntime>(e).unwrap().throttle.bucket
+}
+
+fn throttled_harness(doc: GraphDoc) -> Harness {
+    let assets = MapAssets::default();
+    assets.graphs.lock().unwrap().insert(GRAPH.into(), doc);
+    let mut h = Harness::new(assets);
+    h.resources.insert(view_looking_forward());
+    h
+}
+
+/// (a) A play-once started while the entity sits in the slowest bucket still
+/// fires its marker exactly once and visibly plays — an active slot forces
+/// evaluation every frame.
+#[test]
+fn a_throttled_play_once_still_fires_once_and_visibly_plays() {
+    let mut h = throttled_harness(slot_doc());
+    let e = h.world.spawn((
+        ahead(200.0), // past 70 m — the slowest bucket, eval every 8th frame
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm: the first frame always evaluates
+
+    // Prove the throttle throttles: the next 8 frames are quiet (idle's next
+    // marker crossing is at t = 1.05, tick 11) — at most the one
+    // stagger-due evaluation happens.
+    let r0 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    let quiet = revision_of(&h, e) - r0;
+    assert!(quiet <= 1, "slowest bucket evaluates ~once per 8 frames, got {quiet}");
+
+    // Fire the play-once while throttled. Clip len 0.35 s at 0.1 s ticks:
+    // starts, crosses its 0.25 s marker, finishes and retires within 6.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .fire_trigger("attack");
+    let r1 = revision_of(&h, e);
+    let mut swings = 0;
+    let mut saw_attack_pose = false;
+    for _ in 0..6 {
+        h.tick();
+        swings += count(&h.world.get::<&AnimGraphRuntime>(e).unwrap().events, "swing");
+        let sk = h.world.get::<&SkeletonInstance>(e).unwrap();
+        if (sk.local_transforms[0].translation.x - 30.0).abs() < 1e-3 {
+            saw_attack_pose = true; // the overlay reached the skeleton
+        }
+    }
+    assert_eq!(swings, 1, "the marker fired exactly once under throttling");
+    assert!(saw_attack_pose, "the play-once visibly played");
+    assert!(
+        revision_of(&h, e) - r1 >= 5,
+        "an active play-once forces evaluation every frame it is active"
+    );
+}
+
+/// (b) An active crossfade forces evaluation every frame until it completes
+/// (the completing frame included — the final snap to full weight shows).
+#[test]
+fn an_active_crossfade_forces_evaluation_every_frame() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(200.0),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_bool("walk", true);
+
+    // Fire tick + 0.5 s fade at 0.1 s ticks: exactly 6 consecutive forced
+    // evaluations (the fire, four mid-fade frames, the completing frame).
+    let r0 = revision_of(&h, e);
+    for _ in 0..6 {
+        h.tick();
+    }
+    assert_eq!(revision_of(&h, e) - r0, 6, "every crossfade frame evaluated");
+
+    // Fade over (walk clip has no markers): throttling resumes.
+    let r1 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    let after = revision_of(&h, e) - r1;
+    assert!(after <= 1, "the crossfade over, throttling resumes: {after}");
+}
+
+/// (c) Event parity: a throttled run emits the identical per-tick event
+/// sequence (order and content) as a full-rate run of the same scenario —
+/// machine, slot and event collection are never throttled.
+#[test]
+fn throttled_and_full_rate_runs_emit_identical_events() {
+    fn run(throttled: bool) -> (Vec<Vec<AnimEventFire>>, u64) {
+        let assets = MapAssets::default();
+        assets.graphs.lock().unwrap().insert(GRAPH.into(), slot_doc());
+        let mut h = Harness::new(assets);
+        if throttled {
+            h.resources.insert(view_looking_forward());
+        }
+        let e = h.world.spawn((
+            ahead(200.0),
+            AnimGraphRunner::new(GRAPH),
+            SkeletonInstance::from_bones(synthetic_bones()),
+        ));
+        let mut log = Vec::new();
+        for t in 0..40 {
+            if t == 5 {
+                h.world
+                    .get::<&mut AnimGraphRuntime>(e)
+                    .unwrap()
+                    .params
+                    .fire_trigger("attack");
+            }
+            if t == 20 {
+                h.world
+                    .get::<&mut AnimGraphRuntime>(e)
+                    .unwrap()
+                    .params
+                    .set_bool("walk", true);
+            }
+            h.tick();
+            log.push(h.world.get::<&AnimGraphRuntime>(e).unwrap().events.clone());
+        }
+        (log, revision_of(&h, e))
+    }
+    let (full, full_revs) = run(false);
+    let (thr, thr_revs) = run(true);
+    assert_eq!(thr, full, "event order and content identical under throttling");
+    assert!(
+        thr_revs < full_revs,
+        "the throttled run really skipped evaluations ({thr_revs} vs {full_revs})"
+    );
+}
+
+/// (d) Hysteresis: an entity oscillating around a bucket boundary never
+/// flips buckets; a decisive move past the band does.
+#[test]
+fn bucket_boundaries_have_hysteresis() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(34.0), // just inside the 35 m boundary → bucket 1
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 1);
+
+    // Straddle the boundary every frame — the bucket must not move.
+    for i in 0..20 {
+        let x = if i % 2 == 0 { 36.0 } else { 34.0 };
+        h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(x, 0.0, 0.0);
+        h.tick();
+        assert_eq!(bucket_of(&h, e), 1, "oscillating across 35 m flipped the bucket");
+    }
+
+    // Decisive moves cross the hysteresis band (× / ÷ 1.15) and stick.
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(50.0, 0.0, 0.0);
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 2, "50 m is past 35 × 1.15");
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(20.0, 0.0, 0.0);
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 1, "20 m is inside 35 ÷ 1.15");
+}
+
+/// Entering the camera frustum forces an immediate evaluation — a character
+/// walking on screen shows a current pose, not one up to 8 frames stale.
+#[test]
+fn entering_the_frustum_forces_an_immediate_evaluation() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(-50.0), // behind the camera — outside the frustum
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    for _ in 0..4 {
+        h.tick();
+    }
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(30.0, 0.0, 0.0);
+    let r0 = revision_of(&h, e);
+    h.tick();
+    assert!(revision_of(&h, e) > r0, "first visible frame evaluated immediately");
 }

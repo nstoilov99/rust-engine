@@ -51,6 +51,6 @@ pub use plan::{
 };
 pub use runner::{
     compile_blend_space, invalidate_blend_space, AnimAssetLoader, AnimClipCache,
-    AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime, AnimGraphSystem, BlendSpaceCache,
-    ClipSet, DiskAnimAssets,
+    AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime, AnimGraphSystem, AnimViewInfo,
+    BlendSpaceCache, ClipSet, DiskAnimAssets, ThrottleState,
 };

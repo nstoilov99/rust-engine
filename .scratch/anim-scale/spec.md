@@ -61,3 +61,23 @@ per ticket. Serial execution (single-build machine).
   (validation layer enforces VUID-VkAttachmentDescription2-finalLayout —
   PresentSrc without `khr_swapchain` on the extension-less test device).
   Pre-existing; not a P1 gate failure. 880/881 engine tests pass.
+- **R5 (P4): significance inputs are camera distance + camera-frustum
+  visibility — no shadow frustum.** The directional light's VP is computed
+  at packet-build time (`prepare_light_data`), after `AnimGraphSystem` ran,
+  and the shadow pass draws all casters unculled, so there is no shadow
+  frustum to test main-thread pre-system. Off-camera entities therefore
+  never freeze: they clamp to the slowest interval (every 8 frames) so
+  their shadows keep moving. Camera data reaches the system via a new
+  `AnimViewInfo` resource (Y-up render space, previous frame's camera)
+  inserted by both hosts before `run_schedule`; absent ⇒ full rate.
+- **R6 (P4): upload gate shipped as stable-base skip, not the R2 fallback.**
+  `write_palette(key, revision, palette)`: the ring cursor always advances
+  (space reserved even when the copy is skipped), so a skeleton's base
+  repeats exactly when the frame's write-sequence prefix repeats. Each
+  region records `(entity key, len, palette revision)` per write in order;
+  a prefix-matching entry with a matching `SkeletonInstance.revision`
+  (bumped on every palette recompute) skips the memcpy. First divergence
+  in a visit → the rest of that visit copies and re-records; `grow()` keeps
+  the current region's carried prefix, forgets the rest. R2 still holds:
+  every visible skeleton is *present* in every frame's region — only the
+  redundant bytes are skipped.

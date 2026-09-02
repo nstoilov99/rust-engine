@@ -241,10 +241,13 @@ impl StandaloneApp {
             let descriptor = || {
                 SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
                     .reads_resource::<Time>()
+                    .reads_resource::<rust_engine::engine::animation::graph::AnimViewInfo>()
+                    .reads_resource::<TransformCache>()
                     .writes_resource::<AnimGraphPlanCache>()
                     .writes_resource::<AnimClipCache>()
                     .writes_resource::<BlendSpaceCache>()
                     .reads::<AnimGraphRunner>()
+                    .reads::<Transform>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
@@ -602,6 +605,19 @@ impl StandaloneApp {
 
         if let Some(time) = self.game_world.resource_mut::<Time>() {
             time.advance(delta_time);
+        }
+
+        // Task 41.5 P4: the previous frame's camera feeds animation
+        // significance bucketing (Y-up render space, the same camera the
+        // mesh path culls with; absent ⇒ machines evaluate at full rate).
+        {
+            use rust_engine::engine::animation::graph::AnimViewInfo;
+            use rust_engine::engine::math::Frustum;
+            let cam = &self.renderer.camera_3d;
+            self.game_world.resources_mut().insert(AnimViewInfo {
+                camera_pos: cam.position,
+                frustum: Frustum::from_view_projection(cam.view_projection_matrix()),
+            });
         }
 
         self.game_world.run_schedule(&mut self.schedule);

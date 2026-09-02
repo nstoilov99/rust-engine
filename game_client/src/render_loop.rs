@@ -143,14 +143,16 @@ pub fn prepare_mesh_data(
 
         // One ring write per skeleton per frame; every submesh draw of the
         // entity shares the returned palette_base. Base 0 = identity (static
-        // meshes, or a failed write — mesh renders in bind pose).
+        // meshes, or a failed write — mesh renders in bind pose). The entity
+        // key + palette revision let the backend skip re-copying a palette
+        // the region already holds (P4 upload gate for throttled skeletons).
         let is_skinned = skeleton.is_some_and(|s| !s.palette.is_empty());
         let palette_base = if let Some(skel) = skeleton.filter(|s| !s.palette.is_empty()) {
             // Task 41.5 bench hook (moved here from the old per-entity
             // descriptor upload): count = skeletons written this frame,
             // ms = time writing palettes into the ring.
             let t0 = bench.then(std::time::Instant::now);
-            let base = match skinning.write_palette(&skel.palette) {
+            let base = match skinning.write_palette(entity.to_bits().get(), skel.revision, &skel.palette) {
                 Ok(base) => base,
                 Err(_) => {
                     warn_once_per_path("palette ring write for", &mesh_renderer.mesh_path);
