@@ -412,6 +412,7 @@ fn extract_animations(
                 name,
                 duration_seconds: max_time,
                 channels: bone_channels.into_values().collect(),
+                events: Vec::new(),
             });
         }
     }

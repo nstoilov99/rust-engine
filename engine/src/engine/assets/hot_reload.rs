@@ -46,6 +46,12 @@ pub enum ReloadEvent {
     CurveChanged {
         path: String,
     },
+    /// A `.blendspace` asset was modified (Task 41.5): the consumer drops the
+    /// compiled space and every animation plan (a state compiles the space
+    /// into its plan).
+    BlendSpaceChanged {
+        path: String,
+    },
 }
 
 /// Watches asset files and triggers hot-reload
@@ -115,6 +121,7 @@ impl HotReloadWatcher {
                                 // from its own saves).
                                 if normalized_path.ends_with(".graph")
                                     || normalized_path.ends_with(".subgraph")
+                                    || normalized_path.ends_with(".animgraph")
                                 {
                                     let _ = reload_sender.send(ReloadEvent::GraphChanged {
                                         path: normalized_path.clone(),
@@ -125,6 +132,14 @@ impl HotReloadWatcher {
                                 // `.curve` assets, on the same terms.
                                 if normalized_path.ends_with(".curve") {
                                     let _ = reload_sender.send(ReloadEvent::CurveChanged {
+                                        path: normalized_path.clone(),
+                                    });
+                                    continue;
+                                }
+
+                                // `.blendspace` assets likewise.
+                                if normalized_path.ends_with(".blendspace") {
+                                    let _ = reload_sender.send(ReloadEvent::BlendSpaceChanged {
                                         path: normalized_path.clone(),
                                     });
                                     continue;

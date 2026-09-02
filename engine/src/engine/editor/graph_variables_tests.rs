@@ -442,3 +442,28 @@ fn display_names_come_from_configuration() {
     let d = DocDescriptors::new(&st.doc, &reg);
     assert_eq!(d.display_name(99), None, "no such node");
 }
+
+/// Per-document layouts ticket 02: the Details panel's Name row renames a
+/// node through `set_node_title` — one undo entry, byte-identical undo, and
+/// no entry at all for a no-op.
+#[test]
+fn a_node_title_edit_is_one_undo_entry() {
+    let reg = registry();
+    let mut st = state();
+    st.doc.nodes.push(var_node(1, VAR_GET_TYPE_ID, "score"));
+    let before = ron(&st);
+    let depth = st.stack.undo_len();
+    assert!(st.set_node_title(1, Some("Score".into()), &reg));
+    assert_eq!(st.doc.node(1).unwrap().title.as_deref(), Some("Score"));
+    assert_eq!(st.stack.undo_len(), depth + 1);
+    assert_eq!(st.stack.undo_description().as_deref(), Some("Rename Node"));
+    // Same title again, or a node that does not exist: nothing recorded.
+    assert!(!st.set_node_title(1, Some("Score".into()), &reg));
+    assert!(!st.set_node_title(99, None, &reg));
+    assert_eq!(st.stack.undo_len(), depth + 1);
+    let after = ron(&st);
+    st.undo(&reg);
+    assert_eq!(ron(&st), before, "undo returns the exact starting bytes");
+    st.redo(&reg);
+    assert_eq!(ron(&st), after, "redo returns the exact ending bytes");
+}

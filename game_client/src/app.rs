@@ -188,6 +188,9 @@ pub struct SceneEditorState {
     pub registry: SceneRegistry,
     /// Model import dialog state (shown when model files are dropped).
     pub import_dialog: Option<ImportDialogState>,
+    /// Anim event marker list for a `.anim` asset (Task 41; opened by
+    /// double-clicking the asset).
+    pub anim_events_dialog: Option<rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog>,
     /// Open mesh editors keyed by content-relative mesh path.
     pub mesh_editors:
         std::collections::HashMap<String, rust_engine::engine::editor::mesh_editor::MeshEditorData>,
@@ -201,9 +204,25 @@ pub struct SceneEditorState {
         String,
         rust_engine::engine::editor::curve_editor::CurveEditorState,
     >,
+    /// Open `.blendspace` editors keyed by content-relative path (Task 41.5).
+    pub blend_space_editors: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
+    /// The Anim Preview panel's machines, keyed by `.animgraph` path
+    /// (per-document layouts ticket 03). An entry lives while the panel
+    /// draws it — the focused graph's — and goes when it stops.
+    pub anim_previews: std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
     /// Node type registry (Task 40) — feeds graph load/validate; shared by
     /// every open graph editor.
     pub node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
+    /// The animation node library (Task 41): its own registry, selected by
+    /// file extension — a script palette never offers a State and an
+    /// animation palette never offers a Print, with no filter to maintain.
+    pub anim_node_registry: std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry>,
     /// Shared graph editor clipboard (copy/paste across open graphs).
     pub graph_clipboard: Option<rust_engine::engine::editor::graph_editor::GraphFragment>,
     /// Open input action editors (one per .inputaction file).
@@ -214,6 +233,22 @@ pub struct SceneEditorState {
     pub save_as_dialog: Option<SaveAsDialog>,
     /// Entity clipboard: serialized subtrees from Copy/Cut.
     pub clipboard: Vec<EntityData>,
+}
+
+impl SceneEditorState {
+    /// The registry a graph document authored at `key` validates and lists
+    /// its palette against — the animation library for `.animgraph`, the
+    /// script registry for everything else.
+    pub fn graph_registry(
+        &self,
+        key: &str,
+    ) -> &std::sync::Arc<rust_engine::engine::node_graph::NodeRegistry> {
+        if key.ends_with(".animgraph") {
+            &self.anim_node_registry
+        } else {
+            &self.node_registry
+        }
+    }
 }
 
 /// The two per-frame document resolvers the graph canvas reads: `.graph`
@@ -308,6 +343,12 @@ pub struct App {
     /// Subject of the open tab context menu (right-clicked dock tab).
     #[cfg(feature = "editor")]
     crusty_tab_ctx: Option<String>,
+    /// Tab id of the focused *document* (viewport, graph, curve, …) in the
+    /// main dock. Unlike `DockState::focused_tab` it survives clicks on side
+    /// panels, so Details/Variables/Preview and edit routing keep their
+    /// document; the active layout profile follows it (doc-layouts spec).
+    #[cfg(feature = "editor")]
+    focused_document: Option<String>,
     /// Tabs dropped outside any dock target — main.rs turns these into OS
     /// windows next `about_to_wait` (window creation needs ActiveEventLoop).
     #[cfg(feature = "editor")]
@@ -331,6 +372,15 @@ pub struct App {
     /// registration round-trips via `RenderEvent::CrustyNativeRegistered`.
     #[cfg(feature = "editor")]
     crusty_mesh_textures: std::collections::HashMap<String, CrustyMeshTexture>,
+    /// Blend space tab preview targets, keyed by the tab's content-relative
+    /// path (ticket 08) — the mesh-preview registration, one asset kind over.
+    #[cfg(feature = "editor")]
+    crusty_blend_textures: std::collections::HashMap<String, CrustyMeshTexture>,
+    /// The Anim Preview panel's target (ticket 03): one registration,
+    /// `anim_preview`, re-pointed whenever the focused graph's target
+    /// changes and dropped when no preview holds one.
+    #[cfg(feature = "editor")]
+    crusty_anim_texture: Option<CrustyMeshTexture>,
     /// Preview CBs for mesh tabs docked in the main crusty dock — sent to
     /// the render thread in the frame packet (executed before the GUI pass).
     #[cfg(feature = "editor")]
@@ -354,6 +404,95 @@ pub struct App {
 struct CrustyMeshTexture {
     id: Option<rust_engine::engine::gui::crusty::TextureId>,
     view: std::sync::Arc<vulkano::image::view::ImageView>,
+}
+
+/// The Anim Preview panel's tab id — also its CB key and native texture
+/// name (one panel, one target).
+#[cfg(feature = "editor")]
+const ANIM_PREVIEW_TAB: &str = "anim_preview";
+
+/// One skinned preview's GPU-facing pieces, borrowed field-wise from a
+/// blend space tab's or the Anim Preview panel's evaluator.
+#[cfg(feature = "editor")]
+struct SkinnedPreviewTarget<'a> {
+    /// The mesh the evaluator resolved to (`None` = nothing to draw).
+    mesh: &'a Option<String>,
+    /// The render target, recreated when `mesh` differs from `gpu_mesh`.
+    gpu: &'a mut Option<rust_engine::engine::editor::mesh_editor::MeshPreviewState>,
+    gpu_mesh: &'a mut Option<String>,
+    skeleton: Option<&'a rust_engine::engine::animation::components::SkeletonInstance>,
+    /// Log prefix.
+    what: &'a str,
+}
+
+/// Record one skinned preview pass: (re)create the target for a new mesh,
+/// follow the pane's size, upload this frame's palette, draw. `None` when
+/// there is nothing to draw yet (no mesh, empty pane, mesh not on the GPU).
+#[cfg(feature = "editor")]
+fn record_skinned_preview(
+    renderer: &rust_engine::engine::editor::mesh_editor::MeshPreviewRenderer,
+    meshes: &rust_engine::engine::rendering::rendering_3d::MeshManager,
+    queue: &std::sync::Arc<vulkano::device::Queue>,
+    cb_alloc: &std::sync::Arc<vulkano::command_buffer::allocator::StandardCommandBufferAllocator>,
+    target: SkinnedPreviewTarget,
+) -> Option<std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>> {
+    use rust_engine::engine::editor::mesh_editor::MeshPreviewState;
+    let SkinnedPreviewTarget { mesh, gpu, gpu_mesh, skeleton, what } = target;
+    // A new (or first) mesh gets a fresh target; the old one is dropped and
+    // its registration re-pointed by the packet build.
+    if *gpu_mesh != *mesh {
+        *gpu = None;
+        *gpu_mesh = mesh.clone();
+        if let Some(mesh) = mesh {
+            match MeshPreviewState::new(renderer, meshes, mesh) {
+                Ok(state) => {
+                    if let Err(e) = state.texture.clear(queue.clone(), cb_alloc.clone()) {
+                        eprintln!("{what} clear failed: {e}");
+                    }
+                    *gpu = Some(state);
+                }
+                Err(e) => eprintln!("Failed to create {what}: {e}"),
+            }
+        }
+    }
+    let gpu = gpu.as_mut()?;
+    let (pw, ph) = gpu.size;
+    if pw == 0 || ph == 0 || gpu.mesh_indices.is_empty() {
+        return None;
+    }
+    if pw != gpu.texture.width() || ph != gpu.texture.height() {
+        if let Ok(true) = gpu.resize(renderer, pw, ph) {
+            if let Err(e) = gpu.texture.clear(queue.clone(), cb_alloc.clone()) {
+                eprintln!("{what} clear failed: {e}");
+            }
+        }
+    }
+    let gpu_meshes: Vec<_> = gpu
+        .mesh_indices
+        .iter()
+        .filter_map(|&idx| meshes.get(idx))
+        .map(|gm| (gm.vertex_buffer.clone(), gm.index_buffer.clone(), gm.index_count))
+        .collect();
+    if gpu_meshes.is_empty() {
+        return None;
+    }
+    let palette = skeleton
+        .filter(|s| !s.palette.is_empty())
+        .and_then(|s| match renderer.create_palette_set(&s.palette) {
+            Ok(set) => Some(set),
+            Err(e) => {
+                eprintln!("{what} palette upload failed: {e}");
+                None
+            }
+        });
+    let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
+    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
+        Ok(cb) => Some(cb),
+        Err(e) => {
+            eprintln!("{what} render error: {e}");
+            None
+        }
+    }
 }
 
 impl App {
@@ -483,6 +622,33 @@ impl App {
                 .writes::<AnimationPlayer>()
                 .writes::<SkeletonInstance>(),
         );
+        // Task 41: `.animgraph` state machines. Ordered after the single-clip
+        // player because both write skeletons (the graph wins on entities
+        // that carry both — the system skip lives engine-side).
+        {
+            use rust_engine::engine::animation::graph::{
+                AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
+                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets,
+            };
+            game_world.resources_mut().insert(AnimGraphPlanCache::new());
+            game_world.resources_mut().insert(AnimClipCache::new());
+            game_world.resources_mut().insert(BlendSpaceCache::new());
+            schedule.add_system_described(
+                AnimGraphSystem::new(Box::new(DiskAnimAssets {
+                    content_root: rust_engine::engine::assets::content_root::content_root(),
+                })),
+                Stage::PreUpdate,
+                SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
+                    .reads_resource::<Time>()
+                    .writes_resource::<AnimGraphPlanCache>()
+                    .writes_resource::<AnimClipCache>()
+                    .writes_resource::<BlendSpaceCache>()
+                    .reads::<AnimGraphRunner>()
+                    .writes::<AnimGraphRuntime>()
+                    .writes::<SkeletonInstance>()
+                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE),
+            );
+        }
         // `PhysicsStepSystem` is registered by `RapierPhysicsPlugin` inside
         // `build_all` below (39.8 D7) — it lands in the same stage, in the
         // same relative position, with the same descriptor and criteria.
@@ -778,10 +944,16 @@ impl App {
                 active_dirty: false,
                 registry: SceneRegistry::new(SceneId(0)),
                 import_dialog: None,
+                anim_events_dialog: None,
                 mesh_editors: std::collections::HashMap::new(),
                 graph_editors: std::collections::HashMap::new(),
                 curve_editors: std::collections::HashMap::new(),
+                blend_space_editors: std::collections::HashMap::new(),
+                anim_previews: std::collections::HashMap::new(),
                 node_registry,
+                anim_node_registry: std::sync::Arc::new(
+                    rust_engine::engine::animation::graph::anim_node_registry(),
+                ),
                 graph_clipboard: None,
                 input_action_editor: InputActionEditor::new(),
                 input_context_editor: InputContextEditor::new(),
@@ -851,6 +1023,8 @@ impl App {
             crusty_dock_drag: None,
             crusty_tab_ctx: None,
             #[cfg(feature = "editor")]
+            focused_document: None,
+            #[cfg(feature = "editor")]
             pending_crusty_floats: Vec::new(),
             // The layout was just restored from disk; its per-file tabs have
             // no documents behind them yet.
@@ -860,6 +1034,10 @@ impl App {
             crusty_floats: std::collections::HashMap::new(),
             #[cfg(feature = "editor")]
             crusty_mesh_textures: std::collections::HashMap::new(),
+            #[cfg(feature = "editor")]
+            crusty_blend_textures: std::collections::HashMap::new(),
+            #[cfg(feature = "editor")]
+            crusty_anim_texture: None,
             #[cfg(feature = "editor")]
             crusty_docked_preview_cbs: Vec::new(),
             #[cfg(feature = "editor")]
@@ -1160,6 +1338,11 @@ impl App {
         self.editor.ui.crusty_dock.open_tab(tab);
     }
 
+    /// Open a `.blendspace` file as a dock tab (Task 41.5).
+    pub fn open_blend_space_as_tab(&mut self, key: String) {
+        self.editor.ui.crusty_dock.open_tab(EditorTab::BlendSpace(key));
+    }
+
     pub fn begin_frame(&mut self) {
         puffin::GlobalProfiler::lock().new_frame();
         #[cfg(feature = "tracy")]
@@ -1250,6 +1433,10 @@ impl App {
                 #[cfg(feature = "editor")]
                 self.save_curve_editor(key);
             }
+            SecondaryWindowKind::BlendSpace => {
+                #[cfg(feature = "editor")]
+                self.save_blend_space_editor(key);
+            }
             SecondaryWindowKind::InputAction => {
                 if let Some(data) = self
                     .editor
@@ -1314,6 +1501,15 @@ impl App {
                     EditorAction::Undo | EditorAction::Redo | EditorAction::Delete
                 ) {
                     self.curve_edit(&key, action);
+                    return;
+                }
+            }
+            if let Some(key) = self.active_blend_space_key() {
+                if matches!(
+                    action,
+                    EditorAction::Undo | EditorAction::Redo | EditorAction::Delete
+                ) {
+                    self.blend_space_edit(&key, action);
                     return;
                 }
             }
@@ -1576,6 +1772,10 @@ impl App {
                         if kind == SecondaryWindowKind::Curve {
                             self.close_curve_tab(&key);
                         }
+                        #[cfg(feature = "editor")]
+                        if kind == SecondaryWindowKind::BlendSpace {
+                            self.close_blend_space_tab(&key);
+                        }
                     }
                     Err(error) => self.editor.console.messages.push(LogMessage::error(format!(
                         "Failed to save '{}': {}",
@@ -1597,6 +1797,11 @@ impl App {
                     }
                     SecondaryWindowKind::Curve => {
                         if let Some(state) = self.editor.scene.curve_editors.get_mut(&key) {
+                            state.dirty = false;
+                        }
+                    }
+                    SecondaryWindowKind::BlendSpace => {
+                        if let Some(state) = self.editor.scene.blend_space_editors.get_mut(&key) {
                             state.dirty = false;
                         }
                     }
@@ -1633,6 +1838,10 @@ impl App {
                 #[cfg(feature = "editor")]
                 if kind == SecondaryWindowKind::Curve {
                     self.close_curve_tab(&key);
+                }
+                #[cfg(feature = "editor")]
+                if kind == SecondaryWindowKind::BlendSpace {
+                    self.close_blend_space_tab(&key);
                 }
             }
             EditorAction::GraphSaveGraph => {
@@ -1973,6 +2182,28 @@ impl App {
                     #[cfg(not(feature = "editor"))]
                     let _ = path;
                 }
+                ReloadEvent::BlendSpaceChanged { path } => {
+                    // Task 41.5: a state compiles the space into its plan, so
+                    // the space *and* every plan drop (wholesale, like a
+                    // nested `.animgraph`); live machines re-arm on the bump.
+                    // The editor tab's save path (later ticket) calls the
+                    // same helper. Hosts' anchored refusals read from disk
+                    // too, so they recompute now.
+                    let key = asset_source::to_content_relative(&path);
+                    #[cfg(feature = "editor")]
+                    if self.blend_space_save_echo(&key) {
+                        continue;
+                    }
+                    rust_engine::engine::animation::graph::invalidate_blend_space(
+                        self.core.game_world.resources_mut(),
+                        &key,
+                    );
+                    #[cfg(feature = "editor")]
+                    {
+                        self.refresh_anim_graph_hosts(&key);
+                        self.reload_blend_space_editor(&key);
+                    }
+                }
                 ReloadEvent::ShaderChanged { path } => {
                     use rust_engine::engine::rendering::shader_compiler::ShaderCompiler;
 
@@ -2108,6 +2339,9 @@ impl App {
                             true
                         } else if let Some(key) = self.active_curve_key() {
                             self.save_curve_editor(&key);
+                            true
+                        } else if let Some(key) = self.active_blend_space_key() {
+                            self.save_blend_space_editor(&key);
                             true
                         } else {
                             false
@@ -2287,8 +2521,14 @@ impl App {
                             if !gpu_meshes.is_empty() {
                                 let aspect = pw as f32 / ph.max(1) as f32;
                                 let vp = preview.compute_view_projection(aspect);
-                                match renderer.render(&preview.framebuffer, pw, ph, &gpu_meshes, vp)
-                                {
+                                match renderer.render(
+                                    &preview.framebuffer,
+                                    pw,
+                                    ph,
+                                    &gpu_meshes,
+                                    vp,
+                                    None,
+                                ) {
                                     Ok(cb) => {
                                         result.push((key.clone(), cb));
                                         data.preview_dirty = false;
@@ -2304,6 +2544,103 @@ impl App {
             }
         }
         result
+    }
+
+    /// Build the blend space tabs' preview command buffers (ticket 08):
+    /// `build_mesh_preview_cbs` for the other embedded viewport. Keys are
+    /// the tab ids (`blendspace:<path>`), so `main.rs` routes each CB to the
+    /// window hosting the tab. The pose was evaluated on the main thread by
+    /// the panel; here it becomes a fresh palette set and a recorded pass.
+    pub fn build_blend_space_preview_cbs(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )> {
+        let Some(renderer) = self.editor.mesh_preview_renderer.as_ref() else {
+            return Vec::new();
+        };
+        let editors = &mut self.editor.scene.blend_space_editors;
+        let meshes: Vec<String> = editors.values().filter_map(|s| s.preview.mesh.clone()).collect();
+        Self::load_preview_meshes(&self.core.asset_manager, &meshes, "Blend space preview");
+        let queue = self.core.renderer.gpu.queue.clone();
+        let cb_alloc = self.core.renderer.gpu.command_buffer_allocator.clone();
+        let meshes = self.core.asset_manager.meshes.read();
+        let mut result = Vec::new();
+        for (key, st) in editors.iter_mut() {
+            let pv = &mut st.preview;
+            let target = SkinnedPreviewTarget {
+                mesh: &pv.mesh,
+                gpu: &mut pv.gpu,
+                gpu_mesh: &mut pv.gpu_mesh,
+                skeleton: pv.skeleton.as_ref(),
+                what: "Blend space preview",
+            };
+            if let Some(cb) = record_skinned_preview(renderer, &meshes, &queue, &cb_alloc, target) {
+                result.push((format!("blendspace:{key}"), cb));
+            }
+        }
+        result
+    }
+
+    /// The Anim Preview panel's command buffer (doc-layouts ticket 03), keyed
+    /// by the panel's tab id so `main.rs` routes it like a blend space tab's.
+    /// Runs first in the frame: it prunes the previews the panel did not
+    /// draw last frame, so what remains is the one the panel shows — the
+    /// one CB under the one key, and the one target the packet build and
+    /// the float pass register. (A second entry only ever exists between
+    /// the panel's draw and this prune.)
+    pub fn build_anim_preview_cbs(
+        &mut self,
+    ) -> Vec<(
+        String,
+        std::sync::Arc<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    )> {
+        self.prune_anim_previews();
+        let Some(renderer) = self.editor.mesh_preview_renderer.as_ref() else {
+            return Vec::new();
+        };
+        let previews = &mut self.editor.scene.anim_previews;
+        let meshes: Vec<String> = previews.values().filter_map(|p| p.mesh.clone()).collect();
+        Self::load_preview_meshes(&self.core.asset_manager, &meshes, "Anim preview");
+        let queue = self.core.renderer.gpu.queue.clone();
+        let cb_alloc = self.core.renderer.gpu.command_buffer_allocator.clone();
+        let meshes = self.core.asset_manager.meshes.read();
+        let mut result = Vec::new();
+        for pv in previews.values_mut() {
+            let target = SkinnedPreviewTarget {
+                mesh: &pv.mesh,
+                gpu: &mut pv.gpu,
+                gpu_mesh: &mut pv.gpu_mesh,
+                skeleton: pv.skeleton.as_ref(),
+                what: "Anim preview",
+            };
+            if let Some(cb) = record_skinned_preview(renderer, &meshes, &queue, &cb_alloc, target) {
+                result.push((ANIM_PREVIEW_TAB.to_string(), cb));
+                break;
+            }
+        }
+        result
+    }
+
+    /// Upload the meshes the previews resolved to but the GPU has not seen.
+    fn load_preview_meshes(
+        assets: &rust_engine::engine::assets::AssetManager,
+        wanted: &[String],
+        what: &str,
+    ) {
+        let to_load: Vec<&String> = {
+            let meshes = assets.meshes.read();
+            wanted
+                .iter()
+                .filter(|p| meshes.indices_for_path(p).is_none())
+                .collect()
+        };
+        for path in to_load {
+            if let Err(e) = assets.load_model_gpu(path) {
+                eprintln!("{what}: failed to load mesh '{path}': {e}");
+            }
+        }
     }
 
     pub fn render(&mut self, _window: &Window) -> Result<(), Box<dyn std::error::Error>> {
@@ -2337,6 +2674,14 @@ impl App {
                         for (key, tid) in regs {
                             if let Some(k) = key.strip_prefix("mesh_preview:") {
                                 if let Some(entry) = self.crusty_mesh_textures.get_mut(k) {
+                                    entry.id = Some(tid);
+                                }
+                            } else if let Some(k) = key.strip_prefix("bs_preview:") {
+                                if let Some(entry) = self.crusty_blend_textures.get_mut(k) {
+                                    entry.id = Some(tid);
+                                }
+                            } else if key == ANIM_PREVIEW_TAB {
+                                if let Some(entry) = self.crusty_anim_texture.as_mut() {
                                     entry.id = Some(tid);
                                 }
                             }
@@ -2703,6 +3048,11 @@ impl App {
                 let _ = self.editor.ui.crusty_dock.save_to_default();
                 println!("Layout reset to default");
             }
+            MenuAction::ResetAllLayouts => {
+                self.editor.ui.crusty_dock.reset_all();
+                let _ = self.editor.ui.crusty_dock.save_to_default();
+                println!("All layouts reset to default");
+            }
             MenuAction::LoadBenchmarkScene => self.load_benchmark_scene(),
             MenuAction::RunBenchmark => self.run_benchmark(),
             MenuAction::Play => self.enter_play_mode(),
@@ -2856,8 +3206,12 @@ impl App {
                                     self.open_mesh_as_tab(relative);
                                 }
                             }
-                        } else if asset_type == AssetType::Graph {
-                            // Open node graph editor tab (Task 40 P4/P6).
+                        } else if asset_type == AssetType::Graph
+                            || asset_type == AssetType::AnimGraph
+                        {
+                            // Open node graph editor tab (Task 40 P4/P6;
+                            // `.animgraph` rides the same path with its own
+                            // node library, Task 41).
                             let relative =
                                 asset_source::to_content_relative(&meta_path.to_string_lossy());
                             #[cfg(feature = "editor")]
@@ -2872,6 +3226,32 @@ impl App {
                             self.open_curve_document(relative);
                             #[cfg(not(feature = "editor"))]
                             let _ = relative;
+                        } else if asset_type == AssetType::BlendSpace {
+                            // Open the `.blendspace` editor tab (Task 41.5).
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            #[cfg(feature = "editor")]
+                            self.open_blend_space_document(relative);
+                            #[cfg(not(feature = "editor"))]
+                            let _ = relative;
+                        } else if asset_type == AssetType::Animation {
+                            // Anim event markers, as a minimal list (Task 41).
+                            use rust_engine::engine::editor::anim_events_dialog::AnimEventsDialog;
+                            let abs = self
+                                .editor
+                                .scene
+                                .asset_browser
+                                .registry
+                                .root_path()
+                                .join(&meta_path);
+                            let relative =
+                                asset_source::to_content_relative(&meta_path.to_string_lossy());
+                            match AnimEventsDialog::load(abs, relative) {
+                                Ok(dlg) => self.editor.scene.anim_events_dialog = Some(dlg),
+                                Err(e) => self.editor.console.messages.push(LogMessage::error(
+                                    format!("Cannot open anim events: {e}"),
+                                )),
+                            }
                         } else if asset_type == AssetType::InputAction {
                             let full_path = std::path::Path::new("content").join(&meta_path);
                             self.open_input_action_as_tab(full_path);
@@ -3373,6 +3753,9 @@ impl App {
                         .root_path()
                         .join(&parent_path);
 
+                    // Create ▸ menu (blend space ticket 03): write the
+                    // template, then the rescan selects the new row and
+                    // enters inline rename — nothing auto-opens.
                     match asset_type {
                         AssetType::InputAction => {
                             let base_name = "NewInputAction";
@@ -3394,7 +3777,10 @@ impl App {
                                         "Created input action: {}",
                                         action_name
                                     )));
-                                    self.editor.scene.asset_browser.request_rescan();
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(&new_name));
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
@@ -3427,7 +3813,10 @@ impl App {
                                         "Created mapping context: {}",
                                         ctx_name
                                     )));
-                                    self.editor.scene.asset_browser.request_rescan();
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(&new_name));
                                 }
                                 Err(e) => {
                                     self.editor.console.messages.push(LogMessage::error(format!(
@@ -3437,7 +3826,29 @@ impl App {
                                 }
                             }
                         }
-                        _ => {}
+                        other => {
+                            use rust_engine::engine::editor::asset_browser::templates;
+                            match templates::create_asset_file(&full_parent, other) {
+                                Ok(Some(file_name)) => {
+                                    self.editor.console.messages.push(LogMessage::info(format!(
+                                        "Created {}: {}",
+                                        other.display_name().to_lowercase(),
+                                        file_name.display()
+                                    )));
+                                    self.editor
+                                        .scene
+                                        .asset_browser
+                                        .select_and_rename_after_rescan(parent_path.join(file_name));
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    self.editor.console.messages.push(LogMessage::error(format!(
+                                        "Failed to create {}: {e}",
+                                        other.display_name().to_lowercase()
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -3453,10 +3864,15 @@ impl App {
         let mut crusty_float_drag: Option<(winit::window::WindowId, bool)> = None;
         let mut crusty_dialog_actions = Vec::new();
         let mut crusty_import_action = ImportDialogAction::None;
-        // Subgraph node double-clicked in a docked graph this frame (P6);
-        // declared out here so it outlives the layout block and can be applied
-        // once the panel borrows are released.
-        let mut graph_open_request: Option<String> = None;
+        let mut anim_events_action =
+            rust_engine::engine::editor::anim_events_dialog::AnimEventsAction::None;
+        // Graph-file descend (subgraph node, nested `.animgraph` state) in a
+        // docked graph this frame (P6 / ticket 09); declared out here so it
+        // outlives the layout block and can be applied once the panel borrows
+        // are released.
+        let mut graph_open_request: Option<
+            rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+        > = None;
         // Set by a graph toolbar's "Clear trace"; applied after the UI, where
         // the world is reachable (GS-3).
         let mut graph_clear_trace: Option<String> = None;
@@ -3472,6 +3888,7 @@ impl App {
         // float window's own Ctrl+S). Saving reaches the plan/curve caches, so
         // it has to happen outside the panel borrows.
         let mut curve_save_requests: Vec<String> = Vec::new();
+        let mut blend_space_save_requests: Vec<String> = Vec::new();
         let crusty_result = {
             use rust_engine::engine::editor::asset_browser_crusty::{
                 asset_browser_panel, AssetBrowserPanelCtx,
@@ -3496,6 +3913,9 @@ impl App {
             };
             use rust_engine::engine::editor::curve_editor_crusty::{
                 curve_editor_panel, CurveEditorPanelCtx,
+            };
+            use rust_engine::engine::editor::blend_space_editor_crusty::{
+                blend_space_editor_panel, BlendSpaceEditorPanelCtx,
             };
             use rust_engine::engine::editor::profiler_crusty::profiler_panel;
             use rust_engine::engine::editor::status_bar_crusty::{status_bar_panel, StatusBarCtx};
@@ -3558,6 +3978,12 @@ impl App {
             // Graph selection outline: preset-invariant except for Graphite's
             // achromatic carve-out, so it must come from the live theme.
             let graph_sel_outline = self.editor.services.theme.palette.selection.outline;
+            // Edit-menu overrides follow the document that owns Edit actions
+            // (same source as `active_graph_key`), so menu and shortcuts agree.
+            let focused_document = self.edit_target_document();
+            // The graph side panels (Details, Variables) show the focused
+            // graph document (per-document layouts ticket 02).
+            let focused_graph_key = self.focused_graph_key();
             let console = &mut self.editor.console;
             let fps = self.core.game_loop.fps();
             let delta_ms = self.core.game_loop.delta_ms();
@@ -3592,6 +4018,8 @@ impl App {
             let inspector = &mut self.editor.scene.inspector_panel;
             inspector.drive_eyedropper();
             let asset_browser = &mut self.editor.scene.asset_browser;
+            let anim_assets = anim_asset_paths(&asset_browser.registry);
+            let mesh_assets = mesh_asset_paths(&asset_browser.registry);
             let profiler = &mut self.editor.ui.profiler_panel;
             let input_settings = &mut self.editor.ui.input_settings_panel;
             let action_set = action_set_snapshot.as_ref();
@@ -3603,7 +4031,10 @@ impl App {
             let mesh_editors = &mut self.editor.scene.mesh_editors;
             let graph_editors = &mut self.editor.scene.graph_editors;
             let curve_editors = &mut self.editor.scene.curve_editors;
+            let blend_space_editors = &mut self.editor.scene.blend_space_editors;
+            let anim_panel = &mut self.editor.scene.anim_previews;
             let graph_registry = &self.editor.scene.node_registry;
+            let anim_graph_registry = &self.editor.scene.anim_node_registry;
             // A frame-local snapshot: the preferences page edits the live
             // keymap mutably in the same block, and the graph panel only
             // reads. A rebind therefore takes effect next frame, which is
@@ -3658,10 +4089,24 @@ impl App {
                 graph_camera_pos,
                 graph_editors.keys(),
             );
+            // Task 41 ticket 06: animation preview — candidates and the bound
+            // preview per open `.animgraph` tab, the LIVE chip's binding rule.
+            let anim_tabs: Vec<(String, Option<u64>)> = graph_editors
+                .iter()
+                .filter(|(k, _)| k.ends_with(".animgraph"))
+                .map(|(k, st)| (k.clone(), st.anim_bind))
+                .collect();
+            let anim_instances =
+                anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
+            let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+            let mut anim_previews =
+                anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
+            fold_anim_panel_previews(&*world, anim_panel, &mut anim_previews);
+            let anim_texture = self.crusty_anim_texture.as_ref().and_then(|e| e.id);
             let graph_focused_tab = self.editor.ui.crusty_dock.state.focused_tab.clone();
             // The curve editor's own Edit-menu override — same rule, fewer
             // verbs (no curve clipboard, so paste/duplicate stay the scene's).
-            let curve_edit_override = graph_focused_tab
+            let curve_edit_override = focused_document
                 .as_deref()
                 .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
                 .and_then(|ft| ft.strip_prefix("curve:"))
@@ -3686,8 +4131,33 @@ impl App {
                         has_clipboard: false,
                     }
                 });
+            let blend_space_edit_override = focused_document
+                .as_deref()
+                .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
+                .and_then(|ft| ft.strip_prefix("blendspace:"))
+                .and_then(|k| blend_space_editors.get(k))
+                .map(|st| {
+                    use rust_engine::engine::editor::menu_bar_crusty::EditMenuOverride;
+                    EditMenuOverride {
+                        undo_label: st
+                            .stack
+                            .undo_description()
+                            .map(|d| format!("Undo {d}"))
+                            .unwrap_or_else(|| "Undo".to_string()),
+                        can_undo: st.stack.can_undo(),
+                        redo_label: st
+                            .stack
+                            .redo_description()
+                            .map(|d| format!("Redo {d}"))
+                            .unwrap_or_else(|| "Redo".to_string()),
+                        can_redo: st.stack.can_redo(),
+                        has_selection: st.selection.is_some(),
+                        has_deletable: st.selection.is_some(),
+                        has_clipboard: false,
+                    }
+                });
             // Edit-menu override when a docked graph tab has focus (P5 routing).
-            let graph_edit_override = graph_focused_tab
+            let graph_edit_override = focused_document
                 .as_deref()
                 .filter(|ft| self.editor.ui.crusty_dock.tree.contains_tab(ft))
                 .and_then(|ft| ft.strip_prefix("graph:"))
@@ -3715,6 +4185,7 @@ impl App {
                     }
                 });
             let mesh_textures = &self.crusty_mesh_textures;
+            let blend_textures = &self.crusty_blend_textures;
             let icons = &self.crusty_icons;
             let icon_registry = self.editor.services.icons.clone();
             // Per-file editor dirty dots: build the set of dirty tab ids so
@@ -3735,6 +4206,12 @@ impl App {
                         .iter()
                         .filter(|(_, s)| s.dirty)
                         .map(|(k, _)| format!("curve:{k}")),
+                )
+                .chain(
+                    blend_space_editors
+                        .iter()
+                        .filter(|(_, s)| s.dirty)
+                        .map(|(k, _)| format!("blendspace:{k}")),
                 )
                 .collect();
             // Both driven by the *active* runtime plugin set (39.8 §5.8/D7),
@@ -3812,6 +4289,7 @@ impl App {
             let command_palette = &mut self.editor.services.command_palette;
             let command_registry = &self.editor.services.command_registry;
             let import_dialog = &mut self.editor.scene.import_dialog;
+            let anim_events_dialog = &mut self.editor.scene.anim_events_dialog;
             let save_as_dialog = &mut self.editor.scene.save_as_dialog;
             let mut save_as_cancel = false;
             let mut crusty_menu_action = MenuAction::None;
@@ -3834,7 +4312,8 @@ impl App {
                         command_history: &*vp_command_history,
                         edit_override: graph_edit_override
                             .clone()
-                            .or_else(|| curve_edit_override.clone()),
+                            .or_else(|| curve_edit_override.clone())
+                            .or_else(|| blend_space_edit_override.clone()),
                         play_mode: current_play_mode,
                         build_dialog,
                         console_messages: &mut console.messages,
@@ -4013,7 +4492,11 @@ impl App {
                                             ui,
                                             GraphEditorPanelCtx {
                                                 state,
-                                                registry: graph_registry,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
                                                 keymap: graph_keymap,
                                                 clipboard: graph_clipboard,
                                                 resolver: &graph_resolver_docs,
@@ -4039,6 +4522,14 @@ impl App {
                                                     .map(Vec::as_slice)
                                                     .unwrap_or(&[]),
                                                 exec_clear: &mut graph_clear_trace,
+                                                anim: anim_previews
+                                                    .iter()
+                                                    .find(|(k, _)| *k == key)
+                                                    .map(|(_, v)| v),
+                                                anim_instances: anim_instances
+                                                    .get(&key)
+                                                    .map(Vec::as_slice)
+                                                    .unwrap_or(&[]),
                                             },
                                         ),
                                         None => dock_crusty::missing_document_panel(
@@ -4073,6 +4564,35 @@ impl App {
                                         ),
                                     }
                                 }
+                                Some(EditorTab::BlendSpace(key)) => {
+                                    match blend_space_editors.get_mut(&key) {
+                                        Some(state) => {
+                                            if blend_space_editor_panel(
+                                                ui,
+                                                rect,
+                                                BlendSpaceEditorPanelCtx {
+                                                    state,
+                                                    anim_assets: &anim_assets,
+                                                    mesh_assets: &mesh_assets,
+                                                    texture: blend_textures
+                                                        .get(&key)
+                                                        .and_then(|e| e.id),
+                                                    selection_outline: graph_sel_outline,
+                                                    focused: graph_focused_tab.as_deref()
+                                                        == Some(tab),
+                                                    handle_shortcuts: false,
+                                                },
+                                            )
+                                            .save_requested
+                                            {
+                                                blend_space_save_requests.push(key.clone());
+                                            }
+                                        }
+                                        None => dock_crusty::missing_document_panel(
+                                            ui, "Blend Space", &key, None,
+                                        ),
+                                    }
+                                }
                                 Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
                                     Some(entry) => entry.panel.draw(
                                         ui,
@@ -4092,6 +4612,68 @@ impl App {
                                         Some("no enabled plugin registers this panel"),
                                     ),
                                 },
+                                // Bodies land in doc-layouts tickets 02–03.
+                                Some(EditorTab::GraphDetails) => {
+                                    use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                        graph_details_panel, GraphDetailsPanelCtx,
+                                    };
+                                    let focused = focused_graph_key
+                                        .as_deref()
+                                        .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                                    match focused {
+                                        Some((key, state)) => graph_details_panel(
+                                            ui,
+                                            rect,
+                                            GraphDetailsPanelCtx {
+                                                state,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
+                                                resolver: &graph_resolver_docs,
+                                                curves: &graph_curve_docs,
+                                                mesh_assets: &mesh_assets,
+                                                auto_mesh: anim_panel
+                                                    .get(key)
+                                                    .and_then(|p| p.mesh.as_deref()),
+                                            },
+                                        ),
+                                        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                                    }
+                                }
+                                Some(EditorTab::GraphVariables) => {
+                                    use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                        graph_variables_panel, GraphVariablesPanelCtx,
+                                    };
+                                    let focused = focused_graph_key
+                                        .as_deref()
+                                        .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                                    match focused {
+                                        Some((key, state)) => graph_variables_panel(
+                                            ui,
+                                            rect,
+                                            GraphVariablesPanelCtx {
+                                                state,
+                                                registry: if key.ends_with(".animgraph") {
+                                                    anim_graph_registry
+                                                } else {
+                                                    graph_registry
+                                                },
+                                            },
+                                        ),
+                                        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                                    }
+                                }
+                                Some(EditorTab::AnimPreview) => anim_preview_body(
+                                    ui,
+                                    rect,
+                                    focused_graph_key.as_deref(),
+                                    graph_editors,
+                                    anim_panel,
+                                    &mesh_assets,
+                                    anim_texture,
+                                ),
                                 _ => dock_crusty::placeholder_panel(
                                     ui,
                                     "This panel is not yet ported to crusty-gui.",
@@ -4172,6 +4754,10 @@ impl App {
                 if let Some(state) = import_dialog.as_mut() {
                     crusty_import_action = dialogs_crusty::import_dialog_panel(ui, state);
                 }
+                if let Some(dlg) = anim_events_dialog.as_mut() {
+                    use rust_engine::engine::editor::anim_events_dialog;
+                    anim_events_action = anim_events_dialog::anim_events_dialog_panel(ui, dlg);
+                }
                 if let Some(dlg) = save_as_dialog.as_mut() {
                     save_as_cancel = dialogs_crusty::save_as_dialog_panel(ui, dlg);
                 }
@@ -4192,6 +4778,11 @@ impl App {
             if save_as_cancel {
                 *save_as_dialog = None;
             }
+            // Ticket 06: land the preview strips' parameter edits on their
+            // bound runtimes — after the UI, when the world is reachable
+            // again. Runtime-only writes; next frame's tick reads them.
+            apply_anim_param_edits(&mut *world, graph_editors, &anim_previews, anim_panel);
+            drive_blend_space_previews(&mut *world, &*world_resources, &picked_bits, blend_space_editors);
             self.crusty_menu_action = crusty_menu_action;
             crusty_result
         };
@@ -4200,8 +4791,23 @@ impl App {
         if let Some(style) = graph_style_request {
             self.editor.ui.settings.prefs.graph.wires.style = style;
         }
-        if let Some(relative) = graph_open_request {
-            self.open_graph_document(relative);
+        match graph_open_request {
+            // Ticket 06: a state's blend space descends into its own tab
+            // kind — no breadcrumb chain for it (spec: out of scope).
+            Some(req) if req.path.ends_with(".blendspace") => {
+                self.open_blend_space_document(req.path);
+            }
+            Some(req) => {
+                self.open_graph_document(req.path.clone());
+                // A descent seeds the opened tab's breadcrumb chain; a plain
+                // jump (empty chain) leaves the target's session nav alone.
+                if !req.back.is_empty() {
+                    if let Some(st) = self.editor.scene.graph_editors.get_mut(&req.path) {
+                        st.nav_back = req.back;
+                    }
+                }
+            }
+            None => {}
         }
         // "Clear trace" (GS-3): the taken-path tint and the pulse history are
         // one session's statement, and the recorder that owns them lives on
@@ -4217,6 +4823,9 @@ impl App {
         for key in std::mem::take(&mut curve_save_requests) {
             self.save_curve_editor(&key);
         }
+        for key in std::mem::take(&mut blend_space_save_requests) {
+            self.save_blend_space_editor(&key);
+        }
 
         // Commit (or veto) a crusty dock tab-close request.
         if let Some(tab) = crusty_close_tab.take() {
@@ -4225,6 +4834,7 @@ impl App {
         for tab in std::mem::take(&mut crusty_ctx_close) {
             self.handle_crusty_tab_close(&tab);
         }
+        self.sync_layout_profile();
 
         // Resolve a cross-window drag from a float window: docked into the
         // main tree → drop the tab from the float (an emptied window closes
@@ -4242,6 +4852,7 @@ impl App {
         }
 
         self.handle_import_dialog_action(crusty_import_action);
+        self.handle_anim_events_action(anim_events_action);
         for action in crusty_dialog_actions {
             self.handle_editor_action(action);
         }
@@ -4312,6 +4923,87 @@ impl App {
                         }
                     }
                 }
+            }
+            // Blend space previews: the same registration dance, keyed by
+            // the tab's path and the `bs_preview:` name.
+            let bs_editors = &self.editor.scene.blend_space_editors;
+            self.crusty_blend_textures.retain(|k, entry| {
+                if bs_editors.contains_key(k) {
+                    return true;
+                }
+                if let Some(id) = entry.id {
+                    packet.crusty_native_removals.push(id);
+                }
+                false
+            });
+            for (key, st) in bs_editors.iter() {
+                let Some(ref gpu) = st.preview.gpu else { continue };
+                if gpu.mesh_indices.is_empty() {
+                    continue;
+                }
+                let tab = format!("blendspace:{key}");
+                if !self.crusty_docked_preview_cbs.iter().any(|(k, _)| *k == tab) {
+                    continue;
+                }
+                let view = gpu.texture.image_view();
+                match self.crusty_blend_textures.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        packet
+                            .crusty_native_registrations
+                            .push((format!("bs_preview:{key}"), view.clone()));
+                        e.insert(CrustyMeshTexture { id: None, view });
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let entry = e.get_mut();
+                        if !std::sync::Arc::ptr_eq(&entry.view, &view) {
+                            if let Some(id) = entry.id {
+                                packet.crusty_native_updates.push((id, view.clone()));
+                                entry.view = view;
+                            }
+                        }
+                    }
+                }
+            }
+            // The Anim Preview panel (ticket 03): one registration for the
+            // focused graph's target; re-pointed when that target changes
+            // (another graph took the focus, the mesh changed), dropped when
+            // no preview holds one or the panel left the main dock (a float
+            // window registers the target in its own registry).
+            let anim_docked = self.editor.ui.crusty_dock.tree.contains_tab(ANIM_PREVIEW_TAB);
+            let anim_view = self
+                .editor
+                .scene
+                .anim_previews
+                .values()
+                .find_map(|pv| pv.gpu.as_ref().filter(|g| !g.mesh_indices.is_empty()))
+                .filter(|_| anim_docked)
+                .map(|g| g.texture.image_view());
+            let anim_has_cb = self
+                .crusty_docked_preview_cbs
+                .iter()
+                .any(|(k, _)| k == ANIM_PREVIEW_TAB);
+            match (anim_view, self.crusty_anim_texture.as_mut()) {
+                (Some(view), None) if anim_has_cb => {
+                    packet
+                        .crusty_native_registrations
+                        .push((ANIM_PREVIEW_TAB.to_string(), view.clone()));
+                    self.crusty_anim_texture = Some(CrustyMeshTexture { id: None, view });
+                }
+                (Some(view), Some(entry)) if anim_has_cb => {
+                    if !std::sync::Arc::ptr_eq(&entry.view, &view) {
+                        if let Some(id) = entry.id {
+                            packet.crusty_native_updates.push((id, view.clone()));
+                            entry.view = view;
+                        }
+                    }
+                }
+                (None, Some(entry)) => {
+                    if let Some(id) = entry.id {
+                        packet.crusty_native_removals.push(id);
+                    }
+                    self.crusty_anim_texture = None;
+                }
+                _ => {}
             }
             packet.crusty_preview_cbs = std::mem::take(&mut self.crusty_docked_preview_cbs)
                 .into_iter()
@@ -4606,6 +5298,32 @@ impl App {
                 return;
             }
             self.close_curve_tab(key);
+        } else if let Some(key) = tab.strip_prefix("blendspace:") {
+            if self
+                .editor
+                .scene
+                .blend_space_editors
+                .get(key)
+                .is_some_and(|s| s.dirty)
+            {
+                let key = key.to_string();
+                let msg = format!("Save changes to '{key}' before closing?");
+                self.editor.services.dialogs.save_discard_cancel(
+                    format!("blendspace_close:{key}"),
+                    "Unsaved Blend Space",
+                    msg,
+                    EditorAction::SaveAndCloseEditor {
+                        kind: SecondaryWindowKind::BlendSpace,
+                        key: key.clone(),
+                    },
+                    EditorAction::DiscardAndCloseEditor {
+                        kind: SecondaryWindowKind::BlendSpace,
+                        key,
+                    },
+                );
+                return;
+            }
+            self.close_blend_space_tab(key);
         } else {
             self.editor.ui.crusty_dock.tree.close_tab(tab);
             if let Some(key) = tab.strip_prefix("mesh:") {
@@ -4618,16 +5336,120 @@ impl App {
         }
     }
 
-    /// Content-relative key of the graph tab that currently has focus in the
-    /// *main* dock, if any. Returns `None` when the focused tab isn't a graph,
-    /// or the graph is torn off into a float window (that window owns its
-    /// keyboard editing). Drives edit-action focus routing (Task 40 P5).
+    /// Keep `focused_document` and the active layout profile in step with
+    /// the dock, after the dock frame and its tab closes have landed.
+    ///
+    /// A click on a document tab makes it the focused document; a click on
+    /// a side panel changes nothing; a focused document that left the tree
+    /// (closed, torn off) yields to the strip's front tab. The profile then
+    /// follows the focused document's kind — swapping the surrounding
+    /// panels when the kind changes (doc-layouts spec).
+    #[cfg(feature = "editor")]
+    fn sync_layout_profile(&mut self) {
+        use rust_engine::engine::editor::dock_crusty::{self, is_document_id};
+        let dock = &self.editor.ui.crusty_dock;
+        // A tab closed this frame can still be the dock's focused tab (its
+        // cleanup ran before the close landed); membership is the test.
+        let focused = dock
+            .state
+            .focused_tab
+            .as_deref()
+            .filter(|t| is_document_id(t) && dock.tree.contains_tab(t));
+        let doc = match focused {
+            Some(t) => Some(t.to_string()),
+            None => self
+                .focused_document
+                .clone()
+                .filter(|d| dock.tree.contains_tab(d))
+                .or_else(|| dock.active_document()),
+        };
+        self.focused_document = doc.clone();
+        let Some(tab) = doc.as_deref().and_then(dock_crusty::parse_tab) else {
+            return;
+        };
+        let domain = match &tab {
+            EditorTab::GraphEditor(key) => {
+                self.editor.scene.graph_editors.get(key).map(|st| st.domain)
+            }
+            _ => None,
+        };
+        let Some(profile) = dock_crusty::profile_of(&tab, domain) else {
+            return;
+        };
+        if profile != dock.active {
+            if let Some(doc) = doc {
+                self.editor.ui.crusty_dock.swap_profile(profile, &doc);
+            }
+        }
+    }
+
+    /// The document that owns Edit actions and the Edit menu: the focused
+    /// document (`focused_document`, in the main dock) — except while a
+    /// scene-side panel (Hierarchy, Inspector, Assets, Console, …) holds the
+    /// dock focus, which keeps today's scene routing. The graph side panels
+    /// (Details, Variables, Preview) defer to the focused graph, so editing
+    /// in them undoes on the graph's stack.
+    #[cfg(feature = "editor")]
+    fn edit_target_document(&self) -> Option<String> {
+        use rust_engine::engine::editor::dock_crusty::{is_document, parse_tab};
+        let dock = &self.editor.ui.crusty_dock;
+        if let Some(ft) = dock.state.focused_tab.as_deref().and_then(parse_tab) {
+            let graph_panel = matches!(
+                ft,
+                EditorTab::GraphDetails | EditorTab::GraphVariables | EditorTab::AnimPreview
+            );
+            if !is_document(&ft) && !graph_panel {
+                return None;
+            }
+        }
+        self.focused_document
+            .clone()
+            .filter(|d| dock.tree.contains_tab(d))
+    }
+
+    /// Content-relative key of the graph the Details / Variables panels show:
+    /// the focused graph document, whichever side panel holds dock focus
+    /// (spec ruling: clicking a panel never loses the document — dragging a
+    /// clip from Assets into a Details row depends on it). Edit routing asks
+    /// the stricter question, `active_graph_key`.
+    #[cfg(feature = "editor")]
+    fn focused_graph_key(&self) -> Option<String> {
+        let dock = &self.editor.ui.crusty_dock;
+        let key = self
+            .focused_document
+            .as_deref()
+            .filter(|d| dock.tree.contains_tab(d))?
+            .strip_prefix("graph:")?;
+        self.editor
+            .scene
+            .graph_editors
+            .contains_key(key)
+            .then(|| key.to_string())
+    }
+
+    /// Keep the Anim Preview panel's machines in step with the panel
+    /// (doc-layouts ticket 03): an entry lives while the panel draws it.
+    /// A preview nobody drew last frame — the panel closed, the focus moved
+    /// to another graph, or its graph tab closed — goes, render target and
+    /// all; the next draw starts it fresh at ENTRY. Runs once per frame,
+    /// first (`build_anim_preview_cbs`), after the last frame's `shown`
+    /// flags landed and before anything records or registers a target.
+    #[cfg(feature = "editor")]
+    fn prune_anim_previews(&mut self) {
+        let editors = &self.editor.scene.graph_editors;
+        self.editor
+            .scene
+            .anim_previews
+            .retain(|k, pv| std::mem::take(&mut pv.shown) && editors.contains_key(k));
+    }
+
+    /// Content-relative key of the graph that owns Edit actions
+    /// (`edit_target_document`), if any. `None` when that document isn't a
+    /// graph, or the graph is torn off into a float window (that window owns
+    /// its keyboard editing). Drives edit-action focus routing (Task 40 P5).
     #[cfg(feature = "editor")]
     fn active_graph_key(&self) -> Option<String> {
-        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
-        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
-            return None;
-        }
+        let ft = self.edit_target_document()?;
         let key = ft.strip_prefix("graph:")?.to_string();
         self.editor
             .scene
@@ -4643,7 +5465,13 @@ impl App {
         let Some(st) = scene.graph_editors.get_mut(key) else {
             return;
         };
-        let reg = &scene.node_registry;
+        // Disjoint field borrows on purpose — a helper call would borrow the
+        // whole scene across `st`.
+        let reg = if key.ends_with(".animgraph") {
+            &scene.anim_node_registry
+        } else {
+            &scene.node_registry
+        };
         let clip = &mut scene.graph_clipboard;
         // Never act across a half-finished gesture: undo/redo/save would
         // otherwise skip an untracked mutation, or mark a save cursor over
@@ -4682,7 +5510,11 @@ impl App {
             // A save cursor must describe committed content, so any live
             // gesture is settled before the write.
             if st.gesture_in_flight() {
-                let reg = &self.editor.scene.node_registry;
+                let reg = if key.ends_with(".animgraph") {
+                    &self.editor.scene.anim_node_registry
+                } else {
+                    &self.editor.scene.node_registry
+                };
                 st.flush_prop_edit(reg);
                 st.cancel_interactions();
             }
@@ -4704,6 +5536,24 @@ impl App {
         // no longer contains, across restarts, for the rest of the session.
         //
         // Same shape as `save_curve_state` (P8b): write, then invalidate.
+        if key.ends_with(".animgraph") {
+            // Task 41: the animation plan cache is this document's consumer;
+            // the generation bump restarts live machines on their next tick.
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::animation::graph::AnimGraphPlanCache>()
+            {
+                cache.invalidate(key);
+            }
+            // Ticket 09: another open `.animgraph` may nest the one just
+            // saved — its anchored refusals compile against the file on
+            // disk, so they are recomputed now rather than on its next edit.
+            let key = key.to_string();
+            self.refresh_anim_graph_hosts(&key);
+            return;
+        }
         #[cfg(feature = "graph-scripting")]
         if let Some(cache) = self
             .core
@@ -4712,6 +5562,20 @@ impl App {
             .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
         {
             cache.invalidate(key);
+        }
+    }
+
+    /// Recompute the domain-compiler refusals of every open `.animgraph` tab
+    /// other than `changed_key` — a nested reference (ticket 09) makes a
+    /// host's compile depend on files it does not own, and those refusals
+    /// read from disk, so a save/reload of any `.animgraph` is the moment
+    /// they can change.
+    #[cfg(feature = "editor")]
+    fn refresh_anim_graph_hosts(&mut self, changed_key: &str) {
+        for st in self.editor.scene.graph_editors.values_mut() {
+            if st.domain.is_animation() && st.path != changed_key {
+                st.refresh_domain_errors();
+            }
         }
     }
 
@@ -4793,6 +5657,12 @@ impl App {
                     }
                     Some(("Curve", key.clone(), self.hydrate_curve(key)))
                 }
+                EditorTab::BlendSpace(key) => {
+                    if self.editor.scene.blend_space_editors.contains_key(key) {
+                        continue;
+                    }
+                    Some(("Blend Space", key.clone(), self.hydrate_blend_space(key)))
+                }
                 EditorTab::MeshEditor(key) => {
                     if self.editor.scene.mesh_editors.contains_key(key) {
                         continue;
@@ -4867,7 +5737,7 @@ impl App {
         let mut state = rust_engine::engine::editor::graph_editor::GraphEditorState::open(
             &abs,
             key,
-            &self.editor.scene.node_registry,
+            self.editor.scene.graph_registry(key),
         )?;
         restore_graph_ui_state(&mut state, key);
         self.editor.scene.graph_editors.insert(key.to_string(), state);
@@ -4887,6 +5757,20 @@ impl App {
         let state =
             rust_engine::engine::editor::curve_editor::CurveEditorState::open(&abs, key)?;
         self.editor.scene.curve_editors.insert(key.to_string(), state);
+        Ok(())
+    }
+
+    /// Load a `.blendspace` for a restored tab, without touching the dock:
+    /// `hydrate_curve`, one asset kind over.
+    #[cfg(feature = "editor")]
+    fn hydrate_blend_space(&mut self, key: &str) -> Result<(), String> {
+        let abs = std::path::Path::new("content").join(key);
+        if !abs.exists() {
+            return Err("file missing".to_string());
+        }
+        let state =
+            rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState::open(&abs, key)?;
+        self.editor.scene.blend_space_editors.insert(key.to_string(), state);
         Ok(())
     }
 
@@ -4933,7 +5817,7 @@ impl App {
             match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
                 &abs,
                 &relative,
-                &self.editor.scene.node_registry,
+                self.editor.scene.graph_registry(&relative),
             ) {
                 Ok(mut state) => {
                     restore_graph_ui_state(&mut state, &relative);
@@ -4972,15 +5856,125 @@ impl App {
         }
     }
 
+    /// Open a `.blendspace` by content-relative key: focus it if already
+    /// open (unless it lives in a float window), else load it and open a tab.
+    /// Ticket 06 routes the animation graph state descend here too.
+    #[cfg(feature = "editor")]
+    pub fn open_blend_space_document(&mut self, relative: String) {
+        self.hydration_failed.remove(&format!("blendspace:{relative}"));
+        if !self.editor.scene.blend_space_editors.contains_key(&relative) {
+            match self.hydrate_blend_space(&relative) {
+                Ok(()) => self.open_blend_space_as_tab(relative),
+                Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                    "Failed to open blend space '{relative}': {e}"
+                ))),
+            }
+        } else if !self.crusty_float_hosts_tab(&format!("blendspace:{relative}")) {
+            self.open_blend_space_as_tab(relative);
+        }
+    }
+
+    /// Content-relative key of the focused *main-dock* blend space tab, if
+    /// any (the `active_curve_key` rule).
+    #[cfg(feature = "editor")]
+    fn active_blend_space_key(&self) -> Option<String> {
+        let ft = self.edit_target_document()?;
+        let key = ft.strip_prefix("blendspace:")?.to_string();
+        self.editor
+            .scene
+            .blend_space_editors
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    #[cfg(feature = "editor")]
+    fn blend_space_edit(&mut self, key: &str, action: EditorAction) {
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return;
+        };
+        match action {
+            EditorAction::Undo => st.undo(),
+            EditorAction::Redo => st.redo(),
+            EditorAction::Delete => st.delete_selection(),
+            _ => {}
+        }
+    }
+
+    /// Save the blend space editor `key` (docked path). See [`save_blend_space_state`].
+    #[cfg(feature = "editor")]
+    fn save_blend_space_editor(&mut self, key: &str) {
+        save_blend_space_state(
+            &mut self.editor.scene.blend_space_editors,
+            &mut self.editor.scene.graph_editors,
+            &mut self.editor.console,
+            &mut self.core.game_world,
+            key,
+        );
+    }
+
+    /// Close a blend space tab everywhere (main dock + float windows) and
+    /// drop its document.
+    #[cfg(feature = "editor")]
+    fn close_blend_space_tab(&mut self, key: &str) {
+        let tab = format!("blendspace:{key}");
+        self.editor.ui.crusty_dock.tree.close_tab(&tab);
+        for fw in self.crusty_floats.values_mut() {
+            fw.tree.close_tab(&tab);
+        }
+        self.editor.scene.blend_space_editors.remove(key);
+    }
+
+    /// The watcher echo of this editor's own `.blendspace` save: one event
+    /// per save, consumed by clearing the stamp (the curve editor's guard).
+    #[cfg(feature = "editor")]
+    fn blend_space_save_echo(&mut self, key: &str) -> bool {
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return false;
+        };
+        let own = st
+            .last_saved_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+        if own {
+            st.last_saved_at = None;
+        }
+        own
+    }
+
+    /// An external `.blendspace` write: reload the open doc if clean (view
+    /// kept), warn if dirty.
+    #[cfg(feature = "editor")]
+    fn reload_blend_space_editor(&mut self, key: &str) {
+        use rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState;
+        let Some(st) = self.editor.scene.blend_space_editors.get_mut(key) else {
+            return;
+        };
+        if st.dirty {
+            self.editor.console.messages.push(LogMessage::warning(format!(
+                "Blend space '{key}' changed on disk; keeping your unsaved edits"
+            )));
+            return;
+        }
+        let abs = std::path::Path::new("content").join(key);
+        match BlendSpaceEditorState::open(&abs, key) {
+            Ok(fresh) => {
+                *st = fresh;
+                self.editor
+                    .console
+                    .messages
+                    .push(LogMessage::info(format!("Blend space reloaded: {key}")));
+            }
+            Err(e) => self.editor.console.messages.push(LogMessage::error(format!(
+                "Failed to reload blend space '{key}': {e}"
+            ))),
+        }
+    }
+
     /// Content-relative key of the focused *main-dock* curve tab, if any. The
     /// `active_graph_key` rule, verbatim: a tab torn off into a float window
     /// owns its own keyboard, so it does not answer here.
     #[cfg(feature = "editor")]
     fn active_curve_key(&self) -> Option<String> {
-        let ft = self.editor.ui.crusty_dock.state.focused_tab.clone()?;
-        if !self.editor.ui.crusty_dock.tree.contains_tab(&ft) {
-            return None;
-        }
+        let ft = self.edit_target_document()?;
         let key = ft.strip_prefix("curve:")?.to_string();
         self.editor
             .scene
@@ -5053,13 +6047,18 @@ impl App {
             &docs,
             root,
         );
+        let script_reg = std::sync::Arc::clone(&scene.node_registry);
+        let anim_reg = std::sync::Arc::clone(&scene.anim_node_registry);
         for st in scene.graph_editors.values_mut() {
-            st.ref_errors = validate_refs(&st.doc, &st.path, &scene.node_registry, &docs);
+            // The document's own library (Task 41): an `.animgraph` resolves
+            // and validates against the animation registry.
+            let reg = if st.domain.is_animation() { &anim_reg } else { &script_reg };
+            st.ref_errors = validate_refs(&st.doc, &st.path, reg, &docs);
             // A dangling `.curve` is cross-asset too, so it belongs to this
             // pass and not to the doc-local `errors` recomputed on every
             // keystroke. Same rule the compiler applies, shared code.
             st.ref_errors.extend(validate_curves(
-                &DocDescriptors::new(&st.doc, &scene.node_registry).with_curves(&curves),
+                &DocDescriptors::new(&st.doc, reg).with_curves(&curves),
             ));
         }
         GraphResolverDocs { docs, curves }
@@ -5073,6 +6072,7 @@ impl App {
         use rust_engine::engine::editor::graph_editor::GraphEditorState;
         use rust_engine::engine::node_graph::referencing_hosts;
         let key = asset_source::to_content_relative(abs_path);
+        let is_anim = key.ends_with(".animgraph");
 
         // Suppress the watcher echo of our own just-completed save: consume
         // exactly one event per save (clear the stamp), so a genuine external
@@ -5099,18 +6099,38 @@ impl App {
         // Invalidation also bumps a generation counter, so any *running*
         // instance restarts on its next tick and re-fires BeginPlay. Editing a
         // graph while playing is a stated non-goal (D9); restarting is the
-        // simplest behavior that is never subtly wrong.
+        // simplest behavior that is never subtly wrong. An `.animgraph` write
+        // (Task 41) drops the animation plan cache the same way — live
+        // machines restart against the new document on their next tick.
+        if is_anim {
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::animation::graph::AnimGraphPlanCache>()
+            {
+                cache.invalidate(&key);
+            }
+            // Ticket 09: hosts nesting the changed graph recompile their
+            // anchored refusals against the new file.
+            self.refresh_anim_graph_hosts(&key);
+        }
         #[cfg(feature = "graph-scripting")]
-        if let Some(cache) = self
-            .core
-            .game_world
-            .resources_mut()
-            .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
-        {
-            cache.invalidate(&key);
+        if !is_anim {
+            if let Some(cache) = self
+                .core
+                .game_world
+                .resources_mut()
+                .get_mut::<rust_engine::engine::scripting::GraphPlanCache>()
+            {
+                cache.invalidate(&key);
+            }
         }
 
-        // Reload the changed doc if it's open and clean; warn if dirty.
+        // Reload the changed doc if it's open and clean; warn if dirty. The
+        // registry Arc is cloned up front: the helper borrows the scene the
+        // `get_mut` is already holding.
+        let reload_reg = std::sync::Arc::clone(self.editor.scene.graph_registry(&key));
         if let Some(st) = self.editor.scene.graph_editors.get_mut(&key) {
             if st.dirty {
                 self.editor.console.messages.push(LogMessage::warning(format!(
@@ -5118,7 +6138,7 @@ impl App {
                 )));
             } else {
                 let abs = std::path::Path::new("content").join(&key);
-                match GraphEditorState::open(&abs, &key, &self.editor.scene.node_registry) {
+                match GraphEditorState::open(&abs, &key, &reload_reg) {
                     Ok(mut fresh) => {
                         // Preserve the view and any selection whose ids survive.
                         fresh.view = st.view;
@@ -5361,6 +6381,9 @@ impl App {
         let play_mode = self.play_mode();
         let active_scene_id = self.editor.scene.registry.active_id;
         let scene_name = self.editor.scene.current_scene_name.clone();
+        // A floated Details/Variables panel follows the main dock's focused
+        // graph, same as a docked one (ticket 02).
+        let focused_graph_key = self.focused_graph_key();
 
         let Self {
             crusty_floats,
@@ -5404,9 +6427,14 @@ impl App {
         let mesh_editors = &mut editor.scene.mesh_editors;
         let graph_editors = &mut editor.scene.graph_editors;
         let graph_registry = &editor.scene.node_registry;
+        let anim_graph_registry = &editor.scene.anim_node_registry;
         let graph_keymap = &editor.services.keymap;
         let graph_clipboard = &mut editor.scene.graph_clipboard;
         let curve_editors = &mut editor.scene.curve_editors;
+        let blend_space_editors = &mut editor.scene.blend_space_editors;
+        let anim_panel = &mut editor.scene.anim_previews;
+        let anim_assets = anim_asset_paths(&asset_browser.registry);
+        let mesh_assets = mesh_asset_paths(&asset_browser.registry);
         // P6: subgraph resolver + `.subgraph` asset list for float graph panels.
         let graph_resolver_docs = rust_engine::engine::editor::graph_editor::build_resolver_docs(
             graph_editors.iter().map(|(k, s)| (k.as_str(), &s.doc)),
@@ -5462,24 +6490,46 @@ impl App {
             graph_camera_pos,
             graph_editors.keys(),
         );
+        // Ticket 06 preview bindings, same rule as the docked path.
+        let anim_tabs: Vec<(String, Option<u64>)> = graph_editors
+            .iter()
+            .filter(|(k, _)| k.ends_with(".animgraph"))
+            .map(|(k, st)| (k.clone(), st.anim_bind))
+            .collect();
+        let anim_instances =
+            anim_instance_lists(&*world, graph_camera_pos, anim_tabs.iter().map(|(k, _)| k));
+        let picked_bits: Vec<u64> = sel.all().map(|e| e.to_bits().get()).collect();
+        let mut anim_previews =
+            anim_preview_bindings(&*world, &picked_bits, &anim_tabs, &anim_instances);
+        fold_anim_panel_previews(&*world, anim_panel, &mut anim_previews);
         let mut graph_clear_trace: Option<String> = None;
-        let mut graph_open_requests: Vec<String> = Vec::new();
+        let mut graph_open_requests: Vec<
+            rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+        > = Vec::new();
         let mut graph_style_request: Option<WireStyle> = None;
         // Curve tabs in float windows that asked to save (their own Ctrl+S or
         // the toolbar). Applied after the window loop, like the graph opens.
         let mut float_curve_saves: Vec<String> = Vec::new();
+        let mut float_blend_space_saves: Vec<String> = Vec::new();
+        // Blend spaces descended into from a float `.animgraph` (ticket 06):
+        // their own tab kind, opened after the borrows below end.
+        let mut float_blend_space_opens: Vec<String> = Vec::new();
 
         for fw in crusty_floats.values_mut() {
             let mut tabs = Vec::new();
             fw.tree.collect_tabs(&mut tabs);
 
-            // Mesh previews hosted here: drop stale textures, register this
-            // window's registry-local ids, claim this window's preview CBs.
-            fw.prune_mesh_textures(|k| tabs.iter().any(|t| t == &format!("mesh:{k}")));
+            // Mesh + blend space previews hosted here: drop stale textures,
+            // register this window's registry-local ids, claim this window's
+            // preview CBs. Mesh previews key by mesh path, blend space
+            // previews by their full tab id (`blendspace:<path>`).
+            fw.prune_mesh_textures(|k| {
+                tabs.iter().any(|t| t == &format!("mesh:{k}") || t == k)
+            });
             let mut cbs = Vec::new();
             let mut cb_keys = Vec::new();
             float_cbs.retain(|(k, cb)| {
-                if tabs.iter().any(|t| t == &format!("mesh:{k}")) {
+                if tabs.iter().any(|t| t == &format!("mesh:{k}") || t == k) {
                     cbs.push(cb.clone());
                     cb_keys.push(k.clone());
                     false
@@ -5489,16 +6539,35 @@ impl App {
             });
             let mut mesh_tex = std::collections::HashMap::new();
             for tab in &tabs {
-                let Some(key) = tab.strip_prefix("mesh:") else {
-                    continue;
-                };
-                if let Some(preview) = mesh_editors.get(key).and_then(|d| d.preview.as_ref()) {
-                    if !preview.mesh_indices.is_empty() {
-                        let has_cb = cb_keys.iter().any(|k| k == key);
-                        if let Some(id) =
-                            fw.ensure_mesh_texture(key, preview.texture.image_view(), has_cb)
-                        {
-                            mesh_tex.insert(key.to_string(), id);
+                if let Some(key) = tab.strip_prefix("mesh:") {
+                    if let Some(preview) = mesh_editors.get(key).and_then(|d| d.preview.as_ref()) {
+                        if !preview.mesh_indices.is_empty() {
+                            let has_cb = cb_keys.iter().any(|k| k == key);
+                            if let Some(id) =
+                                fw.ensure_mesh_texture(key, preview.texture.image_view(), has_cb)
+                            {
+                                mesh_tex.insert(key.to_string(), id);
+                            }
+                        }
+                    }
+                } else if let Some(key) = tab.strip_prefix("blendspace:") {
+                    let gpu = blend_space_editors.get(key).and_then(|s| s.preview.gpu.as_ref());
+                    if let Some(gpu) = gpu.filter(|g| !g.mesh_indices.is_empty()) {
+                        let has_cb = cb_keys.iter().any(|k| k == tab);
+                        if let Some(id) = fw.ensure_mesh_texture(tab, gpu.texture.image_view(), has_cb) {
+                            mesh_tex.insert(tab.clone(), id);
+                        }
+                    }
+                } else if tab == ANIM_PREVIEW_TAB {
+                    // The Anim Preview panel floated here (ticket 03): the
+                    // focused graph's target, under the panel's own tab id.
+                    let gpu = anim_panel
+                        .values()
+                        .find_map(|pv| pv.gpu.as_ref().filter(|g| !g.mesh_indices.is_empty()));
+                    if let Some(gpu) = gpu {
+                        let has_cb = cb_keys.iter().any(|k| k == tab);
+                        if let Some(id) = fw.ensure_mesh_texture(tab, gpu.texture.image_view(), has_cb) {
+                            mesh_tex.insert(tab.clone(), id);
                         }
                     }
                 }
@@ -5535,8 +6604,10 @@ impl App {
                     plugin_titles: &plugin_panel_titles,
                 },
             );
-            // Subgraph double-click in this float → queued for the host to open.
-            let mut float_open_request: Option<String> = None;
+            // Graph-file descend in this float → queued for the host to open.
+            let mut float_open_request: Option<
+                rust_engine::engine::editor::graph_editor::GraphOpenRequest,
+            > = None;
             let res = fw.frame(
                 device.clone(),
                 queue.clone(),
@@ -5626,7 +6697,11 @@ impl App {
                                 ui,
                                 GraphEditorPanelCtx {
                                     state,
-                                    registry: graph_registry,
+                                    registry: if key.ends_with(".animgraph") {
+                                        anim_graph_registry
+                                    } else {
+                                        graph_registry
+                                    },
                                     keymap: graph_keymap,
                                     clipboard: graph_clipboard,
                                     resolver: &graph_resolver_docs,
@@ -5652,6 +6727,14 @@ impl App {
                                         .map(Vec::as_slice)
                                         .unwrap_or(&[]),
                                     exec_clear: &mut graph_clear_trace,
+                                    anim: anim_previews
+                                        .iter()
+                                        .find(|(k, _)| *k == key)
+                                        .map(|(_, v)| v),
+                                    anim_instances: anim_instances
+                                        .get(&key)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]),
                                 },
                             ),
                             None => dock_crusty::missing_document_panel(ui, "Graph", &key, None),
@@ -5682,6 +6765,34 @@ impl App {
                             }
                             None => dock_crusty::missing_document_panel(ui, "Curve", &key, None),
                         },
+                        Some(EditorTab::BlendSpace(key)) => {
+                            match blend_space_editors.get_mut(&key) {
+                                Some(state) => {
+                                    if rust_engine::engine::editor::blend_space_editor_crusty::
+                                        blend_space_editor_panel(
+                                            ui,
+                                            rect,
+                                            rust_engine::engine::editor::blend_space_editor_crusty::
+                                                BlendSpaceEditorPanelCtx {
+                                                    state,
+                                                    anim_assets: &anim_assets,
+                                                    mesh_assets: &mesh_assets,
+                                                    texture: mesh_tex.get(tab).copied(),
+                                                    selection_outline: graph_sel_outline,
+                                                    focused: true,
+                                                    handle_shortcuts: true,
+                                                },
+                                        )
+                                        .save_requested
+                                    {
+                                        float_blend_space_saves.push(key.clone());
+                                    }
+                                }
+                                None => dock_crusty::missing_document_panel(
+                                    ui, "Blend Space", &key, None,
+                                ),
+                            }
+                        }
                         Some(EditorTab::Plugin(id)) => match plugin_set.panel_mut(&id) {
                             Some(entry) => entry.panel.draw(
                                 ui,
@@ -5699,6 +6810,67 @@ impl App {
                                 Some("no enabled plugin registers this panel"),
                             ),
                         },
+                        Some(EditorTab::GraphDetails) => {
+                            use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                graph_details_panel, GraphDetailsPanelCtx,
+                            };
+                            let focused = focused_graph_key
+                                .as_deref()
+                                .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                            match focused {
+                                Some((key, state)) => graph_details_panel(
+                                    ui,
+                                    rect,
+                                    GraphDetailsPanelCtx {
+                                        state,
+                                        registry: if key.ends_with(".animgraph") {
+                                            anim_graph_registry
+                                        } else {
+                                            graph_registry
+                                        },
+                                        resolver: &graph_resolver_docs,
+                                        curves: &graph_curve_docs,
+                                        mesh_assets: &mesh_assets,
+                                        auto_mesh: anim_panel
+                                            .get(key)
+                                            .and_then(|p| p.mesh.as_deref()),
+                                    },
+                                ),
+                                None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                            }
+                        }
+                        Some(EditorTab::GraphVariables) => {
+                            use rust_engine::engine::editor::graph_dock_panels_crusty::{
+                                graph_variables_panel, GraphVariablesPanelCtx,
+                            };
+                            let focused = focused_graph_key
+                                .as_deref()
+                                .and_then(|k| graph_editors.get_mut(k).map(|s| (k, s)));
+                            match focused {
+                                Some((key, state)) => graph_variables_panel(
+                                    ui,
+                                    rect,
+                                    GraphVariablesPanelCtx {
+                                        state,
+                                        registry: if key.ends_with(".animgraph") {
+                                            anim_graph_registry
+                                        } else {
+                                            graph_registry
+                                        },
+                                    },
+                                ),
+                                None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+                            }
+                        }
+                        Some(EditorTab::AnimPreview) => anim_preview_body(
+                            ui,
+                            rect,
+                            focused_graph_key.as_deref(),
+                            graph_editors,
+                            anim_panel,
+                            &mesh_assets,
+                            mesh_tex.get(tab).copied(),
+                        ),
                         _ => dock_crusty::placeholder_panel(
                             ui,
                             "This panel is not yet ported to crusty-gui.",
@@ -5709,8 +6881,12 @@ impl App {
             if let Err(e) = res {
                 eprintln!("crusty float window frame failed: {e}");
             }
-            if let Some(path) = float_open_request {
-                graph_open_requests.push(path);
+            if let Some(req) = float_open_request {
+                if req.path.ends_with(".blendspace") {
+                    float_blend_space_opens.push(req.path);
+                } else {
+                    graph_open_requests.push(req);
+                }
             }
         }
 
@@ -5720,30 +6896,62 @@ impl App {
         if let Some(style) = graph_style_request {
             editor.ui.settings.prefs.graph.wires.style = style;
         }
-        for relative in graph_open_requests {
-            if graph_editors.contains_key(&relative) {
-                editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
-            } else {
+        for req in graph_open_requests {
+            let relative = req.path;
+            if !graph_editors.contains_key(&relative) {
                 let abs = std::path::Path::new("content").join(&relative);
+                // The document's own library, exactly as the docked open
+                // path picks it — an `.animgraph` authors against the
+                // animation registry wherever it was opened from.
+                let reg = if relative.ends_with(".animgraph") {
+                    anim_graph_registry
+                } else {
+                    graph_registry
+                };
                 match rust_engine::engine::editor::graph_editor::GraphEditorState::open(
                     &abs,
                     &relative,
-                    graph_registry,
+                    reg,
                 ) {
                     Ok(mut state) => {
                         restore_graph_ui_state(&mut state, &relative);
                         graph_editors.insert(relative.clone(), state);
-                        editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
                     }
-                    Err(e) => editor.console.messages.push(LogMessage::error(format!(
-                        "Failed to open graph '{relative}': {e}"
-                    ))),
+                    Err(e) => {
+                        editor.console.messages.push(LogMessage::error(format!(
+                            "Failed to open graph '{relative}': {e}"
+                        )));
+                        continue;
+                    }
                 }
             }
+            if let Some(st) = graph_editors.get_mut(&relative) {
+                if !req.back.is_empty() {
+                    st.nav_back = req.back;
+                }
+            }
+            editor.ui.crusty_dock.open_tab(EditorTab::GraphEditor(relative));
         }
 
         for key in std::mem::take(&mut float_curve_saves) {
             save_curve_state(curve_editors, &mut editor.console, &mut core.game_world, &key);
+        }
+        for key in std::mem::take(&mut float_blend_space_saves) {
+            save_blend_space_state(
+                blend_space_editors,
+                graph_editors,
+                &mut editor.console,
+                &mut core.game_world,
+                &key,
+            );
+        }
+
+        // Ticket 06, float-window path: same edit delivery as the docked one
+        // — done here because the world is mutably reachable again.
+        apply_anim_param_edits(core.game_world.hecs_mut(), graph_editors, &anim_previews, anim_panel);
+        {
+            let (world, resources) = core.game_world.world_and_resources_mut();
+            drive_blend_space_previews(world, &*resources, &picked_bits, blend_space_editors);
         }
 
         // GS-4, float-window path: same delivery as the docked one — the bound
@@ -5774,6 +6982,28 @@ impl App {
                     let key = t.strip_prefix("curve:")?;
                     curve_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
                 });
+                let dirty_blend_space = tabs.iter().find_map(|t| {
+                    let key = t.strip_prefix("blendspace:")?;
+                    blend_space_editors.get(key).filter(|s| s.dirty).map(|_| key.to_string())
+                });
+                if let Some(key) = dirty_blend_space {
+                    let msg = format!("Save changes to '{key}' before closing?");
+                    editor.services.dialogs.save_discard_cancel(
+                        format!("blendspace_close:{key}"),
+                        "Unsaved Blend Space",
+                        msg,
+                        EditorAction::SaveAndCloseEditor {
+                            kind: SecondaryWindowKind::BlendSpace,
+                            key: key.clone(),
+                        },
+                        EditorAction::DiscardAndCloseEditor {
+                            kind: SecondaryWindowKind::BlendSpace,
+                            key,
+                        },
+                    );
+                    fw.close_requested = false;
+                    return true;
+                }
                 if let Some(key) = dirty_curve {
                     let msg = format!("Save changes to '{key}' before closing?");
                     editor.services.dialogs.save_discard_cancel(
@@ -5822,6 +7052,8 @@ impl App {
                         graph_editors.remove(key);
                     } else if let Some(key) = tab.strip_prefix("curve:") {
                         curve_editors.remove(key);
+                    } else if let Some(key) = tab.strip_prefix("blendspace:") {
+                        blend_space_editors.remove(key);
                     } else {
                         dock_crusty::redock_tab(&mut editor.ui.crusty_dock.tree, tab);
                     }
@@ -5830,6 +7062,12 @@ impl App {
             }
             !tabs.is_empty()
         });
+
+        // The destructured borrows above are done; blend spaces descended
+        // into from a float `.animgraph` open as main-dock tabs now.
+        for relative in float_blend_space_opens {
+            self.open_blend_space_document(relative);
+        }
     }
 
     fn save_active_scene(&mut self) {
@@ -6495,6 +7733,49 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply the anim events dialog's result: Save rewrites the `.anim` and
+    /// invalidates the clip + plan caches, so running graph machines re-arm
+    /// against the edited markers on their next tick.
+    fn handle_anim_events_action(
+        &mut self,
+        action: rust_engine::engine::editor::anim_events_dialog::AnimEventsAction,
+    ) {
+        use rust_engine::engine::animation::graph::{AnimClipCache, AnimGraphPlanCache};
+        use rust_engine::engine::editor::anim_events_dialog::AnimEventsAction;
+        match action {
+            AnimEventsAction::None => {}
+            AnimEventsAction::Cancel => {
+                self.editor.scene.anim_events_dialog = None;
+            }
+            AnimEventsAction::Save => {
+                let Some(mut dlg) = self.editor.scene.anim_events_dialog.take() else {
+                    return;
+                };
+                match dlg.save() {
+                    Ok(()) => {
+                        let resources = self.core.game_world.resources_mut();
+                        if let Some(clips) = resources.get_mut::<AnimClipCache>() {
+                            clips.invalidate(&dlg.relative);
+                        }
+                        if let Some(plans) = resources.get_mut::<AnimGraphPlanCache>() {
+                            plans.invalidate(&dlg.relative);
+                        }
+                        self.editor.console.messages.push(LogMessage::info(format!(
+                            "Anim events saved: {}",
+                            dlg.relative
+                        )));
+                    }
+                    Err(e) => {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::error(format!("Anim events save failed: {e}")));
                     }
                 }
             }
@@ -7510,6 +8791,245 @@ fn graph_instance_lists<'a>(
     }
 }
 
+/// Every entity an open `.animgraph` could preview on (Task 41 ticket 06):
+/// armed runtimes of that graph, nearest the editor camera first — minus the
+/// net rigs whose parameters `anim_bridge` derives every frame. A preview
+/// strip driving those would fight gameplay on every write, so bridge-owned
+/// rigs are not preview targets at all; scene-authored graph entities are.
+#[cfg(feature = "editor")]
+fn anim_instance_lists<'a>(
+    world: &hecs::World,
+    camera: [f32; 3],
+    keys: impl IntoIterator<Item = &'a String>,
+) -> std::collections::HashMap<
+    String,
+    Vec<rust_engine::engine::editor::graph_exec_viz::ExecInstance>,
+> {
+    let excluded: Vec<u64> = world
+        .query::<&crate::anim_bridge::CharacterRig>()
+        .iter()
+        .map(|(e, _)| e.to_bits().get())
+        .collect();
+    keys.into_iter()
+        .map(|k| {
+            (
+                k.clone(),
+                rust_engine::engine::editor::anim_preview::anim_instances_for(
+                    world,
+                    k,
+                    Some(camera),
+                    &excluded,
+                ),
+            )
+        })
+        .filter(|(_, v)| !v.is_empty())
+        .collect()
+}
+
+/// The bound preview per `.animgraph` tab (ticket 06): the explicit pick
+/// while it is still a candidate, else the first selected entity running
+/// this graph — the LIVE chip's binding ladder, resolved in the engine.
+#[cfg(feature = "editor")]
+fn anim_preview_bindings(
+    world: &hecs::World,
+    selected: &[u64],
+    tabs: &[(String, Option<u64>)],
+    instances: &std::collections::HashMap<
+        String,
+        Vec<rust_engine::engine::editor::graph_exec_viz::ExecInstance>,
+    >,
+) -> Vec<(String, rust_engine::engine::editor::anim_preview::AnimPreview)> {
+    use rust_engine::engine::editor::anim_preview::{anim_preview_for, resolve_anim_bind};
+    tabs.iter()
+        .filter_map(|(k, bind)| {
+            let cands = instances.get(k).map(Vec::as_slice).unwrap_or(&[]);
+            let bound = resolve_anim_bind(*bind, selected, cands)?;
+            Some((k.clone(), anim_preview_for(world, bound)?))
+        })
+        .collect()
+}
+
+/// Fold the Anim Preview panel's machines into the strips' bindings
+/// (doc-layouts ticket 03, the parameter-ownership ruling). A graph whose
+/// strip is bound to a world entity keeps that binding — the strip drives
+/// the entity — and the panel *mirrors* the runtime read-only this frame.
+/// One with no entity bound previews on the panel's own machine: its
+/// snapshot joins the list under [`PANEL_INSTANCE_ID`], so the strip shows
+/// and drives it like any bound instance.
+#[cfg(feature = "editor")]
+fn fold_anim_panel_previews(
+    world: &hecs::World,
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
+    previews: &mut Vec<(String, rust_engine::engine::editor::anim_preview::AnimPreview)>,
+) {
+    use rust_engine::engine::animation::graph::AnimGraphRuntime;
+    use rust_engine::engine::editor::anim_graph_preview::Mirror;
+    for (key, pv) in panel.iter_mut() {
+        match previews.iter().find(|(k, _)| k == key) {
+            Some((_, bound)) => {
+                pv.mirror = hecs::Entity::from_bits(bound.instance_id)
+                    .and_then(|e| world.get::<&AnimGraphRuntime>(e).ok())
+                    .filter(|rt| rt.disabled.is_none())
+                    .map(|rt| Mirror {
+                        name: bound.instance.clone(),
+                        plan: rt.plan.clone(),
+                        machine: rt.machine.clone(),
+                        params: rt.params.clone(),
+                    });
+            }
+            None => {
+                pv.mirror = None;
+                previews.push((key.clone(), pv.snapshot()));
+            }
+        }
+    }
+}
+
+/// The Anim Preview panel body (ticket 03), shared by the docked and float
+/// paths: tick the focused animation graph's machine against its document
+/// revision, then draw the pane. Not an animation graph, or none focused:
+/// an empty-state line, like the other graph side panels.
+#[cfg(feature = "editor")]
+fn anim_preview_body(
+    ui: &mut rust_engine::engine::gui::crusty::Ui,
+    rect: rust_engine::engine::editor::dock_crusty::Rect,
+    focused_graph_key: Option<&str>,
+    graph_editors: &std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
+    mesh_assets: &[String],
+    texture: Option<rust_engine::engine::gui::crusty::TextureId>,
+) {
+    use rust_engine::engine::editor::anim_preview_crusty::{anim_preview_panel, AnimPreviewPanelCtx};
+    use rust_engine::engine::editor::dock_crusty;
+    let focused = focused_graph_key.and_then(|k| graph_editors.get(k).map(|s| (k, s)));
+    match focused {
+        Some((key, state)) if state.domain.is_animation() => {
+            let pv = panel.entry(key.to_string()).or_default();
+            pv.tick(&state.doc, &state.path, state.revision, mesh_assets);
+            anim_preview_panel(ui, rect, AnimPreviewPanelCtx { preview: pv, key, texture });
+        }
+        Some(_) => dock_crusty::placeholder_panel(ui, "Not an animation graph"),
+        None => dock_crusty::placeholder_panel(ui, "No graph focused"),
+    }
+}
+
+/// Land the preview strips' parameter edits on their bound runtimes (ticket
+/// 06) — or, for a graph previewing on the Anim Preview panel, on the
+/// panel's own blackboard (ticket 03). Edits drain whether or not the
+/// binding still exists — a write with nowhere to go is dropped, never
+/// queued against a future binding.
+#[cfg(feature = "editor")]
+fn apply_anim_param_edits(
+    world: &mut hecs::World,
+    graph_editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    previews: &[(String, rust_engine::engine::editor::anim_preview::AnimPreview)],
+    panel: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::anim_graph_preview::AnimGraphPreview,
+    >,
+) {
+    use rust_engine::engine::animation::graph::AnimGraphRuntime;
+    use rust_engine::engine::editor::anim_preview::PANEL_INSTANCE_ID;
+    for (key, st) in graph_editors.iter_mut() {
+        if st.anim_edits.is_empty() {
+            continue;
+        }
+        let edits = std::mem::take(&mut st.anim_edits);
+        let Some((_, p)) = previews.iter().find(|(k, _)| k == key) else {
+            continue;
+        };
+        if p.instance_id == PANEL_INSTANCE_ID {
+            if let Some(pv) = panel.get_mut(key) {
+                for e in &edits {
+                    pv.apply(e);
+                }
+            }
+            continue;
+        }
+        let Some(entity) = hecs::Entity::from_bits(p.instance_id) else {
+            continue;
+        };
+        if let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(entity) {
+            for e in &edits {
+                e.apply(&mut rt.params);
+            }
+        }
+    }
+}
+
+/// Drive the viewport from every shown blend space tab's preview point
+/// (Task 41.5 ticket 05). Binding: the first selected entity with an
+/// animation runtime, else the first runtime whose plan blends through this
+/// `.blendspace`. Parameters only — `SetFloat` per live axis, every frame
+/// the point is set (ADR 0002: never states). The tab's `shown` flag is
+/// consumed here so a tab hidden behind another stops driving.
+#[cfg(feature = "editor")]
+fn drive_blend_space_previews(
+    world: &mut hecs::World,
+    resources: &rust_engine::engine::ecs::resources::Resources,
+    selected: &[u64],
+    editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
+) {
+    use rust_engine::engine::animation::graph::{AnimGraphRuntime, BlendSpaceCache};
+    use rust_engine::engine::ecs::components::Name;
+    use rust_engine::engine::editor::anim_preview::{plan_references_space, AnimParamEdit};
+    use rust_engine::engine::editor::blend_space_editor::resolve_blend_space_bind;
+    for st in editors.values_mut() {
+        // A tab this pass did not draw keeps whatever the pass that drew it
+        // decided (docked and float passes both land here every frame).
+        if !std::mem::take(&mut st.shown) {
+            continue;
+        }
+        let Some(point) = st.preview_point else {
+            st.preview_bound = None;
+            continue;
+        };
+        let space = resources
+            .get::<BlendSpaceCache>()
+            .and_then(|c| c.peek(&st.path))
+            .and_then(Result::ok);
+        let runtimes: Vec<(u64, bool)> = world
+            .query::<&AnimGraphRuntime>()
+            .iter()
+            .map(|(e, rt)| {
+                (
+                    e.to_bits().get(),
+                    space.as_ref().is_some_and(|sp| plan_references_space(&rt.plan, sp)),
+                )
+            })
+            .collect();
+        let bound = resolve_blend_space_bind(selected, &runtimes)
+            .and_then(hecs::Entity::from_bits);
+        st.preview_bound = bound.map(|e| {
+            world
+                .get::<&Name>(e)
+                .map(|n| n.0.clone())
+                .unwrap_or_default()
+        });
+        let Some(entity) = bound else { continue };
+        if let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(entity) {
+            for (k, axis) in st.doc.active_axes().iter().enumerate() {
+                AnimParamEdit::SetFloat(axis.param_name().to_string(), point[k]).apply(&mut rt.params);
+            }
+        }
+    }
+}
+
 /// Write one open `.curve` to disk and make every consumer re-read it.
 ///
 /// A free function because two callers need it under different borrows: the
@@ -7557,6 +9077,77 @@ fn save_curve_state(
     }
     #[cfg(not(feature = "graph-scripting"))]
     let _ = world;
+}
+
+/// Save a blend space editor: write, then the ticket 02 invalidation pair:
+/// drop the cached space + every animation plan (a state compiles the space
+/// into its plan) and recompute the open `.animgraph` hosts' anchored
+/// refusals, exactly what the `BlendSpaceChanged` reload arm does.
+#[cfg(feature = "editor")]
+fn save_blend_space_state(
+    editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::blend_space_editor::BlendSpaceEditorState,
+    >,
+    graph_editors: &mut std::collections::HashMap<
+        String,
+        rust_engine::engine::editor::graph_editor::GraphEditorState,
+    >,
+    console: &mut ConsoleState,
+    world: &mut GameWorld,
+    key: &str,
+) {
+    let Some(st) = editors.get_mut(key) else {
+        return;
+    };
+    let abs = std::path::Path::new("content").join(&st.path);
+    if let Err(e) = st.save(&abs) {
+        console
+            .messages
+            .push(LogMessage::error(format!("Failed to save blend space '{key}': {e}")));
+        return;
+    }
+    rust_engine::engine::animation::graph::invalidate_blend_space(world.resources_mut(), key);
+    for g in graph_editors.values_mut() {
+        if g.domain.is_animation() {
+            g.refresh_domain_errors();
+        }
+    }
+}
+
+/// Content-relative paths of every `.anim` in the registry: the blend space
+/// editor's Clip dropdown rows.
+#[cfg(feature = "editor")]
+fn anim_asset_paths(registry: &rust_engine::engine::editor::AssetRegistry) -> Vec<String> {
+    registry_paths(registry, AssetType::Animation, "anim")
+}
+
+/// Every `.mesh` in the registry: the Preview Mesh dropdown rows and the
+/// auto-pick candidates (ticket 08).
+#[cfg(feature = "editor")]
+fn mesh_asset_paths(registry: &rust_engine::engine::editor::AssetRegistry) -> Vec<String> {
+    registry_paths(registry, AssetType::Mesh, "mesh")
+}
+
+#[cfg(feature = "editor")]
+fn registry_paths(
+    registry: &rust_engine::engine::editor::AssetRegistry,
+    ty: AssetType,
+    ext: &str,
+) -> Vec<String> {
+    let filter = rust_engine::engine::editor::AssetFilter {
+        asset_types: Some(vec![ty]),
+        include_subfolders: true,
+        ..Default::default()
+    };
+    let mut paths: Vec<String> = registry
+        .query(&filter)
+        .into_iter()
+        .filter(|m| m.path.extension().and_then(|e| e.to_str()) == Some(ext))
+        .map(|m| asset_source::to_content_relative(&m.path.to_string_lossy()))
+        .collect();
+    paths.sort();
+    paths
 }
 
 /// Forget every recorded session for the instances running `graph_path`.

@@ -193,6 +193,49 @@ if let Some(selected) = editor_state.selected_entity {
 3. Entity selection
 4. Panel interaction (lowest when cursor in viewport)
 
+### Layout profiles (per-document layouts)
+
+The dock has one tree per *document kind* (`dock_crusty::LayoutProfile`: `Scene`, `AnimGraph`,
+`ScriptGraph`, `BlendSpace`, `Curve`, `Mesh`); the focused document picks which one is live.
+Gotchas:
+
+- **The `documents` marker is never rendered.** A stored (inactive) profile tree holds the tab id
+  `documents` where its document strip goes; `swap_profile` splices the real document tabs in
+  there. Every default tree has exactly one marker (test-pinned); a stored tree that lost its
+  marker falls back to `default_tree`. A marker that leaks into the live tree is stripped on load.
+- **Gather rule.** Document tabs (`viewport:*`, `graph:*`, `curve:*`, `blendspace:*`, `mesh:*`,
+  `ia:*`, `mc:*` — `is_document`) live in one leaf. Docking one elsewhere works until the next
+  swap, which gathers every document back into the incoming profile's strip (strip order, then
+  strays in traversal order). Side panels stay in whichever profile tree they were docked in.
+- **`focused_document` is not the dock focus.** `DockState::focused_tab` is whatever was clicked
+  last, side panels included. `App::focused_document` remembers the last focused *document* and
+  only changes when another document takes focus or the current one closes. Profile swaps and the
+  graph side panels (`focused_graph_key`) follow `focused_document`, so clicking Assets or Console
+  never swaps the layout or blanks Details/Variables/Preview. Edit-action routing
+  (`edit_target_document` → `active_graph_key`) is stricter: a scene-side panel holding the dock
+  focus keeps scene routing (Delete after clicking Hierarchy still deletes the entity).
+- **Layout file v1 → v2.** `editor_layout_crusty.ron` gained `version`, `active` and `profiles`
+  (inactive profiles only — `profiles` never contains `active`). `tree`/`state` stay the active
+  profile's live copy. A v1 file (no `version`) loads as the `Scene` profile verbatim and is
+  rewritten as v2 on the next save. View ▸ Reset Layout resets the active profile only; Reset All
+  Layouts resets every profile. A *stored* profile never re-reads `default_tree`; a profile with no
+  stored tree yet does on its first activation (every non-Scene profile after a v1 migration, all
+  of them after Reset All, one whose stored tree lost its marker).
+- **The document strip is a heuristic, not an id.** `documents_leaf_index` picks the leaf holding
+  the most document tabs (ties → first in traversal order); `active_document`, `reset` and the
+  swap write-back all use it.
+- **Profile gate vs preview gate.** `profile_of` uses `GraphDomain::is_animation_family` (machine
+  *and* embedded rule graphs get the AnimGraph layout); `anim_preview_body` needs `is_animation`
+  (the machine), so a focused rule graph shows the Preview panel with "Not an animation graph".
+- **One preview target at a time.** A graph's preview strip drives exactly one target: a bound
+  ECS `AnimGraphRuntime` when one exists (the Anim Preview panel then *mirrors* it read-only,
+  chip `LIVE · name`, no Play/Pause), otherwise the panel's own `AnimMachine`
+  (`PANEL_INSTANCE_ID`). `fold_anim_panel_previews` in `app.rs` decides per frame. Panel machines
+  live in `scene.anim_previews` and are pruned when nobody drew them last frame — the next draw
+  restarts at ENTRY, so hiding the panel resets the preview by design. `build_anim_preview_cbs`
+  records one command buffer per frame under the fixed `ANIM_PREVIEW_TAB` key and stops at the
+  first entry that records; a second Anim Preview surface needs per-graph target keys first.
+
 ## Physics Patterns
 
 ### Body Types
@@ -323,12 +366,16 @@ pub struct EntityRef {
 
 ## Graph Execution Gotchas (Task 45-A)
 
-- **Timeline is frame-parity, not wall-clock**: `update` fires *once per
-  tick* while a run is under way, and the first tick samples `t = 0`. A run of
-  duration `d` therefore lands its last sample on the tick that crosses `d` —
-  do not assert "N ticks = N×dt seconds of curve" without accounting for that
-  first sample. `finished` fires exactly once, and never for a looping
-  Timeline.
+- **Timeline is a per-node ticker, not a wait**: `update` fires *once per
+  tick* while a run is under way — the Play tick samples `t = 0` in the
+  caller's activation, every later tick is an interpreter-spawned drive
+  activation independent of all exec flow (`GraphInstance::tickers`, Task 41
+  ticket 10). Play is therefore fire-and-forget, and a `Delay` — in the
+  Update chain or after Play — parks only its own activation, never the run.
+  A run of duration `d` lands its last sample on the tick that crosses `d` —
+  do not assert "N ticks = N×dt seconds of curve" without accounting for the
+  `t = 0` sample. `finished` fires exactly once, one tick after the clamped
+  end sample, and never for a looping Timeline.
 - **A pause holds the whole instance, and only the bound one** (GS-4). When
   any activation parks on a breakpoint, no other activation of that instance
   advances, no due latent wakes, no queued event drains and instance time does

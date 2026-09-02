@@ -1,0 +1,129 @@
+(
+    version: 3,
+    realm: Client,
+    nodes: [
+        (
+            id: 0,
+            type_id: "anim_entry",
+            type_version: 1,
+            position: (-420.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 1,
+            type_id: "anim_state",
+            type_version: 1,
+            position: (-180.0, 0.0),
+            properties: {
+                "clip": Asset("Defeated.anim"),
+                "speed": Float(0.0),
+            },
+            subgraph: None,
+            tint: None,
+            title: Some("Idle"),
+        ),
+        (
+            id: 2,
+            type_id: "anim_state",
+            type_version: 1,
+            position: (320.0, 0.0),
+            properties: {
+                "clip": Asset("Defeated.anim"),
+                "space": Asset("blendspaces/locomotion.blendspace"),
+            },
+            subgraph: None,
+            tint: None,
+            title: Some("Walk"),
+        ),
+        (
+            id: 3,
+            type_id: "anim_transition",
+            type_version: 1,
+            position: (70.0, 0.0),
+            properties: {
+                "duration": Float(0.4),
+                "priority": Int(0),
+            },
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+    ],
+    edges: [
+        (
+            from_node: 0,
+            from_pin: "out",
+            to_node: 1,
+            to_pin: "in",
+        ),
+        (
+            from_node: 1,
+            from_pin: "out",
+            to_node: 3,
+            to_pin: "from",
+        ),
+        (
+            from_node: 3,
+            from_pin: "to",
+            to_node: 2,
+            to_pin: "in",
+        ),
+    ],
+    comments: [],
+    groups: [],
+    inputs: [],
+    outputs: [],
+    variables: [
+        (
+            slug: "walk",
+            label: "Walk",
+            ty: Bool,
+            default: Some(Bool(false)),
+        ),
+        (
+            slug: "Speed",
+            label: "Speed",
+            ty: Float,
+            default: Some(Float(0.0)),
+        ),
+    ],
+    regions: {
+        3: (
+            nodes: [
+                (
+                    id: 0,
+                    type_id: "var_get",
+                    type_version: 1,
+                    position: (-160.0, 0.0),
+                    properties: {
+                        "var": Str("walk"),
+                    },
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+                (
+                    id: 1,
+                    type_id: "anim_rule_result",
+                    type_version: 1,
+                    position: (120.0, 0.0),
+                    properties: {},
+                    subgraph: None,
+                    tint: None,
+                    title: None,
+                ),
+            ],
+            edges: [
+                (
+                    from_node: 0,
+                    from_pin: "value",
+                    to_node: 1,
+                    to_pin: "value",
+                ),
+            ],
+        ),
+    },
+)

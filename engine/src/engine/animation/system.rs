@@ -26,8 +26,11 @@ impl System for AnimationUpdateSystem {
             .map(|t| t.scaled_delta())
             .unwrap_or(0.0);
 
-        for (_entity, (player, skeleton)) in
-            world.query_mut::<(&mut AnimationPlayer, &mut SkeletonInstance)>()
+        // Graph-driven entities belong to `AnimGraphSystem`; two writers on
+        // one skeleton would fight, so the graph wins where both exist.
+        for (_entity, (player, skeleton)) in world
+            .query_mut::<(&mut AnimationPlayer, &mut SkeletonInstance)>()
+            .without::<&crate::engine::animation::graph::AnimGraphRuntime>()
         {
             if player.state != PlaybackState::Playing {
                 continue;

@@ -27,6 +27,7 @@ use super::inspector_panel::{
 use super::Selection;
 use crate::engine::animation::{AnimationPlayer, PlaybackState, SkeletonInstance};
 use crate::engine::assets::asset_type::AssetType;
+use crate::engine::assets::model_loader::BoneData;
 use crate::engine::audio::{AudioBus, AudioEmitter, AudioListener};
 use crate::engine::ecs::resources::PlayMode;
 use crate::engine::ecs::{
@@ -87,6 +88,7 @@ enum ComponentAction {
     RemoveRigidBody,
     RemoveCollider,
     RemoveGraphRunner,
+    RemoveAnimGraphRunner,
     RemoveAudioEmitter,
     RemoveAudioListener,
     RemoveParticleEffect,
@@ -524,8 +526,7 @@ fn vec3_row(
         ui.set_cursor(Pos2::new(start.x + VEC3_LABEL_W, start.y));
 
         let remain = ui.available_size().x;
-        let field_w =
-            ((remain - (VEC3_RESET_W + 6.0) - 3.0 * 6.0) / 3.0).clamp(40.0, VEC3_INPUT_W);
+        let field_w = ((remain - (VEC3_RESET_W + 6.0) - 3.0 * 6.0) / 3.0).clamp(40.0, VEC3_INPUT_W);
 
         for (i, (axis_label, color)) in [("X", axis.x), ("Y", axis.y), ("Z", axis.z)]
             .into_iter()
@@ -710,7 +711,8 @@ fn asset_ref_field(
         Vec2::splat(REF_THUMB),
     );
     ui.painter().rect_filled(thumb, 3.0, style.palette.window);
-    ui.painter().rect_stroke(thumb, 3.0, 1.0, style.palette.stroke);
+    ui.painter()
+        .rect_stroke(thumb, 3.0, 1.0, style.palette.stroke);
     if let Some(tex) = thumb_tex {
         let inner = Rect::from_min_max(
             Pos2::new(thumb.min.x + 1.0, thumb.min.y + 1.0),
@@ -756,7 +758,8 @@ fn asset_ref_field(
     let pid = Id::new("asset_ref_picker").with(id_source);
     let open = Popup::is_open(ui, pid);
     let trigger = ui.interact(pid.with("trigger"), name_rect);
-    ui.painter().rect_filled(name_rect, 3.0, style.palette.input);
+    ui.painter()
+        .rect_filled(name_rect, 3.0, style.palette.input);
     let border = if open {
         style.palette.focus_ring
     } else {
@@ -785,9 +788,15 @@ fn asset_ref_field(
         Some(name_w - 30.0),
     );
     if missing {
-        let nw = ui.painter().measure_text(&display, style.fonts.body, None).x;
+        let nw = ui
+            .painter()
+            .measure_text(&display, style.fonts.body, None)
+            .x;
         ui.painter().text_family(
-            Pos2::new(name_rect.min.x + 8.0 + nw.min(name_w - 60.0) + 6.0, ty + 2.0),
+            Pos2::new(
+                name_rect.min.x + 8.0 + nw.min(name_w - 60.0) + 6.0,
+                ty + 2.0,
+            ),
             "missing",
             9.0,
             style.palette.text_disabled,
@@ -811,7 +820,9 @@ fn asset_ref_field(
         Popup::toggle(ui, pid);
         if !open {
             // Fresh open: clear search, focus it next frame.
-            ui.ctx_mut().memory.data_insert(pid.with("search"), String::new());
+            ui.ctx_mut()
+                .memory
+                .data_insert(pid.with("search"), String::new());
             ui.ctx_mut().memory.data_insert(pid.with("focus"), true);
         }
     }
@@ -895,7 +906,15 @@ fn asset_ref_field(
 
     // Picker popover (E3): search + type chip, list, actions, mono footer.
     if Popup::is_open(ui, pid) {
-        asset_ref_picker(ui, pid, path, allowed_types, asset_browser, icons, name_rect);
+        asset_ref_picker(
+            ui,
+            pid,
+            path,
+            allowed_types,
+            asset_browser,
+            icons,
+            name_rect,
+        );
     }
     ui.add_space(4.0);
 }
@@ -934,8 +953,8 @@ fn asset_ref_picker(
         .unwrap_or_default();
     let search_lower = search.to_lowercase();
 
-    let include_prims = allowed_types.contains(&AssetType::Mesh)
-        || allowed_types.contains(&AssetType::Model);
+    let include_prims =
+        allowed_types.contains(&AssetType::Mesh) || allowed_types.contains(&AssetType::Model);
     let mut entries: Vec<PickerEntry> = Vec::new();
     if include_prims {
         for prim in PRIMITIVE_PATHS {
@@ -960,7 +979,11 @@ fn asset_ref_picker(
         .into_iter()
         .cloned()
         .collect();
-    let prim_total = if include_prims { PRIMITIVE_PATHS.len() } else { 0 };
+    let prim_total = if include_prims {
+        PRIMITIVE_PATHS.len()
+    } else {
+        0
+    };
     let total = prim_total
         + if search.is_empty() {
             metas.len()
@@ -1009,7 +1032,8 @@ fn asset_ref_picker(
                 .show_full(ui);
             let chip = ui.allocate(Vec2::new(chip_w, 20.0));
             ui.painter().rect_filled(chip, 3.0, tcol.with_alpha(0.12));
-            ui.painter().rect_stroke(chip, 3.0, 1.0, tcol.with_alpha(0.45));
+            ui.painter()
+                .rect_stroke(chip, 3.0, 1.0, tcol.with_alpha(0.45));
             let sz = ui
                 .painter()
                 .measure_text_family(&type_label, 9.5, None, FontFamily::Mono);
@@ -1030,28 +1054,28 @@ fn asset_ref_picker(
         // Entry rows: None first, then primitives + registry assets.
         let row_h = 24.0;
         let entry_row = |ui: &mut Ui,
-                             key: usize,
-                             name: &str,
-                             thumb: Option<TextureId>,
-                             is_current: bool,
-                             show_well: bool|
+                         key: usize,
+                         name: &str,
+                         thumb: Option<TextureId>,
+                         is_current: bool,
+                         show_well: bool|
          -> bool {
             let r = ui.allocate(Vec2::new(inner_w, row_h));
             let resp = ui.interact(pid.with(("entry", key)), r);
             let style = ui.style();
             if is_current {
-                ui.painter().rect_filled(r, 3.0, style.palette.selection_fill);
+                ui.painter()
+                    .rect_filled(r, 3.0, style.palette.selection_fill);
             } else if resp.hovered {
                 ui.painter().rect_filled(r, 3.0, style.palette.hover);
             }
             let mut x = r.min.x + 6.0;
             if show_well {
-                let well = Rect::from_center_size(
-                    Pos2::new(x + 9.0, r.center().y),
-                    Vec2::splat(18.0),
-                );
+                let well =
+                    Rect::from_center_size(Pos2::new(x + 9.0, r.center().y), Vec2::splat(18.0));
                 ui.painter().rect_filled(well, 2.0, style.palette.window);
-                ui.painter().rect_stroke(well, 2.0, 1.0, style.palette.stroke);
+                ui.painter()
+                    .rect_stroke(well, 2.0, 1.0, style.palette.stroke);
                 if let Some(tex) = thumb {
                     ui.ctx_mut().paint.push(PaintCmd::Image {
                         rect: well,
@@ -1094,7 +1118,9 @@ fn asset_ref_picker(
             );
             if is_current {
                 let tag = "current";
-                let sz = ui.painter().measure_text_family(tag, 9.0, None, FontFamily::Mono);
+                let sz = ui
+                    .painter()
+                    .measure_text_family(tag, 9.0, None, FontFamily::Mono);
                 ui.painter().text_family(
                     Pos2::new(r.max.x - 6.0 - sz.x, r.center().y - sz.y * 0.5),
                     tag,
@@ -1191,7 +1217,9 @@ fn asset_ref_picker(
             FontFamily::Mono,
         );
         let esc = "Esc";
-        let sz = ui.painter().measure_text_family(esc, 9.5, None, FontFamily::Mono);
+        let sz = ui
+            .painter()
+            .measure_text_family(esc, 9.5, None, FontFamily::Mono);
         ui.painter().text_family(
             Pos2::new(f.max.x - 6.0 - sz.x, f.min.y + 3.0),
             esc,
@@ -1307,6 +1335,14 @@ fn render_components(
     {
         edit_animation_player(ui, world, entity);
     }
+    if (panel.matches_filter("animation")
+        || panel.matches_filter("graph")
+        || panel.matches_filter("runner"))
+        && p.has(ComponentPresence::ANIM_GRAPH_RUNNER)
+        && edit_anim_graph_runner(ui, world, entity, asset_browser, icons)
+    {
+        action = Some(ComponentAction::RemoveAnimGraphRunner);
+    }
     if (panel.matches_filter("audio")
         || panel.matches_filter("emitter")
         || panel.matches_filter("sound")
@@ -1367,6 +1403,13 @@ fn render_components(
             }
             ComponentAction::RemoveGraphRunner => {
                 let _ = world.remove_one::<crate::engine::scripting::GraphRunner>(entity);
+            }
+            ComponentAction::RemoveAnimGraphRunner => {
+                // The paired `AnimGraphRuntime` is the system's to drop: it
+                // notices the missing runner on its next tick (see
+                // `runner_edits_re_arm_and_removal_drops_the_runtime`).
+                let _ =
+                    world.remove_one::<crate::engine::animation::graph::AnimGraphRunner>(entity);
             }
             ComponentAction::RemoveParticleEffect => {
                 let _ = world.remove_one::<ParticleEffect>(entity);
@@ -1830,9 +1873,7 @@ fn edit_graph_runner(ui: &mut Ui, world: &mut World, entity: Entity, inert: bool
     };
     component_section(ui, "Graph Runner", cat("scripting"), true, |ui| {
         if inert {
-            ui.label(
-                "The Graph Scripting plugin is disabled - this component is inert.",
-            );
+            ui.label("The Graph Scripting plugin is disabled - this component is inert.");
         }
         property_row(ui, "Graph", |ui| {
             let field_bg = ui.style().palette.input;
@@ -1948,22 +1989,47 @@ fn edit_skeleton(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             if !skeleton.bones.is_empty() {
                 CollapsingHeader::new("Bone List").show(ui, |ui| {
-                    let style = ui.style();
-                    let dim = style.palette.text_secondary;
-                    for (i, bone) in skeleton.bones.iter().enumerate() {
-                        let parent_str = bone
-                            .parent_index
-                            .map(|p| format!(" (parent: {p})"))
-                            .unwrap_or_default();
-                        Label::new(format!("[{i}] {}{parent_str}", bone.name))
-                            .size(style.fonts.small)
-                            .color(dim)
-                            .show(ui);
+                    let bones = &skeleton.bones;
+                    // Children per bone, in index order.
+                    let mut children = vec![Vec::new(); bones.len()];
+                    for (i, bone) in bones.iter().enumerate() {
+                        if let Some(p) = bone.parent_index.filter(|&p| p < i) {
+                            children[p].push(i);
+                        }
+                    }
+                    for (i, bone) in bones.iter().enumerate() {
+                        if bone.parent_index.filter(|&p| p < i).is_none() {
+                            bone_tree_row(ui, bones, &children, i);
+                        }
                     }
                 });
             }
         });
     }
+}
+
+/// One row of the skeleton tree: a collapsing header for bones with
+/// children, a plain label (aligned with sibling headers) for leaves.
+fn bone_tree_row(ui: &mut Ui, bones: &[BoneData], children: &[Vec<usize>], i: usize) {
+    let style = ui.style();
+    let (font, dim) = (style.fonts.small, style.palette.text_secondary);
+    let label = format!("{}  [{i}]", bones[i].name);
+    if children[i].is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(font + style.spacing.box_label_gap);
+            Label::new(label).size(font).color(dim).show(ui);
+        });
+        return;
+    }
+    CollapsingHeader::new(label)
+        .default_open(true)
+        .text_size(font)
+        .text_color(dim)
+        .show(ui, |ui| {
+            for &c in &children[i] {
+                bone_tree_row(ui, bones, children, c);
+            }
+        });
 }
 
 fn edit_animation_player(ui: &mut Ui, world: &mut World, entity: Entity) {
@@ -2005,6 +2071,43 @@ fn edit_animation_player(ui: &mut Ui, world: &mut World, entity: Entity) {
             Checkbox::new(&mut player.looping, "Loop").show(ui);
         });
     }
+}
+
+/// The `AnimGraphRunner` row: which `.animgraph`, and whether it runs —
+/// the animation twin of [`edit_graph_runner`], with the asset picker the
+/// script side still defers. Edits land directly on the component; the
+/// system notices a re-pointed path or a cleared `enabled` on its next tick
+/// and drops/re-arms the runtime (the same lifecycle hot-reload rides).
+fn edit_anim_graph_runner(
+    ui: &mut Ui,
+    world: &mut World,
+    entity: Entity,
+    asset_browser: &mut AssetBrowserPanel,
+    icons: &std::collections::HashMap<String, TextureId>,
+) -> bool {
+    let Ok(mut runner) = world.get::<&mut crate::engine::animation::graph::AnimGraphRunner>(entity)
+    else {
+        return false;
+    };
+    component_section(ui, "Anim Graph Runner", cat("animation"), true, |ui| {
+        asset_ref_field(
+            ui,
+            "anim_graph_slot",
+            "Graph",
+            &mut runner.graph,
+            &[AssetType::AnimGraph],
+            asset_browser,
+            icons,
+        );
+        // The component's contract is forward slashes (registry paths can
+        // carry `\` on Windows); normalize so the runtime's stale check and
+        // the saved scene both see the canonical form.
+        let normalized = crate::engine::scripting::normalize_graph_path(&runner.graph);
+        if runner.graph != normalized {
+            runner.graph = normalized;
+        }
+        checkbox_row(ui, "Enabled", &mut runner.enabled);
+    })
 }
 
 fn edit_audio_emitter(
@@ -2524,9 +2627,14 @@ fn render_add_component(
                 added = true;
             }
             if !p.has(ComponentPresence::GRAPH_RUNNER) && entry(ui, "Graph Runner", false) {
+                let _ = world.insert_one(entity, crate::engine::scripting::GraphRunner::default());
+                added = true;
+            }
+            if !p.has(ComponentPresence::ANIM_GRAPH_RUNNER) && entry(ui, "Anim Graph Runner", false)
+            {
                 let _ = world.insert_one(
                     entity,
-                    crate::engine::scripting::GraphRunner::default(),
+                    crate::engine::animation::graph::AnimGraphRunner::default(),
                 );
                 added = true;
             }

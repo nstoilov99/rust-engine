@@ -302,6 +302,12 @@ impl Prefab {
                         enabled: *enabled,
                     });
                 }
+                ComponentData::AnimGraphRunner { graph, enabled } => {
+                    builder.add(crate::engine::animation::graph::AnimGraphRunner {
+                        graph: crate::engine::scripting::normalize_graph_path(graph),
+                        enabled: *enabled,
+                    });
+                }
                 ComponentData::Parent { .. } => {
                     // Parent relationships are not applicable for prefabs
                     // They are handled separately during scene loading

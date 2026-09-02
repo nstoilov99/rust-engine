@@ -170,76 +170,20 @@ fn set_key(doc: &mut CurveDoc, track: usize, index: usize, key: Key) {
     }
 }
 
-/// Doc-local undo/redo with saved-cursor dirty tracking. Same contract as
-/// `GraphEditStack`: dirty is the distance from the save point, not a sticky
-/// flag, and a post-undo edit that truncates the branch holding the save point
-/// loses it.
-#[derive(Default)]
-pub struct CurveEditStack {
-    undo: Vec<CurveEdit>,
-    redo: Vec<CurveEdit>,
-    saved: Option<usize>,
-}
+/// Doc-local undo/redo with saved-cursor dirty tracking — the shared
+/// [`EditStack`](super::edit_stack::EditStack) over [`CurveEdit`].
+pub type CurveEditStack = super::edit_stack::EditStack<CurveEdit>;
 
-impl CurveEditStack {
-    /// A stack for a freshly loaded (clean) document.
-    pub fn new() -> Self {
-        Self { undo: Vec::new(), redo: Vec::new(), saved: Some(0) }
+impl super::edit_stack::ReversibleEdit for CurveEdit {
+    type Doc = CurveDoc;
+    fn apply(&self, doc: &mut CurveDoc) {
+        CurveEdit::apply(self, doc)
     }
-
-    /// Record an edit that has *already* been applied to the doc.
-    pub fn record(&mut self, edit: CurveEdit) {
-        if let Some(s) = self.saved {
-            if s > self.undo.len() {
-                self.saved = None;
-            }
-        }
-        self.undo.push(edit);
-        self.redo.clear();
+    fn revert(&self, doc: &mut CurveDoc) {
+        CurveEdit::revert(self, doc)
     }
-
-    pub fn undo(&mut self, doc: &mut CurveDoc) -> Option<String> {
-        let edit = self.undo.pop()?;
-        edit.revert(doc);
-        let desc = edit.description();
-        self.redo.push(edit);
-        Some(desc)
-    }
-
-    pub fn redo(&mut self, doc: &mut CurveDoc) -> Option<String> {
-        let edit = self.redo.pop()?;
-        edit.apply(doc);
-        let desc = edit.description();
-        self.undo.push(edit);
-        Some(desc)
-    }
-
-    pub fn undo_len(&self) -> usize {
-        self.undo.len()
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
-    }
-
-    pub fn undo_description(&self) -> Option<String> {
-        self.undo.last().map(CurveEdit::description)
-    }
-
-    pub fn redo_description(&self) -> Option<String> {
-        self.redo.last().map(CurveEdit::description)
-    }
-
-    pub fn mark_saved(&mut self) {
-        self.saved = Some(self.undo.len());
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.saved != Some(self.undo.len())
+    fn description(&self) -> String {
+        CurveEdit::description(self)
     }
 }
 

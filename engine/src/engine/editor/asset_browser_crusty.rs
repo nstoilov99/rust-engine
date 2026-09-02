@@ -96,8 +96,9 @@ pub(super) fn type_color(t: AssetType) -> Color {
         | AssetType::Graph => "scripting",
         // A curve is animation data — it shares a slot with `.anim` because
         // Task 41 grows this exact asset into animation channels, and the two
-        // reading alike is the point rather than an accident.
-        AssetType::Curve => "animation",
+        // reading alike is the point rather than an accident. An `.animgraph`
+        // is the same family: the machine that plays those clips.
+        AssetType::Curve | AssetType::AnimGraph | AssetType::BlendSpace => "animation",
         _ => "geometry",
     })
 }
@@ -1087,14 +1088,12 @@ fn render_folder_node(
         // Context menu.
         let ctx_path = node.path.clone();
         let ctx_name = node.name.clone();
-        let mut new_folder = false;
+        let mut create = None;
         let mut rename = false;
         let mut reveal = false;
         let mut delete = false;
         ui.context_menu_for(("ab_folder_ctx", hash_key(&node.path)), body_rect, |ui| {
-            if ui.menu_item("New Folder") {
-                new_folder = true;
-            }
+            create = create_submenu(ui);
             if !is_root {
                 if ui.menu_item("Rename") {
                     rename = true;
@@ -1113,10 +1112,8 @@ fn render_folder_node(
                 }
             }
         });
-        if new_folder {
-            panel.events.push(AssetBrowserEvent::CreateFolder {
-                parent_path: ctx_path.clone(),
-            });
+        if let Some(choice) = create {
+            push_create_event(panel, choice, ctx_path.clone());
         }
         if rename {
             panel.renaming = Some(RenameTarget::Folder {
@@ -1165,6 +1162,62 @@ fn handle_asset_click(ui: &Ui, panel: &mut AssetBrowserPanel, id: AssetId, visib
         panel.selection.select(id);
     }
     panel.events.push(AssetBrowserEvent::AssetSelected { id });
+}
+
+/// The `Create ▸` entries: label and the asset type (`None` is a folder).
+const CREATE_ENTRIES: [(&str, Option<AssetType>); 7] = [
+    ("Folder", None),
+    ("Scene", Some(AssetType::Scene)),
+    ("Material", Some(AssetType::Material)),
+    ("Script Graph", Some(AssetType::Graph)),
+    ("Animation Graph", Some(AssetType::AnimGraph)),
+    ("Blend Space", Some(AssetType::BlendSpace)),
+    ("Curve", Some(AssetType::Curve)),
+];
+
+/// `Create ▸` submenu shared by the folder-tree and grid-background menus.
+/// Returns the picked entry (`Some(None)` = folder) on the click frame.
+fn create_submenu(ui: &mut Ui) -> Option<Option<AssetType>> {
+    let mut picked = None;
+    ui.submenu("Create", |ui| {
+        for (label, ty) in CREATE_ENTRIES {
+            if ui.menu_item(label) {
+                picked = Some(ty);
+            }
+        }
+    });
+    picked
+}
+
+fn push_create_event(panel: &mut AssetBrowserPanel, choice: Option<AssetType>, parent_path: PathBuf) {
+    panel.events.push(match choice {
+        None => AssetBrowserEvent::CreateFolder { parent_path },
+        Some(asset_type) => AssetBrowserEvent::CreateAsset { asset_type, parent_path },
+    });
+}
+
+/// Right-click on empty content space: create into the current folder or
+/// reveal it. `rect` is empty while a row is under the pointer so the row's
+/// own menu wins; an already-open menu keeps drawing regardless.
+fn background_context_menu(ui: &mut Ui, panel: &mut AssetBrowserPanel, rect: Rect) {
+    let mut create = None;
+    let mut reveal = false;
+    ui.context_menu_for("ab_bg_ctx", rect, |ui| {
+        create = create_submenu(ui);
+        ui.separator();
+        if ui.menu_item("Reveal in Explorer") {
+            reveal = true;
+        }
+    });
+    let folder = panel.current_folder.clone();
+    if let Some(choice) = create {
+        push_create_event(panel, choice, folder.clone());
+    }
+    if reveal {
+        panel
+            .events
+            .push(AssetBrowserEvent::RevealFolderInExplorer { path: folder });
+    }
 }
 
 /// Context menu shared by grid cards and list rows. "Copy Path" is omitted —
@@ -1238,8 +1291,9 @@ fn render_content(
     visible_ids: &[AssetId],
 ) {
     ui.add_space(8.0);
+    let content_rect = ui.available();
     if rows.is_empty() {
-        let avail = ui.available();
+        let avail = content_rect;
         let dim = ui.style().palette.text_secondary;
         let msg = "No assets found";
         let sz = ui.painter().measure_text(msg, 16.0, None);
@@ -1265,13 +1319,16 @@ fn render_content(
                 None,
             );
         }
+        background_context_menu(ui, panel, content_rect);
         return;
     }
 
-    match panel.view_mode {
+    let over_row = match panel.view_mode {
         ViewMode::Grid => render_grid(ui, panel, icons, rows, visible_ids),
         ViewMode::List => render_list(ui, panel, icons, rows, visible_ids),
-    }
+    };
+    let bg = if over_row { Rect::ZERO } else { content_rect };
+    background_context_menu(ui, panel, bg);
 }
 
 // ─── grid view ──────────────────────────────────────────────────────────
@@ -1282,7 +1339,7 @@ fn render_grid(
     icons: &HashMap<String, TextureId>,
     rows: &[AssetRow],
     visible_ids: &[AssetId],
-) {
+) -> bool {
     // Improved tile: thumbnail well + 2px type edge + framed two-line label.
     // 96px wide at the default slider value, scaling with it.
     let item = panel.grid_item_size;
@@ -1296,6 +1353,7 @@ fn render_grid(
     let inset = 14.0;
 
     let avail_h = ui.available_size().y;
+    let mut over_card = false;
     ScrollArea::new(avail_h)
         .auto_shrink(false)
         .inset(0.0)
@@ -1320,9 +1378,11 @@ fn render_grid(
                 if card.max.y < clip.min.y || card.min.y > clip.max.y {
                     continue;
                 }
+                over_card |= ui.contains_pointer(card);
                 render_grid_card(ui, panel, icons, row, card, thumb_h, visible_ids);
             }
         });
+    over_card
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1505,7 +1565,7 @@ fn render_list(
     icons: &HashMap<String, TextureId>,
     rows: &[AssetRow],
     visible_ids: &[AssetId],
-) {
+) -> bool {
     let sort_id = Id::new("ab_list_sort");
     let mut sort = ui
         .ctx()
@@ -1570,15 +1630,17 @@ fn render_list(
     ui.separator();
 
     let avail_h = ui.available_size().y;
+    let mut over_row = false;
     ScrollArea::new(avail_h)
         .auto_shrink(false)
         .inset(0.0)
         .spacing(0.0)
         .show(ui, |ui| {
             for row in rows {
-                render_list_row(ui, panel, icons, row, visible_ids);
+                over_row |= render_list_row(ui, panel, icons, row, visible_ids);
             }
         });
+    over_row
 }
 
 fn render_list_row(
@@ -1587,13 +1649,14 @@ fn render_list_row(
     icons: &HashMap<String, TextureId>,
     row: &AssetRow,
     visible_ids: &[AssetId],
-) {
+) -> bool {
     let width = ui.available().width();
     let row_rect = ui.allocate(Vec2::new(width, LIST_ROW_H));
     let clip = ui.clip_rect();
     if row_rect.max.y < clip.min.y || row_rect.min.y > clip.max.y {
-        return;
+        return false;
     }
+    let over_row = ui.contains_pointer(row_rect);
 
     let is_selected = panel.selection.is_selected(row.id);
     let is_renaming = matches!(
@@ -1715,6 +1778,7 @@ fn render_list_row(
         }
         asset_context_menu(ui, panel, row, row_rect);
     }
+    over_row
 }
 
 // ─── delete confirmation ────────────────────────────────────────────────

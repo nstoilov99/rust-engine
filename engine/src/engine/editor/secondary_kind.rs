@@ -16,6 +16,8 @@ pub enum SecondaryWindowKind {
     Graph,
     /// A `.curve` document editor (45-A P8b).
     Curve,
+    /// A `.blendspace` document editor (Task 41.5).
+    BlendSpace,
     Hierarchy,
     Inspector,
     AssetBrowser,

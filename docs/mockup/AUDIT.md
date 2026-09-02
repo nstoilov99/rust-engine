@@ -263,6 +263,7 @@ implementation to port*, not as shipped code.
 | Spline tangent `clamp(|dx|·(0.35+curve·0.55),34,190)` + backward `max(t, 70+0.35|dx|)` | same; prototype path 1124 | contradicts | Current: horizontal tangent `max(|dx|·0.5, |dy|·0.4, 24·zoom)` (:1150) — also **zoom-dependent** (spec: graph-space then scale) |
 | Stroke width zoom-invariant, geometry scales | nodegraph routing | contradicts | Width scales with zoom (:1153) — 0.5px wires at 0.25× |
 | Wire color from **source** pin type | prototype 1302 | missing | n/a until typed colors land |
+| Machine transition = straight arrow with an annotated edge chip (rule · duration · priority) at its midpoint | Task 41 mockup 2b/2d | superseded | Ruling 2026-09-01 (`.scratch/anim-transitions/spec.md`): **one straight line per (from, to) direction**, opposite directions ±½·`LANE_GAP`; each transition is a circular arrow **badge** (vector reading of `engine/icons/left-arrow-circle.svg`, D = `row_h`, disc `stroke_strong`, arrow cut out in the canvas colour, pointing with the flow) in a row beside the line, ascending node id, right of travel by radius + `label_gap`. Text left the canvas: tooltip ("Idle → Jump" + chip line) and the unfolded card. Below `glyphs()` the plain disc. `graph_anim_edge.rs` / `graph_editor_crusty.rs` |
 
 ### Wire routing (the router)
 

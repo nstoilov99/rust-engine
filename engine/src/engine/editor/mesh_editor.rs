@@ -66,6 +66,7 @@ pub struct MeshPreviewRenderer {
     queue: Arc<Queue>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
     identity_palette_set: Arc<DescriptorSet>,
@@ -164,6 +165,7 @@ impl MeshPreviewRenderer {
             queue,
             memory_allocator,
             command_buffer_allocator,
+            descriptor_set_allocator,
             render_pass,
             pipeline,
             identity_palette_set,
@@ -178,7 +180,22 @@ impl MeshPreviewRenderer {
         &self.memory_allocator
     }
 
-    /// Render mesh submeshes into the given framebuffer.
+    /// A bone-palette set for this pipeline's layout (a skinned preview
+    /// passes it to [`Self::render`]). Built per frame like the scene's.
+    pub fn create_palette_set(
+        &self,
+        palette: &[Mat4],
+    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
+        SkinningBackend::create_palette_set_for_layout(
+            &self.memory_allocator,
+            &self.descriptor_set_allocator,
+            self.pipeline.layout().set_layouts()[0].clone(),
+            palette,
+        )
+    }
+
+    /// Render mesh submeshes into the given framebuffer with `palette` bound
+    /// at set 0 (the identity palette when `None` — a static mesh).
     /// Returns a command buffer ready for submission (not executed).
     pub fn render(
         &self,
@@ -187,6 +204,7 @@ impl MeshPreviewRenderer {
         height: u32,
         gpu_meshes: &[GpuMeshBuffers],
         view_projection: Mat4,
+        palette: Option<&Arc<DescriptorSet>>,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
@@ -221,12 +239,11 @@ impl MeshPreviewRenderer {
 
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
-        // Bind identity bone palette (set 0) — preview renders static meshes
         builder.bind_descriptor_sets(
             PipelineBindPoint::Graphics,
             self.pipeline.layout().clone(),
             0,
-            self.identity_palette_set.clone(),
+            palette.unwrap_or(&self.identity_palette_set).clone(),
         )?;
 
         let model_matrix = Mat4::IDENTITY;

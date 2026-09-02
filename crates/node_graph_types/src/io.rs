@@ -78,6 +78,10 @@ fn migrate_container(doc: &mut GraphDoc, from: u32) {
             // real work is the stamp, which is what makes "this document is
             // v2" true rather than incidental.
             1 => {}
+            // v2 → v3: `regions` arrives (Task 41 embedded rule graphs),
+            // empty on an old document. Additive and defaulted, like v1→v2:
+            // the stamp is the step.
+            2 => {}
             // No step for this version: stop rather than claim an upgrade
             // that did not happen. The stamp below then reports how far the
             // document actually got.
@@ -124,6 +128,14 @@ pub fn canonical_form(doc: &GraphDoc) -> GraphDoc {
     }
     for g in out.groups.iter_mut() {
         g.rect = g.rect.map(round_px);
+    }
+    // Embedded regions are part of the document and get the same discipline
+    // (the map itself is a BTreeMap — already ordered).
+    for r in out.regions.values_mut() {
+        r.nodes.sort_by_key(|n| n.id);
+        for n in r.nodes.iter_mut() {
+            n.position = [round_px(n.position[0]), round_px(n.position[1])];
+        }
     }
     out
 }
@@ -515,7 +527,10 @@ mod tests {
         assert_eq!(back, doc);
         assert_eq!(serialize_graph(&back).unwrap(), a, "canonical form is idempotent");
         assert!(a.ends_with('\n'));
-        assert!(a.contains("version: 2"), "a saved doc is v2: {a}");
+        assert!(
+            a.contains(&format!("version: {GRAPH_DOC_VERSION}")),
+            "a saved doc carries the current container version: {a}"
+        );
         // Node titles and variable declarations reach the file.
         assert!(a.contains("title: Some(\"Start Here\")"), "{a}");
         assert!(a.contains("Array(String)"), "{a}");
@@ -581,6 +596,125 @@ mod tests {
     fn checked_in_v2_fixture_parses() {
         let doc = parse_graph(include_str!("fixtures/container_v2.graph")).unwrap();
         assert_eq!(doc, v2_doc());
+    }
+
+    /// A v3 document exercising the container bump: an embedded region
+    /// ("virtual subgraph") keyed under its owner node, with region-local
+    /// node ids, plus a domain-typed variable (the animation Trigger shape).
+    fn v3_doc() -> GraphDoc {
+        let mut doc = demo_doc();
+        doc.variables = vec![VarDecl {
+            slug: "jump".to_string(),
+            label: "Jump".to_string(),
+            ty: PinType::Domain("anim_trigger".to_string()),
+            default: None,
+            group: None,
+        }];
+        doc.regions.insert(
+            1,
+            GraphRegion {
+                nodes: vec![
+                    NodeInst {
+                        id: 0,
+                        type_id: "var_get".to_string(),
+                        type_version: 1,
+                        position: [0.0, 0.0],
+                        properties: BTreeMap::from([(
+                            "var".to_string(),
+                            PropValue::Str("jump".to_string()),
+                        )]),
+                        subgraph: None,
+                        tint: None,
+                        title: None,
+                    },
+                    NodeInst {
+                        id: 1,
+                        type_id: "anim_rule_result".to_string(),
+                        type_version: 1,
+                        position: [200.0, 0.0],
+                        properties: BTreeMap::new(),
+                        subgraph: None,
+                        tint: None,
+                        title: None,
+                    },
+                ],
+                edges: vec![Edge {
+                    from_node: 0,
+                    from_pin: "value".to_string(),
+                    to_node: 1,
+                    to_pin: "value".to_string(),
+                }],
+            },
+        );
+        doc
+    }
+
+    /// Embedded regions survive a save → load → save cycle byte-identically,
+    /// in canonical form, and a document *without* regions serializes exactly
+    /// as it did before v3 — the field must not churn every script graph.
+    #[test]
+    fn regions_round_trip_in_canonical_form() {
+        let doc = v3_doc();
+        let a = serialize_graph(&doc).unwrap();
+        let back = parse_graph(&a).unwrap();
+        assert_eq!(back, doc);
+        assert_eq!(serialize_graph(&back).unwrap(), a, "canonical form is idempotent");
+        assert!(a.contains("version: 3"), "{a}");
+        assert!(a.contains("regions"), "{a}");
+
+        // Region nodes get the same canonical discipline as top-level ones.
+        let mut messy = doc.clone();
+        let region = messy.regions.get_mut(&1).unwrap();
+        region.nodes.reverse();
+        region.nodes[0].position = [199.6, 0.4];
+        assert_eq!(serialize_graph(&messy).unwrap(), a, "region order/sub-pixels must not churn");
+
+        // No regions → no `regions` field on disk (and byte-parity with what
+        // a v2 build wrote, apart from the version stamp).
+        let plain = serialize_graph(&demo_doc()).unwrap();
+        assert!(!plain.contains("regions"), "{plain}");
+    }
+
+    /// A v2 document (no regions) loads, is stamped v3, and nothing moves.
+    #[test]
+    fn container_v2_migrates_to_v3() {
+        let doc = parse_graph(include_str!("fixtures/container_v2.graph")).unwrap();
+        assert_eq!(doc.version, GRAPH_DOC_VERSION, "loading stamps the new version");
+        assert!(doc.regions.is_empty(), "v2 knew no regions");
+        assert_eq!(doc, v2_doc());
+    }
+
+    /// The committed v3 fixture: the shape the engine writes today, frozen so
+    /// a schema change fails here before it reaches a user asset.
+    /// `UPDATE_GRAPH_FIXTURES=1` regenerates it.
+    #[test]
+    fn checked_in_v3_fixture_parses() {
+        if std::env::var("UPDATE_GRAPH_FIXTURES").is_ok() {
+            std::fs::write(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/fixtures/container_v3.graph"),
+                serialize_graph(&v3_doc()).unwrap(),
+            )
+            .unwrap();
+            return; // freshly written; the compiled-in copy is stale
+        }
+        let doc = parse_graph(include_str!("fixtures/container_v3.graph")).unwrap();
+        assert_eq!(doc, v3_doc());
+    }
+
+    /// Deleting a node through the document helper takes its edges, its
+    /// region and its anchored comments with it — a region never outlives
+    /// its owner (Task 41: a transition and its rule are one unit).
+    #[test]
+    fn remove_node_cascades_region_edges_and_anchored_comments() {
+        let mut doc = v3_doc();
+        doc.comments.push(CommentBox { anchor: Some(1), ..Default::default() });
+        assert!(doc.remove_node(1));
+        assert!(doc.node(1).is_none());
+        assert!(doc.regions.is_empty(), "the rule dies with its transition");
+        assert!(doc.edges.iter().all(|e| e.from_node != 1 && e.to_node != 1));
+        assert!(doc.comments.is_empty());
+        assert!(!serialize_graph(&doc).unwrap().contains("regions"));
+        assert!(!doc.remove_node(1), "already gone");
     }
 
     #[test]

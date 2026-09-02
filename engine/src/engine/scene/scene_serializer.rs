@@ -173,6 +173,14 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         });
     }
 
+    // Task 41: the attached animation graph, on the same terms.
+    if let Ok(runner) = world.get::<&crate::engine::animation::graph::AnimGraphRunner>(entity) {
+        components.push(ComponentData::AnimGraphRunner {
+            graph: runner.graph.clone(),
+            enabled: runner.enabled,
+        });
+    }
+
     if let Ok(emitter) = world.get::<&AudioEmitter>(entity) {
         components.push(ComponentData::AudioEmitter {
             clip_path: emitter.clip_path.clone(),
@@ -620,6 +628,12 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
             }
             ComponentData::GraphRunner { graph, enabled } => {
                 builder.add(crate::engine::scripting::GraphRunner {
+                    graph: crate::engine::scripting::normalize_graph_path(graph),
+                    enabled: *enabled,
+                });
+            }
+            ComponentData::AnimGraphRunner { graph, enabled } => {
+                builder.add(crate::engine::animation::graph::AnimGraphRunner {
                     graph: crate::engine::scripting::normalize_graph_path(graph),
                     enabled: *enabled,
                 });

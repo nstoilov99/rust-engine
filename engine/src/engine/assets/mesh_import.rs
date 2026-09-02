@@ -8,8 +8,8 @@
 //! `.anim` binary files store extracted animation clips separately.
 
 use super::model_loader::{
-    AnimationChannel, BoneData, ImportedMaterial, LoadedMesh, Model, RawAnimationClip,
-    VertexBoneData,
+    AnimEventMarker, AnimationChannel, BoneData, ImportedMaterial, LoadedMesh, Model,
+    RawAnimationClip, VertexBoneData,
 };
 use crate::engine::rendering::rendering_3d::pipeline_3d::Vertex3D;
 use glam::{Mat4, Quat, Vec3};
@@ -33,7 +33,9 @@ const MESH_DESC_SIZE: usize = 68;
 const FLAG_HAS_BONES: u32 = 1;
 
 const ANIM_MAGIC: &[u8; 4] = b"RANM";
-const ANIM_VERSION: u32 = 1;
+/// v2 appends the anim event marker list per clip (Task 41); v1 files load
+/// with no markers.
+const ANIM_VERSION: u32 = 2;
 
 // ──────────────────────────────────────────────────────────────
 // Import settings
@@ -184,6 +186,16 @@ pub fn import_model_to_mesh(
     let anim_clip_count = if anim_written {
         let anim_path = output_path.with_extension("anim");
         let bone_names: Vec<String> = model.bones.iter().map(|b| b.name.clone()).collect();
+        // Anim event markers are hand-authored on the asset (Task 41), not in
+        // the source file — a re-import must not silently destroy them, so
+        // carry the existing file's markers over by clip name.
+        if let Ok((_, old_clips)) = load_anim_binary(&anim_path) {
+            for clip in &mut model.animations {
+                if let Some(old) = old_clips.iter().find(|c| c.name == clip.name) {
+                    clip.events = old.events.clone();
+                }
+            }
+        }
         write_anim_binary(&anim_path, &model.animations, &bone_names)?;
         model.animations.len()
     } else {
@@ -1030,6 +1042,15 @@ pub fn write_anim_binary(
                 buf.extend_from_slice(&scl.z.to_le_bytes());
             }
         }
+
+        // Anim event markers (v2)
+        buf.extend_from_slice(&(clip.events.len() as u32).to_le_bytes());
+        for ev in &clip.events {
+            buf.extend_from_slice(&ev.time_seconds.to_le_bytes());
+            let name_bytes = ev.name.as_bytes();
+            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+        }
     }
 
     std::fs::write(path, &buf)
@@ -1257,10 +1278,36 @@ pub fn load_anim_binary_from_bytes(
             });
         }
 
+        // Anim event markers (v2; a v1 file simply has none).
+        let mut events = Vec::new();
+        if version >= 2 {
+            if cursor + 4 > data.len() {
+                return Err("Anim file truncated in event markers".into());
+            }
+            let event_count = read_u32(data, cursor) as usize;
+            cursor += 4;
+            for _ in 0..event_count {
+                if cursor + 8 > data.len() {
+                    return Err("Anim file truncated in event marker".into());
+                }
+                let time_seconds = read_f32(data, cursor);
+                let name_len = read_u32(data, cursor + 4) as usize;
+                cursor += 8;
+                if cursor + name_len > data.len() {
+                    return Err("Anim file truncated in event marker name".into());
+                }
+                let name =
+                    String::from_utf8_lossy(&data[cursor..cursor + name_len]).to_string();
+                cursor += name_len;
+                events.push(AnimEventMarker { time_seconds, name });
+            }
+        }
+
         clips.push(RawAnimationClip {
             name: clip_name,
             duration_seconds: duration,
             channels,
+            events,
         });
     }
 
@@ -1531,6 +1578,16 @@ mod tests {
                 ],
                 scale_keys: vec![(0.0, Vec3::ONE)],
             }],
+            events: vec![
+                AnimEventMarker {
+                    time_seconds: 0.4,
+                    name: "footstep".to_string(),
+                },
+                AnimEventMarker {
+                    time_seconds: 1.1,
+                    name: "footstep".to_string(),
+                },
+            ],
         }];
 
         let temp_dir = std::env::temp_dir().join("rust_engine_test_anim");
@@ -1551,6 +1608,34 @@ mod tests {
         assert_eq!(loaded_clips[0].channels[0].position_keys.len(), 2);
         assert_eq!(loaded_clips[0].channels[0].rotation_keys.len(), 2);
         assert_eq!(loaded_clips[0].channels[0].scale_keys.len(), 1);
+        assert_eq!(loaded_clips[0].events, clips[0].events, "markers round-trip");
+    }
+
+    /// A v1 `.anim` (no marker section) still loads — with no markers.
+    #[test]
+    fn v1_anim_binary_loads_without_markers() {
+        let clips = vec![RawAnimationClip {
+            name: "Old".to_string(),
+            duration_seconds: 1.0,
+            channels: vec![],
+            events: vec![],
+        }];
+        let temp_dir = std::env::temp_dir().join("rust_engine_test_anim_v1");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let anim_path = temp_dir.join("v1.anim");
+        write_anim_binary(&anim_path, &clips, &[]).expect("write failed");
+
+        // Rewrite the header's version to 1 and drop the (empty) marker
+        // section — exactly what a pre-Task-41 file looks like.
+        let mut data = std::fs::read(&anim_path).expect("read failed");
+        data[4..8].copy_from_slice(&1u32.to_le_bytes());
+        data.truncate(data.len() - 4);
+        let (_, loaded) = load_anim_binary_from_bytes(&data).expect("v1 loads");
+
+        let _ = std::fs::remove_file(&anim_path);
+        let _ = std::fs::remove_dir(&temp_dir);
+        assert_eq!(loaded[0].name, "Old");
+        assert!(loaded[0].events.is_empty());
     }
 
     #[test]
