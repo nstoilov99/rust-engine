@@ -206,6 +206,18 @@ pub const IK_AXIS_X_PROP: &str = "axis_x";
 pub const IK_AXIS_Y_PROP: &str = "axis_y";
 pub const IK_AXIS_Z_PROP: &str = "axis_z";
 pub const IK_MAX_ANGLE_PROP: &str = "max_angle";
+/// Foot-placement properties (Task 41.5 P6, I-D4) — two-bone chains only.
+/// `foot` (`Bool`, default false) marks the chain as a foot:
+/// `FootPlacementSystem` rays the ground under the chain's tip bone and
+/// writes the chain's `IkTargets` entry each frame; anim events named
+/// `<chain name>_down` / `<chain name>_up` drive the plant lock.
+/// `ankle_offset` (`Float`, default 0.1) lifts the effector along the hit
+/// normal (the foot bone sits at ankle height, not on the sole). `pelvis`
+/// (`Str`) names the bone the pelvis adjust lowers — every foot chain that
+/// sets it must agree; empty = no pelvis adjust.
+pub const IK_FOOT_PROP: &str = "foot";
+pub const IK_ANKLE_OFFSET_PROP: &str = "ankle_offset";
+pub const IK_PELVIS_PROP: &str = "pelvis";
 
 /// Trigger parameters are declared as `PinType::Domain("anim_trigger")` —
 /// the pin system's consumer-owned extension point, so the shared container
@@ -462,6 +474,17 @@ pub enum PlanIkSolver {
     LookAt { axis: glam::Vec3, max_angle: f32 },
 }
 
+/// Foot-placement config on a two-bone chain (Task 41.5 P6, I-D4): the tip
+/// bone is the foot; `<chain name>_down` / `<chain name>_up` anim events
+/// drive the plant lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFootPlacement {
+    /// Effector lift along the ground-hit normal, meters.
+    pub ankle_offset: f32,
+    /// The bone the pelvis adjust lowers; empty = no pelvis adjust.
+    pub pelvis_bone: String,
+}
+
 /// A compiled IK chain (I-D3): bone *names* — resolution to indices happens
 /// at arm time against the entity's actual skeleton (`runner.rs`), which is
 /// also where a missing bone refuses. Lives beside states/slots on
@@ -476,6 +499,8 @@ pub struct PlanIkChain {
     pub solver: PlanIkSolver,
     /// The declared Float parameter fading this chain (0 = off).
     pub weight_param: String,
+    /// Foot-placement config (P6); `None` = a plain gameplay-driven chain.
+    pub foot: Option<PlanFootPlacement>,
 }
 
 /// Where a transition starts. Always a concrete state: a transition drawn
@@ -1112,12 +1137,34 @@ fn compile_doc(
                 ))
             }
         }
+        // Foot placement (P6): opt-in per chain, two-bone only — the tip
+        // bone is the foot, so a look-at chain has nothing to plant.
+        let foot = match n.properties.get(IK_FOOT_PROP) {
+            Some(PropValue::Bool(true)) => {
+                if !matches!(solver, PlanIkSolver::TwoBone) {
+                    return Err(format!(
+                        "IK chain '{name}': foot placement needs the \
+                         '{IK_SOLVER_TWO_BONE}' solver"
+                    ));
+                }
+                Some(PlanFootPlacement {
+                    ankle_offset: float_prop(&n.properties, IK_ANKLE_OFFSET_PROP)
+                        .unwrap_or(0.1),
+                    pelvis_bone: str_prop(&n.properties, IK_PELVIS_PROP)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                })
+            }
+            _ => None,
+        };
         ik_chains.push(PlanIkChain {
             node_id: n.id,
             name,
             bones,
             solver,
             weight_param,
+            foot,
         });
     }
     ik_chains.sort_by_key(|c| c.node_id);
@@ -1144,6 +1191,26 @@ fn compile_doc(
                  component, so they must be unique",
                 c.name
             ));
+        }
+    }
+    // One pelvis drives the character: every foot chain that names a pelvis
+    // bone must name the same one (nested chains included).
+    let mut pelvis: Option<(&str, &str)> = None;
+    for c in &ik_chains {
+        let Some(f) = &c.foot else { continue };
+        if f.pelvis_bone.is_empty() {
+            continue;
+        }
+        match pelvis {
+            None => pelvis = Some((&c.name, &f.pelvis_bone)),
+            Some((_, b)) if b == f.pelvis_bone => {}
+            Some((other, b)) => {
+                return Err(format!(
+                    "IK chains '{other}' and '{}' name different pelvis bones \
+                     ('{b}' vs '{}') — one pelvis drives the character",
+                    c.name, f.pelvis_bone
+                ))
+            }
         }
     }
 

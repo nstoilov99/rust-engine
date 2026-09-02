@@ -33,7 +33,7 @@ mod world;
 pub use components::*;
 pub use debug_render::submit_collider_debug_draws;
 pub use system::PhysicsStepSystem;
-pub use world::PhysicsWorld;
+pub use world::{PhysicsWorld, RayHit};
 
 /// Clear every Rapier body/collider and re-register the ECS world's physics
 /// entities from scratch.

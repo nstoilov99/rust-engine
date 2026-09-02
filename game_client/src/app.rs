@@ -618,11 +618,27 @@ impl App {
         {
             use rust_engine::engine::animation::graph::{
                 AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
-                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets,
+                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets, IkTargets,
             };
             game_world.resources_mut().insert(AnimGraphPlanCache::new());
             game_world.resources_mut().insert(AnimClipCache::new());
             game_world.resources_mut().insert(BlendSpaceCache::new());
+            // Task 41.5 P6: foot placement feeds IK targets from ground
+            // raycasts — serial, immediately before the graph system.
+            schedule.add_system_described(
+                rust_engine::engine::animation::FootPlacementSystem::new(),
+                Stage::PreUpdate,
+                SystemDescriptor::new(rust_engine::engine::ecs::system_names::FOOT_PLACEMENT)
+                    .reads_resource::<Time>()
+                    .reads_resource::<rust_engine::engine::physics::PhysicsWorld>()
+                    .reads_resource::<TransformCache>()
+                    .reads::<Transform>()
+                    .reads::<rust_engine::engine::physics::RigidBody>()
+                    .writes::<AnimGraphRuntime>()
+                    .writes::<IkTargets>()
+                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
+                    .before(rust_engine::engine::ecs::system_names::ANIM_GRAPH),
+            );
             schedule.add_system_described(
                 AnimGraphSystem::new(Box::new(DiskAnimAssets {
                     content_root: rust_engine::engine::assets::content_root::content_root(),

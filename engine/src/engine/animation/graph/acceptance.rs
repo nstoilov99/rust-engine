@@ -3833,3 +3833,194 @@ fn look_at_runs_end_to_end() {
         "the hand's +Z aims at the target: {fwd}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Foot placement (Task 41.5 P6, I-D4)
+// ---------------------------------------------------------------------------
+//
+// The lock state machine and pelvis math live in
+// `animation/foot_placement.rs` against a scripted raycast; these tests
+// cover the graph-side config (compile + arm refusals) and the end-to-end
+// flow: `place_feet` writes targets + pelvis offsets, the next evaluation
+// applies the pelvis before the leg chain solves.
+
+/// A two-bone foot chain: `foot = true`, pelvis on the chain's own root
+/// bone (the 4-bone test skeleton has nothing above it).
+fn foot_props() -> Vec<(&'static str, PropValue)> {
+    vec![
+        (plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+        (plan::IK_FOOT_PROP, PropValue::Bool(true)),
+        (plan::IK_PELVIS_PROP, PropValue::Str("upper".into())),
+    ]
+}
+
+#[test]
+fn foot_placement_compiles_and_refuses_bad_configs() {
+    let p = compile_anim_graph(&ik_doc(&foot_props())).expect("compiles");
+    let f = p.ik_chains[0].foot.as_ref().expect("foot config compiled");
+    assert!((f.ankle_offset - 0.1).abs() < 1e-6, "default ankle offset");
+    assert_eq!(f.pelvis_bone, "upper");
+
+    // Foot placement plants a tip bone — look-at has none.
+    let e = compile_anim_graph(&ik_doc(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+        (plan::IK_FOOT_PROP, PropValue::Bool(true)),
+    ]))
+    .unwrap_err();
+    assert!(
+        e.contains("foot placement needs the 'two_bone' solver"),
+        "{e}"
+    );
+
+    // One pelvis drives the character: disagreeing chains refuse.
+    let mut doc = ik_doc(&foot_props());
+    let mut props = foot_props();
+    props.retain(|(k, _)| *k != plan::IK_PELVIS_PROP);
+    props.push((plan::IK_PELVIS_PROP, PropValue::Str("lower".into())));
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_IK_CHAIN_TYPE_ID,
+        Some("foot_r"),
+        &props,
+    ));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("different pelvis bones"), "{e}");
+}
+
+#[test]
+fn arming_refuses_a_missing_pelvis_bone() {
+    let mut props = foot_props();
+    props.retain(|(k, _)| *k != plan::IK_PELVIS_PROP);
+    props.push((plan::IK_PELVIS_PROP, PropValue::Str("hips".into())));
+    let mut h = ik_harness(&props);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("pelvis bone 'hips' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+/// P6 end to end: the scripted ground sits 0.3 below the entity plane. The
+/// serial foot pass writes the chain's target (contact + ankle offset along
+/// the normal) and the pelvis drop; the next evaluation applies the pelvis
+/// *before* the leg chain solves — the root drops the full 0.3 while the
+/// tip still lands exactly on the target.
+#[test]
+fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
+    use crate::engine::animation::foot_placement::place_feet;
+
+    let mut h = ik_harness(&foot_props());
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        IkTargets::default(),
+    ));
+    h.tick(); // arm + first eval records the animated tip
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        assert_eq!(rt.pelvis.map(|p| p.bone), Some(0), "pelvis armed on 'upper'");
+        assert_eq!(
+            rt.ik[0].animated_tip,
+            Some(Vec3::new(0.0, 2.0, 0.0)),
+            "the pre-IK tip was recorded"
+        );
+    }
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+
+    // The serial foot pass, scripted flat ground at world z = −0.3. The
+    // animated hand sits at world Z-up (0, 0, 2) (entity at the origin).
+    {
+        let mut q = h
+            .world
+            .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
+            .expect("entity");
+        let (rt, targets) = q.get().expect("components");
+        place_feet(rt, targets, Mat4::IDENTITY, Vec3::X, 1.0, true, &mut |o| {
+            Some((Vec3::new(o.x, o.y, -0.3), Vec3::Z))
+        });
+        let t = targets.targets.get("arm").expect("target written");
+        assert!(
+            (t.effector - Vec3::new(0.0, 0.0, -0.2)).length() < 1e-5,
+            "contact −0.3 lifted 0.1 along the normal: {}",
+            t.effector
+        );
+    }
+    h.tick();
+
+    // Model space (Y-up): the pelvis bone dropped the smoothed 0.3, the tip
+    // is on the target (world (0,0,−0.2) → model (0,−0.2,0)).
+    let root = bone_pos(&h, e, 0);
+    assert!(
+        (root - Vec3::new(0.0, -0.3, 0.0)).length() < 1e-3,
+        "pelvis dropped before the solve: {root}"
+    );
+    let tip = bone_pos(&h, e, 2);
+    assert!(
+        (tip - Vec3::new(0.0, -0.2, 0.0)).length() < 1e-3,
+        "the foot planted on the offset contact: {tip}"
+    );
+}
+
+/// The P6 forced-eval source, pinned per plan risk §7.3: a foot lock/unlock
+/// edge sets `throttle.force_eval_external` from the serial foot-placement
+/// pass; the significance pre-pass consumes it and that frame evaluates
+/// even in the slowest bucket — then throttling resumes (one-shot).
+#[test]
+fn a_foot_lock_edge_forces_evaluation_while_throttled() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(200.0), // slowest bucket
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm
+    // Move into Walk (marker-less) so the Idle clip's `step` event cannot
+    // force evaluations inside the measurement windows below.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_bool("walk", true);
+    for _ in 0..8 {
+        h.tick(); // fire + 0.5 s crossfade complete
+    }
+    let r0 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    assert!(revision_of(&h, e) - r0 <= 1, "the bucket really throttles");
+
+    // What FootPlacementSystem sets on a `<chain>_down` / `<chain>_up` edge.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .throttle
+        .force_eval_external = true;
+    let r1 = revision_of(&h, e);
+    h.tick();
+    assert_eq!(revision_of(&h, e) - r1, 1, "the forced frame evaluated");
+
+    let r2 = revision_of(&h, e);
+    for _ in 0..7 {
+        h.tick();
+    }
+    assert!(
+        revision_of(&h, e) - r2 <= 1,
+        "the hook is one-shot: throttling resumes"
+    );
+}

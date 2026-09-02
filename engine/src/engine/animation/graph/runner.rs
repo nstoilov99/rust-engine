@@ -121,6 +121,45 @@ pub struct ResolvedIkTarget {
     pub pole: glam::Vec3,
 }
 
+/// A ground contact as foot placement wrote it: the target (world Z-up) and
+/// the raw contact height the pelvis drop measures against.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldContact {
+    pub target: IkTarget,
+    pub contact_z: f32,
+}
+
+/// One foot chain's placement config + lock state (Task 41.5 P6, I-D4),
+/// armed from [`super::plan::PlanFootPlacement`]. Lock edges come from anim
+/// event name conventions: `<chain>_down` latches the current contact until
+/// `<chain>_up` releases it (`FootPlacementSystem` reads last tick's fires).
+#[derive(Debug, Clone)]
+pub struct FootState {
+    /// Effector lift along the ground-hit normal (the foot bone sits at
+    /// ankle height, not on the sole).
+    pub ankle_offset: f32,
+    pub locked: bool,
+    /// The latched contact while locked.
+    pub held: Option<HeldContact>,
+}
+
+/// The cosmetic pelvis drop (P6, I-D4). `offset` (world Z, ≤ 0) is smoothed
+/// by `FootPlacementSystem` toward the lowest foot contact below the
+/// entity's ground plane; `model_offset` is the same drop converted into
+/// the mesh's Y-up model space (through the entity render matrix), which is
+/// what the IK stage applies to the pelvis bone before the leg chains
+/// solve. Cosmetic only — the entity/collider never move from animation
+/// (non-goal: root motion).
+#[derive(Debug, Clone, Copy)]
+pub struct PelvisState {
+    /// Index into `SkeletonInstance::bones`, resolved at arm time.
+    pub bone: usize,
+    /// Smoothed world-Z drop, ≤ 0.
+    pub offset: f32,
+    /// `offset` as a model-space vector — `apply_ik`'s input.
+    pub model_offset: glam::Vec3,
+}
+
 /// A plan IK chain armed against one entity's skeleton: bone names resolved
 /// to indices (arm time refuses on a missing bone), plus the per-frame
 /// resolved targets the serial pre-pass writes.
@@ -135,6 +174,13 @@ pub struct ArmedIkChain {
     /// section must not touch), read inside `tick_entity`. `None` = no
     /// `IkTargets` entry for this chain, so it does not solve.
     pub resolved: Option<ResolvedIkTarget>,
+    /// Foot-placement config + lock state (P6); `None` = a plain chain.
+    pub foot: Option<FootState>,
+    /// The *animated* (pre-IK) model-space tip position recorded by the last
+    /// evaluation (`apply_ik`, two-bone chains only). Foot placement rays
+    /// down from this pose and measures the pelvis drop against it — it is
+    /// IK-free, so the solve never feeds back into its own inputs.
+    pub animated_tip: Option<glam::Vec3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,9 +254,10 @@ pub struct ThrottleState {
     /// Never evaluated under this runtime yet: the first frame after arming
     /// always evaluates (consumed by the pre-pass).
     pub pending_first_eval: bool,
-    /// P5/P6 IK hook: an external system (foot lock/unlock edge) sets this
-    /// to force one full evaluation; the pre-pass consumes it. Nothing in
-    /// the engine sets it yet.
+    /// P5/P6 IK hook: an external system sets this to force one full
+    /// evaluation; the pre-pass consumes it. `FootPlacementSystem` sets it
+    /// on foot lock/unlock edges (and when leaving the top bucket clears
+    /// its targets) — always from serial code, never the parallel section.
     pub force_eval_external: bool,
 }
 
@@ -253,6 +300,10 @@ pub struct AnimGraphRuntime {
     /// Armed IK chains (Task 41.5 P5): the plan's chains with bone names
     /// resolved to this skeleton's indices. Empty when the plan has none.
     pub ik: Vec<ArmedIkChain>,
+    /// Pelvis adjust (P6): armed when a foot chain names a pelvis bone.
+    /// `FootPlacementSystem` writes the per-frame offsets; `apply_ik`
+    /// consumes the model-space vector before the leg chains solve.
+    pub pelvis: Option<PelvisState>,
     /// Scratch for the IK descendant re-walk (sized to the bone count on
     /// first use, reused every frame — no steady-state allocation).
     pub ik_touched: Vec<bool>,
@@ -622,6 +673,7 @@ impl AnimGraphSystem {
             disabled: Some(why),
             throttle: ThrottleState::default(),
             ik: Vec::new(),
+            pelvis: None,
             ik_touched: Vec::new(),
         };
 
@@ -712,6 +764,7 @@ impl AnimGraphSystem {
             disabled: None,
             throttle: ThrottleState::default(),
             ik: Vec::new(),
+            pelvis: None,
             ik_touched: Vec::new(),
         }
     }
@@ -725,9 +778,10 @@ impl AnimGraphSystem {
 fn arm_ik_chains(
     plan: &AnimGraphPlan,
     skeleton: &SkeletonInstance,
-) -> Result<Vec<ArmedIkChain>, String> {
+) -> Result<(Vec<ArmedIkChain>, Option<PelvisState>), String> {
     let index_of = |name: &str| skeleton.bones.iter().position(|b| b.name == name);
     let mut out = Vec::with_capacity(plan.ik_chains.len());
+    let mut pelvis: Option<PelvisState> = None;
     for chain in &plan.ik_chains {
         let mut bones = Vec::with_capacity(chain.bones.len());
         for b in &chain.bones {
@@ -755,15 +809,39 @@ fn arm_ik_chains(
                 ));
             }
         }
+        // Foot placement (P6): the pelvis bone resolves here too — the
+        // compiler already guaranteed every foot chain names the same one,
+        // so the first non-empty name is *the* name.
+        if let Some(f) = &chain.foot {
+            if !f.pelvis_bone.is_empty() && pelvis.is_none() {
+                let bone = index_of(&f.pelvis_bone).ok_or_else(|| {
+                    format!(
+                        "IK chain '{}': pelvis bone '{}' is not in the skeleton",
+                        chain.name, f.pelvis_bone
+                    )
+                })?;
+                pelvis = Some(PelvisState {
+                    bone,
+                    offset: 0.0,
+                    model_offset: glam::Vec3::ZERO,
+                });
+            }
+        }
         out.push(ArmedIkChain {
             name: chain.name.clone(),
             bones,
             solver: chain.solver,
             weight_param: chain.weight_param.clone(),
             resolved: None,
+            foot: chain.foot.as_ref().map(|f| FootState {
+                ankle_offset: f.ankle_offset,
+                locked: false,
+                held: None,
+            }),
+            animated_tip: None,
         });
     }
-    Ok(out)
+    Ok((out, pelvis))
 }
 
 /// The clip a plan reference names, out of the cache.
@@ -855,6 +933,43 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         model_space,
         ..
     } = skeleton;
+    // P6 — record the animated (pre-IK, pre-pelvis) two-bone tips first:
+    // foot placement rays down from this pose next frame and measures the
+    // pelvis drop against it, so it must never contain this frame's
+    // corrections (no feedback loop).
+    for chain in &mut rt.ik {
+        if matches!(chain.solver, PlanIkSolver::TwoBone) {
+            chain.animated_tip = chain
+                .bones
+                .get(2)
+                .filter(|&&i| i < model_space.len())
+                .map(|&i| model_space[i].w_axis.truncate());
+        }
+    }
+    // P6 — pelvis adjust: a cosmetic model-space drop on the pelvis bone,
+    // faded by the strongest foot chain's weight, applied *before* the leg
+    // chains solve so both feet can still reach their contacts. The entity
+    // and collider never move (non-goal: root motion).
+    if let Some(p) = &rt.pelvis {
+        let weight = rt
+            .ik
+            .iter()
+            .filter(|c| c.foot.is_some())
+            .filter_map(|c| rt.params.get_float(&c.weight_param))
+            .fold(0.0f32, f32::max)
+            .min(1.0);
+        let offset = p.model_offset * weight;
+        if p.bone < model_space.len() && offset.length_squared() > 1e-10 {
+            model_space[p.bone].w_axis += offset.extend(0.0);
+            ik::rewalk_descendants(
+                model_space,
+                local_transforms,
+                |i| bones[i].parent_index,
+                &[p.bone],
+                &mut touched,
+            );
+        }
+    }
     for chain in &rt.ik {
         let Some(t) = chain.resolved else { continue };
         let weight = rt
@@ -980,7 +1095,10 @@ impl System for AnimGraphSystem {
             if runtime.disabled.is_none() && !runtime.plan.ik_chains.is_empty() {
                 if let Ok(skel) = world.get::<&SkeletonInstance>(entity) {
                     match arm_ik_chains(&runtime.plan, &skel) {
-                        Ok(chains) => runtime.ik = chains,
+                        Ok((chains, pelvis)) => {
+                            runtime.ik = chains;
+                            runtime.pelvis = pelvis;
+                        }
                         Err(why) => runtime.disabled = Some(format!("{graph}: {why}")),
                     }
                 }

@@ -784,8 +784,9 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
     use crate::engine::animation::graph::plan::{
         ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
         ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, CLIP_NAME_PROP, CLIP_PROP, DURATION_PROP,
-        GRAPH_PROP, IK_AXIS_X_PROP, IK_AXIS_Y_PROP, IK_AXIS_Z_PROP, IK_BONES_PROP,
-        IK_MAX_ANGLE_PROP, IK_SOLVER_LOOK_AT, IK_SOLVER_PROP, IK_SOLVER_TWO_BONE,
+        GRAPH_PROP, IK_ANKLE_OFFSET_PROP, IK_AXIS_X_PROP, IK_AXIS_Y_PROP, IK_AXIS_Z_PROP,
+        IK_BONES_PROP, IK_FOOT_PROP, IK_MAX_ANGLE_PROP, IK_PELVIS_PROP, IK_SOLVER_LOOK_AT,
+        IK_SOLVER_PROP, IK_SOLVER_TWO_BONE,
         IK_WEIGHT_PARAM_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
         SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
     };
@@ -1052,6 +1053,29 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
                         key.to_string(),
                         label.to_string(),
                         InlineKind::Float(float_of(key, default)),
+                    ));
+                }
+            }
+            // Foot placement (Task 41.5 P6) — two-bone only: the tip bone is
+            // the foot. The extra rows appear once the box is ticked, like
+            // look-at's axis rows appear with its solver.
+            if solver == IK_SOLVER_TWO_BONE {
+                let foot = matches!(n.properties.get(IK_FOOT_PROP), Some(PropValue::Bool(true)));
+                out.push((
+                    IK_FOOT_PROP.to_string(),
+                    "Foot".to_string(),
+                    InlineKind::Bool(foot),
+                ));
+                if foot {
+                    out.push((
+                        IK_ANKLE_OFFSET_PROP.to_string(),
+                        "Ankle Offset".to_string(),
+                        InlineKind::Float(float_of(IK_ANKLE_OFFSET_PROP, 0.1)),
+                    ));
+                    out.push((
+                        IK_PELVIS_PROP.to_string(),
+                        "Pelvis".to_string(),
+                        InlineKind::Str(text_of(IK_PELVIS_PROP)),
                     ));
                 }
             }

@@ -398,6 +398,7 @@ mod tests {
             disabled: None,
             throttle: Default::default(),
             ik: Vec::new(),
+            pelvis: None,
             ik_touched: Vec::new(),
         }
     }

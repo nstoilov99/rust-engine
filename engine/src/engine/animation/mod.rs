@@ -8,10 +8,12 @@ pub mod blend_space;
 pub mod components;
 #[cfg(debug_assertions)]
 pub mod debug_draw;
+pub mod foot_placement;
 pub mod graph;
 pub mod ik;
 pub mod sampling;
 pub mod system;
 
 pub use components::{AnimationPlayer, CrossfadeState, PlaybackState, SkeletonInstance};
+pub use foot_placement::FootPlacementSystem;
 pub use system::AnimationUpdateSystem;

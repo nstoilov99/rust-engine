@@ -145,7 +145,8 @@ pub fn anim_node_registry() -> NodeRegistry {
         desc(
             ANIM_IK_CHAIN_TYPE_ID,
             "IK Chain",
-            "A post-pose IK pass — two-bone (foot, hand) or look-at — faded by a Float parameter.",
+            "A post-pose IK pass — two-bone (foot, hand) or look-at — faded by a Float \
+             parameter. Foot mode adds ground raycasts, plant locking and pelvis drop.",
             vec![],
             vec![],
         ),
