@@ -253,12 +253,18 @@ impl SkinningBackend {
             if !self
                 .sync
                 .wait_done(gate_fence_slot, gate, Duration::from_secs(2))
-                && !self.warned_wait
             {
-                eprintln!(
-                    "skinning: palette ring wait timed out (render thread stalled?) — proceeding"
-                );
-                self.warned_wait = true;
+                // Anti-deadlock escape hatch: writing the region anyway can
+                // race a merely-stalled (not dead) render thread's GPU reads.
+                if !self.warned_wait {
+                    eprintln!(
+                        "skinning: palette ring wait timed out (render thread stalled?) — proceeding"
+                    );
+                    self.warned_wait = true;
+                }
+            } else {
+                // Warn once per stall episode, not once per process.
+                self.warned_wait = false;
             }
         }
         self.cur_seq = seq;

@@ -151,6 +151,9 @@ struct SkinBindCache {
     identity_region: Subbuffer<[[f32; 16]]>,
     /// Slot rotation for the identity fallback (no packet slot available).
     fallback_slot: usize,
+    /// Set once a palette-bearing frame is seen; guards against a host
+    /// interleaving `Some`/`None` palettes (see `prepare_skinning_binds`).
+    saw_palette_frame: bool,
 }
 
 impl SkinBindCache {
@@ -173,6 +176,7 @@ impl SkinBindCache {
             shadow: PassSkinBind::new(allocator)?,
             identity_region,
             fallback_slot: 0,
+            saw_palette_frame: false,
         })
     }
 }
@@ -804,8 +808,20 @@ impl DeferredRenderer {
         light_vp: [[f32; 4]; 4],
     ) -> Result<(Arc<DescriptorSet>, Arc<DescriptorSet>), Box<dyn std::error::Error>> {
         let (region, slot) = match palette {
-            Some(p) => (p.region.clone(), p.slot % 4),
+            Some(p) => {
+                self.skin_binds.saw_palette_frame = true;
+                (p.region.clone(), p.slot % 4)
+            }
             None => {
+                // Tests/tools only — shipping hosts always send `Some`.
+                // `fallback_slot` rotates independently of the fence ring, so
+                // a `None` frame after palette frames could rewrite a VP UBO
+                // still referenced by an in-flight frame 1-3 slots back.
+                debug_assert!(
+                    !self.skin_binds.saw_palette_frame,
+                    "palette-less frame after palette-bearing frames: \
+                     fallback slot rotation is not fence-synchronized"
+                );
                 self.skin_binds.fallback_slot = (self.skin_binds.fallback_slot + 1) % 4;
                 (
                     self.skin_binds.identity_region.clone(),

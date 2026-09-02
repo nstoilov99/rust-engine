@@ -103,8 +103,8 @@ pub fn prepare_mesh_data(
     shadow_caster_buffer.clear();
 
     let meshes = asset_manager.meshes.read();
-    // Claim this frame's ring region (blocks until the render thread has
-    // reclaimed the fence of the frame that used it 3 frames ago).
+    // Claim this frame's ring region (blocks until frame N-4 — the region's
+    // previous occupant — is marked done via fence reclaim or guard).
     skinning.begin_frame(frame_number);
 
     let view_matrix = renderer.camera_3d.view_matrix();
