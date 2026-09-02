@@ -10,7 +10,6 @@ use vulkano::command_buffer::{
     SubpassBeginInfo, SubpassContents, SubpassEndInfo,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::{Device, DeviceOwned, Queue};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
@@ -69,7 +68,6 @@ pub struct MeshPreviewRenderer {
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
-    identity_palette_set: Arc<DescriptorSet>,
 }
 
 impl MeshPreviewRenderer {
@@ -153,14 +151,6 @@ impl MeshPreviewRenderer {
             },
         )?;
 
-        // Identity bone palette for static mesh preview
-        let identity_palette_set = SkinningBackend::create_identity_set_for_layout(
-            &memory_allocator,
-            &descriptor_set_allocator,
-            pipeline.layout().set_layouts()[0].clone(),
-        )
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-
         Ok(Self {
             queue,
             memory_allocator,
@@ -168,7 +158,6 @@ impl MeshPreviewRenderer {
             descriptor_set_allocator,
             render_pass,
             pipeline,
-            identity_palette_set,
         })
     }
 
@@ -180,22 +169,9 @@ impl MeshPreviewRenderer {
         &self.memory_allocator
     }
 
-    /// A bone-palette set for this pipeline's layout (a skinned preview
-    /// passes it to [`Self::render`]). Built per frame like the scene's.
-    pub fn create_palette_set(
-        &self,
-        palette: &[Mat4],
-    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        SkinningBackend::create_palette_set_for_layout(
-            &self.memory_allocator,
-            &self.descriptor_set_allocator,
-            self.pipeline.layout().set_layouts()[0].clone(),
-            palette,
-        )
-    }
-
-    /// Render mesh submeshes into the given framebuffer with `palette` bound
-    /// at set 0 (the identity palette when `None` — a static mesh).
+    /// Render mesh submeshes into the given framebuffer with this frame's
+    /// pose `palette` (identity when `None` — a static mesh). Builds the one
+    /// set-0 descriptor set (palette SSBO + view-projection UBO) per call.
     /// Returns a command buffer ready for submission (not executed).
     pub fn render(
         &self,
@@ -204,8 +180,15 @@ impl MeshPreviewRenderer {
         height: u32,
         gpu_meshes: &[GpuMeshBuffers],
         view_projection: Mat4,
-        palette: Option<&Arc<DescriptorSet>>,
+        palette: Option<&[Mat4]>,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, Box<dyn std::error::Error>> {
+        let frame_set = SkinningBackend::create_preview_set(
+            &self.memory_allocator,
+            &self.descriptor_set_allocator,
+            self.pipeline.layout().set_layouts()[0].clone(),
+            palette.unwrap_or(&[]),
+            view_projection,
+        )?;
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             self.queue.queue_family_index(),
@@ -243,13 +226,13 @@ impl MeshPreviewRenderer {
             PipelineBindPoint::Graphics,
             self.pipeline.layout().clone(),
             0,
-            palette.unwrap_or(&self.identity_palette_set).clone(),
+            frame_set,
         )?;
 
         let model_matrix = Mat4::IDENTITY;
         let push_data = preview_vs::PushConstants {
             model: model_matrix.to_cols_array_2d(),
-            view_projection: view_projection.to_cols_array_2d(),
+            palette_base: 0,
         };
         builder.push_constants(self.pipeline.layout().clone(), 0, push_data)?;
 

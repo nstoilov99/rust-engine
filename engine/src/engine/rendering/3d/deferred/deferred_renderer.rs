@@ -15,6 +15,7 @@ use crate::engine::rendering::error::RenderError;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
+use crate::engine::rendering::rendering_3d::skinning::SkinnedPaletteFrame;
 use crate::engine::rendering::rendering_3d::material::{
     create_default_texture, create_default_texture_with_format, PbrMaterial, DEFAULT_ALBEDO_RGBA,
     DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
@@ -70,6 +71,110 @@ pub struct DeferredRenderer {
     grid_render_pass: Arc<RenderPass>,
     grid_present_render_pass: Arc<RenderPass>,
     plankton_system: PlanktonSystem,
+    skin_binds: SkinBindCache,
+}
+
+/// Per-pass set-0 state for the palette SSBO ring (Task 41.5 P1): one tiny
+/// view-projection UBO per ring region (rewritten each frame — safe because
+/// the region's previous frame's fence was reclaimed before `render` runs)
+/// and a cached descriptor set per region binding `{ palette region, vp ubo }`.
+/// Sets are rebuilt only when the region identity changes (ring growth) —
+/// no per-frame descriptor allocation.
+struct PassSkinBind {
+    vp_ubos: [Subbuffer<[[f32; 4]; 4]>; 4],
+    /// (buffer ptr, byte offset) of the region each cached set binds.
+    sets: [Option<(usize, u64, Arc<DescriptorSet>)>; 4],
+}
+
+impl PassSkinBind {
+    fn new(allocator: &Arc<StandardMemoryAllocator>) -> Result<Self, Box<dyn std::error::Error>> {
+        let make = || -> Result<Subbuffer<[[f32; 4]; 4]>, Box<dyn std::error::Error>> {
+            Ok(vulkano::buffer::Buffer::from_data(
+                allocator.clone(),
+                vulkano::buffer::BufferCreateInfo {
+                    usage: vulkano::buffer::BufferUsage::UNIFORM_BUFFER,
+                    ..Default::default()
+                },
+                AllocationCreateInfo {
+                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                    ..Default::default()
+                },
+                Mat4::IDENTITY.to_cols_array_2d(),
+            )?)
+        };
+        Ok(Self {
+            vp_ubos: [make()?, make()?, make()?, make()?],
+            sets: [None, None, None, None],
+        })
+    }
+
+    /// Write this slot's VP and return the (cached) set-0 descriptor set for
+    /// `region`.
+    fn bind(
+        &mut self,
+        descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
+        layout: Arc<vulkano::descriptor_set::layout::DescriptorSetLayout>,
+        slot: usize,
+        region: &Subbuffer<[[f32; 16]]>,
+        view_projection: [[f32; 4]; 4],
+    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
+        *self.vp_ubos[slot].write()? = view_projection;
+        let key = (Arc::as_ptr(region.buffer()) as usize, region.offset());
+        if let Some((ptr, off, set)) = &self.sets[slot] {
+            if (*ptr, *off) == key {
+                return Ok(set.clone());
+            }
+        }
+        let set = DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            layout,
+            [
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(0, region.clone()),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(
+                    1,
+                    self.vp_ubos[slot].clone(),
+                ),
+            ],
+            [],
+        )?;
+        self.sets[slot] = Some((key.0, key.1, set.clone()));
+        Ok(set)
+    }
+}
+
+struct SkinBindCache {
+    geometry: PassSkinBind,
+    shadow: PassSkinBind,
+    /// One identity matrix — bound when a frame carries no palette ring
+    /// (tests, tools); static meshes still render via `palette_base = 0`.
+    identity_region: Subbuffer<[[f32; 16]]>,
+    /// Slot rotation for the identity fallback (no packet slot available).
+    fallback_slot: usize,
+}
+
+impl SkinBindCache {
+    fn new(allocator: &Arc<StandardMemoryAllocator>) -> Result<Self, Box<dyn std::error::Error>> {
+        let identity_region = vulkano::buffer::Buffer::from_iter(
+            allocator.clone(),
+            vulkano::buffer::BufferCreateInfo {
+                usage: vulkano::buffer::BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            [Mat4::IDENTITY.to_cols_array()],
+        )?;
+        Ok(Self {
+            geometry: PassSkinBind::new(allocator)?,
+            shadow: PassSkinBind::new(allocator)?,
+            identity_region,
+            fallback_slot: 0,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -477,6 +582,8 @@ impl DeferredRenderer {
                 )?;
         let default_material_set = default_material.descriptor_set.clone();
 
+        let skin_binds = SkinBindCache::new(&allocator)?;
+
         let mut renderer = Self {
             gbuffer,
             geometry_pass,
@@ -507,6 +614,7 @@ impl DeferredRenderer {
             grid_render_pass,
             grid_present_render_pass,
             plankton_system,
+            skin_binds,
         };
 
         // Populate every pass's descriptor sets / framebuffers (same loop
@@ -684,6 +792,46 @@ impl DeferredRenderer {
         Ok(())
     }
 
+    /// Write this frame slot's per-pass view-projection UBOs and resolve the
+    /// set-0 descriptor sets (palette region + VP) for the geometry and
+    /// shadow passes. Safe to write: the caller's fence discipline guarantees
+    /// the slot's previous GPU use was reclaimed (render thread reclaims the
+    /// slot fence before calling `render`).
+    fn prepare_skinning_binds(
+        &mut self,
+        palette: Option<&SkinnedPaletteFrame>,
+        camera_vp: Mat4,
+        light_vp: [[f32; 4]; 4],
+    ) -> Result<(Arc<DescriptorSet>, Arc<DescriptorSet>), Box<dyn std::error::Error>> {
+        let (region, slot) = match palette {
+            Some(p) => (p.region.clone(), p.slot % 4),
+            None => {
+                self.skin_binds.fallback_slot = (self.skin_binds.fallback_slot + 1) % 4;
+                (
+                    self.skin_binds.identity_region.clone(),
+                    self.skin_binds.fallback_slot,
+                )
+            }
+        };
+        let geom_layout = self.geometry_pass.layout().set_layouts()[0].clone();
+        let shadow_layout = self.shadow_pass.layout().set_layouts()[0].clone();
+        let geom_set = self.skin_binds.geometry.bind(
+            &self.descriptor_set_allocator,
+            geom_layout,
+            slot,
+            &region,
+            camera_vp.to_cols_array_2d(),
+        )?;
+        let shadow_set = self.skin_binds.shadow.bind(
+            &self.descriptor_set_allocator,
+            shadow_layout,
+            slot,
+            &region,
+            light_vp,
+        )?;
+        Ok((geom_set, shadow_set))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -699,10 +847,14 @@ impl DeferredRenderer {
         debug_draw: &DebugDrawData,
         settings: &PostProcessingSettings,
         plankton_emitters: &[crate::engine::rendering::frame_packet::PlanktonEmitterFrameData],
+        palette: Option<&SkinnedPaletteFrame>,
     ) -> Result<Arc<PrimaryAutoCommandBuffer>, RenderError> {
         crate::profile_function!();
 
         self.render_counters.reset();
+
+        let (geom_skin_set, shadow_skin_set) =
+            self.prepare_skinning_binds(palette, view_proj, light_data.light_vp)?;
 
         let needs_depth_framebuffer = grid_visible || !debug_draw.is_empty();
 
@@ -768,6 +920,8 @@ impl DeferredRenderer {
         let this: &Self = &*self;
         let target_fb_ref = &target_framebuffer;
         let depth_fb_ref = &depth_framebuffer;
+        let geom_skin_set_ref = &geom_skin_set;
+        let shadow_skin_set_ref = &shadow_skin_set;
 
         let mut graph = RenderGraph::new();
         {
@@ -813,7 +967,7 @@ impl DeferredRenderer {
                         ctx.mark_write(id);
                     }
                     ctx.mark_write(gbuffer_depth);
-                    this.record_geometry_pass(ctx.builder, mesh_data, counters_ref)
+                    this.record_geometry_pass(ctx.builder, mesh_data, geom_skin_set_ref, counters_ref)
                 },
             );
 
@@ -828,7 +982,7 @@ impl DeferredRenderer {
                         this.record_shadow_pass(
                             ctx.builder,
                             shadow_caster_data,
-                            light_data,
+                            shadow_skin_set_ref,
                             counters_ref,
                         )
                     },
@@ -1043,7 +1197,7 @@ impl DeferredRenderer {
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         mesh_data: &[MeshRenderData],
-        light_data: &LightUniformData,
+        skin_set: &Arc<DescriptorSet>,
         counters: &std::cell::RefCell<RenderCounters>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::profile_scope!("shadow_pass");
@@ -1077,25 +1231,19 @@ impl DeferredRenderer {
             .set_scissor(0, smallvec![shadow_scissor])?;
 
         let shadow_layout = self.shadow_pass.layout();
+        // One palette/VP bind for the whole pass (SSBO ring, S-D1).
+        builder.bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            shadow_layout.clone(),
+            0,
+            skin_set.clone(),
+        )?;
         let mut counters = counters.borrow_mut();
         for mesh in mesh_data {
             builder
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    shadow_layout.clone(),
-                    0,
-                    mesh.bone_palette_set.clone(),
-                )?
                 .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
                 .bind_index_buffer(mesh.index_buffer.clone())?
-                .push_constants(
-                    shadow_layout.clone(),
-                    0,
-                    PushConstantData {
-                        model: mesh.push_constants.model,
-                        view_projection: light_data.light_vp,
-                    },
-                )?;
+                .push_constants(shadow_layout.clone(), 0, mesh.push_constants)?;
             unsafe {
                 builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
             }
@@ -1110,6 +1258,7 @@ impl DeferredRenderer {
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
         mesh_data: &[MeshRenderData],
+        skin_set: &Arc<DescriptorSet>,
         counters: &std::cell::RefCell<RenderCounters>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::profile_scope!("geometry_pass");
@@ -1151,8 +1300,15 @@ impl DeferredRenderer {
             crate::profile_scope!("mesh_loop");
             let mut counters = counters.borrow_mut();
             let mut last_material_ptr: Option<usize> = None;
-            let mut last_palette: Option<usize> = None;
             let geom_layout = self.geometry_pass.layout();
+            // One palette/VP bind for the whole pass (SSBO ring, S-D1);
+            // per-draw addressing is the palette_base push constant.
+            builder.bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                geom_layout.clone(),
+                0,
+                skin_set.clone(),
+            )?;
             for mesh in mesh_data {
                 counters.visible_entities += 1;
                 counters.draw_calls += 1;
@@ -1172,17 +1328,6 @@ impl DeferredRenderer {
                     )?;
                     last_material_ptr = Some(mat_ptr);
                     counters.material_changes += 1;
-                }
-
-                let palette_ptr = Arc::as_ptr(&mesh.bone_palette_set) as usize;
-                if last_palette != Some(palette_ptr) {
-                    builder.bind_descriptor_sets(
-                        PipelineBindPoint::Graphics,
-                        geom_layout.clone(),
-                        0,
-                        mesh.bone_palette_set.clone(),
-                    )?;
-                    last_palette = Some(palette_ptr);
                 }
 
                 builder
@@ -1859,17 +2004,20 @@ pub struct MeshRenderData {
     pub mesh_index: usize,
     pub material_index: usize,
     pub push_constants: PushConstantData,
-    pub bone_palette_set: Arc<DescriptorSet>,
     /// Pre-resolved material descriptor set (Set 1 for geometry pass).
     /// Resolved at `prepare_mesh_data` time — the render thread does no manager lookups.
     pub material_descriptor_set: Option<Arc<DescriptorSet>>,
 }
 
+/// Per-draw push constants: model matrix + flat index of this entity's
+/// palette in the frame's SSBO ring region (0 = identity, static meshes).
+/// Must match the 68-byte `PushConstants` block in `gbuffer.vert` /
+/// `shadow_vs.glsl` exactly — no trailing padding.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PushConstantData {
     pub model: [[f32; 4]; 4],
-    pub view_projection: [[f32; 4]; 4],
+    pub palette_base: u32,
 }
 
 unsafe impl bytemuck::Pod for PushConstantData {}

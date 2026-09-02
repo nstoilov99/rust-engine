@@ -7,7 +7,7 @@
 
 use crate::engine::debug_draw::DebugDrawData;
 use crate::engine::rendering::rendering_3d::{
-    LightUniformData, MeshRenderData, PostProcessingSettings,
+    LightUniformData, MeshRenderData, PostProcessingSettings, SkinnedPaletteFrame,
 };
 use glam::{Mat4, Vec3};
 #[cfg(feature = "editor")]
@@ -97,6 +97,10 @@ pub struct FramePacket {
     pub debug_draw: DebugDrawData,
     pub post_processing: PostProcessingSettings,
     pub plankton_emitters: Vec<PlanktonEmitterFrameData>,
+
+    /// This frame's bone-palette SSBO ring region + fence-ring slot
+    /// (Task 41.5 P1). `None` renders every mesh with the identity palette.
+    pub palette: Option<SkinnedPaletteFrame>,
 
     /// crusty-gui paint list — the editor's sole UI pass, and the
     /// standalone HUD overlay when the `hud` feature is on.
@@ -211,6 +215,7 @@ impl FramePacket {
             debug_draw,
             post_processing: PostProcessingSettings::default(),
             plankton_emitters,
+            palette: None,
             #[cfg(any(feature = "editor", feature = "hud"))]
             crusty_paint: None,
             #[cfg(feature = "editor")]
@@ -260,6 +265,7 @@ impl FramePacket {
             debug_draw,
             post_processing: PostProcessingSettings::default(),
             plankton_emitters,
+            palette: None,
             crusty_paint: None,
             crusty_texture_uploads: Vec::new(),
             crusty_preview_cbs: Vec::new(),

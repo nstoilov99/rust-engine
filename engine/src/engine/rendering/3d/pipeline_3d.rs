@@ -11,7 +11,6 @@ use vulkano::descriptor_set::{
 use vulkano::device::Device;
 use vulkano::image::sampler::Sampler;
 use vulkano::image::view::ImageView;
-use vulkano::pipeline::graphics::rasterization::DepthBiasState;
 use vulkano::pipeline::graphics::{
     color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
     depth_stencil::CompareOp,
@@ -62,20 +61,7 @@ pub mod lit_mesh_fs {
     }
 }
 
-// Shadow shaders
-pub mod shadow_vs {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        path: "src/engine/rendering/shaders/3d/shadow_vs.glsl",
-    }
-}
-
-pub mod shadow_fs {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        path: "src/engine/rendering/shaders/3d/shadow_fs.glsl",
-    }
-}
+// Shadow shaders live in `deferred::shadow_pass` (the only shadow pipeline).
 
 // PBR shaders
 pub mod pbr_vs {
@@ -129,41 +115,8 @@ impl Default for Vertex3D {
     }
 }
 
-/// Maximum bones supported by the FixedUbo skinning backend.
-/// This is a backend limit, not a permanent engine-wide skeleton limit.
-pub const MAX_PALETTE_BONES: usize = 256;
-
-/// GPU bone palette data for the FixedUbo skinning backend.
-///
-/// Uploaded as a uniform buffer and bound at set 0, binding 0 for all
-/// Vertex3D pipelines. Static meshes use the identity palette.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct BonePaletteData {
-    pub matrices: [[f32; 16]; MAX_PALETTE_BONES],
-    pub bone_count: u32,
-    pub _pad: [u32; 3],
-}
-
-unsafe impl bytemuck::Pod for BonePaletteData {}
-unsafe impl bytemuck::Zeroable for BonePaletteData {}
-
-impl BonePaletteData {
-    /// Identity palette: every bone slot = identity matrix.
-    /// Used for static (non-skinned) meshes and as a safe fallback
-    /// for skinned meshes rendered without a skeleton (thumbnails, previews).
-    pub fn identity() -> Self {
-        // Mat4::IDENTITY as column-major [f32; 16]
-        let id = [
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ];
-        Self {
-            matrices: [id; MAX_PALETTE_BONES],
-            bone_count: 0,
-            _pad: [0; 3],
-        }
-    }
-}
+// Bone palettes are a runtime-sized SSBO ring — see `skinning.rs`
+// (Task 41.5 P1). No fixed bone cap exists anymore.
 
 /// Lighting data for forward rendering pipeline (uniform buffer).
 ///
@@ -502,71 +455,6 @@ pub fn create_pbr_pipeline(
                         stages: ShaderStages::VERTEX,
                         offset: 0,
                         size: size_of::<pbr_vs::PushConstants>() as u32,
-                    }],
-                    ..Default::default()
-                },
-            )?)
-        },
-    )?;
-
-    Ok(pipeline)
-}
-
-/// Creates shadow rendering pipeline (depth-only)
-pub fn create_shadow_pipeline(
-    device: Arc<Device>,
-    render_pass: Arc<RenderPass>,
-) -> Result<Arc<GraphicsPipeline>, Box<dyn std::error::Error>> {
-    let vs = shadow_vs::load(device.clone())?;
-    let fs = shadow_fs::load(device.clone())?;
-
-    let vs_entry = vs
-        .entry_point("main")
-        .ok_or("Vertex shader missing 'main' entry point")?;
-    let fs_entry = fs
-        .entry_point("main")
-        .ok_or("Fragment shader missing 'main' entry point")?;
-
-    let vertex_input_state = Vertex3D::per_vertex().definition(&vs_entry)?;
-
-    let pipeline = GraphicsPipeline::new(
-        device.clone(),
-        None,
-        GraphicsPipelineCreateInfo {
-            stages: smallvec![
-                PipelineShaderStageCreateInfo::new(vs_entry),
-                PipelineShaderStageCreateInfo::new(fs_entry),
-            ],
-            vertex_input_state: Some(vertex_input_state),
-            input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState::default()),
-            rasterization_state: Some(RasterizationState {
-                depth_bias: Some(DepthBiasState {
-                    constant_factor: 1.25, // Prevents shadow acne
-                    clamp: 0.0,
-                    slope_factor: 1.75,
-                }),
-                ..Default::default()
-            }),
-            multisample_state: Some(MultisampleState::default()),
-            depth_stencil_state: Some(DepthStencilState {
-                depth: Some(DepthState {
-                    write_enable: true,
-                    compare_op: CompareOp::Less,
-                }),
-                ..Default::default()
-            }),
-            color_blend_state: None, // No color attachment
-            dynamic_state: [DynamicState::Viewport].into_iter().collect(),
-            subpass: Some(render_pass.clone().first_subpass().into()),
-            ..GraphicsPipelineCreateInfo::layout(PipelineLayout::new(
-                device.clone(),
-                PipelineLayoutCreateInfo {
-                    set_layouts: vec![],
-                    push_constant_ranges: vec![PushConstantRange {
-                        stages: ShaderStages::VERTEX,
-                        offset: 0,
-                        size: size_of::<shadow_vs::PushConstants>() as u32,
                     }],
                     ..Default::default()
                 },

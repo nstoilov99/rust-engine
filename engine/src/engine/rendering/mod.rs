@@ -38,7 +38,10 @@ pub mod rendering_3d {
     pub use mesh_manager::{GpuMesh, MeshManager};
     pub use pipeline_3d::*;
     pub use shadow::*;
-    pub use skinning::SkinningBackend;
+    pub use skinning::{
+        PaletteRingSync, SkinnedPaletteFrame, SkinningBackend, PALETTE_RING_REGIONS,
+        PALETTE_RING_SLOTS,
+    };
 }
 
 pub use common::*;

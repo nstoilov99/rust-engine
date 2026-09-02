@@ -35,7 +35,6 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::sync::GpuFuture;
 
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::DescriptorSet;
 use vulkano::pipeline::PipelineBindPoint;
 
 use crate::engine::assets::model_loader::{LoadedMesh, Model};
@@ -86,9 +85,9 @@ pub struct ThumbnailRenderer {
     queue: Arc<Queue>,
     memory_allocator: Arc<StandardMemoryAllocator>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     _render_pass: Arc<RenderPass>,
     pipeline: Arc<GraphicsPipeline>,
-    identity_palette_set: Arc<DescriptorSet>,
     color_image: Arc<Image>,
     _color_view: Arc<ImageView>,
     _depth_view: Arc<ImageView>,
@@ -167,14 +166,6 @@ impl ThumbnailRenderer {
             },
         )?;
 
-        // Identity bone palette for static meshes
-        let identity_palette_set = SkinningBackend::create_identity_set_for_layout(
-            &ctx.memory_allocator,
-            &ctx.descriptor_set_allocator,
-            pipeline.layout().set_layouts()[0].clone(),
-        )
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
-
         // Offscreen attachments
         let color_image = Image::new(
             ctx.memory_allocator.clone(),
@@ -230,9 +221,9 @@ impl ThumbnailRenderer {
             queue: ctx.queue,
             memory_allocator: ctx.memory_allocator,
             command_buffer_allocator: ctx.command_buffer_allocator,
+            descriptor_set_allocator: ctx.descriptor_set_allocator,
             _render_pass: render_pass,
             pipeline,
-            identity_palette_set,
             color_image,
             _color_view: color_view,
             _depth_view: depth_view,
@@ -336,19 +327,28 @@ impl ThumbnailRenderer {
 
         builder.bind_pipeline_graphics(self.pipeline.clone())?;
 
-        // Bind identity bone palette (set 0) — all thumbnails render static meshes
+        // Set 0: identity bone palette + this thumbnail's view-projection —
+        // all thumbnails render static meshes (palette_base = 0).
+        let frame_set = SkinningBackend::create_preview_set(
+            &self.memory_allocator,
+            &self.descriptor_set_allocator,
+            self.pipeline.layout().set_layouts()[0].clone(),
+            &[],
+            view_projection,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         builder.bind_descriptor_sets(
             PipelineBindPoint::Graphics,
             self.pipeline.layout().clone(),
             0,
-            self.identity_palette_set.clone(),
+            frame_set,
         )?;
 
-        // Push constants: model (identity) + view_projection
+        // Push constants: model (identity) + palette base
         let model_matrix = Mat4::IDENTITY;
         let push_data = thumbnail_vs::PushConstants {
             model: model_matrix.to_cols_array_2d(),
-            view_projection: view_projection.to_cols_array_2d(),
+            palette_base: 0,
         };
         builder.push_constants(self.pipeline.layout().clone(), 0, push_data)?;
 

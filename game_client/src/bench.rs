@@ -25,7 +25,7 @@ pub fn render_hooks_enabled() -> bool {
     RENDER_HOOKS.load(Relaxed)
 }
 
-/// One palette descriptor upload took `nanos`.
+/// One skeleton's palette write into the SSBO ring took `nanos`.
 pub fn palette_upload(nanos: u64) {
     PALETTE_UPLOADS.fetch_add(1, Relaxed);
     PALETTE_NANOS.fetch_add(nanos, Relaxed);
@@ -239,7 +239,10 @@ impl BenchRun {
         row("palette upload ms", &self.palette_ms);
         row("skinned draws", &self.skinned_draws);
         out.push_str("\nskinned draws = per-submesh draws submitted (camera list + shadow list).\n");
-        out.push_str("palette uploads = per-entity UBO + descriptor-set allocations per frame.\n");
+        out.push_str(
+            "palette uploads = skeleton palettes written into the SSBO ring per frame \
+             (P1; pre-P1 baselines measured per-entity UBO + descriptor-set allocations).\n",
+        );
 
         let dir = std::path::Path::new(".scratch/anim-scale");
         let path = dir.join(format!("baseline-{}.txt", self.n));

@@ -190,11 +190,7 @@ impl StandaloneApp {
             (tmp.geometry_pipeline(), tmp.default_material_set().clone())
         };
 
-        let skinning = SkinningBackend::new(
-            renderer.gpu.memory_allocator.clone(),
-            renderer.gpu.descriptor_set_allocator.clone(),
-            &geometry_pipeline,
-        )?;
+        let skinning = SkinningBackend::new(renderer.gpu.memory_allocator.clone())?;
 
         // Scene-referenced meshes/materials resolve inside `load_world` (once
         // per world load, not per frame like the editor).
@@ -342,6 +338,7 @@ impl StandaloneApp {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Standalone,
             initial_dimensions: [width, height],
+            palette_sync: skinning.sync().clone(),
             swapchain_transfer: Some(
                 rust_engine::engine::rendering::render_thread::SwapchainTransfer {
                     surface: renderer.swapchain_state.surface.clone(),
@@ -728,14 +725,15 @@ impl StandaloneApp {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
-        render_loop::prepare_mesh_data(
+        let palette_frame = render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
             &mut self.shadow_caster_buffer,
             tc,
-            &self.skinning,
+            &mut self.skinning,
+            self.frame_number,
             &self.default_material_set,
             &self.materials.cache,
         );
@@ -760,7 +758,6 @@ impl StandaloneApp {
 
         let debug_draw_data = rust_engine::engine::debug_draw::DebugDrawData::empty();
 
-        #[cfg_attr(not(feature = "hud"), allow(unused_mut))]
         let mut packet = FramePacket::build_standalone(
             std::mem::take(&mut self.mesh_data_buffer),
             std::mem::take(&mut self.shadow_caster_buffer),
@@ -774,6 +771,7 @@ impl StandaloneApp {
             self.frame_number,
             std::mem::take(&mut self.plankton_emitter_buffer),
         );
+        packet.palette = Some(palette_frame);
         self.frame_number += 1;
 
         #[cfg(feature = "hud")]

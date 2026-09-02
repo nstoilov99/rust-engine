@@ -849,26 +849,8 @@ pub fn load_mesh_binary_from_bytes(
         });
     }
 
-    // Validate bone count against FixedUbo backend cap
-    use crate::engine::rendering::rendering_3d::pipeline_3d::MAX_PALETTE_BONES;
-    if bones.len() > MAX_PALETTE_BONES {
-        return Err(format!(
-            "Mesh '{}' has {} bones, exceeding the current skinning backend cap of {}. \
-             A larger backend (LargeSsbo) is needed for this asset.",
-            name,
-            bones.len(),
-            MAX_PALETTE_BONES,
-        )
-        .into());
-    }
-    if bones.len() > 200 {
-        log::warn!(
-            "Mesh '{}' has {} bones (approaching FixedUbo cap of {})",
-            name,
-            bones.len(),
-            MAX_PALETTE_BONES,
-        );
-    }
+    // No bone cap: the LargeSsbo skinning backend sizes palettes from actual
+    // bone counts (Task 41.5 P1).
 
     let mut model = Model {
         meshes,

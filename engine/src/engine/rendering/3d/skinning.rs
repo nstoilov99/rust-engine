@@ -1,111 +1,202 @@
-//! Skinning backend for GPU bone palette upload and binding.
+//! Skinning backend: bone-palette SSBO ring (Task 41.5 P1, the `LargeSsbo`
+//! backend the old FixedUbo comments anticipated).
 //!
-//! Phase 1 implements the `FixedUbo` backend: a fixed-capacity UBO
-//! with `MAX_PALETTE_BONES` slots. The animation system produces
-//! `Vec<Mat4>` palette data; this module converts it into a GPU
-//! binding (descriptor set). A future `LargeSsbo` backend can be
-//! added without changing animation sampling or ECS components.
+//! One large storage buffer holds every skeleton's palette back-to-back.
+//! It is split into [`PALETTE_RING_REGIONS`] independently-written regions.
+//! Region reuse is gated on the renderer's 3-slot fence ring: the main thread
+//! writes frame N's palettes into region `N % 4` after the render thread has
+//! reclaimed the fence of frame N-4 — published through [`PaletteRingSync`]
+//! (marked when a fence-ring slot is reclaimed, or immediately when a frame
+//! is consumed without GPU work). [`SkinningBackend::begin_frame`] blocks on
+//! that marker.
+//!
+//! Why 4 regions against a 3-slot fence ring (P1 ruling): the renderer
+//! reclaims a fence-ring slot *lazily* — frame N-3's fence is taken at the
+//! start of processing frame N's packet. With only 3 regions the main thread
+//! would have to wait for that reclaim before it could build (and send)
+//! frame N — a producer/consumer deadlock. One region of slack matches the
+//! actual reclaim point: frame N needs frame N-4 done, which the renderer
+//! publishes while processing frame N-1 (already sent). Every index is
+//! derived from the packet's `frame_number` (regions `% 4`, fence slots
+//! `% 3`) — there is no second ring counter to drift.
+//!
+//! Draws address palettes with a flat `palette_base` index (push constant)
+//! into the frame's region — no dynamic offsets, no per-entity descriptor
+//! sets. Element 0 of every region is the identity matrix, so static meshes
+//! use `palette_base = 0`.
+//!
+//! Growth: if a frame needs more matrices than a region holds, a new (larger)
+//! buffer is allocated on the spot and the current frame's writes are copied
+//! over. In-flight frames keep the old buffer alive through their descriptor
+//! sets (Arc), so no fence wait is needed; the first 3 frames on the new
+//! buffer skip the ring wait (fresh regions were never seen by the GPU).
 
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use glam::Mat4;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::DescriptorSetLayout;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
+use vulkano::device::DeviceOwned;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::GraphicsPipeline;
-use vulkano::pipeline::Pipeline;
+use vulkano::DeviceSize;
 
-use super::pipeline_3d::{BonePaletteData, MAX_PALETTE_BONES};
+/// Fence-ring slots (the render thread's ring) — release markers are keyed
+/// by `frame_number % PALETTE_RING_SLOTS`.
+pub const PALETTE_RING_SLOTS: usize = 3;
 
-/// FixedUbo skinning backend.
+/// Palette ring regions — one more than the fence ring because fence slots
+/// are reclaimed lazily (see module docs). Regions are indexed by
+/// `frame_number % PALETTE_RING_REGIONS`.
+pub const PALETTE_RING_REGIONS: usize = 4;
+
+/// Bytes per palette matrix (column-major mat4).
+const MAT_BYTES: DeviceSize = 64;
+
+/// Initial region capacity in matrices (before alignment rounding).
+const INITIAL_REGION_MATS: DeviceSize = 256;
+
+const IDENTITY_MAT: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// Cross-thread release markers for the palette ring.
 ///
-/// Manages bone palette UBO allocation and descriptor set creation
-/// for a specific pipeline layout. The identity binding is shared
-/// across all static meshes.
+/// `state[slot]` holds `seq + 1` of the newest frame on that slot whose GPU
+/// work is provably finished (0 = none yet). The render thread publishes via
+/// [`mark_done`](Self::mark_done); the main thread blocks in
+/// [`wait_done`](Self::wait_done) before rewriting a region.
+pub struct PaletteRingSync {
+    state: Mutex<[u64; PALETTE_RING_SLOTS]>,
+    cv: Condvar,
+}
+
+impl Default for PaletteRingSync {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PaletteRingSync {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new([0; PALETTE_RING_SLOTS]),
+            cv: Condvar::new(),
+        }
+    }
+
+    /// Frame `seq` (which used region `slot`) is finished on the GPU — its
+    /// region may be rewritten.
+    pub fn mark_done(&self, slot: usize, seq: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state[slot] < seq + 1 {
+            state[slot] = seq + 1;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Block until frame `seq` on `slot` has been marked done. Returns
+    /// `false` on timeout (render thread stalled or gone).
+    pub fn wait_done(&self, slot: usize, seq: u64, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state[slot] < seq + 1 {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .cv
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = guard;
+        }
+        true
+    }
+}
+
+/// One frame's view of the palette ring, handed to the renderer: the region
+/// slice (bound whole at set 0 / binding 0) and the region index the frame
+/// occupies (`frame_number % PALETTE_RING_REGIONS`) — also the renderer's
+/// index into its per-slot VP UBOs / set cache.
+#[derive(Clone)]
+pub struct SkinnedPaletteFrame {
+    pub region: Subbuffer<[[f32; 16]]>,
+    pub slot: usize,
+}
+
+/// Main-thread palette writer over the SSBO ring.
 pub struct SkinningBackend {
     allocator: Arc<StandardMemoryAllocator>,
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    #[allow(dead_code)] // Kept alive — referenced by identity_set's descriptor
-    identity_buffer: Subbuffer<BonePaletteData>,
-    identity_set: Arc<DescriptorSet>,
-    set_layout: Arc<DescriptorSetLayout>,
+    sync: Arc<PaletteRingSync>,
+    buffer: Subbuffer<[[f32; 16]]>,
+    /// Region capacity in matrices; region byte size is a multiple of
+    /// `minStorageBufferOffsetAlignment` so every region offset is aligned.
+    region_capacity: DeviceSize,
+    /// Alignment expressed in matrices (>= 1).
+    align_mats: DeviceSize,
+    /// First frame sequence written to the current buffer — the first 4
+    /// frames of a buffer skip the ring wait (fresh regions).
+    epoch_start_seq: u64,
+    cur_seq: u64,
+    cur_slot: usize,
+    /// Matrices written into the current region (element 0 is the identity).
+    cursor: DeviceSize,
+    warned_wait: bool,
 }
 
 impl SkinningBackend {
-    /// Create a new skinning backend for the given pipeline.
-    ///
-    /// The pipeline must have a descriptor set layout at set 0 with
-    /// a uniform buffer binding at binding 0 (the bone palette UBO).
     pub fn new(
         allocator: Arc<StandardMemoryAllocator>,
-        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-        pipeline: &Arc<GraphicsPipeline>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let set_layout = pipeline.layout().set_layouts()[0].clone();
-
-        let identity_buffer = Buffer::from_data(
-            allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            BonePaletteData::identity(),
-        )?;
-
-        let identity_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
-            set_layout.clone(),
-            [WriteDescriptorSet::buffer(0, identity_buffer.clone())],
-            [],
-        )?;
+        let align: DeviceSize = allocator
+            .device()
+            .physical_device()
+            .properties()
+            .min_storage_buffer_offset_alignment
+            .as_devicesize();
+        let align_mats = align.div_ceil(MAT_BYTES).max(1);
+        let region_capacity = round_up(INITIAL_REGION_MATS, align_mats);
+        let buffer = Self::alloc_buffer(&allocator, region_capacity)?;
 
         Ok(Self {
             allocator,
-            descriptor_set_allocator,
-            identity_buffer,
-            identity_set,
-            set_layout,
+            sync: Arc::new(PaletteRingSync::new()),
+            buffer,
+            region_capacity,
+            align_mats,
+            epoch_start_seq: 0,
+            cur_seq: 0,
+            cur_slot: 0,
+            cursor: 1,
+            warned_wait: false,
         })
     }
 
-    /// Returns the shared identity bone palette descriptor set.
-    /// Used for all static (non-skinned) meshes.
-    pub fn identity_set(&self) -> &Arc<DescriptorSet> {
-        &self.identity_set
+    /// The release-marker handshake shared with the render thread
+    /// (pass a clone into `RenderThreadConfig`).
+    pub fn sync(&self) -> &Arc<PaletteRingSync> {
+        &self.sync
     }
 
-    /// Create a descriptor set from a bone palette (Vec<Mat4>).
-    ///
-    /// The palette must not exceed `MAX_PALETTE_BONES`. Panics if it does.
-    /// The animation system should validate bone counts before calling this.
-    pub fn create_palette_set(
-        &self,
-        palette: &[Mat4],
-    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        debug_assert!(
-            palette.len() <= MAX_PALETTE_BONES,
-            "Bone palette ({}) exceeds FixedUbo cap ({})",
-            palette.len(),
-            MAX_PALETTE_BONES,
-        );
-
-        let mut data = BonePaletteData::identity();
-        data.bone_count = palette.len() as u32;
-        for (i, mat) in palette.iter().enumerate() {
-            data.matrices[i] = mat.to_cols_array();
-        }
-
-        let buffer = Buffer::from_data(
-            self.allocator.clone(),
+    /// Allocate a ring buffer of `4 * capacity` matrices and write the
+    /// identity matrix into element 0 of each region.
+    fn alloc_buffer(
+        allocator: &Arc<StandardMemoryAllocator>,
+        capacity: DeviceSize,
+    ) -> Result<Subbuffer<[[f32; 16]]>, Box<dyn std::error::Error>> {
+        let buffer = Buffer::new_slice::<[f32; 16]>(
+            allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -113,48 +204,137 @@ impl SkinningBackend {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            data,
+            capacity * PALETTE_RING_REGIONS as DeviceSize,
         )?;
-
-        let set = DescriptorSet::new(
-            self.descriptor_set_allocator.clone(),
-            self.set_layout.clone(),
-            [WriteDescriptorSet::buffer(0, buffer)],
-            [],
-        )?;
-
-        Ok(set)
+        for slot in 0..PALETTE_RING_REGIONS as DeviceSize {
+            let ident = buffer.clone().slice(slot * capacity..slot * capacity + 1);
+            let mut guard = ident.write()?;
+            guard[0] = IDENTITY_MAT;
+        }
+        Ok(buffer)
     }
 
-    /// Create an identity descriptor set for a different pipeline layout.
+    /// Open frame `seq` (the packet's `frame_number`): claims region
+    /// `seq % 4`, blocking until frame `seq - 4` — the region's previous
+    /// occupant — has been marked done (its fence reclaimed, or it never
+    /// submitted GPU work).
+    pub fn begin_frame(&mut self, seq: u64) {
+        let slot = (seq % PALETTE_RING_REGIONS as u64) as usize;
+        if seq >= self.epoch_start_seq + PALETTE_RING_REGIONS as u64 {
+            let gate = seq - PALETTE_RING_REGIONS as u64;
+            let gate_fence_slot = (gate % PALETTE_RING_SLOTS as u64) as usize;
+            if !self
+                .sync
+                .wait_done(gate_fence_slot, gate, Duration::from_secs(2))
+                && !self.warned_wait
+            {
+                eprintln!(
+                    "skinning: palette ring wait timed out (render thread stalled?) — proceeding"
+                );
+                self.warned_wait = true;
+            }
+        }
+        self.cur_seq = seq;
+        self.cur_slot = slot;
+        self.cursor = 1;
+    }
+
+    /// Write one skeleton's palette into the current frame's region and
+    /// return its flat `palette_base` index (region-relative). Call once per
+    /// skeleton per frame, between `begin_frame` and `end_frame`.
+    pub fn write_palette(&mut self, palette: &[Mat4]) -> Result<u32, Box<dyn std::error::Error>> {
+        let n = palette.len() as DeviceSize;
+        if n == 0 {
+            return Ok(0);
+        }
+        if self.cursor + n > self.region_capacity {
+            self.grow(self.cursor + n)?;
+        }
+        let start = self.cur_slot as DeviceSize * self.region_capacity + self.cursor;
+        let sub = self.buffer.clone().slice(start..start + n);
+        {
+            let mut guard = sub.write()?;
+            for (dst, mat) in guard.iter_mut().zip(palette) {
+                *dst = mat.to_cols_array();
+            }
+        }
+        let base = self.cursor as u32;
+        self.cursor += n;
+        Ok(base)
+    }
+
+    /// Close the frame: the region slice + slot for the `FramePacket`.
+    pub fn end_frame(&self) -> SkinnedPaletteFrame {
+        let start = self.cur_slot as DeviceSize * self.region_capacity;
+        SkinnedPaletteFrame {
+            region: self
+                .buffer
+                .clone()
+                .slice(start..start + self.region_capacity),
+            slot: self.cur_slot,
+        }
+    }
+
+    /// Reallocate with room for at least `needed` matrices per region and
+    /// carry the current frame's writes over. Old buffer stays alive via the
+    /// Arcs held by in-flight frames' descriptor sets; new regions were never
+    /// GPU-visible, so the ring wait restarts (`epoch_start_seq`).
+    fn grow(&mut self, needed: DeviceSize) -> Result<(), Box<dyn std::error::Error>> {
+        let new_capacity = round_up(needed.max(self.region_capacity * 2), self.align_mats);
+        let new_buffer = Self::alloc_buffer(&self.allocator, new_capacity)?;
+        if self.cursor > 1 {
+            let old_start = self.cur_slot as DeviceSize * self.region_capacity;
+            let new_start = self.cur_slot as DeviceSize * new_capacity;
+            let src = self
+                .buffer
+                .clone()
+                .slice(old_start + 1..old_start + self.cursor);
+            let dst = new_buffer
+                .clone()
+                .slice(new_start + 1..new_start + self.cursor);
+            let src_guard = src.read()?;
+            let mut dst_guard = dst.write()?;
+            dst_guard.copy_from_slice(&src_guard);
+        }
+        self.buffer = new_buffer;
+        self.region_capacity = new_capacity;
+        self.epoch_start_seq = self.cur_seq;
+        Ok(())
+    }
+
+    /// One-off palette + view-projection descriptor set for the editor
+    /// preview pipelines (thumbnails, mesh/anim/blend-space previews). Their
+    /// set 0 is `{ binding 0: palette SSBO, binding 1: view-projection UBO }`;
+    /// an empty `palette` binds a single identity matrix (`palette_base = 0`).
     ///
-    /// Used by pipelines (shadow, thumbnail, mesh editor) that have their
-    /// own layout but need an identity bone palette at set 0.
-    pub fn create_identity_set_for_layout(
-        allocator: &Arc<StandardMemoryAllocator>,
-        descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
-        set_layout: Arc<DescriptorSetLayout>,
-    ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        Self::create_palette_set_for_layout(allocator, descriptor_set_allocator, set_layout, &[])
-    }
-
-    /// Create a bone-palette descriptor set for any pipeline whose set 0 /
-    /// binding 0 is `BonePaletteData` (the editor's preview pipeline). An
-    /// empty `palette` is the identity; anything past `MAX_PALETTE_BONES`
-    /// is dropped.
-    pub fn create_palette_set_for_layout(
+    /// These paths record a fresh buffer per call (no reuse), so no ring
+    /// discipline applies.
+    pub fn create_preview_set(
         allocator: &Arc<StandardMemoryAllocator>,
         descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
         set_layout: Arc<DescriptorSetLayout>,
         palette: &[Mat4],
+        view_projection: Mat4,
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
-        let mut data = BonePaletteData::identity();
-        let n = palette.len().min(MAX_PALETTE_BONES);
-        data.bone_count = n as u32;
-        for (slot, mat) in data.matrices.iter_mut().zip(palette) {
-            *slot = mat.to_cols_array();
-        }
-        let buffer = Buffer::from_data(
+        let mats: Vec<[f32; 16]> = if palette.is_empty() {
+            vec![IDENTITY_MAT]
+        } else {
+            palette.iter().map(|m| m.to_cols_array()).collect()
+        };
+        let palette_buffer = Buffer::from_iter(
+            allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            mats,
+        )?;
+        let vp_buffer = Buffer::from_data(
             allocator.clone(),
             BufferCreateInfo {
                 usage: BufferUsage::UNIFORM_BUFFER,
@@ -165,16 +345,46 @@ impl SkinningBackend {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            data,
+            view_projection.to_cols_array_2d(),
         )?;
-
         let set = DescriptorSet::new(
             descriptor_set_allocator.clone(),
             set_layout,
-            [WriteDescriptorSet::buffer(0, buffer)],
+            [
+                WriteDescriptorSet::buffer(0, palette_buffer),
+                WriteDescriptorSet::buffer(1, vp_buffer),
+            ],
             [],
         )?;
-
         Ok(set)
+    }
+}
+
+fn round_up(value: DeviceSize, multiple: DeviceSize) -> DeviceSize {
+    value.div_ceil(multiple) * multiple
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_sync_marks_and_waits() {
+        let sync = PaletteRingSync::new();
+        assert!(!sync.wait_done(0, 0, Duration::from_millis(10)));
+        sync.mark_done(0, 0);
+        assert!(sync.wait_done(0, 0, Duration::from_millis(10)));
+        // Monotone: an older seq can't regress the marker.
+        sync.mark_done(0, 5);
+        sync.mark_done(0, 2);
+        assert!(sync.wait_done(0, 5, Duration::from_millis(10)));
+        assert!(!sync.wait_done(0, 6, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn round_up_multiples() {
+        assert_eq!(round_up(256, 4), 256);
+        assert_eq!(round_up(257, 4), 260);
+        assert_eq!(round_up(1, 1), 1);
     }
 }

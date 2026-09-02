@@ -19,7 +19,8 @@ use rust_engine::engine::rendering::frame_packet::{
     EmissionParameters, EmitterFlags, ForceParameters, PlanktonEmitterFrameData, VisualParameters,
 };
 use rust_engine::engine::rendering::rendering_3d::{
-    DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinningBackend,
+    DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinnedPaletteFrame,
+    SkinningBackend,
 };
 use rust_engine::Renderer;
 use std::sync::Arc;
@@ -72,6 +73,12 @@ fn is_editor_visible(world: &World, entity: hecs::Entity) -> bool {
 /// Reads pre-computed transforms from `transform_cache` (populated by
 /// `TransformCache::propagate` earlier in the frame).  No recursive
 /// hierarchy traversal happens here.
+///
+/// Writes every visible skeleton's palette into the SSBO ring's region for
+/// `frame_number` (one write per skeleton, shared by all its submesh draws)
+/// and returns the frame's ring region for the `FramePacket`. The caller's
+/// fence ring must release ring slots via `skinning.sync()` (the render
+/// thread does; `benchmark_runner` does it inline).
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_mesh_data(
     world: &World,
@@ -80,10 +87,11 @@ pub fn prepare_mesh_data(
     mesh_data_buffer: &mut Vec<MeshRenderData>,
     shadow_caster_buffer: &mut Vec<MeshRenderData>,
     transform_cache: &TransformCache,
-    skinning: &SkinningBackend,
+    skinning: &mut SkinningBackend,
+    frame_number: u64,
     default_material_set: &Arc<vulkano::descriptor_set::DescriptorSet>,
     material_cache: &std::collections::HashMap<String, Arc<vulkano::descriptor_set::DescriptorSet>>,
-) {
+) -> SkinnedPaletteFrame {
     rust_engine::profile_scope!("prepare_mesh_data");
 
     // Task 41.5 P0 bench hooks — inert (one atomic load) unless --bench-secs
@@ -95,15 +103,15 @@ pub fn prepare_mesh_data(
     shadow_caster_buffer.clear();
 
     let meshes = asset_manager.meshes.read();
-    let identity_set = skinning.identity_set();
+    // Claim this frame's ring region (blocks until the render thread has
+    // reclaimed the fence of the frame that used it 3 frames ago).
+    skinning.begin_frame(frame_number);
 
     let view_matrix = renderer.camera_3d.view_matrix();
     let projection_matrix = renderer.camera_3d.projection_matrix();
     let view_projection = projection_matrix * view_matrix;
 
     let camera_frustum = Frustum::from_view_projection(view_projection);
-
-    let vp_array: [[f32; 4]; 4] = view_projection.to_cols_array_2d();
 
     for (entity, (_transform, mesh_renderer, skeleton)) in world
         .query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>()
@@ -133,23 +141,28 @@ pub fn prepare_mesh_data(
         });
         let model_array: [[f32; 4]; 4] = unsafe { std::mem::transmute(model_matrix) };
 
+        // One ring write per skeleton per frame; every submesh draw of the
+        // entity shares the returned palette_base. Base 0 = identity (static
+        // meshes, or a failed write — mesh renders in bind pose).
         let is_skinned = skeleton.is_some_and(|s| !s.palette.is_empty());
-        let palette_set = if let Some(skel) = skeleton {
-            if !skel.palette.is_empty() {
-                let t0 = bench.then(std::time::Instant::now);
-                let set = match skinning.create_palette_set(&skel.palette) {
-                    Ok(set) => set,
-                    Err(_) => identity_set.clone(),
-                };
-                if let Some(t0) = t0 {
-                    crate::bench::palette_upload(t0.elapsed().as_nanos() as u64);
+        let palette_base = if let Some(skel) = skeleton.filter(|s| !s.palette.is_empty()) {
+            // Task 41.5 bench hook (moved here from the old per-entity
+            // descriptor upload): count = skeletons written this frame,
+            // ms = time writing palettes into the ring.
+            let t0 = bench.then(std::time::Instant::now);
+            let base = match skinning.write_palette(&skel.palette) {
+                Ok(base) => base,
+                Err(_) => {
+                    warn_once_per_path("palette ring write for", &mesh_renderer.mesh_path);
+                    0
                 }
-                set
-            } else {
-                identity_set.clone()
+            };
+            if let Some(t0) = t0 {
+                crate::bench::palette_upload(t0.elapsed().as_nanos() as u64);
             }
+            base
         } else {
-            identity_set.clone()
+            0
         };
 
         for (sub_i, &mesh_idx) in submesh_indices.iter().enumerate() {
@@ -180,9 +193,8 @@ pub fn prepare_mesh_data(
                     material_index: mesh_renderer.material_index,
                     push_constants: PushConstantData {
                         model: model_array,
-                        view_projection: vp_array,
+                        palette_base,
                     },
-                    bone_palette_set: palette_set.clone(),
                     material_descriptor_set: Some(mat_set),
                 };
 
@@ -206,6 +218,8 @@ pub fn prepare_mesh_data(
 
     mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
     shadow_caster_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
+
+    skinning.end_frame()
 }
 
 fn compute_light_vp(light_dir_render: glm::Vec3) -> glam::Mat4 {

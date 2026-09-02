@@ -478,15 +478,9 @@ fn record_skinned_preview(
     }
     let palette = skeleton
         .filter(|s| !s.palette.is_empty())
-        .and_then(|s| match renderer.create_palette_set(&s.palette) {
-            Ok(set) => Some(set),
-            Err(e) => {
-                eprintln!("{what} palette upload failed: {e}");
-                None
-            }
-        });
+        .map(|s| s.palette.as_slice());
     let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
-    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
+    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette) {
         Ok(cb) => Some(cb),
         Err(e) => {
             eprintln!("{what} render error: {e}");
@@ -582,11 +576,7 @@ impl App {
             600,
         )?;
 
-        let skinning = SkinningBackend::new(
-            renderer.gpu.memory_allocator.clone(),
-            renderer.gpu.descriptor_set_allocator.clone(),
-            &deferred_renderer.geometry_pipeline(),
-        )?;
+        let skinning = SkinningBackend::new(renderer.gpu.memory_allocator.clone())?;
 
         let viewport_texture = ViewportTexture::new(
             renderer.gpu.device.clone(),
@@ -780,6 +770,7 @@ impl App {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Editor,
             initial_dimensions: [800, 600],
+            palette_sync: skinning.sync().clone(),
             swapchain_transfer: Some(
                 rust_engine::engine::rendering::render_thread::SwapchainTransfer {
                     surface: renderer.swapchain_state.surface.clone(),
@@ -2712,14 +2703,15 @@ impl App {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
-        render_loop::prepare_mesh_data(
+        let palette_frame = render_loop::prepare_mesh_data(
             self.core.game_world.hecs(),
             &self.core.asset_manager,
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
             &mut self.core.shadow_caster_buffer,
             transform_cache,
-            &self.core.skinning,
+            &mut self.core.skinning,
+            self.core.frame_number,
             self.core.deferred_renderer.default_material_set(),
             &self.core.materials.cache,
         );
@@ -2883,7 +2875,7 @@ impl App {
 
         let window_size = self.core.window.inner_size();
         let (vp_w, vp_h) = self.editor.viewport.size;
-        let packet = FramePacket::build_editor(
+        let mut packet = FramePacket::build_editor(
             std::mem::take(&mut self.core.mesh_data_buffer),
             std::mem::take(&mut self.core.shadow_caster_buffer),
             light_data,
@@ -2902,6 +2894,7 @@ impl App {
             self.core.frame_number,
             std::mem::take(&mut self.core.plankton_emitter_buffer),
         );
+        packet.palette = Some(palette_frame);
         self.core.frame_number += 1;
 
         let physics_ref = self
