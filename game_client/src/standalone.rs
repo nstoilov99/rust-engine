@@ -337,12 +337,19 @@ impl StandaloneApp {
 
         let validation_errors = schedule.validate();
         if !validation_errors.is_empty() {
+            // No logger is installed in game_client — log::error! is
+            // invisible. Put the errors where the user can see them.
             for err in &validation_errors {
-                log::error!("Schedule validation error: {err}");
+                eprintln!("Schedule validation error: {err}");
             }
             panic!(
-                "Schedule validation failed with {} error(s) — see log above",
-                validation_errors.len()
+                "Schedule validation failed with {} error(s):\n{}",
+                validation_errors.len(),
+                validation_errors
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
         schedule.print_access_report();
