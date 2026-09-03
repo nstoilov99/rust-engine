@@ -447,6 +447,66 @@ pub struct EntityRef {
   `content/prefabs/graph_cube.prefab`, and refuses to write either unless the
   graph compiles and runs.
 
+## Animation at Scale Gotchas (Task 41.5)
+
+- **Any new pose-affecting feature must join the forced-eval list — or tick
+  every frame.** Under update-rate throttling only pose evaluation is gated;
+  a feature that changes the pose on a frame the bucket skips will simply
+  not show (plan risk §7.3). Tick-local sources (crossfade, play-once, event
+  fired) live in `tick_entity`; external sources set
+  `throttle.force_eval_external` from a *serial* system before
+  `AnimGraphSystem` (foot-lock edges do this). Every source is pinned by a
+  test in the "Update-rate throttling" section of `acceptance.rs` — add
+  yours there too, or the next refactor silently drops it.
+- **Never touch `Resources` or arming from the parallel section.**
+  `AnimGraphSystem.evaluating` is set around the rayon region and `arm()`
+  debug-asserts against it. The parallel closure gets an entity's two
+  components and an immutable clip-cache borrow, nothing else — anything
+  needing camera data, `TransformCache`, or structural changes goes in a
+  serial pre-pass that lands results as component state (that is exactly
+  what the significance pre-pass and IK target resolution do).
+- **`model_space` (and everything IK) is mesh-local Y-up render space** —
+  pre-inverse-bind, not game Z-up. Converting a world Z-up target:
+  `target_model = entity_render⁻¹ * zup_to_yup(target_world)` with
+  `entity_render = TransformCache::get_render` — which is the *previous*
+  frame's transform (accepted one-frame latency, same as the render path).
+  Going the other way (sockets → world): entity render matrix then
+  yup→zup, as `debug_draw.rs::joint_positions` does.
+- **Editing a bone's model-space matrix does not move its children.**
+  Phase-1 FK ran already; descendants keep their stale model matrices until
+  you call `ik::rewalk_descendants` over the edited set (recomputing them
+  from the unchanged animated locals). Forgetting this is how a solved knee
+  leaves the foot behind.
+- **Two-bone IK reach is exact only under uniform bone scale.** The solver
+  recomposes via TRS decomposition; a non-uniformly scaled mid bone
+  displaces the tip from the target (no NaN, just imprecision) — the SQT
+  pipeline's existing decomposability assumption (ruling R7).
+- **Every visible skeleton is present in every ring region — `dirty`/
+  revision gate evaluation and the memcpy, never presence** (rulings
+  R2/R6). Regions rotate, so "skip the upload for clean skeletons" is
+  wrong by construction; the cursor always advances and only the redundant
+  bytes are skipped (prefix + revision match). Do not "optimize" a skipped
+  skeleton out of `write_palette` — its base index must exist in the frame's
+  region or its draws read someone else's palette.
+- **`Some`/`None` palette frames must never interleave** (debug-assert in
+  `prepare_skinning_binds`, commit 5d8682e). The palette-less fallback
+  rotates its own slot independently of the fence ring, so a `None` frame
+  after palette-bearing frames could rewrite a VP UBO still referenced by
+  an in-flight frame. Shipping hosts always send `Some`; the `None` path is
+  for tests/tools that never mix.
+- **Ring growth waits like any other frame** (ruling R14). P1's
+  "fresh regions skip the wait" epoch shortcut was removed in P7: with two
+  ring buffers (palettes + instance metadata) behind one `PaletteRingSync`
+  handshake, skipping is only sound if *both* buffers were just replaced.
+  The wait is free in steady state — do not reintroduce the shortcut when
+  adding a third per-frame GPU-read buffer; join the existing handshake.
+- **Foot IK is configured on the IK Chain node, not a component** (ruling
+  R11): `foot`/`ankle_offset`/`pelvis` props on `anim_ik_chain`; the foot
+  bone is the chain's tip, and the lock event names derive from the *chain
+  name* (`<chain>_down`/`<chain>_up` clip events). Rename a chain and the
+  clip's event markers must follow. `IkTargets` is inserted by
+  `FootPlacementSystem` automatically — there is nothing to attach by hand.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing

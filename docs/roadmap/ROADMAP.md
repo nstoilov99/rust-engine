@@ -2189,10 +2189,65 @@ pub struct SpeedBlend {
 ---
 
 ### Task 41.5: Animation at Scale + IK
-**Status:** 📋 Planned — see [`VULKANO-41.5-ANIMATION-SCALE.md`](VULKANO-41.5-ANIMATION-SCALE.md) (drafted 2026-08-30, Claude + Codex audit)
+**Status:** ✅ **Complete** (2026-09, pending live verification). Plan + rulings R1–R15:
+[`VULKANO-41.5-ANIMATION-SCALE.md`](VULKANO-41.5-ANIMATION-SCALE.md).
 **Prerequisites:** Task 41
 
-Hundreds of animated characters at frame rate (palette SSBO ring buffer, zero-alloc two-phase FK, rayon pose evaluation, update-rate optimisation, instanced skinned draws) plus IK v1 (two-bone + look-at solvers, graph-declared chains, foot placement with foot lock and pelvis adjust). Root motion, LOD tiers, and GPU crowd paths stay in the deferred ledger.
+Hundreds of animated characters at frame rate, and IK v1 on top of the
+Task 41 graph. Everything that blocked scale sat *around* pose evaluation —
+per-entity UBO/descriptor allocation, serial evaluation, no throttling, one
+draw per submesh — and each package removed one blocker. IK is a pose
+post-process on the retained model space and never touches the graph's
+design. Architecture: `docs/ARCHITECTURE.md` ▸ Animation at Scale; gotchas:
+`docs/KNOWLEDGE.md` ▸ Animation at Scale Gotchas.
+
+**Commit map**
+
+| Pkg | Commit | What landed |
+|---|---|---|
+| P0 | `6df6f81` | `--stress-anim N` crowd + `--bench-secs S` baseline capture (writes `.scratch/anim-scale/baseline-N.txt`, auto-exits; Immediate present so frame ms isn't vsync-flattened) |
+| P1 | `f2ac605` | Palette SSBO ring — 4 regions vs the 3-slot fence ring (R1), `PaletteRingSync` handshake, flat `palette_base`, VP → per-pass UBO, gbuffer/shadow/thumbnail/preview layouts migrated in one commit; unconditional per-region presence (R2) |
+| P2 | `401eaa3` | Two-phase FK: retained `model_space` on `SkeletonInstance` (zero steady-state alloc), phase-2-only re-entry, `socket()` accessor, debug_draw reads model space |
+| P3 | `db01c54` | rayon pose evaluation — batched `par_bridge` over step 3 only, per-thread `PoseScratch` in `thread_local`, `evaluating` debug-assert, lifecycle Vec reuse |
+| P4 | `823036b` | Update-rate throttling: distance buckets + hysteresis + stagger (`AnimViewInfo`, absent ⇒ full rate), forced-eval list, held pose, stable-base upload gate (R6); off-frustum clamps to slowest instead of freezing (R5) |
+| P5 | `7e6afd4` | IK core: two-bone + look-at solvers (pure, unit-tested), `PlanIkChain` from `anim_ik_chain` nodes, `IkTargets`, serial target resolution, model-space writes + descendant re-walk (R7–R10), effector/pole debug draw |
+| — | `5d8682e` | Review hardening: fallback-slot guard (`Some`/`None` palette interleave assert), stall warn per episode |
+| P6 | `6958f99` | Foot placement: `raycast_filtered` (normal + own-collider exclusion), config on the IK Chain node (R11), pre-IK ray origin + entity-ground-plane pelvis (R12), foot lock via `<chain>_down`/`_up` events, bucket-0 gating + stale-target policy (R13) |
+| P7 | `73adfab` | Instanced draws: instance-metadata ring behind the same handshake (growth keeps waiting, R14), batch by (material, submesh, set ptr), visible-prefix per-pass ranges (R15), unskinned meshes on the same path, push constants gone |
+
+**P8 (clip data layout)** — gated, **not exercised**: the decision requires
+baseline numbers re-captured after P4, which the user has not run yet.
+Recorded in `.scratch/anim-scale/issues/08-clip-layout.md`; revisit when the
+numbers exist.
+
+**Acceptance (§5)** — the correctness half is proven in CI (throttled
+play-once fires and plays, crossfade forces eval, event ordering identical
+to full rate, forced-eval pin, IK end-to-end + refusals, foot lock/latch
+tests). The *performance* half — 300 characters ≥ 60 fps, stated ms budgets,
+zero steady-state allocation by profile — is **pending the user's baseline
+capture** (`--stress-anim 300 --bench-secs 10 --release`), as is the live
+eyeball of the crowd, previews, and the stairs/slope foot-IK demo (setup
+steps in `06-foot-placement.md` — graph-driven, nothing to code).
+
+**Deferred ledger** (plan §6 merged with in-flight deferrals):
+
+- Pose interpolation under throttling + measured global ms budget
+  (ABA-style) — v1 holds the last pose on skipped frames.
+- Screen-space-size significance: v1 buckets are camera-distance bands (no
+  per-entity bounds available main-thread pre-render); shadow frustum is
+  not a significance input (the light VP is computed after the system runs
+  — off-frustum clamps to the slowest interval instead).
+- Leader-pose sharing (identical graph + params share one evaluation).
+- FABRIK/CCD N-bone chains; joint limits / preferred bend axes in
+  `BoneData` (the pole vector is the only disambiguator in v1).
+- Root-motion extraction and entity/collider reconciliation — pelvis
+  adjust is cosmetic only, the entity never moves from animation.
+- Skeleton/mesh LOD tiers; GPU crowd path (compute skinning / baked
+  animation textures) for thousands.
+- Clip quantisation; the whole P8 SoA clip layout unless profiling says
+  sampling is hot.
+- Editor preview/thumbnail paths stay on their push-constant shader —
+  deliberate (single-mesh draws, nothing to batch), not a gap.
 
 ---
 

@@ -676,6 +676,168 @@ Components in scenes (needs a name-keyed registry with
 serialize/deserialize/inspect — a reflection-lite arc), asset types/importers,
 and render passes. See `VULKANO-39.8-PLUGIN-SYSTEM.md` §D2.
 
+## Animation at Scale (Task 41.5)
+
+How hundreds of skinned characters run at frame rate, and where IK sits in
+the frame. Plan and rulings:
+[`VULKANO-41.5-ANIMATION-SCALE.md`](roadmap/VULKANO-41.5-ANIMATION-SCALE.md).
+Runtime: `engine/src/engine/animation/` (components, `graph/runner.rs`,
+`ik.rs`, `foot_placement.rs`); GPU side:
+`rendering/3d/skinning.rs` + `deferred/deferred_renderer.rs`.
+
+### Palette SSBO ring
+
+All bone palettes for a frame live back-to-back in one large SSBO
+(`SkinningBackend`), split into **4** regions; a draw addresses its palette
+by a flat `palette_base` index. Four regions against the renderer's 3-slot
+fence ring, deliberately: the render thread reclaims fences *lazily* — frame
+N-3's fence is taken at the start of processing frame N's packet — so with 3
+regions the main thread would wait on a reclaim that requires the very packet
+it is building (deadlock at frame 3). One region of slack matches the real
+reclaim point: frame N gates on frame N-4. Both indices derive from the one
+packet counter (region `% 4`, fence slot `% 3`); no second counter exists.
+
+- **Handshake**: `PaletteRingSync` — the render thread calls
+  `mark_done(slot, seq)` when it reclaims a fence; `begin_frame(seq)` on the
+  main thread blocks until frame N-4 is marked. A `PaletteSlotGuard` covers
+  every packet consumed *without* a stored fence (no swapchain, recreate,
+  acquire fail, render error), so the ring never stalls on an error path.
+- **Growth**: a frame that outgrows a region allocates a new buffer on the
+  spot (`max(needed, 2×current)`), copies the already-written span; old
+  buffers stay alive via the Arcs in in-flight command buffers. Growth does
+  **not** skip the ring wait (ruling R14): with two ring buffers behind one
+  handshake, skipping is only sound if both were just replaced — and the
+  wait is free in steady state anyway.
+- **Upload gate** ("stable bases", ruling R6): the cursor always advances —
+  every visible skeleton occupies its span in every frame's region (ruling
+  R2: regions rotate, so presence is unconditional; `dirty` gates
+  *evaluation*, never presence). Each region records `(entity, len,
+  revision)` per write in frame order; a prefix-matching write with an
+  unchanged `SkeletonInstance.revision` skips the memcpy. First divergence in
+  a visit → the rest copies and re-records. O(1) per write, no hash map,
+  self-heals on churn.
+
+### Instanced draws
+
+Skinned and unskinned meshes share the gbuffer/shadow vertex shaders, so
+both ride one instanced path. A second SSBO ring (parallel cursor in
+`SkinningBackend`, same 4 regions, same handshake) carries per-instance
+`InstanceData { model, palette_base }` (80 B std430) addressed by
+`gl_InstanceIndex`; unskinned meshes use `palette_base = 0` (identity at
+element 0 of every palette region).
+
+- **Batching** (`render_loop::prepare_mesh_data`): per (entity, submesh)
+  records, stable-sorted and grouped by `(material_index, submesh index,
+  material-set Arc ptr)` — one `draw_indexed(.., instance_count, ..,
+  first_instance)` per batch. 300 characters × 2 submeshes collapse from
+  ~600 draws per pass to single digits.
+- **Per-pass ranges via visible prefix** (ruling R15): camera-visible
+  instances sort first within a batch, so one contiguous metadata span
+  serves both passes — camera draws `(first_instance, visible)`, shadow
+  draws `(first_instance, total)` (shadow stays unculled, as before).
+- **No push constants** in these passes: `view_projection` lives in a
+  per-pass UBO (set 0 binding 1, one per ring slot, rewritten by the
+  renderer — camera VP from `packet.view_proj`, shadow VP from the light).
+  Set 0 is `{palette region, VP UBO, instance region}`, bound once per pass;
+  descriptor sets are cached per slot and rebuilt only on ring growth. The
+  editor thumbnail/preview paths (`thumbnail_vs.glsl`) keep their own
+  push-constant shader with fresh one-off buffers — single-mesh draws,
+  nothing to batch, no ring discipline needed.
+
+### Two-phase FK, retained model space
+
+`compute_palette` is two phases on `SkeletonInstance`: (1)
+`compute_model_space` walks locals parent-before-child into a retained
+`model_space: Vec<Mat4>` (allocated once, reused — zero steady-state
+alloc); (2) `refresh_palette_from_model_space` does `palette[i] =
+model_space[i] * inverse_bind[i]` and bumps `revision`. Retained model
+space is the IK substrate and gives bone sockets
+(`SkeletonInstance::socket(name)`) for free. The space is the mesh's local
+**Y-up render space** — pre-inverse-bind, the same space `debug_draw.rs`
+now reads directly instead of inverting binds. Phase 2 alone is the
+re-entry point after IK edits model space.
+
+### Parallel pose evaluation
+
+`AnimGraphSystem::run` parallelizes only step 3 — the per-entity tick —
+via rayon over `query_mut::<(&mut AnimGraphRuntime, &mut
+SkeletonInstance)>().into_iter_batched(64).par_bridge()`. Everything
+structural stays serial: stale-runtime removal, arming (plan compile, clip
+prefetch — the only `AnimClipCache` mutation — component inserts), the
+significance pre-pass, and IK target resolution. The parallel closure
+touches only that entity's two components plus an immutable clip-cache
+borrow; per-thread `PoseScratch` lives in a `thread_local`, reused across
+frames. An `evaluating: AtomicBool` brackets the parallel region and
+`arm()` debug-asserts it is clear — any new serial-side work must stay
+outside that window, and nothing inside it may touch `Resources`. Anim
+events stay per-entity (`rt.events`, refilled in place), so ordering is
+deterministic regardless of rayon scheduling.
+
+### Update-rate throttling
+
+Machine tick, slot tick and event collection run **every frame** (cheap, no
+sampling); only pose evaluation + palette recompute sit behind the gate, so
+a short play-once can never start, fire and end invisibly. Significance
+comes from a serial pre-pass reading `AnimViewInfo` (camera position +
+frustum, Y-up, previous frame's camera; absent ⇒ full rate — tests, tools
+and previews are unaffected): distance buckets with intervals `[1, 2, 4,
+8]` frames, hysteresis, and entity-id stagger so buckets don't beat.
+Off-frustum entities clamp to the slowest interval rather than freezing
+(their shadows keep moving — there is no shadow frustum available
+main-thread pre-system). Forced evaluation overrides the bucket: active
+crossfade/transition, active play-once, an event fired this tick, first
+visible frame, first frame after arming, and the external hook
+(`throttle.force_eval_external`, set by serial systems — foot-lock edges
+use it). Skipped frames hold the last pose; no interpolation in v1.
+
+### IK pipeline
+
+Frame order per entity, inside the eval gate: machine → blend trees →
+play-once overlay → `compute_model_space()` → `apply_ik` →
+`refresh_palette_from_model_space()` — one palette pass, one revision bump.
+
+- **Solvers** (`animation/ik.rs`, pure, no ECS): two-bone analytic with a
+  mandatory pole vector (degenerate pole falls back to the chain's current
+  bend plane), and look-at with an angle clamp. Solvers replace rotation +
+  translation only — animated scale is never touched. Weight blends in
+  model space per edited bone (`blend_model`: slerp/lerp, scale kept).
+- **Chains from the graph**: `PlanIkChain { name, bones, solver,
+  weight_param, foot }` compiles from `anim_ik_chain` nodes on the machine
+  canvas (pin-less, like play-once slots); bone names resolve to indices at
+  arm time, refusals disable the runtime with an anchored message.
+  `weight_param` is a declared Float, so states fade IK through the normal
+  parameter contract; weight 0 skips the solve and all writes.
+- **Targets**: `IkTargets` (world Z-up, keyed by chain name) is resolved to
+  mesh Y-up model space in a serial pre-pass (`entity_render⁻¹ *
+  zup_to_yup(target)`, `entity_render` from `TransformCache::get_render` —
+  previous frame, the accepted render-path latency). That pre-pass is the
+  only place IK touches `Resources`.
+- **`apply_ik` order**: record each two-bone chain's *animated* tip, apply
+  the pelvis offset (bone matrix + descendant re-walk) **before** the leg
+  chains solve — so both feet can still reach — then per chain: solve,
+  blend by weight, write model-space matrices, re-walk descendants from the
+  unchanged animated locals. IK writes model space, never locals (the next
+  evaluation overwrites locals anyway).
+- **Foot placement** (`FootPlacementSystem`, serial, before
+  `AnimGraphSystem`): configured on the IK Chain node itself (`foot`,
+  `ankle_offset`, `pelvis` props — ruling R11); the system inserts
+  `IkTargets` itself. Rays down from the recorded *pre-IK* foot position
+  (a locked foot must not pin its own ray) via
+  `PhysicsWorld::raycast_filtered` (normal + own-collider exclusion);
+  effector = contact + normal × ankle_offset. Foot lock latches the contact
+  on a `<chain>_down` anim event and releases on `<chain>_up`; both edges
+  set `force_eval_external`. Pelvis drop measures against the entity's
+  ground plane (not the oscillating animated foot height — ruling R12),
+  clamped and smoothed; cosmetic only, the entity/collider never move.
+  Raycasts run only in bucket 0; leaving the bucket removes the targets,
+  releases locks and forces one eval so the pose snaps back to animated.
+
+The `--stress-anim N --bench-secs S` flags on the standalone client spawn a
+character crowd and write baseline metrics to
+`.scratch/anim-scale/baseline-N.txt`; the acceptance numbers (300 @ 60 fps)
+are pending the user's baseline capture, as is the P8 clip-layout decision
+gated on them.
+
 ## Performance Profiling
 
 The engine integrates puffin and Tracy for profiling:
