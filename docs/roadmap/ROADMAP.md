@@ -2215,19 +2215,33 @@ design. Architecture: `docs/ARCHITECTURE.md` ▸ Animation at Scale; gotchas:
 | P6 | `6958f99` | Foot placement: `raycast_filtered` (normal + own-collider exclusion), config on the IK Chain node (R11), pre-IK ray origin + entity-ground-plane pelvis (R12), foot lock via `<chain>_down`/`_up` events, bucket-0 gating + stale-target policy (R13) |
 | P7 | `73adfab` | Instanced draws: instance-metadata ring behind the same handshake (growth keeps waiting, R14), batch by (material, submesh, set ptr), visible-prefix per-pass ranges (R15), unskinned meshes on the same path, push constants gone |
 
-**P8 (clip data layout)** — gated, **not exercised**: the decision requires
-baseline numbers re-captured after P4, which the user has not run yet.
-Recorded in `.scratch/anim-scale/issues/08-clip-layout.md`; revisit when the
-numbers exist.
+**P8 (clip data layout)** — gate closed 2026-09-03: **skipped**. The N=300
+capture puts the whole animation system (machine + slot + event ticks,
+sampling, IK, two-phase FK) at **0.36 ms avg / 0.45 ms p95** — sampling is
+nowhere near hot, so the SoA resample layout stays in the deferred ledger.
+Numbers recorded in `.scratch/anim-scale/issues/08-clip-layout.md`.
 
 **Acceptance (§5)** — the correctness half is proven in CI (throttled
 play-once fires and plays, crossfade forces eval, event ordering identical
 to full rate, forced-eval pin, IK end-to-end + refusals, foot lock/latch
-tests). The *performance* half — 300 characters ≥ 60 fps, stated ms budgets,
-zero steady-state allocation by profile — is **pending the user's baseline
-capture** (`--stress-anim 300 --bench-secs 10 --release`), as is the live
-eyeball of the crowd, previews, and the stairs/slope foot-IK demo (setup
-steps in `06-foot-placement.md` — graph-driven, nothing to code).
+tests). The performance half was measured 2026-09-03 (release, RTX 5080,
+forced-Immediate present, 15 s windows, `.scratch/anim-scale/baseline-*.txt`):
+
+| N | frame avg / p95 | anim system | palette upload | draws | evals held |
+|---|---|---|---|---|---|
+| 1 | 0.30 / 0.42 ms | 0.14 ms | 0.002 ms | 4 | 0 |
+| 100 | 1.57 / 1.96 ms | 0.29 ms | 0.068 ms | 4 | 14 |
+| 300 | 3.69 / 4.12 ms | 0.36 ms | 0.21 ms | 4 | 113 |
+
+**300 characters ≈ 271 fps — the ≥ 60 fps bar passes 4.5×.** The crowd draws
+in 4 calls total (camera + shadow × 2 submeshes, 1050 instances); throttling
+holds ~113/300 pose evals per frame at the default camera. Still open: the
+live eyeball of the crowd, previews, and the stairs/slope foot-IK demo
+(setup steps in `06-foot-placement.md` — graph-driven, nothing to code).
+Startup schedule-validation conflict between the P6/P4 PreUpdate readers and
+`PhysicsStepSystem` was caught on the first live launch and fixed in
+`2f30e1a` (physics step ordered after the anim stack; validation errors now
+printed to stderr — `log::` is invisible in game_client).
 
 **Deferred ledger** (plan §6 merged with in-flight deferrals):
 
