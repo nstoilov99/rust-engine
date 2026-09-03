@@ -158,6 +158,9 @@ struct SkinBindCache {
     identity_region: Subbuffer<[[f32; 16]]>,
     /// One identity instance — the matching instance-metadata fallback for
     /// palette-less frames (draws read instance 0: identity model, base 0).
+    /// Invariant: fallback-mode draws must use `first_instance = 0`,
+    /// `instance_count <= 1` — anything else reads past this 1-element
+    /// buffer in the shader.
     identity_instances: Subbuffer<[InstanceData]>,
     /// Slot rotation for the identity fallback (no packet slot available).
     fallback_slot: usize,

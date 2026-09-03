@@ -1167,7 +1167,6 @@ fn compile_doc(
             foot,
         });
     }
-    ik_chains.sort_by_key(|c| c.node_id);
     // Nested graphs' chains act on the same skeleton, so they join the
     // host's list (exact duplicates from nesting one graph twice drop).
     let nested_chains: Vec<PlanIkChain> = states
@@ -1183,6 +1182,10 @@ fn compile_doc(
             ik_chains.push(c);
         }
     }
+    // Sort after the merge so the "applied in node-id order" contract holds
+    // across host + nested chains (stable: host wins ties on cross-document
+    // id collisions).
+    ik_chains.sort_by_key(|c| c.node_id);
     // Chain names key the `IkTargets` component, so they must be unique.
     for (i, c) in ik_chains.iter().enumerate() {
         if ik_chains[..i].iter().any(|o| o.name == c.name) {

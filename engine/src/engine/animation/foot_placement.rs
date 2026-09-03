@@ -243,8 +243,16 @@ impl System for FootPlacementSystem {
                     glam::Vec3::new(f.x, f.y, f.z)
                 })
                 .unwrap_or(glam::Vec3::X);
+            // No `RigidBody` component ⇒ no exclusion filter: a character
+            // whose collider isn't backed by an ECS RigidBody can ray-hit
+            // itself. Shipping characters attach colliders via RigidBody.
             let exclude = body.and_then(|b| b.handle);
-            // I-D5: raycasts only in the top significance bucket.
+            // I-D5: raycasts only in the top significance bucket. `bucket`
+            // is written by AnimGraphSystem step 2.5, which runs *after*
+            // this system — one frame of latency entering/leaving bucket 0
+            // (harmless: the cleanup path forces an eval). The cleanup also
+            // zeroes the pelvis instantly rather than easing out — a pop,
+            // but only when the entity is already far/small on screen.
             let active = physics.is_some() && rt.throttle.bucket == 0;
             let mut cast = |origin: glam::Vec3| {
                 let hit = physics?.raycast_filtered(

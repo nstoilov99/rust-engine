@@ -79,6 +79,9 @@ struct DrawRecord {
     mat_ptr: usize,
     in_camera: bool,
     is_skinned: bool,
+    /// Push order — sort tiebreak so `sort_unstable_by_key` stays
+    /// deterministic (entity iteration order within a batch).
+    seq: u32,
     model: [[f32; 4]; 4],
     palette_base: u32,
     mat_set: Option<Arc<DescriptorSet>>,
@@ -94,10 +97,20 @@ impl DrawRecord {
     }
 }
 
-/// Stable sort: batch keys adjacent, visible instances first within a batch,
-/// entity iteration order preserved otherwise (deterministic frame to frame).
+/// Batch keys adjacent, visible instances first within a batch, entity
+/// iteration order (`seq`) breaking ties — a total order, so the unstable
+/// sort is deterministic frame to frame and allocates no merge scratch
+/// (the stable `sort_by_key` would, every frame, on the hot path).
 fn sort_draw_records(records: &mut [DrawRecord]) {
-    records.sort_by_key(|r| (r.material_index, r.mesh_idx, r.mat_ptr, !r.in_camera));
+    records.sort_unstable_by_key(|r| (r.material_index, r.mesh_idx, r.mat_ptr, !r.in_camera, r.seq));
+}
+
+thread_local! {
+    /// Reusable phase-1 scratch — `prepare_mesh_data` runs on one thread per
+    /// host (main thread, or `benchmark_runner`'s); a fresh Vec per frame
+    /// would be a steady-state allocation on the hot path (review F1).
+    static DRAW_RECORDS: std::cell::RefCell<Vec<DrawRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Prepare mesh render data from ECS world into a reusable buffer.
@@ -150,7 +163,7 @@ pub fn prepare_mesh_data(
     // Phase 1: one DrawRecord per (entity, submesh). Palette writes happen
     // here, in entity iteration order — the ring's upload gate (R6) keys on
     // that write sequence and is untouched by batching.
-    let mut records: Vec<DrawRecord> = Vec::with_capacity(256);
+    let mut records = DRAW_RECORDS.with(|r| std::mem::take(&mut *r.borrow_mut()));
 
     for (entity, (_transform, mesh_renderer, skeleton)) in world
         .query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>()
@@ -232,6 +245,7 @@ pub fn prepare_mesh_data(
                     mat_ptr: Arc::as_ptr(&mat_set) as usize,
                     in_camera,
                     is_skinned,
+                    seq: records.len() as u32,
                     model: model_array,
                     palette_base,
                     mat_set: Some(mat_set),
@@ -308,6 +322,10 @@ pub fn prepare_mesh_data(
         crate::bench::add_skinned_draws(skinned_draws);
         crate::bench::add_skinned_instances(skinned_instances);
     }
+
+    // Return the scratch (cleared so material-set Arcs drop now, capacity kept).
+    records.clear();
+    DRAW_RECORDS.with(|r| *r.borrow_mut() = records);
 
     skinning.end_frame()
 }
@@ -637,6 +655,7 @@ mod tests {
             mat_ptr,
             in_camera,
             is_skinned: false,
+            seq: 0,
             model: [[0.0; 4]; 4],
             palette_base: 0,
             mat_set: None,
@@ -656,6 +675,9 @@ mod tests {
             rec(0, 2, 10, true),
             rec(0, 1, 10, false),
         ];
+        for (i, r) in records.iter_mut().enumerate() {
+            r.seq = i as u32;
+        }
         sort_draw_records(&mut records);
         let groups: Vec<(usize, usize, usize, usize)> = records
             .chunk_by(|a, b| a.batch_key() == b.batch_key())
