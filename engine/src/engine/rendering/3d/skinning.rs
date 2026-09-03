@@ -20,16 +20,27 @@
 //! derived from the packet's `frame_number` (regions `% 4`, fence slots
 //! `% 3`) — there is no second ring counter to drift.
 //!
-//! Draws address palettes with a flat `palette_base` index (push constant)
-//! into the frame's region — no dynamic offsets, no per-entity descriptor
-//! sets. Element 0 of every region is the identity matrix, so static meshes
-//! use `palette_base = 0`.
+//! Draws address palettes with a flat `palette_base` index into the frame's
+//! region — no dynamic offsets, no per-entity descriptor sets. Element 0 of
+//! every region is the identity matrix, so static meshes use
+//! `palette_base = 0`.
 //!
-//! Growth: if a frame needs more matrices than a region holds, a new (larger)
+//! A second ring buffer with the same region/sync discipline holds per-draw
+//! [`InstanceData`] (Task 41.5 P7): batched draws address it by
+//! `gl_InstanceIndex`, which carries `model` + `palette_base` per instance —
+//! push constants dropped entirely. Frames are done atomically, so the one
+//! [`PaletteRingSync`] handshake gates both buffers; the instance buffer is a
+//! parallel cursor in this backend rather than a generic ring allocator
+//! because the palette side carries residency (upload-gate) state the
+//! instance side has no use for — the shared parts are two small helpers.
+//!
+//! Growth: if a frame needs more elements than a region holds, a new (larger)
 //! buffer is allocated on the spot and the current frame's writes are copied
 //! over. In-flight frames keep the old buffer alive through their descriptor
-//! sets (Arc), so no fence wait is needed; the first 3 frames on the new
-//! buffer skip the ring wait (fresh regions were never seen by the GPU).
+//! sets (Arc), so growth needs no fence wait of its own — but the ring wait
+//! keeps running afterwards: with two ring buffers gated by one handshake, a
+//! "fresh regions" wait-skip would only be sound if *both* buffers were just
+//! replaced, and the steady-state wait is free (frame N-4 is long reclaimed).
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -58,9 +69,31 @@ const MAT_BYTES: DeviceSize = 64;
 /// Initial region capacity in matrices (before alignment rounding).
 const INITIAL_REGION_MATS: DeviceSize = 256;
 
+/// Initial instance-region capacity in instances (before alignment rounding).
+const INITIAL_REGION_INSTANCES: DeviceSize = 256;
+
 const IDENTITY_MAT: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
+
+/// Per-draw-instance metadata for instanced skinned draws (Task 41.5 P7),
+/// addressed by `gl_InstanceIndex` in `gbuffer.vert` / `shadow_vs.glsl`.
+///
+/// std430 layout — must match the shader-side `InstanceData` struct exactly:
+/// `mat4 model` (64 B, offset 0) + `uint palette_base` (4 B, offset 64) +
+/// 12 B explicit padding = **80 B stride** (std430 rounds the struct to the
+/// mat4's 16-byte alignment).
+#[derive(Clone, Copy, vulkano::buffer::BufferContents)]
+#[repr(C)]
+pub struct InstanceData {
+    /// Model (world) matrix, column-major.
+    pub model: [[f32; 4]; 4],
+    /// Flat index of this instance's palette in the frame's palette region
+    /// (0 = identity, static meshes).
+    pub palette_base: u32,
+    /// Explicit std430 tail padding.
+    pub _pad: [u32; 3],
+}
 
 /// Cross-thread release markers for the palette ring.
 ///
@@ -123,13 +156,15 @@ impl PaletteRingSync {
     }
 }
 
-/// One frame's view of the palette ring, handed to the renderer: the region
-/// slice (bound whole at set 0 / binding 0) and the region index the frame
+/// One frame's view of the skinning rings, handed to the renderer: the
+/// palette region slice (bound whole at set 0 / binding 0), the instance
+/// metadata region slice (set 0 / binding 2) and the region index the frame
 /// occupies (`frame_number % PALETTE_RING_REGIONS`) — also the renderer's
 /// index into its per-slot VP UBOs / set cache.
 #[derive(Clone)]
 pub struct SkinnedPaletteFrame {
     pub region: Subbuffer<[[f32; 16]]>,
+    pub instances: Subbuffer<[InstanceData]>,
     pub slot: usize,
 }
 
@@ -166,8 +201,21 @@ pub struct SkinningBackend {
     region_capacity: DeviceSize,
     /// Alignment expressed in matrices (>= 1).
     align_mats: DeviceSize,
-    /// First frame sequence written to the current buffer — the first 4
-    /// frames of a buffer skip the ring wait (fresh regions).
+    /// Instance-metadata ring (P7): same 4 regions, same sync markers, own
+    /// cursor/capacity/growth. No residency — instance data (models) changes
+    /// every frame, so every write copies.
+    inst_buffer: Subbuffer<[InstanceData]>,
+    /// Instance-region capacity in instances; region byte offsets are kept
+    /// multiples of `minStorageBufferOffsetAlignment`.
+    inst_capacity: DeviceSize,
+    /// Instance-capacity granularity (>= 1) that keeps region offsets aligned.
+    inst_align: DeviceSize,
+    /// Instances written into the current region.
+    inst_cursor: DeviceSize,
+    /// First frame sequence of the process — the first 4 frames skip the
+    /// ring wait (no prior occupant). Not reset on growth: with two ring
+    /// buffers behind one handshake the skip would only be sound if both
+    /// were just replaced (see module docs).
     epoch_start_seq: u64,
     cur_seq: u64,
     cur_slot: usize,
@@ -193,12 +241,24 @@ impl SkinningBackend {
         let region_capacity = round_up(INITIAL_REGION_MATS, align_mats);
         let buffer = Self::alloc_buffer(&allocator, region_capacity)?;
 
+        // Instance stride is 80 B (not a divisor of the alignment), so the
+        // capacity granularity that keeps region byte offsets aligned is
+        // `align / gcd(stride, align)` instances.
+        let inst_stride = std::mem::size_of::<InstanceData>() as DeviceSize;
+        let inst_align = (align / gcd(inst_stride, align)).max(1);
+        let inst_capacity = round_up(INITIAL_REGION_INSTANCES, inst_align);
+        let inst_buffer = Self::alloc_inst_buffer(&allocator, inst_capacity)?;
+
         Ok(Self {
             allocator,
             sync: Arc::new(PaletteRingSync::new()),
             buffer,
             region_capacity,
             align_mats,
+            inst_buffer,
+            inst_capacity,
+            inst_align,
+            inst_cursor: 0,
             epoch_start_seq: 0,
             cur_seq: 0,
             cur_slot: 0,
@@ -241,10 +301,31 @@ impl SkinningBackend {
         Ok(buffer)
     }
 
+    /// Allocate an instance-metadata ring buffer of `4 * capacity` instances.
+    /// No identity element — every draw's instances are written each frame.
+    fn alloc_inst_buffer(
+        allocator: &Arc<StandardMemoryAllocator>,
+        capacity: DeviceSize,
+    ) -> Result<Subbuffer<[InstanceData]>, Box<dyn std::error::Error>> {
+        Ok(Buffer::new_slice::<InstanceData>(
+            allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            capacity * PALETTE_RING_REGIONS as DeviceSize,
+        )?)
+    }
+
     /// Open frame `seq` (the packet's `frame_number`): claims region
-    /// `seq % 4`, blocking until frame `seq - 4` — the region's previous
-    /// occupant — has been marked done (its fence reclaimed, or it never
-    /// submitted GPU work).
+    /// `seq % 4` of both rings (palette + instance metadata), blocking until
+    /// frame `seq - 4` — the region's previous occupant — has been marked
+    /// done (its fence reclaimed, or it never submitted GPU work).
     pub fn begin_frame(&mut self, seq: u64) {
         let slot = (seq % PALETTE_RING_REGIONS as u64) as usize;
         if seq >= self.epoch_start_seq + PALETTE_RING_REGIONS as u64 {
@@ -270,6 +351,7 @@ impl SkinningBackend {
         self.cur_seq = seq;
         self.cur_slot = slot;
         self.cursor = 1;
+        self.inst_cursor = 0;
         let res = &mut self.residency[slot];
         res.cursor = 0;
         res.prefix_ok = true;
@@ -339,22 +421,57 @@ impl SkinningBackend {
         Ok(base)
     }
 
-    /// Close the frame: the region slice + slot for the `FramePacket`.
+    /// Append one draw instance's metadata to the current frame's instance
+    /// region and return its flat instance index (region-relative — the value
+    /// `gl_InstanceIndex` takes when the draw's `first_instance` points at
+    /// the run's first entry). Call in draw order between `begin_frame` and
+    /// `end_frame`; consecutive calls are contiguous, which is what makes a
+    /// batch's `first_instance..+instance_count` range valid.
+    pub fn write_instance(
+        &mut self,
+        model: [[f32; 4]; 4],
+        palette_base: u32,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
+        if self.inst_cursor + 1 > self.inst_capacity {
+            self.grow_instances(self.inst_cursor + 1)?;
+        }
+        let index = self.inst_cursor as u32;
+        let start = self.cur_slot as DeviceSize * self.inst_capacity + self.inst_cursor;
+        let sub = self.inst_buffer.clone().slice(start..start + 1);
+        {
+            let mut guard = sub.write()?;
+            guard[0] = InstanceData {
+                model,
+                palette_base,
+                _pad: [0; 3],
+            };
+        }
+        self.inst_cursor += 1;
+        Ok(index)
+    }
+
+    /// Close the frame: the region slices + slot for the `FramePacket`.
     pub fn end_frame(&self) -> SkinnedPaletteFrame {
         let start = self.cur_slot as DeviceSize * self.region_capacity;
+        let inst_start = self.cur_slot as DeviceSize * self.inst_capacity;
         SkinnedPaletteFrame {
             region: self
                 .buffer
                 .clone()
                 .slice(start..start + self.region_capacity),
+            instances: self
+                .inst_buffer
+                .clone()
+                .slice(inst_start..inst_start + self.inst_capacity),
             slot: self.cur_slot,
         }
     }
 
     /// Reallocate with room for at least `needed` matrices per region and
     /// carry the current frame's writes over. Old buffer stays alive via the
-    /// Arcs held by in-flight frames' descriptor sets; new regions were never
-    /// GPU-visible, so the ring wait restarts (`epoch_start_seq`).
+    /// Arcs held by in-flight frames' descriptor sets, so no fence wait is
+    /// needed here. The ring wait keeps running for later frames (the epoch
+    /// is not reset — see the field doc / module docs).
     fn grow(&mut self, needed: DeviceSize) -> Result<(), Box<dyn std::error::Error>> {
         let new_capacity = round_up(needed.max(self.region_capacity * 2), self.align_mats);
         let new_buffer = Self::alloc_buffer(&self.allocator, new_capacity)?;
@@ -374,7 +491,6 @@ impl SkinningBackend {
         }
         self.buffer = new_buffer;
         self.region_capacity = new_capacity;
-        self.epoch_start_seq = self.cur_seq;
         // Residency: the current region's already-written span was carried
         // over (entries up to this visit's cursor stay valid); everything
         // else refers to the old buffer and must be forgotten.
@@ -388,6 +504,31 @@ impl SkinningBackend {
                 res.prefix_ok = true;
             }
         }
+        Ok(())
+    }
+
+    /// Reallocate the instance ring with room for at least `needed` instances
+    /// per region and carry the current frame's writes over (same discipline
+    /// as [`grow`](Self::grow); no residency to fix up).
+    fn grow_instances(&mut self, needed: DeviceSize) -> Result<(), Box<dyn std::error::Error>> {
+        let new_capacity = round_up(needed.max(self.inst_capacity * 2), self.inst_align);
+        let new_buffer = Self::alloc_inst_buffer(&self.allocator, new_capacity)?;
+        if self.inst_cursor > 0 {
+            let old_start = self.cur_slot as DeviceSize * self.inst_capacity;
+            let new_start = self.cur_slot as DeviceSize * new_capacity;
+            let src = self
+                .inst_buffer
+                .clone()
+                .slice(old_start..old_start + self.inst_cursor);
+            let dst = new_buffer
+                .clone()
+                .slice(new_start..new_start + self.inst_cursor);
+            let src_guard = src.read()?;
+            let mut dst_guard = dst.write()?;
+            dst_guard.copy_from_slice(&src_guard);
+        }
+        self.inst_buffer = new_buffer;
+        self.inst_capacity = new_capacity;
         Ok(())
     }
 
@@ -453,6 +594,13 @@ fn round_up(value: DeviceSize, multiple: DeviceSize) -> DeviceSize {
     value.div_ceil(multiple) * multiple
 }
 
+fn gcd(mut a: DeviceSize, mut b: DeviceSize) -> DeviceSize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,5 +623,26 @@ mod tests {
         assert_eq!(round_up(256, 4), 256);
         assert_eq!(round_up(257, 4), 260);
         assert_eq!(round_up(1, 1), 1);
+    }
+
+    /// The shader-side std430 `InstanceData` stride is 80 B; the Rust struct
+    /// must match exactly (explicit tail padding, no compiler surprises).
+    #[test]
+    fn instance_data_layout() {
+        assert_eq!(std::mem::size_of::<InstanceData>(), 80);
+        assert_eq!(std::mem::offset_of!(InstanceData, model), 0);
+        assert_eq!(std::mem::offset_of!(InstanceData, palette_base), 64);
+    }
+
+    /// Region byte offsets stay aligned for every power-of-two SSBO offset
+    /// alignment when capacities are rounded to `align / gcd(stride, align)`.
+    #[test]
+    fn instance_region_alignment_granularity() {
+        let stride = std::mem::size_of::<InstanceData>() as DeviceSize;
+        for align in [1u64, 4, 16, 64, 256] {
+            let granule = (align / gcd(stride, align)).max(1);
+            let capacity = round_up(INITIAL_REGION_INSTANCES, granule);
+            assert_eq!((capacity * stride) % align, 0, "align {align}");
+        }
     }
 }

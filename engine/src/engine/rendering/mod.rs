@@ -39,8 +39,8 @@ pub mod rendering_3d {
     pub use pipeline_3d::*;
     pub use shadow::*;
     pub use skinning::{
-        PaletteRingSync, SkinnedPaletteFrame, SkinningBackend, PALETTE_RING_REGIONS,
-        PALETTE_RING_SLOTS,
+        InstanceData, PaletteRingSync, SkinnedPaletteFrame, SkinningBackend,
+        PALETTE_RING_REGIONS, PALETTE_RING_SLOTS,
     };
 }
 

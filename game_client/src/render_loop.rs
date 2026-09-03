@@ -19,11 +19,11 @@ use rust_engine::engine::rendering::frame_packet::{
     EmissionParameters, EmitterFlags, ForceParameters, PlanktonEmitterFrameData, VisualParameters,
 };
 use rust_engine::engine::rendering::rendering_3d::{
-    DeferredRenderer, LightUniformData, MeshRenderData, PushConstantData, SkinnedPaletteFrame,
-    SkinningBackend,
+    DeferredRenderer, LightUniformData, MeshRenderData, SkinnedPaletteFrame, SkinningBackend,
 };
 use rust_engine::Renderer;
 use std::sync::Arc;
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::image::Image;
 use vulkano::swapchain::acquire_next_image;
 use vulkano::sync::{self, GpuFuture};
@@ -68,6 +68,38 @@ fn is_editor_visible(world: &World, entity: hecs::Entity) -> bool {
     }
 }
 
+/// One submesh draw awaiting batching (Task 41.5 P7): sort-key fields plus
+/// the per-instance metadata. Records are sorted so equal batch keys are
+/// adjacent with camera-visible instances first — a batch's camera draw is
+/// then a prefix (`visible` instances) of its shadow draw's span (`all`
+/// instances), over one contiguous run in the instance-metadata ring.
+struct DrawRecord {
+    material_index: usize,
+    mesh_idx: usize,
+    mat_ptr: usize,
+    in_camera: bool,
+    is_skinned: bool,
+    model: [[f32; 4]; 4],
+    palette_base: u32,
+    mat_set: Option<Arc<DescriptorSet>>,
+}
+
+impl DrawRecord {
+    /// Batch identity — one draw call per distinct key. `mesh_idx` names the
+    /// GPU submesh (its vertex/index buffers); the material set's Arc pointer
+    /// is stable per cached material, so it splits batches by material
+    /// cheaply (same discriminator the geometry pass uses for rebinds).
+    fn batch_key(&self) -> (usize, usize, usize) {
+        (self.material_index, self.mesh_idx, self.mat_ptr)
+    }
+}
+
+/// Stable sort: batch keys adjacent, visible instances first within a batch,
+/// entity iteration order preserved otherwise (deterministic frame to frame).
+fn sort_draw_records(records: &mut [DrawRecord]) {
+    records.sort_by_key(|r| (r.material_index, r.mesh_idx, r.mat_ptr, !r.in_camera));
+}
+
 /// Prepare mesh render data from ECS world into a reusable buffer.
 ///
 /// Reads pre-computed transforms from `transform_cache` (populated by
@@ -75,10 +107,13 @@ fn is_editor_visible(world: &World, entity: hecs::Entity) -> bool {
 /// hierarchy traversal happens here.
 ///
 /// Writes every visible skeleton's palette into the SSBO ring's region for
-/// `frame_number` (one write per skeleton, shared by all its submesh draws)
-/// and returns the frame's ring region for the `FramePacket`. The caller's
-/// fence ring must release ring slots via `skinning.sync()` (the render
-/// thread does; `benchmark_runner` does it inline).
+/// `frame_number` (one write per skeleton, shared by all its submesh draws),
+/// batches submesh draws by (submesh, material) into instanced draws — one
+/// `MeshRenderData` per batch, instances contiguous in the frame's
+/// instance-metadata ring region — and returns the frame's ring regions for
+/// the `FramePacket`. The caller's fence ring must release ring slots via
+/// `skinning.sync()` (the render thread does; `benchmark_runner` does it
+/// inline).
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_mesh_data(
     world: &World,
@@ -97,7 +132,6 @@ pub fn prepare_mesh_data(
     // Task 41.5 P0 bench hooks — inert (one atomic load) unless --bench-secs
     // armed them in the standalone build.
     let bench = crate::bench::render_hooks_enabled();
-    let mut skinned_draws = 0u32;
 
     mesh_data_buffer.clear();
     shadow_caster_buffer.clear();
@@ -112,6 +146,11 @@ pub fn prepare_mesh_data(
     let view_projection = projection_matrix * view_matrix;
 
     let camera_frustum = Frustum::from_view_projection(view_projection);
+
+    // Phase 1: one DrawRecord per (entity, submesh). Palette writes happen
+    // here, in entity iteration order — the ring's upload gate (R6) keys on
+    // that write sequence and is untouched by batching.
+    let mut records: Vec<DrawRecord> = Vec::with_capacity(256);
 
     for (entity, (_transform, mesh_renderer, skeleton)) in world
         .query::<(&Transform, &MeshRenderer, Option<&SkeletonInstance>)>()
@@ -187,39 +226,88 @@ pub fn prepare_mesh_data(
                     _ => default_material_set.clone(),
                 };
 
-                let data = MeshRenderData {
-                    vertex_buffer: gpu_mesh.vertex_buffer.clone(),
-                    index_buffer: gpu_mesh.index_buffer.clone(),
-                    index_count: gpu_mesh.index_count,
-                    mesh_index: mesh_idx,
+                records.push(DrawRecord {
                     material_index: mesh_renderer.material_index,
-                    push_constants: PushConstantData {
-                        model: model_array,
-                        palette_base,
-                    },
-                    material_descriptor_set: Some(mat_set),
-                };
+                    mesh_idx,
+                    mat_ptr: Arc::as_ptr(&mat_set) as usize,
+                    in_camera,
+                    is_skinned,
+                    model: model_array,
+                    palette_base,
+                    mat_set: Some(mat_set),
+                });
+            }
+        }
+    }
 
-                // Shadow casters are not camera-frustum culled — an off-screen
-                // object can still cast a shadow into the visible region.
-                shadow_caster_buffer.push(data.clone());
-                if is_skinned {
-                    skinned_draws += 1 + in_camera as u32;
+    // Phase 2: batch (Task 41.5 P7). Sort so equal batch keys are adjacent
+    // (camera-visible first), write instance metadata in draw order —
+    // contiguous per batch — and emit one shadow entry per batch (all
+    // instances: the shadow pass is not camera-frustum culled, an off-screen
+    // instance can still cast into the visible region) plus one camera entry
+    // over the visible prefix when it is non-empty.
+    sort_draw_records(&mut records);
+    let mut skinned_draws = 0u32;
+    let mut skinned_instances = 0u32;
+    for group in records.chunk_by(|a, b| a.batch_key() == b.batch_key()) {
+        let Some(gpu_mesh) = meshes.get(group[0].mesh_idx) else {
+            continue;
+        };
+        let mut first_instance = 0u32;
+        let mut written = 0u32;
+        let mut visible = 0u32;
+        let mut any_skinned = false;
+        for rec in group {
+            match skinning.write_instance(rec.model, rec.palette_base) {
+                Ok(idx) => {
+                    if written == 0 {
+                        first_instance = idx;
+                    }
+                    written += 1;
+                    visible += rec.in_camera as u32;
+                    any_skinned |= rec.is_skinned;
                 }
-
-                if in_camera {
-                    mesh_data_buffer.push(data);
+                Err(_) => {
+                    // Host-write failure (effectively never). Truncate the
+                    // batch: the written records are a prefix of the group,
+                    // so the visible-first accounting stays consistent.
+                    warn_once_per_path("instance ring write for submesh", &group[0].mesh_idx.to_string());
+                    break;
                 }
             }
+        }
+        if written == 0 {
+            continue;
+        }
+        let batch = MeshRenderData {
+            vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+            index_buffer: gpu_mesh.index_buffer.clone(),
+            index_count: gpu_mesh.index_count,
+            mesh_index: group[0].mesh_idx,
+            material_index: group[0].material_index,
+            first_instance,
+            instance_count: written,
+            material_descriptor_set: group[0].mat_set.clone(),
+        };
+        if visible > 0 {
+            mesh_data_buffer.push(MeshRenderData {
+                instance_count: visible,
+                ..batch.clone()
+            });
+        }
+        shadow_caster_buffer.push(batch);
+        if any_skinned {
+            // Draw calls this batch submits (shadow + camera-if-visible) and
+            // the instances they cover — the bench's collapse metrics.
+            skinned_draws += 1 + (visible > 0) as u32;
+            skinned_instances += written + visible;
         }
     }
 
     if bench {
         crate::bench::add_skinned_draws(skinned_draws);
+        crate::bench::add_skinned_instances(skinned_instances);
     }
-
-    mesh_data_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
-    shadow_caster_buffer.sort_by_key(|mesh| (mesh.material_index, mesh.mesh_index));
 
     skinning.end_frame()
 }
@@ -535,5 +623,53 @@ pub fn prepare_plankton_data(
             delta_time,
             capacity: effect.capacity,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(material_index: usize, mesh_idx: usize, mat_ptr: usize, in_camera: bool) -> DrawRecord {
+        DrawRecord {
+            material_index,
+            mesh_idx,
+            mat_ptr,
+            in_camera,
+            is_skinned: false,
+            model: [[0.0; 4]; 4],
+            palette_base: 0,
+            mat_set: None,
+        }
+    }
+
+    /// Batching invariants (P7): equal batch keys adjacent after the sort,
+    /// camera-visible records form each batch's prefix (the camera draw's
+    /// instance count is a prefix of the shadow draw's span).
+    #[test]
+    fn draw_records_group_with_visible_prefix() {
+        let mut records = vec![
+            rec(0, 2, 10, false),
+            rec(0, 1, 10, true),
+            rec(0, 2, 10, true),
+            rec(1, 2, 11, true),
+            rec(0, 2, 10, true),
+            rec(0, 1, 10, false),
+        ];
+        sort_draw_records(&mut records);
+        let groups: Vec<(usize, usize, usize, usize)> = records
+            .chunk_by(|a, b| a.batch_key() == b.batch_key())
+            .map(|g| {
+                let visible = g.iter().filter(|r| r.in_camera).count();
+                assert!(
+                    g.iter().take(visible).all(|r| r.in_camera)
+                        && g.iter().skip(visible).all(|r| !r.in_camera),
+                    "camera-visible records must be the batch prefix"
+                );
+                let (mat, mesh, _) = g[0].batch_key();
+                (mat, mesh, g.len(), visible)
+            })
+            .collect();
+        assert_eq!(groups, vec![(0, 1, 2, 1), (0, 2, 3, 2), (1, 2, 1, 1)]);
     }
 }

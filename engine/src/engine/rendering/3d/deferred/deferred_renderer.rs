@@ -15,7 +15,7 @@ use crate::engine::rendering::error::RenderError;
 use crate::engine::rendering::graph::RenderGraph;
 use crate::engine::rendering::pipeline_registry::PipelineRegistry;
 use crate::engine::rendering::render_target::RenderTarget;
-use crate::engine::rendering::rendering_3d::skinning::SkinnedPaletteFrame;
+use crate::engine::rendering::rendering_3d::skinning::{InstanceData, SkinnedPaletteFrame};
 use crate::engine::rendering::rendering_3d::material::{
     create_default_texture, create_default_texture_with_format, PbrMaterial, DEFAULT_ALBEDO_RGBA,
     DEFAULT_AO_RGBA, DEFAULT_METALLIC_ROUGHNESS_RGBA, DEFAULT_NORMAL_RGBA,
@@ -74,16 +74,18 @@ pub struct DeferredRenderer {
     skin_binds: SkinBindCache,
 }
 
-/// Per-pass set-0 state for the palette SSBO ring (Task 41.5 P1): one tiny
-/// view-projection UBO per ring region (rewritten each frame — safe because
-/// the region's previous frame's fence was reclaimed before `render` runs)
-/// and a cached descriptor set per region binding `{ palette region, vp ubo }`.
-/// Sets are rebuilt only when the region identity changes (ring growth) —
+/// Per-pass set-0 state for the skinning SSBO rings (Task 41.5 P1 + P7): one
+/// tiny view-projection UBO per ring region (rewritten each frame — safe
+/// because the region's previous frame's fence was reclaimed before `render`
+/// runs) and a cached descriptor set per region binding
+/// `{ palette region, vp ubo, instance-metadata region }`.
+/// Sets are rebuilt only when a region's identity changes (ring growth) —
 /// no per-frame descriptor allocation.
 struct PassSkinBind {
     vp_ubos: [Subbuffer<[[f32; 4]; 4]>; 4],
-    /// (buffer ptr, byte offset) of the region each cached set binds.
-    sets: [Option<(usize, u64, Arc<DescriptorSet>)>; 4],
+    /// (buffer ptr, byte offset) of the palette + instance regions each
+    /// cached set binds.
+    sets: [Option<([(usize, u64); 2], Arc<DescriptorSet>)>; 4],
 }
 
 impl PassSkinBind {
@@ -110,19 +112,23 @@ impl PassSkinBind {
     }
 
     /// Write this slot's VP and return the (cached) set-0 descriptor set for
-    /// `region`.
+    /// `region` + `instances`.
     fn bind(
         &mut self,
         descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
         layout: Arc<vulkano::descriptor_set::layout::DescriptorSetLayout>,
         slot: usize,
         region: &Subbuffer<[[f32; 16]]>,
+        instances: &Subbuffer<[InstanceData]>,
         view_projection: [[f32; 4]; 4],
     ) -> Result<Arc<DescriptorSet>, Box<dyn std::error::Error>> {
         *self.vp_ubos[slot].write()? = view_projection;
-        let key = (Arc::as_ptr(region.buffer()) as usize, region.offset());
-        if let Some((ptr, off, set)) = &self.sets[slot] {
-            if (*ptr, *off) == key {
+        let key = [
+            (Arc::as_ptr(region.buffer()) as usize, region.offset()),
+            (Arc::as_ptr(instances.buffer()) as usize, instances.offset()),
+        ];
+        if let Some((cached, set)) = &self.sets[slot] {
+            if *cached == key {
                 return Ok(set.clone());
             }
         }
@@ -135,10 +141,11 @@ impl PassSkinBind {
                     1,
                     self.vp_ubos[slot].clone(),
                 ),
+                vulkano::descriptor_set::WriteDescriptorSet::buffer(2, instances.clone()),
             ],
             [],
         )?;
-        self.sets[slot] = Some((key.0, key.1, set.clone()));
+        self.sets[slot] = Some((key, set.clone()));
         Ok(set)
     }
 }
@@ -149,6 +156,9 @@ struct SkinBindCache {
     /// One identity matrix — bound when a frame carries no palette ring
     /// (tests, tools); static meshes still render via `palette_base = 0`.
     identity_region: Subbuffer<[[f32; 16]]>,
+    /// One identity instance — the matching instance-metadata fallback for
+    /// palette-less frames (draws read instance 0: identity model, base 0).
+    identity_instances: Subbuffer<[InstanceData]>,
     /// Slot rotation for the identity fallback (no packet slot available).
     fallback_slot: usize,
     /// Set once a palette-bearing frame is seen; guards against a host
@@ -171,10 +181,28 @@ impl SkinBindCache {
             },
             [Mat4::IDENTITY.to_cols_array()],
         )?;
+        let identity_instances = vulkano::buffer::Buffer::from_iter(
+            allocator.clone(),
+            vulkano::buffer::BufferCreateInfo {
+                usage: vulkano::buffer::BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            [InstanceData {
+                model: Mat4::IDENTITY.to_cols_array_2d(),
+                palette_base: 0,
+                _pad: [0; 3],
+            }],
+        )?;
         Ok(Self {
             geometry: PassSkinBind::new(allocator)?,
             shadow: PassSkinBind::new(allocator)?,
             identity_region,
+            identity_instances,
             fallback_slot: 0,
             saw_palette_frame: false,
         })
@@ -807,10 +835,10 @@ impl DeferredRenderer {
         camera_vp: Mat4,
         light_vp: [[f32; 4]; 4],
     ) -> Result<(Arc<DescriptorSet>, Arc<DescriptorSet>), Box<dyn std::error::Error>> {
-        let (region, slot) = match palette {
+        let (region, instances, slot) = match palette {
             Some(p) => {
                 self.skin_binds.saw_palette_frame = true;
-                (p.region.clone(), p.slot % 4)
+                (p.region.clone(), p.instances.clone(), p.slot % 4)
             }
             None => {
                 // Tests/tools only — shipping hosts always send `Some`.
@@ -825,6 +853,7 @@ impl DeferredRenderer {
                 self.skin_binds.fallback_slot = (self.skin_binds.fallback_slot + 1) % 4;
                 (
                     self.skin_binds.identity_region.clone(),
+                    self.skin_binds.identity_instances.clone(),
                     self.skin_binds.fallback_slot,
                 )
             }
@@ -836,6 +865,7 @@ impl DeferredRenderer {
             geom_layout,
             slot,
             &region,
+            &instances,
             camera_vp.to_cols_array_2d(),
         )?;
         let shadow_set = self.skin_binds.shadow.bind(
@@ -843,6 +873,7 @@ impl DeferredRenderer {
             shadow_layout,
             slot,
             &region,
+            &instances,
             light_vp,
         )?;
         Ok((geom_set, shadow_set))
@@ -1247,7 +1278,9 @@ impl DeferredRenderer {
             .set_scissor(0, smallvec![shadow_scissor])?;
 
         let shadow_layout = self.shadow_pass.layout();
-        // One palette/VP bind for the whole pass (SSBO ring, S-D1).
+        // One palette/VP/instance bind for the whole pass (SSBO rings,
+        // S-D1 + S-D5); per-draw data lives in the instance-metadata SSBO,
+        // addressed by gl_InstanceIndex (= first_instance + i in Vulkan).
         builder.bind_descriptor_sets(
             PipelineBindPoint::Graphics,
             shadow_layout.clone(),
@@ -1258,10 +1291,15 @@ impl DeferredRenderer {
         for mesh in mesh_data {
             builder
                 .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
-                .bind_index_buffer(mesh.index_buffer.clone())?
-                .push_constants(shadow_layout.clone(), 0, mesh.push_constants)?;
+                .bind_index_buffer(mesh.index_buffer.clone())?;
             unsafe {
-                builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                builder.draw_indexed(
+                    mesh.index_count,
+                    mesh.instance_count,
+                    0,
+                    0,
+                    mesh.first_instance,
+                )?;
             }
             counters.draw_calls += 1;
         }
@@ -1317,8 +1355,9 @@ impl DeferredRenderer {
             let mut counters = counters.borrow_mut();
             let mut last_material_ptr: Option<usize> = None;
             let geom_layout = self.geometry_pass.layout();
-            // One palette/VP bind for the whole pass (SSBO ring, S-D1);
-            // per-draw addressing is the palette_base push constant.
+            // One palette/VP/instance bind for the whole pass (SSBO rings,
+            // S-D1 + S-D5); per-draw model + palette_base come from the
+            // instance-metadata SSBO via gl_InstanceIndex.
             builder.bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 geom_layout.clone(),
@@ -1326,9 +1365,9 @@ impl DeferredRenderer {
                 skin_set.clone(),
             )?;
             for mesh in mesh_data {
-                counters.visible_entities += 1;
+                counters.visible_entities += mesh.instance_count;
                 counters.draw_calls += 1;
-                counters.triangles += mesh.index_count / 3;
+                counters.triangles += (mesh.index_count / 3) * mesh.instance_count;
 
                 let mat_set = mesh
                     .material_descriptor_set
@@ -1348,10 +1387,15 @@ impl DeferredRenderer {
 
                 builder
                     .bind_vertex_buffers(0, mesh.vertex_buffer.clone())?
-                    .bind_index_buffer(mesh.index_buffer.clone())?
-                    .push_constants(geom_layout.clone(), 0, mesh.push_constants)?;
+                    .bind_index_buffer(mesh.index_buffer.clone())?;
                 unsafe {
-                    builder.draw_indexed(mesh.index_count, 1, 0, 0, 0)?;
+                    builder.draw_indexed(
+                        mesh.index_count,
+                        mesh.instance_count,
+                        0,
+                        0,
+                        mesh.first_instance,
+                    )?;
                 }
             }
         }
@@ -2012,6 +2056,13 @@ impl DeferredRenderer {
     }
 }
 
+/// One instanced draw batch (Task 41.5 P7): all instances sharing this
+/// submesh + material, occupying the contiguous instance-metadata span
+/// `first_instance..first_instance + instance_count` in the frame's ring
+/// region. The camera list and the shadow list carry entries over the same
+/// span with different counts — instances are written camera-visible-first,
+/// so the camera entry's count is a prefix of the shadow entry's (shadow
+/// draws all casters unculled).
 #[derive(Clone)]
 pub struct MeshRenderData {
     pub vertex_buffer: Subbuffer<[crate::engine::rendering::rendering_3d::Vertex3D]>,
@@ -2019,25 +2070,14 @@ pub struct MeshRenderData {
     pub index_count: u32,
     pub mesh_index: usize,
     pub material_index: usize,
-    pub push_constants: PushConstantData,
+    /// First index of this batch's span in the frame's instance-metadata
+    /// region; passed to `draw_indexed` so `gl_InstanceIndex` starts here.
+    pub first_instance: u32,
+    pub instance_count: u32,
     /// Pre-resolved material descriptor set (Set 1 for geometry pass).
     /// Resolved at `prepare_mesh_data` time — the render thread does no manager lookups.
     pub material_descriptor_set: Option<Arc<DescriptorSet>>,
 }
-
-/// Per-draw push constants: model matrix + flat index of this entity's
-/// palette in the frame's SSBO ring region (0 = identity, static meshes).
-/// Must match the 68-byte `PushConstants` block in `gbuffer.vert` /
-/// `shadow_vs.glsl` exactly — no trailing padding.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PushConstantData {
-    pub model: [[f32; 4]; 4],
-    pub palette_base: u32,
-}
-
-unsafe impl bytemuck::Pod for PushConstantData {}
-unsafe impl bytemuck::Zeroable for PushConstantData {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

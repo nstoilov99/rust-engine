@@ -18,6 +18,7 @@ static RENDER_HOOKS: AtomicBool = AtomicBool::new(false);
 static PALETTE_UPLOADS: AtomicU32 = AtomicU32::new(0);
 static PALETTE_NANOS: AtomicU64 = AtomicU64::new(0);
 static SKINNED_DRAWS: AtomicU32 = AtomicU32::new(0);
+static SKINNED_INSTANCES: AtomicU32 = AtomicU32::new(0);
 
 /// Whether `prepare_mesh_data` should time palette uploads and count skinned
 /// draws this frame.
@@ -31,9 +32,15 @@ pub fn palette_upload(nanos: u64) {
     PALETTE_NANOS.fetch_add(nanos, Relaxed);
 }
 
-/// Skinned submesh draws submitted this frame (camera + shadow lists).
+/// Skinned draw calls submitted this frame (camera + shadow lists). Since P7
+/// these are instanced batch draws — the number that batching collapses.
 pub fn add_skinned_draws(n: u32) {
     SKINNED_DRAWS.fetch_add(n, Relaxed);
+}
+
+/// Instances covered by this frame's skinned draw calls (camera + shadow).
+pub fn add_skinned_instances(n: u32) {
+    SKINNED_INSTANCES.fetch_add(n, Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +167,7 @@ pub struct BenchRun {
     palette_counts: Vec<f32>,
     palette_ms: Vec<f32>,
     skinned_draws: Vec<f32>,
+    skinned_instances: Vec<f32>,
     evals_skipped: Vec<f32>,
     finished: bool,
 }
@@ -178,6 +186,7 @@ impl BenchRun {
             palette_counts: Vec::with_capacity(4096),
             palette_ms: Vec::with_capacity(4096),
             skinned_draws: Vec::with_capacity(4096),
+            skinned_instances: Vec::with_capacity(4096),
             evals_skipped: Vec::with_capacity(4096),
             finished: false,
         }
@@ -195,6 +204,7 @@ impl BenchRun {
         let uploads = PALETTE_UPLOADS.swap(0, Relaxed);
         let palette_ns = PALETTE_NANOS.swap(0, Relaxed);
         let draws = SKINNED_DRAWS.swap(0, Relaxed);
+        let instances = SKINNED_INSTANCES.swap(0, Relaxed);
         let skips = EVAL_SKIPS.swap(0, Relaxed);
 
         // First frame carries plan compile + first uploads; the bench window
@@ -209,6 +219,7 @@ impl BenchRun {
         self.palette_counts.push(uploads as f32);
         self.palette_ms.push(palette_ns as f32 / 1.0e6);
         self.skinned_draws.push(draws as f32);
+        self.skinned_instances.push(instances as f32);
         self.evals_skipped.push(skips as f32);
 
         if started.elapsed().as_secs_f32() >= self.secs {
@@ -244,8 +255,15 @@ impl BenchRun {
         row("palette uploads", &self.palette_counts);
         row("palette upload ms", &self.palette_ms);
         row("skinned draws", &self.skinned_draws);
+        row("skinned instances", &self.skinned_instances);
         row("pose evals skipped", &self.evals_skipped);
-        out.push_str("\nskinned draws = per-submesh draws submitted (camera list + shadow list).\n");
+        out.push_str(
+            "\nskinned draws = draw calls submitted (camera list + shadow list). Instanced \
+             batches since P7 — pre-P7 baselines counted one draw per submesh per entity.\n",
+        );
+        out.push_str(
+            "skinned instances = instances covered by those draw calls (camera + shadow).\n",
+        );
         out.push_str(
             "pose evals skipped = pose evaluations held by update-rate throttling per frame \
              (P4; machine/slot/event ticks still ran).\n",
