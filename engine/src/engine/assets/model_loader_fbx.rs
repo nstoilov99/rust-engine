@@ -7,7 +7,6 @@ use super::model_loader::{
     calculate_tangents_safe, compute_bounding_sphere, generate_flat_normals, AnimationChannel,
     BoneData, ImportedMaterial, LoadedMesh, Model, RawAnimationClip, VertexBoneData,
 };
-use crate::engine::rendering::rendering_3d::pipeline_3d::MAX_PALETTE_BONES;
 
 /// Load FBX model from filesystem path.
 pub fn load_model_fbx(source_path: &str) -> Result<Model, Box<dyn std::error::Error>> {
@@ -122,24 +121,8 @@ fn build_model_from_fbx(
     model.rebuild_legacy_textures();
 
     let bone_count = model.bones.len();
-
-    // Validate bone count against FixedUbo backend cap
-    if bone_count > MAX_PALETTE_BONES {
-        return Err(format!(
-            "Model '{}' has {} bones, exceeding the current skinning backend cap of {}. \
-             A larger backend (LargeSsbo) is needed for this asset.",
-            name, bone_count, MAX_PALETTE_BONES,
-        )
-        .into());
-    }
-    if bone_count > 200 {
-        log::warn!(
-            "Model '{}' has {} bones (approaching FixedUbo cap of {})",
-            name,
-            bone_count,
-            MAX_PALETTE_BONES,
-        );
-    }
+    // No bone cap: the LargeSsbo skinning backend sizes palettes from actual
+    // bone counts (Task 41.5 P1).
 
     let anim_count = model.animations.len();
     let skinned_count = model.meshes.iter().filter(|m| m.skinning.is_some()).count();

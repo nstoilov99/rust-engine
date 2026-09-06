@@ -16,10 +16,21 @@ use hecs::{Entity, World};
 use nalgebra_glm as glm;
 use rapier3d::na::{Isometry3, Point3, Vector3};
 use rapier3d::prelude::{
-    CCDSolver, ColliderBuilder, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
+    CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
     IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
     QueryFilter, QueryPipeline, Ray, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SharedShape,
 };
+
+/// A [`PhysicsWorld::raycast_filtered`] hit. Everything is ECS Z-up game
+/// space (the adapter converts from Rapier's Y-up).
+pub struct RayHit {
+    pub collider: ColliderHandle,
+    /// Distance along the ray (assuming a unit-length direction).
+    pub distance: f32,
+    pub point: glm::Vec3,
+    /// Surface normal at the hit, unit length.
+    pub normal: glm::Vec3,
+}
 
 /// Manages Rapier physics simulation
 ///
@@ -268,6 +279,57 @@ impl PhysicsWorld {
                     toi,
                     position_from_physics(&Vector3::new(hit_point.x, hit_point.y, hit_point.z)),
                 )
+            })
+    }
+
+    /// Cast a ray and return the first hit *with its surface normal*,
+    /// optionally excluding one rigid body (and every collider attached to
+    /// it) — a character probing the ground must not hit itself.
+    ///
+    /// `origin` / `direction` are Z-up game space, like [`Self::raycast`]
+    /// (which stays as-is for its callers); this variant exists for foot
+    /// placement (Task 41.5 P6, I-D4).
+    pub fn raycast_filtered(
+        &self,
+        origin: nalgebra_glm::Vec3,
+        direction: nalgebra_glm::Vec3,
+        max_distance: f32,
+        exclude: Option<RigidBodyHandle>,
+    ) -> Option<RayHit> {
+        let physics_origin = position_to_physics(&origin);
+        let physics_direction = position_to_physics(&direction);
+        let ray = Ray::new(
+            Point3::new(physics_origin.x, physics_origin.y, physics_origin.z),
+            Vector3::new(
+                physics_direction.x,
+                physics_direction.y,
+                physics_direction.z,
+            ),
+        );
+        let mut filter = QueryFilter::default();
+        if let Some(rb) = exclude {
+            filter = filter.exclude_rigid_body(rb);
+        }
+
+        self.query_pipeline
+            .cast_ray_and_get_normal(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_distance,
+                true,
+                filter,
+            )
+            .map(|(collider, hit)| {
+                let point = ray.point_at(hit.time_of_impact);
+                RayHit {
+                    collider,
+                    distance: hit.time_of_impact,
+                    point: position_from_physics(&Vector3::new(point.x, point.y, point.z)),
+                    // A normal is a free vector: the same pure-rotation
+                    // conversion velocities use.
+                    normal: velocity_from_physics(&hit.normal),
+                }
             })
     }
 

@@ -305,6 +305,21 @@ impl AnimMachine {
         self.fade.as_ref()
     }
 
+    /// True while this machine — or the sampled chain of nested machines —
+    /// is mid-crossfade or fired a transition this very tick (instant
+    /// switches included). The S-D4 forced-evaluation condition: an
+    /// update-rate-throttled entity must not hold a stale pose through a
+    /// transition. Only the active state's sub is consulted; a frozen sub
+    /// (instant-switched away) keeps its fade but is not sampled, so it must
+    /// not pin the entity at full rate.
+    pub fn transition_activity(&self) -> bool {
+        self.fade.is_some()
+            || self.fired.is_some_and(|(_, age)| age == 0.0)
+            || self
+                .sub(self.current)
+                .is_some_and(AnimMachine::transition_activity)
+    }
+
     /// The last transition that fired: `(plan transition index, seconds
     /// since)`. `None` until the first fire. The editor's live highlight
     /// reads this to light the firing transition; age lets an instant

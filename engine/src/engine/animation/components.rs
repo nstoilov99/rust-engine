@@ -13,11 +13,22 @@ pub struct SkeletonInstance {
     pub bones: Vec<BoneData>,
     /// Per-bone local-space transforms (SQT), indexed by bone index.
     pub local_transforms: Vec<LocalBoneTransform>,
-    /// World-space bone palette: `inverse_bind * world_transform` for each bone.
-    /// This is what gets uploaded to the GPU bone palette UBO.
+    /// Per-bone model-space matrices (FK phase 1 output), indexed by bone
+    /// index. This is the mesh's local **Y-up render space** — the space the
+    /// inverse-bind matrices map out of. Retained across frames (allocated
+    /// once, reused); the substrate for IK and bone sockets.
+    pub model_space: Vec<Mat4>,
+    /// World-space bone palette: `model_space * inverse_bind` for each bone.
+    /// This is what gets uploaded to the GPU bone palette buffer.
     pub palette: Vec<Mat4>,
     /// Whether the palette needs re-uploading this frame.
     pub dirty: bool,
+    /// Monotonic palette revision, bumped every time the palette is
+    /// recomputed (`refresh_palette_from_model_space`, and therefore
+    /// `compute_palette`). The SSBO ring upload compares it against what a
+    /// ring region already holds to skip re-copying an unchanged palette —
+    /// the Task 41.5 P4 upload gate for update-rate-throttled skeletons.
+    pub revision: u64,
     /// Whether to show debug bone visualization in the viewport.
     pub debug_draw_visible: bool,
 }
@@ -84,42 +95,81 @@ impl SkeletonInstance {
             })
             .collect();
 
+        let model_space = vec![Mat4::IDENTITY; bone_count];
         let palette = vec![Mat4::IDENTITY; bone_count];
 
         let mut instance = Self {
             bones,
             local_transforms,
+            model_space,
             palette,
             dirty: true,
+            revision: 0,
             debug_draw_visible: false,
         };
         instance.compute_palette();
         instance
     }
 
-    /// Recompute world-space bone palette via forward kinematics.
-    ///
-    /// Traverses bones in index order (parent-before-child guarantee
-    /// from the importer). Each bone's world transform is:
-    ///   `world[i] = world[parent[i]] * local[i]`
-    /// Then the palette entry is:
-    ///   `palette[i] = world[i] * inverse_bind[i]`
+    /// Recompute the bone palette via two-phase forward kinematics:
+    /// phase 1 (`compute_model_space`) then phase 2
+    /// (`refresh_palette_from_model_space`).
     pub fn compute_palette(&mut self) {
+        self.compute_model_space();
+        self.refresh_palette_from_model_space();
+    }
+
+    /// FK phase 1: walk locals parent-before-child (index order, guaranteed
+    /// by the importer) into the retained `model_space`:
+    ///   `model_space[i] = model_space[parent[i]] * local[i]`
+    ///
+    /// Zero steady-state allocation: `model_space` is sized once and reused.
+    pub fn compute_model_space(&mut self) {
         let bone_count = self.bones.len();
-        // Temp storage for world-space transforms
-        let mut world_transforms = vec![Mat4::IDENTITY; bone_count];
+        if self.model_space.len() != bone_count {
+            self.model_space.resize(bone_count, Mat4::IDENTITY);
+        }
 
         for i in 0..bone_count {
             let local_mat = self.local_transforms[i].to_matrix();
-            let parent_world = self.bones[i]
+            let parent_model = self.bones[i]
                 .parent_index
-                .map(|p| world_transforms[p])
+                .map(|p| self.model_space[p])
                 .unwrap_or(Mat4::IDENTITY);
-            world_transforms[i] = parent_world * local_mat;
-            self.palette[i] = world_transforms[i] * self.bones[i].inverse_bind_matrix;
+            self.model_space[i] = parent_model * local_mat;
         }
+    }
 
+    /// FK phase 2: fill the retained `palette` from `model_space`:
+    ///   `palette[i] = model_space[i] * inverse_bind[i]`
+    ///
+    /// Safe to call on its own after mutating `model_space` directly —
+    /// IK writes corrected model-space matrices and re-runs just this
+    /// phase to refresh the GPU palette.
+    pub fn refresh_palette_from_model_space(&mut self) {
+        let bone_count = self.bones.len();
+        if self.palette.len() != bone_count {
+            self.palette.resize(bone_count, Mat4::IDENTITY);
+        }
+        for i in 0..bone_count {
+            self.palette[i] = self.model_space[i] * self.bones[i].inverse_bind_matrix;
+        }
         self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Model-space matrix of the named bone (a "socket" for attachments),
+    /// valid after the last `compute_palette` / `compute_model_space`.
+    ///
+    /// The matrix is in the mesh's local **Y-up render space**. To place
+    /// something in the game world, multiply by the entity's Y-up render
+    /// matrix and convert Y-up → Z-up, exactly as
+    /// `animation/debug_draw.rs::joint_positions` does.
+    pub fn socket(&self, bone_name: &str) -> Option<Mat4> {
+        self.bones
+            .iter()
+            .position(|b| b.name == bone_name)
+            .and_then(|i| self.model_space.get(i).copied())
     }
 }
 
@@ -254,6 +304,108 @@ impl AnimationPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::assets::model_loader::BoneData;
+
+    /// Posed 3-bone chain with non-trivial locals and inverse binds.
+    fn posed_skeleton() -> SkeletonInstance {
+        let bones = vec![
+            BoneData {
+                name: "root".into(),
+                parent_index: None,
+                inverse_bind_matrix: Mat4::from_translation(Vec3::new(0.1, -0.2, 0.3)),
+            },
+            BoneData {
+                name: "spine".into(),
+                parent_index: Some(0),
+                inverse_bind_matrix: Mat4::from_rotation_translation(
+                    Quat::from_rotation_x(0.4),
+                    Vec3::new(0.0, -1.0, 0.0),
+                ),
+            },
+            BoneData {
+                name: "head".into(),
+                parent_index: Some(1),
+                inverse_bind_matrix: Mat4::from_rotation_translation(
+                    Quat::from_rotation_z(-0.7),
+                    Vec3::new(0.2, -2.0, 0.1),
+                ),
+            },
+        ];
+        let mut skeleton = SkeletonInstance::from_bones(bones);
+        // Pose it away from the bind pose.
+        skeleton.local_transforms[0] = LocalBoneTransform {
+            translation: Vec3::new(0.5, 0.25, -0.75),
+            rotation: Quat::from_rotation_y(0.9),
+            scale: Vec3::new(1.0, 2.0, 0.5),
+        };
+        skeleton.local_transforms[1] = LocalBoneTransform {
+            translation: Vec3::new(0.0, 1.2, 0.0),
+            rotation: Quat::from_rotation_x(-0.3),
+            scale: Vec3::ONE,
+        };
+        skeleton.local_transforms[2] = LocalBoneTransform {
+            translation: Vec3::new(0.1, 0.8, -0.2),
+            rotation: Quat::from_rotation_z(1.1),
+            scale: Vec3::splat(1.5),
+        };
+        skeleton
+    }
+
+    #[test]
+    fn two_phase_palette_matches_single_pass_fk() {
+        let mut skeleton = posed_skeleton();
+
+        // Old single-pass FK, inline: world walk + palette in one loop.
+        let bone_count = skeleton.bones.len();
+        let mut world_transforms = vec![Mat4::IDENTITY; bone_count];
+        let mut expected = vec![Mat4::IDENTITY; bone_count];
+        for i in 0..bone_count {
+            let local_mat = skeleton.local_transforms[i].to_matrix();
+            let parent_world = skeleton.bones[i]
+                .parent_index
+                .map(|p| world_transforms[p])
+                .unwrap_or(Mat4::IDENTITY);
+            world_transforms[i] = parent_world * local_mat;
+            expected[i] = world_transforms[i] * skeleton.bones[i].inverse_bind_matrix;
+        }
+
+        skeleton.compute_palette();
+        for i in 0..bone_count {
+            let got = skeleton.palette[i].to_cols_array();
+            let want = expected[i].to_cols_array();
+            for (g, w) in got.iter().zip(&want) {
+                assert!(
+                    (g - w).abs() < 1e-6,
+                    "palette[{i}] mismatch: got {got:?}, want {want:?}"
+                );
+            }
+            // model_space is the pre-inverse-bind world walk, retained.
+            assert_eq!(
+                skeleton.model_space[i].to_cols_array(),
+                world_transforms[i].to_cols_array()
+            );
+        }
+    }
+
+    #[test]
+    fn compute_palette_does_not_allocate_in_steady_state() {
+        let mut skeleton = posed_skeleton();
+        skeleton.compute_palette();
+        let model_ptr = skeleton.model_space.as_ptr();
+        let palette_ptr = skeleton.palette.as_ptr();
+        skeleton.compute_palette();
+        assert_eq!(skeleton.model_space.as_ptr(), model_ptr);
+        assert_eq!(skeleton.palette.as_ptr(), palette_ptr);
+    }
+
+    #[test]
+    fn socket_returns_model_space_by_name() {
+        let mut skeleton = posed_skeleton();
+        skeleton.compute_palette();
+        let head = skeleton.socket("head").expect("head bone exists");
+        assert_eq!(head.to_cols_array(), skeleton.model_space[2].to_cols_array());
+        assert!(skeleton.socket("no_such_bone").is_none());
+    }
 
     #[test]
     fn blend_halfway() {

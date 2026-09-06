@@ -180,6 +180,45 @@ pub const SLOT_TRIGGER_PROP: &str = "trigger";
 pub const SLOT_FADE_IN_PROP: &str = "fade_in";
 pub const SLOT_FADE_OUT_PROP: &str = "fade_out";
 
+/// An IK chain (Task 41.5 P5, I-D3): a standalone node on the machine canvas
+/// — no wires, like a play-once slot — declaring a post-pose IK pass. The
+/// node title is the chain's name (default `IK <id>`), which is also the key
+/// gameplay writes `IkTargets` under. Compiles to [`PlanIkChain`], **not**
+/// into any `PlanTree` (tree regions stay single-typed Pose).
+pub const ANIM_IK_CHAIN_TYPE_ID: &str = "anim_ik_chain";
+/// IK property (`Str`, required): comma-separated bone names, root→tip.
+/// The two-bone solver takes exactly 3 (root, mid, tip); look-at exactly 1.
+/// Names resolve to skeleton indices at arm time.
+pub const IK_BONES_PROP: &str = "bones";
+/// IK property (`Enum`/`Str`): [`IK_SOLVER_TWO_BONE`] (default) or
+/// [`IK_SOLVER_LOOK_AT`].
+pub const IK_SOLVER_PROP: &str = "solver";
+pub const IK_SOLVER_TWO_BONE: &str = "two_bone";
+pub const IK_SOLVER_LOOK_AT: &str = "look_at";
+/// IK property (`Str`, required): the declared **Float** parameter that
+/// fades the chain — 0 skips the solve entirely (I-D5), 1 is fully solved.
+/// States fade IK through the existing parameter contract.
+pub const IK_WEIGHT_PARAM_PROP: &str = "weight_param";
+/// Look-at properties (`Float`): the bone-local aim axis (defaults 0,0,1 —
+/// mesh-space +Z) and the clamp in **degrees** (default 90; the compiled
+/// plan carries radians).
+pub const IK_AXIS_X_PROP: &str = "axis_x";
+pub const IK_AXIS_Y_PROP: &str = "axis_y";
+pub const IK_AXIS_Z_PROP: &str = "axis_z";
+pub const IK_MAX_ANGLE_PROP: &str = "max_angle";
+/// Foot-placement properties (Task 41.5 P6, I-D4) — two-bone chains only.
+/// `foot` (`Bool`, default false) marks the chain as a foot:
+/// `FootPlacementSystem` rays the ground under the chain's tip bone and
+/// writes the chain's `IkTargets` entry each frame; anim events named
+/// `<chain name>_down` / `<chain name>_up` drive the plant lock.
+/// `ankle_offset` (`Float`, default 0.1) lifts the effector along the hit
+/// normal (the foot bone sits at ankle height, not on the sole). `pelvis`
+/// (`Str`) names the bone the pelvis adjust lowers — every foot chain that
+/// sets it must agree; empty = no pelvis adjust.
+pub const IK_FOOT_PROP: &str = "foot";
+pub const IK_ANKLE_OFFSET_PROP: &str = "ankle_offset";
+pub const IK_PELVIS_PROP: &str = "pelvis";
+
 /// Trigger parameters are declared as `PinType::Domain("anim_trigger")` —
 /// the pin system's consumer-owned extension point, so the shared container
 /// needs no animation-specific variant. Inside a rule a trigger reads as a
@@ -424,6 +463,46 @@ pub struct PlanSlot {
     pub fade_out: f32,
 }
 
+/// How a compiled IK chain solves (Task 41.5 P5, I-D2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlanIkSolver {
+    /// Two-bone analytic (root, mid, tip). The pole comes from the entity's
+    /// `IkTargets` entry at runtime — it is data, not configuration.
+    TwoBone,
+    /// Aim one bone's local `axis` at the target, clamped to `max_angle`
+    /// **radians** away from the animated orientation.
+    LookAt { axis: glam::Vec3, max_angle: f32 },
+}
+
+/// Foot-placement config on a two-bone chain (Task 41.5 P6, I-D4): the tip
+/// bone is the foot; `<chain name>_down` / `<chain name>_up` anim events
+/// drive the plant lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFootPlacement {
+    /// Effector lift along the ground-hit normal, meters.
+    pub ankle_offset: f32,
+    /// The bone the pelvis adjust lowers; empty = no pelvis adjust.
+    pub pelvis_bone: String,
+}
+
+/// A compiled IK chain (I-D3): bone *names* — resolution to indices happens
+/// at arm time against the entity's actual skeleton (`runner.rs`), which is
+/// also where a missing bone refuses. Lives beside states/slots on
+/// [`AnimGraphPlan`], never inside a `PlanTree`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanIkChain {
+    pub node_id: u64,
+    /// Chain name (node title) — the `IkTargets` key gameplay writes.
+    pub name: String,
+    /// Bone names, root→tip down one hierarchy path.
+    pub bones: Vec<String>,
+    pub solver: PlanIkSolver,
+    /// The declared Float parameter fading this chain (0 = off).
+    pub weight_param: String,
+    /// Foot-placement config (P6); `None` = a plain gameplay-driven chain.
+    pub foot: Option<PlanFootPlacement>,
+}
+
 /// Where a transition starts. Always a concrete state: a transition drawn
 /// from a State Alias compiles into one entry per aliased state (sharing the
 /// transition's `node_id`), so the machine never sees an alias.
@@ -471,6 +550,12 @@ pub struct AnimGraphPlan {
     /// graphs' slots merge in here (the overlay channel is machine-wide;
     /// exact duplicates from nesting one graph twice are dropped).
     pub slots: Vec<PlanSlot>,
+    /// IK chains, sorted by node id — applied in this order after pose
+    /// evaluation, each seeing the previous chain's result. Nested graphs'
+    /// chains merge in here (one skeleton serves the whole machine tree;
+    /// exact duplicates drop, name collisions refuse — names key
+    /// `IkTargets`).
+    pub ik_chains: Vec<PlanIkChain>,
 }
 
 impl AnimGraphPlan {
@@ -958,6 +1043,180 @@ fn compile_doc(
         }
     }
 
+    // IK chains (Task 41.5 P5): standalone nodes, like slots. Bone existence
+    // is an arm-time check (the compiler never sees a skeleton); everything
+    // knowable from the document refuses here, anchored on the chain.
+    let mut ik_chains: Vec<PlanIkChain> = Vec::new();
+    for n in doc
+        .nodes
+        .iter()
+        .filter(|n| n.type_id == ANIM_IK_CHAIN_TYPE_ID)
+    {
+        let name = n
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("IK {}", n.id));
+        let bones: Vec<String> = str_prop(&n.properties, IK_BONES_PROP)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if bones.is_empty() {
+            return Err(format!(
+                "IK chain '{name}' names no bones (property `{IK_BONES_PROP}`: \
+                 comma-separated bone names, root\u{2192}tip)"
+            ));
+        }
+        let solver_slug = match n.properties.get(IK_SOLVER_PROP) {
+            Some(PropValue::Enum(s)) | Some(PropValue::Str(s)) if !s.is_empty() => s.as_str(),
+            _ => IK_SOLVER_TWO_BONE,
+        };
+        let solver = match solver_slug {
+            IK_SOLVER_TWO_BONE => {
+                if bones.len() != 3 {
+                    return Err(format!(
+                        "IK chain '{name}': the two-bone solver takes exactly 3 bones \
+                         (root, mid, tip), got {}",
+                        bones.len()
+                    ));
+                }
+                PlanIkSolver::TwoBone
+            }
+            IK_SOLVER_LOOK_AT => {
+                if bones.len() != 1 {
+                    return Err(format!(
+                        "IK chain '{name}': the look-at solver takes exactly 1 bone, got {}",
+                        bones.len()
+                    ));
+                }
+                let axis = glam::Vec3::new(
+                    float_prop(&n.properties, IK_AXIS_X_PROP).unwrap_or(0.0),
+                    float_prop(&n.properties, IK_AXIS_Y_PROP).unwrap_or(0.0),
+                    float_prop(&n.properties, IK_AXIS_Z_PROP).unwrap_or(1.0),
+                );
+                if axis.length_squared() < 1e-8 {
+                    return Err(format!("IK chain '{name}': the aim axis is zero"));
+                }
+                PlanIkSolver::LookAt {
+                    axis: axis.normalize(),
+                    max_angle: float_prop(&n.properties, IK_MAX_ANGLE_PROP)
+                        .unwrap_or(90.0)
+                        .max(0.0)
+                        .to_radians(),
+                }
+            }
+            other => {
+                return Err(format!(
+                    "IK chain '{name}': unknown solver '{other}' (the solvers are \
+                     '{IK_SOLVER_TWO_BONE}' and '{IK_SOLVER_LOOK_AT}')"
+                ))
+            }
+        };
+        let weight_param = match n.properties.get(IK_WEIGHT_PARAM_PROP) {
+            Some(PropValue::Str(s)) if !s.is_empty() => s.clone(),
+            _ => {
+                return Err(format!(
+                    "IK chain '{name}' names no weight parameter \
+                     (property `{IK_WEIGHT_PARAM_PROP}`)"
+                ))
+            }
+        };
+        match parameters.iter().find(|p| p.slug == weight_param) {
+            Some(p) if p.ty == AnimParamType::Float => {}
+            Some(_) => {
+                return Err(format!(
+                    "IK chain '{name}': parameter '{weight_param}' is not a Float"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "IK chain '{name}': parameter '{weight_param}' is not declared"
+                ))
+            }
+        }
+        // Foot placement (P6): opt-in per chain, two-bone only — the tip
+        // bone is the foot, so a look-at chain has nothing to plant.
+        let foot = match n.properties.get(IK_FOOT_PROP) {
+            Some(PropValue::Bool(true)) => {
+                if !matches!(solver, PlanIkSolver::TwoBone) {
+                    return Err(format!(
+                        "IK chain '{name}': foot placement needs the \
+                         '{IK_SOLVER_TWO_BONE}' solver"
+                    ));
+                }
+                Some(PlanFootPlacement {
+                    ankle_offset: float_prop(&n.properties, IK_ANKLE_OFFSET_PROP)
+                        .unwrap_or(0.1),
+                    pelvis_bone: str_prop(&n.properties, IK_PELVIS_PROP)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                })
+            }
+            _ => None,
+        };
+        ik_chains.push(PlanIkChain {
+            node_id: n.id,
+            name,
+            bones,
+            solver,
+            weight_param,
+            foot,
+        });
+    }
+    // Nested graphs' chains act on the same skeleton, so they join the
+    // host's list (exact duplicates from nesting one graph twice drop).
+    let nested_chains: Vec<PlanIkChain> = states
+        .iter()
+        .filter_map(|s| match &s.source {
+            PoseSource::Machine { plan, .. } => Some(plan.ik_chains.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for c in nested_chains {
+        if !ik_chains.contains(&c) {
+            ik_chains.push(c);
+        }
+    }
+    // Sort after the merge so the "applied in node-id order" contract holds
+    // across host + nested chains (stable: host wins ties on cross-document
+    // id collisions).
+    ik_chains.sort_by_key(|c| c.node_id);
+    // Chain names key the `IkTargets` component, so they must be unique.
+    for (i, c) in ik_chains.iter().enumerate() {
+        if ik_chains[..i].iter().any(|o| o.name == c.name) {
+            return Err(format!(
+                "two IK chains are named '{}' — chain names key the IkTargets \
+                 component, so they must be unique",
+                c.name
+            ));
+        }
+    }
+    // One pelvis drives the character: every foot chain that names a pelvis
+    // bone must name the same one (nested chains included).
+    let mut pelvis: Option<(&str, &str)> = None;
+    for c in &ik_chains {
+        let Some(f) = &c.foot else { continue };
+        if f.pelvis_bone.is_empty() {
+            continue;
+        }
+        match pelvis {
+            None => pelvis = Some((&c.name, &f.pelvis_bone)),
+            Some((_, b)) if b == f.pelvis_bone => {}
+            Some((other, b)) => {
+                return Err(format!(
+                    "IK chains '{other}' and '{}' name different pelvis bones \
+                     ('{b}' vs '{}') — one pelvis drives the character",
+                    c.name, f.pelvis_bone
+                ))
+            }
+        }
+    }
+
     // Nested declarations join the blackboard: one shared surface drives the
     // whole machine tree, so gameplay writes the union. Same name and type
     // collapse to one entry (this document's declaration and default win); a
@@ -985,6 +1244,7 @@ fn compile_doc(
         entry,
         parameters,
         slots,
+        ik_chains,
     })
 }
 

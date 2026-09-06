@@ -381,6 +381,7 @@ mod tests {
                 },
             ],
             slots: Vec::new(),
+            ik_chains: Vec::new(),
         }
     }
 
@@ -395,6 +396,10 @@ mod tests {
             plan,
             generation: 0,
             disabled: None,
+            throttle: Default::default(),
+            ik: Vec::new(),
+            pelvis: None,
+            ik_touched: Vec::new(),
         }
     }
 

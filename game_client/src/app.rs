@@ -478,15 +478,9 @@ fn record_skinned_preview(
     }
     let palette = skeleton
         .filter(|s| !s.palette.is_empty())
-        .and_then(|s| match renderer.create_palette_set(&s.palette) {
-            Ok(set) => Some(set),
-            Err(e) => {
-                eprintln!("{what} palette upload failed: {e}");
-                None
-            }
-        });
+        .map(|s| s.palette.as_slice());
     let vp = gpu.compute_view_projection(pw as f32 / ph.max(1) as f32);
-    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette.as_ref()) {
+    match renderer.render(&gpu.framebuffer, pw, ph, &gpu_meshes, vp, palette) {
         Ok(cb) => Some(cb),
         Err(e) => {
             eprintln!("{what} render error: {e}");
@@ -582,11 +576,7 @@ impl App {
             600,
         )?;
 
-        let skinning = SkinningBackend::new(
-            renderer.gpu.memory_allocator.clone(),
-            renderer.gpu.descriptor_set_allocator.clone(),
-            &deferred_renderer.geometry_pipeline(),
-        )?;
+        let skinning = SkinningBackend::new(renderer.gpu.memory_allocator.clone())?;
 
         let viewport_texture = ViewportTexture::new(
             renderer.gpu.device.clone(),
@@ -628,11 +618,27 @@ impl App {
         {
             use rust_engine::engine::animation::graph::{
                 AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
-                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets,
+                AnimGraphSystem, BlendSpaceCache, DiskAnimAssets, IkTargets,
             };
             game_world.resources_mut().insert(AnimGraphPlanCache::new());
             game_world.resources_mut().insert(AnimClipCache::new());
             game_world.resources_mut().insert(BlendSpaceCache::new());
+            // Task 41.5 P6: foot placement feeds IK targets from ground
+            // raycasts — serial, immediately before the graph system.
+            schedule.add_system_described(
+                rust_engine::engine::animation::FootPlacementSystem::new(),
+                Stage::PreUpdate,
+                SystemDescriptor::new(rust_engine::engine::ecs::system_names::FOOT_PLACEMENT)
+                    .reads_resource::<Time>()
+                    .reads_resource::<rust_engine::engine::physics::PhysicsWorld>()
+                    .reads_resource::<TransformCache>()
+                    .reads::<Transform>()
+                    .reads::<rust_engine::engine::physics::RigidBody>()
+                    .writes::<AnimGraphRuntime>()
+                    .writes::<IkTargets>()
+                    .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
+                    .before(rust_engine::engine::ecs::system_names::ANIM_GRAPH),
+            );
             schedule.add_system_described(
                 AnimGraphSystem::new(Box::new(DiskAnimAssets {
                     content_root: rust_engine::engine::assets::content_root::content_root(),
@@ -640,10 +646,13 @@ impl App {
                 Stage::PreUpdate,
                 SystemDescriptor::new(rust_engine::engine::ecs::system_names::ANIM_GRAPH)
                     .reads_resource::<Time>()
+                    .reads_resource::<rust_engine::engine::animation::graph::AnimViewInfo>()
+                    .reads_resource::<TransformCache>()
                     .writes_resource::<AnimGraphPlanCache>()
                     .writes_resource::<AnimClipCache>()
                     .writes_resource::<BlendSpaceCache>()
                     .reads::<AnimGraphRunner>()
+                    .reads::<Transform>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<SkeletonInstance>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE),
@@ -731,12 +740,19 @@ impl App {
 
         let validation_errors = schedule.validate();
         if !validation_errors.is_empty() {
+            // No logger is installed in game_client — log::error! is
+            // invisible. Put the errors where the user can see them.
             for err in &validation_errors {
-                log::error!("Schedule validation error: {err}");
+                eprintln!("Schedule validation error: {err}");
             }
             panic!(
-                "Schedule validation failed with {} error(s) — see log above",
-                validation_errors.len()
+                "Schedule validation failed with {} error(s):\n{}",
+                validation_errors.len(),
+                validation_errors
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
         schedule.print_access_report();
@@ -780,6 +796,7 @@ impl App {
             gpu_context: renderer.gpu.clone(),
             render_mode: rust_engine::engine::rendering::frame_packet::RenderMode::Editor,
             initial_dimensions: [800, 600],
+            palette_sync: skinning.sync().clone(),
             swapchain_transfer: Some(
                 rust_engine::engine::rendering::render_thread::SwapchainTransfer {
                     surface: renderer.swapchain_state.surface.clone(),
@@ -1973,6 +1990,19 @@ impl App {
             time.advance(delta_time);
         }
 
+        // Task 41.5 P4: the previous frame's viewport camera feeds animation
+        // significance bucketing (Y-up render space — `camera_3d` mirrors the
+        // viewport camera during render; absent ⇒ machines run at full rate).
+        {
+            use rust_engine::engine::animation::graph::AnimViewInfo;
+            use rust_engine::engine::math::Frustum;
+            let cam = &self.core.renderer.camera_3d;
+            self.core.game_world.resources_mut().insert(AnimViewInfo {
+                camera_pos: cam.position,
+                frustum: Frustum::from_view_projection(cam.view_projection_matrix()),
+            });
+        }
+
         self.core.game_world.run_schedule(&mut self.core.schedule);
 
         // Graph `Print` output, and the runner's own refusals, reach the
@@ -2712,14 +2742,15 @@ impl App {
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
-        render_loop::prepare_mesh_data(
+        let palette_frame = render_loop::prepare_mesh_data(
             self.core.game_world.hecs(),
             &self.core.asset_manager,
             &self.core.renderer,
             &mut self.core.mesh_data_buffer,
             &mut self.core.shadow_caster_buffer,
             transform_cache,
-            &self.core.skinning,
+            &mut self.core.skinning,
+            self.core.frame_number,
             self.core.deferred_renderer.default_material_set(),
             &self.core.materials.cache,
         );
@@ -2794,6 +2825,11 @@ impl App {
                 self.core.game_world.hecs(),
                 &mut self.core.debug_draw_buffer,
                 tc,
+            );
+            // IK effector/pole overlays (Task 41.5 P5) ride the same toggle.
+            rust_engine::engine::animation::debug_draw::submit_ik_debug_draws(
+                self.core.game_world.hecs(),
+                &mut self.core.debug_draw_buffer,
             );
         }
 
@@ -2883,7 +2919,7 @@ impl App {
 
         let window_size = self.core.window.inner_size();
         let (vp_w, vp_h) = self.editor.viewport.size;
-        let packet = FramePacket::build_editor(
+        let mut packet = FramePacket::build_editor(
             std::mem::take(&mut self.core.mesh_data_buffer),
             std::mem::take(&mut self.core.shadow_caster_buffer),
             light_data,
@@ -2902,6 +2938,7 @@ impl App {
             self.core.frame_number,
             std::mem::take(&mut self.core.plankton_emitter_buffer),
         );
+        packet.palette = Some(palette_frame);
         self.core.frame_number += 1;
 
         let physics_ref = self

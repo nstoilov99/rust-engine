@@ -7,6 +7,7 @@ mod anim_bridge;
 #[cfg(feature = "editor")]
 mod app;
 mod asset_resolve;
+mod bench;
 mod benchmark_runner;
 mod game_setup;
 #[cfg(all(not(feature = "editor"), feature = "hud"))]
@@ -482,7 +483,7 @@ impl ApplicationHandler for GameApp {
     ) {
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.is_minimized {
             return;
         }
@@ -498,6 +499,11 @@ impl ApplicationHandler for GameApp {
         app.end_frame();
         if let Err(e) = render_result {
             eprintln!("Render error: {}", e);
+        }
+
+        // Task 41.5 P0: --bench-secs wrote its baseline; exit cleanly.
+        if app.bench_finished() {
+            event_loop.exit();
         }
     }
 

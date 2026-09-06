@@ -8,7 +8,7 @@
 use crate::engine::rendering::common::gpu_context::GpuContext;
 use crate::engine::rendering::frame_packet::{FramePacket, RenderEvent, RenderMode};
 use crate::engine::rendering::render_target::RenderTarget;
-use crate::engine::rendering::rendering_3d::DeferredRenderer;
+use crate::engine::rendering::rendering_3d::{DeferredRenderer, PaletteRingSync};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -30,6 +30,10 @@ pub struct RenderThreadConfig {
     pub render_mode: RenderMode,
     pub initial_dimensions: [u32; 2],
     pub swapchain_transfer: Option<SwapchainTransfer>,
+    /// Palette-ring release handshake shared with the main thread's
+    /// `SkinningBackend` (Task 41.5 P1). The render thread marks a frame's
+    /// ring slot reusable once that frame's fence is reclaimed.
+    pub palette_sync: Arc<PaletteRingSync>,
     #[cfg(feature = "editor")]
     pub viewport_dimensions: Option<[u32; 2]>,
     /// Glyph shaper/atlas shared with the main thread's `CrustyGui`
@@ -113,9 +117,16 @@ impl RenderThread {
         // each fence ~12ms after submission and still block for a few ms waiting on
         // it. 3 slots gives us ~18ms of head-start — fence is always signaled by
         // the time we drop it, so Drop is an instant no-op.
-        let mut fence_slots: [Option<Box<dyn GpuFuture>>; 3] = [None, None, None];
-        let mut frame_count: u64 = 0;
+        //
+        // Slot index = `frame_number % 3`. Each entry carries the
+        // frame_number of the submitted frame; reclaiming a slot's fence
+        // publishes that frame as done (`palette_sync`), which releases its
+        // palette ring region (regions rotate `frame_number % 4` — one slack
+        // region over the fence ring because this reclaim is lazy: frame
+        // N-3's fence is taken here, at the start of frame N).
+        let mut fence_slots: [Option<(u64, Box<dyn GpuFuture>)>; 3] = [None, None, None];
         let mut needs_recreate = false;
+        let palette_sync = config.palette_sync.clone();
 
         #[cfg(feature = "editor")]
         let mut viewport_texture = {
@@ -252,6 +263,22 @@ impl RenderThread {
                 }
             }
 
+            // Reclaim this frame's fence slot (3 slots, round-robin on
+            // frame_number). Dropping the previous future blocks until its
+            // fence signals, so afterwards the frame that last used this
+            // slot — and its palette ring region — is provably finished.
+            let slot = (packet.frame_number % 3) as usize;
+            if let Some((done_seq, mut prev)) = fence_slots[slot].take() {
+                prev.cleanup_finished();
+                drop(prev);
+                palette_sync.mark_done(slot, done_seq);
+            }
+            // Until a fence is stored for this frame, the guard guarantees the
+            // ring slot is released even when the packet is consumed without
+            // GPU work (no swapchain, recreate, acquire failure, render error).
+            let mut palette_guard =
+                PaletteSlotGuard::new(&palette_sync, &gpu.device, slot, packet.frame_number);
+
             if !has_swapchain {
                 continue;
             }
@@ -259,12 +286,6 @@ impl RenderThread {
             let swapchain_ref = sc_swapchain.as_ref().unwrap();
             let images_ref = sc_images.as_ref().unwrap();
             let surface_ref = surface.as_ref().unwrap();
-
-            // Wait on the fence slot for this frame (3 slots, round-robin).
-            let slot = (frame_count % 3) as usize;
-            if let Some(mut prev) = fence_slots[slot].take() {
-                prev.cleanup_finished();
-            }
 
             // Handle swapchain recreation
             if needs_recreate {
@@ -403,6 +424,7 @@ impl RenderThread {
                             &packet.debug_draw,
                             &packet.post_processing,
                             &packet.plankton_emitters,
+                            packet.palette.as_ref(),
                         ) {
                             Ok(cb) => Some(cb),
                             Err(e) => {
@@ -472,6 +494,7 @@ impl RenderThread {
                                 unsafe { future.signal_finished() };
                                 None
                             } else {
+                                palette_guard.set_gpu_flushed();
                                 unsafe { future.signal_finished() };
                                 let present = future
                                     .then_swapchain_present(
@@ -500,7 +523,8 @@ impl RenderThread {
                     };
 
                     if let Some(fence) = submit_result {
-                        fence_slots[slot] = Some(fence);
+                        fence_slots[slot] = Some((packet.frame_number, fence));
+                        palette_guard.disarm();
                     }
                 }
             } else {
@@ -524,6 +548,7 @@ impl RenderThread {
                         &packet.debug_draw,
                         &packet.post_processing,
                         &packet.plankton_emitters,
+                        packet.palette.as_ref(),
                     ) {
                         Ok(cb) => cb,
                         Err(e) => {
@@ -586,6 +611,7 @@ impl RenderThread {
                         log::error!("render_thread: flush failed: {:?}", e);
                         unsafe { future.signal_finished() };
                     } else {
+                        palette_guard.set_gpu_flushed();
                         unsafe { future.signal_finished() };
                         let present = future
                             .then_swapchain_present(
@@ -598,7 +624,8 @@ impl RenderThread {
                             .then_signal_fence_and_flush();
                         match present {
                             Ok(f) => {
-                                fence_slots[slot] = Some(f.boxed());
+                                fence_slots[slot] = Some((packet.frame_number, f.boxed()));
+                                palette_guard.disarm();
                             }
                             Err(Validated::Error(VulkanError::OutOfDate)) => {
                                 needs_recreate = true;
@@ -610,13 +637,11 @@ impl RenderThread {
                     }
                 }
             }
-
-            frame_count += 1;
         }
 
         // Shutdown: wait for ALL fence slots before dropping GPU state
         for slot in &mut fence_slots {
-            if let Some(mut prev) = slot.take() {
+            if let Some((_, mut prev)) = slot.take() {
                 prev.cleanup_finished();
             }
         }
@@ -671,6 +696,63 @@ impl RenderThread {
 impl Drop for RenderThread {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// Releases a frame's palette-ring slot when the frame produces no tracked
+/// fence: dropped armed, it marks the slot done (safe — no GPU work read the
+/// region). If GPU work *was* flushed but no fence could be stored (present
+/// failure), it waits for device idle first so the main thread can't rewrite
+/// a region the GPU is still reading. Disarmed when a fence is stored — the
+/// slot is then released by the fence reclaim on a later frame.
+struct PaletteSlotGuard<'a> {
+    sync: &'a Arc<PaletteRingSync>,
+    device: &'a Arc<vulkano::device::Device>,
+    slot: usize,
+    seq: u64,
+    armed: bool,
+    gpu_flushed: bool,
+}
+
+impl<'a> PaletteSlotGuard<'a> {
+    fn new(
+        sync: &'a Arc<PaletteRingSync>,
+        device: &'a Arc<vulkano::device::Device>,
+        slot: usize,
+        seq: u64,
+    ) -> Self {
+        Self {
+            sync,
+            device,
+            slot,
+            seq,
+            armed: true,
+            gpu_flushed: false,
+        }
+    }
+
+    /// A fence for this frame was stored in the ring — release happens there.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// GPU work for this frame was submitted (successful flush).
+    fn set_gpu_flushed(&mut self) {
+        self.gpu_flushed = true;
+    }
+}
+
+impl Drop for PaletteSlotGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.gpu_flushed {
+            // Rare path (present failed after a successful flush): the frame's
+            // commands are on the GPU without a tracked fence.
+            let _ = unsafe { self.device.wait_idle() };
+        }
+        self.sync.mark_done(self.slot, self.seq);
     }
 }
 
@@ -733,6 +815,7 @@ mod tests {
             render_mode: RenderMode::Standalone,
             initial_dimensions: [800, 600],
             swapchain_transfer: None,
+            palette_sync: Arc::new(PaletteRingSync::new()),
             #[cfg(feature = "editor")]
             viewport_dimensions: None,
             #[cfg(any(feature = "editor", feature = "hud"))]
@@ -771,6 +854,9 @@ mod tests {
 
         match event {
             RenderEvent::RenderThreadReady { .. } => {}
+            RenderEvent::RenderError { message } => {
+                panic!("expected RenderThreadReady, got RenderError: {message}")
+            }
             _ => panic!("expected RenderThreadReady, got different event"),
         }
 

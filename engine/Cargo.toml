@@ -34,6 +34,7 @@ serde = { workspace = true }
 uuid = { workspace = true }
 nalgebra-glm = { workspace = true }
 log = { workspace = true }
+rayon = { workspace = true }
 
 # Window and event handling
 winit = "0.30"

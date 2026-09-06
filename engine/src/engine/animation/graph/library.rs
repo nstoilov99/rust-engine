@@ -28,9 +28,9 @@ use node_graph_types::std_nodes::{
 use node_graph_types::{Edge, GraphDoc, GraphRealm, NodeInst, NodeRealm, PinType};
 
 use super::plan::{
-    ANIM_ENTRY_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
-    ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, RULE_RESULT_PIN, STATE_IN_PIN, STATE_OUT_PIN,
-    TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
+    ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID,
+    ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, RULE_RESULT_PIN,
+    STATE_IN_PIN, STATE_OUT_PIN, TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
 };
 
 /// The machine-topology wire: state → transition → state. Not a Pose and not
@@ -59,6 +59,7 @@ pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
         ANIM_ENTRY_TYPE_ID => Some("ENTRY"),
         ANIM_STATE_ALIAS_TYPE_ID => Some("ALIAS"),
         ANIM_PLAY_ONCE_TYPE_ID => Some("SLOT"),
+        ANIM_IK_CHAIN_TYPE_ID => Some("IK"),
         ANIM_TRANSITION_TYPE_ID => Some("TRANS"),
         // The rule canvas's one sink (mockup: "RESULT ◉ Bool").
         ANIM_RULE_RESULT_TYPE_ID => Some("RESULT"),
@@ -138,6 +139,14 @@ pub fn anim_node_registry() -> NodeRegistry {
             ANIM_PLAY_ONCE_TYPE_ID,
             "Play-Once Slot",
             "Plays a clip over the base result when its Trigger fires, then returns.",
+            vec![],
+            vec![],
+        ),
+        desc(
+            ANIM_IK_CHAIN_TYPE_ID,
+            "IK Chain",
+            "A post-pose IK pass — two-bone (foot, hand) or look-at — faded by a Float \
+             parameter. Foot mode adds ground raycasts, plant locking and pelvis drop.",
             vec![],
             vec![],
         ),
@@ -237,6 +246,7 @@ mod tests {
             ANIM_STATE_ALIAS_TYPE_ID,
             ANIM_TRANSITION_TYPE_ID,
             ANIM_PLAY_ONCE_TYPE_ID,
+            ANIM_IK_CHAIN_TYPE_ID,
         ] {
             assert!(reg.get(id).is_some(), "{id}");
             assert_eq!(reg.get(id).unwrap().category, ANIM_CATEGORY);
@@ -267,6 +277,7 @@ mod tests {
             ANIM_STATE_ALIAS_TYPE_ID,
             ANIM_TRANSITION_TYPE_ID,
             ANIM_PLAY_ONCE_TYPE_ID,
+            ANIM_IK_CHAIN_TYPE_ID,
         ] {
             assert!(rules.get(id).is_none(), "rule registry must not offer {id}");
         }

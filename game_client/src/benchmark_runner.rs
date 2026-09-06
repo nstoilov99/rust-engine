@@ -173,8 +173,10 @@ struct BenchmarkRunner {
     // fence.wait(None) if the fence isn't signaled yet. On Windows with DWM the
     // present fence is delayed 2–3 vblanks by the compositor, so 3 slots ensures
     // the fence is always signaled before we drop it — making Drop a no-op.
-    previous_frame_ends: [Option<Box<dyn GpuFuture>>; 3],
-    frame_slot: usize,
+    // Entries carry the frame seq so reclaiming a fence can release that
+    // frame's palette ring region (skinning.sync().mark_done).
+    previous_frame_ends: [Option<(u64, Box<dyn GpuFuture>)>; 3],
+    frame_seq: u64,
     mesh_data_buffer: Vec<MeshRenderData>,
     shadow_caster_buffer: Vec<MeshRenderData>,
     plankton_emitter_buffer:
@@ -263,8 +265,6 @@ impl BenchmarkRunner {
 
         let skinning = rust_engine::engine::rendering::rendering_3d::SkinningBackend::new(
             renderer.gpu.memory_allocator.clone(),
-            renderer.gpu.descriptor_set_allocator.clone(),
-            &deferred_renderer.geometry_pipeline(),
         )?;
 
         let mut transform_cache = TransformCache::new();
@@ -278,11 +278,7 @@ impl BenchmarkRunner {
         );
         game_world.resources_mut().insert(transform_cache);
 
-        let previous_frame_ends = [
-            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
-            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
-            Some(vulkano::sync::now(renderer.gpu.device.clone()).boxed() as Box<dyn GpuFuture>),
-        ];
+        let previous_frame_ends = [None, None, None];
         let (profile_collector, profile_sink_id) = create_profile_sink();
 
         Ok(Self {
@@ -294,7 +290,7 @@ impl BenchmarkRunner {
             skinning,
             game_loop: GameLoop::new(),
             previous_frame_ends,
-            frame_slot: 0,
+            frame_seq: 0,
             mesh_data_buffer: Vec::with_capacity(1024),
             shadow_caster_buffer: Vec::with_capacity(1024),
             plankton_emitter_buffer: Vec::with_capacity(32),
@@ -345,30 +341,36 @@ impl BenchmarkRunner {
             tc.propagate(self.game_world.hecs_mut());
             self.game_world.resources_mut().insert(tc);
         }
+        // Reclaim the fence from 3 frames ago — signaled long before drop —
+        // and release that frame's palette ring region. Must happen before
+        // prepare_mesh_data, which blocks on the region being free.
+        let seq = self.frame_seq;
+        self.frame_seq += 1;
+        let slot = (seq % 3) as usize;
+        if let Some((done_seq, mut prev_future)) = self.previous_frame_ends[slot].take() {
+            prev_future.cleanup_finished();
+            drop(prev_future);
+            self.skinning.sync().mark_done(slot, done_seq);
+        }
+
         let tc = self
             .game_world
             .resource::<TransformCache>()
             .expect("TransformCache resource missing");
         let empty_mat_cache = std::collections::HashMap::new();
-        render_loop::prepare_mesh_data(
+        let palette_frame = render_loop::prepare_mesh_data(
             self.game_world.hecs(),
             &self.asset_manager,
             &self.renderer,
             &mut self.mesh_data_buffer,
             &mut self.shadow_caster_buffer,
             tc,
-            &self.skinning,
+            &mut self.skinning,
+            seq,
             self.deferred_renderer.default_material_set(),
             &empty_mat_cache,
         );
         let light_data = render_loop::prepare_light_data(self.game_world.hecs(), &self.renderer);
-
-        // Reclaim the fence from 3 frames ago — signaled long before drop.
-        let slot = self.frame_slot;
-        self.frame_slot = (self.frame_slot + 1) % 3;
-        if let Some(mut prev_future) = self.previous_frame_ends[slot].take() {
-            prev_future.cleanup_finished();
-        }
 
         if self.renderer.swapchain_state.recreate_swapchain {
             match render_loop::handle_swapchain_recreation(
@@ -377,7 +379,7 @@ impl BenchmarkRunner {
             )? {
                 false => {
                     self.previous_frame_ends[slot] =
-                        Some(render_loop::create_now_future(&self.renderer));
+                        Some((seq, render_loop::create_now_future(&self.renderer)));
                     return Ok(());
                 }
                 true => {
@@ -396,7 +398,7 @@ impl BenchmarkRunner {
                 Ok(result) => result,
                 Err(_) => {
                     self.previous_frame_ends[slot] =
-                        Some(render_loop::create_now_future(&self.renderer));
+                        Some((seq, render_loop::create_now_future(&self.renderer)));
                     return Ok(());
                 }
             };
@@ -417,6 +419,7 @@ impl BenchmarkRunner {
             &debug_draw_data,
             &rust_engine::engine::rendering::rendering_3d::PostProcessingSettings::default(),
             &self.plankton_emitter_buffer,
+            Some(&palette_frame),
         )?;
 
         let future = {
@@ -436,11 +439,14 @@ impl BenchmarkRunner {
 
         match future {
             Ok(future) => {
-                self.previous_frame_ends[slot] = Some(future.boxed());
+                self.previous_frame_ends[slot] = Some((seq, future.boxed()));
             }
             Err(error) => {
+                // Work may have been flushed without a tracked fence — don't
+                // let a later frame rewrite the palette region under the GPU.
+                let _ = unsafe { self.renderer.gpu.device.wait_idle() };
                 self.previous_frame_ends[slot] =
-                    Some(render_loop::create_now_future(&self.renderer));
+                    Some((seq, render_loop::create_now_future(&self.renderer)));
                 return Err(format!("Present error: {error:?}").into());
             }
         }

@@ -78,6 +78,12 @@ impl EnginePlugin for RapierPhysicsPlugin {
         //    `PlayMode::Playing` at startup precisely so this criteria is
         //    always true there (see `StandaloneApp::new`), which is how every
         //    other gameplay system already behaves in a shipped game.
+        // Ordered after the whole animation stack (Task 41.5): foot
+        // placement reads `PhysicsWorld` + `Transform` and the graph system
+        // reads `Transform`, all in PreUpdate — the anim systems consume the
+        // *previous* step's state by design, so the step runs last. Hosts
+        // register all three names before plugins build (test harnesses stub
+        // them — see `with_core_systems`).
         ctx.add_system_with_criteria(
             PhysicsStepSystem,
             Stage::PreUpdate,
@@ -89,7 +95,9 @@ impl EnginePlugin for RapierPhysicsPlugin {
                 .reads::<RigidBody>()
                 .reads::<Collider>()
                 .reads::<Velocity>()
-                .after("AnimationUpdateSystem"),
+                .after(crate::engine::ecs::system_names::ANIMATION_UPDATE)
+                .after(crate::engine::ecs::system_names::FOOT_PLACEMENT)
+                .after(crate::engine::ecs::system_names::ANIM_GRAPH),
             RunIfPlaying,
         );
 
@@ -162,22 +170,30 @@ mod tests {
             );
         }
 
-        /// Core registers `AnimationUpdateSystem` before any plugin builds;
-        /// `PhysicsStepSystem` orders itself after it, so a harness that omits
-        /// it would see a dangling edge that the real binaries never have.
+        /// Core registers the animation stack (`AnimationUpdateSystem`,
+        /// `FootPlacementSystem`, `AnimGraphSystem`) before any plugin
+        /// builds; `PhysicsStepSystem` orders itself after all three, so a
+        /// harness that omits them would see dangling edges that the real
+        /// binaries never have.
         fn with_core_systems(mut self) -> Self {
-            struct Anim;
-            impl crate::engine::ecs::schedule::System for Anim {
+            struct Stub(&'static str);
+            impl crate::engine::ecs::schedule::System for Stub {
                 fn run(&mut self, _w: &mut hecs::World, _r: &mut Resources) {}
                 fn name(&self) -> &str {
-                    "AnimationUpdateSystem"
+                    self.0
                 }
             }
-            self.schedule.add_system_described(
-                Anim,
-                Stage::PreUpdate,
-                SystemDescriptor::new("AnimationUpdateSystem"),
-            );
+            for name in [
+                crate::engine::ecs::system_names::ANIMATION_UPDATE,
+                crate::engine::ecs::system_names::FOOT_PLACEMENT,
+                crate::engine::ecs::system_names::ANIM_GRAPH,
+            ] {
+                self.schedule.add_system_described(
+                    Stub(name),
+                    Stage::PreUpdate,
+                    SystemDescriptor::new(name),
+                );
+            }
             self
         }
 
@@ -293,7 +309,7 @@ mod tests {
         set.add(GameplayPlugin);
         h.build(&mut set, None);
         assert!(set.failures().is_empty(), "{:?}", set.failures());
-        assert_eq!(h.schedule.system_count(), 3, "core anim + physics + gameplay");
+        assert_eq!(h.schedule.system_count(), 5, "core anim stack + physics + gameplay");
         let on_errors = h.schedule.validate();
         assert!(
             on_errors.is_empty(),
@@ -317,7 +333,7 @@ mod tests {
         ));
         assert!(!set.is_active("game_client"), "drives the toolbar hint");
 
-        assert_eq!(h.schedule.system_count(), 1, "only the core system remains");
+        assert_eq!(h.schedule.system_count(), 3, "only the core stubs remain");
         let errors = h.schedule.validate();
         assert!(
             errors.is_empty(),

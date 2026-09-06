@@ -24,7 +24,7 @@ use crate::engine::animation::{AnimationPlayer, AnimationUpdateSystem};
 use crate::engine::assets::model_loader::{
     AnimEventMarker, AnimationChannel, BoneData, RawAnimationClip,
 };
-use crate::engine::ecs::components::MeshRenderer;
+use crate::engine::ecs::components::{MeshRenderer, Transform};
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
 
@@ -36,7 +36,7 @@ use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     invalidate_blend_space, AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner,
-    AnimGraphRuntime, AnimGraphSystem, BlendSpaceCache, ClipSet,
+    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet, IkTargets,
 };
 use crate::engine::animation::blend_space::{
     parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
@@ -1623,6 +1623,14 @@ impl AnimAssetLoader for MapAssets {
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
+        if content_rel == "anims/attack.anim" {
+            // A short play-once clip with one marker — the throttling tests
+            // (Task 41.5 P4) fire it while the entity sits in a slow bucket.
+            return Some(ClipSet {
+                bone_names: vec!["root".into(), "child".into()],
+                clips: vec![marked_clip("Attack", 30.0, 0.35, &[(0.25, "swing")])],
+            });
+        }
         let (name, x) = match content_rel {
             "anims/idle.anim" => ("Idle", 0.0),
             "anims/walk.anim" => ("Walk", 10.0),
@@ -3283,4 +3291,736 @@ fn the_demo_blend_space_compiles_from_a_state() {
     let rates: Vec<f32> = sp.samples.iter().map(|(_, r)| *r).collect();
     assert_eq!(rates, [0.5, 1.0, 2.0]);
     assert_eq!(plan.clip_refs(), ["Defeated.anim"]);
+}
+
+// ---------------------------------------------------------------------------
+// Update-rate throttling (Task 41.5 P4, S-D4)
+// ---------------------------------------------------------------------------
+//
+// The ruling these tests pin: machine tick, slot tick and event collection
+// run every frame; only pose evaluation (and the palette it produces) is
+// rate-limited by significance bucket. `SkeletonInstance::revision` bumps
+// exactly once per pose evaluation, so it is the observable for "did this
+// frame evaluate". The harness has no `TransformCache`, so positions come
+// from the entities' `Transform` (Z-up; +X converts to straight ahead of the
+// test camera below at that distance).
+
+/// A camera at the render-space origin looking down -Z (the Y-up forward).
+fn view_looking_forward() -> AnimViewInfo {
+    let vp = Mat4::perspective_rh(60f32.to_radians(), 1.6, 0.1, 1000.0)
+        * Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+    AnimViewInfo {
+        camera_pos: Vec3::ZERO,
+        frustum: crate::engine::math::Frustum::from_view_projection(vp),
+    }
+}
+
+/// A Z-up transform `x` meters straight ahead of the test camera.
+fn ahead(x: f32) -> Transform {
+    Transform::new(nalgebra_glm::vec3(x, 0.0, 0.0))
+}
+
+fn revision_of(h: &Harness, e: hecs::Entity) -> u64 {
+    h.world.get::<&SkeletonInstance>(e).unwrap().revision
+}
+
+fn bucket_of(h: &Harness, e: hecs::Entity) -> u8 {
+    h.world.get::<&AnimGraphRuntime>(e).unwrap().throttle.bucket
+}
+
+fn throttled_harness(doc: GraphDoc) -> Harness {
+    let assets = MapAssets::default();
+    assets.graphs.lock().unwrap().insert(GRAPH.into(), doc);
+    let mut h = Harness::new(assets);
+    h.resources.insert(view_looking_forward());
+    h
+}
+
+/// (a) A play-once started while the entity sits in the slowest bucket still
+/// fires its marker exactly once and visibly plays — an active slot forces
+/// evaluation every frame.
+#[test]
+fn a_throttled_play_once_still_fires_once_and_visibly_plays() {
+    let mut h = throttled_harness(slot_doc());
+    let e = h.world.spawn((
+        ahead(200.0), // past 70 m — the slowest bucket, eval every 8th frame
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm: the first frame always evaluates
+
+    // Prove the throttle throttles: the next 8 frames are quiet (idle's next
+    // marker crossing is at t = 1.05, tick 11) — at most the one
+    // stagger-due evaluation happens.
+    let r0 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    let quiet = revision_of(&h, e) - r0;
+    assert!(quiet <= 1, "slowest bucket evaluates ~once per 8 frames, got {quiet}");
+
+    // Fire the play-once while throttled. Clip len 0.35 s at 0.1 s ticks:
+    // starts, crosses its 0.25 s marker, finishes and retires within 6.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .fire_trigger("attack");
+    let r1 = revision_of(&h, e);
+    let mut swings = 0;
+    let mut saw_attack_pose = false;
+    for _ in 0..6 {
+        h.tick();
+        swings += count(&h.world.get::<&AnimGraphRuntime>(e).unwrap().events, "swing");
+        let sk = h.world.get::<&SkeletonInstance>(e).unwrap();
+        if (sk.local_transforms[0].translation.x - 30.0).abs() < 1e-3 {
+            saw_attack_pose = true; // the overlay reached the skeleton
+        }
+    }
+    assert_eq!(swings, 1, "the marker fired exactly once under throttling");
+    assert!(saw_attack_pose, "the play-once visibly played");
+    assert!(
+        revision_of(&h, e) - r1 >= 5,
+        "an active play-once forces evaluation every frame it is active"
+    );
+}
+
+/// (b) An active crossfade forces evaluation every frame until it completes
+/// (the completing frame included — the final snap to full weight shows).
+#[test]
+fn an_active_crossfade_forces_evaluation_every_frame() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(200.0),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_bool("walk", true);
+
+    // Fire tick + 0.5 s fade at 0.1 s ticks: exactly 6 consecutive forced
+    // evaluations (the fire, four mid-fade frames, the completing frame).
+    let r0 = revision_of(&h, e);
+    for _ in 0..6 {
+        h.tick();
+    }
+    assert_eq!(revision_of(&h, e) - r0, 6, "every crossfade frame evaluated");
+
+    // Fade over (walk clip has no markers): throttling resumes.
+    let r1 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    let after = revision_of(&h, e) - r1;
+    assert!(after <= 1, "the crossfade over, throttling resumes: {after}");
+}
+
+/// (c) Event parity: a throttled run emits the identical per-tick event
+/// sequence (order and content) as a full-rate run of the same scenario —
+/// machine, slot and event collection are never throttled.
+#[test]
+fn throttled_and_full_rate_runs_emit_identical_events() {
+    fn run(throttled: bool) -> (Vec<Vec<AnimEventFire>>, u64) {
+        let assets = MapAssets::default();
+        assets.graphs.lock().unwrap().insert(GRAPH.into(), slot_doc());
+        let mut h = Harness::new(assets);
+        if throttled {
+            h.resources.insert(view_looking_forward());
+        }
+        let e = h.world.spawn((
+            ahead(200.0),
+            AnimGraphRunner::new(GRAPH),
+            SkeletonInstance::from_bones(synthetic_bones()),
+        ));
+        let mut log = Vec::new();
+        for t in 0..40 {
+            if t == 5 {
+                h.world
+                    .get::<&mut AnimGraphRuntime>(e)
+                    .unwrap()
+                    .params
+                    .fire_trigger("attack");
+            }
+            if t == 20 {
+                h.world
+                    .get::<&mut AnimGraphRuntime>(e)
+                    .unwrap()
+                    .params
+                    .set_bool("walk", true);
+            }
+            h.tick();
+            log.push(h.world.get::<&AnimGraphRuntime>(e).unwrap().events.clone());
+        }
+        (log, revision_of(&h, e))
+    }
+    let (full, full_revs) = run(false);
+    let (thr, thr_revs) = run(true);
+    assert_eq!(thr, full, "event order and content identical under throttling");
+    assert!(
+        thr_revs < full_revs,
+        "the throttled run really skipped evaluations ({thr_revs} vs {full_revs})"
+    );
+}
+
+/// (d) Hysteresis: an entity oscillating around a bucket boundary never
+/// flips buckets; a decisive move past the band does.
+#[test]
+fn bucket_boundaries_have_hysteresis() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(34.0), // just inside the 35 m boundary → bucket 1
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 1);
+
+    // Straddle the boundary every frame — the bucket must not move.
+    for i in 0..20 {
+        let x = if i % 2 == 0 { 36.0 } else { 34.0 };
+        h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(x, 0.0, 0.0);
+        h.tick();
+        assert_eq!(bucket_of(&h, e), 1, "oscillating across 35 m flipped the bucket");
+    }
+
+    // Decisive moves cross the hysteresis band (× / ÷ 1.15) and stick.
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(50.0, 0.0, 0.0);
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 2, "50 m is past 35 × 1.15");
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(20.0, 0.0, 0.0);
+    h.tick();
+    assert_eq!(bucket_of(&h, e), 1, "20 m is inside 35 ÷ 1.15");
+}
+
+/// Entering the camera frustum forces an immediate evaluation — a character
+/// walking on screen shows a current pose, not one up to 8 frames stale.
+#[test]
+fn entering_the_frustum_forces_an_immediate_evaluation() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(-50.0), // behind the camera — outside the frustum
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    for _ in 0..4 {
+        h.tick();
+    }
+    h.world.get::<&mut Transform>(e).unwrap().position = nalgebra_glm::vec3(30.0, 0.0, 0.0);
+    let r0 = revision_of(&h, e);
+    h.tick();
+    assert!(revision_of(&h, e) > r0, "first visible frame evaluated immediately");
+}
+
+// ---------------------------------------------------------------------------
+// IK (Task 41.5 P5, I-D1..3)
+// ---------------------------------------------------------------------------
+//
+// The compiler carries chains as bone *names*; arming resolves them against
+// the entity's skeleton and refuses on a missing bone; the serial pass
+// converts world Z-up `IkTargets` through the entity render matrix (the
+// harness has no `TransformCache`, so the documented `Transform` fallback is
+// what runs); the stage itself sits inside the eval gate, after FK phase 1.
+
+/// Three-bone Y-up arm: upper at the origin, lower one unit up, hand two
+/// units up (l1 = l2 = 1) — plus a "tool" hanging half a unit above the hand
+/// for the descendant re-walk test.
+fn ik_bones() -> Vec<BoneData> {
+    let bind = |y: f32| Mat4::from_translation(Vec3::new(0.0, y, 0.0)).inverse();
+    vec![
+        BoneData {
+            name: "upper".into(),
+            parent_index: None,
+            inverse_bind_matrix: Mat4::IDENTITY,
+        },
+        BoneData {
+            name: "lower".into(),
+            parent_index: Some(0),
+            inverse_bind_matrix: bind(1.0),
+        },
+        BoneData {
+            name: "hand".into(),
+            parent_index: Some(1),
+            inverse_bind_matrix: bind(2.0),
+        },
+        BoneData {
+            name: "tool".into(),
+            parent_index: Some(2),
+            inverse_bind_matrix: bind(2.5),
+        },
+    ]
+}
+
+/// ENTRY → Idle plus one IK Chain node with the given props.
+fn ik_doc(props: &[(&str, PropValue)]) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("ik")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(
+            2,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Idle"),
+            &[(plan::CLIP_PROP, PropValue::Asset("anims/idle.anim".into()))],
+        ),
+        with(5, plan::ANIM_IK_CHAIN_TYPE_ID, Some("arm"), props),
+    ];
+    doc.edges = vec![edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN)];
+    doc
+}
+
+fn two_bone_props(bones: &str) -> Vec<(&'static str, PropValue)> {
+    vec![
+        (plan::IK_BONES_PROP, PropValue::Str(bones.to_string())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]
+}
+
+#[test]
+fn ik_chains_compile_into_the_plan() {
+    let p = compile_anim_graph(&ik_doc(&two_bone_props("upper, lower, hand"))).expect("compiles");
+    assert_eq!(p.ik_chains.len(), 1);
+    let c = &p.ik_chains[0];
+    assert_eq!(c.name, "arm");
+    assert_eq!(c.bones, vec!["upper", "lower", "hand"]);
+    assert_eq!(c.solver, plan::PlanIkSolver::TwoBone, "the default solver");
+    assert_eq!(c.weight_param, "ik");
+
+    // Look-at: one bone, default axis +Z, default clamp 90° carried as
+    // radians in the plan.
+    let p = compile_anim_graph(&ik_doc(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]))
+    .expect("compiles");
+    match p.ik_chains[0].solver {
+        plan::PlanIkSolver::LookAt { axis, max_angle } => {
+            assert!((axis - Vec3::Z).length() < 1e-6);
+            assert!((max_angle - 90f32.to_radians()).abs() < 1e-6);
+        }
+        ref other => panic!("expected LookAt, got {other:?}"),
+    }
+}
+
+#[test]
+fn ik_chains_refuse_bad_configs_with_anchored_messages() {
+    let err = |props: &[(&str, PropValue)]| compile_anim_graph(&ik_doc(props)).unwrap_err();
+
+    let e = err(&[(plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into()))]);
+    assert!(e.contains("IK chain 'arm' names no bones"), "{e}");
+
+    let e = err(&two_bone_props("upper, lower"));
+    assert!(e.contains("exactly 3 bones") && e.contains("got 2"), "{e}");
+
+    let e = err(&[
+        (plan::IK_BONES_PROP, PropValue::Str("upper".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum("fabrik".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]);
+    assert!(e.contains("unknown solver 'fabrik'"), "{e}");
+
+    let e = err(&[(plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into()))]);
+    assert!(e.contains("IK chain 'arm' names no weight parameter"), "{e}");
+
+    let e = err(&[
+        (plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("nope".into())),
+    ]);
+    assert!(
+        e.contains("IK chain 'arm': parameter 'nope' is not declared"),
+        "{e}"
+    );
+
+    // Duplicate names refuse — chain names key `IkTargets`.
+    let mut doc = ik_doc(&two_bone_props("upper, lower, hand"));
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_IK_CHAIN_TYPE_ID,
+        Some("arm"),
+        &two_bone_props("upper, lower, hand"),
+    ));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("two IK chains are named 'arm'"), "{e}");
+}
+
+fn ik_harness(props: &[(&str, PropValue)]) -> Harness {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), ik_doc(props));
+    Harness::new(assets)
+}
+
+#[test]
+fn arming_refuses_a_missing_ik_bone() {
+    let mut h = ik_harness(&two_bone_props("upper, shin, hand"));
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).expect("runtime exists");
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("IK chain 'arm': bone 'shin' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+#[test]
+fn arming_refuses_a_chain_off_the_hierarchy_path() {
+    // tool → hand is child → parent: not a root→tip descent.
+    let mut h = ik_harness(&two_bone_props("upper, tool, hand"));
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("'hand' is not a descendant of 'tool'"),
+        "{why}"
+    );
+}
+
+/// The model-space translation of bone `i`.
+fn bone_pos(h: &Harness, e: hecs::Entity, i: usize) -> Vec3 {
+    h.world.get::<&SkeletonInstance>(e).unwrap().model_space[i]
+        .to_scale_rotation_translation()
+        .2
+}
+
+/// End to end: the entity sits at Z-up (2, 0, 0); world-space targets
+/// convert through the entity render matrix (Transform fallback — no
+/// `TransformCache` in the harness) into the mesh's Y-up model space. The
+/// model-space goal is (1, 1, 0) with a +X pole:
+///   yup (1,1,0) at entity zup (2,0,0) → world zup (2, 1, 1);
+///   pole yup (1,0,0) → world zup (2, 1, 0).
+#[test]
+fn ik_reaches_the_target_and_weight_zero_skips_entirely() {
+    let mut h = ik_harness(&two_bone_props("upper, lower, hand"));
+    let mut targets = IkTargets::default();
+    targets.set("arm", Vec3::new(2.0, 1.0, 1.0), Vec3::new(2.0, 1.0, 0.0));
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(2.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+
+    // Weight defaults to 0 → the chain never touches the pose.
+    h.tick();
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        assert_eq!(rt.ik.len(), 1);
+        assert_eq!(rt.ik[0].bones, vec![0, 1, 2], "names resolved to indices");
+        assert!(rt.ik[0].resolved.is_some(), "targets resolved serially");
+    }
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        (hand - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4,
+        "weight 0 leaves the animated pose untouched: {hand}"
+    );
+
+    // Weight 1 → the hand lands on the model-space target exactly.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        (hand - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-3,
+        "tip on target: {hand}"
+    );
+    // +X pole → the elbow bent toward +X.
+    assert!(bone_pos(&h, e, 1).x > 0.1, "elbow follows the pole");
+
+    // Half weight blends between the animated and solved poses.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 0.5);
+    h.tick();
+    let hand = bone_pos(&h, e, 2);
+    assert!(
+        hand.x > 0.05 && hand.x < 0.95 && hand.y < 2.0,
+        "half weight is strictly between rest and solved: {hand}"
+    );
+}
+
+/// The P2 caveat, pinned: descendants of the solved bones are re-walked, so
+/// the tool attached to the hand follows exactly (hand * its unchanged local).
+#[test]
+fn ik_rewalks_descendants_below_the_chain() {
+    let mut h = ik_harness(&two_bone_props("upper, lower, hand"));
+    let mut targets = IkTargets::default();
+    // Entity at the origin: model yup (1,1,0) → world zup (0,1,1);
+    // pole yup (1,0,0) → world zup (0,1,0).
+    targets.set("arm", Vec3::new(0.0, 1.0, 1.0), Vec3::new(0.0, 1.0, 0.0));
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+    h.tick();
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+
+    let sk = h.world.get::<&SkeletonInstance>(e).unwrap();
+    let hand = sk.model_space[2];
+    let tool = sk.model_space[3].to_scale_rotation_translation().2;
+    // tool = hand * its rest local (half a unit up the hand's own Y).
+    let expected = (hand * Mat4::from_translation(Vec3::new(0.0, 0.5, 0.0)))
+        .to_scale_rotation_translation()
+        .2;
+    assert!((tool - expected).length() < 1e-3, "tool {tool} vs {expected}");
+    assert!(
+        (tool - Vec3::new(0.0, 2.5, 0.0)).length() > 0.3,
+        "the tool really moved off its rest position"
+    );
+}
+
+/// Look-at end to end: the hand's local +Z aims at a target off to model +X,
+/// under the default 90° clamp.
+#[test]
+fn look_at_runs_end_to_end() {
+    let mut h = ik_harness(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+    ]);
+    let mut targets = IkTargets::default();
+    // Model yup (5, 2, 0) at the origin entity → world zup (0, 5, 2).
+    targets.set("arm", Vec3::new(0.0, 5.0, 2.0), Vec3::ZERO);
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+    h.tick();
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+    h.tick();
+    let rot = h.world.get::<&SkeletonInstance>(e).unwrap().model_space[2]
+        .to_scale_rotation_translation()
+        .1;
+    let fwd = rot * Vec3::Z;
+    assert!(
+        (fwd - Vec3::X).length() < 1e-3,
+        "the hand's +Z aims at the target: {fwd}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Foot placement (Task 41.5 P6, I-D4)
+// ---------------------------------------------------------------------------
+//
+// The lock state machine and pelvis math live in
+// `animation/foot_placement.rs` against a scripted raycast; these tests
+// cover the graph-side config (compile + arm refusals) and the end-to-end
+// flow: `place_feet` writes targets + pelvis offsets, the next evaluation
+// applies the pelvis before the leg chain solves.
+
+/// A two-bone foot chain: `foot = true`, pelvis on the chain's own root
+/// bone (the 4-bone test skeleton has nothing above it).
+fn foot_props() -> Vec<(&'static str, PropValue)> {
+    vec![
+        (plan::IK_BONES_PROP, PropValue::Str("upper, lower, hand".into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+        (plan::IK_FOOT_PROP, PropValue::Bool(true)),
+        (plan::IK_PELVIS_PROP, PropValue::Str("upper".into())),
+    ]
+}
+
+#[test]
+fn foot_placement_compiles_and_refuses_bad_configs() {
+    let p = compile_anim_graph(&ik_doc(&foot_props())).expect("compiles");
+    let f = p.ik_chains[0].foot.as_ref().expect("foot config compiled");
+    assert!((f.ankle_offset - 0.1).abs() < 1e-6, "default ankle offset");
+    assert_eq!(f.pelvis_bone, "upper");
+
+    // Foot placement plants a tip bone — look-at has none.
+    let e = compile_anim_graph(&ik_doc(&[
+        (plan::IK_BONES_PROP, PropValue::Str("hand".into())),
+        (plan::IK_SOLVER_PROP, PropValue::Enum(plan::IK_SOLVER_LOOK_AT.into())),
+        (plan::IK_WEIGHT_PARAM_PROP, PropValue::Str("ik".into())),
+        (plan::IK_FOOT_PROP, PropValue::Bool(true)),
+    ]))
+    .unwrap_err();
+    assert!(
+        e.contains("foot placement needs the 'two_bone' solver"),
+        "{e}"
+    );
+
+    // One pelvis drives the character: disagreeing chains refuse.
+    let mut doc = ik_doc(&foot_props());
+    let mut props = foot_props();
+    props.retain(|(k, _)| *k != plan::IK_PELVIS_PROP);
+    props.push((plan::IK_PELVIS_PROP, PropValue::Str("lower".into())));
+    doc.nodes.push(with(
+        6,
+        plan::ANIM_IK_CHAIN_TYPE_ID,
+        Some("foot_r"),
+        &props,
+    ));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("different pelvis bones"), "{e}");
+}
+
+#[test]
+fn arming_refuses_a_missing_pelvis_bone() {
+    let mut props = foot_props();
+    props.retain(|(k, _)| *k != plan::IK_PELVIS_PROP);
+    props.push((plan::IK_PELVIS_PROP, PropValue::Str("hips".into())));
+    let mut h = ik_harness(&props);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("pelvis bone 'hips' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+/// P6 end to end: the scripted ground sits 0.3 below the entity plane. The
+/// serial foot pass writes the chain's target (contact + ankle offset along
+/// the normal) and the pelvis drop; the next evaluation applies the pelvis
+/// *before* the leg chain solves — the root drops the full 0.3 while the
+/// tip still lands exactly on the target.
+#[test]
+fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
+    use crate::engine::animation::foot_placement::place_feet;
+
+    let mut h = ik_harness(&foot_props());
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        IkTargets::default(),
+    ));
+    h.tick(); // arm + first eval records the animated tip
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        assert_eq!(rt.pelvis.map(|p| p.bone), Some(0), "pelvis armed on 'upper'");
+        assert_eq!(
+            rt.ik[0].animated_tip,
+            Some(Vec3::new(0.0, 2.0, 0.0)),
+            "the pre-IK tip was recorded"
+        );
+    }
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_float("ik", 1.0);
+
+    // The serial foot pass, scripted flat ground at world z = −0.3. The
+    // animated hand sits at world Z-up (0, 0, 2) (entity at the origin).
+    {
+        let mut q = h
+            .world
+            .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
+            .expect("entity");
+        let (rt, targets) = q.get().expect("components");
+        place_feet(rt, targets, Mat4::IDENTITY, Vec3::X, 1.0, true, &mut |o| {
+            Some((Vec3::new(o.x, o.y, -0.3), Vec3::Z))
+        });
+        let t = targets.targets.get("arm").expect("target written");
+        assert!(
+            (t.effector - Vec3::new(0.0, 0.0, -0.2)).length() < 1e-5,
+            "contact −0.3 lifted 0.1 along the normal: {}",
+            t.effector
+        );
+    }
+    h.tick();
+
+    // Model space (Y-up): the pelvis bone dropped the smoothed 0.3, the tip
+    // is on the target (world (0,0,−0.2) → model (0,−0.2,0)).
+    let root = bone_pos(&h, e, 0);
+    assert!(
+        (root - Vec3::new(0.0, -0.3, 0.0)).length() < 1e-3,
+        "pelvis dropped before the solve: {root}"
+    );
+    let tip = bone_pos(&h, e, 2);
+    assert!(
+        (tip - Vec3::new(0.0, -0.2, 0.0)).length() < 1e-3,
+        "the foot planted on the offset contact: {tip}"
+    );
+}
+
+/// The P6 forced-eval source, pinned per plan risk §7.3: a foot lock/unlock
+/// edge sets `throttle.force_eval_external` from the serial foot-placement
+/// pass; the significance pre-pass consumes it and that frame evaluates
+/// even in the slowest bucket — then throttling resumes (one-shot).
+#[test]
+fn a_foot_lock_edge_forces_evaluation_while_throttled() {
+    let mut h = throttled_harness(two_state_doc());
+    let e = h.world.spawn((
+        ahead(200.0), // slowest bucket
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick(); // arm
+    // Move into Walk (marker-less) so the Idle clip's `step` event cannot
+    // force evaluations inside the measurement windows below.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .params
+        .set_bool("walk", true);
+    for _ in 0..8 {
+        h.tick(); // fire + 0.5 s crossfade complete
+    }
+    let r0 = revision_of(&h, e);
+    for _ in 0..8 {
+        h.tick();
+    }
+    assert!(revision_of(&h, e) - r0 <= 1, "the bucket really throttles");
+
+    // What FootPlacementSystem sets on a `<chain>_down` / `<chain>_up` edge.
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .throttle
+        .force_eval_external = true;
+    let r1 = revision_of(&h, e);
+    h.tick();
+    assert_eq!(revision_of(&h, e) - r1, 1, "the forced frame evaluated");
+
+    let r2 = revision_of(&h, e);
+    for _ in 0..7 {
+        h.tick();
+    }
+    assert!(
+        revision_of(&h, e) - r2 <= 1,
+        "the hook is one-shot: throttling resumes"
+    );
 }
