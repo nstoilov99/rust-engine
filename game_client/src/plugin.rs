@@ -28,8 +28,8 @@ impl EnginePlugin for ClientGamePlugin {
             .with_description("Player input, character movement and game command execution.")
             .with_origin(PluginOrigin::Project)
             .with_kind(PluginKind::Runtime)
-            // The honest truth of this codebase (D7 cascade): PlayerInputSystem
-            // declares `.after(PhysicsStepSystem)` and CharacterMovementSystem
+            // The honest truth of this codebase (D7 cascade):
+            // CharacterMovementSystem declares `.before(PhysicsStepSystem)`,
             // writes `PhysicsWorld` and consumes Rapier handles. Turning
             // physics off therefore turns gameplay off with it — "physics off"
             // is a scene-editing configuration, not a playable one.
@@ -40,15 +40,18 @@ impl EnginePlugin for ClientGamePlugin {
     fn build(&self, ctx: &mut PluginContext) -> Result<(), PluginError> {
         ctx.insert_resource(GameCommandBuffer::new());
 
+        // Task 41.6 D11: PreUpdate, ahead of the anim stack and the physics
+        // step, so this frame's velocity reaches the step and the anim
+        // bridge sees this frame's state.
         ctx.add_system_with_criteria(
             PlayerInputSystem,
-            Stage::Update,
+            Stage::PreUpdate,
             PlayerInputSystem::descriptor(),
             RunIfPlaying,
         );
         ctx.add_system_with_criteria(
             CharacterMovementSystem,
-            Stage::Update,
+            Stage::PreUpdate,
             CharacterMovementSystem::descriptor(),
             RunIfPlaying,
         );
@@ -81,4 +84,91 @@ pub fn client_plugin_set() -> PluginSet {
     set.add(rust_engine::engine::plugins::DevNodesPlugin);
     set.add(ClientGamePlugin);
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_engine::engine::ecs::resources::{EditorState, Resources};
+    use rust_engine::engine::ecs::schedule::{Schedule, Stage, System};
+    use rust_engine::engine::ecs::system_names;
+    use rust_engine::engine::plugins::PluginTargets;
+
+    struct Stub(&'static str);
+    impl System for Stub {
+        fn run(&mut self, _w: &mut hecs::World, _r: &mut Resources) {}
+        fn name(&self) -> &str {
+            self.0
+        }
+    }
+
+    /// The gameplay systems share PreUpdate with the anim stack and the
+    /// physics step. Only a launch builds the runtime schedule, so this
+    /// mirrors both hosts' PreUpdate registrations (same descriptors as
+    /// `app.rs` / `standalone.rs`) and runs the validator over the real
+    /// plugin set: every overlapping access must be declared and ordered.
+    #[test]
+    fn gameplay_systems_validate_against_the_host_preupdate_stage() {
+        use rust_engine::engine::animation::graph::{AnimGraphRunner, AnimGraphRuntime, IkTargets};
+        use rust_engine::engine::animation::{AnimationPlayer, SkeletonInstance};
+        use rust_engine::engine::ecs::components::Transform;
+        use rust_engine::engine::ecs::resources::Time;
+        use rust_engine::engine::ecs::hierarchy::TransformCache;
+        use rust_engine::engine::physics::{PhysicsWorld, RigidBody};
+
+        let mut schedule = Schedule::new();
+        schedule.add_system_described(
+            Stub(system_names::ANIMATION_UPDATE),
+            Stage::PreUpdate,
+            SystemDescriptor::new(system_names::ANIMATION_UPDATE)
+                .reads_resource::<Time>()
+                .writes::<AnimationPlayer>()
+                .writes::<SkeletonInstance>(),
+        );
+        schedule.add_system_described(
+            Stub(system_names::FOOT_PLACEMENT),
+            Stage::PreUpdate,
+            SystemDescriptor::new(system_names::FOOT_PLACEMENT)
+                .reads_resource::<Time>()
+                .reads_resource::<PhysicsWorld>()
+                .reads_resource::<TransformCache>()
+                .reads::<Transform>()
+                .reads::<RigidBody>()
+                .writes::<AnimGraphRuntime>()
+                .writes::<IkTargets>()
+                .after(system_names::ANIMATION_UPDATE)
+                .before(system_names::ANIM_GRAPH),
+        );
+        schedule.add_system_described(
+            Stub(system_names::ANIM_GRAPH),
+            Stage::PreUpdate,
+            SystemDescriptor::new(system_names::ANIM_GRAPH)
+                .reads_resource::<Time>()
+                .reads_resource::<TransformCache>()
+                .reads::<AnimGraphRunner>()
+                .reads::<Transform>()
+                .writes::<AnimGraphRuntime>()
+                .writes::<SkeletonInstance>()
+                .after(system_names::ANIMATION_UPDATE),
+        );
+
+        let mut resources = Resources::new();
+        resources.insert(PhysicsWorld::new());
+        resources.insert(EditorState::new());
+        let mut registry = rust_engine::engine::node_graph::NodeRegistry::new();
+
+        let mut set = client_plugin_set();
+        set.build_all(
+            PluginTargets {
+                schedule: &mut schedule,
+                resources: &mut resources,
+                node_registry: &mut registry,
+            },
+            None,
+        );
+        assert!(set.failures().is_empty(), "{:?}", set.failures());
+
+        let errors = schedule.validate();
+        assert!(errors.is_empty(), "schedule validation: {errors:?}");
+    }
 }

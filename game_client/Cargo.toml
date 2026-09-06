@@ -35,6 +35,7 @@ glam = { workspace = true }
 serde = { workspace = true }
 nalgebra-glm = { workspace = true }
 log = { workspace = true }
+uuid = { workspace = true }
 
 # Window and event handling
 winit = "0.30"

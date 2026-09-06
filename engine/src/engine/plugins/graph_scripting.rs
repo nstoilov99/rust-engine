@@ -191,8 +191,8 @@ impl EnginePlugin for GraphScriptingPlugin {
                 // Both client gameplay systems move things too, and the
                 // ordering edge is meaningful rather than a formality: a graph
                 // should see this frame's movement, not last frame's.
-                .after("PlayerInputSystem")
-                .after("CharacterMovementSystem"),
+                .after(crate::engine::ecs::system_names::PLAYER_INPUT)
+                .after(crate::engine::ecs::system_names::CHARACTER_MOVEMENT),
             RunIfPlaying,
         );
 

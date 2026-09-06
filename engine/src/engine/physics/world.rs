@@ -9,7 +9,7 @@ use super::components::{
 };
 use crate::engine::adapters::physics_adapter::{
     cuboid_half_extents_to_physics, position_from_physics, position_to_physics,
-    rotation_from_physics, rotation_to_physics, velocity_from_physics,
+    rotation_from_physics, rotation_to_physics, velocity_from_physics, velocity_to_physics,
 };
 use crate::engine::ecs::components::Transform;
 use hecs::{Entity, World};
@@ -198,6 +198,15 @@ impl PhysicsWorld {
             .linear_damping(rigidbody.linear_damping)
             .angular_damping(rigidbody.angular_damping)
             .can_sleep(rigidbody.can_sleep)
+            .gravity_scale(rigidbody.gravity_scale)
+            .ccd_enabled(rigidbody.continuous_collision)
+            // `lock_rotation` is per Z-up axis [X, Y, Z]; Rapier's axes are
+            // (x, y, z)_yup = (y, z, -x)_zup, and a lock ignores sign.
+            .enabled_rotations(
+                !rigidbody.lock_rotation[1],
+                !rigidbody.lock_rotation[2],
+                !rigidbody.lock_rotation[0],
+            )
             .build();
 
         let rb_handle = self.rigid_body_set.insert(rb);
@@ -239,6 +248,31 @@ impl PhysicsWorld {
     pub fn apply_force(&mut self, handle: RigidBodyHandle, force: Vector3<f32>) {
         if let Some(rb) = self.rigid_body_set.get_mut(handle) {
             rb.add_force(force, true);
+        }
+    }
+
+    /// Linear velocity of a body in Z-up game space; `None` for a stale handle.
+    pub fn linear_velocity(&self, handle: RigidBodyHandle) -> Option<glm::Vec3> {
+        self.rigid_body_set
+            .get(handle)
+            .map(|rb| velocity_from_physics(rb.linvel()))
+    }
+
+    /// Set a body's linear velocity (Z-up game space) and wake it. The
+    /// character controller drives its capsule this way (Task 41.6 D1).
+    pub fn set_linear_velocity(&mut self, handle: RigidBodyHandle, velocity: glm::Vec3) {
+        if let Some(rb) = self.rigid_body_set.get_mut(handle) {
+            rb.set_linvel(velocity_to_physics(&velocity), true);
+        }
+    }
+
+    /// Set a body's rotation (Z-up game space) and wake it. A gameplay
+    /// system that writes `Transform.rotation` on a dynamic body must write
+    /// it here too: every fixed step copies the body's rotation back into
+    /// the transform.
+    pub fn set_rotation(&mut self, handle: RigidBodyHandle, rotation: &glm::Quat) {
+        if let Some(rb) = self.rigid_body_set.get_mut(handle) {
+            rb.set_rotation(rotation_to_physics(rotation), true);
         }
     }
 
@@ -450,6 +484,52 @@ mod tests {
         assert!(
             rb.handle.is_some(),
             "handle should be assigned after registration"
+        );
+    }
+
+    #[test]
+    fn velocity_and_rotation_roundtrip_in_zup() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 1.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::capsule(0.5, 0.4),
+        );
+        let handle = world.get::<&EcsRigidBody>(entity).unwrap().handle.unwrap();
+
+        physics.set_linear_velocity(handle, glm::vec3(1.0, 2.0, 3.0));
+        let v = physics.linear_velocity(handle).expect("live handle");
+        assert!((v - glm::vec3(1.0, 2.0, 3.0)).norm() < 1e-5, "{v:?}");
+
+        let yaw = glm::quat_angle_axis(0.7, &glm::vec3(0.0, 0.0, 1.0));
+        physics.set_rotation(handle, &yaw);
+        let rb = &physics.rigid_body_set[handle];
+        let back = rotation_from_physics(rb.rotation());
+        let fwd = glm::quat_rotate_vec3(&back, &glm::vec3(1.0, 0.0, 0.0));
+        assert!((fwd.y.atan2(fwd.x) - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lock_rotation_maps_zup_axes_to_rapier() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let mut rb = EcsRigidBody::dynamic();
+        rb.lock_rotation = [true, false, true]; // Z-up X and Z
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 1.0),
+            rb,
+            EcsCollider::cuboid(0.5, 0.5, 0.5),
+        );
+        let handle = world.get::<&EcsRigidBody>(entity).unwrap().handle.unwrap();
+        // Rapier (x, y, z) = Z-up (y, z, x): Y-up y (= Z-up Z) and z (= Z-up X) locked.
+        assert_eq!(
+            physics.rigid_body_set[handle].is_rotation_locked(),
+            [false, true, true]
         );
     }
 

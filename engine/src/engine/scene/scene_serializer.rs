@@ -181,6 +181,17 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         });
     }
 
+    // Task 41.6: offline character controller + orbit camera, config only.
+    if let Ok(cm) = world.get::<&game_shared::components::CharacterMovement>(entity) {
+        components.push(ComponentData::CharacterMovement((*cm).clone()));
+    }
+    if let Ok(pi) = world.get::<&game_shared::components::PlayerInput>(entity) {
+        components.push(ComponentData::PlayerInput((*pi).clone()));
+    }
+    if let Ok(oc) = world.get::<&game_shared::components::OrbitCamera>(entity) {
+        components.push(ComponentData::OrbitCamera((*oc).clone()));
+    }
+
     if let Ok(emitter) = world.get::<&AudioEmitter>(entity) {
         components.push(ComponentData::AudioEmitter {
             clip_path: emitter.clip_path.clone(),
@@ -637,6 +648,15 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     graph: crate::engine::scripting::normalize_graph_path(graph),
                     enabled: *enabled,
                 });
+            }
+            ComponentData::CharacterMovement(cm) => {
+                builder.add(cm.clone());
+            }
+            ComponentData::PlayerInput(pi) => {
+                builder.add(pi.clone());
+            }
+            ComponentData::OrbitCamera(oc) => {
+                builder.add(oc.clone());
             }
             ComponentData::Player => {
                 builder.add(Player);
