@@ -394,6 +394,59 @@ fn the_committed_demo_document_loads_and_compiles() {
     assert!(rule.triggers.is_empty());
 }
 
+/// Task 41.6 P4: the locomotion demo graph, read from disk. Its clips are
+/// placeholders until P0 lands, so this pins structure, not content: the
+/// machine copied from `character.animgraph`, the `foot_ik` Float and the
+/// two foot chains sharing one pelvis (bone existence is an arm-time check).
+#[test]
+fn the_locomotion_demo_document_loads_and_compiles() {
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content");
+    let path = "graphs/locomotion_demo.animgraph";
+    let doc = node_graph_types::load_graph(&content.join(path)).expect("the demo animgraph loads");
+    let load = super::DiskAnimAssets { content_root: content };
+    let plan = plan::compile_anim_graph_with(&doc, path, &load)
+        .expect("the demo animgraph compiles");
+
+    assert_eq!(plan.states[plan.entry].name, "Idle");
+    for state in ["Idle", "Locomotion", "Jump", "Death"] {
+        assert!(plan.states.iter().any(|s| s.name == state), "state {state}");
+    }
+    let foot_ik = plan
+        .parameters
+        .iter()
+        .find(|p| p.slug == "foot_ik")
+        .expect("foot_ik declared");
+    assert_eq!(foot_ik.ty, plan::AnimParamType::Float);
+    assert_eq!(foot_ik.default, super::machine::ParamValue::Float(1.0));
+
+    let chain = |name: &str| {
+        plan.ik_chains
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("chain {name}"))
+    };
+    assert_eq!(plan.ik_chains.len(), 2);
+    for (name, side) in [("foot_l", "Left"), ("foot_r", "Right")] {
+        let c = chain(name);
+        assert_eq!(
+            c.bones,
+            [
+                format!("mixamorig:{side}UpLeg"),
+                format!("mixamorig:{side}Leg"),
+                format!("mixamorig:{side}Foot"),
+            ]
+        );
+        assert!(matches!(c.solver, plan::PlanIkSolver::TwoBone));
+        assert_eq!(c.weight_param, "foot_ik");
+        let foot = c.foot.as_ref().expect("foot placement on");
+        assert_eq!(foot.ankle_offset, 0.1);
+        assert_eq!(foot.pelvis_bone, "mixamorig:Hips");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compiler
 // ---------------------------------------------------------------------------

@@ -919,6 +919,74 @@ mod tests {
             })
     }
 
+    /// Task 41.6 P4: the committed demo scene, read from disk. The loader
+    /// only spawns components (meshes resolve later), so no GPU is needed.
+    #[test]
+    fn the_locomotion_demo_scene_loads_with_player_rig_and_camera() {
+        use crate::engine::animation::graph::AnimGraphRunner;
+        use game_shared::components::{CharacterMovement, OrbitCamera, PlayerInput};
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("content/scenes/locomotion_demo.scene");
+        let text = fs::read_to_string(&path).expect("the demo scene exists");
+        let mut world = World::new();
+        let (_, roots) = load_scene_from_string(&mut world, &text).expect("the demo scene loads");
+
+        let find = |name: &str| {
+            world
+                .query::<&Name>()
+                .iter()
+                .find(|(_, n)| n.0 == name)
+                .map(|(e, _)| e)
+                .unwrap_or_else(|| panic!("entity '{name}'"))
+        };
+        let (player, rig, camera) = (find("Player"), find("Character Rig"), find("Camera"));
+        assert!(roots.contains(&player) && roots.contains(&camera));
+        assert!(!roots.contains(&rig), "the rig is a child");
+
+        // Player root: dynamic capsule, upright, never asleep, controller + input.
+        let rb = world.get::<&PhysRigidBody>(player).unwrap();
+        assert_eq!(rb.body_type, RigidBodyType::Dynamic);
+        assert_eq!(rb.lock_rotation, [true; 3]);
+        assert!(!rb.can_sleep);
+        let col = world.get::<&PhysCollider>(player).unwrap();
+        assert!(matches!(col.shape, ColliderShape::Capsule { .. }));
+        assert_eq!(col.friction, 0.0);
+        assert!(world.get::<&CharacterMovement>(player).is_ok());
+        assert!(world.get::<&PlayerInput>(player).is_ok());
+
+        // Rig child: graph runner, offset under the root, no body of its own.
+        assert_eq!(world.get::<&Parent>(rig).unwrap().0, player);
+        assert_eq!(
+            world.get::<&AnimGraphRunner>(rig).unwrap().graph,
+            "graphs/locomotion_demo.animgraph"
+        );
+        assert_eq!(world.get::<&Transform>(rig).unwrap().position.z, -0.9);
+        assert!(world.get::<&PhysRigidBody>(rig).is_err());
+
+        // Camera: active, orbiting the player by GUID.
+        assert!(world.get::<&Camera>(camera).unwrap().active);
+        let player_guid = world.get::<&EntityGuid>(player).unwrap().0;
+        assert_eq!(world.get::<&OrbitCamera>(camera).unwrap().target, Some(player_guid));
+
+        // Terrain: every static body is a cuboid with a visible mesh.
+        let mut terrain = 0;
+        for (_, (rb, col, mesh)) in world
+            .query::<(&PhysRigidBody, &PhysCollider, &MeshRenderer)>()
+            .iter()
+        {
+            if rb.body_type != RigidBodyType::Static {
+                continue;
+            }
+            assert!(matches!(col.shape, ColliderShape::Cuboid { .. }));
+            assert!(mesh.visible && !mesh.mesh_path.is_empty());
+            terrain += 1;
+        }
+        assert!(terrain >= 1 + 2 + 8 + 9, "floor, ramps, stairs, blocks: {terrain}");
+    }
+
     #[test]
     fn paste_remaps_intra_subtree_parent_guids() {
         let mut world = World::new();

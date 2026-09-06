@@ -93,9 +93,12 @@ pub struct StandaloneApp {
     bench: Option<crate::bench::BenchRun>,
     /// Task 41.6 D4: true while Escape has released the cursor.
     cursor_released: bool,
+    /// Task 41.6 D10: the offline / fallback scene, `--scene <content-relative
+    /// path>` or [`OFFLINE_SCENE`].
+    offline_scene: String,
 }
 
-/// Offline / fallback scene.
+/// Default offline / fallback scene.
 const OFFLINE_SCENE: &str = "scenes/main.scene";
 
 impl StandaloneApp {
@@ -107,6 +110,9 @@ impl StandaloneApp {
 
         let args: Vec<String> = std::env::args().collect();
         let bench_flags = crate::bench::parse_flags(&args);
+        let offline_scene = crate::bench::arg_value(&args, "--scene")
+            .unwrap_or_else(|| OFFLINE_SCENE.to_string());
+        println!("standalone: offline scene '{offline_scene}'");
 
         let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
         // Bench runs measure frame time; an fps cap from the configured
@@ -436,13 +442,15 @@ impl StandaloneApp {
                 .bench_secs
                 .map(|s| crate::bench::BenchRun::new(s, bench_flags.stress_anim)),
             cursor_released: true,
+            offline_scene,
         };
         // D4: mouse look from the first frame; bench runs are unattended.
         if bench_flags.bench_secs.is_none() {
             app.set_cursor_captured(true);
         }
         if app.net.is_none() {
-            app.load_world(OFFLINE_SCENE);
+            let scene = app.offline_scene.clone();
+            app.load_world(&scene);
         } else {
             println!("standalone: waiting for server world scene");
         }
@@ -559,11 +567,13 @@ impl StandaloneApp {
                 if let Some(net) = &mut self.net {
                     net.disconnect();
                 }
-                self.load_world(OFFLINE_SCENE);
+                let scene = self.offline_scene.clone();
+                self.load_world(&scene);
             }
             Decision::Offline => {
                 println!("standalone: no server world (connection failed); loading offline scene");
-                self.load_world(OFFLINE_SCENE);
+                let scene = self.offline_scene.clone();
+                self.load_world(&scene);
             }
         }
     }

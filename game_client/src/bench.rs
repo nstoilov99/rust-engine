@@ -58,25 +58,44 @@ pub struct BenchFlags {
     pub bench_secs: Option<f32>,
 }
 
+/// The value of `--name value` or `--name=value` in `args`, if present.
+#[cfg(not(feature = "editor"))]
+pub fn arg_value(args: &[String], name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    args.iter().enumerate().find_map(|(i, a)| {
+        if a == name {
+            args.get(i + 1).cloned()
+        } else {
+            a.strip_prefix(&prefix).map(str::to_string)
+        }
+    })
+}
+
 /// Parse `--stress-anim N` / `--bench-secs S` (both `--flag value` and
 /// `--flag=value` forms). Absent or unparsable values disable the feature.
 #[cfg(not(feature = "editor"))]
 pub fn parse_flags(args: &[String]) -> BenchFlags {
-    let value = |name: &str| -> Option<String> {
-        let prefix = format!("{name}=");
-        args.iter().enumerate().find_map(|(i, a)| {
-            if a == name {
-                args.get(i + 1).cloned()
-            } else {
-                a.strip_prefix(&prefix).map(str::to_string)
-            }
-        })
-    };
     BenchFlags {
-        stress_anim: value("--stress-anim")
+        stress_anim: arg_value(args, "--stress-anim")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
-        bench_secs: value("--bench-secs").and_then(|v| v.parse().ok()),
+        bench_secs: arg_value(args, "--bench-secs").and_then(|v| v.parse().ok()),
+    }
+}
+
+#[cfg(all(test, not(feature = "editor")))]
+mod tests {
+    use super::arg_value;
+
+    #[test]
+    fn arg_value_accepts_both_spellings_and_ignores_absent_flags() {
+        let args: Vec<String> = ["game", "--scene", "scenes/a.scene", "--bench-secs=5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(arg_value(&args, "--scene").as_deref(), Some("scenes/a.scene"));
+        assert_eq!(arg_value(&args, "--bench-secs").as_deref(), Some("5"));
+        assert_eq!(arg_value(&args, "--stress-anim"), None);
     }
 }
 
