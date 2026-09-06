@@ -10,16 +10,24 @@
 //! tested headlessly); [`AnimBridge::update`] is the thin ECS walk that feeds
 //! each character rig's parameter blackboard. Writes land before the machine
 //! ticks in `Stage::PreUpdate`, per the runner contract.
+//!
+//! Offline play (Task 41.6 D5) has no net session: [`CharacterAnimBridgeSystem`]
+//! feeds the same [`LocalDeriver`] from `CharacterMovement` instead, for the
+//! rig child of every scene-authored character.
 
 use std::collections::HashMap;
 
-use rust_engine::engine::animation::graph::{AnimGraphRuntime, AnimParams};
+use rust_engine::engine::animation::graph::{AnimGraphRunner, AnimGraphRuntime, AnimParams};
+use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::Transform;
-use rust_engine::engine::ecs::hierarchy::Parent;
+use rust_engine::engine::ecs::hierarchy::{Children, Parent};
+use rust_engine::engine::ecs::resources::Resources;
+use rust_engine::engine::ecs::schedule::System;
+use rust_engine::engine::ecs::system_names;
 
 use crate::prediction::Prediction;
 use crate::replication::{NetLocalPlayer, Replication};
-use game_shared::components::NetProxy;
+use game_shared::components::{CharacterMovement, NetProxy};
 
 /// Parameter slugs of `graphs/character.animgraph` — the contract between
 /// this bridge and the shipped graph. Every entry is derivable from
@@ -217,6 +225,70 @@ impl AnimBridge {
     }
 }
 
+/// The offline character's rig: the first child carrying an
+/// [`AnimGraphRunner`] and *not* the net [`CharacterRig`] marker (net rigs
+/// belong to [`AnimBridge`]). The parent link is the whole contract — no
+/// marker component to author.
+pub fn offline_rig(world: &hecs::World, children: &Children) -> Option<hecs::Entity> {
+    children.iter().copied().find(|&c| {
+        world.get::<&AnimGraphRunner>(c).is_ok() && world.get::<&CharacterRig>(c).is_err()
+    })
+}
+
+/// Task 41.6 D5: per-frame parameter derivation for scene-authored
+/// characters (`CharacterMovement` + `Children`), driven by the controller's
+/// own velocity/grounded state. `PreUpdate`, after the controller wrote this
+/// frame's state and before the anim stack reads the blackboard.
+#[derive(Default)]
+pub struct CharacterAnimBridgeSystem {
+    /// One death-edge memory per rig entity, pruned with the entity.
+    derivers: HashMap<hecs::Entity, LocalDeriver>,
+    /// Read-pass output (rig, velocity, grounded) — reused across frames.
+    scratch: Vec<(hecs::Entity, [f32; 3], bool)>,
+}
+
+impl CharacterAnimBridgeSystem {
+    pub fn descriptor() -> SystemDescriptor {
+        SystemDescriptor::new(system_names::CHARACTER_ANIM_BRIDGE)
+            .reads::<CharacterMovement>()
+            .reads::<Children>()
+            .reads::<AnimGraphRunner>()
+            .reads::<CharacterRig>()
+            .writes::<AnimGraphRuntime>()
+            // Both write `CharacterMovement`; this frame's state must be in.
+            .after(system_names::PLAYER_INPUT)
+            .after(system_names::CHARACTER_MOVEMENT)
+            // Both write `AnimGraphRuntime`; the writes must land first.
+            .before(system_names::FOOT_PLACEMENT)
+            .before(system_names::ANIM_GRAPH)
+    }
+}
+
+impl System for CharacterAnimBridgeSystem {
+    fn run(&mut self, world: &mut hecs::World, _resources: &mut Resources) {
+        self.scratch.clear();
+        for (_, (cm, children)) in world.query::<(&CharacterMovement, &Children)>().iter() {
+            if let Some(rig) = offline_rig(world, children) {
+                self.scratch.push((rig, cm.velocity, cm.grounded));
+            }
+        }
+        // A rig whose machine has not armed yet has no runtime: skip the
+        // deriver too, so its edges fire on the first frame that can hear them.
+        for &(rig, vel, grounded) in &self.scratch {
+            let Ok(mut rt) = world.get::<&mut AnimGraphRuntime>(rig) else {
+                continue;
+            };
+            let writes = self.derivers.entry(rig).or_default().step(vel, grounded, true);
+            apply(&writes, &mut rt.params);
+        }
+        self.derivers.retain(|e, _| world.contains(*e));
+    }
+
+    fn name(&self) -> &str {
+        system_names::CHARACTER_ANIM_BRIDGE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +394,31 @@ mod tests {
         assert_eq!(name(&machine), "Death", "stays dead — the Trigger fired once");
         drive(&mut machine, &mut params, [0.0, 0.0, 0.0], true, true);
         assert_eq!(name(&machine), "Idle", "respawn returns to Idle");
+    }
+
+    #[test]
+    fn offline_rig_is_the_unmarked_graph_child() {
+        use rust_engine::engine::ecs::hierarchy::set_parent;
+        let mut world = hecs::World::new();
+        let player = world.spawn((CharacterMovement::default(),));
+        let net_rig = world.spawn((AnimGraphRunner::new("graphs/x.animgraph"), CharacterRig));
+        let plain = world.spawn((Transform::default(),));
+        let rig = world.spawn((AnimGraphRunner::new("graphs/x.animgraph"),));
+        for c in [net_rig, plain, rig] {
+            assert!(set_parent(&mut world, c, player));
+        }
+        {
+            let children = world.get::<&Children>(player).unwrap();
+            assert_eq!(
+                offline_rig(&world, &children),
+                Some(rig),
+                "skips the net rig and the child without a runner"
+            );
+        }
+
+        let lonely = world.spawn((CharacterMovement::default(), Children::new()));
+        let none = world.get::<&Children>(lonely).unwrap();
+        assert_eq!(offline_rig(&world, &none), None);
     }
 
     #[test]

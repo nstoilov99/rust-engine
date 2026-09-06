@@ -21,10 +21,10 @@ use crate::engine::animation::graph::runner::{
     AnimGraphRuntime, HeldContact, IkTarget, IkTargets,
 };
 use crate::engine::ecs::components::Transform;
-use crate::engine::ecs::hierarchy::TransformCache;
+use crate::engine::ecs::hierarchy::{Parent, TransformCache};
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
-use crate::engine::physics::{PhysicsWorld, RigidBody};
+use crate::engine::physics::{PhysicsWorld, RigidBody, RigidBodyHandle};
 use crate::engine::utils::coords::{convert_position_yup_to_zup, convert_position_zup_to_yup};
 use nalgebra_glm as glm;
 
@@ -165,8 +165,21 @@ pub fn place_feet(
     }
 }
 
+/// Which body the ground rays must ignore (Task 41.6 D8): the rig entity's
+/// own, else its parent's. A character's capsule lives on the gameplay root
+/// while the animated rig is a child carrying no collider — without the
+/// fallback every ray would hit the capsule the feet stand inside.
+pub fn exclude_handle(
+    own: Option<&RigidBody>,
+    parent: Option<&RigidBody>,
+) -> Option<RigidBodyHandle> {
+    own.and_then(|b| b.handle)
+        .or_else(|| parent.and_then(|b| b.handle))
+}
+
 /// The system: [`place_feet`] per entity with armed foot chains, rays
-/// through the physics world, excluding the entity's own rigid body.
+/// through the physics world, excluding the entity's own rigid body (or
+/// its parent's — see [`exclude_handle`]).
 ///
 /// Structural licence: inserts a default `IkTargets` on entities that need
 /// one — serial work, same terms as `AnimGraphSystem`'s arming.
@@ -217,12 +230,19 @@ impl System for FootPlacementSystem {
 
         let physics = resources.get::<PhysicsWorld>();
         let cache = resources.get::<TransformCache>();
-        for (e, (rt, targets, transform, body)) in world.query_mut::<(
-            &mut AnimGraphRuntime,
-            &mut IkTargets,
-            Option<&Transform>,
-            Option<&RigidBody>,
-        )>() {
+        // `query` (not `query_mut`) so the parent's body can be read
+        // through `world.get` inside the loop — shared borrows on
+        // `RigidBody` only, so hecs' runtime check is satisfied.
+        for (e, (rt, targets, transform, body, parent)) in world
+            .query::<(
+                &mut AnimGraphRuntime,
+                &mut IkTargets,
+                Option<&Transform>,
+                Option<&RigidBody>,
+                Option<&Parent>,
+            )>()
+            .iter()
+        {
             if rt.disabled.is_some() || !rt.ik.iter().any(|c| c.foot.is_some()) {
                 continue;
             }
@@ -243,10 +263,12 @@ impl System for FootPlacementSystem {
                     glam::Vec3::new(f.x, f.y, f.z)
                 })
                 .unwrap_or(glam::Vec3::X);
-            // No `RigidBody` component ⇒ no exclusion filter: a character
-            // whose collider isn't backed by an ECS RigidBody can ray-hit
-            // itself. Shipping characters attach colliders via RigidBody.
-            let exclude = body.and_then(|b| b.handle);
+            // No `RigidBody` on the rig or its parent ⇒ no exclusion
+            // filter: a character whose collider isn't backed by an ECS
+            // RigidBody can ray-hit itself. Shipping characters attach
+            // colliders via RigidBody (on the root, D8).
+            let parent_body = parent.and_then(|p| world.get::<&RigidBody>(p.0).ok());
+            let exclude = exclude_handle(body, parent_body.as_deref());
             // I-D5: raycasts only in the top significance bucket. `bucket`
             // is written by AnimGraphSystem step 2.5, which runs *after*
             // this system — one frame of latency entering/leaving bucket 0
@@ -472,5 +494,35 @@ mod tests {
         // Steady state off-bucket: nothing changes, nothing forces.
         place(&mut rt, &mut targets, 1.0, false, &mut ground(-0.3));
         assert!(!rt.throttle.force_eval_external);
+    }
+
+    fn body(handle: Option<RigidBodyHandle>) -> RigidBody {
+        RigidBody {
+            handle,
+            ..RigidBody::default()
+        }
+    }
+
+    #[test]
+    fn exclude_prefers_the_rigs_own_body_then_falls_back_to_the_parents() {
+        let own = RigidBodyHandle::from_raw_parts(1, 0);
+        let parents = RigidBodyHandle::from_raw_parts(2, 0);
+        assert_eq!(
+            exclude_handle(Some(&body(Some(own))), Some(&body(Some(parents)))),
+            Some(own),
+            "a rig with its own body excludes that"
+        );
+        assert_eq!(
+            exclude_handle(None, Some(&body(Some(parents)))),
+            Some(parents),
+            "D8: the rig child carries no body — the parent's capsule is excluded"
+        );
+        assert_eq!(
+            exclude_handle(Some(&body(None)), Some(&body(Some(parents)))),
+            Some(parents),
+            "an unregistered own body (no handle yet) still falls back"
+        );
+        assert_eq!(exclude_handle(None, None), None, "no body anywhere: no filter");
+        assert_eq!(exclude_handle(None, Some(&body(None))), None);
     }
 }

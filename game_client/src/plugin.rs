@@ -12,6 +12,7 @@ use rust_engine::engine::plugins::{
     EnginePlugin, PluginContext, PluginError, PluginKind, PluginManifest, PluginOrigin, PluginSet,
 };
 
+use crate::anim_bridge::CharacterAnimBridgeSystem;
 use crate::systems::{
     CharacterMovementSystem, GameCommandExecutor, OrbitCameraSystem, PlayerInputSystem,
 };
@@ -57,6 +58,14 @@ impl EnginePlugin for ClientGamePlugin {
             CharacterMovementSystem::descriptor(),
             RunIfPlaying,
         );
+        // D5/D11: this frame's controller state onto the rig's blackboard,
+        // before foot placement and the graph tick read it.
+        ctx.add_system_with_criteria(
+            CharacterAnimBridgeSystem::default(),
+            Stage::PreUpdate,
+            CharacterAnimBridgeSystem::descriptor(),
+            RunIfPlaying,
+        );
         // D3/D11: Update, after the step moved the target and before the
         // propagation that the viewport reads this frame.
         ctx.add_system_with_criteria(
@@ -71,8 +80,9 @@ impl EnginePlugin for ClientGamePlugin {
             SystemDescriptor::new("GameCommandExecutor").writes_resource::<GameCommandBuffer>(),
             RunIfPlaying,
         );
-        // The Task 41 tracer demo writer (ticket 01) is retired: the real
-        // parameter bridge lives in `anim_bridge` (net characters, ADR 0002).
+        // The Task 41 tracer demo writer (ticket 01) is retired: the net
+        // parameter bridge lives in `anim_bridge` too (`AnimBridge`, driven
+        // by the net session rather than the schedule — ADR 0002).
 
         Ok(())
     }
@@ -147,6 +157,7 @@ mod tests {
                 .reads_resource::<TransformCache>()
                 .reads::<Transform>()
                 .reads::<RigidBody>()
+                .reads::<Parent>()
                 .writes::<AnimGraphRuntime>()
                 .writes::<IkTargets>()
                 .after(system_names::ANIMATION_UPDATE)

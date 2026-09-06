@@ -634,6 +634,7 @@ impl App {
                     .reads_resource::<TransformCache>()
                     .reads::<Transform>()
                     .reads::<rust_engine::engine::physics::RigidBody>()
+                    .reads::<rust_engine::engine::ecs::hierarchy::Parent>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<IkTargets>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
