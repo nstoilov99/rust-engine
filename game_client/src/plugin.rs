@@ -12,7 +12,9 @@ use rust_engine::engine::plugins::{
     EnginePlugin, PluginContext, PluginError, PluginKind, PluginManifest, PluginOrigin, PluginSet,
 };
 
-use crate::systems::{CharacterMovementSystem, GameCommandExecutor, PlayerInputSystem};
+use crate::systems::{
+    CharacterMovementSystem, GameCommandExecutor, OrbitCameraSystem, PlayerInputSystem,
+};
 
 /// Client-side game plugin that registers player input, movement, and command systems.
 pub struct ClientGamePlugin;
@@ -53,6 +55,14 @@ impl EnginePlugin for ClientGamePlugin {
             CharacterMovementSystem,
             Stage::PreUpdate,
             CharacterMovementSystem::descriptor(),
+            RunIfPlaying,
+        );
+        // D3/D11: Update, after the step moved the target and before the
+        // propagation that the viewport reads this frame.
+        ctx.add_system_with_criteria(
+            OrbitCameraSystem,
+            Stage::Update,
+            OrbitCameraSystem::descriptor(),
             RunIfPlaying,
         );
         ctx.add_system_with_criteria(
@@ -103,15 +113,18 @@ mod tests {
     }
 
     /// The gameplay systems share PreUpdate with the anim stack and the
-    /// physics step. Only a launch builds the runtime schedule, so this
-    /// mirrors both hosts' PreUpdate registrations (same descriptors as
-    /// `app.rs` / `standalone.rs`) and runs the validator over the real
-    /// plugin set: every overlapping access must be declared and ordered.
+    /// physics step, and Update with the graph runner. Only a launch builds
+    /// the runtime schedule, so this mirrors both hosts' own registrations
+    /// (same descriptors as `app.rs` / `standalone.rs`; neither host puts
+    /// anything in Update itself) and runs the validator over the real
+    /// plugin set: every overlapping access must be declared and ordered,
+    /// and every `.after`/`.before` name must exist.
     #[test]
-    fn gameplay_systems_validate_against_the_host_preupdate_stage() {
+    fn gameplay_systems_validate_against_the_host_schedule() {
         use rust_engine::engine::animation::graph::{AnimGraphRunner, AnimGraphRuntime, IkTargets};
         use rust_engine::engine::animation::{AnimationPlayer, SkeletonInstance};
-        use rust_engine::engine::ecs::components::Transform;
+        use rust_engine::engine::ecs::components::{Transform, TransformDirty};
+        use rust_engine::engine::ecs::hierarchy::{Children, HierarchyChanged, Parent};
         use rust_engine::engine::ecs::resources::Time;
         use rust_engine::engine::ecs::hierarchy::TransformCache;
         use rust_engine::engine::physics::{PhysicsWorld, RigidBody};
@@ -150,6 +163,17 @@ mod tests {
                 .writes::<AnimGraphRuntime>()
                 .writes::<SkeletonInstance>()
                 .after(system_names::ANIMATION_UPDATE),
+        );
+        schedule.add_system_described(
+            Stub(system_names::TRANSFORM_PROPAGATION),
+            Stage::PostUpdate,
+            SystemDescriptor::new(system_names::TRANSFORM_PROPAGATION)
+                .writes_resource::<TransformCache>()
+                .writes_resource::<HierarchyChanged>()
+                .reads::<Transform>()
+                .reads::<Parent>()
+                .reads::<Children>()
+                .writes::<TransformDirty>(),
         );
 
         let mut resources = Resources::new();

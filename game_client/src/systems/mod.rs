@@ -1,7 +1,9 @@
 pub mod character_movement;
 pub mod command_executor;
+pub mod orbit_camera;
 pub mod player_input;
 
 pub use character_movement::CharacterMovementSystem;
 pub use command_executor::GameCommandExecutor;
+pub use orbit_camera::OrbitCameraSystem;
 pub use player_input::PlayerInputSystem;

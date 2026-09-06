@@ -32,9 +32,9 @@ use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
-use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::keyboard::PhysicalKey;
-use winit::window::Window;
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window};
 
 #[allow(dead_code)]
 pub struct StandaloneApp {
@@ -91,6 +91,8 @@ pub struct StandaloneApp {
     stress_anim: usize,
     /// Task 41.5 P0: `--bench-secs S` — per-frame metric collector.
     bench: Option<crate::bench::BenchRun>,
+    /// Task 41.6 D4: true while Escape has released the cursor.
+    cursor_released: bool,
 }
 
 /// Offline / fallback scene.
@@ -432,7 +434,12 @@ impl StandaloneApp {
             bench: bench_flags
                 .bench_secs
                 .map(|s| crate::bench::BenchRun::new(s, bench_flags.stress_anim)),
+            cursor_released: true,
         };
+        // D4: mouse look from the first frame; bench runs are unattended.
+        if bench_flags.bench_secs.is_none() {
+            app.set_cursor_captured(true);
+        }
         if app.net.is_none() {
             app.load_world(OFFLINE_SCENE);
         } else {
@@ -678,6 +685,27 @@ impl StandaloneApp {
         }
     }
 
+    /// D4: capture (confine, else lock, else give up) hides the cursor and
+    /// switches the `look` axis to raw motion; release undoes all three.
+    /// Same behaviour as the editor's Play-mode F1 toggle.
+    pub fn set_cursor_captured(&mut self, captured: bool) {
+        let mode = if captured {
+            [CursorGrabMode::Confined, CursorGrabMode::Locked]
+                .into_iter()
+                .find(|m| self.window.set_cursor_grab(*m).is_ok())
+        } else {
+            None
+        };
+        if mode.is_none() {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        }
+        self.window.set_cursor_visible(!captured);
+        if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+            im.set_use_raw_mouse(captured);
+        }
+        self.cursor_released = !captured;
+    }
+
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
             #[cfg_attr(not(feature = "hud"), allow(unused_variables))]
@@ -694,6 +722,14 @@ impl StandaloneApp {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
+                // D4: Escape toggles cursor release / recapture.
+                if keycode == Some(KeyCode::Escape)
+                    && key_event.state == ElementState::Pressed
+                    && !key_event.repeat
+                {
+                    let recapture = self.cursor_released;
+                    self.set_cursor_captured(recapture);
+                }
                 if let Some(im) = self.game_world.resource_mut::<InputManager>() {
                     im.handle_keyboard(keycode, key_event.state);
                 }

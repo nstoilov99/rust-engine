@@ -479,8 +479,15 @@ impl ApplicationHandler for GameApp {
         &mut self,
         _event_loop: &ActiveEventLoop,
         _device_id: DeviceId,
-        _event: DeviceEvent,
+        event: DeviceEvent,
     ) {
+        let Some(app) = &mut self.app else { return };
+        // Raw motion feeds the `look` axis while the cursor is captured (D4).
+        if let DeviceEvent::MouseMotion { delta } = event {
+            if let Some(im) = app.game_world.resource_mut::<rust_engine::InputManager>() {
+                im.handle_raw_mouse_motion(delta.0, delta.1);
+            }
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
