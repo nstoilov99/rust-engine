@@ -710,6 +710,9 @@ impl StandaloneApp {
         if mode.is_none() {
             let _ = self.window.set_cursor_grab(CursorGrabMode::None);
         }
+        // Only a successful grab counts as captured; otherwise the cursor
+        // would vanish while still free to leave the window.
+        let captured = captured && mode.is_some();
         self.window.set_cursor_visible(!captured);
         if let Some(im) = self.game_world.resource_mut::<InputManager>() {
             im.set_use_raw_mouse(captured);

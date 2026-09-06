@@ -7,8 +7,8 @@
 //! turn the body to face its heading. Runs in PreUpdate before the anim
 //! stack and the physics step.
 //!
-//! Geometry assumed (D1): capsule `half_height 0.5, radius 0.4`, feet 0.9 m
-//! below the body centre.
+//! Geometry comes from the entity's capsule `Collider` (feet = half_height +
+//! radius below the body centre); D1's `0.5 + 0.4` is the fallback.
 
 use game_shared::components::CharacterMovement;
 use nalgebra_glm as glm;
@@ -18,15 +18,14 @@ use rust_engine::engine::ecs::hierarchy::mark_transform_dirty;
 use rust_engine::engine::ecs::resources::{Resources, Time};
 use rust_engine::engine::ecs::schedule::System;
 use rust_engine::engine::ecs::system_names;
-use rust_engine::engine::physics::{PhysicsWorld, RigidBody};
+use rust_engine::engine::physics::{Collider, ColliderShape, PhysicsWorld, RigidBody};
 use std::f32::consts::{PI, TAU};
 
-/// Feet below the capsule centre (half_height + radius).
-const FEET_BELOW_CENTRE: f32 = 0.9;
-/// Extra reach on the ground probe so slopes and small drops stay grounded.
-const GROUND_PROBE_SLACK: f32 = 0.15;
-/// Knee-height probe origin below the centre, for the step assist.
-const KNEE_BELOW_CENTRE: f32 = 0.6;
+/// Feet below the capsule centre when the entity has no capsule collider.
+const DEFAULT_FEET_BELOW_CENTRE: f32 = 0.9;
+/// Step-assist knee probe origin: this far above the feet, so risers from
+/// a few cm up to `step_height` are all seen.
+const KNEE_ABOVE_FEET: f32 = 0.05;
 /// Forward reach of the step probes.
 const STEP_PROBE_LEN: f32 = 0.5;
 /// Vertical velocity applied for one frame when a step is detected.
@@ -35,6 +34,13 @@ const STEP_ASSIST_VZ: f32 = 3.0;
 const MIN_STEP_SPEED: f32 = 0.1;
 /// Below this horizontal speed the character keeps its facing.
 const MIN_TURN_SPEED: f32 = 0.2;
+/// Ground probe / snap / step assist stay off this long after a jump.
+const JUMP_HOLD_SECS: f32 = 0.15;
+/// Fastest the ground snap pulls a floating grounded body down, m/s.
+const GROUND_SNAP_MAX_VZ: f32 = 3.0;
+/// Ground normals flatter than this (cos of the angle to +Z) count as
+/// walkable; steeper hits are walls and get no slope projection.
+const MIN_WALKABLE_NZ: f32 = 0.5;
 
 pub struct CharacterMovementSystem;
 
@@ -47,9 +53,12 @@ impl System for CharacterMovementSystem {
         let down = glm::vec3(0.0, 0.0, -1.0);
         let mut turned: Vec<hecs::Entity> = Vec::new();
 
-        for (entity, (transform, rb, cm)) in
-            world.query_mut::<(&mut Transform, &RigidBody, &mut CharacterMovement)>()
-        {
+        for (entity, (transform, rb, cm, collider)) in world.query_mut::<(
+            &mut Transform,
+            &RigidBody,
+            &mut CharacterMovement,
+            Option<&Collider>,
+        )>() {
             let Some(handle) = rb.physics_handle() else {
                 continue;
             };
@@ -57,14 +66,19 @@ impl System for CharacterMovementSystem {
                 continue;
             };
             let centre = transform.position;
-            let grounded = physics
-                .raycast_filtered(
-                    centre,
-                    down,
-                    FEET_BELOW_CENTRE + GROUND_PROBE_SLACK,
-                    Some(handle),
-                )
-                .is_some();
+            let feet = feet_below_centre(collider);
+
+            // Right after a jump the fixed-rate step may not have moved the
+            // body yet, so the probe would still report ground; hold it off.
+            cm.jump_hold = (cm.jump_hold - dt).max(0.0);
+            // Probe down to `step_height` past the feet so walking off a
+            // tread stays grounded and snaps down instead of free-falling.
+            let ground = if cm.jump_hold > 0.0 {
+                None
+            } else {
+                physics.raycast_filtered(centre, down, feet + cm.step_height, Some(handle))
+            };
+            let grounded = ground.is_some();
 
             let target_speed = if cm.run { cm.run_speed } else { cm.walk_speed };
             let desired = glm::vec2(cm.desired_dir[0], cm.desired_dir[1]) * target_speed;
@@ -79,22 +93,30 @@ impl System for CharacterMovementSystem {
             let speed = xy.norm();
 
             let mut vz = vel.z;
-            if cm.jump_requested && grounded {
-                vz = cm.jump_speed;
-            } else if grounded && speed > MIN_STEP_SPEED {
-                let heading = glm::vec3(xy.x / speed, xy.y / speed, 0.0);
-                let knee = centre - glm::vec3(0.0, 0.0, KNEE_BELOW_CENTRE);
-                let knee_blocked = physics
-                    .raycast_filtered(knee, heading, STEP_PROBE_LEN, Some(handle))
-                    .is_some();
-                let step_clear = knee_blocked && {
-                    let step = centre - glm::vec3(0.0, 0.0, FEET_BELOW_CENTRE - cm.step_height);
-                    physics
-                        .raycast_filtered(step, heading, STEP_PROBE_LEN, Some(handle))
-                        .is_none()
-                };
-                if wants_step_assist(grounded, speed, knee_blocked, step_clear) {
-                    vz = STEP_ASSIST_VZ;
+            if let Some(hit) = ground.as_ref() {
+                if cm.jump_requested {
+                    vz = cm.jump_speed;
+                    cm.jump_hold = JUMP_HOLD_SECS;
+                } else {
+                    // Follow the ground: ride the slope with the horizontal
+                    // velocity and pull a floating body down onto it.
+                    vz = slope_vz(&xy, &hit.normal, vel.z) + snap_vz(hit.distance, feet, dt);
+                    if speed > MIN_STEP_SPEED {
+                        let heading = glm::vec3(xy.x / speed, xy.y / speed, 0.0);
+                        let knee = centre - glm::vec3(0.0, 0.0, feet - KNEE_ABOVE_FEET);
+                        let knee_blocked = physics
+                            .raycast_filtered(knee, heading, STEP_PROBE_LEN, Some(handle))
+                            .is_some();
+                        let step_clear = knee_blocked && {
+                            let step = centre - glm::vec3(0.0, 0.0, feet - cm.step_height);
+                            physics
+                                .raycast_filtered(step, heading, STEP_PROBE_LEN, Some(handle))
+                                .is_none()
+                        };
+                        if wants_step_assist(grounded, speed, knee_blocked, step_clear) {
+                            vz = STEP_ASSIST_VZ;
+                        }
+                    }
                 }
             }
             cm.jump_requested = false;
@@ -140,6 +162,7 @@ impl CharacterMovementSystem {
             .writes::<TransformDirty>()
             .writes::<CharacterMovement>()
             .reads::<RigidBody>()
+            .reads::<Collider>()
             .after(system_names::PLAYER_INPUT)
             // D11: this frame's velocity and facing must be visible to foot
             // placement, the anim graph and the step — all of which touch
@@ -175,6 +198,38 @@ pub fn accelerate_toward(
     } else {
         current + delta * (max_step / dist)
     }
+}
+
+/// Feet below the body centre: the capsule's `half_height + radius`, or the
+/// D1 default when the entity carries no capsule.
+pub fn feet_below_centre(collider: Option<&Collider>) -> f32 {
+    match collider.map(|c| &c.shape) {
+        Some(ColliderShape::Capsule {
+            half_height,
+            radius,
+        }) => half_height + radius,
+        _ => DEFAULT_FEET_BELOW_CENTRE,
+    }
+}
+
+/// Vertical velocity that keeps a horizontal velocity on the ground plane
+/// with unit `normal` (uphill positive, downhill negative). Too-steep
+/// normals are walls: the current `vz` is kept.
+pub fn slope_vz(xy: &glm::Vec2, normal: &glm::Vec3, current_vz: f32) -> f32 {
+    if normal.z < MIN_WALKABLE_NZ {
+        return current_vz;
+    }
+    -(normal.x * xy.x + normal.y * xy.y) / normal.z
+}
+
+/// Downward velocity closing the gap between the probe hit and the feet
+/// within one frame (rate-limited), zero when already in contact.
+pub fn snap_vz(hit_distance: f32, feet: f32, dt: f32) -> f32 {
+    let gap = hit_distance - feet;
+    if gap <= 0.0 || dt <= 0.0 {
+        return 0.0;
+    }
+    -(gap / dt).min(GROUND_SNAP_MAX_VZ)
 }
 
 /// Step assist decision (D2): grounded and moving, a knee-height probe is
@@ -246,6 +301,39 @@ mod tests {
             let q = glm::quat_angle_axis(deg.to_radians(), &glm::vec3(0.0, 0.0, 1.0));
             assert!((yaw_of(&q) - deg.to_radians()).abs() < 1e-5, "{deg}");
         }
+    }
+
+    #[test]
+    fn feet_come_from_the_capsule_or_the_default() {
+        let capsule = Collider::capsule(0.6, 0.3);
+        assert!((feet_below_centre(Some(&capsule)) - 0.9).abs() < 1e-6);
+        let cube = Collider::cuboid(1.0, 1.0, 1.0);
+        assert_eq!(feet_below_centre(Some(&cube)), DEFAULT_FEET_BELOW_CENTRE);
+        assert_eq!(feet_below_centre(None), DEFAULT_FEET_BELOW_CENTRE);
+    }
+
+    #[test]
+    fn slope_projection_rides_the_ground_and_ignores_walls() {
+        let flat = glm::vec3(0.0, 0.0, 1.0);
+        assert_eq!(slope_vz(&glm::vec2(3.0, 0.0), &flat, -5.0), 0.0);
+        // 30° ramp rising along +X: normal tilts back toward -X.
+        let a = 30.0_f32.to_radians();
+        let ramp = glm::vec3(-a.sin(), 0.0, a.cos());
+        let up = slope_vz(&glm::vec2(4.5, 0.0), &ramp, 0.0);
+        assert!((up - 4.5 * a.tan()).abs() < 1e-4, "uphill vz {up}");
+        let down = slope_vz(&glm::vec2(-4.5, 0.0), &ramp, 0.0);
+        assert!((down + 4.5 * a.tan()).abs() < 1e-4, "downhill vz {down}");
+        let wall = glm::vec3(-1.0, 0.0, 0.1);
+        assert_eq!(slope_vz(&glm::vec2(1.0, 0.0), &wall, -2.0), -2.0, "wall keeps vz");
+    }
+
+    #[test]
+    fn ground_snap_closes_a_gap_and_rests_on_contact() {
+        assert_eq!(snap_vz(0.9, 0.9, 0.016), 0.0, "in contact");
+        assert_eq!(snap_vz(0.85, 0.9, 0.016), 0.0, "penetrating: the solver handles it");
+        let v = snap_vz(0.92, 0.9, 0.01);
+        assert!((v + 2.0).abs() < 1e-4, "2 cm in 10 ms = -2 m/s: {v}");
+        assert_eq!(snap_vz(1.2, 0.9, 0.01), -GROUND_SNAP_MAX_VZ, "rate-limited");
     }
 
     #[test]

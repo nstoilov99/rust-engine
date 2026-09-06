@@ -51,6 +51,11 @@ pub struct CharacterMovement {
     /// Velocity set this frame, Z-up game space, m/s.
     #[serde(skip)]
     pub velocity: [f32; 3],
+    /// Seconds left during which the ground probe, ground snap and step
+    /// assist are suppressed after a jump (the physics step is fixed-rate,
+    /// so the probe would still see the ground for a frame or two).
+    #[serde(skip)]
+    pub jump_hold: f32,
 }
 
 impl Default for CharacterMovement {
@@ -69,6 +74,7 @@ impl Default for CharacterMovement {
             grounded: false,
             horizontal_speed: 0.0,
             velocity: [0.0; 3],
+            jump_hold: 0.0,
         }
     }
 }
