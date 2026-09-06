@@ -2263,6 +2263,22 @@ printed to stderr — `log::` is invisible in game_client).
 - Editor preview/thumbnail paths stay on their push-constant shader —
   deliberate (single-mesh draws, nothing to batch), not a gap.
 
+**Note — motion matching (decided 2026-09-06, not scheduled).** Unreal's
+Game Animation Sample mode is feasible on this runtime but is a data problem
+first: the sample's 500+ clips are free yet licensed for Unreal Engine
+products only (Unreal Engine EULA, not Fab Standard License — no open-source
+release found as of 2026-09), and a sparse set (Mixamo) makes motion
+matching look worse than a tuned blend space. Prerequisites in order:
+inertialization blending (needed for state-machine transitions anyway),
+the Task 41.7 pose graph (Motion Matching becomes a pose-source node beside
+State Machine), a Z-up trajectory predictor from the controller, an
+import-time feature database (foot pos/vel, hip vel, future trajectory
+samples; KD tree or SIMD brute force), the search/switch node with hold
+time, and stride/orientation warping (no root motion here). Roughly 3–4
+tasks the size of 41.5. Revisit only with a dense locomotion set in hand
+(Fab Standard License pack or own capture); research sets (LaFAN1, Bandai
+Namco) are non-commercial only.
+
 ---
 
 ### Task 42: Save/Load & Runtime Persistence
