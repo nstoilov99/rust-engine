@@ -4063,7 +4063,7 @@ fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
             .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
             .expect("entity");
         let (rt, targets) = q.get().expect("components");
-        place_feet(rt, targets, Mat4::IDENTITY, Vec3::X, 1.0, true, &mut |o| {
+        place_feet(rt, targets, Mat4::IDENTITY, 1.0, true, &mut |o: Vec3| {
             Some((Vec3::new(o.x, o.y, -0.3), Vec3::Z))
         });
         let t = targets.targets.get("arm").expect("target written");

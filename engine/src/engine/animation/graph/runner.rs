@@ -182,6 +182,12 @@ pub struct ArmedIkChain {
     /// down from this pose and measures the pelvis drop against it — it is
     /// IK-free, so the solve never feeds back into its own inputs.
     pub animated_tip: Option<glam::Vec3>,
+    /// The animated root (hip) and middle (knee) joints, same pose and
+    /// space as `animated_tip`. Foot placement builds the knee pole from
+    /// them, so the bend side comes from the clip, not from any assumed
+    /// mesh forward axis (Task 41.6: the imported rig faces −X).
+    pub animated_root: Option<glam::Vec3>,
+    pub animated_mid: Option<glam::Vec3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -954,6 +960,8 @@ fn arm_ik_chains(
                 held: None,
             }),
             animated_tip: None,
+            animated_root: None,
+            animated_mid: None,
         });
     }
     Ok((out, pelvis))
@@ -1066,11 +1074,16 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
     // corrections (no feedback loop).
     for chain in &mut rt.ik {
         if matches!(chain.solver, PlanIkSolver::TwoBone) {
-            chain.animated_tip = chain
-                .bones
-                .get(2)
-                .filter(|&&i| i < model_space.len())
-                .map(|&i| model_space[i].w_axis.truncate());
+            let joint = |slot: usize| {
+                chain
+                    .bones
+                    .get(slot)
+                    .filter(|&&i| i < model_space.len())
+                    .map(|&i| model_space[i].w_axis.truncate())
+            };
+            chain.animated_root = joint(0);
+            chain.animated_mid = joint(1);
+            chain.animated_tip = joint(2);
         }
     }
     // P6 — pelvis adjust: a cosmetic model-space drop on the pelvis bone,

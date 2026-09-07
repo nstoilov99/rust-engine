@@ -35,10 +35,10 @@ const RAY_START_ABOVE: f32 = 0.5;
 const STEP_HEIGHT: f32 = 0.6;
 /// Total ray length.
 const RAY_LENGTH: f32 = RAY_START_ABOVE + STEP_HEIGHT;
-/// Knee pole point: this far ahead of the foot along character forward…
+/// Knee pole point: this far from the animated knee, on the side the clip
+/// already bends it (away from the hip→foot line), so the solve keeps the
+/// clip's bend direction whatever way the mesh happens to face.
 const POLE_FORWARD: f32 = 1.0;
-/// …and this far up — in front of the knee, so the leg bends forward.
-const POLE_UP: f32 = 0.5;
 /// The pelvis never drops further than this.
 const MAX_PELVIS_DROP: f32 = 0.5;
 /// Exponential approach rate (1/s) for the pelvis drop.
@@ -67,11 +67,25 @@ fn fired(events: &[AnimEventFire], chain: &str, suffix: &str) -> bool {
 /// entirely: no target ⇒ no writes), locks release, the pelvis returns, and
 /// one forced evaluation snaps the pose back to animated instead of holding
 /// a half-corrected pose forever.
+/// Pole point for a two-bone leg: `POLE_FORWARD` from the animated knee,
+/// away from the hip→foot line — the side the clip bends the knee toward.
+/// A straight leg (knee on the line) falls back to straight up.
+pub fn knee_pole(hip: glam::Vec3, knee: glam::Vec3, foot: glam::Vec3) -> glam::Vec3 {
+    let axis = foot - hip;
+    let len2 = axis.length_squared();
+    let closest = if len2 > 1e-8 {
+        hip + axis * ((knee - hip).dot(axis) / len2)
+    } else {
+        hip
+    };
+    let dir = (knee - closest).try_normalize().unwrap_or(glam::Vec3::Z);
+    knee + dir * POLE_FORWARD
+}
+
 pub fn place_feet(
     rt: &mut AnimGraphRuntime,
     targets: &mut IkTargets,
     entity_render: glam::Mat4,
-    forward_zup: glam::Vec3,
     dt: f32,
     active: bool,
     ray: &mut dyn FnMut(glam::Vec3) -> Option<(glam::Vec3, glam::Vec3)>,
@@ -106,14 +120,24 @@ pub fn place_feet(
         let Some(foot) = &mut chain.foot else { continue };
         // The animated (pre-IK) foot from the last evaluation — absent only
         // before the first one.
+        let to_world = |model: glam::Vec3| {
+            convert_position_yup_to_zup((entity_render * model.extend(1.0)).truncate())
+        };
         let fresh = chain.animated_tip.and_then(|tip| {
-            let foot_world =
-                convert_position_yup_to_zup((entity_render * tip.extend(1.0)).truncate());
+            let foot_world = to_world(tip);
             let (point, normal) = ray(foot_world + glam::Vec3::Z * RAY_START_ABOVE)?;
+            let pole = match (chain.animated_root, chain.animated_mid) {
+                (Some(root), Some(mid)) => {
+                    knee_pole(to_world(root), to_world(mid), foot_world)
+                }
+                // Before the first evaluation there is no knee to read:
+                // a pole straight above the foot keeps the solve stable.
+                _ => foot_world + glam::Vec3::Z * POLE_FORWARD,
+            };
             Some(HeldContact {
                 target: IkTarget {
                     effector: point + normal * foot.ankle_offset,
-                    pole: foot_world + forward_zup * POLE_FORWARD + glam::Vec3::Z * POLE_UP,
+                    pole,
                 },
                 contact_z: point.z,
             })
@@ -255,14 +279,6 @@ impl System for FootPlacementSystem {
                     .map(|t| glam::Mat4::from_cols_slice(t.model_matrix().as_slice()))
                     .unwrap_or(glam::Mat4::IDENTITY),
             };
-            // Character forward in world Z-up (+X is forward) — the knee
-            // pole sits ahead of the foot along it.
-            let forward = transform
-                .map(|t| {
-                    let f = glm::quat_rotate_vec3(&t.rotation, &glm::vec3(1.0, 0.0, 0.0));
-                    glam::Vec3::new(f.x, f.y, f.z)
-                })
-                .unwrap_or(glam::Vec3::X);
             // No `RigidBody` on the rig or its parent ⇒ no exclusion
             // filter: a character whose collider isn't backed by an ECS
             // RigidBody can ray-hit itself. Shipping characters attach
@@ -288,7 +304,7 @@ impl System for FootPlacementSystem {
                     glam::Vec3::new(hit.normal.x, hit.normal.y, hit.normal.z),
                 ))
             };
-            place_feet(rt, targets, entity_render, forward, dt, active, &mut cast);
+            place_feet(rt, targets, entity_render, dt, active, &mut cast);
         }
     }
 
@@ -344,6 +360,10 @@ mod tests {
                     held: None,
                 }),
                 animated_tip: Some(Vec3::new(0.0, 0.1, 0.0)),
+                // Hip straight above the foot, knee pushed toward model +Z
+                // (world +X under the identity entity): the bend side.
+                animated_root: Some(Vec3::new(0.0, 0.9, 0.0)),
+                animated_mid: Some(Vec3::new(0.0, 0.5, 0.2)),
             }],
             pelvis: Some(PelvisState {
                 bone: 0,
@@ -367,7 +387,7 @@ mod tests {
         active: bool,
         ray: &mut dyn FnMut(Vec3) -> Option<(Vec3, Vec3)>,
     ) {
-        place_feet(rt, targets, glam::Mat4::IDENTITY, Vec3::X, dt, active, ray);
+        place_feet(rt, targets, glam::Mat4::IDENTITY, dt, active, ray);
     }
 
     fn fire(rt: &mut AnimGraphRuntime, name: &str) {
@@ -390,12 +410,18 @@ mod tests {
             "contact −0.3 lifted 0.1 along the normal: {}",
             t.effector
         );
-        // Pole: 1 m ahead of the animated foot (world (0,0,0.1)), 0.5 m up.
-        assert!(
-            (t.pole - Vec3::new(1.0, 0.0, 0.6)).length() < 1e-5,
-            "knee-forward pole: {}",
-            t.pole
-        );
+        // Pole: 1 m from the animated knee, on the side it bends toward.
+        // Model (0, 0.5, 0.2) Y-up is world (x, y, z) via the Y-up→Z-up
+        // conversion; the hip and foot share x/y so the bend axis is the
+        // knee's own horizontal offset from the hip→foot line.
+        let knee = convert_position_yup_to_zup(Vec3::new(0.0, 0.5, 0.2));
+        let hip = convert_position_yup_to_zup(Vec3::new(0.0, 0.9, 0.0));
+        let foot = convert_position_yup_to_zup(Vec3::new(0.0, 0.1, 0.0));
+        let expect = knee_pole(hip, knee, foot);
+        assert!((t.pole - expect).length() < 1e-5, "knee-side pole: {}", t.pole);
+        assert!(((t.pole - knee).length() - 1.0).abs() < 1e-5, "1 m from the knee");
+        let side = knee - (hip + foot) * 0.5;
+        assert!((t.pole - knee).dot(side) > 0.0, "on the bend side of the leg");
         let p = rt.pelvis.unwrap();
         assert!(
             (p.offset - (-0.3)).abs() < 1e-5,

@@ -56,6 +56,11 @@ pub struct CharacterMovement {
     /// so the probe would still see the ground for a frame or two).
     #[serde(skip)]
     pub jump_hold: f32,
+    /// Feet height (world Z) the step assist is lifting toward; `None` when
+    /// no step is being climbed. Set when a step is detected ahead, cleared
+    /// once the feet clear it or the input stops.
+    #[serde(skip)]
+    pub step_lift_target: Option<f32>,
 }
 
 impl Default for CharacterMovement {
@@ -75,6 +80,7 @@ impl Default for CharacterMovement {
             horizontal_speed: 0.0,
             velocity: [0.0; 3],
             jump_hold: 0.0,
+            step_lift_target: None,
         }
     }
 }
