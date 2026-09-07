@@ -397,6 +397,66 @@ fn the_committed_demo_document_loads_and_compiles() {
 /// Task 41.6 P4: the locomotion demo graph, read from disk. Its clips are
 /// placeholders until P0 lands, so this pins structure, not content: the
 /// machine copied from `character.animgraph`, the `foot_ik` Float and the
+/// The demo rig arms and poses against the real `Defeated.mesh` skeleton
+/// through the real system + disk loader — the headless twin of "press
+/// F5 and the character is not in a T-pose".
+#[test]
+fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content");
+    let mut resources = Resources::new();
+    let mut time = Time::new();
+    time.delta = 1.0 / 60.0;
+    resources.insert(time);
+    resources.insert(AnimGraphPlanCache::new());
+    resources.insert(AnimClipCache::new());
+    resources.insert(BlendSpaceCache::new());
+    let mut system = AnimGraphSystem::new(Box::new(super::DiskAnimAssets {
+        content_root: content,
+    }));
+    let mut world = hecs::World::new();
+    let rig = world.spawn((
+        Transform::default(),
+        MeshRenderer {
+            mesh_path: "Defeated.mesh".to_string(),
+            ..Default::default()
+        },
+        AnimGraphRunner::new("graphs/locomotion_demo.animgraph"),
+    ));
+    let bind = {
+        system.run(&mut world, &mut resources);
+        let rt = world.get::<&AnimGraphRuntime>(rig).expect("armed");
+        assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+        world.get::<&SkeletonInstance>(rig).unwrap().local_transforms.clone()
+    };
+    for _ in 0..30 {
+        system.run(&mut world, &mut resources);
+    }
+    let skel = world.get::<&SkeletonInstance>(rig).unwrap();
+    let moved = skel
+        .local_transforms
+        .iter()
+        .zip(&bind)
+        .filter(|(a, b)| a.rotation != b.rotation || a.translation != b.translation)
+        .count();
+    assert!(moved > 10, "only {moved} bones left the bind pose after 30 ticks");
+    // The renderer reads the palette, not the locals: it must have left the
+    // bind pose too (an all-identity palette is exactly the T-pose on screen).
+    let non_identity = skel
+        .palette
+        .iter()
+        .filter(|m| (**m - Mat4::IDENTITY).abs().to_cols_array().iter().any(|v| *v > 1e-4))
+        .count();
+    assert!(
+        non_identity > 10,
+        "palette: only {non_identity} of {} bones differ from identity (revision {})",
+        skel.palette.len(),
+        skel.revision
+    );
+}
+
 /// two foot chains sharing one pelvis (bone existence is an arm-time check).
 #[test]
 fn the_locomotion_demo_document_loads_and_compiles() {
