@@ -18,8 +18,7 @@
             type_version: 1,
             position: (-489.0, 22.0),
             properties: {
-                "clip": Asset("Defeated.anim"),
-                "speed": Float(0.5999995),
+                "clip": Asset("anims/Idle.anim"),
             },
             subgraph: None,
             tint: None,
@@ -41,8 +40,7 @@
             type_version: 1,
             position: (-80.0, 320.0),
             properties: {
-                "clip": Asset("Defeated.anim"),
-                "speed": Float(0.5),
+                "clip": Asset("anims/Idle.anim"),
             },
             subgraph: None,
             tint: None,
@@ -180,7 +178,7 @@
             id: 14,
             type_id: "anim_ik_chain",
             type_version: 1,
-            position: (-706.0, 520.0),
+            position: (-693.0, 370.0),
             properties: {
                 "ankle_offset": Float(0.1),
                 "bones": Str("mixamorig:LeftUpLeg, mixamorig:LeftLeg, mixamorig:LeftFoot"),
@@ -360,7 +358,7 @@
                     type_version: 1,
                     position: (-320.0, -60.0),
                     properties: {
-                        "clip": Asset("Defeated.anim"),
+                        "clip": Asset("anims/Walking.anim"),
                     },
                     subgraph: None,
                     tint: None,
@@ -372,7 +370,7 @@
                     type_version: 1,
                     position: (-320.0, 60.0),
                     properties: {
-                        "clip": Asset("Defeated.anim"),
+                        "clip": Asset("anims/Running.anim"),
                     },
                     subgraph: None,
                     tint: None,
