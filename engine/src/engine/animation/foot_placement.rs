@@ -351,6 +351,7 @@ mod tests {
                 model_offset: Vec3::ZERO,
             }),
             ik_touched: Vec::new(),
+            clips: Default::default(),
         }
     }
 

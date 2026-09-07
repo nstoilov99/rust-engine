@@ -63,6 +63,18 @@ pub struct MeshImportSettings {
     pub up_axis: UpAxis,
     /// Import animation clips as separate `.anim` file.
     pub import_animations: bool,
+    /// Task 41.6 D6: write **only** the `.anim` — no `.mesh`, sidecar,
+    /// materials or textures. For clip-only sources (Mixamo animations
+    /// exported "With Skin" so the skeleton is in the file) whose mesh the
+    /// project already has. Implies `import_animations`.
+    #[serde(default)]
+    pub animation_only: bool,
+    /// Copy the source file next to the imported asset (editor import).
+    /// Off by default: the sidecar records the absolute source path, so a
+    /// copy only buys a project-local re-import source. Never copied for
+    /// animation-only imports.
+    #[serde(default)]
+    pub copy_source: bool,
 }
 
 impl Default for MeshImportSettings {
@@ -74,6 +86,8 @@ impl Default for MeshImportSettings {
             flip_uvs: false,
             up_axis: UpAxis::YUp,
             import_animations: true,
+            animation_only: false,
+            copy_source: false,
         }
     }
 }
@@ -104,6 +118,8 @@ pub struct MeshImportMeta {
 
 /// Result of an import operation.
 pub struct ImportResult {
+    /// Whether a `.mesh` (+ sidecar) was written — false for animation-only.
+    pub mesh_written: bool,
     /// Whether a `.anim` file was written.
     pub anim_written: bool,
     /// Number of bones in the skeleton.
@@ -178,26 +194,29 @@ pub fn import_model_to_mesh(
         }
     }
 
+    // Animation-only (Task 41.6 D6): the `.anim` at the output path, nothing
+    // else. A clip source without clips is a mistake, not an empty import.
+    if settings.animation_only {
+        if model.animations.is_empty() {
+            return Err(format!("'{}' has no animation clips", source_path.display()).into());
+        }
+        let anim_clip_count = write_clips(&output_path.with_extension("anim"), &mut model)?;
+        return Ok(ImportResult {
+            mesh_written: false,
+            anim_written: true,
+            bone_count: model.bones.len(),
+            anim_clip_count,
+            material_count: 0,
+        });
+    }
+
     // 4. Write .mesh binary (v2: includes bones + skinning)
     write_mesh_binary(output_path, &model)?;
 
     // 5. Write .anim file if model has animations and setting is enabled
     let anim_written = settings.import_animations && !model.animations.is_empty();
     let anim_clip_count = if anim_written {
-        let anim_path = output_path.with_extension("anim");
-        let bone_names: Vec<String> = model.bones.iter().map(|b| b.name.clone()).collect();
-        // Anim event markers are hand-authored on the asset (Task 41), not in
-        // the source file — a re-import must not silently destroy them, so
-        // carry the existing file's markers over by clip name.
-        if let Ok((_, old_clips)) = load_anim_binary(&anim_path) {
-            for clip in &mut model.animations {
-                if let Some(old) = old_clips.iter().find(|c| c.name == clip.name) {
-                    clip.events = old.events.clone();
-                }
-            }
-        }
-        write_anim_binary(&anim_path, &model.animations, &bone_names)?;
-        model.animations.len()
+        write_clips(&output_path.with_extension("anim"), &mut model)?
     } else {
         0
     };
@@ -243,11 +262,29 @@ pub fn import_model_to_mesh(
     write_mesh_sidecar(output_path, &meta)?;
 
     Ok(ImportResult {
+        mesh_written: true,
         anim_written,
         bone_count: model.bones.len(),
         anim_clip_count,
         material_count,
     })
+}
+
+/// Write the model's clips to `anim_path` against its bone-name table.
+/// Anim event markers are hand-authored on the asset (Task 41), not in the
+/// source file — a re-import must not silently destroy them, so the existing
+/// file's markers are carried over by clip name. Returns the clip count.
+fn write_clips(anim_path: &Path, model: &mut Model) -> io::Result<usize> {
+    let bone_names: Vec<String> = model.bones.iter().map(|b| b.name.clone()).collect();
+    if let Ok((_, old_clips)) = load_anim_binary(anim_path) {
+        for clip in &mut model.animations {
+            if let Some(old) = old_clips.iter().find(|c| c.name == clip.name) {
+                clip.events = old.events.clone();
+            }
+        }
+    }
+    write_anim_binary(anim_path, &model.animations, &bone_names)?;
+    Ok(model.animations.len())
 }
 
 /// Apply import settings to a loaded Model in-place.
@@ -1651,6 +1688,54 @@ mod tests {
         let h2 = crc32_hash(data);
         assert_eq!(h1, h2);
         assert_ne!(h1, 0);
+    }
+
+    /// Task 41.6 D6: an animation-only import of a rigged FBX leaves exactly
+    /// one file behind — the `.anim` — and keeps hand-authored markers
+    /// across a re-import. Requires content/Defeated.fbx (Mixamo character).
+    #[test]
+    fn animation_only_import_writes_only_the_anim() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("content/Defeated.fbx");
+        if !source.exists() {
+            eprintln!("Skipping test: {} not found", source.display());
+            return;
+        }
+        let temp_dir = std::env::temp_dir().join("rust_engine_test_anim_only");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let out = temp_dir.join("Defeated.anim");
+        let settings = MeshImportSettings {
+            scale: 0.01,
+            animation_only: true,
+            ..Default::default()
+        };
+
+        let result = import_model_to_mesh(&source, &out, &settings).expect("imports");
+        assert!(result.anim_written && !result.mesh_written);
+        assert_eq!(result.material_count, 0);
+        assert!(result.anim_clip_count >= 1 && result.bone_count > 0);
+        let written: Vec<String> = std::fs::read_dir(&temp_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(written, vec!["Defeated.anim".to_string()], "only the .anim");
+
+        // Markers survive a re-import (carried by clip name), and the
+        // position keys carry the import scale.
+        let (names, mut clips) = load_anim_binary(&out).expect("loads");
+        assert_eq!(names.len(), result.bone_count);
+        clips[0].events.push(AnimEventMarker {
+            time_seconds: 0.1,
+            name: "foot_l_down".into(),
+        });
+        write_anim_binary(&out, &clips, &names).unwrap();
+        import_model_to_mesh(&source, &out, &settings).expect("re-imports");
+        let (_, again) = load_anim_binary(&out).expect("reloads");
+        assert_eq!(again[0].events, clips[0].events, "markers carried over");
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

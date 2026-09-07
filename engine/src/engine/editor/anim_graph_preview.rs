@@ -23,7 +23,7 @@ use std::time::Instant;
 use node_graph_types::GraphDoc;
 
 use super::anim_preview::{preview_from_machine, AnimParamEdit, AnimPreview, PANEL_INSTANCE_ID};
-use super::blend_space_preview::{bones_cover, stem};
+use super::blend_space_preview::{arm_clips_to_skeleton, bones_cover, stem};
 use super::mesh_editor::MeshPreviewState;
 use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::animation::graph::plan::preview_mesh_of;
@@ -205,6 +205,7 @@ impl AnimGraphPreview {
         if rebuilt || mirror_changed {
             if let Some(plan) = &mirror_plan {
                 self.ensure_clips(plan, assets);
+                arm_clips_to_skeleton(&mut self.clips, self.skeleton.as_ref());
             }
             self.status = self.diagnose();
             self.diagnosed_mirror = mirror_plan;
@@ -251,7 +252,12 @@ impl AnimGraphPreview {
                 .and_then(|m| assets.load_skeleton(m))
                 .filter(|b| !b.is_empty())
                 .map(SkeletonInstance::from_bones);
+            // A new skeleton: reload the sets (an earlier remap dropped
+            // channels this mesh may have) before arming them again.
+            self.clips.clear();
+            self.ensure_clips(&plan, assets);
         }
+        arm_clips_to_skeleton(&mut self.clips, self.skeleton.as_ref());
         if *plan != *self.plan {
             let mut params = AnimParams::from_decls(&plan.parameters);
             for decl in &self.plan.parameters {

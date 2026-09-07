@@ -7847,12 +7847,15 @@ impl App {
                 .and_then(|s| s.to_str())
                 .unwrap_or("model");
 
-            // Determine output .mesh path with duplicate handling
-            let mut mesh_path = target_dir.join(format!("{}.mesh", stem));
+            // Determine the output path (`.anim` for an animation-only
+            // import, Task 41.6 D6) with duplicate handling
+            let animation_only = dialog.settings.animation_only;
+            let ext = if animation_only { "anim" } else { "mesh" };
+            let mut mesh_path = target_dir.join(format!("{}.{}", stem, ext));
             if mesh_path.exists() {
                 let mut counter = 1;
                 loop {
-                    mesh_path = target_dir.join(format!("{} ({}).mesh", stem, counter));
+                    mesh_path = target_dir.join(format!("{} ({}).{}", stem, counter, ext));
                     if !mesh_path.exists() || counter > 100 {
                         break;
                     }
@@ -7860,17 +7863,21 @@ impl App {
                 }
             }
 
-            // Also copy the source file alongside the .mesh for re-import
-            let source_dest = target_dir.join(source_path.file_name().unwrap_or_default());
-            if !source_dest.exists() {
-                if let Err(e) = std::fs::copy(source_path, &source_dest) {
-                    self.editor
-                        .console
-                        .messages
-                        .push(LogMessage::warning(format!(
-                            "Could not copy source file: {}",
-                            e
-                        )));
+            // Copy the source file alongside the .mesh when asked (the
+            // sidecar records the original path either way); never for an
+            // animation-only import.
+            if dialog.settings.copy_source && !animation_only {
+                let source_dest = target_dir.join(source_path.file_name().unwrap_or_default());
+                if !source_dest.exists() {
+                    if let Err(e) = std::fs::copy(source_path, &source_dest) {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::warning(format!(
+                                "Could not copy source file: {}",
+                                e
+                            )));
+                    }
                 }
             }
 
@@ -7906,7 +7913,7 @@ impl App {
                         msg.push_str(&format!(", {} material(s)", result.material_count));
                     }
 
-                    if result.anim_written {
+                    if result.anim_written && result.mesh_written {
                         let anim_path = mesh_path.with_extension("anim");
                         let anim_size = std::fs::metadata(&anim_path)
                             .map(|m| m.len() as f64 / 1024.0)
@@ -7917,6 +7924,9 @@ impl App {
                         ));
                     }
 
+                    if !result.mesh_written {
+                        msg.push_str(&format!(", {} animation(s), animation only", result.anim_clip_count));
+                    }
                     self.editor.console.messages.push(LogMessage::info(msg));
                     imported_count += 1;
                 }

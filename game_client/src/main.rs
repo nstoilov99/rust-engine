@@ -543,6 +543,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rust_engine::engine::editor::relaunch::wait_for_parent(parent);
     }
 
+    // Task 41.6 D6: animation-only import from the command line, no window.
+    if let Some(at) = args.iter().position(|a| a == "--import-anim") {
+        return import_anim_cli(&args, at);
+    }
+
     let event_loop = EventLoop::new()?;
     // Poll keeps the event loop spinning continuously instead of sleeping between
     // events. On Windows the DWM delivers RedrawRequested at vblank, so Wait caps
@@ -567,6 +572,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run_app(&mut game_app)?;
 
+    Ok(())
+}
+
+/// `--import-anim <source model> <out .anim> [--import-scale S]`: write only
+/// the source's clips (Task 41.6 D6). `<out>` is content-relative unless
+/// absolute. The scale must match the target mesh's import scale
+/// (`Defeated.mesh.ron`: 0.01) or the position keys will not fit the rig.
+fn import_anim_cli(args: &[String], at: usize) -> Result<(), Box<dyn std::error::Error>> {
+    use rust_engine::engine::assets::mesh_import::{import_model_to_mesh, MeshImportSettings};
+    let (Some(source), Some(out)) = (args.get(at + 1), args.get(at + 2)) else {
+        return Err("usage: --import-anim <source.fbx> <out.anim> [--import-scale S]".into());
+    };
+    let scale = args
+        .iter()
+        .position(|a| a == "--import-scale")
+        .and_then(|i| args.get(i + 1))
+        .map(|v| v.parse::<f32>())
+        .transpose()?
+        .unwrap_or(1.0);
+    let out = std::path::PathBuf::from(out);
+    let out = if out.is_absolute() {
+        out
+    } else {
+        rust_engine::engine::assets::content_root::content_root().join(out)
+    };
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let settings = MeshImportSettings {
+        scale,
+        animation_only: true,
+        ..Default::default()
+    };
+    let result = import_model_to_mesh(std::path::Path::new(source), &out, &settings)?;
+    println!(
+        "import-anim: wrote {} ({} clip(s), {} bones, scale {scale})",
+        out.with_extension("anim").display(),
+        result.anim_clip_count,
+        result.bone_count
+    );
     Ok(())
 }
 

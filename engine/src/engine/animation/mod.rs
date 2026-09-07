@@ -9,6 +9,7 @@ pub mod components;
 #[cfg(debug_assertions)]
 pub mod debug_draw;
 pub mod foot_placement;
+pub mod footfall;
 pub mod graph;
 pub mod ik;
 pub mod sampling;

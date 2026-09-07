@@ -46,6 +46,29 @@ pub fn bones_cover(mesh_bones: &[String], clip_bones: &[String]) -> bool {
     !clip_bones.is_empty() && clip_bones.iter().all(|b| mesh_bones.contains(b))
 }
 
+/// Task 41.6 D7: arm every loaded set against the preview skeleton by name
+/// — the runner's remap, applied in place. A remapped set carries the
+/// skeleton's table, so a repeat is a no-op; no skeleton, nothing to do.
+pub fn arm_clips_to_skeleton(
+    clips: &mut HashMap<String, Option<ClipSet>>,
+    skeleton: Option<&SkeletonInstance>,
+) {
+    let Some(skel) = skeleton else { return };
+    for (path, set) in clips.iter_mut() {
+        let Some(set) = set else { continue };
+        if let Some((armed, dropped)) = set.armed_for(&skel.bones) {
+            if !dropped.is_empty() {
+                eprintln!(
+                    "[anim preview] '{path}': dropped {} channel(s) — the skeleton has no bone {}",
+                    dropped.len(),
+                    dropped.join(", ")
+                );
+            }
+            *set = armed;
+        }
+    }
+}
+
 /// The input the preview evaluates at: the preview point, else the axis
 /// minimums.
 pub fn preview_input(doc: &BlendSpaceDoc, point: Option<[f32; 2]>) -> [f32; 2] {
@@ -136,16 +159,7 @@ impl BlendSpacePreview {
         mesh_assets: &[String],
         loader: &dyn AnimAssetLoader,
     ) {
-        for s in &doc.samples {
-            // Cached under both spellings so the plan's normalized path and
-            // the document's own resolve to one load.
-            let norm = crate::engine::scripting::normalize_graph_path(&s.clip);
-            if !s.clip.is_empty() && !self.clips.contains_key(&norm) {
-                let set = loader.load_clips(&norm);
-                self.clips.insert(norm.clone(), set.clone());
-                self.clips.insert(s.clip.clone(), set);
-            }
-        }
+        self.ensure_clips(doc, loader);
         let mesh = if doc.preview_mesh.is_empty() {
             self.auto_pick(doc, mesh_assets, loader)
         } else {
@@ -158,7 +172,12 @@ impl BlendSpacePreview {
                 .and_then(|m| loader.load_skeleton(m))
                 .filter(|b| !b.is_empty())
                 .map(SkeletonInstance::from_bones);
+            // A new skeleton: reload the sets (an earlier remap dropped
+            // channels this mesh may have) before arming them again.
+            self.clips.clear();
+            self.ensure_clips(doc, loader);
         }
+        arm_clips_to_skeleton(&mut self.clips, self.skeleton.as_ref());
         let had_states = self.plan.states.len();
         self.plan = Arc::new(match compiled {
             Ok(space) => one_state_plan(doc, space),
@@ -172,6 +191,20 @@ impl BlendSpacePreview {
         }
         self.params = AnimParams::from_decls(&self.plan.parameters);
         self.status = self.diagnose(doc, compiled);
+    }
+
+    /// Load (once) every clip container the samples name.
+    fn ensure_clips(&mut self, doc: &BlendSpaceDoc, loader: &dyn AnimAssetLoader) {
+        for s in &doc.samples {
+            // Cached under both spellings so the plan's normalized path and
+            // the document's own resolve to one load.
+            let norm = crate::engine::scripting::normalize_graph_path(&s.clip);
+            if !s.clip.is_empty() && !self.clips.contains_key(&norm) {
+                let set = loader.load_clips(&norm);
+                self.clips.insert(norm.clone(), set.clone());
+                self.clips.insert(s.clip.clone(), set);
+            }
+        }
     }
 
     /// The first `.mesh` whose bones cover every bone the loadable sample
