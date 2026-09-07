@@ -34,3 +34,6 @@ nul
 editor_graph_state.ron
 .p2_play.txt
 .p2_play.err.txt
+
+# Task 41.6: raw animation sources (Mixamo FBX) — imported into content/anims, never shipped
+/content/import/
