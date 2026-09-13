@@ -52,6 +52,6 @@ pub use plan::{
 pub use runner::{
     compile_blend_space, invalidate_blend_space, AnimAssetLoader, AnimClipCache,
     AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime, AnimGraphSystem, AnimViewInfo,
-    ArmedIkChain, BlendSpaceCache, ClipSet, DiskAnimAssets, FootState, HeldContact, IkTarget,
-    IkTargets, PelvisState, ResolvedIkTarget, ThrottleState,
+    ArmedIkChain, BlendSpaceCache, ClipSet, DiskAnimAssets, FootRelease, FootState, HeldContact,
+    IkGoal, IkTarget, IkTargets, PelvisState, ResolvedIkTarget, ThrottleState,
 };

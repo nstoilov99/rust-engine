@@ -82,14 +82,47 @@ impl AnimGraphRunner {
 // IK targets (Task 41.5 P5, I-D3)
 // ---------------------------------------------------------------------------
 
+/// Where a chain's effector should go (Task 41.6 P6). Positions are
+/// **world Z-up** inside [`IkTarget`]; the serial resolution pass converts
+/// them into the mesh's Y-up model space ([`ResolvedIkTarget`]) — the
+/// `Point` through the entity render matrix, the `Offset` as a vector
+/// (no translation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IkGoal {
+    /// An absolute point (two-bone: the tip; look-at: the point to aim at).
+    /// Gameplay-written targets.
+    Point(glam::Vec3),
+    /// A displacement of *this frame's* animated (pre-pelvis) tip: the
+    /// chain keeps the clip's pose and shifts by the terrain difference.
+    /// Foot placement writes this for unlocked feet, so the swing phase
+    /// keeps its clearance instead of being pinned to the ground.
+    Offset(glam::Vec3),
+}
+
 /// One chain's IK goals, in **world Z-up** game space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IkTarget {
-    /// Where the effector should land (two-bone: the tip; look-at: the point
-    /// to aim at).
-    pub effector: glam::Vec3,
+    pub goal: IkGoal,
     /// Bend-plane disambiguator for the two-bone solver; ignored by look-at.
-    pub pole: glam::Vec3,
+    /// `None` = the runner builds it from the chain's own animated knee
+    /// ([`super::super::ik::bend_direction`]), which foot placement relies on.
+    pub pole: Option<glam::Vec3>,
+}
+
+impl IkTarget {
+    pub fn point(effector: glam::Vec3, pole: glam::Vec3) -> Self {
+        Self {
+            goal: IkGoal::Point(effector),
+            pole: Some(pole),
+        }
+    }
+
+    pub fn offset(delta_world: glam::Vec3) -> Self {
+        Self {
+            goal: IkGoal::Offset(delta_world),
+            pole: None,
+        }
+    }
 }
 
 /// Per-chain IK goals, written by gameplay (P6's foot placement, a look-at
@@ -107,10 +140,10 @@ pub struct IkTargets {
 }
 
 impl IkTargets {
-    /// Upsert one chain's goals (world Z-up).
+    /// Upsert one chain's absolute goals (world Z-up).
     pub fn set(&mut self, chain: &str, effector: glam::Vec3, pole: glam::Vec3) {
         self.targets
-            .insert(chain.to_string(), IkTarget { effector, pole });
+            .insert(chain.to_string(), IkTarget::point(effector, pole));
     }
 }
 
@@ -118,22 +151,45 @@ impl IkTargets {
 /// space** — what the solvers consume directly.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedIkTarget {
-    pub target: glam::Vec3,
-    pub pole: glam::Vec3,
+    pub goal: IkGoal,
+    pub pole: Option<glam::Vec3>,
 }
 
-/// A ground contact as foot placement wrote it: the target (world Z-up) and
-/// the raw contact height the pelvis drop measures against.
+/// A ground contact as foot placement latched it on a `<chain>_down` edge:
+/// the clip's plant pose shifted by the terrain delta (world Z-up) and the
+/// raw contact height the pelvis drop measures against.
 #[derive(Debug, Clone, Copy)]
 pub struct HeldContact {
-    pub target: IkTarget,
+    pub point: glam::Vec3,
     pub contact_z: f32,
 }
+
+/// A lock letting go (Task 41.6 P6, F2): the target blends from the last
+/// held point toward the unlocked offset target over [`RELEASE_SECS`].
+#[derive(Debug, Clone, Copy)]
+pub struct FootRelease {
+    /// The point the lock held, world Z-up.
+    pub from: glam::Vec3,
+    /// 0 = still on the held point, 1 = fully on the offset target.
+    pub blend: f32,
+}
+
+/// Lock release blend duration, seconds.
+pub const RELEASE_SECS: f32 = 0.1;
+
+/// A locked target farther from the hip than this fraction of the leg
+/// length is abandoned before the solver straightens the knee (F2).
+pub const LOCK_REACH: f32 = 0.98;
 
 /// One foot chain's placement config + lock state (Task 41.5 P6, I-D4),
 /// armed from [`super::plan::PlanFootPlacement`]. Lock edges come from anim
 /// event name conventions: `<chain>_down` latches the current contact until
 /// `<chain>_up` releases it (`FootPlacementSystem` reads last tick's fires).
+///
+/// The lock lives here, not in `IkTargets`: the chain's entry there is
+/// always the terrain offset (or absent over air), which doubles as the
+/// fallback when a held point goes out of reach and as the release blend's
+/// destination.
 #[derive(Debug, Clone)]
 pub struct FootState {
     /// Effector lift along the ground-hit normal (the foot bone sits at
@@ -142,6 +198,47 @@ pub struct FootState {
     pub locked: bool,
     /// The latched contact while locked.
     pub held: Option<HeldContact>,
+    /// A release in progress (unlocked, still blending off the held point).
+    pub release: Option<FootRelease>,
+    /// Set by `apply_ik` (parallel side) when the held point went out of
+    /// reach; `place_feet` consumes it next frame (unlock + release blend).
+    pub release_requested: bool,
+    /// `held.point` (locked) or `release.from` (releasing) in model space,
+    /// written by the serial resolution pass each frame.
+    pub lock_model: Option<glam::Vec3>,
+}
+
+impl FootState {
+    pub fn new(ankle_offset: f32) -> Self {
+        Self {
+            ankle_offset,
+            locked: false,
+            held: None,
+            release: None,
+            release_requested: false,
+            lock_model: None,
+        }
+    }
+
+    /// Drop the lock (if any) and start blending off the held point.
+    pub fn unlock(&mut self) {
+        self.locked = false;
+        if let Some(h) = self.held.take() {
+            self.release = Some(FootRelease {
+                from: h.point,
+                blend: 0.0,
+            });
+        }
+    }
+
+    /// Forget everything — lock, release, pending request.
+    pub fn clear(&mut self) {
+        self.locked = false;
+        self.held = None;
+        self.release = None;
+        self.release_requested = false;
+        self.lock_model = None;
+    }
 }
 
 /// The cosmetic pelvis drop (P6, I-D4). `offset` (world Z, ≤ 0) is smoothed
@@ -188,6 +285,9 @@ pub struct ArmedIkChain {
     /// mesh forward axis (Task 41.6: the imported rig faces −X).
     pub animated_root: Option<glam::Vec3>,
     pub animated_mid: Option<glam::Vec3>,
+    /// The last well-defined knee bend direction (model space, unit), kept
+    /// so a near-straight knee does not flip its bend plane frame to frame.
+    pub pole_dir: Option<glam::Vec3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -954,14 +1054,11 @@ fn arm_ik_chains(
             solver: chain.solver,
             weight_param: chain.weight_param.clone(),
             resolved: None,
-            foot: chain.foot.as_ref().map(|f| FootState {
-                ankle_offset: f.ankle_offset,
-                locked: false,
-                held: None,
-            }),
+            foot: chain.foot.as_ref().map(|f| FootState::new(f.ankle_offset)),
             animated_tip: None,
             animated_root: None,
             animated_mid: None,
+            pole_dir: None,
         });
     }
     Ok((out, pelvis))
@@ -1071,7 +1168,9 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
     // P6 — record the animated (pre-IK, pre-pelvis) two-bone tips first:
     // foot placement rays down from this pose next frame and measures the
     // pelvis drop against it, so it must never contain this frame's
-    // corrections (no feedback loop).
+    // corrections (no feedback loop). `Offset` goals are applied to this
+    // tip — never the post-pelvis one, which would add the pelvis drop to
+    // the terrain delta.
     for chain in &mut rt.ik {
         if matches!(chain.solver, PlanIkSolver::TwoBone) {
             let joint = |slot: usize| {
@@ -1110,10 +1209,9 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
             );
         }
     }
-    for chain in &rt.ik {
-        let Some(t) = chain.resolved else { continue };
-        let weight = rt
-            .params
+    let params = &rt.params;
+    for chain in &mut rt.ik {
+        let weight = params
             .get_float(&chain.weight_param)
             .unwrap_or(0.0)
             .min(1.0);
@@ -1128,12 +1226,15 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         match chain.solver {
             PlanIkSolver::TwoBone => {
                 let (r, m, tip) = (chain.bones[0], chain.bones[1], chain.bones[2]);
+                let Some((target, pole)) = two_bone_goal(chain, model_space) else {
+                    continue;
+                };
                 let (root2, mid2) = ik::solve_two_bone(
                     model_space[r],
                     model_space[m],
                     model_space[tip],
-                    t.target,
-                    t.pole,
+                    target,
+                    pole,
                 );
                 model_space[r] = ik::blend_model(&model_space[r], &root2, weight);
                 model_space[m] = ik::blend_model(&model_space[m], &mid2, weight);
@@ -1146,8 +1247,15 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
                 );
             }
             PlanIkSolver::LookAt { axis, max_angle } => {
+                let Some(ResolvedIkTarget {
+                    goal: IkGoal::Point(target),
+                    ..
+                }) = chain.resolved
+                else {
+                    continue;
+                };
                 let b = chain.bones[0];
-                let solved = ik::solve_look_at(model_space[b], t.target, axis, max_angle);
+                let solved = ik::solve_look_at(model_space[b], target, axis, max_angle);
                 model_space[b] = ik::blend_model(&model_space[b], &solved, weight);
                 ik::rewalk_descendants(
                     model_space,
@@ -1160,6 +1268,66 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         }
     }
     rt.ik_touched = touched;
+}
+
+/// Distance of the knee pole point from the knee, model units. Only its
+/// direction matters to the solver.
+const KNEE_POLE_DISTANCE: f32 = 1.0;
+/// A knee closer than this to the hip→foot line has no bend side of its
+/// own; the previous frame's direction is kept instead.
+const STRAIGHT_KNEE_EPS: f32 = 0.01;
+
+/// This frame's `(target, pole)` for a two-bone chain, model space — `None`
+/// when the chain has nothing to solve (Task 41.6 P6, F1/F2).
+///
+/// - `Offset` goals land on the pre-pelvis animated tip recorded above.
+/// - A locked foot uses its held point unless that lies beyond
+///   [`LOCK_REACH`] of the leg length: then the offset target stands in
+///   (or the chain skips) and the lock asks to be released.
+/// - A releasing foot lerps from the held point to the offset target.
+/// - A missing pole comes from the chain's own knee ([`ik::bend_direction`]),
+///   stabilised across near-straight frames via `pole_dir`, model up last.
+fn two_bone_goal(
+    chain: &mut ArmedIkChain,
+    model_space: &[glam::Mat4],
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    let joint = |slot: usize| model_space[chain.bones[slot]].w_axis.truncate();
+    let (hip, knee, foot) = (joint(0), joint(1), joint(2));
+    let offset_target = chain.resolved.map(|t| match t.goal {
+        IkGoal::Point(p) => p,
+        IkGoal::Offset(d) => chain.animated_tip.unwrap_or(foot) + d,
+    });
+    let target = match &mut chain.foot {
+        Some(f) if f.locked => match f.lock_model {
+            Some(held) => {
+                let reach = (knee - hip).length() + (foot - knee).length();
+                if (held - hip).length() > LOCK_REACH * reach {
+                    f.release_requested = true;
+                    offset_target?
+                } else {
+                    held
+                }
+            }
+            None => offset_target?,
+        },
+        Some(f) => match (f.release, f.lock_model, offset_target) {
+            (Some(rel), Some(from), Some(to)) => from.lerp(to, rel.blend.clamp(0.0, 1.0)),
+            (Some(_), Some(from), None) => from,
+            _ => offset_target?,
+        },
+        None => offset_target?,
+    };
+    let pole = match chain.resolved.and_then(|t| t.pole) {
+        Some(p) => p,
+        None => {
+            let dir = ik::bend_direction(hip, knee, foot, STRAIGHT_KNEE_EPS)
+                .or(chain.pole_dir)
+                .unwrap_or(glam::Vec3::Y);
+            chain.pole_dir = Some(dir);
+            knee + dir * KNEE_POLE_DISTANCE
+        }
+    };
+    Some((target, pole))
 }
 
 impl System for AnimGraphSystem {
@@ -1344,19 +1512,32 @@ impl System for AnimGraphSystem {
                     .unwrap_or(glam::Mat4::IDENTITY),
             };
             let inv = entity_render.inverse();
+            let to_model = |p: glam::Vec3| {
+                inv.transform_point3(crate::engine::utils::coords::convert_position_zup_to_yup(p))
+            };
             for chain in &mut rt.ik {
                 chain.resolved = targets
                     .and_then(|t| t.targets.get(&chain.name))
                     .map(|t| ResolvedIkTarget {
-                        target: inv.transform_point3(
-                            crate::engine::utils::coords::convert_position_zup_to_yup(
-                                t.effector,
-                            ),
-                        ),
-                        pole: inv.transform_point3(
-                            crate::engine::utils::coords::convert_position_zup_to_yup(t.pole),
-                        ),
+                        goal: match t.goal {
+                            IkGoal::Point(p) => IkGoal::Point(to_model(p)),
+                            // A displacement: rotate/scale only, no translation.
+                            IkGoal::Offset(d) => IkGoal::Offset(inv.transform_vector3(
+                                crate::engine::utils::coords::convert_position_zup_to_yup(d),
+                            )),
+                        },
+                        pole: t.pole.map(to_model),
                     });
+                // The foot lock's world point (held, or the one a release is
+                // blending off) lands in model space the same way.
+                if let Some(foot) = &mut chain.foot {
+                    let world = if foot.locked {
+                        foot.held.map(|h| h.point)
+                    } else {
+                        foot.release.map(|r| r.from)
+                    };
+                    foot.lock_model = world.map(to_model);
+                }
             }
         }
 

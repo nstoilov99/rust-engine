@@ -9,6 +9,12 @@
 //!
 //! Geometry comes from the entity's capsule `Collider` (feet = half_height +
 //! radius below the body centre); D1's `0.5 + 0.4` is the fallback.
+//!
+//! The body centre for every probe is Rapier's simulated position, not
+//! `Transform.position` — that one is the interpolated presentation pose
+//! (`PhysicsWorld::present`), up to a fixed step behind. Velocities that
+//! close a gap (ground snap, step lift) close it over the fixed step the
+//! simulation will actually integrate, not the render frame (P6, F3/F4).
 
 use game_shared::components::CharacterMovement;
 use nalgebra_glm as glm;
@@ -56,6 +62,7 @@ impl System for CharacterMovementSystem {
         let Some(physics) = resources.get_mut::<PhysicsWorld>() else {
             return;
         };
+        let fixed_dt = physics.fixed_dt();
         let down = glm::vec3(0.0, 0.0, -1.0);
         let mut turned: Vec<hecs::Entity> = Vec::new();
 
@@ -71,7 +78,7 @@ impl System for CharacterMovementSystem {
             let Some(vel) = physics.linear_velocity(handle) else {
                 continue;
             };
-            let centre = transform.position;
+            let centre = physics.body_position(handle).unwrap_or(transform.position);
             let (feet, radius) = capsule_dims(collider);
 
             // Right after a jump the fixed-rate step may not have moved the
@@ -119,7 +126,7 @@ impl System for CharacterMovementSystem {
                 } else if let Some(target) = cm.step_lift_target {
                     // Rise until the feet clear the step, then hold height
                     // (no snap) and glide until the centre is over it.
-                    vz = if feet_z < target { STEP_ASSIST_VZ } else { 0.0 };
+                    vz = step_lift_vz(target - feet_z, fixed_dt);
                 } else {
                     // The surface to follow is the one under the body — or,
                     // when a walkable slope starts just ahead, that slope,
@@ -161,14 +168,14 @@ impl System for CharacterMovementSystem {
                         }
                     }
                     vz = match cm.step_lift_target {
-                        Some(_) => STEP_ASSIST_VZ,
+                        Some(target) => step_lift_vz(target - feet_z, fixed_dt),
                         None => {
                             // On a slope the straight-down probe is longer
                             // than the resting distance, so the snap measures
                             // against the slope-corrected feet height.
                             let rest = feet_on_slope(feet, radius, &hit.normal);
                             slope_vz(&xy, &follow, vel.z)
-                                + if snap { snap_vz(hit.distance, rest, dt) } else { 0.0 }
+                                + if snap { snap_vz(hit.distance, rest, fixed_dt) } else { 0.0 }
                         }
                     };
                 }
@@ -298,8 +305,18 @@ pub fn slope_vz(xy: &glm::Vec2, normal: &glm::Vec3, current_vz: f32) -> f32 {
     -(normal.x * xy.x + normal.y * xy.y) / normal.z
 }
 
+/// Upward velocity lifting the feet by `remaining` (height still to climb
+/// to the step's top) within one fixed step, capped at [`STEP_ASSIST_VZ`];
+/// zero once the feet are level with it.
+pub fn step_lift_vz(remaining: f32, fixed_dt: f32) -> f32 {
+    if remaining <= 0.0 || fixed_dt <= 0.0 {
+        return 0.0;
+    }
+    (remaining / fixed_dt).min(STEP_ASSIST_VZ)
+}
+
 /// Downward velocity closing the gap between the probe hit and the feet
-/// within one frame (rate-limited), zero when already in contact. Gaps
+/// within one fixed step (rate-limited), zero when already in contact. Gaps
 /// inside the dead band are contact-solver slack, not floating: snapping on
 /// them would bob the body (and every IK target on it) every frame.
 pub fn snap_vz(hit_distance: f32, feet: f32, dt: f32) -> f32 {
@@ -431,6 +448,16 @@ mod tests {
         let v = snap_vz(0.94, 0.9, 0.02);
         assert!((v + 2.0).abs() < 1e-4, "4 cm in 20 ms = -2 m/s: {v}");
         assert_eq!(snap_vz(1.2, 0.9, 0.01), -GROUND_SNAP_MAX_VZ, "rate-limited");
+    }
+
+    #[test]
+    fn step_lift_closes_the_remaining_height_in_one_fixed_step_capped() {
+        let dt = 1.0 / 60.0;
+        assert_eq!(step_lift_vz(0.0, dt), 0.0, "level with the top");
+        assert_eq!(step_lift_vz(-0.02, dt), 0.0, "already above it");
+        let v = step_lift_vz(0.02, dt);
+        assert!((v - 1.2).abs() < 1e-4, "2 cm in one 60 Hz step: {v}");
+        assert_eq!(step_lift_vz(0.3, dt), STEP_ASSIST_VZ, "capped far below the top");
     }
 
     #[test]

@@ -61,6 +61,45 @@ pub fn contact_times(heights: &[f32], rate: f32, min_gap: f32) -> Vec<f32> {
     kept
 }
 
+/// Enforce alternating feet across the circular timeline (Task 41.6 P6,
+/// F2): `plants[k]` is foot `k`'s `(time, height)` list; of two
+/// consecutive plants (by time, the loop seam included) that belong to the
+/// same foot the *lower* one is kept, until no two neighbours share a foot.
+/// Returns the surviving plant times per foot, in order. With plants on
+/// fewer than two feet there is nothing to alternate and the input is
+/// returned as-is.
+pub fn alternate_feet(plants: &[Vec<(f32, f32)>]) -> Vec<Vec<f32>> {
+    let times = |plants: &[Vec<(f32, f32)>]| -> Vec<Vec<f32>> {
+        plants
+            .iter()
+            .map(|v| v.iter().map(|&(t, _)| t).collect())
+            .collect()
+    };
+    if plants.iter().filter(|v| !v.is_empty()).count() < 2 {
+        return times(plants);
+    }
+    let mut all: Vec<(f32, f32, usize)> = plants
+        .iter()
+        .enumerate()
+        .flat_map(|(k, v)| v.iter().map(move |&(t, h)| (t, h, k)))
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0));
+    loop {
+        let n = all.len();
+        let Some(i) = (0..n).find(|&i| n > 1 && all[i].2 == all[(i + 1) % n].2) else {
+            break;
+        };
+        let j = (i + 1) % n;
+        // Keep the lower plant; on a tie the earlier one (contact start).
+        all.remove(if all[i].1 <= all[j].1 { j } else { i });
+    }
+    let mut out = vec![Vec::new(); plants.len()];
+    for (t, _, k) in all {
+        out[k].push(t);
+    }
+    out
+}
+
 /// `<chain>_down` at each plant, `<chain>_up` at the plant plus
 /// [`UP_FRACTION`] of the (circular) interval to the next plant.
 pub fn footfall_markers(chain: &str, plants: &[f32], duration: f32) -> Vec<AnimEventMarker> {
@@ -155,9 +194,20 @@ pub fn author_footfall_events(
             }
         }
         clip.events.retain(|e| !e.name.starts_with("foot_"));
+        // Plants per foot with their heights, then alternated across feet
+        // (a doubled plant on one foot would lock it while the other swings).
+        let candidates: Vec<Vec<(f32, f32)>> = heights
+            .iter()
+            .map(|h| {
+                contact_times(h, SAMPLE_RATE, MIN_GAP)
+                    .into_iter()
+                    .map(|t| (t, h[((t * SAMPLE_RATE).round() as usize).min(h.len() - 1)]))
+                    .collect()
+            })
+            .collect();
+        let plants = alternate_feet(&candidates);
         for (k, (chain, _)) in feet.iter().enumerate() {
-            let plants = contact_times(&heights[k], SAMPLE_RATE, MIN_GAP);
-            let markers = footfall_markers(chain, &plants, clip.duration_seconds);
+            let markers = footfall_markers(chain, &plants[k], clip.duration_seconds);
             report.push(format!(
                 "  '{}' {chain}: {}",
                 clip.name,
@@ -224,6 +274,32 @@ mod tests {
             }
         }
         assert_eq!(contact_times(&h, SAMPLE_RATE, MIN_GAP), vec![0.45]);
+    }
+
+    /// F2: a foot with two plants in a row (a doubled minimum) keeps only
+    /// the lower one, so the two feet alternate — across the loop seam too —
+    /// and `_up` is regenerated against the surviving plant of that foot.
+    #[test]
+    fn alternation_drops_the_higher_of_two_same_foot_plants() {
+        // Left: a real plant at 0.25 (h 0) and a wobble at 0.5 (h 0.1);
+        // right: 0.75 (h 0). Sequence L L R → the wobble goes.
+        let plants = alternate_feet(&[vec![(0.25, 0.0), (0.5, 0.1)], vec![(0.75, 0.0)]]);
+        assert_eq!(plants, vec![vec![0.25], vec![0.75]]);
+        let m = footfall_markers("foot_l", &plants[0], 1.0);
+        let got: Vec<(&str, f32)> = m.iter().map(|e| (e.name.as_str(), e.time_seconds)).collect();
+        assert_eq!(got, vec![("foot_l_down", 0.25), ("foot_l_up", 0.65)]);
+
+        // Across the seam: R at 0.9 and R at 0.1 are neighbours; the lower
+        // (0.1) survives. L L at 0.3 / 0.5 keeps the earlier on a tie.
+        let plants = alternate_feet(&[
+            vec![(0.3, 0.0), (0.5, 0.0)],
+            vec![(0.1, 0.0), (0.9, 0.05)],
+        ]);
+        assert_eq!(plants, vec![vec![0.3], vec![0.1]]);
+
+        // One foot only: nothing to alternate against.
+        let plants = alternate_feet(&[vec![(0.25, 0.0), (0.75, 0.0)], vec![]]);
+        assert_eq!(plants, vec![vec![0.25, 0.75], vec![]]);
     }
 
     #[test]

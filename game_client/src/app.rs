@@ -2831,6 +2831,7 @@ impl App {
             rust_engine::engine::animation::debug_draw::submit_ik_debug_draws(
                 self.core.game_world.hecs(),
                 &mut self.core.debug_draw_buffer,
+                tc,
             );
         }
 

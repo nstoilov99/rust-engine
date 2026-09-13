@@ -36,7 +36,8 @@ use super::plan::AnimGraphPlan;
 use super::plan::{self, compile_anim_graph, RuleExpr, TransitionFrom};
 use super::runner::{
     invalidate_blend_space, AnimAssetLoader, AnimClipCache, AnimGraphPlanCache, AnimGraphRunner,
-    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet, IkTargets,
+    AnimGraphRuntime, AnimGraphSystem, AnimViewInfo, BlendSpaceCache, ClipSet, HeldContact,
+    IkTargets,
 };
 use crate::engine::animation::blend_space::{
     parse_blend_space, serialize_blend_space, BlendAxis, BlendSample, BlendSpace, BlendSpaceDoc,
@@ -4022,16 +4023,9 @@ fn arming_refuses_a_missing_pelvis_bone() {
     );
 }
 
-/// P6 end to end: the scripted ground sits 0.3 below the entity plane. The
-/// serial foot pass writes the chain's target (contact + ankle offset along
-/// the normal) and the pelvis drop; the next evaluation applies the pelvis
-/// *before* the leg chain solves — the root drops the full 0.3 while the
-/// tip still lands exactly on the target.
-#[test]
-fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
-    use crate::engine::animation::foot_placement::place_feet;
-
-    let mut h = ik_harness(&foot_props());
+/// Arm a foot-chain entity at the origin, evaluate once (records the
+/// animated tip at model (0, 2, 0)) and switch the chain fully on.
+fn armed_foot_entity(h: &mut Harness) -> hecs::Entity {
     let e = h.world.spawn((
         Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
         AnimGraphRunner::new(GRAPH),
@@ -4054,29 +4048,49 @@ fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
         .unwrap()
         .params
         .set_float("ik", 1.0);
+    e
+}
 
-    // The serial foot pass, scripted flat ground at world z = −0.3. The
-    // animated hand sits at world Z-up (0, 0, 2) (entity at the origin).
+/// The serial foot pass against scripted flat ground at world `z`, dt 1 s
+/// (saturates the pelvis smoothing).
+fn place_on_flat_ground(h: &mut Harness, e: hecs::Entity, z: f32) {
+    use crate::engine::animation::foot_placement::place_feet;
+    let mut q = h
+        .world
+        .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
+        .expect("entity");
+    let (rt, targets) = q.get().expect("components");
+    place_feet(rt, targets, Mat4::IDENTITY, 1.0, true, &mut |o: Vec3| {
+        Some((Vec3::new(o.x, o.y, z), Vec3::Z))
+    });
+}
+
+/// P6 end to end (Task 41.6 F1): the scripted ground sits 0.3 below the
+/// entity plane. The serial foot pass writes the chain's *offset* (the
+/// terrain delta) and the pelvis drop; the next evaluation applies the
+/// pelvis *before* the leg chain solves, and the offset lands on the
+/// **pre-pelvis** animated tip — so the whole leg rides down 0.3 with the
+/// pelvis and keeps the clip's shape (a post-pelvis tip would have moved
+/// the foot down 0.6).
+#[test]
+fn foot_placement_drops_the_pelvis_and_offsets_the_pre_pelvis_tip() {
+    let mut h = ik_harness(&foot_props());
+    let e = armed_foot_entity(&mut h);
+    place_on_flat_ground(&mut h, e, -0.3);
     {
-        let mut q = h
-            .world
-            .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
-            .expect("entity");
-        let (rt, targets) = q.get().expect("components");
-        place_feet(rt, targets, Mat4::IDENTITY, 1.0, true, &mut |o: Vec3| {
-            Some((Vec3::new(o.x, o.y, -0.3), Vec3::Z))
-        });
+        let targets = h.world.get::<&IkTargets>(e).unwrap();
         let t = targets.targets.get("arm").expect("target written");
-        assert!(
-            (t.effector - Vec3::new(0.0, 0.0, -0.2)).length() < 1e-5,
-            "contact −0.3 lifted 0.1 along the normal: {}",
-            t.effector
+        assert_eq!(
+            t.goal,
+            super::runner::IkGoal::Offset(Vec3::new(0.0, 0.0, -0.3)),
+            "flat ground 0.3 below the plane: shift down 0.3"
         );
+        assert_eq!(t.pole, None, "the pole comes from the chain's own knee");
     }
     h.tick();
 
-    // Model space (Y-up): the pelvis bone dropped the smoothed 0.3, the tip
-    // is on the target (world (0,0,−0.2) → model (0,−0.2,0)).
+    // Model space (Y-up): the pelvis bone dropped the smoothed 0.3 and the
+    // tip sits 0.3 below its animated (0, 2, 0) — not 0.6.
     let root = bone_pos(&h, e, 0);
     assert!(
         (root - Vec3::new(0.0, -0.3, 0.0)).length() < 1e-3,
@@ -4084,9 +4098,101 @@ fn foot_placement_drops_the_pelvis_and_plants_the_foot() {
     );
     let tip = bone_pos(&h, e, 2);
     assert!(
-        (tip - Vec3::new(0.0, -0.2, 0.0)).length() < 1e-3,
-        "the foot planted on the offset contact: {tip}"
+        (tip - Vec3::new(0.0, 1.7, 0.0)).length() < 1e-3,
+        "the foot conformed by the terrain delta on the pre-pelvis tip: {tip}"
     );
+}
+
+/// F1: flat ground at the entity's own plane is a zero delta, and a zero
+/// delta at weight 1 leaves the animated pose exactly where it was.
+#[test]
+fn flat_ground_at_the_entity_plane_leaves_the_pose_unchanged() {
+    let mut h = ik_harness(&foot_props());
+    let e = armed_foot_entity(&mut h);
+    let before: Vec<Vec3> = (0..4).map(|i| bone_pos(&h, e, i)).collect();
+    place_on_flat_ground(&mut h, e, 0.0);
+    assert_eq!(
+        h.world.get::<&IkTargets>(e).unwrap().targets["arm"].goal,
+        super::runner::IkGoal::Offset(Vec3::ZERO)
+    );
+    h.tick();
+    for (i, b) in before.iter().enumerate() {
+        let after = bone_pos(&h, e, i);
+        assert!((after - *b).length() < 1e-4, "bone {i} moved: {b} -> {after}");
+    }
+}
+
+/// F2: a locked foot whose held point lies beyond 98 % of the leg is not
+/// used — the offset target stands in this frame, the chain asks to be
+/// released, and the next serial pass unlocks it into a release blend.
+#[test]
+fn a_held_point_out_of_reach_falls_back_and_requests_release() {
+    use crate::engine::animation::foot_placement::place_feet;
+
+    let mut h = ik_harness(&foot_props());
+    let e = armed_foot_entity(&mut h);
+    place_on_flat_ground(&mut h, e, 0.0); // zero offset entry
+    {
+        let mut rt = h.world.get::<&mut AnimGraphRuntime>(e).unwrap();
+        let foot = rt.ik[0].foot.as_mut().unwrap();
+        foot.locked = true;
+        // 5 m from the hip; the leg is 2 long. World Z-up (0, 0, 5) is
+        // model (0, 5, 0) under the identity entity.
+        foot.held = Some(HeldContact {
+            point: Vec3::new(0.0, 0.0, 5.0),
+            contact_z: 0.0,
+        });
+    }
+    h.tick();
+    let tip = bone_pos(&h, e, 2);
+    assert!(
+        (tip - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-3,
+        "the zero offset stood in, no straightened reach toward (0,5,0): {tip}"
+    );
+    {
+        let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+        let foot = rt.ik[0].foot.as_ref().unwrap();
+        assert!(foot.release_requested, "the runner asked for a release");
+        assert!(foot.locked, "the serial side owns the unlock");
+    }
+    {
+        let mut q = h
+            .world
+            .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
+            .unwrap();
+        let (rt, targets) = q.get().unwrap();
+        place_feet(rt, targets, Mat4::IDENTITY, 0.01, true, &mut |o: Vec3| {
+            Some((Vec3::new(o.x, o.y, 0.0), Vec3::Z))
+        });
+        let foot = rt.ik[0].foot.as_ref().unwrap();
+        assert!(!foot.locked && foot.held.is_none(), "released");
+        assert!(foot.release.is_some(), "blending off the held point");
+        assert!(rt.throttle.force_eval_external);
+    }
+
+    // A held point within reach is used as-is: world (0, 0, 1.5) → model
+    // (0, 1.5, 0), 1.5 < 0.98 × 2.
+    {
+        let mut rt = h.world.get::<&mut AnimGraphRuntime>(e).unwrap();
+        let foot = rt.ik[0].foot.as_mut().unwrap();
+        foot.release = None;
+        foot.locked = true;
+        foot.held = Some(HeldContact {
+            point: Vec3::new(0.0, 0.0, 1.5),
+            contact_z: 0.0,
+        });
+    }
+    h.tick();
+    let tip = bone_pos(&h, e, 2);
+    assert!(
+        (tip - Vec3::new(0.0, 1.5, 0.0)).length() < 1e-3,
+        "held point in reach is planted: {tip}"
+    );
+    assert!(!h.world.get::<&AnimGraphRuntime>(e).unwrap().ik[0]
+        .foot
+        .as_ref()
+        .unwrap()
+        .release_requested);
 }
 
 /// The P6 forced-eval source, pinned per plan risk §7.3: a foot lock/unlock

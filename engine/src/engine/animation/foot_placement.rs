@@ -1,6 +1,7 @@
-//! Foot placement (Task 41.5 P6, I-D4): rays the ground under each foot
-//! chain, writes the chain's `IkTargets` entry, locks planted feet on anim
-//! event edges, and drives the cosmetic pelvis drop.
+//! Foot placement (Task 41.5 P6, I-D4; Task 41.6 P6): rays the ground under
+//! each foot chain, writes the chain's `IkTargets` entry as a terrain
+//! *offset* of the animated foot, locks planted feet on anim event edges,
+//! and drives the cosmetic pelvis drop.
 //!
 //! Serial by design, scheduled immediately **before** `AnimGraphSystem`: it
 //! reads `Resources` (physics world, transform cache), reads last tick's
@@ -18,7 +19,7 @@
 
 use crate::engine::animation::graph::machine::AnimEventFire;
 use crate::engine::animation::graph::runner::{
-    AnimGraphRuntime, HeldContact, IkTarget, IkTargets,
+    AnimGraphRuntime, HeldContact, IkTarget, IkTargets, RELEASE_SECS,
 };
 use crate::engine::ecs::components::Transform;
 use crate::engine::ecs::hierarchy::{Parent, TransformCache};
@@ -35,10 +36,6 @@ const RAY_START_ABOVE: f32 = 0.5;
 const STEP_HEIGHT: f32 = 0.6;
 /// Total ray length.
 const RAY_LENGTH: f32 = RAY_START_ABOVE + STEP_HEIGHT;
-/// Knee pole point: this far from the animated knee, on the side the clip
-/// already bends it (away from the hip→foot line), so the solve keeps the
-/// clip's bend direction whatever way the mesh happens to face.
-const POLE_FORWARD: f32 = 1.0;
 /// The pelvis never drops further than this.
 const MAX_PELVIS_DROP: f32 = 0.5;
 /// Exponential approach rate (1/s) for the pelvis drop.
@@ -57,6 +54,34 @@ fn fired(events: &[AnimEventFire], chain: &str, suffix: &str) -> bool {
         .any(|e| e.name.strip_prefix(chain).is_some_and(|rest| rest == suffix))
 }
 
+/// This frame's ground reading under one foot (Task 41.6 P6, F1).
+#[derive(Clone, Copy)]
+struct Contact {
+    /// World Z-up displacement of the animated foot: the terrain height
+    /// difference from the entity's ground plane (clamped to what the
+    /// pelvis drop / step reach can absorb) plus the ankle offset tilted
+    /// onto the surface normal — zero on flat ground at the entity's level.
+    delta: glam::Vec3,
+    /// The animated foot shifted by `delta`: the clip's plant pose on this
+    /// terrain, what a `_down` edge latches.
+    plant: glam::Vec3,
+    /// Raw contact height, world Z.
+    contact_z: f32,
+}
+
+/// Terrain delta for a foot: `contact_z − entity_z` clamped to
+/// `[−MAX_PELVIS_DROP, +STEP_HEIGHT]` along Z, plus the ankle offset
+/// re-aimed from straight up to the surface normal.
+pub fn terrain_delta(
+    contact_z: f32,
+    entity_z: f32,
+    normal: glam::Vec3,
+    ankle_offset: f32,
+) -> glam::Vec3 {
+    let dz = (contact_z - entity_z).clamp(-MAX_PELVIS_DROP, STEP_HEIGHT);
+    glam::Vec3::Z * dz + (normal - glam::Vec3::Z) * ankle_offset
+}
+
 /// One entity's foot-placement step — the injectable core (tests script
 /// `ray`, the system wires it to [`PhysicsWorld::raycast_filtered`]).
 ///
@@ -67,21 +92,15 @@ fn fired(events: &[AnimEventFire], chain: &str, suffix: &str) -> bool {
 /// entirely: no target ⇒ no writes), locks release, the pelvis returns, and
 /// one forced evaluation snaps the pose back to animated instead of holding
 /// a half-corrected pose forever.
-/// Pole point for a two-bone leg: `POLE_FORWARD` from the animated knee,
-/// away from the hip→foot line — the side the clip bends the knee toward.
-/// A straight leg (knee on the line) falls back to straight up.
-pub fn knee_pole(hip: glam::Vec3, knee: glam::Vec3, foot: glam::Vec3) -> glam::Vec3 {
-    let axis = foot - hip;
-    let len2 = axis.length_squared();
-    let closest = if len2 > 1e-8 {
-        hip + axis * ((knee - hip).dot(axis) / len2)
-    } else {
-        hip
-    };
-    let dir = (knee - closest).try_normalize().unwrap_or(glam::Vec3::Z);
-    knee + dir * POLE_FORWARD
-}
-
+///
+/// Per foot (Task 41.6 P6): the ray starts above the last evaluation's
+/// animated foot; the chain's `IkTargets` entry is the resulting
+/// [`terrain_delta`] as an `Offset` goal (the pole comes from the chain's
+/// own knee in the runner), so an unlocked foot keeps the clip's swing and
+/// only conforms to the terrain. Lock state lives on the chain's
+/// `FootState`: a `_down` edge latches the shifted plant pose, `_up` (or a
+/// runner-side reach failure) releases it into a [`RELEASE_SECS`] blend
+/// toward the offset target.
 pub fn place_feet(
     rt: &mut AnimGraphRuntime,
     targets: &mut IkTargets,
@@ -94,9 +113,10 @@ pub fn place_feet(
         let mut changed = false;
         for chain in &mut rt.ik {
             let Some(foot) = &mut chain.foot else { continue };
-            changed |= targets.targets.remove(&chain.name).is_some() || foot.locked;
-            foot.locked = false;
-            foot.held = None;
+            changed |= targets.targets.remove(&chain.name).is_some()
+                || foot.locked
+                || foot.release.is_some();
+            foot.clear();
         }
         if let Some(p) = &mut rt.pelvis {
             changed |= p.offset < -PELVIS_EPSILON;
@@ -120,61 +140,75 @@ pub fn place_feet(
         let Some(foot) = &mut chain.foot else { continue };
         // The animated (pre-IK) foot from the last evaluation — absent only
         // before the first one.
-        let to_world = |model: glam::Vec3| {
-            convert_position_yup_to_zup((entity_render * model.extend(1.0)).truncate())
-        };
         let fresh = chain.animated_tip.and_then(|tip| {
-            let foot_world = to_world(tip);
+            let foot_world =
+                convert_position_yup_to_zup((entity_render * tip.extend(1.0)).truncate());
             let (point, normal) = ray(foot_world + glam::Vec3::Z * RAY_START_ABOVE)?;
-            let pole = match (chain.animated_root, chain.animated_mid) {
-                (Some(root), Some(mid)) => {
-                    knee_pole(to_world(root), to_world(mid), foot_world)
-                }
-                // Before the first evaluation there is no knee to read:
-                // a pole straight above the foot keeps the solve stable.
-                _ => foot_world + glam::Vec3::Z * POLE_FORWARD,
-            };
-            Some(HeldContact {
-                target: IkTarget {
-                    effector: point + normal * foot.ankle_offset,
-                    pole,
-                },
+            let delta = terrain_delta(point.z, entity_z, normal, foot.ankle_offset);
+            Some(Contact {
+                delta,
+                plant: foot_world + delta,
                 contact_z: point.z,
             })
         });
 
+        // The runner found the held point out of reach last evaluation:
+        // let go now, blending off it.
+        if std::mem::take(&mut foot.release_requested) && foot.locked {
+            foot.unlock();
+            rt.throttle.force_eval_external = true;
+        }
         // Lock edges (`<chain>_down` / `<chain>_up`, last tick's fires).
         // Either edge forces one full evaluation — the P4 hook, serial-side.
         // A down edge with no ground under the foot does not latch.
         if fired(&rt.events, &chain.name, FOOT_EVENT_DOWN_SUFFIX) {
             if let Some(c) = fresh {
                 foot.locked = true;
-                foot.held = Some(c);
+                foot.held = Some(HeldContact {
+                    point: c.plant,
+                    contact_z: c.contact_z,
+                });
+                foot.release = None;
             }
             rt.throttle.force_eval_external = true;
         }
         if fired(&rt.events, &chain.name, FOOT_EVENT_UP_SUFFIX) {
-            foot.locked = false;
-            foot.held = None;
+            foot.unlock();
             rt.throttle.force_eval_external = true;
         }
+        if let Some(rel) = &mut foot.release {
+            rel.blend += dt / RELEASE_SECS;
+            if rel.blend >= 1.0 {
+                foot.release = None;
+            }
+        }
 
-        match if foot.locked { foot.held.or(fresh) } else { fresh } {
+        match fresh {
             Some(c) => {
                 // Upsert without allocating at steady state.
+                let target = IkTarget::offset(c.delta);
                 match targets.targets.get_mut(&chain.name) {
-                    Some(t) => *t = c.target,
+                    Some(t) => *t = target,
                     None => {
-                        targets.targets.insert(chain.name.clone(), c.target);
+                        targets.targets.insert(chain.name.clone(), target);
                     }
                 }
-                lowest = lowest.min(c.contact_z - entity_z);
             }
             // No ground under the foot (mid-air, past a ledge): no target,
-            // so the chain skips its solve — the foot stays animated.
+            // so the chain skips its solve — the foot stays animated (a
+            // locked foot still holds its point).
             None => {
                 targets.targets.remove(&chain.name);
             }
+        }
+        let contact_z = if foot.locked {
+            foot.held.map(|h| h.contact_z)
+        } else {
+            None
+        }
+        .or(fresh.map(|c| c.contact_z));
+        if let Some(z) = contact_z {
+            lowest = lowest.min(z - entity_z);
         }
     }
 
@@ -328,7 +362,7 @@ mod tests {
     };
     use crate::engine::animation::graph::plan::{AnimGraphPlan, PlanIkSolver};
     use crate::engine::animation::graph::runner::{
-        ArmedIkChain, FootState, PelvisState, ThrottleState,
+        ArmedIkChain, FootState, IkGoal, PelvisState, ThrottleState,
     };
     use glam::Vec3;
     use std::sync::Arc;
@@ -354,16 +388,11 @@ mod tests {
                 solver: PlanIkSolver::TwoBone,
                 weight_param: "ik".into(),
                 resolved: None,
-                foot: Some(FootState {
-                    ankle_offset: 0.1,
-                    locked: false,
-                    held: None,
-                }),
+                foot: Some(FootState::new(0.1)),
                 animated_tip: Some(Vec3::new(0.0, 0.1, 0.0)),
-                // Hip straight above the foot, knee pushed toward model +Z
-                // (world +X under the identity entity): the bend side.
                 animated_root: Some(Vec3::new(0.0, 0.9, 0.0)),
                 animated_mid: Some(Vec3::new(0.0, 0.5, 0.2)),
+                pole_dir: None,
             }],
             pelvis: Some(PelvisState {
                 bone: 0,
@@ -397,31 +426,32 @@ mod tests {
         });
     }
 
+    fn foot(rt: &AnimGraphRuntime) -> &FootState {
+        rt.ik[0].foot.as_ref().unwrap()
+    }
+
+    fn delta(targets: &IkTargets) -> Vec3 {
+        match targets.targets.get("foot_l").expect("target written") {
+            IkTarget {
+                goal: IkGoal::Offset(d),
+                pole: None,
+            } => *d,
+            other => panic!("feet write pole-less offsets: {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_contact_writes_the_target_with_ankle_offset_and_drops_the_pelvis() {
+    fn a_contact_writes_the_terrain_delta_and_drops_the_pelvis() {
         let mut rt = foot_rt();
         let mut targets = IkTargets::default();
         // dt 1.0 saturates the smoothing, so the pelvis lands on its goal.
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.3));
 
-        let t = targets.targets.get("foot_l").expect("target written");
+        let d = delta(&targets);
         assert!(
-            (t.effector - Vec3::new(0.0, 0.0, -0.2)).length() < 1e-5,
-            "contact −0.3 lifted 0.1 along the normal: {}",
-            t.effector
+            (d - Vec3::new(0.0, 0.0, -0.3)).length() < 1e-5,
+            "ground 0.3 below the entity plane, flat: the foot shifts down 0.3: {d}"
         );
-        // Pole: 1 m from the animated knee, on the side it bends toward.
-        // Model (0, 0.5, 0.2) Y-up is world (x, y, z) via the Y-up→Z-up
-        // conversion; the hip and foot share x/y so the bend axis is the
-        // knee's own horizontal offset from the hip→foot line.
-        let knee = convert_position_yup_to_zup(Vec3::new(0.0, 0.5, 0.2));
-        let hip = convert_position_yup_to_zup(Vec3::new(0.0, 0.9, 0.0));
-        let foot = convert_position_yup_to_zup(Vec3::new(0.0, 0.1, 0.0));
-        let expect = knee_pole(hip, knee, foot);
-        assert!((t.pole - expect).length() < 1e-5, "knee-side pole: {}", t.pole);
-        assert!(((t.pole - knee).length() - 1.0).abs() < 1e-5, "1 m from the knee");
-        let side = knee - (hip + foot) * 0.5;
-        assert!((t.pole - knee).dot(side) > 0.0, "on the bend side of the leg");
         let p = rt.pelvis.unwrap();
         assert!(
             (p.offset - (-0.3)).abs() < 1e-5,
@@ -430,6 +460,29 @@ mod tests {
         );
         // World Z-up drop → identity-entity model Y-up: (0, −0.3, 0).
         assert!((p.model_offset - Vec3::new(0.0, -0.3, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn flat_ground_at_the_entity_plane_is_a_zero_delta() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(0.0));
+        assert_eq!(delta(&targets), Vec3::ZERO, "nothing to conform to");
+        assert_eq!(rt.pelvis.unwrap().offset, 0.0);
+    }
+
+    #[test]
+    fn the_delta_clamps_and_tilts_the_ankle_offset_onto_the_normal() {
+        // Deep chasm: the drop is capped at the pelvis reach.
+        let d = terrain_delta(-5.0, 0.0, Vec3::Z, 0.1);
+        assert!((d - Vec3::new(0.0, 0.0, -MAX_PELVIS_DROP)).length() < 1e-6, "{d}");
+        // Tall step: capped at the step reach.
+        let d = terrain_delta(2.0, 0.0, Vec3::Z, 0.1);
+        assert!((d - Vec3::new(0.0, 0.0, STEP_HEIGHT)).length() < 1e-6, "{d}");
+        // A slope tilts the 0.1 ankle lift from Z onto the normal.
+        let n = Vec3::new(-0.6, 0.0, 0.8);
+        let d = terrain_delta(0.0, 0.0, n, 0.1);
+        assert!((d - (n - Vec3::Z) * 0.1).length() < 1e-6, "{d}");
     }
 
     #[test]
@@ -456,32 +509,73 @@ mod tests {
     }
 
     #[test]
-    fn a_down_event_latches_the_contact_until_the_up_event() {
+    fn a_down_event_latches_the_plant_pose_until_the_up_event_then_blends_out() {
         let mut rt = foot_rt();
         let mut targets = IkTargets::default();
 
         fire(&mut rt, "foot_l_down");
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
-        assert!(rt.ik[0].foot.as_ref().unwrap().locked);
+        assert!(foot(&rt).locked);
         assert!(
             std::mem::take(&mut rt.throttle.force_eval_external),
             "the down edge forces one evaluation"
         );
-        let held = targets.targets["foot_l"].effector;
-        assert!((held.z - 0.0).abs() < 1e-5, "contact −0.1 + offset 0.1");
+        let held = foot(&rt).held.expect("latched");
+        assert!(
+            (held.point - Vec3::new(0.0, 0.0, 0.0)).length() < 1e-5,
+            "animated foot (0,0,0.1) shifted by the −0.1 delta: {}",
+            held.point
+        );
+        assert!((held.contact_z - (-0.1)).abs() < 1e-6);
 
-        // The ground moves; the locked foot does not.
+        // The ground moves; the lock does not, the offset entry follows
+        // (it is the runner's fallback), the pelvis measures the held contact.
         rt.events.clear();
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.4));
-        assert_eq!(targets.targets["foot_l"].effector, held, "held while locked");
+        assert_eq!(foot(&rt).held.unwrap().point, held.point, "held while locked");
+        assert!((delta(&targets).z - (-0.4)).abs() < 1e-5, "fresh offset still written");
+        assert!(
+            (rt.pelvis.unwrap().offset - (-0.1)).abs() < 1e-5,
+            "pelvis on the held contact"
+        );
         assert!(!rt.throttle.force_eval_external, "no edge, no force");
 
-        // The up edge releases: the target follows the fresh contact again.
+        // The up edge releases into a blend from the held point.
         fire(&mut rt, "foot_l_up");
-        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.4));
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked);
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.4));
+        assert!(!foot(&rt).locked && foot(&rt).held.is_none());
         assert!(rt.throttle.force_eval_external, "the up edge forces too");
-        assert!((targets.targets["foot_l"].effector.z - (-0.3)).abs() < 1e-5);
+        let rel = foot(&rt).release.expect("release blend started");
+        assert_eq!(rel.from, held.point);
+        assert!((rel.blend - 0.5).abs() < 1e-5, "0.05 s of a 0.1 s blend: {}", rel.blend);
+        assert!(
+            (rt.pelvis.unwrap().offset - (-0.25)).abs() < 1e-5,
+            "pelvis easing (half-way at dt 0.05) toward the fresh contact: {}",
+            rt.pelvis.unwrap().offset
+        );
+
+        rt.events.clear();
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.4));
+        assert!(foot(&rt).release.is_none(), "blend complete");
+    }
+
+    #[test]
+    fn a_runner_reach_failure_releases_the_lock_next_frame() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        fire(&mut rt, "foot_l_down");
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
+        rt.events.clear();
+        rt.throttle.force_eval_external = false;
+
+        // What `apply_ik` sets when the held point is past 98 % of the leg.
+        rt.ik[0].foot.as_mut().unwrap().release_requested = true;
+        place(&mut rt, &mut targets, 0.01, true, &mut ground(-0.1));
+        let f = foot(&rt);
+        assert!(!f.locked && f.held.is_none(), "unlocked");
+        assert!(!f.release_requested, "consumed");
+        assert!(f.release.is_some(), "blending off the held point");
+        assert!(rt.throttle.force_eval_external, "one forced evaluation");
     }
 
     #[test]
@@ -497,7 +591,7 @@ mod tests {
             targets.targets.is_empty(),
             "mid-air: no target, the chain skips its solve"
         );
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked, "air never locks");
+        assert!(!foot(&rt).locked, "air never locks");
     }
 
     #[test]
@@ -510,11 +604,12 @@ mod tests {
         rt.throttle.force_eval_external = false;
 
         // Bucket left: stale targets are removed (the documented policy —
-        // the solve skips, the pose returns to animated), locks release,
-        // the pelvis resets, and one corrective eval is forced.
+        // the solve skips, the pose returns to animated), locks release
+        // without a blend, the pelvis resets, and one corrective eval is
+        // forced.
         place(&mut rt, &mut targets, 1.0, false, &mut ground(-0.3));
         assert!(targets.targets.is_empty());
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked);
+        assert!(!foot(&rt).locked && foot(&rt).release.is_none());
         assert_eq!(rt.pelvis.unwrap().offset, 0.0);
         assert!(std::mem::take(&mut rt.throttle.force_eval_external));
 

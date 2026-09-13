@@ -20,6 +20,7 @@ use rapier3d::prelude::{
     IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
     QueryFilter, QueryPipeline, Ray, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SharedShape,
 };
+use std::collections::HashMap;
 
 /// A [`PhysicsWorld::raycast_filtered`] hit. Everything is ECS Z-up game
 /// space (the adapter converts from Rapier's Y-up).
@@ -66,6 +67,11 @@ pub struct PhysicsWorld {
     // Fixed timestep accumulator
     accumulator: f32,
     fixed_dt: f32,
+    /// Every dynamic body's pose before its latest fixed step (Task 41.6
+    /// P6, F3): the presentation pass after the accumulator loop lerps from
+    /// here to the current pose by the accumulator fraction, so a 60 Hz
+    /// simulation renders smoothly at any frame rate.
+    pub(super) prev_poses: HashMap<RigidBodyHandle, Isometry3<f32>>,
 }
 
 impl PhysicsWorld {
@@ -94,6 +100,7 @@ impl PhysicsWorld {
             gravity: gravity_yup,
             accumulator: 0.0,
             fixed_dt: 1.0 / 60.0,
+            prev_poses: HashMap::new(),
         }
     }
 
@@ -102,9 +109,18 @@ impl PhysicsWorld {
         self.gravity = crate::engine::adapters::physics_adapter::gravity_to_physics(&gravity);
     }
 
-    /// Set fixed timestep for physics simulation (default: 1/60)
+    /// Set fixed timestep for physics simulation (default: 1/60) — both the
+    /// accumulator interval and the integrator's `dt`.
     pub fn set_timestep(&mut self, dt: f32) {
         self.fixed_dt = dt;
+        self.integration_parameters.dt = dt;
+    }
+
+    /// The fixed simulation timestep, seconds. Per-frame control code that
+    /// sets velocities must close gaps over *this* interval, not the render
+    /// frame (Task 41.6 P6, F4).
+    pub fn fixed_dt(&self) -> f32 {
+        self.fixed_dt
     }
 
     /// Reset the fixed-timestep accumulator to zero.
@@ -127,6 +143,7 @@ impl PhysicsWorld {
         self.accumulator += delta_time;
 
         while self.accumulator >= self.fixed_dt {
+            self.snapshot_poses();
             // Sync ECS -> Physics (kinematic bodies)
             {
                 crate::profile_scope!("physics_sync_to_rapier");
@@ -160,6 +177,62 @@ impl PhysicsWorld {
             }
 
             self.accumulator -= self.fixed_dt;
+        }
+
+        // Presentation (F3): every frame, stepped or not, dynamic bodies
+        // show the pose interpolated between their last two fixed steps.
+        {
+            crate::profile_scope!("physics_present");
+            self.present(ecs_world, self.accumulator / self.fixed_dt);
+        }
+    }
+
+    /// Remember every dynamic body's pose before a fixed step.
+    fn snapshot_poses(&mut self) {
+        for (handle, rb) in self.rigid_body_set.iter() {
+            if rb.is_dynamic() {
+                self.prev_poses.insert(handle, *rb.position());
+            }
+        }
+    }
+
+    /// Write `lerp(prev, curr, alpha)` into every dynamic body's
+    /// `Transform` (Z-up) and mark it dirty. Rotation is interpolated only
+    /// for bodies with an unlocked rotation axis; a fully rotation-locked
+    /// body (the character capsule) copies Rapier's rotation as-is — a
+    /// controller owns that yaw and writes it every frame.
+    pub fn present(&self, ecs_world: &mut World, alpha: f32) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let mut dirty_entities: Vec<Entity> = Vec::new();
+        for (entity, (transform, rigidbody)) in ecs_world
+            .query::<(&mut Transform, &EcsRigidBody)>()
+            .iter()
+        {
+            if rigidbody.body_type != EcsRigidBodyType::Dynamic {
+                continue;
+            }
+            let Some(rb) = rigidbody.handle.and_then(|h| self.rigid_body_set.get(h)) else {
+                continue;
+            };
+            let curr = rb.position();
+            let prev = rigidbody
+                .handle
+                .and_then(|h| self.prev_poses.get(&h))
+                .unwrap_or(curr);
+            let translation = prev.translation.vector.lerp(&curr.translation.vector, alpha);
+            transform.position = position_from_physics(&translation);
+            let rotation = if rb.is_rotation_locked().iter().all(|&locked| locked) {
+                curr.rotation
+            } else {
+                prev.rotation
+                    .try_slerp(&curr.rotation, alpha, 1e-6)
+                    .unwrap_or(curr.rotation)
+            };
+            transform.rotation = rotation_from_physics(&rotation);
+            dirty_entities.push(entity);
+        }
+        for entity in dirty_entities {
+            crate::engine::ecs::hierarchy::mark_transform_dirty(ecs_world, entity);
         }
     }
 
@@ -211,6 +284,9 @@ impl PhysicsWorld {
 
         let rb_handle = self.rigid_body_set.insert(rb);
         rigidbody.handle = Some(rb_handle);
+        // No history yet: the presentation pass starts on the spawn pose.
+        self.prev_poses
+            .insert(rb_handle, *self.rigid_body_set[rb_handle].position());
 
         // Build collider shape using adapter for dimension conversion
         let shape = match &collider.shape {
@@ -249,6 +325,15 @@ impl PhysicsWorld {
         if let Some(rb) = self.rigid_body_set.get_mut(handle) {
             rb.add_force(force, true);
         }
+    }
+
+    /// A body's simulated position in Z-up game space — the authoritative
+    /// pose, as opposed to the interpolated one on its `Transform`; `None`
+    /// for a stale handle. Controllers probe from here (Task 41.6 P6, F3).
+    pub fn body_position(&self, handle: RigidBodyHandle) -> Option<glm::Vec3> {
+        self.rigid_body_set
+            .get(handle)
+            .map(|rb| position_from_physics(rb.translation()))
     }
 
     /// Linear velocity of a body in Z-up game space; `None` for a stale handle.
@@ -440,7 +525,7 @@ impl Default for PhysicsWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::ecs::components::Transform;
+    use crate::engine::ecs::components::{Transform, TransformDirty};
     use hecs::World;
     use nalgebra_glm as glm;
 
@@ -647,6 +732,94 @@ mod tests {
             "static body should not move: z = {}",
             transform.position.z
         );
+    }
+
+    /// F3: the presentation pose is `lerp(prev, curr, alpha)` — prev being
+    /// the pose before the body's latest fixed step.
+    #[test]
+    fn presentation_interpolates_between_the_last_two_fixed_steps() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let mut rb = EcsRigidBody::dynamic();
+        rb.gravity_scale = 0.0;
+        rb.linear_damping = 0.0;
+        let entity = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 1.0),
+            rb,
+            EcsCollider::ball(0.1),
+        );
+        let handle = world.get::<&EcsRigidBody>(entity).unwrap().handle.unwrap();
+        physics.set_linear_velocity(handle, glm::vec3(6.0, 0.0, 0.0));
+        // Exactly one fixed step: prev = spawn pose, curr = 0.1 m along +X.
+        physics.step(1.0 / 60.0, &mut world);
+        let curr = physics.body_position(handle).unwrap();
+        assert!((curr.x - 0.1).abs() < 1e-4, "one step at 6 m/s: {curr:?}");
+        let pos = |world: &World| world.get::<&Transform>(entity).unwrap().position;
+
+        physics.present(&mut world, 0.0);
+        assert!((pos(&world).x - 0.0).abs() < 1e-4, "alpha 0 = previous pose: {:?}", pos(&world));
+        physics.present(&mut world, 0.5);
+        assert!((pos(&world).x - 0.05).abs() < 1e-4, "alpha 0.5 = half-way: {:?}", pos(&world));
+        physics.present(&mut world, 1.0);
+        assert!((pos(&world).x - 0.1).abs() < 1e-4, "alpha 1 = current pose: {:?}", pos(&world));
+        assert!(
+            world.get::<&TransformDirty>(entity).is_ok(),
+            "presentation marks the transform dirty"
+        );
+
+        // A frame that steps twice and leaves half a step in the accumulator
+        // presents half-way between step 2 and step 3.
+        physics.step(2.5 / 60.0, &mut world);
+        let curr = physics.body_position(handle).unwrap();
+        assert!((curr.x - 0.3).abs() < 1e-4, "three steps: {curr:?}");
+        assert!((pos(&world).x - 0.25).abs() < 1e-4, "presented at alpha 0.5: {:?}", pos(&world));
+    }
+
+    /// F3: a fully rotation-locked body shows Rapier's rotation as-is (the
+    /// controller writes its yaw every frame); an unlocked one is slerped.
+    #[test]
+    fn rotation_locked_bodies_keep_their_rotation_unlocked_ones_interpolate() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let mut locked = EcsRigidBody::dynamic();
+        locked.lock_rotation = [true; 3];
+        let locked_e = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 1.0),
+            locked,
+            EcsCollider::capsule(0.5, 0.4),
+        );
+        let free_e = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(3.0, 0.0, 1.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::ball(0.4),
+        );
+        let yaw = glm::quat_angle_axis(0.8, &glm::vec3(0.0, 0.0, 1.0));
+        for e in [locked_e, free_e] {
+            let handle = world.get::<&EcsRigidBody>(e).unwrap().handle.unwrap();
+            physics.set_rotation(handle, &yaw); // prev = identity, curr = yaw
+        }
+        physics.present(&mut world, 0.5);
+        let yaw_of = |e: Entity| {
+            let q = world.get::<&Transform>(e).unwrap().rotation;
+            let fwd = glm::quat_rotate_vec3(&q, &glm::vec3(1.0, 0.0, 0.0));
+            fwd.y.atan2(fwd.x)
+        };
+        assert!((yaw_of(locked_e) - 0.8).abs() < 1e-4, "locked: {}", yaw_of(locked_e));
+        assert!((yaw_of(free_e) - 0.4).abs() < 1e-4, "free, half-way: {}", yaw_of(free_e));
+    }
+
+    #[test]
+    fn set_timestep_drives_the_integrator_too() {
+        let mut physics = PhysicsWorld::new();
+        physics.set_timestep(1.0 / 120.0);
+        assert!((physics.fixed_dt() - 1.0 / 120.0).abs() < 1e-9);
+        assert!((physics.integration_parameters.dt - 1.0 / 120.0).abs() < 1e-9);
     }
 
     #[test]

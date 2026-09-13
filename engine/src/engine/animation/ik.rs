@@ -25,6 +25,23 @@ fn reject(v: Vec3, axis: Vec3) -> Option<Vec3> {
     (r.length_squared() > 1e-8).then(|| r.normalize())
 }
 
+/// Bend direction of a two-bone chain: the unit vector from the root→tip
+/// line to the mid joint — the side the animation already bends the knee
+/// toward, whatever way the mesh faces. `None` when the mid lies within
+/// `min_offset` of the line (a straight chain has no side of its own; the
+/// caller keeps its previous direction — Task 41.6 P6).
+pub fn bend_direction(root: Vec3, mid: Vec3, tip: Vec3, min_offset: f32) -> Option<Vec3> {
+    let axis = tip - root;
+    let len2 = axis.length_squared();
+    let closest = if len2 > EPS {
+        root + axis * ((mid - root).dot(axis) / len2)
+    } else {
+        root
+    };
+    let off = mid - closest;
+    (off.length() > min_offset).then(|| off.normalize())
+}
+
 /// Two-bone analytic IK with a **mandatory pole vector**.
 ///
 /// `root`, `mid`, `tip` are the chain's current model-space matrices
@@ -286,6 +303,18 @@ mod tests {
             solve_two_bone(root, mid, tip, Vec3::new(1.0, 1.0, 0.0), Vec3::X);
         assert!((root2.to_scale_rotation_translation().0 - Vec3::splat(2.0)).length() < 1e-4);
         assert!((mid2.to_scale_rotation_translation().0 - Vec3::ONE).length() < 1e-4);
+    }
+
+    #[test]
+    fn bend_direction_points_from_the_line_to_the_knee_and_is_none_when_straight() {
+        let (hip, foot) = (Vec3::new(0.0, 0.9, 0.0), Vec3::new(0.0, 0.1, 0.0));
+        let d = bend_direction(hip, Vec3::new(0.0, 0.5, 0.2), foot, 0.01).unwrap();
+        assert!((d - Vec3::Z).length() < 1e-5, "knee pushed toward +Z: {d}");
+        // Within 1 cm of the line: no direction of its own.
+        assert!(bend_direction(hip, Vec3::new(0.0, 0.5, 0.005), foot, 0.01).is_none());
+        // A collapsed chain (root on tip) measures against the root.
+        let d = bend_direction(hip, Vec3::new(0.3, 0.9, 0.0), hip, 0.01).unwrap();
+        assert!((d - Vec3::X).length() < 1e-5, "{d}");
     }
 
     #[test]
