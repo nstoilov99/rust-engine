@@ -362,6 +362,23 @@ impl PhysicsWorld {
         }
     }
 
+    /// Set the friction coefficient of every collider attached to a body
+    /// (Task 41.6 P7). The character controller runs frictionless while
+    /// moving and grippy while standing, so it neither drags on risers nor
+    /// slides off tread edges and slopes at rest.
+    pub fn set_friction(&mut self, handle: RigidBodyHandle, friction: f32) {
+        let Some(rb) = self.rigid_body_set.get(handle) else {
+            return;
+        };
+        for &c in rb.colliders() {
+            if let Some(col) = self.collider_set.get_mut(c) {
+                if col.friction() != friction {
+                    col.set_friction(friction);
+                }
+            }
+        }
+    }
+
     /// Set a body's rotation (Z-up game space) and wake it. A gameplay
     /// system that writes `Transform.rotation` on a dynamic body must write
     /// it here too: every fixed step copies the body's rotation back into
@@ -633,6 +650,14 @@ mod tests {
         };
         assert_eq!(rule_of(slick), CoefficientCombineRule::Min);
         assert_eq!(rule_of(rough), CoefficientCombineRule::Average);
+
+        // Runtime friction changes reach every collider of the body.
+        let body = world.get::<&EcsRigidBody>(slick).unwrap().handle.unwrap();
+        let col = world.get::<&EcsCollider>(slick).unwrap().handle.unwrap();
+        physics.set_friction(body, 1.0);
+        assert_eq!(physics.collider_set[col].friction(), 1.0);
+        physics.set_friction(body, 0.0);
+        assert_eq!(physics.collider_set[col].friction(), 0.0);
     }
 
     #[test]

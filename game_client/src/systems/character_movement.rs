@@ -53,6 +53,10 @@ const GROUND_SNAP_DEADBAND: f32 = 0.02;
 /// Ground normals flatter than this (cos of the angle to +Z) count as
 /// walkable; steeper hits are walls and get no slope projection.
 const MIN_WALKABLE_NZ: f32 = 0.5;
+/// Capsule friction while standing still on the ground (the moving
+/// capsule runs at 0, and its collider's combine rule is `Min`, so this is
+/// capped by the surface it stands on).
+const STANDING_FRICTION: f32 = 1.0;
 
 pub struct CharacterMovementSystem;
 
@@ -195,6 +199,12 @@ impl System for CharacterMovementSystem {
 
             let new_vel = glm::vec3(xy.x, xy.y, vz);
             physics.set_linear_velocity(handle, new_vel);
+            // Frictionless while moving (no dragging on risers and edges),
+            // grippy while standing (no sliding off tread edges or slopes;
+            // a frictionless capsule resting on an edge always slides).
+            let has_input = cm.desired_dir[0] != 0.0 || cm.desired_dir[1] != 0.0;
+            let standing = grounded && !has_input && speed < MIN_STEP_SPEED;
+            physics.set_friction(handle, if standing { STANDING_FRICTION } else { 0.0 });
 
             if speed > MIN_TURN_SPEED {
                 let yaw = turn_toward(
