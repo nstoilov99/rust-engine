@@ -174,8 +174,19 @@ impl System for CharacterMovementSystem {
                             // than the resting distance, so the snap measures
                             // against the slope-corrected feet height.
                             let rest = feet_on_slope(feet, radius, &hit.normal);
-                            slope_vz(&xy, &follow, vel.z)
-                                + if snap { snap_vz(hit.distance, rest, fixed_dt) } else { 0.0 }
+                            let ride = slope_vz(&xy, &follow, vel.z);
+                            let pull = if snap { snap_vz(hit.distance, rest, fixed_dt) } else { 0.0 };
+                            if ride == 0.0 && pull == 0.0 {
+                                // Flat and in contact: nothing to correct, so
+                                // do not fight the solver — keep whatever
+                                // downward motion gravity and the contacts
+                                // produced (a capsule rolling off a tread
+                                // edge must be allowed to fall), never an
+                                // upward residual.
+                                vel.z.min(0.0)
+                            } else {
+                                ride + pull
+                            }
                         }
                     };
                 }

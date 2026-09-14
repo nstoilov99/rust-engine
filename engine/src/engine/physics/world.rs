@@ -301,8 +301,19 @@ impl PhysicsWorld {
             } => SharedShape::capsule_y(*half_height, *radius),
         };
 
+        // Rapier combines the two colliders' frictions with `Average` by
+        // default, so a "frictionless" (0.0) collider against a 0.8 floor
+        // still gets 0.4 — enough to pin a character capsule on a stair
+        // edge (Task 41.6 P7). A zero friction is a stated intent: make it
+        // win the combination.
+        let friction_rule = if collider.friction <= 0.0 {
+            rapier3d::prelude::CoefficientCombineRule::Min
+        } else {
+            rapier3d::prelude::CoefficientCombineRule::Average
+        };
         let col = ColliderBuilder::new(shape)
             .friction(collider.friction)
+            .friction_combine_rule(friction_rule)
             .restitution(collider.restitution)
             .sensor(collider.is_sensor)
             .build();
@@ -595,6 +606,33 @@ mod tests {
         let back = rotation_from_physics(rb.rotation());
         let fwd = glm::quat_rotate_vec3(&back, &glm::vec3(1.0, 0.0, 0.0));
         assert!((fwd.y.atan2(fwd.x) - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn zero_friction_colliders_win_the_friction_combination() {
+        use rapier3d::prelude::CoefficientCombineRule;
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let slick = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(0.0, 0.0, 1.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::capsule(0.5, 0.4).with_friction(0.0),
+        );
+        let rough = spawn_and_register(
+            &mut world,
+            &mut physics,
+            glm::vec3(3.0, 0.0, 1.0),
+            EcsRigidBody::dynamic(),
+            EcsCollider::cuboid(0.5, 0.5, 0.5).with_friction(0.8),
+        );
+        let rule_of = |e: Entity| {
+            let h = world.get::<&EcsCollider>(e).unwrap().handle.unwrap();
+            physics.collider_set[h].friction_combine_rule()
+        };
+        assert_eq!(rule_of(slick), CoefficientCombineRule::Min);
+        assert_eq!(rule_of(rough), CoefficientCombineRule::Average);
     }
 
     #[test]
