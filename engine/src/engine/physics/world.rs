@@ -380,6 +380,11 @@ impl PhysicsWorld {
                 if col.friction() != friction {
                     col.set_friction(friction);
                 }
+                // Controller-owned friction is a cap by intent: it must win
+                // the combination whatever the collider was authored with.
+                if col.friction_combine_rule() != rapier3d::prelude::CoefficientCombineRule::Min {
+                    col.set_friction_combine_rule(rapier3d::prelude::CoefficientCombineRule::Min);
+                }
             }
         }
     }

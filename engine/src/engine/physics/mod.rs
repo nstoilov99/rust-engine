@@ -141,6 +141,7 @@ pub fn deregister_entity(
         &mut physics_world.multibody_joint_set,
         true,
     );
+    physics_world.prev_poses.remove(&handle);
     if let Ok(mut rb) = world.get::<&mut RigidBody>(entity) {
         rb.handle = None;
     }

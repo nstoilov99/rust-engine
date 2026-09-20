@@ -115,7 +115,9 @@ impl System for CharacterMovementSystem {
             if let Some(target) = cm.step_lift_target {
                 let ground_below = ground.as_ref().map(|h| centre.z - h.distance);
                 let over_step = ground_below.is_some_and(|z| z >= target - STEP_CLEARANCE - 0.01);
-                if over_step || speed <= MIN_STEP_SPEED || cm.jump_hold > 0.0 {
+                // Walking off a ledge mid-lift must drop the target too, or
+                // the landing would fire the full lift at a stale height.
+                if over_step || !grounded || speed <= MIN_STEP_SPEED || cm.jump_hold > 0.0 {
                     cm.step_lift_target = None;
                 }
             }

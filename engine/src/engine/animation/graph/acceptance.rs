@@ -395,9 +395,6 @@ fn the_committed_demo_document_loads_and_compiles() {
     assert!(rule.triggers.is_empty());
 }
 
-/// Task 41.6 P4: the locomotion demo graph, read from disk. Its clips are
-/// placeholders until P0 lands, so this pins structure, not content: the
-/// machine copied from `character.animgraph`, the `foot_ik` Float and the
 /// The demo rig arms and poses against the real `Defeated.mesh` skeleton
 /// through the real system + disk loader — the headless twin of "press
 /// F5 and the character is not in a T-pose".
@@ -458,7 +455,10 @@ fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
     );
 }
 
-/// two foot chains sharing one pelvis (bone existence is an arm-time check).
+/// Task 41.6 P4: the locomotion demo graph, read from disk. This pins
+/// structure, not content: the machine copied from `character.animgraph`,
+/// the `foot_ik` Float and the two foot chains sharing one pelvis (bone
+/// existence is an arm-time check).
 #[test]
 fn the_locomotion_demo_document_loads_and_compiles() {
     let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
