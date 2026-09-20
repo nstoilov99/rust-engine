@@ -37,3 +37,6 @@ editor_graph_state.ron
 
 # Task 41.6: raw animation sources (Mixamo FBX) — imported into content/anims, never shipped
 /content/import/
+
+# Agent working area (tickets, specs, review transcripts, video frames) — never shipped
+/.scratch/
