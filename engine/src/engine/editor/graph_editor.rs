@@ -1513,6 +1513,12 @@ pub struct GraphEditorState {
     pub peek_panel: Option<([f32; 2], [f32; 2])>,
     /// The in-flight peek move/resize gesture, if any.
     pub peek_drag: Option<PeekDrag>,
+    /// Which canvas an animation document shows (Task 41.7 D6). Opens at the
+    /// pipeline root; session-only, like `nav_back`.
+    pub scope: CanvasScope,
+    /// The *other* scope's pan/zoom, remembered across switches. `None` =
+    /// never visited: the first switch frames that canvas's content.
+    pub scope_view: Option<CanvasView>,
 }
 
 /// A live drag on the rule peek panel (Task 41 polish): moving it by its
@@ -1560,7 +1566,10 @@ impl GraphDomain {
         }
     }
 
-    /// The machine canvas specifically — chips, transitions, flow wires.
+    /// The `.animgraph` document itself (not a rule projection): layout
+    /// profile, Details / Variables / Preview panels, the validation
+    /// registry. Machine *geometry* — border wires, badges, the straight
+    /// ghost — is [`GraphEditorState::is_machine_scope`] (Task 41.7 D6).
     pub fn is_animation(self) -> bool {
         self == GraphDomain::Animation
     }
@@ -1628,6 +1637,45 @@ impl GraphDomain {
             }
         }
     }
+}
+
+/// Which of an animation document's two canvases a tab shows (Task 41.7 D6).
+/// An `.animgraph` keeps both node families in one flat list; the scope is a
+/// *view* over it — ids stay shared, edits record unchanged, and only what
+/// the canvas draws, hits, selects and offers changes. Meaningless (always
+/// `Pipeline`) on any other domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasScope {
+    /// The root: State Machine → layers / slots / chains → Output Pose.
+    #[default]
+    Pipeline,
+    /// Inside the inline State Machine node: ENTRY, states, transitions.
+    Machine,
+}
+
+impl CanvasScope {
+    /// The scope a node type belongs to on an animation canvas. Everything
+    /// that is not a pipeline node — machine nodes, reserved types, strays —
+    /// is the machine's, so nothing is ever invisible on *both* canvases.
+    pub fn of_type(type_id: &str) -> Self {
+        if crate::engine::animation::graph::is_pipeline_node(type_id) {
+            CanvasScope::Pipeline
+        } else {
+            CanvasScope::Machine
+        }
+    }
+
+    /// The scope an annotation's `family` tag places it on (`None` = machine).
+    pub fn of_family(family: Option<&str>) -> Self {
+        if family == Some(crate::engine::animation::graph::FAMILY_PIPELINE) {
+            CanvasScope::Pipeline
+        } else {
+            CanvasScope::Machine
+        }
+    }
+
+    /// The breadcrumb's name for the machine scope (the pipeline is the file).
+    pub const MACHINE_CRUMB: &'static str = "State Machine";
 }
 
 /// A request to open another graph document as a tab, raised by descend
@@ -1908,18 +1956,19 @@ impl GraphEditorState {
     /// primary selected node, when it is a transition on a machine canvas.
     pub fn rule_descend_target(&self) -> Option<u64> {
         use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
-        if !self.domain.is_animation() {
+        if !self.is_machine_scope() {
             return None;
         }
         let id = self.primary.or_else(|| self.selection.iter().copied().next())?;
         (self.doc.node(id)?.type_id == ANIM_TRANSITION_TYPE_ID).then_some(id)
     }
 
-    /// The machine canvas is what this tab shows: an animation document with
-    /// no rule region open. Flow there is straight arrows whatever the wire
-    /// style says, so the style switch has nothing to do and hides.
+    /// The machine canvas is what this tab shows: an animation document in
+    /// its machine scope with no rule region open. Flow there is straight
+    /// arrows whatever the wire style says, so the style switch has nothing
+    /// to do and hides. The pipeline scope routes like a script graph.
     pub fn at_machine_level(&self) -> bool {
-        self.domain.is_animation() && self.rule_scope.is_none()
+        self.is_machine_scope() && self.rule_scope.is_none()
     }
 
     /// Open (or refocus) the rule peek on `owner`. Answers `false` when
@@ -1940,6 +1989,9 @@ impl GraphEditorState {
         if self.rule_scope.as_ref().is_some_and(|s| s.owner == owner) {
             return true;
         }
+        // A rule is peeked from the machine canvas only (Task 41.7 D6): F8
+        // or a find hit reaching one from the pipeline root goes there first.
+        self.set_scope(CanvasScope::Machine, registry);
         // Switching transitions: settle the old peek's edits first.
         self.close_rule_scope(registry);
         // The machine's transient surfaces close under the peek, and the
@@ -2076,6 +2128,207 @@ impl GraphEditorState {
             }
         }
         true
+    }
+}
+
+/// The pipeline scope's palette listing — built once, like the rule one.
+fn pipeline_scope_registry() -> &'static NodeRegistry {
+    static REG: std::sync::OnceLock<NodeRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(crate::engine::animation::graph::anim_pipeline_registry)
+}
+
+/// The machine scope's palette listing — built once.
+fn machine_scope_registry() -> &'static NodeRegistry {
+    static REG: std::sync::OnceLock<NodeRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(crate::engine::animation::graph::anim_machine_registry)
+}
+
+/// Canvas scopes (Task 41.7 D6): the one visibility predicate every canvas
+/// consumer — drawing, hit-testing, marquee, frame-all, auto-layout, select
+/// all, paste — routes through, and the switch between the two scopes.
+impl GraphEditorState {
+    /// The machine canvas of an animation document: border wires, transition
+    /// badges, the straight connect ghost, the state→state drag shortcut.
+    pub fn is_machine_scope(&self) -> bool {
+        self.domain.is_animation() && self.scope == CanvasScope::Machine
+    }
+
+    /// The pipeline root of an animation document.
+    pub fn is_pipeline_scope(&self) -> bool {
+        self.domain.is_animation() && self.scope == CanvasScope::Pipeline
+    }
+
+    /// Does the canvas the tab shows draw `n`? Always on non-animation
+    /// domains (a script graph and a rule projection have one canvas).
+    pub fn node_visible(&self, n: &NodeInst) -> bool {
+        !self.domain.is_animation() || CanvasScope::of_type(&n.type_id) == self.scope
+    }
+
+    /// [`node_visible`](Self::node_visible) by id; an unknown id is not shown.
+    pub fn node_id_visible(&self, id: u64) -> bool {
+        self.doc.node(id).is_some_and(|n| self.node_visible(n))
+    }
+
+    pub fn visible_nodes(&self) -> impl Iterator<Item = &NodeInst> + '_ {
+        self.doc.nodes.iter().filter(move |n| self.node_visible(n))
+    }
+
+    /// A wire shows iff both its ends do.
+    pub fn edge_visible(&self, e: &Edge) -> bool {
+        !self.domain.is_animation()
+            || (self.node_id_visible(e.from_node) && self.node_id_visible(e.to_node))
+    }
+
+    /// Visible wires with their document index (the index is what the wire
+    /// geometry and the machine layout key on).
+    pub fn visible_edges(&self) -> impl Iterator<Item = (usize, &Edge)> + '_ {
+        self.doc.edges.iter().enumerate().filter(move |(_, e)| self.edge_visible(e))
+    }
+
+    /// An annotation tagged `pipeline` belongs to the pipeline canvas; every
+    /// other tag (and no tag — the pre-41.7 default) to the machine.
+    pub fn family_visible(&self, family: Option<&str>) -> bool {
+        !self.domain.is_animation() || CanvasScope::of_family(family) == self.scope
+    }
+
+    pub fn comment_visible(&self, c: &CommentBox) -> bool {
+        self.family_visible(c.family.as_deref())
+    }
+
+    pub fn group_visible(&self, g: &GroupBox) -> bool {
+        self.family_visible(g.family.as_deref())
+    }
+
+    /// The `family` tag a comment or group created (or pasted) on this canvas
+    /// takes, so it lands where the author is looking. `None` off the
+    /// pipeline canvas, which is the unmarked machine default.
+    pub fn annotation_family(&self) -> Option<String> {
+        self.is_pipeline_scope()
+            .then(|| crate::engine::animation::graph::FAMILY_PIPELINE.to_string())
+    }
+
+    /// The part of `frag` that belongs to the canvas showing: its nodes of
+    /// this scope's family, the wires between them, their regions, and every
+    /// annotation not anchored to a dropped node (an unanchored note is a
+    /// thought, not a family member — it comes along and gets retagged).
+    pub fn scope_part(&self, frag: &GraphFragment) -> GraphFragment {
+        let nodes: Vec<NodeInst> =
+            frag.nodes.iter().filter(|n| self.node_visible(n)).cloned().collect();
+        let kept: BTreeSet<u64> = nodes.iter().map(|n| n.id).collect();
+        GraphFragment {
+            edges: frag
+                .edges
+                .iter()
+                .filter(|e| kept.contains(&e.from_node) && kept.contains(&e.to_node))
+                .cloned()
+                .collect(),
+            comments: frag
+                .comments
+                .iter()
+                .filter(|c| c.anchor.map_or(true, |a| kept.contains(&a)))
+                .cloned()
+                .collect(),
+            groups: frag.groups.clone(),
+            regions: frag
+                .regions
+                .iter()
+                .filter(|(owner, _)| kept.contains(owner))
+                .map(|(owner, r)| (*owner, r.clone()))
+                .collect(),
+            nodes,
+        }
+    }
+
+    /// Show `scope`. Answers whether anything changed (never on a
+    /// non-animation domain). Settles the open rule peek first
+    /// (`close_rule_scope` — a rule is the machine's), cancels every
+    /// in-flight gesture, drops the selection and the transient surfaces,
+    /// and swaps the remembered pan/zoom: a canvas visited before comes back
+    /// exactly where it was left, one never visited frames its content on
+    /// the next draw.
+    pub fn set_scope(&mut self, scope: CanvasScope, registry: &NodeRegistry) -> bool {
+        if !self.domain.is_animation() || self.scope == scope {
+            return false;
+        }
+        self.close_rule_scope(registry);
+        self.cancel_interactions();
+        self.clear_selection();
+        self.palette = None;
+        self.node_menu = None;
+        self.canvas_menu = None;
+        self.wire_menu = None;
+        self.annotation_menu = None;
+        self.error_popover = false;
+        let other = self.scope_view.replace(self.view);
+        match other {
+            Some(v) => self.view = v,
+            None => self.frame_all_on_open = true,
+        }
+        self.scope = scope;
+        true
+    }
+
+    pub fn enter_machine_scope(&mut self, registry: &NodeRegistry) -> bool {
+        self.set_scope(CanvasScope::Machine, registry)
+    }
+
+    pub fn leave_machine_scope(&mut self, registry: &NodeRegistry) -> bool {
+        self.set_scope(CanvasScope::Pipeline, registry)
+    }
+
+    /// Put node `id` on the canvas the tab shows, switching scope to its
+    /// family when it is on the other one. Answers whether the scope moved —
+    /// the caller's geometry is then a frame stale, so framing waits a draw.
+    pub fn reveal(&mut self, id: u64, registry: &NodeRegistry) -> bool {
+        let Some(n) = self.doc.node(id) else { return false };
+        let scope = CanvasScope::of_type(&n.type_id);
+        self.set_scope(scope, registry)
+    }
+
+    /// The pipeline canvas's pan/zoom, whichever scope shows — what the
+    /// per-user sidecar remembers as the *file's* view.
+    pub fn pipeline_view(&self) -> CanvasView {
+        match self.scope {
+            CanvasScope::Pipeline => self.view,
+            CanvasScope::Machine => self.scope_view.unwrap_or(self.view),
+        }
+    }
+
+    /// Is `id` the inline State Machine node (no nested graph)? Entering it
+    /// is a scope switch, not a file open.
+    pub fn is_inline_machine(&self, id: u64) -> bool {
+        use crate::engine::animation::graph::plan::GRAPH_PROP;
+        use crate::engine::animation::graph::ANIM_PIPE_MACHINE_TYPE_ID;
+        self.domain.is_animation()
+            && self.doc.node(id).is_some_and(|n| {
+                n.type_id == ANIM_PIPE_MACHINE_TYPE_ID
+                    && !matches!(
+                        n.properties.get(GRAPH_PROP),
+                        Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.trim().is_empty()
+                    )
+            })
+    }
+
+    /// The inline State Machine to enter from the keyboard (`PageDown`): the
+    /// primary selected node, when it is one and the pipeline root shows.
+    pub fn machine_descend_target(&self) -> Option<u64> {
+        if !self.is_pipeline_scope() {
+            return None;
+        }
+        let id = self.primary.or_else(|| self.selection.iter().copied().next())?;
+        self.is_inline_machine(id).then_some(id)
+    }
+
+    /// What the add-node palette lists on this canvas, when the domain
+    /// narrows it: the pipeline or machine subset of the animation library.
+    /// `None` = the document's own registry (scripts). Placement gating only
+    /// — validation stays on the union the document was opened against.
+    pub fn palette_registry(&self) -> Option<&'static NodeRegistry> {
+        match (self.domain, self.scope) {
+            (GraphDomain::Animation, CanvasScope::Pipeline) => Some(pipeline_scope_registry()),
+            (GraphDomain::Animation, CanvasScope::Machine) => Some(machine_scope_registry()),
+            _ => None,
+        }
     }
 }
 
@@ -2701,6 +2954,8 @@ impl GraphEditorState {
             revision: 0,
             peek_panel: None,
             peek_drag: None,
+            scope: CanvasScope::Pipeline,
+            scope_view: None,
         }
     }
 
@@ -2856,6 +3111,7 @@ impl GraphEditorState {
         let comment = CommentBox {
             rect: [pos[0], pos[1], 220.0, 130.0],
             text: "Comment".to_string(),
+            family: self.annotation_family(),
             ..CommentBox::default()
         };
         self.doc.comments.push(comment.clone());
@@ -2896,6 +3152,7 @@ impl GraphEditorState {
         let group = GroupBox {
             rect: [minx - PAD, miny - PAD, (maxx - minx) + PAD * 2.0, (maxy - miny) + PAD * 2.0],
             title: "Group".to_string(),
+            family: self.annotation_family(),
             ..GroupBox::default()
         };
         self.doc.groups.push(group.clone());
@@ -4546,7 +4803,7 @@ impl GraphEditorState {
         let scope: BTreeSet<u64> = if self.selection.len() >= 2 {
             self.selection.clone()
         } else {
-            self.doc.nodes.iter().map(|n| n.id).collect()
+            self.visible_nodes().map(|n| n.id).collect()
         };
         if scope.len() < 2 {
             return;
@@ -4954,13 +5211,21 @@ impl GraphEditorState {
         if let Some(path) = &n.subgraph {
             return Some(path.clone());
         }
-        if !self.domain.is_animation() || n.type_id != ANIM_STATE_TYPE_ID {
+        if !self.domain.is_animation() {
             return None;
         }
+        // A nested State Machine node (Task 41.7) descends into its file;
+        // the inline one is a scope switch, not a file — see
+        // [`is_inline_machine`](Self::is_inline_machine).
+        let keys: &[&str] = match n.type_id.as_str() {
+            crate::engine::animation::graph::ANIM_PIPE_MACHINE_TYPE_ID => &[GRAPH_PROP],
+            ANIM_STATE_TYPE_ID => &[GRAPH_PROP, SPACE_PROP],
+            _ => return None,
+        };
         if self.doc.regions.get(&id).is_some_and(|r| !r.nodes.is_empty()) {
             return None;
         }
-        [GRAPH_PROP, SPACE_PROP].iter().find_map(|key| match n.properties.get(*key) {
+        keys.iter().find_map(|key| match n.properties.get(*key) {
             Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.trim().is_empty() => {
                 Some(crate::engine::scripting::normalize_graph_path(s))
             }
@@ -5272,6 +5537,31 @@ impl GraphEditorState {
                 return;
             }
         }
+        // Task 41.7 D6: the two canvases of an animation document share one
+        // clipboard, so a fragment is split by family — the part that belongs
+        // to the canvas showing lands, the rest is dropped with a note. The
+        // one relaxation of the refuse-whole rule above: a mixed selection
+        // copied across scopes must not be a dead end.
+        let split: GraphFragment;
+        let frag = if self.domain.is_animation() {
+            let other = frag.nodes.iter().filter(|n| !self.node_visible(n)).count();
+            if other == 0 {
+                frag
+            } else {
+                self.toast(format!(
+                    "{other} node{} belong{} to the other canvas \u{2014} dropped",
+                    if other == 1 { "" } else { "s" },
+                    if other == 1 { "s" } else { "" }
+                ));
+                split = self.scope_part(frag);
+                if split.is_empty() {
+                    return;
+                }
+                &split
+            }
+        } else {
+            frag
+        };
         // Anchor the fragment's top-left at the target and keep every
         // internal offset, so a pasted cluster arrives shaped as it was.
         let min = frag.bbox_min();
@@ -5301,10 +5591,15 @@ impl GraphEditorState {
             edges: out.edges,
             regions: out.regions,
         }];
-        for c in out.comments {
+        // A pasted annotation lands on the canvas showing, whatever it was
+        // tagged where it was copied.
+        let family = self.annotation_family();
+        for mut c in out.comments {
+            c.family = family.clone();
             edits.push(GraphEdit::AddComment(c));
         }
-        for g in out.groups {
+        for mut g in out.groups {
+            g.family = family.clone();
             edits.push(GraphEdit::AddGroup(g));
         }
         let edit = GraphEdit::Composite {
@@ -8709,13 +9004,16 @@ mod rule_scope_tests {
     }
 
     /// The wire-style switch hides exactly while the machine canvas shows:
-    /// an animation document with no rule open. A script graph and an open
-    /// rule (the parent tab and the child projection alike) show it.
+    /// an animation document in its machine scope with no rule open. A
+    /// script graph, the pipeline root (Task 41.7) and an open rule (the
+    /// parent tab and the child projection alike) show it.
     #[test]
     fn machine_level_is_an_animation_document_with_no_rule_open() {
         let reg = NodeRegistry::new();
         assert!(!test_state("a.graph").at_machine_level());
         let mut st = machine(Some(speed_rule()));
+        assert!(!st.at_machine_level(), "the pipeline root routes like a script");
+        st.enter_machine_scope(&reg);
         assert!(st.at_machine_level());
         assert!(st.open_rule_scope(3, &reg));
         assert!(!st.at_machine_level(), "an open rule is a region");
@@ -9089,4 +9387,233 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
         GraphDomain::of_path(path),
         &NodeRegistry::new(),
     )
+}
+
+/// Canvas scopes (Task 41.7 D6): the pipeline root and the machine as two
+/// views over one flat document.
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::engine::animation::graph::plan::{
+        ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
+        ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, GRAPH_PROP,
+    };
+    use crate::engine::animation::graph::{
+        anim_node_registry, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID,
+        FAMILY_PIPELINE,
+    };
+
+    fn node(id: u64, type_id: &str) -> NodeInst {
+        NodeInst {
+            id,
+            type_id: type_id.to_string(),
+            type_version: 1,
+            position: [id as f32 * 10.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: None,
+        }
+    }
+
+    /// The shipped demo, opened exactly as a tab opens it (migration and
+    /// the pipeline-root upgrade included).
+    fn demo() -> GraphEditorState {
+        let content = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("content");
+        let key = "graphs/locomotion_demo.animgraph";
+        GraphEditorState::open(&content.join(key), key, &anim_node_registry())
+            .expect("the demo animgraph opens")
+    }
+
+    /// A hand-built animation state: SM + Output on the pipeline, ENTRY +
+    /// a state on the machine.
+    fn two_canvases() -> GraphEditorState {
+        let mut st = test_state("graphs/t.animgraph");
+        st.doc.nodes = vec![
+            node(0, ANIM_PIPE_MACHINE_TYPE_ID),
+            node(1, ANIM_PIPE_OUTPUT_TYPE_ID),
+            node(2, ANIM_ENTRY_TYPE_ID),
+            node(3, ANIM_STATE_TYPE_ID),
+        ];
+        st
+    }
+
+    fn count(st: &GraphEditorState, ty: &str) -> usize {
+        st.visible_nodes().filter(|n| n.type_id == ty).count()
+    }
+
+    #[test]
+    fn an_animation_document_opens_at_the_pipeline_root() {
+        let st = demo();
+        assert_eq!(st.scope, CanvasScope::Pipeline);
+        assert!(st.is_pipeline_scope() && !st.is_machine_scope());
+        assert!(!st.at_machine_level(), "the root routes like a script graph");
+        let listing = st.palette_registry().unwrap();
+        assert!(listing.get(ANIM_PIPE_OUTPUT_TYPE_ID).is_some());
+        assert!(listing.get(ANIM_STATE_TYPE_ID).is_none());
+    }
+
+    #[test]
+    fn visible_nodes_partition_the_demo_graph_by_family() {
+        let reg = anim_node_registry();
+        let mut st = demo();
+        assert_eq!(count(&st, ANIM_PIPE_MACHINE_TYPE_ID), 1);
+        assert_eq!(count(&st, ANIM_PIPE_OUTPUT_TYPE_ID), 1);
+        assert_eq!(count(&st, ANIM_IK_CHAIN_TYPE_ID), 2);
+        assert_eq!(st.visible_nodes().count(), 4, "SM, Output and the two IK chains");
+        let pipeline_edges = st.visible_edges().count();
+        assert_eq!(pipeline_edges, 3, "SM > IK > IK > Output");
+
+        assert!(st.enter_machine_scope(&reg));
+        assert_eq!(count(&st, ANIM_ENTRY_TYPE_ID), 1);
+        assert_eq!(count(&st, ANIM_STATE_TYPE_ID), 4);
+        assert_eq!(count(&st, ANIM_STATE_ALIAS_TYPE_ID), 1);
+        assert_eq!(count(&st, ANIM_TRANSITION_TYPE_ID), 8);
+        assert_eq!(
+            st.visible_nodes().count() + 4,
+            st.doc.nodes.len(),
+            "every node is on one canvas"
+        );
+        assert_eq!(
+            st.visible_edges().count() + pipeline_edges,
+            st.doc.edges.len(),
+            "no wire crosses the families"
+        );
+        let listing = st.palette_registry().unwrap();
+        assert!(listing.get(ANIM_STATE_TYPE_ID).is_some());
+        assert!(listing.get(ANIM_PIPE_OUTPUT_TYPE_ID).is_none());
+    }
+
+    #[test]
+    fn switching_clears_selection_and_restores_each_scopes_view() {
+        let reg = NodeRegistry::new();
+        let mut st = two_canvases();
+        st.select_only(0);
+        let root_view = CanvasView { pan: Vec2::new(10.0, 20.0), zoom: 0.5 };
+        st.view = root_view;
+
+        assert!(st.enter_machine_scope(&reg));
+        assert!(st.selection.is_empty() && st.primary.is_none());
+        assert!(st.frame_all_on_open, "a canvas never visited frames its content");
+        assert_eq!(st.view, root_view, "until the draw frames it, the view carries over");
+        assert_eq!(st.pipeline_view(), root_view);
+        let machine_view = CanvasView { pan: Vec2::new(-5.0, 7.0), zoom: 2.0 };
+        st.view = machine_view;
+        st.select_only(3);
+
+        assert!(st.leave_machine_scope(&reg));
+        assert!(st.selection.is_empty());
+        assert_eq!(st.view, root_view);
+        assert_eq!(st.pipeline_view(), root_view);
+        assert!(st.enter_machine_scope(&reg));
+        assert_eq!(st.view, machine_view, "the machine comes back where it was left");
+        assert_eq!(st.pipeline_view(), root_view);
+        assert!(!st.enter_machine_scope(&reg), "already there");
+    }
+
+    #[test]
+    fn a_rule_peek_moves_to_the_machine_scope_first() {
+        let reg = NodeRegistry::new();
+        let mut st = two_canvases();
+        st.doc.nodes.push(node(4, ANIM_TRANSITION_TYPE_ID));
+        assert!(st.open_rule_scope(4, &reg));
+        assert!(st.is_machine_scope());
+        assert_eq!(st.selection.iter().copied().collect::<Vec<_>>(), vec![4]);
+        assert!(st.leave_machine_scope(&reg));
+        assert!(st.rule_scope.is_none(), "leaving the machine settles the peek");
+    }
+
+    #[test]
+    fn inline_machine_enters_the_scope_and_a_nested_one_opens_its_file() {
+        let mut st = two_canvases();
+        st.select_only(0);
+        assert!(st.is_inline_machine(0));
+        assert_eq!(st.machine_descend_target(), Some(0));
+        assert_eq!(st.file_descend_target(0), None);
+
+        st.doc.node_mut(0).unwrap().properties.insert(
+            GRAPH_PROP.to_string(),
+            PropValue::Asset("graphs/legs.animgraph".to_string()),
+        );
+        assert!(!st.is_inline_machine(0));
+        assert_eq!(st.machine_descend_target(), None);
+        assert_eq!(st.file_descend_target(0).as_deref(), Some("graphs/legs.animgraph"));
+        assert_eq!(st.descend_target().as_deref(), Some("graphs/legs.animgraph"));
+    }
+
+    #[test]
+    fn split_paste_keeps_the_matching_family() {
+        let reg = anim_node_registry();
+        let mut st = two_canvases();
+        let frag = GraphFragment {
+            nodes: vec![node(10, ANIM_IK_CHAIN_TYPE_ID), node(11, ANIM_STATE_TYPE_ID)],
+            edges: Vec::new(),
+            comments: vec![CommentBox { family: None, ..CommentBox::default() }],
+            groups: Vec::new(),
+            regions: BTreeMap::new(),
+        };
+        st.paste_fragment(&frag, Some([300.0, 300.0]), &reg);
+        assert_eq!(st.doc.nodes.len(), 5, "the state was dropped");
+        assert_eq!(st.doc.nodes.last().unwrap().type_id, ANIM_IK_CHAIN_TYPE_ID);
+        assert!(st.toasts.iter().any(|t| t.text.contains("belongs to the other canvas")));
+        assert_eq!(
+            st.doc.comments.last().unwrap().family.as_deref(),
+            Some(FAMILY_PIPELINE),
+            "a pasted note lands on the canvas showing"
+        );
+
+        st.enter_machine_scope(&reg);
+        st.paste_fragment(&frag, Some([300.0, 300.0]), &reg);
+        assert_eq!(st.doc.nodes.len(), 6);
+        assert_eq!(st.doc.nodes.last().unwrap().type_id, ANIM_STATE_TYPE_ID);
+        assert_eq!(st.doc.comments.last().unwrap().family, None);
+
+        // Nothing of this family and no annotation: the paste is a no-op
+        // beyond the note.
+        st.leave_machine_scope(&reg);
+        let before = st.doc.nodes.len();
+        let machine_only = GraphFragment {
+            nodes: vec![node(12, ANIM_STATE_TYPE_ID)],
+            comments: Vec::new(),
+            ..frag.clone()
+        };
+        st.paste_fragment(&machine_only, None, &reg);
+        assert_eq!(st.doc.nodes.len(), before);
+    }
+
+    #[test]
+    fn annotations_follow_their_family_tag() {
+        let reg = NodeRegistry::new();
+        let mut st = two_canvases();
+        st.doc.comments.push(CommentBox { family: None, ..CommentBox::default() });
+        st.doc.groups.push(GroupBox {
+            family: Some(FAMILY_PIPELINE.to_string()),
+            ..GroupBox::default()
+        });
+        assert!(!st.comment_visible(&st.doc.comments[0]));
+        assert!(st.group_visible(&st.doc.groups[0]));
+        st.add_comment([0.0, 0.0], &reg);
+        assert_eq!(st.doc.comments[1].family.as_deref(), Some(FAMILY_PIPELINE));
+
+        st.enter_machine_scope(&reg);
+        assert!(st.comment_visible(&st.doc.comments[0]));
+        assert!(!st.group_visible(&st.doc.groups[0]));
+        st.add_comment([0.0, 0.0], &reg);
+        assert_eq!(st.doc.comments[2].family, None);
+    }
+
+    #[test]
+    fn a_script_document_shows_everything() {
+        let reg = NodeRegistry::new();
+        let mut st = test_state("graphs/t.graph");
+        st.doc.nodes = vec![node(0, ANIM_STATE_TYPE_ID), node(1, "custom.print")];
+        st.doc.comments.push(CommentBox {
+            family: Some("whatever".to_string()),
+            ..CommentBox::default()
+        });
+        assert_eq!(st.visible_nodes().count(), 2);
+        assert!(st.comment_visible(&st.doc.comments[0]));
+        assert!(!st.set_scope(CanvasScope::Machine, &reg), "scopes are an animation thing");
+        assert!(!st.is_machine_scope());
+    }
 }

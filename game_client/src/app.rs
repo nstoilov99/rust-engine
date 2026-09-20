@@ -1248,7 +1248,10 @@ impl App {
         for (rel, st) in self.editor.scene.graph_editors.iter() {
             store.store(
                 rel,
-                st.view,
+                // The file's view is the pipeline root's (Task 41.7 D6): a
+                // tab closed inside the machine scope must not reopen the
+                // root at the machine's pan.
+                st.pipeline_view(),
                 &st.bookmarks,
                 stored_watches(st),
                 stored_breakpoints(st),
