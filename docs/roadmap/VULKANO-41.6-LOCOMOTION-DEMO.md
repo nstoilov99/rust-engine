@@ -1,6 +1,7 @@
 # Task 41.6 — Locomotion Demo (Game Animation Sample–style)
 
-**Status:** plan (2026-09-04)
+**Status:** plan (2026-09-04) — shipped 2026-09-20, close-out in `ROADMAP.md` ▸ Task 41.6.
+**Superseded (P8):** jump is a height — `CharacterMovement.jump_height` (m, default 1.6) with `vz = sqrt(2·|g|·h)`; D2's `jump_speed 8` no longer exists.
 **Depends on:** Task 41 (anim graph), 41.5 (IK + foot placement), M6 input layer.
 **Branch:** `task-41.6-locomotion-demo`, branched from `task-41.5-animation-scale`.
 

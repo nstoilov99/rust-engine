@@ -2189,7 +2189,7 @@ pub struct SpeedBlend {
 ---
 
 ### Task 41.5: Animation at Scale + IK
-**Status:** ✅ **Complete** (2026-09, pending live verification). Plan + rulings R1–R15:
+**Status:** ✅ **Complete** (2026-09; foot IK live-verified through the Task 41.6 demo recordings). Plan + rulings R1–R15:
 [`VULKANO-41.5-ANIMATION-SCALE.md`](VULKANO-41.5-ANIMATION-SCALE.md).
 **Prerequisites:** Task 41
 
@@ -2278,6 +2278,108 @@ time, and stride/orientation warping (no root motion here). Roughly 3–4
 tasks the size of 41.5. Revisit only with a dense locomotion set in hand
 (Fab Standard License pack or own capture); research sets (LaFAN1, Bandai
 Namco) are non-commercial only.
+
+---
+
+### Task 41.6: Locomotion Demo
+**Status:** ✅ **Complete** (2026-09-20). Plan + decisions D1–D11:
+[`VULKANO-41.6-LOCOMOTION-DEMO.md`](VULKANO-41.6-LOCOMOTION-DEMO.md);
+process rulings in `.scratch/locomotion/spec.md`.
+**Prerequisites:** Task 41, 41.5, M6 input layer
+
+A playable third-person character on an offline scene, Game Animation
+Sample–style: WASD relative to the camera, Shift to run, Space to jump,
+mouse orbit + scroll zoom, real Mixamo Idle / Walk / Run clips through the
+existing Blend1d, foot IK with foot lock and pelvis drop on ramps, stairs
+and a block field. Runs in editor Play (open
+`scenes/locomotion_demo.scene`, F5) and standalone (`--scene
+scenes/locomotion_demo.scene`). Architecture: `docs/ARCHITECTURE.md` ▸
+Offline character & orbit camera; gotchas: `docs/KNOWLEDGE.md` ▸ Locomotion
+& Foot IK Gotchas.
+
+**Commit map** (branch `task-41.6-locomotion-demo`, oldest first)
+
+| Pkg | Commit | What landed |
+|---|---|---|
+| — | `4dc2948` | Plan doc (D1–D11) |
+| — | `23aa1cd` | Motion-matching note under 41.5 (licensing, prerequisites, not scheduled) |
+| P1 | `331166f` | Velocity-set controller: `PhysicsWorld` velocity/rotation API + `register_entity` honours `lock_rotation`/`gravity_scale`/CCD, `CharacterMovement`/`PlayerInput`/`OrbitCamera` components + scene serialization, `PlayerInputSystem` (camera-relative input), `CharacterMovementSystem` (accel/decel, ground probe, step assist, orient-to-movement), systems moved to PreUpdate, schedule test in `plugin.rs` |
+| P2 | `2ed1094` | `OrbitCameraSystem` (yaw/pitch/zoom, shoulder pivot, boom ray excluding the target body), Camera-entity +X convention, standalone cursor grab + raw mouse feed, Escape toggle |
+| P3 | `e135e40` | `CharacterAnimBridgeSystem` (offline `LocalDeriver` onto the rig child), `FootPlacementSystem` excludes the parent's body for rig children |
+| P4 | `c037f0f` | `locomotion_demo.scene` (floor, 15°/30° ramps + landings, 8-step stair, 3×3 block field, player capsule + rig child + orbit camera), `locomotion_demo.animgraph` (`foot_ik` variable, `foot_l`/`foot_r` IK Chain nodes, thresholds = controller speeds), `--scene` for standalone, disk-loading tests |
+| R1 | `e8a0dbc` | Opus review fixes: ground follow (slope + snap), step-probe height, `jump_hold`, capsule dims from the collider, grab counted only on success |
+| P0 | `8bfd195` | `.gitignore` for raw FBX import sources |
+| P0 | `149efed` | `animation_only` + `copy_source` import settings (dialog + `--import-anim` CLI), by-name clip remap at arm time (`ClipSet::armed_for`, memoised), footfall event tool (`animation/footfall.rs`) |
+| P0 | `bb63101` | Real Mixamo Idle / Idle_1 / Walking / Running clips with authored footfall events; graph clip references swapped |
+| P0 | `c50d13a` | Headless test: the demo rig arms and poses on the real skeleton |
+| R2 | `fdf7cde` | Rig faces forward (180° yaw on the rig child), knee-side IK pole, ride slopes ahead, sustained step lift to the step top, snap dead band |
+| P6 | `127100e` | Foot IK conform-by-terrain-delta (`IkGoal::Offset` on the pre-pelvis tip), optional pole built from the current knee, lock on `FootState` with reach guard + 0.1 s release blend, footfall alternation, `PhysicsWorld::present` interpolation + `body_position`, `set_timestep` drives `integration_parameters.dt`, fixed-dt corrections |
+| P7 | `d2ac995` | Zero-friction colliders use the `Min` combine rule; keep gravity on flat contact (`vel.z.min(0)`) |
+| P7 | `f0307ec` | `PhysicsWorld::set_friction`; grip while standing, frictionless while moving |
+| P7 | `6bf0fa0` | Standing = intent (`grounded && !has_input`); no ground snap while standing |
+| — | `943bd79` | Reflection-driven Inspector note under Task 54 |
+| P8 | `2855d9a` | Inspector sections for Character Movement / Player Input / Orbit Camera, Add/Remove, play-mode status line; `jump_speed` → `jump_height` (`jump_velocity(h, g)`), `standing_friction` field, presence bits widened to `u32` |
+| P6 | `b37a9e7` | Release a foot lock when the machine leaves the planting state (`FootState.lock_state`) |
+
+**What shipped.** Four gameplay systems registered by `ClientGamePlugin`
+(`PlayerInputSystem` → `CharacterMovementSystem` →
+`CharacterAnimBridgeSystem` in PreUpdate, `OrbitCameraSystem` in Update);
+a velocity-set dynamic-capsule controller (authoritative-pose probe, slope
+projection, snap with dead band, sustained step lift, jump as apex height,
+friction switched by intent with the `Min` combine rule for zero-friction
+colliders); physics presentation interpolation; the rig-as-child contract;
+foot IK v2 (terrain-delta goals, current-pose knee pole, foot lock latched
+on `_down` and released on `_up` / reach failure / state change); real
+clips through animation-only import + by-name remap + the footfall tool;
+the demo scene and graph; `--scene` and `--import-anim` CLI flags;
+Inspector sections for the three gameplay components.
+
+**Acceptance (plan §5)** — live verification by the user in recordings,
+2026-09-08 → 2026-09-20 (three investigation rounds fed P6/P7; the
+2026-09-20 screenshot fed `b37a9e7`):
+
+| §5 item | Result |
+|---|---|
+| Editor Play: Idle, WASD walk, Shift run, mouse orbit, scroll zoom, Escape/F1 release, faces movement direction | ✅ verified live (controller, camera, idle/walk/run) |
+| Space jumps | exercised in play, **not formally verified** (no jump/fall/land clips — see ledger) |
+| Standalone `--scene` behaves identically | launch path shipped and tested (`arg_value`, scene load); not separately signed off in the recordings |
+| Feet plant on the 15°/30° ramps and each stair tread with pelvis drop | ✅ verified live after P6/P7/`b37a9e7` (stairs, ramps) |
+| Feet plant on the block field; `foot_ik = 0` comparison | **not formally verified** |
+| No visible foot sliding on the flat | ✅ verified live as part of idle/walk/run |
+| Clean schedule validation in both hosts; engine + game_client tests green | ✅ editor launched live; `plugin.rs` schedule test + per-ticket gates green (game_client 66, engine suites per ticket) |
+
+**Review notes.** Opus read-only review of P1–P4 (2026-09-06): verdict
+sound, no Z-up / quaternion / schedule errors; five fixes landed in
+`e8a0dbc` (step-probe window missed the 0.15 m risers, no ground following,
+jump vs fixed-rate probe, capsule dims from the collider, grab bookkeeping).
+Three Codex gpt-6-astra investigation rounds on the user's recordings
+(`.scratch/locomotion/video2/astra{,2,3}.txt`): rounds 1–2 (2026-09-14)
+diagnosed sticky feet / knee break as full-weight pinning to the ray
+contact every frame, doubled walk plants, un-interpolated 60 Hz sync and
+render-dt corrections → P6; round 3 diagnosed the stair-edge pin as
+Rapier's Average friction combine → P7.
+
+**Deferred ledger**
+
+- Jump / fall / land clips (Jump still plays a placeholder; the jump item
+  is why §5 is not fully signed off).
+- Strafe blend axis — Blend1d Direction stays unused (no strafe clips).
+- Entity picker for `OrbitCamera.target` and per-property Inspector undo →
+  Task 54 reflection-driven Inspector (the sections mirror `edit_collider`:
+  direct writes + `mark_dirty`, Clear included).
+- FK/IK split so the ground rays sample *this* frame's foot: rays start
+  from the last evaluation's animated foot, so at a stair edge the target
+  is one frame on the wrong tread.
+- Evaluate the walk clip's uneven plant spacing (R 0.042 / L 0.383 in a
+  0.967 s cycle after alternation).
+- Kinematic character controller or a smaller capsule for narrow treads
+  (radius 0.4 vs 0.3 m treads is a permanent edge balance).
+- Per-fixed-step control corrections (the controller runs per render
+  frame and writes fixed-dt-scaled velocities).
+- Pelvis drop cap when only one foot is low (drop follows the lowest foot
+  today).
+- Port the real clips to `character.animgraph` for the net player (the
+  user's working tree carries uncommitted edits to that file).
 
 ---
 
@@ -3324,6 +3426,8 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | 39.8 | Plugin System & Module Registry (physics/Steam/GAS as first plugins) | Game Architecture | Infrastructure | ✅ Complete |
 | **40** | **Node Graph Framework & Custom Node SDK** | **Node Graph Foundation** | **Infrastructure** | **Framework** |
 | **41** | **Animation Graph** | Game Architecture | Feature | **1st consumer** |
+| 41.5 | ✅ Animation at Scale + IK | Game Architecture | Performance | |
+| 41.6 | ✅ Locomotion Demo (offline character, orbit camera, foot IK v2) | Game Architecture | Feature | |
 | 42 | 🔀 Save/Load & Runtime Persistence (networked part → M5) | Game Architecture | Feature | |
 | 43 | 🔀 Scene Management & Transitions (zone lifecycle → M4) | Game Architecture | Feature | |
 | 44 | Asset Cooking & Level Streaming | Game Architecture | Infrastructure | |

@@ -797,8 +797,10 @@ play-once overlay → `compute_model_space()` → `apply_ik` →
 `refresh_palette_from_model_space()` — one palette pass, one revision bump.
 
 - **Solvers** (`animation/ik.rs`, pure, no ECS): two-bone analytic with a
-  mandatory pole vector (degenerate pole falls back to the chain's current
-  bend plane), and look-at with an angle clamp. Solvers replace rotation +
+  pole vector — supplied by the target, or (since 41.6) built by the runner
+  from the current knee when the target carries none; a degenerate pole
+  falls back to the chain's current bend plane — and look-at with an angle
+  clamp. Solvers replace rotation +
   translation only — animated scale is never touched. Weight blends in
   model space per edited bone (`blend_model`: slerp/lerp, scale kept).
 - **Chains from the graph**: `PlanIkChain { name, bones, solver,
@@ -809,9 +811,10 @@ play-once overlay → `compute_model_space()` → `apply_ik` →
   parameter contract; weight 0 skips the solve and all writes.
 - **Targets**: `IkTargets` (world Z-up, keyed by chain name) is resolved to
   mesh Y-up model space in a serial pre-pass (`entity_render⁻¹ *
-  zup_to_yup(target)`, `entity_render` from `TransformCache::get_render` —
-  previous frame, the accepted render-path latency). That pre-pass is the
-  only place IK touches `Resources`.
+  zup_to_yup(target)` — `Point` goals through `transform_point3`, `Offset`
+  deltas through `transform_vector3`; `entity_render` from
+  `TransformCache::get_render` — previous frame, the accepted render-path
+  latency). That pre-pass is the only place IK touches `Resources`.
 - **`apply_ik` order**: record each two-bone chain's *animated* tip, apply
   the pelvis offset (bone matrix + descendant re-walk) **before** the leg
   chains solve — so both feet can still reach — then per chain: solve,
@@ -823,10 +826,13 @@ play-once overlay → `compute_model_space()` → `apply_ik` →
   `ankle_offset`, `pelvis` props — ruling R11); the system inserts
   `IkTargets` itself. Rays down from the recorded *pre-IK* foot position
   (a locked foot must not pin its own ray) via
-  `PhysicsWorld::raycast_filtered` (normal + own-collider exclusion);
-  effector = contact + normal × ankle_offset. Foot lock latches the contact
-  on a `<chain>_down` anim event and releases on `<chain>_up`; both edges
-  set `force_eval_external`. Pelvis drop measures against the entity's
+  `PhysicsWorld::raycast_filtered` (normal + exclusion of the rig's own body
+  or, for a rig child, its parent's). Since 41.6 the target is a terrain
+  *delta* on the animated foot (`IkGoal::Offset`), not a pinned world point,
+  and the lock latches on `<chain>_down` and releases on `<chain>_up`, reach
+  failure or leaving the planting state — see ▸ Offline character & orbit
+  camera ▸ Foot IK. Lock edges set `force_eval_external`. Pelvis drop
+  measures against the entity's
   ground plane (not the oscillating animated foot height — ruling R12),
   clamped and smoothed; cosmetic only, the entity/collider never move.
   Raycasts run only in bucket 0; leaving the bucket removes the targets,
@@ -834,9 +840,217 @@ play-once overlay → `compute_model_space()` → `apply_ik` →
 
 The `--stress-anim N --bench-secs S` flags on the standalone client spawn a
 character crowd and write baseline metrics to
-`.scratch/anim-scale/baseline-N.txt`; the acceptance numbers (300 @ 60 fps)
-are pending the user's baseline capture, as is the P8 clip-layout decision
-gated on them.
+`.scratch/anim-scale/baseline-N.txt`; the acceptance capture (2026-09-03:
+300 characters ≈ 271 fps, animation system 0.36 ms) closed the P8
+clip-layout gate as "skipped" — numbers in `roadmap/ROADMAP.md` ▸ Task 41.5.
+
+## Offline character & orbit camera (Task 41.6)
+
+A playable third-person character on an offline scene:
+`content/scenes/locomotion_demo.scene`, graph
+`content/graphs/locomotion_demo.animgraph`, real Mixamo clips in
+`content/anims/`. Plan and rulings:
+[`VULKANO-41.6-LOCOMOTION-DEMO.md`](roadmap/VULKANO-41.6-LOCOMOTION-DEMO.md);
+close-out in `roadmap/ROADMAP.md` ▸ Task 41.6. Gameplay code:
+`game_client/src/systems/{player_input,character_movement,orbit_camera}.rs`
+and `game_client/src/anim_bridge.rs`; components in
+`game_shared/src/components.rs` (`CharacterMovement`, `PlayerInput`,
+`OrbitCamera` — `#[serde(default)]` config is the schema, `#[serde(skip)]`
+runtime state never hits the file; the scene's `ComponentData` variants are
+newtypes over them, and the Inspector draws one hand-coded section each).
+
+### Systems and schedule
+
+All four are registered by `ClientGamePlugin` (`game_client/src/plugin.rs`)
+with `RunIfPlaying`; the hosts (`app.rs` / `standalone.rs`) register none
+of them.
+
+```
+PreUpdate: EnhancedInput(First) → PlayerInputSystem → CharacterMovementSystem
+           → CharacterAnimBridgeSystem → FootPlacement → AnimGraph → PhysicsStep
+Update:    OrbitCameraSystem  (after GraphScriptRunner, before TransformPropagation)
+```
+
+- **`PlayerInputSystem`** activates each `PlayerInput.mapping_context`
+  once, then writes `desired_dir` (camera-relative: the `OrbitCamera` whose
+  `target` is this entity's GUID, else the first `OrbitCamera`, else world
+  +X), `run` (sprint held) and `jump_requested` (jump just pressed).
+- **`CharacterMovementSystem`** — the controller below. Writes
+  `PhysicsWorld`, the yaw into `Transform`/`TransformDirty`, and the runtime
+  fields `grounded`, `horizontal_speed`, `velocity` (Z-up).
+- **`CharacterAnimBridgeSystem`** — offline twin of the net `AnimBridge`.
+  Per `(CharacterMovement, Children)` the rig is the first child carrying
+  `AnimGraphRunner` and **no** `CharacterRig` (net rigs keep the marker);
+  one `LocalDeriver` per rig, `step(cm.velocity, cm.grounded, alive = true)`
+  → `apply` onto the rig's `AnimGraphRuntime` params (`speed`, `grounded`,
+  `alive`, `died`). Skips until the runner has armed a runtime (one frame
+  after first sight). The demo graph's Blend1d thresholds equal the
+  controller's `walk_speed` / `run_speed` (1.6 / 4.5) — the blend axis *is*
+  the controller speed.
+- **`OrbitCameraSystem`** — per `(Transform, Camera, OrbitCamera)`: target
+  = GUID match on `EntityGuid.0`, else the first `CharacterMovement` entity
+  (a root, so its `Transform.position` is read directly). `yaw += look.x ·
+  sensitivity`, `pitch −= look.y · sensitivity` (clamped to
+  `pitch_min_deg..pitch_max_deg`), `distance −= scroll · 0.5` — scroll is
+  `InputManager::scroll_delta()`, not an Enhanced Input action. Pivot =
+  target + `(0,0,pivot_height)` + right(yaw) · shoulder; boom =
+  `raycast_filtered(pivot, −fwd, distance, exclude target body)`, shortened
+  by 0.2 m on a hit; rotation `rotZ(yaw) · rotY(−pitch)`. Camera-entity
+  convention in both hosts: local +X is the view direction, +Y screen-right,
+  +Z up. Standalone grabs the cursor at startup (Confined → Locked → None)
+  and Escape toggles it; the editor keeps F1.
+
+Schedule discipline: the validator checks *pairs* within a stage, so every
+system carries a direct `.after`/`.before` edge against each system it
+shares data with (movement names `FOOT_PLACEMENT`, `ANIM_GRAPH` and
+`PHYSICS_STEP`; the bridge names `PLAYER_INPUT`, `CHARACTER_MOVEMENT`,
+`FOOT_PLACEMENT`, `ANIM_GRAPH`). Edges to feature-gated systems are
+`#[cfg]`-gated the same way (`GraphScriptRunnerSystem`). Cross-stage edges
+are legal (ignored by the per-stage pass; only the dangling-name check is
+global). `plugin.rs::gameplay_systems_validate_against_the_host_schedule`
+builds the real plugin set against stubs of the hosts' descriptors and runs
+`validate()` — the stand-in for a launch.
+
+### Velocity-set capsule controller
+
+D1: a Rapier **dynamic** capsule (half-height 0.5, radius 0.4, all
+rotations locked, damping 0, never sleeps, collider friction 0) driven by
+`PhysicsWorld::set_linear_velocity` every frame — not the M6 shared
+`motion::step` (that collides against cooked chunks; one Rapier world
+serves movement, grounding, foot rays and the camera boom). Per entity:
+
+1. **Probe from the authoritative pose.** `centre =
+   PhysicsWorld::body_position(handle)` — never `Transform.position`, which
+   is the interpolated presentation pose (below). Capsule dims come from the
+   entity's `Collider::Capsule` (`capsule_dims`; 0.9 / 0.4 fallback).
+   Ground = `raycast_filtered(centre, −Z, feet + step_height, exclude
+   self)` — reaching `step_height` past the feet keeps walking off a tread
+   grounded. `jump_hold` (0.15 s after take-off) suppresses the probe so a
+   still-grounded ray cannot overwrite the jump.
+2. **Horizontal**: `accelerate_toward(xy, desired_dir × (walk | run speed),
+   accel, decel, grounded, dt)`. Airborne with no input the velocity is
+   kept (no decel mid-arc); with input `accel` applies in the air.
+3. **Vertical**, grounded and not jumping:
+   - *Step lift*: a knee probe (`KNEE_ABOVE_FEET` = 0.05 m above the feet,
+     0.5 m along the heading) hitting a steep face (`is_step_face`, `n.z <
+     0.5`) while the same probe at `step_height` is clear starts a lift to
+     the step top (a downward probe ahead) + 3 cm clearance;
+     `step_lift_vz = min(3 m/s, remaining / fixed_dt)` sustains it until the
+     ground under the centre *is* the step top, input stops or a jump
+     starts.
+   - *Slope projection*: `slope_vz(xy, normal)` rides the plane under the
+     body — or the walkable slope the knee probe sees ahead, so the body
+     rides onto a ramp instead of being pressed into its foot (no snap
+     during that transition). Walls keep `vz`.
+   - *Snap with dead band*: `snap_vz(hit.distance, rest, fixed_dt)` pulls a
+     floating body down, rate-limited to 3 m/s, zero within 2 cm
+     (`GROUND_SNAP_DEADBAND`: contact-solver slack, not floating) or when
+     penetrating; `rest = feet_on_slope(feet, radius, normal)` because the
+     straight-down ray is longer on a slope. Flat and in contact ⇒
+     `vel.z.min(0)`: keep whatever downward motion gravity and contacts
+     produced (a capsule rolling off a tread edge must fall), never an
+     upward residual.
+   - *Standing intent* (`grounded && !has_input`): no ground following at
+     all, `vz` kept — the snap would press an edge-balanced capsule (radius
+     0.4 > tread 0.3) onto the tilted edge contact and shove it forward
+     every step.
+   - *Jump* is authored as an apex **height**: `vz = jump_velocity(
+     jump_height, g · gravity_scale) = sqrt(2|g|h)` with `g =
+     PhysicsWorld::gravity().z` (1.6 m ⇒ 5.6 m/s at 9.81).
+4. **Friction by intent**: `set_friction(handle, standing ?
+   standing_friction : 0)` — frictionless while moving (no dragging on
+   risers and edges), grippy the moment input stops (no sliding off tread
+   edges or slopes). Intent, not speed: a residual slide keeps the speed
+   up, keeps friction off and sustains itself down a whole staircase.
+   Colliders registered with friction ≤ 0 use Rapier's
+   `CoefficientCombineRule::Min` (`register_entity`) so the zero wins the
+   pairing; everything else keeps the default Average.
+5. **Orient to movement**: above 0.2 m/s the yaw turns toward the heading
+   at `turn_rate_deg`, written to `Transform.rotation` **and**
+   `PhysicsWorld::set_rotation` — the fixed step copies the body's rotation
+   back into the transform.
+
+Corrections that feed the integrator (`snap_vz`, `step_lift_vz`) use
+`PhysicsWorld::fixed_dt()`, not render dt; `set_timestep` sets
+`integration_parameters.dt` together with the accumulator interval.
+
+### Physics presentation
+
+`PhysicsWorld::present(world, accumulator / fixed_dt)` runs every frame
+after the fixed-step loop: for each dynamic body `Transform.position =
+lerp(prev, curr, alpha)` from a per-body `prev_poses` snapshot taken before
+each step (initialised on register, cleared by
+`rebuild_bodies_from_world`); rotation is slerped only for bodies with an
+unlocked axis — fully locked bodies copy Rapier's rotation (the controller
+owns that yaw). The in-loop `sync_physics_to_ecs` stays (it feeds
+`Velocity`); presentation overwrites its position. So a dynamic body's
+`Transform` is ≤ 1 fixed step behind the simulation, and anything that
+needs the simulated pose (probes, distance checks) reads `body_position`.
+
+### Rig-as-child contract
+
+The player **root** carries `Transform`, `RigidBody` (dynamic capsule),
+`Collider`, `CharacterMovement`, `PlayerInput`. The rig is a **child**
+(`Parent` by GUID) with `Transform` (local offset `(0,0,−0.9)` puts the
+mesh feet on the capsule bottom; rotation 180° about Z because a Mixamo
+rig faces −X after import), `MeshRenderer`, `AnimGraphRunner` — no
+`RigidBody`, no `CharacterRig`. The bridge picks the first such child and
+never touches its transform; the camera boom excludes the *target's* body,
+so the capsule must sit on the root; `FootPlacementSystem` excludes the
+rig's own `RigidBody` handle, else the `Parent`'s (`exclude_handle`), so
+foot rays do not hit the capsule from inside. The Camera entity is a root
+with `Transform` + `Camera` + `OrbitCamera`; its authored pose is
+overwritten on the first playing frame.
+
+### Foot IK after 41.6
+
+The 41.5 pipeline keeps its shape (chains on the graph, `IkTargets`
+resolved serially, `apply_ik` on retained model space); what a foot target
+*means* changed:
+
+- **Conform by terrain delta.** `IkTarget { goal: IkGoal, pole: Option<
+  Vec3> }`, `IkGoal::{Point, Offset}`. `place_feet` (`foot_placement.rs`)
+  writes `Offset(terrain_delta)` per foot with ground under it:
+  `terrain_delta = Z · clamp(contact_z − entity_z, −0.5, +0.6) + (normal −
+  Z) · ankle_offset` — zero on flat ground at the entity's plane, so the
+  animated swing clearance survives instead of being pinned to the ray
+  contact. `apply_ik` (`two_bone_goal`) lands the delta on the
+  **pre-pelvis** animated tip recorded at its top (the post-pelvis tip
+  would apply the drop twice). Gameplay `IkTargets::set` still writes
+  `Point`; look-at chains accept only `Point`. Rays still start from the
+  last evaluation's animated foot (one pose-phase of lag).
+- **Knee pole from the current pose.** `pole: None` ⇒ the runner uses
+  `knee + ik::bend_direction(hip, knee, foot)` from this frame's model
+  space; within 1 cm of straight it keeps the previous direction
+  (`ArmedIkChain::pole_dir`), model +Y last. Foot placement never writes a
+  pole.
+- **Foot lock** lives on `FootState` (`held: HeldContact`, `lock_state`,
+  `release`, `release_requested`), not in the `IkTargets` entry — the entry
+  stays "what the terrain says" so the reach fallback and the release blend
+  have it beside the held point. Latch on `<chain>_down` (held = animated
+  foot world position + delta, the clip's plant pose; no ground ⇒ no
+  latch), recording the planting `machine.current_state()`. Release on
+  `<chain>_up`; on reach failure (`apply_ik` finds `|hip → held| > 0.98 ·
+  (l1 + l2)`, uses the offset target that frame and sets
+  `release_requested`, consumed by `place_feet` next frame); or when the
+  machine leaves the planting state (Idle never fires `_up`). Every release
+  blends 0.1 s (`RELEASE_SECS`) from the held point to the offset target;
+  every edge sets `force_eval_external`.
+- **Footfall events are authored by tool** (`animation/footfall.rs`,
+  `#[ignore]` test `author_footfall_events`, run with `--ignored
+  --nocapture`): samples each clip's foot height at 120 Hz on the real
+  skeleton (up axis detected from the bind pose), keeps circular minima in
+  the lower 30 % of the range ≥ 0.15 s apart, enforces alternating feet
+  (`alternate_feet`), and rewrites `foot_{l,r}_down` at the plant and `_up`
+  at +40 % of the interval to the next plant. Every existing `foot_*`
+  marker is replaced on each run.
+- **Clips from separate files**: `--import-anim <src> <out>
+  [--import-scale S]` (or the import dialog's "Animation only") writes just
+  the `.anim`; at arm time `ClipSet::armed_for` remaps channel bone indices
+  by name onto the skeleton (`AnimClipCache::armed`, memoised per (path,
+  bone-table hash); dropped bones printed once), filled into
+  `AnimGraphRuntime.clips` in `run` step 2 because `arm()` runs before the
+  entity has a `SkeletonInstance`.
 
 ## Performance Profiling
 
