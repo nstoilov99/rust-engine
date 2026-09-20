@@ -2952,6 +2952,17 @@ Fifth consumer of the Node Graph Framework. Upgrades Task 31's basic audio with 
 - Search and filtering improvements: global search across hierarchy, assets, and components
 - Recent files / recent scenes quick access
 - Editor layout save/load (persist panel arrangement across sessions — already partially implemented with egui_dock)
+- **Reflection-driven Inspector (noted 2026-09-20, Task 41.6).** The
+  Inspector hand-codes one edit section per component and tracks presence
+  in a full 16-bit field; the gameplay components (`CharacterMovement`,
+  `PlayerInput`, `OrbitCamera`) live in `game_shared` and are edited in
+  that hand-coded style too, which makes the engine editor know about
+  game-specific types (it already does for scene serialization since
+  41.6 P1). The right shape: components register a field schema
+  (name, type, range/units, group) and the Inspector draws from it, so
+  gameplay crates and plugins add editable components without touching
+  engine editor code, and the presence bitfield goes away. Do it here,
+  alongside the undo work — the schema is also what generic undo needs.
 
 **What you'll learn:**
 - Command pattern for comprehensive undo/redo
