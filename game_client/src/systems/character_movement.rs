@@ -98,6 +98,7 @@ impl System for CharacterMovementSystem {
             let grounded = ground.is_some();
 
             let target_speed = if cm.run { cm.run_speed } else { cm.walk_speed };
+            let has_input = cm.desired_dir[0] != 0.0 || cm.desired_dir[1] != 0.0;
             let desired = glm::vec2(cm.desired_dir[0], cm.desired_dir[1]) * target_speed;
             let xy = accelerate_toward(
                 glm::vec2(vel.x, vel.y),
@@ -131,6 +132,13 @@ impl System for CharacterMovementSystem {
                     // Rise until the feet clear the step, then hold height
                     // (no snap) and glide until the centre is over it.
                     vz = step_lift_vz(target - feet_z, fixed_dt);
+                } else if !has_input {
+                    // Standing intent: no ground following at all. The snap
+                    // would press a capsule balanced on a tread edge (its
+                    // radius exceeds a tread) onto the tilted edge contact
+                    // and shove it forward every step; with grip friction
+                    // on (below) the solver holds the body by itself.
+                    vz = vel.z;
                 } else {
                     // The surface to follow is the one under the body — or,
                     // when a walkable slope starts just ahead, that slope,
@@ -200,10 +208,11 @@ impl System for CharacterMovementSystem {
             let new_vel = glm::vec3(xy.x, xy.y, vz);
             physics.set_linear_velocity(handle, new_vel);
             // Frictionless while moving (no dragging on risers and edges),
-            // grippy while standing (no sliding off tread edges or slopes;
-            // a frictionless capsule resting on an edge always slides).
-            let has_input = cm.desired_dir[0] != 0.0 || cm.desired_dir[1] != 0.0;
-            let standing = grounded && !has_input && speed < MIN_STEP_SPEED;
+            // grippy the moment input stops (no sliding off tread edges or
+            // slopes). Decided by intent, not by speed: a residual slide
+            // would otherwise keep the speed up, keep friction off, and
+            // sustain itself down a whole staircase.
+            let standing = grounded && !has_input;
             physics.set_friction(handle, if standing { STANDING_FRICTION } else { 0.0 });
 
             if speed > MIN_TURN_SPEED {
