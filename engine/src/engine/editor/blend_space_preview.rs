@@ -49,13 +49,21 @@ pub fn bones_cover(mesh_bones: &[String], clip_bones: &[String]) -> bool {
 /// Task 41.6 D7: arm every loaded set against the preview skeleton by name
 /// — the runner's remap, applied in place. A remapped set carries the
 /// skeleton's table, so a repeat is a no-op; no skeleton, nothing to do.
+/// A set naming bones the skeleton lacks is left **unarmed**: the preview
+/// reports that mismatch ("bones don't match") instead of silently
+/// dropping channels the way the runtime does — arming would overwrite the
+/// clip's table with the skeleton's and hide the diagnosis.
 pub fn arm_clips_to_skeleton(
     clips: &mut HashMap<String, Option<ClipSet>>,
     skeleton: Option<&SkeletonInstance>,
 ) {
     let Some(skel) = skeleton else { return };
+    let mesh_bones: Vec<String> = skel.bones.iter().map(|b| b.name.clone()).collect();
     for (path, set) in clips.iter_mut() {
         let Some(set) = set else { continue };
+        if !bones_cover(&mesh_bones, &set.bone_names) {
+            continue;
+        }
         if let Some((armed, dropped)) = set.armed_for(&skel.bones) {
             if !dropped.is_empty() {
                 eprintln!(
