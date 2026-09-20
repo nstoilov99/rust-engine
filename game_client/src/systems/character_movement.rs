@@ -61,7 +61,9 @@ impl System for CharacterMovementSystem {
         let Some(physics) = resources.get_mut::<PhysicsWorld>() else {
             return;
         };
-        let fixed_dt = physics.fixed_dt();
+        // Gap-closing velocities (snap, step lift) are integrated over every
+        // fixed step this frame releases, not just one.
+        let fixed_dt = physics.integration_horizon(dt);
         let gravity_z = physics.gravity().z;
         let down = glm::vec3(0.0, 0.0, -1.0);
         let mut turned: Vec<hecs::Entity> = Vec::new();

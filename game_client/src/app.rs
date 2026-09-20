@@ -425,6 +425,18 @@ struct SkinnedPreviewTarget<'a> {
     what: &'a str,
 }
 
+/// `<dir>/<stem>.<ext>`, or `<stem> (n).<ext>` when that already exists.
+#[cfg(feature = "editor")]
+fn unique_output_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let mut path = dir.join(format!("{stem}.{ext}"));
+    let mut counter = 1;
+    while path.exists() && counter <= 100 {
+        path = dir.join(format!("{stem} ({counter}).{ext}"));
+        counter += 1;
+    }
+    path
+}
+
 /// Record one skinned preview pass: (re)create the target for a new mesh,
 /// follow the pane's size, upload this frame's palette, draw. `None` when
 /// there is nothing to draw yet (no mesh, empty pane, mesh not on the GPU).
@@ -7852,17 +7864,7 @@ impl App {
             // import, Task 41.6 D6) with duplicate handling
             let animation_only = dialog.settings.animation_only;
             let ext = if animation_only { "anim" } else { "mesh" };
-            let mut mesh_path = target_dir.join(format!("{}.{}", stem, ext));
-            if mesh_path.exists() {
-                let mut counter = 1;
-                loop {
-                    mesh_path = target_dir.join(format!("{} ({}).{}", stem, counter, ext));
-                    if !mesh_path.exists() || counter > 100 {
-                        break;
-                    }
-                    counter += 1;
-                }
-            }
+            let mesh_path = unique_output_path(&target_dir, stem, ext);
 
             // Copy the source file alongside the .mesh when asked (the
             // sidecar records the original path either way); never for an
@@ -7882,12 +7884,37 @@ impl App {
                 }
             }
 
-            // Run the import pipeline
-            match rust_engine::assets::mesh_import::import_model_to_mesh(
+            // Run the import pipeline. "Animation only" was offered for the
+            // previewed file; a batch can mix in sources with no clips, and
+            // those import as meshes instead of failing.
+            let mut settings = dialog.settings.clone();
+            let mut mesh_path = mesh_path;
+            let mut outcome = rust_engine::assets::mesh_import::import_model_to_mesh(
                 source_path,
                 &mesh_path,
-                &dialog.settings,
-            ) {
+                &settings,
+            );
+            if animation_only
+                && outcome
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains("has no animation clips"))
+            {
+                settings.animation_only = false;
+                mesh_path = unique_output_path(&target_dir, stem, "mesh");
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "'{}' has no animation clips; importing it as a mesh",
+                    source_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )));
+                outcome = rust_engine::assets::mesh_import::import_model_to_mesh(
+                    source_path,
+                    &mesh_path,
+                    &settings,
+                );
+            }
+            match outcome {
                 Ok(result) => {
                     let mesh_size = std::fs::metadata(&mesh_path)
                         .map(|m| m.len() as f64 / 1024.0)

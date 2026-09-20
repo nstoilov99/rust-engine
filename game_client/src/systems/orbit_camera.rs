@@ -95,7 +95,7 @@ impl System for OrbitCameraSystem {
             let hit = physics
                 .raycast_filtered(pivot, -fwd, oc.distance, target.body)
                 .map(|h| h.distance);
-            let len = boom_length(oc.distance, hit, oc.min_distance);
+            let len = boom_length(oc.distance, hit);
 
             transform.position = pivot - fwd * len;
             transform.rotation = look_rotation(oc.yaw, oc.pitch);
@@ -181,12 +181,17 @@ pub fn boom_pivot(target: glm::Vec3, yaw: f32, pivot_height: f32, shoulder: f32)
     target + glm::vec3(0.0, 0.0, pivot_height) + right(yaw) * shoulder
 }
 
+/// Shortest boom a wall can push the camera to (`min_distance` is the
+/// scroll-zoom floor, not a collision floor — a camera held at
+/// `min_distance` inside a wall is worse than one at the pivot).
+const BOOM_COLLISION_MIN: f32 = 0.05;
+
 /// Boom length after collision: a hit at `hit_distance` pulls the camera to
-/// `BOOM_PADDING` before it, never closer than `min_distance` and never
-/// further than `distance`.
-pub fn boom_length(distance: f32, hit_distance: Option<f32>, min_distance: f32) -> f32 {
+/// `BOOM_PADDING` before it (down to [`BOOM_COLLISION_MIN`]), never further
+/// than `distance`.
+pub fn boom_length(distance: f32, hit_distance: Option<f32>) -> f32 {
     match hit_distance {
-        Some(h) => (h - BOOM_PADDING).max(min_distance).min(distance),
+        Some(h) => (h - BOOM_PADDING).clamp(BOOM_COLLISION_MIN, distance.max(BOOM_COLLISION_MIN)),
         None => distance,
     }
 }
@@ -238,10 +243,14 @@ mod tests {
 
     #[test]
     fn boom_shortens_on_hit_with_padding_and_floors_at_min() {
-        assert_eq!(boom_length(3.5, None, 1.5), 3.5);
-        assert!((boom_length(3.5, Some(2.0), 1.5) - 1.8).abs() < 1e-6);
-        assert_eq!(boom_length(3.5, Some(0.1), 1.5), 1.5, "never below min_distance");
-        assert_eq!(boom_length(3.5, Some(3.5), 1.5), 3.3);
+        assert_eq!(boom_length(3.5, None), 3.5);
+        assert!((boom_length(3.5, Some(2.0)) - 1.8).abs() < 1e-6);
+        assert!(
+            (boom_length(3.5, Some(0.5)) - 0.3).abs() < 1e-6,
+            "a wall inside the zoom floor still keeps the camera in front of it"
+        );
+        assert_eq!(boom_length(3.5, Some(0.1)), BOOM_COLLISION_MIN, "never behind the pivot");
+        assert_eq!(boom_length(3.5, Some(3.5)), 3.3);
     }
 
     #[test]

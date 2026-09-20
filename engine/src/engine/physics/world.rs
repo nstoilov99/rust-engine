@@ -128,6 +128,16 @@ impl PhysicsWorld {
         self.fixed_dt
     }
 
+    /// Simulated time the next [`Self::step`] with this `delta_time` will
+    /// integrate: the number of fixed steps the accumulator will release,
+    /// times `fixed_dt` — at least one step's worth, so a velocity set to
+    /// close a gap "this frame" divides by the horizon it is actually
+    /// applied over (a 30 Hz frame runs two 60 Hz steps).
+    pub fn integration_horizon(&self, delta_time: f32) -> f32 {
+        let steps = ((self.accumulator + delta_time.max(0.0)) / self.fixed_dt).floor();
+        steps.max(1.0) * self.fixed_dt
+    }
+
     /// Reset the fixed-timestep accumulator to zero.
     /// Call after rebuilding physics to prevent stale time from triggering steps.
     pub fn reset_accumulator(&mut self) {
@@ -633,6 +643,23 @@ mod tests {
         let back = rotation_from_physics(rb.rotation());
         let fwd = glm::quat_rotate_vec3(&back, &glm::vec3(1.0, 0.0, 0.0));
         assert!((fwd.y.atan2(fwd.x) - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_integration_horizon_counts_the_steps_a_frame_releases() {
+        let mut world = World::new();
+        let mut physics = PhysicsWorld::new();
+        let dt = physics.fixed_dt();
+        // Empty accumulator: a 60 Hz frame is one step, a 30 Hz frame two,
+        // and a frame shorter than a step still divides by one step.
+        assert!((physics.integration_horizon(dt) - dt).abs() < 1e-6);
+        assert!((physics.integration_horizon(2.0 * dt) - 2.0 * dt).abs() < 1e-6);
+        assert!((physics.integration_horizon(0.25 * dt) - dt).abs() < 1e-6);
+        // Half a step left over from the last frame tips a 60 Hz frame to
+        // two steps.
+        physics.step(0.5 * dt, &mut world);
+        assert!((physics.integration_horizon(0.6 * dt) - dt).abs() < 1e-6);
+        assert!((physics.integration_horizon(1.6 * dt) - 2.0 * dt).abs() < 1e-6);
     }
 
     #[test]
