@@ -5068,8 +5068,51 @@ use crate::engine::utils::coords::convert_position_zup_to_yup;
 
 /// Clips on the [`ik_bones`] skeleton (upper, lower, hand, tool), served by
 /// `MapAssets` under `anims/ik/<name>`: translation `x` on `lower`, `x / 2`
-/// on `hand`, nothing on the others.
+/// on `hand`, nothing on the others. The P3 layering fixtures differ:
+/// `twist` keys every SQT channel of `lower` and nothing else, `handonly`
+/// keys `hand` alone, `ramp` runs `lower` 0 → 10 over its second with a
+/// `lap` marker at 0.05.
 fn ik_clip_set(name: &str) -> Option<ClipSet> {
+    let channel = |bone_index: usize, x: f32| AnimationChannel {
+        bone_index,
+        position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0))],
+        rotation_keys: vec![],
+        scale_keys: vec![],
+    };
+    let set = |clip: RawAnimationClip| {
+        Some(ClipSet {
+            bone_names: ik_bones().iter().map(|b| b.name.clone()).collect(),
+            clips: vec![clip],
+        })
+    };
+    match name {
+        "twist.anim" => {
+            let mut clip = marked_clip("Twist", 0.0, 1.0, &[]);
+            clip.channels = vec![AnimationChannel {
+                bone_index: 1,
+                position_keys: vec![(0.0, Vec3::new(40.0, 0.0, 0.0))],
+                rotation_keys: vec![(0.0, glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))],
+                scale_keys: vec![(0.0, Vec3::splat(2.0))],
+            }];
+            return set(clip);
+        }
+        "handonly.anim" => {
+            let mut clip = marked_clip("HandOnly", 0.0, 1.0, &[]);
+            clip.channels = vec![channel(2, 40.0)];
+            return set(clip);
+        }
+        "ramp.anim" => {
+            let mut clip = marked_clip("Ramp", 0.0, 1.0, &[(0.05, "lap")]);
+            clip.channels = vec![AnimationChannel {
+                bone_index: 1,
+                position_keys: vec![(0.0, Vec3::ZERO), (1.0, Vec3::new(10.0, 0.0, 0.0))],
+                rotation_keys: vec![],
+                scale_keys: vec![],
+            }];
+            return set(clip);
+        }
+        _ => {}
+    }
     let (clip, x, duration, marks): (&str, f32, f32, &[(f32, &str)]) = match name {
         "idle.anim" => ("Idle", 0.0, 1.0, &[]),
         "walk.anim" => ("Walk", 10.0, 1.0, &[]),
@@ -5078,18 +5121,9 @@ fn ik_clip_set(name: &str) -> Option<ClipSet> {
         "upper.anim" => ("Upper", 40.0, 1.0, &[(0.05, "wave")]),
         _ => return None,
     };
-    let channel = |bone_index: usize, x: f32| AnimationChannel {
-        bone_index,
-        position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0))],
-        rotation_keys: vec![],
-        scale_keys: vec![],
-    };
     let mut clip = marked_clip(clip, 0.0, duration, marks);
     clip.channels = vec![channel(1, x), channel(2, x * 0.5)];
-    Some(ClipSet {
-        bone_names: ik_bones().iter().map(|b| b.name.clone()).collect(),
-        clips: vec![clip],
-    })
+    set(clip)
 }
 
 fn same_pose(a: &[LocalBoneTransform], b: &[LocalBoneTransform]) -> bool {
@@ -5572,11 +5606,20 @@ fn a_whole_body_play_once_start_releases_the_foot_lock() {
 /// ENTRY → Idle (`ik/idle`); `SM(20) ─base▶ Layer(22: bones, weight aim)
 /// ◀layer─ Clip(21: ik/upper) → Output(25)`.
 fn layer_doc(bones: &str) -> GraphDoc {
+    layer_doc_with(bones, "anims/ik/upper.anim", true)
+}
+
+/// [`layer_doc`] with a chosen layer clip and `include_root`.
+fn layer_doc_with(bones: &str, layer_clip: &str, include_root: bool) -> GraphDoc {
     let mut doc = GraphDoc {
         realm: GraphRealm::Client,
         ..GraphDoc::default()
     };
     doc.variables = vec![float_decl("aim")];
+    let mut layer = layer_node(22, Some("Aim"), bones, "aim");
+    layer
+        .properties
+        .insert(LAYER_INCLUDE_ROOT_PROP.into(), PropValue::Bool(include_root));
     doc.nodes = vec![
         node(1, plan::ANIM_ENTRY_TYPE_ID, None),
         with(
@@ -5586,8 +5629,8 @@ fn layer_doc(bones: &str) -> GraphDoc {
             &[(plan::CLIP_PROP, PropValue::Asset("anims/ik/idle.anim".into()))],
         ),
         node(20, ANIM_PIPE_MACHINE_TYPE_ID, None),
-        clip_source(21, Some("Upper"), "anims/ik/upper.anim"),
-        layer_node(22, Some("Aim"), bones, "aim"),
+        clip_source(21, Some("Upper"), layer_clip),
+        layer,
         node(25, ANIM_PIPE_OUTPUT_TYPE_ID, None),
     ];
     doc.edges = vec![
@@ -5599,13 +5642,11 @@ fn layer_doc(bones: &str) -> GraphDoc {
     doc
 }
 
-fn layer_harness(bones: &str) -> (Harness, hecs::Entity) {
+/// Arm `doc` as [`GRAPH`] on an entity with the [`ik_bones`] skeleton and
+/// tick once (the arming tick).
+fn armed_ik_doc(doc: GraphDoc) -> (Harness, hecs::Entity) {
     let assets = MapAssets::default();
-    assets
-        .graphs
-        .lock()
-        .unwrap()
-        .insert(GRAPH.into(), layer_doc(bones));
+    assets.graphs.lock().unwrap().insert(GRAPH.into(), doc);
     let mut h = Harness::new(assets);
     let e = h.world.spawn((
         AnimGraphRunner::new(GRAPH),
@@ -5613,6 +5654,10 @@ fn layer_harness(bones: &str) -> (Harness, hecs::Entity) {
     ));
     h.tick();
     (h, e)
+}
+
+fn layer_harness(bones: &str) -> (Harness, hecs::Entity) {
+    armed_ik_doc(layer_doc(bones))
 }
 
 /// A Layer masked to `lower` (and so its descendants) at weight 1 puts the
@@ -5686,4 +5731,228 @@ fn arming_refuses_a_missing_root_clip() {
     let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
     let why = rt.disabled.as_deref().expect("refused");
     assert!(why.contains("clip #21: clip 'anims/ik/nope.anim' could not be loaded"), "{why}");
+}
+
+// ---------------------------------------------------------------------------
+// Layered blend semantics (Task 41.7 P3: D7 acceptance, root clips)
+// ---------------------------------------------------------------------------
+
+fn mask_of(h: &Harness, e: hecs::Entity, node: u64) -> Vec<f32> {
+    h.world
+        .get::<&AnimGraphRuntime>(e)
+        .unwrap()
+        .masks
+        .get(&node)
+        .cloned()
+        .expect("mask armed")
+}
+
+fn local_of(h: &Harness, e: hecs::Entity, i: usize) -> LocalBoneTransform {
+    h.world.get::<&SkeletonInstance>(e).unwrap().local_transforms[i]
+}
+
+/// The Layer's weight is its Float clamped to `[0, 1]`: above 1 is 1, below
+/// 0 is 0, and a non-finite value (either infinity, NaN) is 0.
+#[test]
+fn a_layer_weight_clamps_to_the_unit_range() {
+    let (mut h, e) = layer_harness("lower");
+    for (aim, lower, why) in [
+        (2.0, 40.0, "clamped to 1"),
+        (-1.0, 0.0, "clamped to 0"),
+        (1.0, 40.0, "one"),
+        (f32::INFINITY, 0.0, "non-finite"),
+        (0.25, 10.0, "a quarter"),
+        (f32::NEG_INFINITY, 0.0, "non-finite"),
+    ] {
+        set_float(&mut h, e, "aim", aim);
+        h.tick();
+        assert_eq!(local_x(&h, e, 1), lower, "aim {aim}: {why}");
+        assert_eq!(local_x(&h, e, 0), 0.0, "aim {aim}: upper is never masked");
+    }
+}
+
+/// At weight 0.5 a masked bone is the SQT blend of base and layer —
+/// translation and scale lerped, rotation slerped — exactly
+/// [`LocalBoneTransform::blend`] at 0.5. A masked bone the layer clip
+/// leaves unkeyed (`hand` here) keeps the base. The base is read off the
+/// arming tick, before any layering: the idle clip keys translation only,
+/// so once a blend has written `lower`'s rotation and scale they persist
+/// into the next frame's base (the pre-sample agreement every blend keeps).
+#[test]
+fn a_layer_at_half_weight_is_the_sqt_blend_of_base_and_layer() {
+    let (mut h, e) = armed_ik_doc(layer_doc_with("lower", "anims/ik/twist.anim", true));
+    assert!(h.world.get::<&AnimGraphRuntime>(e).unwrap().disabled.is_none());
+    let base = local_of(&h, e, 1);
+    assert_eq!(base.translation, Vec3::ZERO);
+    assert!(base.rotation.abs_diff_eq(glam::Quat::IDENTITY, 1e-6));
+    assert_eq!(base.scale, Vec3::ONE);
+
+    set_float(&mut h, e, "aim", 0.5);
+    h.tick();
+    let got = local_of(&h, e, 1);
+
+    set_float(&mut h, e, "aim", 1.0);
+    h.tick();
+    let layer = local_of(&h, e, 1);
+    assert!(layer.translation.abs_diff_eq(Vec3::new(40.0, 0.0, 0.0), 1e-5));
+    assert!(layer.rotation.abs_diff_eq(glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), 1e-5));
+    assert!(layer.scale.abs_diff_eq(Vec3::splat(2.0), 1e-5));
+    assert_eq!(local_of(&h, e, 2).translation, Vec3::ZERO, "hand: unkeyed by the layer, base kept");
+
+    let want = base.blend(&layer, 0.5);
+    assert!(got.translation.abs_diff_eq(want.translation, 1e-5), "{got:?} vs {want:?}");
+    assert!(got.rotation.abs_diff_eq(want.rotation, 1e-5), "{got:?} vs {want:?}");
+    assert!(got.scale.abs_diff_eq(want.scale, 1e-5), "{got:?} vs {want:?}");
+    assert!(
+        got.rotation.abs_diff_eq(glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4), 1e-5),
+        "a slerp, not a lerp: half a quarter turn"
+    );
+}
+
+/// A masked bone the layer clip carries no channels for keeps the base for
+/// that bone even when the base is not the rest pose: `handonly` over a
+/// walking base masked to `lower` moves the hand and leaves `lower` on the
+/// walk.
+#[test]
+fn a_layer_clip_missing_channels_keeps_the_base_for_that_bone() {
+    let mut doc = layer_doc_with("lower", "anims/ik/handonly.anim", true);
+    doc.node_mut(2).unwrap().properties.insert(
+        plan::CLIP_PROP.into(),
+        PropValue::Asset("anims/ik/walk.anim".into()),
+    );
+    let (mut h, e) = armed_ik_doc(doc);
+    set_float(&mut h, e, "aim", 1.0);
+    h.tick();
+    assert_eq!(local_x(&h, e, 1), 10.0, "lower: the layer has no channel, the walk stays");
+    assert_eq!(local_x(&h, e, 2), 40.0, "hand: the layer's channel");
+    assert_eq!(local_x(&h, e, 0), 0.0);
+}
+
+/// `include_root: false` excludes the listed root itself and keeps its
+/// descendants.
+#[test]
+fn include_root_false_excludes_the_root_bone_itself() {
+    let (mut h, e) = armed_ik_doc(layer_doc_with("lower", "anims/ik/upper.anim", false));
+    assert_eq!(mask_of(&h, e, 22), vec![0.0, 0.0, 1.0, 1.0]);
+    set_float(&mut h, e, "aim", 1.0);
+    h.tick();
+    assert_eq!(local_x(&h, e, 1), 0.0, "lower: the excluded root keeps the base");
+    assert_eq!(local_x(&h, e, 2), 20.0, "hand: a descendant follows the layer");
+}
+
+/// Overlapping roots union — a bone under any listed root is in, whichever
+/// order the roots are written, and under `include_root: false` a listed
+/// root that is also another root's descendant stays in.
+#[test]
+fn overlapping_mask_roots_union() {
+    let (h, e) = layer_harness("hand, lower");
+    assert_eq!(mask_of(&h, e, 22), vec![0.0, 1.0, 1.0, 1.0]);
+    let (h, e) = layer_harness("lower,hand");
+    assert_eq!(mask_of(&h, e, 22), vec![0.0, 1.0, 1.0, 1.0]);
+    let (h, e) = armed_ik_doc(layer_doc_with("upper, hand", "anims/ik/upper.anim", false));
+    assert_eq!(
+        mask_of(&h, e, 22),
+        vec![0.0, 1.0, 1.0, 1.0],
+        "hand is upper's descendant, so it is in although it is a listed root"
+    );
+    let (h, e) = armed_ik_doc(layer_doc_with("tool, hand", "anims/ik/upper.anim", false));
+    assert_eq!(mask_of(&h, e, 22), vec![0.0, 0.0, 0.0, 1.0]);
+}
+
+/// A masked Play Once's own mask root missing on the skeleton refuses at
+/// arm, anchored on the node — with the slot's name.
+#[test]
+fn arming_refuses_a_missing_play_once_mask_root() {
+    let (h, e) = armed_ik_doc(foot_cast_doc(Some("shin")));
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("play-once slot 'Cast' (#23): bone 'shin' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+/// A masked Play Once applies on its masked bones only, through its fade-in
+/// envelope; its own markers fire at the envelope's weight at the marker's
+/// time (the plateau: 1), and the base's events are untouched at every
+/// point of the envelope (U1).
+#[test]
+fn a_masked_play_once_fades_on_its_bones_and_fires_at_plateau_weight() {
+    let mut doc = foot_cast_doc(Some("hand"));
+    doc.node_mut(23)
+        .unwrap()
+        .properties
+        .insert(plan::SLOT_FADE_IN_PROP.into(), PropValue::Float(0.2));
+    let (mut h, e) = armed_ik_doc(doc); // tick 1: state clock [0, 0.1)
+    assert_eq!(mask_of(&h, e, 23), vec![0.0, 0.0, 1.0, 1.0]);
+    fire_trigger(&mut h, e, "cast");
+    h.tick(); // tick 2: the cast starts at weight 0; the stride's foot_down (0.15) crosses
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "foot_down"), 1, "{ev:?}");
+    assert_eq!(ev.iter().find(|f| f.name == "foot_down").unwrap().weight, 1.0);
+    assert_eq!((local_x(&h, e, 1), local_x(&h, e, 2)), (5.0, 2.5), "weight 0: the stride");
+
+    h.tick(); // tick 3: slot clock [0, 0.1) → envelope 0.5
+    assert_eq!(local_x(&h, e, 2), 8.75, "hand: half-way from 2.5 to 15");
+    assert_eq!(local_x(&h, e, 1), 5.0, "lower: outside the mask");
+    h.tick(); // tick 4: [0.1, 0.2) → plateau
+    assert_eq!((local_x(&h, e, 1), local_x(&h, e, 2)), (5.0, 15.0));
+    h.tick(); // tick 5: [0.2, 0.3) crosses `hit` (0.25)
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "hit"), 1, "{ev:?}");
+    assert_eq!(ev.iter().find(|f| f.name == "hit").unwrap().weight, 1.0, "full plateau weight");
+    h.tick(); // tick 6
+    h.tick(); // tick 7: the stride's foot_up (0.65) under the cast
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "foot_up"), 1, "masked: base events untouched: {ev:?}");
+    assert_eq!(ev.iter().find(|f| f.name == "foot_up").unwrap().weight, 1.0);
+}
+
+/// `Clip(21: ik/ramp, speed 2) ─base▶ Layer(22: hand, aim) ◀layer─ SM(20)
+/// → Output(25)`: the root clip on the Base side.
+fn root_clip_base_doc() -> GraphDoc {
+    let mut doc = layer_doc("hand");
+    doc.node_mut(21).unwrap().properties.insert(
+        plan::CLIP_PROP.into(),
+        PropValue::Asset("anims/ik/ramp.anim".into()),
+    );
+    doc.node_mut(21)
+        .unwrap()
+        .properties
+        .insert(plan::SPEED_PROP.into(), PropValue::Float(2.0));
+    doc.edges = vec![
+        edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN),
+        pose_edge(21, 22, LAYER_BASE_PIN),
+        pose_edge(20, 22, LAYER_LAYER_PIN),
+        pose_edge(22, 25, PIPE_IN_PIN),
+    ];
+    doc
+}
+
+/// A root clip runs its own looping clock at `speed`: the ramp wraps after
+/// its second (five ticks at ×2), and its marker fires on every cycle at
+/// the branch's weight — 1 on the Base side (the Layer-side case, silent at
+/// weight 0 and scaled otherwise, is pinned by
+/// `a_layer_at_weight_one_changes_masked_bones_only`).
+#[test]
+fn a_root_clip_loops_at_its_speed_and_fires_at_the_base_weight() {
+    let (mut h, e) = armed_ik_doc(root_clip_base_doc()); // tick 1: clock [0, 0.2)
+    assert!(h.world.get::<&AnimGraphRuntime>(e).unwrap().disabled.is_none());
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "lap"), 1, "{ev:?}");
+    assert_eq!(ev[0].weight, 1.0, "the Base side is heard at 1");
+    assert!((local_x(&h, e, 1) - 2.0).abs() < 1e-4, "0.2 s into the ramp");
+    for t in 2..=5 {
+        h.tick();
+        assert_eq!(count(&events_of(&h, e), "lap"), 0, "tick {t}");
+        if t == 4 {
+            assert!((local_x(&h, e, 1) - 8.0).abs() < 1e-4, "0.8 s into the ramp");
+        }
+    }
+    h.tick(); // tick 6: [1.0, 1.2) — the second cycle
+    let clock = h.world.get::<&AnimGraphRuntime>(e).unwrap().root_clocks[0];
+    assert!((clock.prev - 1.0).abs() < 1e-5 && (clock.time - 1.2).abs() < 1e-5, "{clock:?}");
+    assert_eq!(count(&events_of(&h, e), "lap"), 1, "fired again on the wrap");
+    assert!((local_x(&h, e, 1) - 2.0).abs() < 1e-4, "wrapped: 0.2 s into the ramp again");
+    assert_eq!(local_x(&h, e, 2), 0.0, "the machine's Idle on the Layer side at aim 0 is silent");
 }

@@ -8949,12 +8949,7 @@ fn fold_anim_panel_previews(
                 pv.mirror = hecs::Entity::from_bits(bound.instance_id)
                     .and_then(|e| world.get::<&AnimGraphRuntime>(e).ok())
                     .filter(|rt| rt.disabled.is_none())
-                    .map(|rt| Mirror {
-                        name: bound.instance.clone(),
-                        plan: rt.plan.clone(),
-                        machine: rt.machine.clone(),
-                        params: rt.params.clone(),
-                    });
+                    .map(|rt| Mirror::of_runtime(bound.instance.clone(), &rt));
             }
             None => {
                 pv.mirror = None;

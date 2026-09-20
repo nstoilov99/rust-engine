@@ -1051,11 +1051,12 @@ where
 /// Task 41.7: resolve every Layer / masked Play Once mask of the pipeline
 /// against an entity's skeleton — 1 on each listed root (unless the Layer
 /// says `include_root: false`) and every descendant, 0 elsewhere; roots
-/// union. A root missing on the skeleton refuses, anchored on the node (the
-/// message carries its id; a slot also its name). A mask covering no bone
-/// at all is said out loud, once per arm. Serial: runs beside
-/// [`arm_ik_chains`], never on a worker. Pub so the preview panel can arm
-/// its own masks the same way.
+/// union (so under `include_root: false` a listed root still counts when
+/// another listed root is its ancestor). A root missing on the skeleton
+/// refuses, anchored on the node (the message carries its id; a slot also
+/// its name). A mask covering no bone at all is said out loud, once per
+/// arm. Serial: runs beside [`arm_ik_chains`], never on a worker. Pub so
+/// the preview panel can arm its own masks the same way.
 pub fn arm_masks(
     plan: &AnimGraphPlan,
     skeleton: &SkeletonInstance,
@@ -1104,8 +1105,8 @@ pub fn arm_masks(
         }
         let weights: Vec<f32> = (0..bones.len())
             .map(|i| {
-                if roots.contains(&i) {
-                    return if mask.include_root { 1.0 } else { 0.0 };
+                if mask.include_root && roots.contains(&i) {
+                    return 1.0;
                 }
                 let mut p = bones[i].parent_index;
                 while let Some(j) = p {

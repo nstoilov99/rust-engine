@@ -61,7 +61,7 @@ pub use plan::{
     TRIGGER_PARAM_DOMAIN,
 };
 pub use runner::{
-    compile_blend_space, invalidate_blend_space, AnimAssetLoader, AnimClipCache,
+    arm_masks, compile_blend_space, invalidate_blend_space, AnimAssetLoader, AnimClipCache,
     AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime, AnimGraphSystem, AnimViewInfo,
     ArmedIkChain, BlendSpaceCache, ClipSet, DiskAnimAssets, FootRelease, FootState, HeldContact,
     IkGoal, IkTarget, IkTargets, PelvisState, ResolvedIkTarget, ThrottleState,
