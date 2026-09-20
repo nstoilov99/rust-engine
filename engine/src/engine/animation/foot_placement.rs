@@ -161,9 +161,16 @@ pub fn place_feet(
         // Lock edges (`<chain>_down` / `<chain>_up`, last tick's fires).
         // Either edge forces one full evaluation — the P4 hook, serial-side.
         // A down edge with no ground under the foot does not latch.
+        // The state that planted the foot has been left (a stop into Idle,
+        // a jump): its `_up` will never come, so let go here.
+        if foot.locked && foot.lock_state != rt.machine.current_state() {
+            foot.unlock();
+            rt.throttle.force_eval_external = true;
+        }
         if fired(&rt.events, &chain.name, FOOT_EVENT_DOWN_SUFFIX) {
             if let Some(c) = fresh {
                 foot.locked = true;
+                foot.lock_state = rt.machine.current_state();
                 foot.held = Some(HeldContact {
                     point: c.plant,
                     contact_z: c.contact_z,
@@ -557,6 +564,29 @@ mod tests {
         rt.events.clear();
         place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.4));
         assert!(foot(&rt).release.is_none(), "blend complete");
+    }
+
+    #[test]
+    fn leaving_the_planting_state_releases_the_lock() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        fire(&mut rt, "foot_l_down");
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
+        assert!(foot(&rt).locked);
+        rt.events.clear();
+        rt.throttle.force_eval_external = false;
+
+        // Still in the planting state: the lock holds with no `_up`.
+        place(&mut rt, &mut targets, 0.2, true, &mut ground(-0.1));
+        assert!(foot(&rt).locked, "same state keeps the lock");
+
+        // The machine moves on (a stop into Idle): the lock lets go and
+        // blends off the held point, like an `_up` would.
+        rt.machine.set_current_state_for_test(1);
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.1));
+        assert!(!foot(&rt).locked && foot(&rt).held.is_none());
+        assert!(foot(&rt).release.is_some(), "release blend started");
+        assert!(rt.throttle.force_eval_external, "the release forces an evaluation");
     }
 
     #[test]

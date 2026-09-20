@@ -296,6 +296,12 @@ impl AnimMachine {
         self.current
     }
 
+    /// Test hook: park the machine in `state` without a transition.
+    #[cfg(test)]
+    pub(crate) fn set_current_state_for_test(&mut self, state: usize) {
+        self.current = state;
+    }
+
     /// Seconds into the active state's clip.
     pub fn time(&self) -> f32 {
         self.time

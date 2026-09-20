@@ -206,6 +206,11 @@ pub struct FootState {
     /// `held.point` (locked) or `release.from` (releasing) in model space,
     /// written by the serial resolution pass each frame.
     pub lock_model: Option<glam::Vec3>,
+    /// The machine state that was current when the lock latched. A lock
+    /// belongs to the clip that planted the foot: leaving that state (Idle
+    /// fires no `_up`) releases it, or the leg would stay stretched to a
+    /// plant the body has walked past.
+    pub lock_state: usize,
 }
 
 impl FootState {
@@ -217,6 +222,7 @@ impl FootState {
             release: None,
             release_requested: false,
             lock_model: None,
+            lock_state: 0,
         }
     }
 
