@@ -5,7 +5,7 @@
 //! (not depth-tested): bones sit inside the skinned mesh and would
 //! otherwise be hidden by the character's own skin.
 
-use crate::engine::animation::graph::runner::{AnimGraphRuntime, IkTargets};
+use crate::engine::animation::graph::runner::{AnimGraphRuntime, IkGoal, IkTargets};
 use crate::engine::animation::SkeletonInstance;
 use crate::engine::debug_draw::DebugDrawBuffer;
 use crate::engine::ecs::components::Transform;
@@ -46,27 +46,53 @@ pub fn submit_skeleton_debug_draws(
 
 /// Submit IK effector/pole overlays (Task 41.5 P5) for every entity whose
 /// skeleton debug toggle is on and whose graph armed IK chains: a cross at
-/// each chain's effector, a smaller one at its pole, and a faint tie line.
+/// each chain's effector, a smaller one at its pole (when gameplay supplied
+/// one), and a faint tie line.
 ///
-/// `IkTargets` positions are already world Z-up game space — exactly what
-/// the debug draw API takes, so no conversion happens here.
-pub fn submit_ik_debug_draws(world: &World, buffer: &mut DebugDrawBuffer) {
-    for (_e, (skeleton, rt, targets)) in world
+/// `IkTargets` positions are world Z-up game space — what the debug draw
+/// API takes. An `Offset` goal (foot placement) is drawn where it lands:
+/// the last evaluation's animated tip through the entity render matrix,
+/// plus the delta; a locked foot shows its held point instead.
+pub fn submit_ik_debug_draws(
+    world: &World,
+    buffer: &mut DebugDrawBuffer,
+    transform_cache: &TransformCache,
+) {
+    for (entity, (skeleton, rt, targets)) in world
         .query::<(&SkeletonInstance, &AnimGraphRuntime, &IkTargets)>()
         .iter()
     {
         if !skeleton.debug_draw_visible || rt.ik.is_empty() {
             continue;
         }
+        let entity_mat = glam::Mat4::from_cols_slice(transform_cache.get_render(entity).as_slice());
         for chain in &rt.ik {
+            let held = chain
+                .foot
+                .as_ref()
+                .filter(|f| f.locked)
+                .and_then(|f| f.held)
+                .map(|h| h.point);
             let Some(t) = targets.targets.get(&chain.name) else {
+                if let Some(p) = held {
+                    cross_overlay(buffer, p.to_array(), IK_EFFECTOR_CROSS_SIZE, IK_EFFECTOR_COLOR);
+                }
                 continue;
             };
-            let effector = t.effector.to_array();
-            let pole = t.pole.to_array();
+            let effector = held.or_else(|| match t.goal {
+                IkGoal::Point(p) => Some(p),
+                IkGoal::Offset(d) => chain.animated_tip.map(|tip| {
+                    convert_position_yup_to_zup((entity_mat * tip.extend(1.0)).truncate()) + d
+                }),
+            });
+            let Some(effector) = effector.map(|p| p.to_array()) else {
+                continue;
+            };
             cross_overlay(buffer, effector, IK_EFFECTOR_CROSS_SIZE, IK_EFFECTOR_COLOR);
-            cross_overlay(buffer, pole, IK_POLE_CROSS_SIZE, IK_POLE_COLOR);
-            buffer.line_overlay(effector, pole, IK_TIE_COLOR);
+            if let Some(pole) = t.pole.map(|p| p.to_array()) {
+                cross_overlay(buffer, pole, IK_POLE_CROSS_SIZE, IK_POLE_COLOR);
+                buffer.line_overlay(effector, pole, IK_TIE_COLOR);
+            }
         }
     }
 }

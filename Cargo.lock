@@ -1628,6 +1628,7 @@ dependencies = [
  "rust_engine",
  "serde",
  "tracy-client",
+ "uuid",
  "vulkano",
  "winit",
 ]

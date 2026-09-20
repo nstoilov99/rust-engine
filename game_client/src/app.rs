@@ -425,6 +425,18 @@ struct SkinnedPreviewTarget<'a> {
     what: &'a str,
 }
 
+/// `<dir>/<stem>.<ext>`, or `<stem> (n).<ext>` when that already exists.
+#[cfg(feature = "editor")]
+fn unique_output_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let mut path = dir.join(format!("{stem}.{ext}"));
+    let mut counter = 1;
+    while path.exists() && counter <= 100 {
+        path = dir.join(format!("{stem} ({counter}).{ext}"));
+        counter += 1;
+    }
+    path
+}
+
 /// Record one skinned preview pass: (re)create the target for a new mesh,
 /// follow the pane's size, upload this frame's palette, draw. `None` when
 /// there is nothing to draw yet (no mesh, empty pane, mesh not on the GPU).
@@ -634,6 +646,7 @@ impl App {
                     .reads_resource::<TransformCache>()
                     .reads::<Transform>()
                     .reads::<rust_engine::engine::physics::RigidBody>()
+                    .reads::<rust_engine::engine::ecs::hierarchy::Parent>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<IkTargets>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
@@ -2830,6 +2843,7 @@ impl App {
             rust_engine::engine::animation::debug_draw::submit_ik_debug_draws(
                 self.core.game_world.hecs(),
                 &mut self.core.debug_draw_buffer,
+                tc,
             );
         }
 
@@ -7846,39 +7860,61 @@ impl App {
                 .and_then(|s| s.to_str())
                 .unwrap_or("model");
 
-            // Determine output .mesh path with duplicate handling
-            let mut mesh_path = target_dir.join(format!("{}.mesh", stem));
-            if mesh_path.exists() {
-                let mut counter = 1;
-                loop {
-                    mesh_path = target_dir.join(format!("{} ({}).mesh", stem, counter));
-                    if !mesh_path.exists() || counter > 100 {
-                        break;
+            // Determine the output path (`.anim` for an animation-only
+            // import, Task 41.6 D6) with duplicate handling
+            let animation_only = dialog.settings.animation_only;
+            let ext = if animation_only { "anim" } else { "mesh" };
+            let mesh_path = unique_output_path(&target_dir, stem, ext);
+
+            // Copy the source file alongside the .mesh when asked (the
+            // sidecar records the original path either way); never for an
+            // animation-only import.
+            if dialog.settings.copy_source && !animation_only {
+                let source_dest = target_dir.join(source_path.file_name().unwrap_or_default());
+                if !source_dest.exists() {
+                    if let Err(e) = std::fs::copy(source_path, &source_dest) {
+                        self.editor
+                            .console
+                            .messages
+                            .push(LogMessage::warning(format!(
+                                "Could not copy source file: {}",
+                                e
+                            )));
                     }
-                    counter += 1;
                 }
             }
 
-            // Also copy the source file alongside the .mesh for re-import
-            let source_dest = target_dir.join(source_path.file_name().unwrap_or_default());
-            if !source_dest.exists() {
-                if let Err(e) = std::fs::copy(source_path, &source_dest) {
-                    self.editor
-                        .console
-                        .messages
-                        .push(LogMessage::warning(format!(
-                            "Could not copy source file: {}",
-                            e
-                        )));
-                }
-            }
-
-            // Run the import pipeline
-            match rust_engine::assets::mesh_import::import_model_to_mesh(
+            // Run the import pipeline. "Animation only" was offered for the
+            // previewed file; a batch can mix in sources with no clips, and
+            // those import as meshes instead of failing.
+            let mut settings = dialog.settings.clone();
+            let mut mesh_path = mesh_path;
+            let mut outcome = rust_engine::assets::mesh_import::import_model_to_mesh(
                 source_path,
                 &mesh_path,
-                &dialog.settings,
-            ) {
+                &settings,
+            );
+            if animation_only
+                && outcome
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains("has no animation clips"))
+            {
+                settings.animation_only = false;
+                mesh_path = unique_output_path(&target_dir, stem, "mesh");
+                self.editor.console.messages.push(LogMessage::info(format!(
+                    "'{}' has no animation clips; importing it as a mesh",
+                    source_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )));
+                outcome = rust_engine::assets::mesh_import::import_model_to_mesh(
+                    source_path,
+                    &mesh_path,
+                    &settings,
+                );
+            }
+            match outcome {
                 Ok(result) => {
                     let mesh_size = std::fs::metadata(&mesh_path)
                         .map(|m| m.len() as f64 / 1024.0)
@@ -7905,7 +7941,7 @@ impl App {
                         msg.push_str(&format!(", {} material(s)", result.material_count));
                     }
 
-                    if result.anim_written {
+                    if result.anim_written && result.mesh_written {
                         let anim_path = mesh_path.with_extension("anim");
                         let anim_size = std::fs::metadata(&anim_path)
                             .map(|m| m.len() as f64 / 1024.0)
@@ -7916,6 +7952,9 @@ impl App {
                         ));
                     }
 
+                    if !result.mesh_written {
+                        msg.push_str(&format!(", {} animation(s), animation only", result.anim_clip_count));
+                    }
                     self.editor.console.messages.push(LogMessage::info(msg));
                     imported_count += 1;
                 }

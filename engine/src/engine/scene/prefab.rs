@@ -253,6 +253,15 @@ impl Prefab {
                         handle: None,
                     });
                 }
+                ComponentData::CharacterMovement(cm) => {
+                    builder.add(cm.clone());
+                }
+                ComponentData::PlayerInput(pi) => {
+                    builder.add(pi.clone());
+                }
+                ComponentData::OrbitCamera(oc) => {
+                    builder.add(oc.clone());
+                }
                 ComponentData::Player => {
                     builder.add(Player);
                 }

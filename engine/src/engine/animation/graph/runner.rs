@@ -8,7 +8,8 @@
 //! instances, and a loader trait so tests hand over in-memory documents.
 //! Same seams, same lifecycle rules — one pattern to learn, not two.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use node_graph_types::GraphDoc;
@@ -81,14 +82,47 @@ impl AnimGraphRunner {
 // IK targets (Task 41.5 P5, I-D3)
 // ---------------------------------------------------------------------------
 
+/// Where a chain's effector should go (Task 41.6 P6). Positions are
+/// **world Z-up** inside [`IkTarget`]; the serial resolution pass converts
+/// them into the mesh's Y-up model space ([`ResolvedIkTarget`]) — the
+/// `Point` through the entity render matrix, the `Offset` as a vector
+/// (no translation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IkGoal {
+    /// An absolute point (two-bone: the tip; look-at: the point to aim at).
+    /// Gameplay-written targets.
+    Point(glam::Vec3),
+    /// A displacement of *this frame's* animated (pre-pelvis) tip: the
+    /// chain keeps the clip's pose and shifts by the terrain difference.
+    /// Foot placement writes this for unlocked feet, so the swing phase
+    /// keeps its clearance instead of being pinned to the ground.
+    Offset(glam::Vec3),
+}
+
 /// One chain's IK goals, in **world Z-up** game space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IkTarget {
-    /// Where the effector should land (two-bone: the tip; look-at: the point
-    /// to aim at).
-    pub effector: glam::Vec3,
+    pub goal: IkGoal,
     /// Bend-plane disambiguator for the two-bone solver; ignored by look-at.
-    pub pole: glam::Vec3,
+    /// `None` = the runner builds it from the chain's own animated knee
+    /// ([`super::super::ik::bend_direction`]), which foot placement relies on.
+    pub pole: Option<glam::Vec3>,
+}
+
+impl IkTarget {
+    pub fn point(effector: glam::Vec3, pole: glam::Vec3) -> Self {
+        Self {
+            goal: IkGoal::Point(effector),
+            pole: Some(pole),
+        }
+    }
+
+    pub fn offset(delta_world: glam::Vec3) -> Self {
+        Self {
+            goal: IkGoal::Offset(delta_world),
+            pole: None,
+        }
+    }
 }
 
 /// Per-chain IK goals, written by gameplay (P6's foot placement, a look-at
@@ -106,10 +140,10 @@ pub struct IkTargets {
 }
 
 impl IkTargets {
-    /// Upsert one chain's goals (world Z-up).
+    /// Upsert one chain's absolute goals (world Z-up).
     pub fn set(&mut self, chain: &str, effector: glam::Vec3, pole: glam::Vec3) {
         self.targets
-            .insert(chain.to_string(), IkTarget { effector, pole });
+            .insert(chain.to_string(), IkTarget::point(effector, pole));
     }
 }
 
@@ -117,22 +151,45 @@ impl IkTargets {
 /// space** — what the solvers consume directly.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedIkTarget {
-    pub target: glam::Vec3,
-    pub pole: glam::Vec3,
+    pub goal: IkGoal,
+    pub pole: Option<glam::Vec3>,
 }
 
-/// A ground contact as foot placement wrote it: the target (world Z-up) and
-/// the raw contact height the pelvis drop measures against.
+/// A ground contact as foot placement latched it on a `<chain>_down` edge:
+/// the clip's plant pose shifted by the terrain delta (world Z-up) and the
+/// raw contact height the pelvis drop measures against.
 #[derive(Debug, Clone, Copy)]
 pub struct HeldContact {
-    pub target: IkTarget,
+    pub point: glam::Vec3,
     pub contact_z: f32,
 }
+
+/// A lock letting go (Task 41.6 P6, F2): the target blends from the last
+/// held point toward the unlocked offset target over [`RELEASE_SECS`].
+#[derive(Debug, Clone, Copy)]
+pub struct FootRelease {
+    /// The point the lock held, world Z-up.
+    pub from: glam::Vec3,
+    /// 0 = still on the held point, 1 = fully on the offset target.
+    pub blend: f32,
+}
+
+/// Lock release blend duration, seconds.
+pub const RELEASE_SECS: f32 = 0.1;
+
+/// A locked target farther from the hip than this fraction of the leg
+/// length is abandoned before the solver straightens the knee (F2).
+pub const LOCK_REACH: f32 = 0.98;
 
 /// One foot chain's placement config + lock state (Task 41.5 P6, I-D4),
 /// armed from [`super::plan::PlanFootPlacement`]. Lock edges come from anim
 /// event name conventions: `<chain>_down` latches the current contact until
 /// `<chain>_up` releases it (`FootPlacementSystem` reads last tick's fires).
+///
+/// The lock lives here, not in `IkTargets`: the chain's entry there is
+/// always the terrain offset (or absent over air), which doubles as the
+/// fallback when a held point goes out of reach and as the release blend's
+/// destination.
 #[derive(Debug, Clone)]
 pub struct FootState {
     /// Effector lift along the ground-hit normal (the foot bone sits at
@@ -141,6 +198,53 @@ pub struct FootState {
     pub locked: bool,
     /// The latched contact while locked.
     pub held: Option<HeldContact>,
+    /// A release in progress (unlocked, still blending off the held point).
+    pub release: Option<FootRelease>,
+    /// Set by `apply_ik` (parallel side) when the held point went out of
+    /// reach; `place_feet` consumes it next frame (unlock + release blend).
+    pub release_requested: bool,
+    /// `held.point` (locked) or `release.from` (releasing) in model space,
+    /// written by the serial resolution pass each frame.
+    pub lock_model: Option<glam::Vec3>,
+    /// The machine state that was current when the lock latched. A lock
+    /// belongs to the clip that planted the foot: leaving that state (Idle
+    /// fires no `_up`) releases it, or the leg would stay stretched to a
+    /// plant the body has walked past.
+    pub lock_state: usize,
+}
+
+impl FootState {
+    pub fn new(ankle_offset: f32) -> Self {
+        Self {
+            ankle_offset,
+            locked: false,
+            held: None,
+            release: None,
+            release_requested: false,
+            lock_model: None,
+            lock_state: 0,
+        }
+    }
+
+    /// Drop the lock (if any) and start blending off the held point.
+    pub fn unlock(&mut self) {
+        self.locked = false;
+        if let Some(h) = self.held.take() {
+            self.release = Some(FootRelease {
+                from: h.point,
+                blend: 0.0,
+            });
+        }
+    }
+
+    /// Forget everything — lock, release, pending request.
+    pub fn clear(&mut self) {
+        self.locked = false;
+        self.held = None;
+        self.release = None;
+        self.release_requested = false;
+        self.lock_model = None;
+    }
 }
 
 /// The cosmetic pelvis drop (P6, I-D4). `offset` (world Z, ≤ 0) is smoothed
@@ -181,6 +285,15 @@ pub struct ArmedIkChain {
     /// down from this pose and measures the pelvis drop against it — it is
     /// IK-free, so the solve never feeds back into its own inputs.
     pub animated_tip: Option<glam::Vec3>,
+    /// The animated root (hip) and middle (knee) joints, same pose and
+    /// space as `animated_tip`. Foot placement builds the knee pole from
+    /// them, so the bend side comes from the clip, not from any assumed
+    /// mesh forward axis (Task 41.6: the imported rig faces −X).
+    pub animated_root: Option<glam::Vec3>,
+    pub animated_mid: Option<glam::Vec3>,
+    /// The last well-defined knee bend direction (model space, unit), kept
+    /// so a near-straight knee does not flip its bend plane frame to frame.
+    pub pole_dir: Option<glam::Vec3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +420,16 @@ pub struct AnimGraphRuntime {
     /// Scratch for the IK descendant re-walk (sized to the bone count on
     /// first use, reused every frame — no steady-state allocation).
     pub ik_touched: Vec<bool>,
+    /// Task 41.6 D7: the plan's clip sets armed against this entity's
+    /// skeleton — a set whose bone table differs from the skeleton's is a
+    /// by-name remapped copy (built once per (set, skeleton) in the cache's
+    /// memo), the rest are the shared `Arc`s. Ticks look here first, then
+    /// in the shared cache.
+    pub clips: ArmedClips,
 }
+
+/// Clip sets keyed by normalized content path, armed against one skeleton.
+pub type ArmedClips = Arc<BTreeMap<String, Arc<ClipSet>>>;
 
 // ---------------------------------------------------------------------------
 // Caches and loading
@@ -331,6 +453,62 @@ impl ClipSet {
             None => self.clips.first(),
         }
     }
+
+    /// Task 41.6 D7: this set armed against `bones` by name. `None` when the
+    /// bone tables are identical (nothing to do — the `Defeated` case); else
+    /// a copy whose channels index `bones` (its `bone_names` becomes the
+    /// skeleton's table) plus the names of the channels dropped because
+    /// `bones` lacks them. Sets are shared, so callers memoize per
+    /// (set, skeleton) — [`AnimClipCache::armed`] does for the runner.
+    pub fn armed_for(&self, bones: &[BoneData]) -> Option<(ClipSet, Vec<String>)> {
+        if self.bone_names.len() == bones.len()
+            && self.bone_names.iter().zip(bones).all(|(a, b)| *a == b.name)
+        {
+            return None;
+        }
+        let map: Vec<Option<usize>> = self
+            .bone_names
+            .iter()
+            .map(|n| bones.iter().position(|b| b.name == *n))
+            .collect();
+        let mut dropped: Vec<String> = Vec::new();
+        let clips = self
+            .clips
+            .iter()
+            .map(|clip| {
+                let mut c = clip.clone();
+                c.channels.retain_mut(|ch| match map.get(ch.bone_index).copied().flatten() {
+                    Some(i) => {
+                        ch.bone_index = i;
+                        true
+                    }
+                    None => {
+                        let name = self
+                            .bone_names
+                            .get(ch.bone_index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("#{}", ch.bone_index));
+                        if !dropped.contains(&name) {
+                            dropped.push(name);
+                        }
+                        false
+                    }
+                });
+                c
+            })
+            .collect();
+        let bone_names = bones.iter().map(|b| b.name.clone()).collect();
+        Some((ClipSet { bone_names, clips }, dropped))
+    }
+}
+
+/// Identity of a skeleton's bone table for the remap memo.
+fn bone_table_key(bones: &[BoneData]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for b in bones {
+        b.name.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// How the system gets assets. An indirection because the engine loads from
@@ -556,6 +734,10 @@ impl AnimGraphPlanCache {
 #[derive(Default)]
 pub struct AnimClipCache {
     sets: BTreeMap<String, Arc<ClipSet>>,
+    /// Task 41.6 D7: sets remapped by name onto a skeleton, keyed by
+    /// (path, bone-table hash). Built once per pair — the dropped-channel
+    /// report prints then, once.
+    remapped: HashMap<(String, u64), Arc<ClipSet>>,
 }
 
 impl AnimClipCache {
@@ -572,7 +754,35 @@ impl AnimClipCache {
     }
 
     pub fn invalidate(&mut self, content_rel: &str) {
-        self.sets.remove(&normalize_graph_path(content_rel));
+        let key = normalize_graph_path(content_rel);
+        self.sets.remove(&key);
+        self.remapped.retain(|(p, _), _| *p != key);
+    }
+
+    /// The set at `content_rel` armed against `bones` (Task 41.6 D7): the
+    /// shared copy when the bone tables agree, else a by-name remapped copy
+    /// built once per (set, skeleton). `None` when the set is not loaded.
+    pub fn armed(&mut self, content_rel: &str, bones: &[BoneData]) -> Option<Arc<ClipSet>> {
+        let key = normalize_graph_path(content_rel);
+        let set = self.sets.get(&key)?.clone();
+        let memo = (key, bone_table_key(bones));
+        if let Some(armed) = self.remapped.get(&memo) {
+            return Some(armed.clone());
+        }
+        let Some((armed, dropped)) = set.armed_for(bones) else {
+            return Some(set);
+        };
+        if !dropped.is_empty() {
+            eprintln!(
+                "[animgraph] '{}': dropped {} channel(s) — the skeleton has no bone {}",
+                memo.0,
+                dropped.len(),
+                dropped.join(", ")
+            );
+        }
+        let armed = Arc::new(armed);
+        self.remapped.insert(memo, armed.clone());
+        Some(armed)
     }
 
     /// Load what `paths` names and is not already held. Failures are silent
@@ -675,6 +885,7 @@ impl AnimGraphSystem {
             ik: Vec::new(),
             pelvis: None,
             ik_touched: Vec::new(),
+            clips: Default::default(),
         };
 
         // Peek, compile, store — short borrows, one at a time, the same dance
@@ -717,6 +928,8 @@ impl AnimGraphSystem {
             clips.prefetch(&plan.clip_refs(), &*self.loader);
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
+            let none = BTreeMap::new();
+            let clip_of = |c: &PlanClip| clip_of(&none, clips, c);
             for st in &plan.states {
                 // A blend space names its samples by index, so its refusal
                 // says which sample to fix.
@@ -725,7 +938,7 @@ impl AnimGraphSystem {
                         .samples
                         .iter()
                         .enumerate()
-                        .find(|(_, (c, _))| clip_of(clips, c).is_none())
+                        .find(|(_, (c, _))| clip_of(c).is_none())
                     {
                         return refused(format!(
                             "{graph}: state '{}': blend space sample {i} clip '{}' could not \
@@ -735,7 +948,7 @@ impl AnimGraphSystem {
                     }
                 }
                 for c in st.source.clips() {
-                    if clip_of(clips, c).is_none() {
+                    if clip_of(c).is_none() {
                         return refused(format!(
                             "{graph}: state '{}': clip '{}' could not be loaded",
                             st.name, c.clip
@@ -744,7 +957,7 @@ impl AnimGraphSystem {
                 }
             }
             for slot in &plan.slots {
-                if clip_of(clips, &slot.clip).is_none() {
+                if clip_of(&slot.clip).is_none() {
                     return refused(format!(
                         "{graph}: play-once slot '{}': clip '{}' could not be loaded",
                         slot.name, slot.clip.clip
@@ -766,8 +979,22 @@ impl AnimGraphSystem {
             ik: Vec::new(),
             pelvis: None,
             ik_touched: Vec::new(),
+            clips: Default::default(),
         }
     }
+}
+
+/// Task 41.6 D7: every clip set the plan samples, armed against `bones`
+/// through the cache's memo. Sets that failed to load were refused earlier.
+fn arm_clips(plan: &AnimGraphPlan, bones: &[BoneData], cache: &mut AnimClipCache) -> ArmedClips {
+    let mut armed = BTreeMap::new();
+    for path in plan.clip_refs() {
+        let key = normalize_graph_path(path);
+        if let Some(set) = cache.armed(&key, bones) {
+            armed.insert(key, set);
+        }
+    }
+    Arc::new(armed)
 }
 
 /// Resolve a plan's IK chains against an entity's skeleton — the arm-time
@@ -833,20 +1060,30 @@ fn arm_ik_chains(
             solver: chain.solver,
             weight_param: chain.weight_param.clone(),
             resolved: None,
-            foot: chain.foot.as_ref().map(|f| FootState {
-                ankle_offset: f.ankle_offset,
-                locked: false,
-                held: None,
-            }),
+            foot: chain.foot.as_ref().map(|f| FootState::new(f.ankle_offset)),
             animated_tip: None,
+            animated_root: None,
+            animated_mid: None,
+            pole_dir: None,
         });
     }
     Ok((out, pelvis))
 }
 
 /// The clip a plan reference names, out of the cache.
-fn clip_of<'a>(cache: &'a AnimClipCache, c: &PlanClip) -> Option<&'a RawAnimationClip> {
-    cache.get(&c.clip)?.select(c.clip_name.as_deref())
+/// The loaded clip a plan reference names: the runtime's armed copy first
+/// (Task 41.6 D7), else the shared cache's.
+fn clip_of<'a>(
+    armed: &'a BTreeMap<String, Arc<ClipSet>>,
+    cache: &'a AnimClipCache,
+    c: &PlanClip,
+) -> Option<&'a RawAnimationClip> {
+    let key = normalize_graph_path(&c.clip);
+    let set: &ClipSet = match armed.get(&key) {
+        Some(s) => s,
+        None => cache.sets.get(&key)?,
+    };
+    set.select(c.clip_name.as_deref())
 }
 
 /// One entity's step-3 work: machine + slot tick, event collection into the
@@ -868,7 +1105,8 @@ fn tick_entity(
     scratch: &mut PoseScratch,
 ) -> bool {
     let plan = rt.plan.clone();
-    let clip_for = |c: &PlanClip| clip_of(clips, c);
+    let armed = rt.clips.clone();
+    let clip_for = |c: &PlanClip| clip_of(&armed, clips, c);
     // Checked before the tick too, so the frame a crossfade *completes* on
     // still evaluates (the fade is dropped inside `tick`).
     let fading_before = rt.machine.crossfade().is_some();
@@ -936,14 +1174,21 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
     // P6 — record the animated (pre-IK, pre-pelvis) two-bone tips first:
     // foot placement rays down from this pose next frame and measures the
     // pelvis drop against it, so it must never contain this frame's
-    // corrections (no feedback loop).
+    // corrections (no feedback loop). `Offset` goals are applied to this
+    // tip — never the post-pelvis one, which would add the pelvis drop to
+    // the terrain delta.
     for chain in &mut rt.ik {
         if matches!(chain.solver, PlanIkSolver::TwoBone) {
-            chain.animated_tip = chain
-                .bones
-                .get(2)
-                .filter(|&&i| i < model_space.len())
-                .map(|&i| model_space[i].w_axis.truncate());
+            let joint = |slot: usize| {
+                chain
+                    .bones
+                    .get(slot)
+                    .filter(|&&i| i < model_space.len())
+                    .map(|&i| model_space[i].w_axis.truncate())
+            };
+            chain.animated_root = joint(0);
+            chain.animated_mid = joint(1);
+            chain.animated_tip = joint(2);
         }
     }
     // P6 — pelvis adjust: a cosmetic model-space drop on the pelvis bone,
@@ -970,10 +1215,9 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
             );
         }
     }
-    for chain in &rt.ik {
-        let Some(t) = chain.resolved else { continue };
-        let weight = rt
-            .params
+    let params = &rt.params;
+    for chain in &mut rt.ik {
+        let weight = params
             .get_float(&chain.weight_param)
             .unwrap_or(0.0)
             .min(1.0);
@@ -988,12 +1232,15 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         match chain.solver {
             PlanIkSolver::TwoBone => {
                 let (r, m, tip) = (chain.bones[0], chain.bones[1], chain.bones[2]);
+                let Some((target, pole)) = two_bone_goal(chain, model_space) else {
+                    continue;
+                };
                 let (root2, mid2) = ik::solve_two_bone(
                     model_space[r],
                     model_space[m],
                     model_space[tip],
-                    t.target,
-                    t.pole,
+                    target,
+                    pole,
                 );
                 model_space[r] = ik::blend_model(&model_space[r], &root2, weight);
                 model_space[m] = ik::blend_model(&model_space[m], &mid2, weight);
@@ -1006,8 +1253,15 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
                 );
             }
             PlanIkSolver::LookAt { axis, max_angle } => {
+                let Some(ResolvedIkTarget {
+                    goal: IkGoal::Point(target),
+                    ..
+                }) = chain.resolved
+                else {
+                    continue;
+                };
                 let b = chain.bones[0];
-                let solved = ik::solve_look_at(model_space[b], t.target, axis, max_angle);
+                let solved = ik::solve_look_at(model_space[b], target, axis, max_angle);
                 model_space[b] = ik::blend_model(&model_space[b], &solved, weight);
                 ik::rewalk_descendants(
                     model_space,
@@ -1020,6 +1274,66 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         }
     }
     rt.ik_touched = touched;
+}
+
+/// Distance of the knee pole point from the knee, model units. Only its
+/// direction matters to the solver.
+const KNEE_POLE_DISTANCE: f32 = 1.0;
+/// A knee closer than this to the hip→foot line has no bend side of its
+/// own; the previous frame's direction is kept instead.
+const STRAIGHT_KNEE_EPS: f32 = 0.01;
+
+/// This frame's `(target, pole)` for a two-bone chain, model space — `None`
+/// when the chain has nothing to solve (Task 41.6 P6, F1/F2).
+///
+/// - `Offset` goals land on the pre-pelvis animated tip recorded above.
+/// - A locked foot uses its held point unless that lies beyond
+///   [`LOCK_REACH`] of the leg length: then the offset target stands in
+///   (or the chain skips) and the lock asks to be released.
+/// - A releasing foot lerps from the held point to the offset target.
+/// - A missing pole comes from the chain's own knee ([`ik::bend_direction`]),
+///   stabilised across near-straight frames via `pole_dir`, model up last.
+fn two_bone_goal(
+    chain: &mut ArmedIkChain,
+    model_space: &[glam::Mat4],
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    let joint = |slot: usize| model_space[chain.bones[slot]].w_axis.truncate();
+    let (hip, knee, foot) = (joint(0), joint(1), joint(2));
+    let offset_target = chain.resolved.map(|t| match t.goal {
+        IkGoal::Point(p) => p,
+        IkGoal::Offset(d) => chain.animated_tip.unwrap_or(foot) + d,
+    });
+    let target = match &mut chain.foot {
+        Some(f) if f.locked => match f.lock_model {
+            Some(held) => {
+                let reach = (knee - hip).length() + (foot - knee).length();
+                if (held - hip).length() > LOCK_REACH * reach {
+                    f.release_requested = true;
+                    offset_target?
+                } else {
+                    held
+                }
+            }
+            None => offset_target?,
+        },
+        Some(f) => match (f.release, f.lock_model, offset_target) {
+            (Some(rel), Some(from), Some(to)) => from.lerp(to, rel.blend.clamp(0.0, 1.0)),
+            (Some(_), Some(from), None) => from,
+            _ => offset_target?,
+        },
+        None => offset_target?,
+    };
+    let pole = match chain.resolved.and_then(|t| t.pole) {
+        Some(p) => p,
+        None => {
+            let dir = ik::bend_direction(hip, knee, foot, STRAIGHT_KNEE_EPS)
+                .or(chain.pole_dir)
+                .unwrap_or(glam::Vec3::Y);
+            chain.pole_dir = Some(dir);
+            knee + dir * KNEE_POLE_DISTANCE
+        }
+    };
+    Some((target, pole))
 }
 
 impl System for AnimGraphSystem {
@@ -1101,6 +1415,18 @@ impl System for AnimGraphSystem {
                         }
                         Err(why) => runtime.disabled = Some(format!("{graph}: {why}")),
                     }
+                }
+            }
+
+            // Task 41.6 D7: clip sets whose bone table differs from this
+            // skeleton's get by-name remapped copies (once per pair).
+            if runtime.disabled.is_none() {
+                if let (Ok(skel), Some(cache)) = (
+                    world.get::<&SkeletonInstance>(entity),
+                    resources.get_mut::<AnimClipCache>(),
+                ) {
+                    let armed = arm_clips(&runtime.plan, &skel.bones, cache);
+                    runtime.clips = armed;
                 }
             }
 
@@ -1192,19 +1518,32 @@ impl System for AnimGraphSystem {
                     .unwrap_or(glam::Mat4::IDENTITY),
             };
             let inv = entity_render.inverse();
+            let to_model = |p: glam::Vec3| {
+                inv.transform_point3(crate::engine::utils::coords::convert_position_zup_to_yup(p))
+            };
             for chain in &mut rt.ik {
                 chain.resolved = targets
                     .and_then(|t| t.targets.get(&chain.name))
                     .map(|t| ResolvedIkTarget {
-                        target: inv.transform_point3(
-                            crate::engine::utils::coords::convert_position_zup_to_yup(
-                                t.effector,
-                            ),
-                        ),
-                        pole: inv.transform_point3(
-                            crate::engine::utils::coords::convert_position_zup_to_yup(t.pole),
-                        ),
+                        goal: match t.goal {
+                            IkGoal::Point(p) => IkGoal::Point(to_model(p)),
+                            // A displacement: rotate/scale only, no translation.
+                            IkGoal::Offset(d) => IkGoal::Offset(inv.transform_vector3(
+                                crate::engine::utils::coords::convert_position_zup_to_yup(d),
+                            )),
+                        },
+                        pole: t.pole.map(to_model),
                     });
+                // The foot lock's world point (held, or the one a release is
+                // blending off) lands in model space the same way.
+                if let Some(foot) = &mut chain.foot {
+                    let world = if foot.locked {
+                        foot.held.map(|h| h.point)
+                    } else {
+                        foot.release.map(|r| r.from)
+                    };
+                    foot.lock_model = world.map(to_model);
+                }
             }
         }
 
@@ -1259,6 +1598,68 @@ impl System for AnimGraphSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::animation::components::LocalBoneTransform;
+    use crate::engine::animation::sampling::sample_channels;
+    use crate::engine::assets::model_loader::AnimationChannel;
+    use glam::{Mat4, Vec3};
+
+    fn bone(name: &str, parent_index: Option<usize>) -> BoneData {
+        BoneData {
+            name: name.into(),
+            parent_index,
+            inverse_bind_matrix: Mat4::IDENTITY,
+        }
+    }
+
+    fn channel(bone_index: usize, x: f32) -> AnimationChannel {
+        AnimationChannel {
+            bone_index,
+            position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0))],
+            rotation_keys: vec![],
+            scale_keys: vec![],
+        }
+    }
+
+    /// Task 41.6 D7: a clip set whose bone table is the skeleton's in
+    /// reverse order samples the right bone once armed; a bone the skeleton
+    /// lacks drops its channel; identical tables skip; the cache memoizes
+    /// per (set, skeleton) and forgets on invalidation.
+    #[test]
+    fn clip_sets_arm_onto_the_skeleton_by_name() {
+        let skeleton = vec![bone("a", None), bone("b", Some(0))];
+        let set = ClipSet {
+            bone_names: vec!["b".into(), "a".into(), "ghost".into()],
+            clips: vec![RawAnimationClip {
+                name: "Walk".into(),
+                duration_seconds: 1.0,
+                channels: vec![channel(0, 7.0), channel(1, 3.0), channel(2, 9.0)],
+                events: vec![],
+            }],
+        };
+
+        let (armed, dropped) = set.armed_for(&skeleton).expect("tables differ");
+        assert_eq!(dropped, vec!["ghost".to_string()]);
+        assert_eq!(armed.bone_names, vec!["a".to_string(), "b".to_string()]);
+        let mut pose = vec![LocalBoneTransform::default(); 2];
+        sample_channels(&armed.clips[0].channels, 0.0, &mut pose);
+        assert_eq!(pose[1].translation.x, 7.0, "the clip's bone 0 ('b') moves skeleton bone 1");
+        assert_eq!(pose[0].translation.x, 3.0);
+
+        let same = vec![bone("b", None), bone("a", Some(0)), bone("ghost", Some(0))];
+        assert!(set.armed_for(&same).is_none(), "identical tables skip the work");
+
+        let mut cache = AnimClipCache::new();
+        cache.insert("anims/walk.anim", set);
+        let a1 = cache.armed("anims\\walk.anim", &skeleton).expect("loaded");
+        let a2 = cache.armed("anims/walk.anim", &skeleton).expect("loaded");
+        assert!(Arc::ptr_eq(&a1, &a2), "built once per (set, skeleton)");
+        assert_eq!(a1.clips[0].channels.len(), 2);
+        let shared = cache.armed("anims/walk.anim", &same).expect("loaded");
+        assert_eq!(shared.clips[0].channels.len(), 3, "identical table: the shared copy");
+        cache.invalidate("anims/walk.anim");
+        assert!(cache.armed("anims/walk.anim", &skeleton).is_none());
+        assert!(cache.remapped.is_empty(), "invalidation forgets the memo too");
+    }
 
     #[test]
     fn paths_normalize_and_empty_runners_are_not_runnable() {

@@ -27,3 +27,23 @@ pub const INPUT_ACTION: &str = "InputActionSystem";
 
 /// Audio system — processes spatial audio and playback.
 pub const AUDIO: &str = "AudioSystem";
+
+// --- game_client gameplay systems (Task 41.6). The engine never registers
+// these; the constants exist so engine plugins and the game order against
+// one spelling.
+
+/// Player input system — Enhanced Input → `CharacterMovement` intent
+/// (PreUpdate; stages sequence it after `ENHANCED_INPUT`).
+pub const PLAYER_INPUT: &str = "PlayerInputSystem";
+
+/// Character movement system — velocity-set capsule controller, runs
+/// before the anim stack and `PHYSICS_STEP`.
+pub const CHARACTER_MOVEMENT: &str = "CharacterMovementSystem";
+
+/// Offline anim bridge — `CharacterMovement` state → anim graph params,
+/// between `CHARACTER_MOVEMENT` and `FOOT_PLACEMENT`.
+pub const CHARACTER_ANIM_BRIDGE: &str = "CharacterAnimBridgeSystem";
+
+/// Orbit camera system — writes the Camera entity's transform in Update,
+/// before `TRANSFORM_PROPAGATION`.
+pub const ORBIT_CAMERA: &str = "OrbitCameraSystem";

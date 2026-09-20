@@ -400,6 +400,7 @@ mod tests {
             ik: Vec::new(),
             pelvis: None,
             ik_touched: Vec::new(),
+            clips: Default::default(),
         }
     }
 

@@ -285,6 +285,19 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
                 "Import Animations (.anim)",
             )
             .show(ui);
+            Checkbox::new(
+                &mut state.settings.animation_only,
+                "Animation only (.anim, no mesh or materials)",
+            )
+            .show(ui);
+        }
+        let animation_only = has_animations && state.settings.animation_only;
+        if !animation_only {
+            Checkbox::new(
+                &mut state.settings.copy_source,
+                "Copy source file into project",
+            )
+            .show(ui);
         }
 
         ui.add_space(8.0);
@@ -297,16 +310,17 @@ pub fn import_dialog_panel(ui: &mut Ui, state: &mut ImportDialogState) -> Import
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
             .unwrap_or("model");
+        let ext = if animation_only { "anim" } else { "mesh" };
         let output_display = if state.target_folder.as_os_str().is_empty() {
-            format!("{output_name}.mesh")
+            format!("{output_name}.{ext}")
         } else {
-            format!("{}/{}.mesh", state.target_folder.display(), output_name)
+            format!("{}/{}.{ext}", state.target_folder.display(), output_name)
         };
         ui.horizontal(|ui| {
             Label::new("Output:").show(ui);
             dim_label(ui, output_display);
         });
-        if has_animations && state.settings.import_animations {
+        if has_animations && state.settings.import_animations && !animation_only {
             let anim_display = if state.target_folder.as_os_str().is_empty() {
                 format!("{output_name}.anim")
             } else {

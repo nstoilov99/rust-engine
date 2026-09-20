@@ -181,6 +181,17 @@ fn serialize_entity(world: &World, entity: Entity) -> Option<EntityData> {
         });
     }
 
+    // Task 41.6: offline character controller + orbit camera, config only.
+    if let Ok(cm) = world.get::<&game_shared::components::CharacterMovement>(entity) {
+        components.push(ComponentData::CharacterMovement((*cm).clone()));
+    }
+    if let Ok(pi) = world.get::<&game_shared::components::PlayerInput>(entity) {
+        components.push(ComponentData::PlayerInput((*pi).clone()));
+    }
+    if let Ok(oc) = world.get::<&game_shared::components::OrbitCamera>(entity) {
+        components.push(ComponentData::OrbitCamera((*oc).clone()));
+    }
+
     if let Ok(emitter) = world.get::<&AudioEmitter>(entity) {
         components.push(ComponentData::AudioEmitter {
             clip_path: emitter.clip_path.clone(),
@@ -638,6 +649,15 @@ fn spawn_entity_from_data(world: &mut World, entity_data: &EntityData) -> Entity
                     enabled: *enabled,
                 });
             }
+            ComponentData::CharacterMovement(cm) => {
+                builder.add(cm.clone());
+            }
+            ComponentData::PlayerInput(pi) => {
+                builder.add(pi.clone());
+            }
+            ComponentData::OrbitCamera(oc) => {
+                builder.add(oc.clone());
+            }
             ComponentData::Player => {
                 builder.add(Player);
             }
@@ -897,6 +917,77 @@ mod tests {
                 ComponentData::Parent { parent_guid, .. } => parent_guid.clone(),
                 _ => None,
             })
+    }
+
+    /// Task 41.6 P4: the committed demo scene, read from disk. The loader
+    /// only spawns components (meshes resolve later), so no GPU is needed.
+    #[test]
+    fn the_locomotion_demo_scene_loads_with_player_rig_and_camera() {
+        use crate::engine::animation::graph::AnimGraphRunner;
+        use game_shared::components::{CharacterMovement, OrbitCamera, PlayerInput};
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("content/scenes/locomotion_demo.scene");
+        let text = fs::read_to_string(&path).expect("the demo scene exists");
+        let mut world = World::new();
+        let (_, roots) = load_scene_from_string(&mut world, &text).expect("the demo scene loads");
+
+        let find = |name: &str| {
+            world
+                .query::<&Name>()
+                .iter()
+                .find(|(_, n)| n.0 == name)
+                .map(|(e, _)| e)
+                .unwrap_or_else(|| panic!("entity '{name}'"))
+        };
+        let (player, rig, camera) = (find("Player"), find("Character Rig"), find("Camera"));
+        assert!(roots.contains(&player) && roots.contains(&camera));
+        assert!(!roots.contains(&rig), "the rig is a child");
+
+        // Player root: dynamic capsule, upright, never asleep, controller + input.
+        let rb = world.get::<&PhysRigidBody>(player).unwrap();
+        assert_eq!(rb.body_type, RigidBodyType::Dynamic);
+        assert_eq!(rb.lock_rotation, [true; 3]);
+        assert!(!rb.can_sleep);
+        let col = world.get::<&PhysCollider>(player).unwrap();
+        assert!(matches!(col.shape, ColliderShape::Capsule { .. }));
+        assert_eq!(col.friction, 0.0);
+        let cm = world.get::<&CharacterMovement>(player).unwrap();
+        assert_eq!(cm.jump_height, 1.6, "jump is authored as an apex height (P8)");
+        assert_eq!(cm.standing_friction, 1.0);
+        drop(cm);
+        assert!(world.get::<&PlayerInput>(player).is_ok());
+
+        // Rig child: graph runner, offset under the root, no body of its own.
+        assert_eq!(world.get::<&Parent>(rig).unwrap().0, player);
+        assert_eq!(
+            world.get::<&AnimGraphRunner>(rig).unwrap().graph,
+            "graphs/locomotion_demo.animgraph"
+        );
+        assert_eq!(world.get::<&Transform>(rig).unwrap().position.z, -0.9);
+        assert!(world.get::<&PhysRigidBody>(rig).is_err());
+
+        // Camera: active, orbiting the player by GUID.
+        assert!(world.get::<&Camera>(camera).unwrap().active);
+        let player_guid = world.get::<&EntityGuid>(player).unwrap().0;
+        assert_eq!(world.get::<&OrbitCamera>(camera).unwrap().target, Some(player_guid));
+
+        // Terrain: every static body is a cuboid with a visible mesh.
+        let mut terrain = 0;
+        for (_, (rb, col, mesh)) in world
+            .query::<(&PhysRigidBody, &PhysCollider, &MeshRenderer)>()
+            .iter()
+        {
+            if rb.body_type != RigidBodyType::Static {
+                continue;
+            }
+            assert!(matches!(col.shape, ColliderShape::Cuboid { .. }));
+            assert!(mesh.visible && !mesh.mesh_path.is_empty());
+            terrain += 1;
+        }
+        assert!(terrain >= 1 + 2 + 8 + 9, "floor, ramps, stairs, blocks: {terrain}");
     }
 
     #[test]

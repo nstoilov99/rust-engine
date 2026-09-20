@@ -20,29 +20,32 @@ use std::collections::{HashMap, HashSet};
 /// Computed once per selection change / component mutation, not per frame.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ComponentPresence {
-    bits: u16,
+    bits: u32,
 }
 
 impl ComponentPresence {
-    pub(crate) const NAME: u16 = 1 << 0;
-    pub(crate) const TRANSFORM: u16 = 1 << 1;
-    pub(crate) const CAMERA: u16 = 1 << 2;
-    pub(crate) const MESH_RENDERER: u16 = 1 << 3;
-    pub(crate) const DIR_LIGHT: u16 = 1 << 4;
-    pub(crate) const POINT_LIGHT: u16 = 1 << 5;
-    pub(crate) const RIGID_BODY: u16 = 1 << 6;
-    pub(crate) const COLLIDER: u16 = 1 << 7;
-    pub(crate) const SKELETON: u16 = 1 << 8;
-    pub(crate) const ANIM_PLAYER: u16 = 1 << 9;
-    pub(crate) const AUDIO_EMITTER: u16 = 1 << 10;
-    pub(crate) const AUDIO_LISTENER: u16 = 1 << 11;
-    pub(crate) const PARTICLE_EFFECT: u16 = 1 << 12;
-    pub(crate) const STATIC_COLLISION: u16 = 1 << 13;
-    pub(crate) const GRAPH_RUNNER: u16 = 1 << 14;
-    pub(crate) const ANIM_GRAPH_RUNNER: u16 = 1 << 15;
+    pub(crate) const NAME: u32 = 1 << 0;
+    pub(crate) const TRANSFORM: u32 = 1 << 1;
+    pub(crate) const CAMERA: u32 = 1 << 2;
+    pub(crate) const MESH_RENDERER: u32 = 1 << 3;
+    pub(crate) const DIR_LIGHT: u32 = 1 << 4;
+    pub(crate) const POINT_LIGHT: u32 = 1 << 5;
+    pub(crate) const RIGID_BODY: u32 = 1 << 6;
+    pub(crate) const COLLIDER: u32 = 1 << 7;
+    pub(crate) const SKELETON: u32 = 1 << 8;
+    pub(crate) const ANIM_PLAYER: u32 = 1 << 9;
+    pub(crate) const AUDIO_EMITTER: u32 = 1 << 10;
+    pub(crate) const AUDIO_LISTENER: u32 = 1 << 11;
+    pub(crate) const PARTICLE_EFFECT: u32 = 1 << 12;
+    pub(crate) const STATIC_COLLISION: u32 = 1 << 13;
+    pub(crate) const GRAPH_RUNNER: u32 = 1 << 14;
+    pub(crate) const ANIM_GRAPH_RUNNER: u32 = 1 << 15;
+    pub(crate) const CHARACTER_MOVEMENT: u32 = 1 << 16;
+    pub(crate) const PLAYER_INPUT: u32 = 1 << 17;
+    pub(crate) const ORBIT_CAMERA: u32 = 1 << 18;
 
     pub(crate) fn probe(world: &World, entity: Entity) -> Self {
-        let mut bits = 0u16;
+        let mut bits = 0u32;
         if world.get::<&Name>(entity).is_ok() {
             bits |= Self::NAME;
         }
@@ -97,10 +100,28 @@ impl ComponentPresence {
         if world.get::<&StaticCollision>(entity).is_ok() {
             bits |= Self::STATIC_COLLISION;
         }
+        if world
+            .get::<&game_shared::components::CharacterMovement>(entity)
+            .is_ok()
+        {
+            bits |= Self::CHARACTER_MOVEMENT;
+        }
+        if world
+            .get::<&game_shared::components::PlayerInput>(entity)
+            .is_ok()
+        {
+            bits |= Self::PLAYER_INPUT;
+        }
+        if world
+            .get::<&game_shared::components::OrbitCamera>(entity)
+            .is_ok()
+        {
+            bits |= Self::ORBIT_CAMERA;
+        }
         Self { bits }
     }
 
-    pub(crate) fn has(self, flag: u16) -> bool {
+    pub(crate) fn has(self, flag: u32) -> bool {
         self.bits & flag != 0
     }
 }
@@ -239,4 +260,45 @@ pub(crate) fn quaternions_approximately_equal(a: &glm::Quat, b: &glm::Quat) -> b
         + a.coords.w * b.coords.w)
         .abs();
     dot > 0.9999
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game_shared::components::{CharacterMovement, OrbitCamera, PlayerInput};
+
+    #[test]
+    fn presence_probe_sees_the_gameplay_components() {
+        let mut world = World::new();
+        let bare = world.spawn((Name::new("bare"),));
+        let player = world.spawn((
+            Name::new("player"),
+            CharacterMovement::default(),
+            PlayerInput::default(),
+        ));
+        let camera = world.spawn((OrbitCamera::default(),));
+
+        let p = ComponentPresence::probe(&world, bare);
+        assert!(p.has(ComponentPresence::NAME));
+        assert!(!p.has(ComponentPresence::CHARACTER_MOVEMENT));
+        assert!(!p.has(ComponentPresence::PLAYER_INPUT));
+        assert!(!p.has(ComponentPresence::ORBIT_CAMERA));
+
+        let p = ComponentPresence::probe(&world, player);
+        assert!(p.has(ComponentPresence::CHARACTER_MOVEMENT));
+        assert!(p.has(ComponentPresence::PLAYER_INPUT));
+        assert!(!p.has(ComponentPresence::ORBIT_CAMERA));
+
+        let p = ComponentPresence::probe(&world, camera);
+        assert!(p.has(ComponentPresence::ORBIT_CAMERA));
+        assert!(!p.has(ComponentPresence::NAME));
+
+        // The three new bits are distinct from every older flag.
+        let older = ComponentPresence::probe(&world, bare);
+        assert_ne!(
+            ComponentPresence::CHARACTER_MOVEMENT & ComponentPresence::ANIM_GRAPH_RUNNER,
+            ComponentPresence::CHARACTER_MOVEMENT
+        );
+        assert!(!older.has(ComponentPresence::ORBIT_CAMERA));
+    }
 }

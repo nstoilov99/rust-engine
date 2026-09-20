@@ -32,9 +32,9 @@ use rust_engine::engine::world::{StreamingCtx, WorldStreamer};
 use rust_engine::{GameLoop, InputManager, Renderer};
 use std::sync::Arc;
 use vulkano::descriptor_set::DescriptorSet;
-use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::keyboard::PhysicalKey;
-use winit::window::Window;
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window};
 
 #[allow(dead_code)]
 pub struct StandaloneApp {
@@ -91,9 +91,14 @@ pub struct StandaloneApp {
     stress_anim: usize,
     /// Task 41.5 P0: `--bench-secs S` — per-frame metric collector.
     bench: Option<crate::bench::BenchRun>,
+    /// Task 41.6 D4: true while Escape has released the cursor.
+    cursor_released: bool,
+    /// Task 41.6 D10: the offline / fallback scene, `--scene <content-relative
+    /// path>` or [`OFFLINE_SCENE`].
+    offline_scene: String,
 }
 
-/// Offline / fallback scene.
+/// Default offline / fallback scene.
 const OFFLINE_SCENE: &str = "scenes/main.scene";
 
 impl StandaloneApp {
@@ -105,6 +110,9 @@ impl StandaloneApp {
 
         let args: Vec<String> = std::env::args().collect();
         let bench_flags = crate::bench::parse_flags(&args);
+        let offline_scene = crate::bench::arg_value(&args, "--scene")
+            .unwrap_or_else(|| OFFLINE_SCENE.to_string());
+        println!("standalone: offline scene '{offline_scene}'");
 
         let window_config = rust_engine::engine::utils::WindowConfig::load_or_default();
         // Bench runs measure frame time; an fps cap from the configured
@@ -249,6 +257,7 @@ impl StandaloneApp {
                     .reads_resource::<TransformCache>()
                     .reads::<Transform>()
                     .reads::<rust_engine::engine::physics::RigidBody>()
+                    .reads::<rust_engine::engine::ecs::hierarchy::Parent>()
                     .writes::<AnimGraphRuntime>()
                     .writes::<IkTargets>()
                     .after(rust_engine::engine::ecs::system_names::ANIMATION_UPDATE)
@@ -432,9 +441,16 @@ impl StandaloneApp {
             bench: bench_flags
                 .bench_secs
                 .map(|s| crate::bench::BenchRun::new(s, bench_flags.stress_anim)),
+            cursor_released: true,
+            offline_scene,
         };
+        // D4: mouse look from the first frame; bench runs are unattended.
+        if bench_flags.bench_secs.is_none() {
+            app.set_cursor_captured(true);
+        }
         if app.net.is_none() {
-            app.load_world(OFFLINE_SCENE);
+            let scene = app.offline_scene.clone();
+            app.load_world(&scene);
         } else {
             println!("standalone: waiting for server world scene");
         }
@@ -551,11 +567,13 @@ impl StandaloneApp {
                 if let Some(net) = &mut self.net {
                     net.disconnect();
                 }
-                self.load_world(OFFLINE_SCENE);
+                let scene = self.offline_scene.clone();
+                self.load_world(&scene);
             }
             Decision::Offline => {
                 println!("standalone: no server world (connection failed); loading offline scene");
-                self.load_world(OFFLINE_SCENE);
+                let scene = self.offline_scene.clone();
+                self.load_world(&scene);
             }
         }
     }
@@ -678,6 +696,30 @@ impl StandaloneApp {
         }
     }
 
+    /// D4: capture (confine, else lock, else give up) hides the cursor and
+    /// switches the `look` axis to raw motion; release undoes all three.
+    /// Same behaviour as the editor's Play-mode F1 toggle.
+    pub fn set_cursor_captured(&mut self, captured: bool) {
+        let mode = if captured {
+            [CursorGrabMode::Confined, CursorGrabMode::Locked]
+                .into_iter()
+                .find(|m| self.window.set_cursor_grab(*m).is_ok())
+        } else {
+            None
+        };
+        if mode.is_none() {
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        }
+        // Only a successful grab counts as captured; otherwise the cursor
+        // would vanish while still free to leave the window.
+        let captured = captured && mode.is_some();
+        self.window.set_cursor_visible(!captured);
+        if let Some(im) = self.game_world.resource_mut::<InputManager>() {
+            im.set_use_raw_mouse(captured);
+        }
+        self.cursor_released = !captured;
+    }
+
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         match event {
             #[cfg_attr(not(feature = "hud"), allow(unused_variables))]
@@ -694,6 +736,14 @@ impl StandaloneApp {
                     PhysicalKey::Code(code) => Some(code),
                     _ => None,
                 };
+                // D4: Escape toggles cursor release / recapture.
+                if keycode == Some(KeyCode::Escape)
+                    && key_event.state == ElementState::Pressed
+                    && !key_event.repeat
+                {
+                    let recapture = self.cursor_released;
+                    self.set_cursor_captured(recapture);
+                }
                 if let Some(im) = self.game_world.resource_mut::<InputManager>() {
                     im.handle_keyboard(keycode, key_event.state);
                 }

@@ -835,6 +835,12 @@ pub enum ComponentData {
         #[serde(default = "default_true")]
         enabled: bool,
     },
+    /// Task 41.6 gameplay components. Newtype over the `game_shared`
+    /// struct: its `#[serde(default)]` config fields are the schema and its
+    /// `#[serde(skip)]` runtime state never reaches the file.
+    CharacterMovement(game_shared::components::CharacterMovement),
+    PlayerInput(game_shared::components::PlayerInput),
+    OrbitCamera(game_shared::components::OrbitCamera),
     Player,
     StaticCollision,
     Parent {
@@ -969,6 +975,70 @@ mod tests {
             }
             _ => panic!("expected cuboid shape"),
         }
+    }
+
+    #[test]
+    fn gameplay_components_roundtrip_config_only() {
+        use game_shared::components::{CharacterMovement, OrbitCamera, PlayerInput};
+        let target = uuid::Uuid::from_u128(0x1234);
+        let scene = SceneFile {
+            version: "1.0".into(),
+            name: "t".into(),
+            entities: vec![EntityData {
+                name: "Player".into(),
+                guid: None,
+                components: vec![
+                    ComponentData::CharacterMovement(CharacterMovement {
+                        walk_speed: 2.0,
+                        jump_requested: true,
+                        ..Default::default()
+                    }),
+                    ComponentData::PlayerInput(PlayerInput {
+                        mapping_context: "demo".into(),
+                        ..Default::default()
+                    }),
+                    ComponentData::OrbitCamera(OrbitCamera {
+                        target: Some(target),
+                        distance: 5.0,
+                        yaw: 1.0,
+                        ..Default::default()
+                    }),
+                ],
+            }],
+        };
+        // Same serializer configuration as `serialize_scene_to_string`.
+        let text =
+            ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("jump_requested") && !text.contains("yaw"));
+
+        let back: SceneFile = ron::from_str(&text).unwrap();
+        match &back.entities[0].components[..] {
+            [ComponentData::CharacterMovement(cm), ComponentData::PlayerInput(pi), ComponentData::OrbitCamera(oc)] =>
+            {
+                assert_eq!(cm.walk_speed, 2.0);
+                assert_eq!(cm.run_speed, 4.5);
+                assert!(!cm.jump_requested, "runtime state is not persisted");
+                assert_eq!(pi.mapping_context, "demo");
+                assert_eq!(pi.move_action, "move");
+                assert_eq!(oc.target, Some(target));
+                assert_eq!(oc.distance, 5.0);
+                assert_eq!(oc.yaw, 0.0);
+            }
+            other => panic!("unexpected components: {other:?}"),
+        }
+
+        // Hand-written scenes may name only the fields they change.
+        let partial: ComponentData =
+            ron::from_str(r#"(type: "CharacterMovement", run_speed: 6.0)"#).unwrap();
+        match partial {
+            ComponentData::CharacterMovement(cm) => {
+                assert_eq!(cm.run_speed, 6.0);
+                assert_eq!(cm.walk_speed, 1.6);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let bare: ComponentData = ron::from_str(r#"(type: "OrbitCamera")"#).unwrap();
+        assert!(matches!(bare, ComponentData::OrbitCamera(oc) if oc.target.is_none()));
     }
 
     #[test]

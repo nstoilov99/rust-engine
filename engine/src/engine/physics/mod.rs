@@ -55,6 +55,7 @@ pub fn rebuild_bodies_from_world(physics_world: &mut PhysicsWorld, world: &mut h
     physics_world.multibody_joint_set = rapier3d::prelude::MultibodyJointSet::new();
     physics_world.ccd_solver = rapier3d::prelude::CCDSolver::new();
     physics_world.query_pipeline = rapier3d::prelude::QueryPipeline::new();
+    physics_world.prev_poses.clear();
     physics_world.reset_accumulator();
 
     // Handles from the previous population are dangling now.
@@ -140,6 +141,7 @@ pub fn deregister_entity(
         &mut physics_world.multibody_joint_set,
         true,
     );
+    physics_world.prev_poses.remove(&handle);
     if let Ok(mut rb) = world.get::<&mut RigidBody>(entity) {
         rb.handle = None;
     }

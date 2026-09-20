@@ -1,6 +1,7 @@
-//! Foot placement (Task 41.5 P6, I-D4): rays the ground under each foot
-//! chain, writes the chain's `IkTargets` entry, locks planted feet on anim
-//! event edges, and drives the cosmetic pelvis drop.
+//! Foot placement (Task 41.5 P6, I-D4; Task 41.6 P6): rays the ground under
+//! each foot chain, writes the chain's `IkTargets` entry as a terrain
+//! *offset* of the animated foot, locks planted feet on anim event edges,
+//! and drives the cosmetic pelvis drop.
 //!
 //! Serial by design, scheduled immediately **before** `AnimGraphSystem`: it
 //! reads `Resources` (physics world, transform cache), reads last tick's
@@ -18,13 +19,13 @@
 
 use crate::engine::animation::graph::machine::AnimEventFire;
 use crate::engine::animation::graph::runner::{
-    AnimGraphRuntime, HeldContact, IkTarget, IkTargets,
+    AnimGraphRuntime, HeldContact, IkTarget, IkTargets, RELEASE_SECS,
 };
 use crate::engine::ecs::components::Transform;
-use crate::engine::ecs::hierarchy::TransformCache;
+use crate::engine::ecs::hierarchy::{Parent, TransformCache};
 use crate::engine::ecs::resources::{Resources, Time};
 use crate::engine::ecs::schedule::System;
-use crate::engine::physics::{PhysicsWorld, RigidBody};
+use crate::engine::physics::{PhysicsWorld, RigidBody, RigidBodyHandle};
 use crate::engine::utils::coords::{convert_position_yup_to_zup, convert_position_zup_to_yup};
 use nalgebra_glm as glm;
 
@@ -35,10 +36,6 @@ const RAY_START_ABOVE: f32 = 0.5;
 const STEP_HEIGHT: f32 = 0.6;
 /// Total ray length.
 const RAY_LENGTH: f32 = RAY_START_ABOVE + STEP_HEIGHT;
-/// Knee pole point: this far ahead of the foot along character forward…
-const POLE_FORWARD: f32 = 1.0;
-/// …and this far up — in front of the knee, so the leg bends forward.
-const POLE_UP: f32 = 0.5;
 /// The pelvis never drops further than this.
 const MAX_PELVIS_DROP: f32 = 0.5;
 /// Exponential approach rate (1/s) for the pelvis drop.
@@ -57,6 +54,34 @@ fn fired(events: &[AnimEventFire], chain: &str, suffix: &str) -> bool {
         .any(|e| e.name.strip_prefix(chain).is_some_and(|rest| rest == suffix))
 }
 
+/// This frame's ground reading under one foot (Task 41.6 P6, F1).
+#[derive(Clone, Copy)]
+struct Contact {
+    /// World Z-up displacement of the animated foot: the terrain height
+    /// difference from the entity's ground plane (clamped to what the
+    /// pelvis drop / step reach can absorb) plus the ankle offset tilted
+    /// onto the surface normal — zero on flat ground at the entity's level.
+    delta: glam::Vec3,
+    /// The animated foot shifted by `delta`: the clip's plant pose on this
+    /// terrain, what a `_down` edge latches.
+    plant: glam::Vec3,
+    /// Raw contact height, world Z.
+    contact_z: f32,
+}
+
+/// Terrain delta for a foot: `contact_z − entity_z` clamped to
+/// `[−MAX_PELVIS_DROP, +STEP_HEIGHT]` along Z, plus the ankle offset
+/// re-aimed from straight up to the surface normal.
+pub fn terrain_delta(
+    contact_z: f32,
+    entity_z: f32,
+    normal: glam::Vec3,
+    ankle_offset: f32,
+) -> glam::Vec3 {
+    let dz = (contact_z - entity_z).clamp(-MAX_PELVIS_DROP, STEP_HEIGHT);
+    glam::Vec3::Z * dz + (normal - glam::Vec3::Z) * ankle_offset
+}
+
 /// One entity's foot-placement step — the injectable core (tests script
 /// `ray`, the system wires it to [`PhysicsWorld::raycast_filtered`]).
 ///
@@ -67,11 +92,19 @@ fn fired(events: &[AnimEventFire], chain: &str, suffix: &str) -> bool {
 /// entirely: no target ⇒ no writes), locks release, the pelvis returns, and
 /// one forced evaluation snaps the pose back to animated instead of holding
 /// a half-corrected pose forever.
+///
+/// Per foot (Task 41.6 P6): the ray starts above the last evaluation's
+/// animated foot; the chain's `IkTargets` entry is the resulting
+/// [`terrain_delta`] as an `Offset` goal (the pole comes from the chain's
+/// own knee in the runner), so an unlocked foot keeps the clip's swing and
+/// only conforms to the terrain. Lock state lives on the chain's
+/// `FootState`: a `_down` edge latches the shifted plant pose, `_up` (or a
+/// runner-side reach failure) releases it into a [`RELEASE_SECS`] blend
+/// toward the offset target.
 pub fn place_feet(
     rt: &mut AnimGraphRuntime,
     targets: &mut IkTargets,
     entity_render: glam::Mat4,
-    forward_zup: glam::Vec3,
     dt: f32,
     active: bool,
     ray: &mut dyn FnMut(glam::Vec3) -> Option<(glam::Vec3, glam::Vec3)>,
@@ -80,9 +113,10 @@ pub fn place_feet(
         let mut changed = false;
         for chain in &mut rt.ik {
             let Some(foot) = &mut chain.foot else { continue };
-            changed |= targets.targets.remove(&chain.name).is_some() || foot.locked;
-            foot.locked = false;
-            foot.held = None;
+            changed |= targets.targets.remove(&chain.name).is_some()
+                || foot.locked
+                || foot.release.is_some();
+            foot.clear();
         }
         if let Some(p) = &mut rt.pelvis {
             changed |= p.offset < -PELVIS_EPSILON;
@@ -110,47 +144,78 @@ pub fn place_feet(
             let foot_world =
                 convert_position_yup_to_zup((entity_render * tip.extend(1.0)).truncate());
             let (point, normal) = ray(foot_world + glam::Vec3::Z * RAY_START_ABOVE)?;
-            Some(HeldContact {
-                target: IkTarget {
-                    effector: point + normal * foot.ankle_offset,
-                    pole: foot_world + forward_zup * POLE_FORWARD + glam::Vec3::Z * POLE_UP,
-                },
+            let delta = terrain_delta(point.z, entity_z, normal, foot.ankle_offset);
+            Some(Contact {
+                delta,
+                plant: foot_world + delta,
                 contact_z: point.z,
             })
         });
 
+        // The runner found the held point out of reach last evaluation:
+        // let go now, blending off it.
+        if std::mem::take(&mut foot.release_requested) && foot.locked {
+            foot.unlock();
+            rt.throttle.force_eval_external = true;
+        }
         // Lock edges (`<chain>_down` / `<chain>_up`, last tick's fires).
         // Either edge forces one full evaluation — the P4 hook, serial-side.
         // A down edge with no ground under the foot does not latch.
+        // The state that planted the foot has been left (a stop into Idle,
+        // a jump): its `_up` will never come, so let go here.
+        if foot.locked && foot.lock_state != rt.machine.current_state() {
+            foot.unlock();
+            rt.throttle.force_eval_external = true;
+        }
         if fired(&rt.events, &chain.name, FOOT_EVENT_DOWN_SUFFIX) {
             if let Some(c) = fresh {
                 foot.locked = true;
-                foot.held = Some(c);
+                foot.lock_state = rt.machine.current_state();
+                foot.held = Some(HeldContact {
+                    point: c.plant,
+                    contact_z: c.contact_z,
+                });
+                foot.release = None;
             }
             rt.throttle.force_eval_external = true;
         }
         if fired(&rt.events, &chain.name, FOOT_EVENT_UP_SUFFIX) {
-            foot.locked = false;
-            foot.held = None;
+            foot.unlock();
             rt.throttle.force_eval_external = true;
         }
+        if let Some(rel) = &mut foot.release {
+            rel.blend += dt / RELEASE_SECS;
+            if rel.blend >= 1.0 {
+                foot.release = None;
+            }
+        }
 
-        match if foot.locked { foot.held.or(fresh) } else { fresh } {
+        match fresh {
             Some(c) => {
                 // Upsert without allocating at steady state.
+                let target = IkTarget::offset(c.delta);
                 match targets.targets.get_mut(&chain.name) {
-                    Some(t) => *t = c.target,
+                    Some(t) => *t = target,
                     None => {
-                        targets.targets.insert(chain.name.clone(), c.target);
+                        targets.targets.insert(chain.name.clone(), target);
                     }
                 }
-                lowest = lowest.min(c.contact_z - entity_z);
             }
             // No ground under the foot (mid-air, past a ledge): no target,
-            // so the chain skips its solve — the foot stays animated.
+            // so the chain skips its solve — the foot stays animated (a
+            // locked foot still holds its point).
             None => {
                 targets.targets.remove(&chain.name);
             }
+        }
+        let contact_z = if foot.locked {
+            foot.held.map(|h| h.contact_z)
+        } else {
+            None
+        }
+        .or(fresh.map(|c| c.contact_z));
+        if let Some(z) = contact_z {
+            lowest = lowest.min(z - entity_z);
         }
     }
 
@@ -165,8 +230,21 @@ pub fn place_feet(
     }
 }
 
+/// Which body the ground rays must ignore (Task 41.6 D8): the rig entity's
+/// own, else its parent's. A character's capsule lives on the gameplay root
+/// while the animated rig is a child carrying no collider — without the
+/// fallback every ray would hit the capsule the feet stand inside.
+pub fn exclude_handle(
+    own: Option<&RigidBody>,
+    parent: Option<&RigidBody>,
+) -> Option<RigidBodyHandle> {
+    own.and_then(|b| b.handle)
+        .or_else(|| parent.and_then(|b| b.handle))
+}
+
 /// The system: [`place_feet`] per entity with armed foot chains, rays
-/// through the physics world, excluding the entity's own rigid body.
+/// through the physics world, excluding the entity's own rigid body (or
+/// its parent's — see [`exclude_handle`]).
 ///
 /// Structural licence: inserts a default `IkTargets` on entities that need
 /// one — serial work, same terms as `AnimGraphSystem`'s arming.
@@ -217,12 +295,19 @@ impl System for FootPlacementSystem {
 
         let physics = resources.get::<PhysicsWorld>();
         let cache = resources.get::<TransformCache>();
-        for (e, (rt, targets, transform, body)) in world.query_mut::<(
-            &mut AnimGraphRuntime,
-            &mut IkTargets,
-            Option<&Transform>,
-            Option<&RigidBody>,
-        )>() {
+        // `query` (not `query_mut`) so the parent's body can be read
+        // through `world.get` inside the loop — shared borrows on
+        // `RigidBody` only, so hecs' runtime check is satisfied.
+        for (e, (rt, targets, transform, body, parent)) in world
+            .query::<(
+                &mut AnimGraphRuntime,
+                &mut IkTargets,
+                Option<&Transform>,
+                Option<&RigidBody>,
+                Option<&Parent>,
+            )>()
+            .iter()
+        {
             if rt.disabled.is_some() || !rt.ik.iter().any(|c| c.foot.is_some()) {
                 continue;
             }
@@ -235,18 +320,12 @@ impl System for FootPlacementSystem {
                     .map(|t| glam::Mat4::from_cols_slice(t.model_matrix().as_slice()))
                     .unwrap_or(glam::Mat4::IDENTITY),
             };
-            // Character forward in world Z-up (+X is forward) — the knee
-            // pole sits ahead of the foot along it.
-            let forward = transform
-                .map(|t| {
-                    let f = glm::quat_rotate_vec3(&t.rotation, &glm::vec3(1.0, 0.0, 0.0));
-                    glam::Vec3::new(f.x, f.y, f.z)
-                })
-                .unwrap_or(glam::Vec3::X);
-            // No `RigidBody` component ⇒ no exclusion filter: a character
-            // whose collider isn't backed by an ECS RigidBody can ray-hit
-            // itself. Shipping characters attach colliders via RigidBody.
-            let exclude = body.and_then(|b| b.handle);
+            // No `RigidBody` on the rig or its parent ⇒ no exclusion
+            // filter: a character whose collider isn't backed by an ECS
+            // RigidBody can ray-hit itself. Shipping characters attach
+            // colliders via RigidBody (on the root, D8).
+            let parent_body = parent.and_then(|p| world.get::<&RigidBody>(p.0).ok());
+            let exclude = exclude_handle(body, parent_body.as_deref());
             // I-D5: raycasts only in the top significance bucket. `bucket`
             // is written by AnimGraphSystem step 2.5, which runs *after*
             // this system — one frame of latency entering/leaving bucket 0
@@ -266,7 +345,7 @@ impl System for FootPlacementSystem {
                     glam::Vec3::new(hit.normal.x, hit.normal.y, hit.normal.z),
                 ))
             };
-            place_feet(rt, targets, entity_render, forward, dt, active, &mut cast);
+            place_feet(rt, targets, entity_render, dt, active, &mut cast);
         }
     }
 
@@ -290,7 +369,7 @@ mod tests {
     };
     use crate::engine::animation::graph::plan::{AnimGraphPlan, PlanIkSolver};
     use crate::engine::animation::graph::runner::{
-        ArmedIkChain, FootState, PelvisState, ThrottleState,
+        ArmedIkChain, FootState, IkGoal, PelvisState, ThrottleState,
     };
     use glam::Vec3;
     use std::sync::Arc;
@@ -316,12 +395,11 @@ mod tests {
                 solver: PlanIkSolver::TwoBone,
                 weight_param: "ik".into(),
                 resolved: None,
-                foot: Some(FootState {
-                    ankle_offset: 0.1,
-                    locked: false,
-                    held: None,
-                }),
+                foot: Some(FootState::new(0.1)),
                 animated_tip: Some(Vec3::new(0.0, 0.1, 0.0)),
+                animated_root: Some(Vec3::new(0.0, 0.9, 0.0)),
+                animated_mid: Some(Vec3::new(0.0, 0.5, 0.2)),
+                pole_dir: None,
             }],
             pelvis: Some(PelvisState {
                 bone: 0,
@@ -329,6 +407,7 @@ mod tests {
                 model_offset: Vec3::ZERO,
             }),
             ik_touched: Vec::new(),
+            clips: Default::default(),
         }
     }
 
@@ -344,7 +423,7 @@ mod tests {
         active: bool,
         ray: &mut dyn FnMut(Vec3) -> Option<(Vec3, Vec3)>,
     ) {
-        place_feet(rt, targets, glam::Mat4::IDENTITY, Vec3::X, dt, active, ray);
+        place_feet(rt, targets, glam::Mat4::IDENTITY, dt, active, ray);
     }
 
     fn fire(rt: &mut AnimGraphRuntime, name: &str) {
@@ -354,24 +433,31 @@ mod tests {
         });
     }
 
+    fn foot(rt: &AnimGraphRuntime) -> &FootState {
+        rt.ik[0].foot.as_ref().unwrap()
+    }
+
+    fn delta(targets: &IkTargets) -> Vec3 {
+        match targets.targets.get("foot_l").expect("target written") {
+            IkTarget {
+                goal: IkGoal::Offset(d),
+                pole: None,
+            } => *d,
+            other => panic!("feet write pole-less offsets: {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_contact_writes_the_target_with_ankle_offset_and_drops_the_pelvis() {
+    fn a_contact_writes_the_terrain_delta_and_drops_the_pelvis() {
         let mut rt = foot_rt();
         let mut targets = IkTargets::default();
         // dt 1.0 saturates the smoothing, so the pelvis lands on its goal.
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.3));
 
-        let t = targets.targets.get("foot_l").expect("target written");
+        let d = delta(&targets);
         assert!(
-            (t.effector - Vec3::new(0.0, 0.0, -0.2)).length() < 1e-5,
-            "contact −0.3 lifted 0.1 along the normal: {}",
-            t.effector
-        );
-        // Pole: 1 m ahead of the animated foot (world (0,0,0.1)), 0.5 m up.
-        assert!(
-            (t.pole - Vec3::new(1.0, 0.0, 0.6)).length() < 1e-5,
-            "knee-forward pole: {}",
-            t.pole
+            (d - Vec3::new(0.0, 0.0, -0.3)).length() < 1e-5,
+            "ground 0.3 below the entity plane, flat: the foot shifts down 0.3: {d}"
         );
         let p = rt.pelvis.unwrap();
         assert!(
@@ -381,6 +467,29 @@ mod tests {
         );
         // World Z-up drop → identity-entity model Y-up: (0, −0.3, 0).
         assert!((p.model_offset - Vec3::new(0.0, -0.3, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn flat_ground_at_the_entity_plane_is_a_zero_delta() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(0.0));
+        assert_eq!(delta(&targets), Vec3::ZERO, "nothing to conform to");
+        assert_eq!(rt.pelvis.unwrap().offset, 0.0);
+    }
+
+    #[test]
+    fn the_delta_clamps_and_tilts_the_ankle_offset_onto_the_normal() {
+        // Deep chasm: the drop is capped at the pelvis reach.
+        let d = terrain_delta(-5.0, 0.0, Vec3::Z, 0.1);
+        assert!((d - Vec3::new(0.0, 0.0, -MAX_PELVIS_DROP)).length() < 1e-6, "{d}");
+        // Tall step: capped at the step reach.
+        let d = terrain_delta(2.0, 0.0, Vec3::Z, 0.1);
+        assert!((d - Vec3::new(0.0, 0.0, STEP_HEIGHT)).length() < 1e-6, "{d}");
+        // A slope tilts the 0.1 ankle lift from Z onto the normal.
+        let n = Vec3::new(-0.6, 0.0, 0.8);
+        let d = terrain_delta(0.0, 0.0, n, 0.1);
+        assert!((d - (n - Vec3::Z) * 0.1).length() < 1e-6, "{d}");
     }
 
     #[test]
@@ -407,32 +516,96 @@ mod tests {
     }
 
     #[test]
-    fn a_down_event_latches_the_contact_until_the_up_event() {
+    fn a_down_event_latches_the_plant_pose_until_the_up_event_then_blends_out() {
         let mut rt = foot_rt();
         let mut targets = IkTargets::default();
 
         fire(&mut rt, "foot_l_down");
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
-        assert!(rt.ik[0].foot.as_ref().unwrap().locked);
+        assert!(foot(&rt).locked);
         assert!(
             std::mem::take(&mut rt.throttle.force_eval_external),
             "the down edge forces one evaluation"
         );
-        let held = targets.targets["foot_l"].effector;
-        assert!((held.z - 0.0).abs() < 1e-5, "contact −0.1 + offset 0.1");
+        let held = foot(&rt).held.expect("latched");
+        assert!(
+            (held.point - Vec3::new(0.0, 0.0, 0.0)).length() < 1e-5,
+            "animated foot (0,0,0.1) shifted by the −0.1 delta: {}",
+            held.point
+        );
+        assert!((held.contact_z - (-0.1)).abs() < 1e-6);
 
-        // The ground moves; the locked foot does not.
+        // The ground moves; the lock does not, the offset entry follows
+        // (it is the runner's fallback), the pelvis measures the held contact.
         rt.events.clear();
         place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.4));
-        assert_eq!(targets.targets["foot_l"].effector, held, "held while locked");
+        assert_eq!(foot(&rt).held.unwrap().point, held.point, "held while locked");
+        assert!((delta(&targets).z - (-0.4)).abs() < 1e-5, "fresh offset still written");
+        assert!(
+            (rt.pelvis.unwrap().offset - (-0.1)).abs() < 1e-5,
+            "pelvis on the held contact"
+        );
         assert!(!rt.throttle.force_eval_external, "no edge, no force");
 
-        // The up edge releases: the target follows the fresh contact again.
+        // The up edge releases into a blend from the held point.
         fire(&mut rt, "foot_l_up");
-        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.4));
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked);
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.4));
+        assert!(!foot(&rt).locked && foot(&rt).held.is_none());
         assert!(rt.throttle.force_eval_external, "the up edge forces too");
-        assert!((targets.targets["foot_l"].effector.z - (-0.3)).abs() < 1e-5);
+        let rel = foot(&rt).release.expect("release blend started");
+        assert_eq!(rel.from, held.point);
+        assert!((rel.blend - 0.5).abs() < 1e-5, "0.05 s of a 0.1 s blend: {}", rel.blend);
+        assert!(
+            (rt.pelvis.unwrap().offset - (-0.25)).abs() < 1e-5,
+            "pelvis easing (half-way at dt 0.05) toward the fresh contact: {}",
+            rt.pelvis.unwrap().offset
+        );
+
+        rt.events.clear();
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.4));
+        assert!(foot(&rt).release.is_none(), "blend complete");
+    }
+
+    #[test]
+    fn leaving_the_planting_state_releases_the_lock() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        fire(&mut rt, "foot_l_down");
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
+        assert!(foot(&rt).locked);
+        rt.events.clear();
+        rt.throttle.force_eval_external = false;
+
+        // Still in the planting state: the lock holds with no `_up`.
+        place(&mut rt, &mut targets, 0.2, true, &mut ground(-0.1));
+        assert!(foot(&rt).locked, "same state keeps the lock");
+
+        // The machine moves on (a stop into Idle): the lock lets go and
+        // blends off the held point, like an `_up` would.
+        rt.machine.set_current_state_for_test(1);
+        place(&mut rt, &mut targets, 0.05, true, &mut ground(-0.1));
+        assert!(!foot(&rt).locked && foot(&rt).held.is_none());
+        assert!(foot(&rt).release.is_some(), "release blend started");
+        assert!(rt.throttle.force_eval_external, "the release forces an evaluation");
+    }
+
+    #[test]
+    fn a_runner_reach_failure_releases_the_lock_next_frame() {
+        let mut rt = foot_rt();
+        let mut targets = IkTargets::default();
+        fire(&mut rt, "foot_l_down");
+        place(&mut rt, &mut targets, 1.0, true, &mut ground(-0.1));
+        rt.events.clear();
+        rt.throttle.force_eval_external = false;
+
+        // What `apply_ik` sets when the held point is past 98 % of the leg.
+        rt.ik[0].foot.as_mut().unwrap().release_requested = true;
+        place(&mut rt, &mut targets, 0.01, true, &mut ground(-0.1));
+        let f = foot(&rt);
+        assert!(!f.locked && f.held.is_none(), "unlocked");
+        assert!(!f.release_requested, "consumed");
+        assert!(f.release.is_some(), "blending off the held point");
+        assert!(rt.throttle.force_eval_external, "one forced evaluation");
     }
 
     #[test]
@@ -448,7 +621,7 @@ mod tests {
             targets.targets.is_empty(),
             "mid-air: no target, the chain skips its solve"
         );
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked, "air never locks");
+        assert!(!foot(&rt).locked, "air never locks");
     }
 
     #[test]
@@ -461,16 +634,47 @@ mod tests {
         rt.throttle.force_eval_external = false;
 
         // Bucket left: stale targets are removed (the documented policy —
-        // the solve skips, the pose returns to animated), locks release,
-        // the pelvis resets, and one corrective eval is forced.
+        // the solve skips, the pose returns to animated), locks release
+        // without a blend, the pelvis resets, and one corrective eval is
+        // forced.
         place(&mut rt, &mut targets, 1.0, false, &mut ground(-0.3));
         assert!(targets.targets.is_empty());
-        assert!(!rt.ik[0].foot.as_ref().unwrap().locked);
+        assert!(!foot(&rt).locked && foot(&rt).release.is_none());
         assert_eq!(rt.pelvis.unwrap().offset, 0.0);
         assert!(std::mem::take(&mut rt.throttle.force_eval_external));
 
         // Steady state off-bucket: nothing changes, nothing forces.
         place(&mut rt, &mut targets, 1.0, false, &mut ground(-0.3));
         assert!(!rt.throttle.force_eval_external);
+    }
+
+    fn body(handle: Option<RigidBodyHandle>) -> RigidBody {
+        RigidBody {
+            handle,
+            ..RigidBody::default()
+        }
+    }
+
+    #[test]
+    fn exclude_prefers_the_rigs_own_body_then_falls_back_to_the_parents() {
+        let own = RigidBodyHandle::from_raw_parts(1, 0);
+        let parents = RigidBodyHandle::from_raw_parts(2, 0);
+        assert_eq!(
+            exclude_handle(Some(&body(Some(own))), Some(&body(Some(parents)))),
+            Some(own),
+            "a rig with its own body excludes that"
+        );
+        assert_eq!(
+            exclude_handle(None, Some(&body(Some(parents)))),
+            Some(parents),
+            "D8: the rig child carries no body — the parent's capsule is excluded"
+        );
+        assert_eq!(
+            exclude_handle(Some(&body(None)), Some(&body(Some(parents)))),
+            Some(parents),
+            "an unregistered own body (no handle yet) still falls back"
+        );
+        assert_eq!(exclude_handle(None, None), None, "no body anywhere: no filter");
+        assert_eq!(exclude_handle(None, Some(&body(None))), None);
     }
 }

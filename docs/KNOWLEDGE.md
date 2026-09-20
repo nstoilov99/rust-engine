@@ -507,6 +507,66 @@ pub struct EntityRef {
   clip's event markers must follow. `IkTargets` is inserted by
   `FootPlacementSystem` automatically — there is nothing to attach by hand.
 
+## Locomotion & Foot IK Gotchas (Task 41.6)
+
+- **Rapier's default friction combine rule is Average.** A friction-0
+  capsule against a 0.8 floor still gets μ = 0.4 — enough to pin the
+  trailing hemisphere on a stair edge while the snap pushes it down.
+  `register_entity` gives colliders declared with friction ≤ 0 the `Min`
+  rule so the zero wins; everything else stays Average. Zero friction is a
+  stated intent, not a default.
+- **A capsule wider than a tread is always an edge balance.** Radius 0.4
+  on 0.3 m treads means the body never rests flat on one step; any snap or
+  slope follow applied while standing presses it onto a tilted edge
+  contact and shoves it forward every step — a residual slide that keeps
+  the speed up, keeps friction off and rides the whole staircase down.
+  Hence **never snap while standing**: `standing = grounded && !has_input`
+  (intent, not speed) keeps `vz`, and grip friction plus the contact solver
+  hold the body.
+- **`set_timestep` must set `integration_parameters.dt`.** It only changed
+  the accumulator interval before P6, so Rapier integrated at 1/60 whatever
+  `fixed_timestep_hz` said. Per-fixed-step corrections (`snap_vz`,
+  `step_lift_vz`) use `PhysicsWorld::fixed_dt()`, never render dt —
+  overshoot into the ground otherwise.
+- **`Transform` of a dynamic body is the interpolated presentation pose**
+  (`PhysicsWorld::present`, ≤ 1 fixed step behind). Probe and measure from
+  `PhysicsWorld::body_position(handle)`; a ground ray cast from the
+  presentation position reports last step's ground.
+- **The schedule validator needs a direct edge per conflicting pair** in a
+  stage (`schedule.rs` checks pairs, not transitive reachability), edges
+  to feature-gated systems must be `#[cfg]`-gated (dangling names are
+  rejected globally), and **only a launch builds the runtime schedule** —
+  or the `plugin.rs` test `gameplay_systems_validate_against_the_host_
+  schedule`, which stubs the hosts' descriptors; extend it (and keep the
+  FOOT_PLACEMENT descriptor identical in `app.rs`, `standalone.rs` and
+  the stub) rather than waiting for a launch panic.
+- **Mixamo rigs face −X after import.** The controller faces +X, so the
+  rig child's `Transform` carries a 180° yaw (`rotation: (0, 0, 1, 0)`); a
+  character that runs backwards or sideways is a rig-yaw bug, not a
+  controller bug.
+- **`.anim` bone indices assume the sibling mesh's bone order.** A clip
+  imported from a separate file (`--import-anim`, "Animation only") is
+  remapped by bone *name* when armed (`ClipSet::armed_for`, memoised in
+  `AnimClipCache::armed`); bones the skeleton lacks are dropped with one
+  `eprintln!` per clip set. Identical tables skip the remap.
+- **Import scale 0.01 for Mixamo.** An animation-only asset records no
+  scale anywhere; position keys must be written at the target mesh's scale
+  (`Defeated.mesh.ron`: 0.01) — `--import-scale 0.01` or the dialog's Scale
+  field. A mismatch is a rig that slides or floats, not an error.
+- **`log::` is invisible in `game_client`** (no logger installed). Use
+  `println!` / `eprintln!` for anything that must be seen (the dropped-bone
+  report, schedule validation errors), and keep it terse.
+- **A foot lock belongs to the planting state.** `FootState.lock_state`
+  records `machine.current_state()` at `_down`; `place_feet` releases when
+  the state changes, because a stop into Idle (or a jump) never fires the
+  clip's `_up` and the held point would sit at the reach limit forever.
+- **Foot placement writes terrain deltas, not points.** `IkGoal::Offset` is
+  applied on the *pre-pelvis* animated tip; pinning the foot to the ray
+  contact every frame erases swing clearance ("sticky feet") and drives the
+  two-bone solver to full extension ("knee break"). Never write a `Point`
+  for an unlocked foot; leave `pole: None` for foot chains so the knee is
+  taken from the current pose.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing
