@@ -954,7 +954,10 @@ mod tests {
         let col = world.get::<&PhysCollider>(player).unwrap();
         assert!(matches!(col.shape, ColliderShape::Capsule { .. }));
         assert_eq!(col.friction, 0.0);
-        assert!(world.get::<&CharacterMovement>(player).is_ok());
+        let cm = world.get::<&CharacterMovement>(player).unwrap();
+        assert_eq!(cm.jump_height, 1.6, "jump is authored as an apex height (P8)");
+        assert_eq!(cm.standing_friction, 1.0);
+        drop(cm);
         assert!(world.get::<&PlayerInput>(player).is_ok());
 
         // Rig child: graph runner, offset under the root, no body of its own.

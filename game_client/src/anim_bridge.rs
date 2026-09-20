@@ -111,8 +111,9 @@ const MAX_SPEED: f32 = 8.0;
 /// motion: hold pose instead of flashing a sprint.
 const TELEPORT_DIST: f32 = 2.0;
 /// |vertical velocity| above this reads as airborne. Between jump-arc speeds
-/// (up to `jump_speed` 8 m/s) and flat/gentle-slope walking; steep-ramp
-/// sprints may briefly misread — the ADR 0002 approximation trade, accepted.
+/// (`jump_height` 1.6 m ≈ 5.6 m/s take-off at g = 9.81) and flat/gentle-
+/// slope walking; steep-ramp sprints may briefly misread — the ADR 0002
+/// approximation trade, accepted.
 const AIRBORNE_VZ: f32 = 2.0;
 
 /// Remote proxy: parameters derived from the interpolated transform the

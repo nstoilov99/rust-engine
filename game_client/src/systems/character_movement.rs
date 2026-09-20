@@ -16,7 +16,7 @@
 //! close a gap (ground snap, step lift) close it over the fixed step the
 //! simulation will actually integrate, not the render frame (P6, F3/F4).
 
-use game_shared::components::CharacterMovement;
+use game_shared::components::{jump_velocity, CharacterMovement};
 use nalgebra_glm as glm;
 use rust_engine::engine::ecs::access::SystemDescriptor;
 use rust_engine::engine::ecs::components::{Transform, TransformDirty};
@@ -53,11 +53,6 @@ const GROUND_SNAP_DEADBAND: f32 = 0.02;
 /// Ground normals flatter than this (cos of the angle to +Z) count as
 /// walkable; steeper hits are walls and get no slope projection.
 const MIN_WALKABLE_NZ: f32 = 0.5;
-/// Capsule friction while standing still on the ground (the moving
-/// capsule runs at 0, and its collider's combine rule is `Min`, so this is
-/// capped by the surface it stands on).
-const STANDING_FRICTION: f32 = 1.0;
-
 pub struct CharacterMovementSystem;
 
 impl System for CharacterMovementSystem {
@@ -67,6 +62,7 @@ impl System for CharacterMovementSystem {
             return;
         };
         let fixed_dt = physics.fixed_dt();
+        let gravity_z = physics.gravity().z;
         let down = glm::vec3(0.0, 0.0, -1.0);
         let mut turned: Vec<hecs::Entity> = Vec::new();
 
@@ -125,7 +121,9 @@ impl System for CharacterMovementSystem {
             }
             if let Some(hit) = ground.as_ref() {
                 if cm.jump_requested {
-                    vz = cm.jump_speed;
+                    // Take-off speed for the authored apex height under the
+                    // gravity this body actually feels.
+                    vz = jump_velocity(cm.jump_height, gravity_z * rb.gravity_scale);
                     cm.jump_hold = JUMP_HOLD_SECS;
                     cm.step_lift_target = None;
                 } else if let Some(target) = cm.step_lift_target {
@@ -213,7 +211,7 @@ impl System for CharacterMovementSystem {
             // would otherwise keep the speed up, keep friction off, and
             // sustain itself down a whole staircase.
             let standing = grounded && !has_input;
-            physics.set_friction(handle, if standing { STANDING_FRICTION } else { 0.0 });
+            physics.set_friction(handle, if standing { cm.standing_friction } else { 0.0 });
 
             if speed > MIN_TURN_SPEED {
                 let yaw = turn_toward(

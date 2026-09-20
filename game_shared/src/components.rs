@@ -26,12 +26,16 @@ pub struct CharacterMovement {
     pub accel: f32,
     /// Horizontal deceleration when there is no input, m/s².
     pub decel: f32,
-    /// Vertical velocity set on a grounded jump, m/s.
-    pub jump_speed: f32,
+    /// Apex height of a grounded jump, metres; the controller derives the
+    /// take-off speed from the physics gravity (see [`jump_velocity`]).
+    pub jump_height: f32,
     /// Orient-to-movement turn rate, degrees/s.
     pub turn_rate_deg: f32,
     /// Highest ledge the step assist will hop, metres above the feet.
     pub step_height: f32,
+    /// Capsule friction while grounded with no input (0 while moving; the
+    /// collider's combine rule is `Min`, so the surface caps it).
+    pub standing_friction: f32,
 
     /// Camera-relative movement intent in the XY plane, magnitude ≤ 1.
     #[serde(skip)]
@@ -70,9 +74,10 @@ impl Default for CharacterMovement {
             run_speed: 4.5,
             accel: 20.0,
             decel: 30.0,
-            jump_speed: 8.0,
+            jump_height: 1.6,
             turn_rate_deg: 720.0,
             step_height: 0.35,
+            standing_friction: 1.0,
             desired_dir: [0.0; 2],
             run: false,
             jump_requested: false,
@@ -83,6 +88,12 @@ impl Default for CharacterMovement {
             step_lift_target: None,
         }
     }
+}
+
+/// Take-off speed that reaches `height` metres under `gravity` m/s²
+/// (sign-agnostic): `sqrt(2 · |g| · h)`. Non-positive heights give 0.
+pub fn jump_velocity(height: f32, gravity: f32) -> f32 {
+    (2.0 * gravity.abs() * height.max(0.0)).sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +202,9 @@ mod tests {
         let cm = CharacterMovement::default();
         assert_eq!(cm.walk_speed, 1.6);
         assert_eq!(cm.run_speed, 4.5);
-        assert_eq!(cm.jump_speed, 8.0);
+        assert_eq!(cm.jump_height, 1.6);
         assert_eq!(cm.step_height, 0.35);
+        assert_eq!(cm.standing_friction, 1.0);
         assert!(!cm.grounded && !cm.jump_requested && !cm.run);
         assert_eq!(cm.desired_dir, [0.0; 2]);
     }
@@ -214,6 +226,19 @@ mod tests {
         let partial: CharacterMovement = ron::from_str("(run_speed: 6.0)").unwrap();
         assert_eq!(partial.run_speed, 6.0);
         assert_eq!(partial.walk_speed, 1.6);
+    }
+
+    #[test]
+    fn jump_velocity_reaches_the_default_height_under_standard_gravity() {
+        let g = 9.81;
+        let v = jump_velocity(CharacterMovement::default().jump_height, g);
+        assert!((v - 5.6).abs() < 0.05, "v = {v}");
+        // Apex of a ballistic arc: h = v² / 2g — the height round-trips.
+        assert!((v * v / (2.0 * g) - 1.6).abs() < 1e-5);
+        // Sign-agnostic (the engine's gravity vector is negative Z).
+        assert_eq!(jump_velocity(1.6, -g), v);
+        assert_eq!(jump_velocity(0.0, g), 0.0);
+        assert_eq!(jump_velocity(-1.0, g), 0.0);
     }
 
     #[test]

@@ -1158,7 +1158,7 @@
                     run_speed: 4.5,
                     accel: 20.0,
                     decel: 30.0,
-                    jump_speed: 8.0,
+                    jump_height: 1.6,
                     turn_rate_deg: 720.0,
                     step_height: 0.35,
                 ),

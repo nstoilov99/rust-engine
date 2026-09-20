@@ -35,6 +35,7 @@ use crate::engine::ecs::{
     PointLight, SpawnShape, Transform, UpdateModule,
 };
 use crate::engine::physics::{Collider, ColliderShape, RigidBody, RigidBodyType, StaticCollision};
+use game_shared::components::{CharacterMovement, OrbitCamera, PlayerInput};
 
 /// Section accent stripes: the 2px left bar is one of DESIGN.md's named
 /// **deep**-tone jobs ("inspector section left bars"), resolved through the
@@ -93,6 +94,9 @@ enum ComponentAction {
     RemoveAudioListener,
     RemoveParticleEffect,
     RemoveStaticCollision,
+    RemoveCharacterMovement,
+    RemovePlayerInput,
+    RemoveOrbitCamera,
 }
 
 /// Draw the inspector into the dock tab's content rect (physical pixels).
@@ -171,6 +175,7 @@ pub fn inspector_panel(ui: &mut Ui, tab_rect: Rect, ctx: InspectorPanelCtx) {
                         Label::new("Properties are locked during play mode")
                             .color(dim)
                             .show(ui);
+                        movement_status(ui, world, entity);
                         return;
                     }
                     render_components(ui, panel, world, entity, asset_browser, picker_icon, icons);
@@ -1374,6 +1379,26 @@ fn render_components(
     {
         action = Some(ComponentAction::RemoveStaticCollision);
     }
+    if (panel.matches_filter("character")
+        || panel.matches_filter("movement")
+        || panel.matches_filter("player"))
+        && p.has(ComponentPresence::CHARACTER_MOVEMENT)
+        && edit_character_movement(ui, world, entity)
+    {
+        action = Some(ComponentAction::RemoveCharacterMovement);
+    }
+    if (panel.matches_filter("player") || panel.matches_filter("input"))
+        && p.has(ComponentPresence::PLAYER_INPUT)
+        && edit_player_input(ui, world, entity)
+    {
+        action = Some(ComponentAction::RemovePlayerInput);
+    }
+    if (panel.matches_filter("orbit") || panel.matches_filter("camera"))
+        && p.has(ComponentPresence::ORBIT_CAMERA)
+        && edit_orbit_camera(ui, world, entity)
+    {
+        action = Some(ComponentAction::RemoveOrbitCamera);
+    }
 
     if let Some(action) = action {
         match action {
@@ -1416,6 +1441,15 @@ fn render_components(
             }
             ComponentAction::RemoveStaticCollision => {
                 let _ = world.remove_one::<StaticCollision>(entity);
+            }
+            ComponentAction::RemoveCharacterMovement => {
+                let _ = world.remove_one::<CharacterMovement>(entity);
+            }
+            ComponentAction::RemovePlayerInput => {
+                let _ = world.remove_one::<PlayerInput>(entity);
+            }
+            ComponentAction::RemoveOrbitCamera => {
+                let _ = world.remove_one::<OrbitCamera>(entity);
             }
         }
         panel.cached_presence = ComponentPresence::probe(world, entity);
@@ -1976,6 +2010,156 @@ fn edit_collider(ui: &mut Ui, world: &mut World, entity: Entity, physics_inactiv
 
         Checkbox::new(&mut collider.is_sensor, "Is Sensor (Trigger)").show(ui);
         Checkbox::new(&mut collider.debug_draw_visible, "Debug Draw").show(ui);
+    })
+}
+
+/// Small dim group caption inside a section (Speeds / Boom / ...).
+fn group_label(ui: &mut Ui, text: &str) {
+    let style = ui.style();
+    Label::new(text)
+        .size(style.fonts.small)
+        .color(style.palette.text_secondary)
+        .show(ui);
+}
+
+/// Read-only runtime line for a `CharacterMovement` entity, drawn in play
+/// mode (the sections themselves are locked then).
+fn movement_status(ui: &mut Ui, world: &World, entity: Entity) {
+    let Ok(cm) = world.get::<&CharacterMovement>(entity) else {
+        return;
+    };
+    let dim = ui.style().palette.text_secondary;
+    ui.add_space(4.0);
+    Label::new(format!(
+        "Character: {}, {:.2} m/s",
+        if cm.grounded { "grounded" } else { "airborne" },
+        cm.horizontal_speed
+    ))
+    .color(dim)
+    .show(ui);
+}
+
+fn edit_character_movement(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+    let Ok(mut cm) = world.get::<&mut CharacterMovement>(entity) else {
+        return false;
+    };
+    let cm = &mut *cm;
+    component_section(ui, "Character Movement", cat("physics"), true, |ui| {
+        for v in [
+            &mut cm.walk_speed,
+            &mut cm.run_speed,
+            &mut cm.accel,
+            &mut cm.decel,
+            &mut cm.turn_rate_deg,
+            &mut cm.jump_height,
+            &mut cm.step_height,
+            &mut cm.standing_friction,
+        ] {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
+        group_label(ui, "Speeds");
+        drag_row(ui, "Walk", &mut cm.walk_speed, 0.01, 0.0..=50.0, " m/s");
+        drag_row(ui, "Run", &mut cm.run_speed, 0.01, 0.0..=50.0, " m/s");
+        group_label(ui, "Response");
+        drag_row(ui, "Accel", &mut cm.accel, 0.1, 0.0..=500.0, " m/s\u{b2}");
+        drag_row(ui, "Decel", &mut cm.decel, 0.1, 0.0..=500.0, " m/s\u{b2}");
+        drag_row(ui, "Turn Rate", &mut cm.turn_rate_deg, 1.0, 0.0..=3600.0, " \u{b0}/s");
+        group_label(ui, "Traversal");
+        drag_row(ui, "Jump Height", &mut cm.jump_height, 0.01, 0.0..=20.0, " m");
+        drag_row(ui, "Step Height", &mut cm.step_height, 0.01, 0.0..=2.0, " m");
+        slider_row(ui, "Stand Friction", &mut cm.standing_friction, 0.0..=2.0, "");
+    })
+}
+
+fn edit_player_input(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+    let Ok(mut pi) = world.get::<&mut PlayerInput>(entity) else {
+        return false;
+    };
+    component_section(ui, "Player Input", cat("physics"), true, |ui| {
+        let text_row = |ui: &mut Ui, label: &str, value: &mut String| {
+            property_row(ui, label, |ui| {
+                let field_bg = ui.style().palette.input;
+                let w = (ui.available_size().x - 8.0).clamp(60.0, 280.0);
+                TextEdit::new(value)
+                    .width(w)
+                    .height(18.0)
+                    .fill(field_bg)
+                    .show_full(ui);
+            });
+        };
+        text_row(ui, "Context", &mut pi.mapping_context);
+        text_row(ui, "Move", &mut pi.move_action);
+        text_row(ui, "Look", &mut pi.look_action);
+        text_row(ui, "Jump", &mut pi.jump_action);
+        text_row(ui, "Sprint", &mut pi.sprint_action);
+    })
+}
+
+fn edit_orbit_camera(ui: &mut Ui, world: &mut World, entity: Entity) -> bool {
+    // Resolve the target's display name before taking the `&mut` row.
+    let target_label = world
+        .get::<&OrbitCamera>(entity)
+        .ok()
+        .and_then(|oc| oc.target)
+        .map(|guid| {
+            world
+                .query::<(&crate::engine::ecs::EntityGuid, Option<&Name>)>()
+                .iter()
+                .find(|(_, (g, _))| g.0 == guid)
+                .map(|(_, (_, name))| {
+                    name.map_or_else(|| "(unnamed)".to_string(), |n| n.0.clone())
+                })
+                .unwrap_or_else(|| "(missing entity)".to_string())
+        });
+    let Ok(mut oc) = world.get::<&mut OrbitCamera>(entity) else {
+        return false;
+    };
+    let oc = &mut *oc;
+    component_section(ui, "Orbit Camera", cat("cameras"), true, |ui| {
+        for v in [
+            &mut oc.distance,
+            &mut oc.min_distance,
+            &mut oc.max_distance,
+            &mut oc.pivot_height,
+            &mut oc.shoulder,
+            &mut oc.sensitivity,
+            &mut oc.pitch_min_deg,
+            &mut oc.pitch_max_deg,
+        ] {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
+        property_row(ui, "Target", |ui| {
+            let dim = ui.style().palette.text_secondary;
+            match &target_label {
+                Some(name) => {
+                    Label::new(name.clone()).show(ui);
+                    ui.add_space(6.0);
+                    if Button::new("Clear").show(ui).clicked {
+                        oc.target = None;
+                    }
+                }
+                None => {
+                    Label::new("auto \u{2014} first character")
+                        .color(dim)
+                        .show(ui);
+                }
+            }
+        });
+        group_label(ui, "Boom");
+        drag_row(ui, "Distance", &mut oc.distance, 0.01, 0.0..=100.0, " m");
+        drag_row(ui, "Min", &mut oc.min_distance, 0.01, 0.0..=100.0, " m");
+        drag_row(ui, "Max", &mut oc.max_distance, 0.01, 0.0..=100.0, " m");
+        group_label(ui, "Framing");
+        drag_row(ui, "Pivot Height", &mut oc.pivot_height, 0.01, -10.0..=10.0, " m");
+        drag_row(ui, "Shoulder", &mut oc.shoulder, 0.01, -10.0..=10.0, " m");
+        group_label(ui, "Look");
+        drag_row(ui, "Sensitivity", &mut oc.sensitivity, 0.0001, 0.0..=1.0, "");
+        drag_row(ui, "Pitch Min", &mut oc.pitch_min_deg, 0.5, -89.0..=89.0, " \u{b0}");
+        drag_row(ui, "Pitch Max", &mut oc.pitch_max_deg, 0.5, -89.0..=89.0, " \u{b0}");
     })
 }
 
@@ -2648,6 +2832,26 @@ fn render_add_component(
             }
             if !p.has(ComponentPresence::STATIC_COLLISION) && entry(ui, "Static Collision", false) {
                 let _ = world.insert_one(entity, StaticCollision);
+                added = true;
+            }
+
+            ui.separator();
+            Label::new("Gameplay")
+                .size(ui.style().fonts.small)
+                .color(dim)
+                .show(ui);
+            if !p.has(ComponentPresence::CHARACTER_MOVEMENT)
+                && entry(ui, "Character Movement", false)
+            {
+                let _ = world.insert_one(entity, CharacterMovement::default());
+                added = true;
+            }
+            if !p.has(ComponentPresence::PLAYER_INPUT) && entry(ui, "Player Input", false) {
+                let _ = world.insert_one(entity, PlayerInput::default());
+                added = true;
+            }
+            if !p.has(ComponentPresence::ORBIT_CAMERA) && entry(ui, "Orbit Camera", false) {
+                let _ = world.insert_one(entity, OrbitCamera::default());
                 added = true;
             }
 

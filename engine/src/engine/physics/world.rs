@@ -109,6 +109,11 @@ impl PhysicsWorld {
         self.gravity = crate::engine::adapters::physics_adapter::gravity_to_physics(&gravity);
     }
 
+    /// Gravity vector in ECS Z-up coordinates (default `(0, 0, -9.81)`).
+    pub fn gravity(&self) -> glm::Vec3 {
+        position_from_physics(&self.gravity)
+    }
+
     /// Set fixed timestep for physics simulation (default: 1/60) — both the
     /// accumulator interval and the integrator's `dt`.
     pub fn set_timestep(&mut self, dt: f32) {
@@ -923,6 +928,7 @@ mod tests {
     fn gravity_direction_is_correct() {
         let physics = PhysicsWorld::new();
         // Default gravity in Z-up is (0, 0, -9.81)
+        assert!((physics.gravity().z + 9.81).abs() < 0.001);
         // After conversion to Y-up: (0, -9.81, 0)
         assert!((physics.gravity.x).abs() < 0.001);
         assert!((physics.gravity.y - (-9.81)).abs() < 0.01);
